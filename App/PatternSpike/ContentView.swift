@@ -1,9 +1,11 @@
 import Metal
 import MetalRenderer
+import PatternEngine
 import SwiftUI
 
 struct ContentView: View {
     private let state: CanvasState
+    @State private var runtimeError: String?
 
     init() {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -12,7 +14,12 @@ struct ContentView: View {
         }
 
         do {
-            state = .ready(try BlankRenderer(device: device))
+            state = .ready(
+                try GridRenderer(
+                    device: device,
+                    drawableSize: PatternSize(width: 1, height: 1)
+                )
+            )
         } catch {
             state = .unavailable(error.localizedDescription)
         }
@@ -23,6 +30,23 @@ struct ContentView: View {
             switch state {
             case let .ready(renderer):
                 MetalCanvas(renderer: renderer)
+                    .onAppear {
+                        renderer.onError = {
+                            runtimeError = $0.localizedDescription
+                        }
+                    }
+                    .overlay(alignment: .top) {
+                        if let runtimeError {
+                            Text(runtimeError)
+                                .font(.caption)
+                                .padding(8)
+                                .background(
+                                    .regularMaterial,
+                                    in: RoundedRectangle(cornerRadius: 8)
+                                )
+                                .padding()
+                        }
+                    }
             case let .unavailable(message):
                 ContentUnavailableView(
                     "Renderer Unavailable",
@@ -35,7 +59,7 @@ struct ContentView: View {
     }
 
     private enum CanvasState {
-        case ready(BlankRenderer)
+        case ready(GridRenderer)
         case unavailable(String)
     }
 }

@@ -5,12 +5,17 @@ import SwiftUI
 @MainActor
 private func configure(
     _ view: MTKView,
-    renderer: BlankRenderer
+    renderer: GridRenderer
 ) {
     view.device = renderer.device
     view.delegate = renderer
     view.colorPixelFormat = .bgra8Unorm
-    view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+    view.clearColor = MTLClearColor(
+        red: 242.0 / 255.0,
+        green: 244.0 / 255.0,
+        blue: 241.0 / 255.0,
+        alpha: 1
+    )
     view.framebufferOnly = true
     view.isPaused = false
     view.enableSetNeedsDisplay = false
@@ -21,21 +26,21 @@ private func configure(
 import AppKit
 
 struct MetalCanvas: NSViewRepresentable {
-    let renderer: BlankRenderer
+    let renderer: GridRenderer
 
-    func makeNSView(context: Context) -> MTKView {
-        let view = MTKView(frame: .zero, device: renderer.device)
+    func makeNSView(context: Context) -> InteractiveMetalView {
+        let view = InteractiveMetalView(frame: .zero, renderer: renderer)
         configure(view, renderer: renderer)
         return view
     }
 
-    func updateNSView(_ view: MTKView, context: Context) {}
+    func updateNSView(_ view: InteractiveMetalView, context: Context) {}
 }
 #else
 import UIKit
 
 struct MetalCanvas: UIViewRepresentable {
-    let renderer: BlankRenderer
+    let renderer: GridRenderer
 
     func makeUIView(context: Context) -> MTKView {
         let view = MTKView(frame: .zero, device: renderer.device)

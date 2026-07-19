@@ -27,6 +27,8 @@ targets:
         buildPhase: sources
     dependencies:
       - package: PatternModules
+        product: PatternEngine
+      - package: PatternModules
         product: MetalRenderer
     settings:
       base:
@@ -47,6 +49,8 @@ targets:
       - path: ../Sources/MetalRenderer/Shaders.metal
         buildPhase: sources
     dependencies:
+      - package: PatternModules
+        product: PatternEngine
       - package: PatternModules
         product: MetalRenderer
     settings:
