@@ -16,8 +16,8 @@ public enum GridProjection {
         tileSize: PatternSize
     ) -> CanonicalPoint {
         CanonicalPoint(
-            x: point.x - floor(point.x / tileSize.width) * tileSize.width,
-            y: point.y - floor(point.y / tileSize.height) * tileSize.height
+            x: positiveRemainder(point.x, dividingBy: tileSize.width),
+            y: positiveRemainder(point.y, dividingBy: tileSize.height)
         )
     }
 
@@ -42,12 +42,22 @@ public enum GridProjection {
         result.reserveCapacity(xOffsets.count * yOffsets.count)
         for y in yOffsets {
             for x in xOffsets {
-                result.append(
-                    CanonicalDabPlacement(
-                        center: CanonicalPoint(x: folded.x + x, y: folded.y + y),
-                        radius: radius
-                    )
+                let translatedCenter = CanonicalPoint(
+                    x: folded.x + x,
+                    y: folded.y + y
                 )
+                if intersectsTile(
+                    center: translatedCenter,
+                    radius: radius,
+                    tileSize: tileSize
+                ) {
+                    result.append(
+                        CanonicalDabPlacement(
+                            center: translatedCenter,
+                            radius: radius
+                        )
+                    )
+                }
             }
         }
         result.sort {
@@ -56,6 +66,29 @@ public enum GridProjection {
             return lhsDistance < rhsDistance
         }
         return result
+    }
+
+    private static func positiveRemainder(
+        _ value: Float,
+        dividingBy extent: Float
+    ) -> Float {
+        let remainder = value.truncatingRemainder(dividingBy: extent)
+        if remainder == 0 {
+            return 0
+        }
+        return remainder < 0 ? remainder + extent : remainder
+    }
+
+    private static func intersectsTile(
+        center: CanonicalPoint,
+        radius: Float,
+        tileSize: PatternSize
+    ) -> Bool {
+        let nearestX = min(max(center.x, 0), tileSize.width)
+        let nearestY = min(max(center.y, 0), tileSize.height)
+        let deltaX = center.x - nearestX
+        let deltaY = center.y - nearestY
+        return deltaX * deltaX + deltaY * deltaY < radius * radius
     }
 
     private static func intersectingOffsets(
