@@ -1,0 +1,77 @@
+name: PatternSpike
+
+options:
+  minimumXcodeGenVersion: 2.46.0
+  createIntermediateGroups: true
+
+packages:
+  PatternModules:
+    path: ..
+
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    SWIFT_STRICT_CONCURRENCY: complete
+    ENABLE_USER_SCRIPT_SANDBOXING: true
+    HEADER_SEARCH_PATHS: "$(SRCROOT)/../Sources/CShaderTypes/include"
+    MTL_HEADER_SEARCH_PATHS: "$(SRCROOT)/../Sources/CShaderTypes/include"
+
+targets:
+  PatternSpikeMac:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: PatternSpike
+      - path: ../Sources/MetalRenderer/Shaders.metal
+        buildPhase: sources
+    dependencies:
+      - package: PatternModules
+        product: MetalRenderer
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        PRODUCT_NAME: PatternSpike
+        PRODUCT_BUNDLE_IDENTIFIER: com.anubhav.patternspike
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_CFBundleDisplayName: Pattern
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.1.0
+
+  PatternSpikePad:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: PatternSpike
+      - path: ../Sources/MetalRenderer/Shaders.metal
+        buildPhase: sources
+    dependencies:
+      - package: PatternModules
+        product: MetalRenderer
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        PRODUCT_NAME: PatternSpikePad
+        PRODUCT_BUNDLE_IDENTIFIER: com.anubhav.patternspike.pad
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_CFBundleDisplayName: Pattern
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
+        TARGETED_DEVICE_FAMILY: 2
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.1.0
+
+schemes:
+  PatternSpikeMac:
+    build:
+      targets:
+        PatternSpikeMac: all
+    run:
+      config: Debug
+
+  PatternSpikePad:
+    build:
+      targets:
+        PatternSpikePad: all
+    run:
+      config: Debug
