@@ -35,6 +35,9 @@ struct ContentView: View {
                             runtimeError = $0.localizedDescription
                         }
                     }
+                    .onDisappear {
+                        renderer.onError = nil
+                    }
                     .overlay(alignment: .top) {
                         if let runtimeError {
                             Text(runtimeError)

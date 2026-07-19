@@ -38,6 +38,7 @@ final class InteractiveMetalView: MTKView {
             NotificationCenter.default.removeObserver(screenObserver)
         }
         guard let window else {
+            cancelActiveAndResetGestureState()
             resignObserver = nil
             screenObserver = nil
             return
@@ -50,8 +51,7 @@ final class InteractiveMetalView: MTKView {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.spaceIsDown = false
-                self?.cancelIfActive()
+                self?.cancelActiveAndResetGestureState()
             }
         }
         screenObserver = NotificationCenter.default.addObserver(
@@ -68,14 +68,18 @@ final class InteractiveMetalView: MTKView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        guard gridRenderer.isIdle else {
+            dragMode = nil
+            return
+        }
         let point = backingPoint(event)
-        if spaceIsDown, gridRenderer.isIdle {
+        if spaceIsDown {
             dragMode = .panning(last: point)
         } else {
-            dragMode = .drawing
             gridRenderer.handle(
                 .mouse(position: point, timestamp: event.timestamp, phase: .began)
             )
+            dragMode = gridRenderer.hasActiveStroke ? .drawing : nil
         }
     }
 
@@ -147,7 +151,7 @@ final class InteractiveMetalView: MTKView {
     }
 
     override func resignFirstResponder() -> Bool {
-        cancelIfActive()
+        cancelActiveAndResetGestureState()
         return super.resignFirstResponder()
     }
 
@@ -155,6 +159,12 @@ final class InteractiveMetalView: MTKView {
         let local = convert(event.locationInWindow, from: nil)
         let backing = convertToBacking(local)
         return ScreenPoint(x: Float(backing.x), y: Float(backing.y))
+    }
+
+    private func cancelActiveAndResetGestureState() {
+        cancelIfActive()
+        spaceIsDown = false
+        dragMode = nil
     }
 
     private func cancelIfActive() {
