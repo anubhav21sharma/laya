@@ -1,6 +1,10 @@
 import CShaderTypes
 import Metal
 
+struct DabBufferSubmissionIdentity: Equatable, Sendable {
+    fileprivate let reservation: DabBufferReservationState.Reservation
+}
+
 @MainActor
 public final class DabInstanceBufferPool {
     public struct Lease {
@@ -93,15 +97,35 @@ public final class DabInstanceBufferPool {
         _ lease: Lease,
         on commandBuffer: any MTLCommandBuffer
     ) {
+        _ = submit(lease, on: commandBuffer)
+    }
+
+    func submit(
+        _ lease: Lease,
+        on commandBuffer: any MTLCommandBuffer
+    ) -> DabBufferSubmissionIdentity {
         guard reservationState.markSubmitted(lease.reservation) else {
             fatalError("Dab buffer lease is no longer reserved")
         }
         commandBuffer.encodeSignalEvent(event, value: lease.signalValue)
+        return DabBufferSubmissionIdentity(
+            reservation: lease.reservation
+        )
     }
 
     public func abandon(_ lease: Lease) {
         guard reservationState.abandon(lease.reservation) else {
             fatalError("Dab buffer lease is no longer reserved")
+        }
+    }
+
+    func reclaimTerminalFailure(
+        _ submissions: [DabBufferSubmissionIdentity]
+    ) {
+        for submission in submissions {
+            _ = reservationState.reclaimTerminalFailure(
+                submission.reservation
+            )
         }
     }
 }

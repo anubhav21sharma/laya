@@ -3,6 +3,7 @@ import Foundation
 final class GridRenderCompletionMailbox: @unchecked Sendable {
     struct Outcome: Sendable {
         let commitToken: UInt64?
+        let uploadSubmissions: [DabBufferSubmissionIdentity]
         let succeeded: Bool
         let errorMessage: String?
     }

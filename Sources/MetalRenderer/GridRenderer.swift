@@ -181,7 +181,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 showGridLines: false,
                 liveVisible: liveTile.isVisible || !uploads.isEmpty
             )
-            try finalizeFrameEncoding(
+            _ = try finalizeFrameEncoding(
                 encodedClear: encodedClear,
                 uploads: uploads,
                 encodedCommit: encodedCommit,
@@ -219,21 +219,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func flushPendingLiveForHarness() throws -> GPUFrameMetrics {
         drainFrameOutcomes()
         drainCompletedUploadRanges()
+        try clearLiveForHarnessIfNeeded()
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             throw MetalRendererError.commandBufferUnavailable
         }
 
         var uploads: [FrameUpload] = []
+        var submissions: [DabBufferSubmissionIdentity] = []
         var didFinalize = false
         let start = CFAbsoluteTimeGetCurrent()
         do {
-            let encodedClear = needsLiveClear
-            if encodedClear {
-                try encodeLiveClear(commandBuffer)
-            }
             uploads = try encodePendingLiveDabs(commandBuffer)
-            try finalizeFrameEncoding(
-                encodedClear: encodedClear,
+            submissions = try finalizeFrameEncoding(
+                encodedClear: false,
                 uploads: uploads,
                 encodedCommit: false,
                 commandBuffer: commandBuffer
@@ -253,6 +251,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             do {
                 try validateHarnessCommand(commandBuffer)
             } catch let error as MetalRendererError {
+                instancePool.reclaimTerminalFailure(submissions)
                 failTransiently(error)
                 throw error
             }
@@ -329,7 +328,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
         let start = CFAbsoluteTimeGetCurrent()
         try encodeCommit(commandBuffer, liveVisible: liveTile.isVisible)
-        try finalizeFrameEncoding(
+        _ = try finalizeFrameEncoding(
             encodedClear: false,
             uploads: [],
             encodedCommit: true,
@@ -485,6 +484,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         encoder.label = "Clear Persistent Live Stroke"
         encoder.endEncoding()
+    }
+
+    private func clearLiveForHarnessIfNeeded() throws {
+        guard needsLiveClear else {
+            return
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw MetalRendererError.commandBufferUnavailable
+        }
+        try encodeLiveClear(commandBuffer)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        do {
+            try validateHarnessCommand(commandBuffer)
+        } catch let error as MetalRendererError {
+            failTransiently(error)
+            throw error
+        }
+        liveTile.markCleared()
+        needsLiveClear = false
     }
 
     private func encodePendingLiveDabs(
@@ -691,7 +710,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         uploads: [FrameUpload],
         encodedCommit: Bool,
         commandBuffer: any MTLCommandBuffer
-    ) throws {
+    ) throws -> [DabBufferSubmissionIdentity] {
         let commitToken: UInt64? = encodedCommit
             ? try lifecycle.markCommitSubmitted()
             : nil
@@ -700,8 +719,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             liveTile.markCleared()
             needsLiveClear = false
         }
+        var uploadSubmissions: [DabBufferSubmissionIdentity] = []
+        uploadSubmissions.reserveCapacity(uploads.count)
         for upload in uploads {
-            instancePool.markSubmitted(upload.lease, on: commandBuffer)
+            uploadSubmissions.append(
+                instancePool.submit(
+                    upload.lease,
+                    on: commandBuffer
+                )
+            )
             completedUploadRanges.append(
                 (
                     signal: upload.lease.signalValue,
@@ -719,15 +745,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             liveTile.markStamped()
         }
 
-        commandBuffer.addCompletedHandler { [completionMailbox] buffer in
+        let submittedUploads = uploadSubmissions
+        commandBuffer.addCompletedHandler {
+            [completionMailbox, submittedUploads] buffer in
             completionMailbox.push(
                 .init(
                     commitToken: commitToken,
+                    uploadSubmissions: submittedUploads,
                     succeeded: buffer.status == .completed,
                     errorMessage: buffer.error?.localizedDescription
                 )
             )
         }
+        return submittedUploads
     }
 
     private func drainCompletedUploadRanges() {
@@ -750,6 +780,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             guard outcome.succeeded else {
                 let error = MetalRendererError.commandFailed(
                     outcome.errorMessage ?? "unknown command-buffer error"
+                )
+                instancePool.reclaimTerminalFailure(
+                    outcome.uploadSubmissions
                 )
                 failTransiently(error)
                 latestError = error

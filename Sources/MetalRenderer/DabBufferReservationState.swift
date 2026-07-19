@@ -1,5 +1,5 @@
 struct DabBufferReservationState {
-    struct Reservation: Equatable {
+    struct Reservation: Equatable, Sendable {
         let slot: Int
         let token: UInt64
         let signalValue: UInt64
@@ -8,7 +8,7 @@ struct DabBufferReservationState {
     private enum SlotState {
         case available
         case reserved(token: UInt64)
-        case inFlight(reusableAfterValue: UInt64)
+        case inFlight(token: UInt64, reusableAfterValue: UInt64)
     }
 
     private var slots: [SlotState]
@@ -29,7 +29,7 @@ struct DabBufferReservationState {
                 break
             case .reserved:
                 continue
-            case let .inFlight(reusableAfterValue):
+            case let .inFlight(_, reusableAfterValue):
                 guard completedValue >= reusableAfterValue else {
                     continue
                 }
@@ -65,6 +65,7 @@ struct DabBufferReservationState {
             return false
         }
         slots[reservation.slot] = .inFlight(
+            token: reservation.token,
             reusableAfterValue: reservation.signalValue
         )
         return true
@@ -72,6 +73,23 @@ struct DabBufferReservationState {
 
     mutating func abandon(_ reservation: Reservation) -> Bool {
         guard isReserved(reservation) else {
+            return false
+        }
+        slots[reservation.slot] = .available
+        return true
+    }
+
+    mutating func reclaimTerminalFailure(
+        _ reservation: Reservation
+    ) -> Bool {
+        guard slots.indices.contains(reservation.slot) else {
+            return false
+        }
+        guard case let .inFlight(token, reusableAfterValue) =
+            slots[reservation.slot],
+            token == reservation.token,
+            reusableAfterValue == reservation.signalValue
+        else {
             return false
         }
         slots[reservation.slot] = .available

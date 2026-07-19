@@ -63,3 +63,41 @@ func staleOrDoubleSubmitCannotMutateSlotState() throws {
     #expect(state.isReserved(replacement))
     #expect(stillUnavailable == nil)
 }
+
+@Test
+func terminalFailureReopensSubmittedSlotWithoutEventAdvance() throws {
+    var state = DabBufferReservationState(slotCount: 1)
+    let submittedCandidate = state.acquire(completedValue: 0)
+    let submitted = try #require(submittedCandidate)
+    let didSubmit = state.markSubmitted(submitted)
+
+    let unavailableBeforeFailure = state.acquire(completedValue: 0)
+    let didReclaim = state.reclaimTerminalFailure(submitted)
+    let replacement = state.acquire(completedValue: 0)
+
+    #expect(didSubmit)
+    #expect(unavailableBeforeFailure == nil)
+    #expect(didReclaim)
+    #expect(replacement != nil)
+}
+
+@Test
+func staleTerminalFailureCannotReleaseNewerInFlightSubmission() throws {
+    var state = DabBufferReservationState(slotCount: 1)
+    let staleCandidate = state.acquire(completedValue: 0)
+    let stale = try #require(staleCandidate)
+    let didSubmitStale = state.markSubmitted(stale)
+    let didReclaimStale = state.reclaimTerminalFailure(stale)
+
+    let replacementCandidate = state.acquire(completedValue: 0)
+    let replacement = try #require(replacementCandidate)
+    let didSubmitReplacement = state.markSubmitted(replacement)
+    let didReclaimStaleAgain = state.reclaimTerminalFailure(stale)
+    let unavailable = state.acquire(completedValue: 0)
+
+    #expect(didSubmitStale)
+    #expect(didReclaimStale)
+    #expect(didSubmitReplacement)
+    #expect(!didReclaimStaleAgain)
+    #expect(unavailable == nil)
+}
