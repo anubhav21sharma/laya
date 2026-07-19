@@ -49,7 +49,7 @@ then
   exit 1
 fi
 
-grep -q "HARNESS FAIL" "$artifacts/negative-control/stderr.log"
+grep -Fq "HARNESS FAIL Pixel mismatch at (32, 32): expected [0, 0, 0, 255], actual [241, 244, 242, 255], tolerance 0." "$artifacts/negative-control/stderr.log"
 printf '%s\n' "negative-control=failed-as-expected"
 
 "$binary" \
