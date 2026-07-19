@@ -8,12 +8,11 @@ public struct ViewportTransform: Equatable, Sendable {
     public init(
         drawableSize: PatternSize,
         worldCenter: WorldPoint,
-        zoom: Float
+        zoom: Float = 1
     ) {
-        precondition(zoom > 0)
         self.drawableSize = drawableSize
         self.worldCenter = worldCenter
-        self.zoom = zoom
+        self.zoom = min(8, max(0.25, zoom))
     }
 
     public func worldToScreen(_ point: WorldPoint) -> ScreenPoint {

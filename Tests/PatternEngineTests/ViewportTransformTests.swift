@@ -24,6 +24,36 @@ func viewportRoundTripsAcrossPanAndZoom() {
 }
 
 @Test
+func viewportInitializationClampsZoomToAllowedRange() {
+    let drawableSize = PatternSize(width: 800, height: 600)
+    let worldCenter = WorldPoint(x: 128, y: 128)
+
+    let below = ViewportTransform(
+        drawableSize: drawableSize,
+        worldCenter: worldCenter,
+        zoom: 0.1
+    )
+    let above = ViewportTransform(
+        drawableSize: drawableSize,
+        worldCenter: worldCenter,
+        zoom: 10
+    )
+
+    #expect(below.zoom == 0.25)
+    #expect(above.zoom == 8)
+}
+
+@Test
+func viewportInitializationDefaultsToUnitZoom() {
+    let viewport = ViewportTransform(
+        drawableSize: PatternSize(width: 800, height: 600),
+        worldCenter: WorldPoint(x: 128, y: 128)
+    )
+
+    #expect(viewport.zoom == 1)
+}
+
+@Test
 func panningMovesWorldCenterOppositeTheScreenDelta() {
     let viewport = ViewportTransform(
         drawableSize: PatternSize(width: 800, height: 600),
