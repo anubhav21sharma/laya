@@ -11,3 +11,13 @@ func sliceOneConstantsMatchTheApprovedDesign() {
     #expect(GridCanvasContract.instanceCapacity == 4_096)
     #expect(GridCanvasContract.inFlightBufferCount == 3)
 }
+
+@Test
+func physicalStrokePayloadHasAClosedUpperBound() {
+    let pending = GridCanvasContract.pendingCapacity
+    let inFlight = GridCanvasContract.instanceCapacity
+        * GridCanvasContract.inFlightBufferCount
+
+    #expect(pending == 12_288)
+    #expect(pending + inFlight == 24_576)
+}

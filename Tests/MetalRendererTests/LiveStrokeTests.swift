@@ -44,3 +44,14 @@ func liveStrokeRejectsGrowthBeyondItsPreallocatedCapacity() throws {
         try stroke.append(instance(3))
     }
 }
+
+@Test
+func resetKeepsCapacityButRestoresPerStrokeIdentity() throws {
+    var stroke = LiveStroke(capacity: 4)
+    try stroke.append(instance(1))
+    stroke.reset()
+    try stroke.append(instance(2))
+
+    #expect(stroke.pending.map(\.identity) == [0])
+    #expect(stroke.capacity == 4)
+}

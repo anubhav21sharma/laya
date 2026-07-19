@@ -6,6 +6,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
     case shaderFunctionUnavailable(String)
     case pipelineCreationFailed(String)
     case textureAllocationFailed
+    case sharedEventUnavailable
+    case instanceBufferAllocationFailed
     case commandBufferUnavailable
     case renderEncoderUnavailable
     case commandFailed(String)
@@ -23,6 +25,10 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
             "Metal pipeline creation failed: \(message)"
         case .textureAllocationFailed:
             "Metal render texture allocation failed."
+        case .sharedEventUnavailable:
+            "Metal shared-event creation failed."
+        case .instanceBufferAllocationFailed:
+            "Metal instance-buffer allocation failed."
         case .commandBufferUnavailable:
             "Metal command buffer creation failed."
         case .renderEncoderUnavailable:
