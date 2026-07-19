@@ -11,6 +11,8 @@ let package = Package(
     products: [
         .library(name: "PatternEngine", targets: ["PatternEngine"]),
         .library(name: "EditorCore", targets: ["EditorCore"]),
+        .library(name: "CShaderTypes", targets: ["CShaderTypes"]),
+        .library(name: "MetalRenderer", targets: ["MetalRenderer"]),
         .library(name: "PatternFile", targets: ["PatternFile"]),
     ],
     targets: [
@@ -18,6 +20,15 @@ let package = Package(
         .target(
             name: "EditorCore",
             dependencies: ["PatternEngine"]
+        ),
+        .target(
+            name: "CShaderTypes",
+            publicHeadersPath: "include"
+        ),
+        .target(
+            name: "MetalRenderer",
+            dependencies: ["PatternEngine", "CShaderTypes"],
+            exclude: ["Shaders.metal"]
         ),
         .target(
             name: "PatternFile",
@@ -30,6 +41,10 @@ let package = Package(
         .testTarget(
             name: "EditorCoreTests",
             dependencies: ["EditorCore"]
+        ),
+        .testTarget(
+            name: "MetalRendererTests",
+            dependencies: ["MetalRenderer", "CShaderTypes"]
         ),
         .testTarget(
             name: "PatternFileTests",
