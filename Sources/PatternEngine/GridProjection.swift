@@ -76,7 +76,10 @@ public enum GridProjection {
         if remainder == 0 {
             return 0
         }
-        return remainder < 0 ? remainder + extent : remainder
+        if remainder < 0 {
+            return min(remainder + extent, extent.nextDown)
+        }
+        return remainder
     }
 
     private static func intersectsTile(

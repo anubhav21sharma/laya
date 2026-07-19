@@ -42,6 +42,20 @@ func gridFoldPreservesHighMagnitudeRemainders() {
 }
 
 @Test
+func gridFoldKeepsTinyNegativeRemainderHalfOpen() {
+    let extent: Float = 1
+    let folded = GridProjection.fold(
+        WorldPoint(x: -1e-8, y: -1e-8),
+        tileSize: PatternSize(width: extent, height: extent)
+    )
+    let expected = Float(1).nextDown
+
+    #expect(folded == CanonicalPoint(x: expected, y: expected))
+    #expect(folded.x >= 0 && folded.x < extent)
+    #expect(folded.y >= 0 && folded.y < extent)
+}
+
+@Test
 func interiorDabHasOnePlacement() {
     let placements = GridProjection.placements(
         center: WorldPoint(x: 100, y: 100),
