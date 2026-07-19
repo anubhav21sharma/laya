@@ -8,18 +8,18 @@ public final class DabInstanceBufferPool {
         public let buffer: any MTLBuffer
         public let capacity: Int
         public let signalValue: UInt64
+
+        fileprivate let reservation: DabBufferReservationState.Reservation
     }
 
     private struct Entry {
         let buffer: any MTLBuffer
-        var reusableAfterValue: UInt64
     }
 
     public let event: any MTLSharedEvent
 
-    private var entries: [Entry]
-    private var nextSignalValue: UInt64 = 1
-    private var searchStart = 0
+    private let entries: [Entry]
+    private var reservationState: DabBufferReservationState
 
     public init(
         device: any MTLDevice,
@@ -44,39 +44,39 @@ public final class DabInstanceBufferPool {
                 throw MetalRendererError.instanceBufferAllocationFailed
             }
             buffer.label = "Dab Instances \(index)"
-            entries.append(Entry(buffer: buffer, reusableAfterValue: 0))
+            entries.append(Entry(buffer: buffer))
         }
 
         self.entries = entries
+        reservationState = DabBufferReservationState(
+            slotCount: GridCanvasContract.inFlightBufferCount
+        )
     }
 
     public func acquire() -> Lease? {
-        for offset in entries.indices {
-            let index = (searchStart + offset) % entries.count
-            guard event.signaledValue >= entries[index].reusableAfterValue else {
-                continue
-            }
-
-            let signal = nextSignalValue
-            nextSignalValue &+= 1
-            searchStart = (index + 1) % entries.count
-
-            return Lease(
-                slot: index,
-                buffer: entries[index].buffer,
-                capacity: entries[index].buffer.length
-                    / MemoryLayout<PatternDabInstance>.stride,
-                signalValue: signal
-            )
+        guard let reservation = reservationState.acquire(
+            completedValue: event.signaledValue
+        ) else {
+            return nil
         }
 
-        return nil
+        let buffer = entries[reservation.slot].buffer
+        return Lease(
+            slot: reservation.slot,
+            buffer: buffer,
+            capacity: buffer.length / MemoryLayout<PatternDabInstance>.stride,
+            signalValue: reservation.signalValue,
+            reservation: reservation
+        )
     }
 
     public func write(
         _ instances: ArraySlice<IdentifiedDab>,
         into lease: Lease
     ) {
+        guard reservationState.isReserved(lease.reservation) else {
+            fatalError("Dab buffer lease is no longer reserved")
+        }
         precondition(instances.count <= lease.capacity)
 
         let destination = lease.buffer.contents()
@@ -93,7 +93,15 @@ public final class DabInstanceBufferPool {
         _ lease: Lease,
         on commandBuffer: any MTLCommandBuffer
     ) {
-        entries[lease.slot].reusableAfterValue = lease.signalValue
+        guard reservationState.markSubmitted(lease.reservation) else {
+            fatalError("Dab buffer lease is no longer reserved")
+        }
         commandBuffer.encodeSignalEvent(event, value: lease.signalValue)
+    }
+
+    public func abandon(_ lease: Lease) {
+        guard reservationState.abandon(lease.reservation) else {
+            fatalError("Dab buffer lease is no longer reserved")
+        }
     }
 }
