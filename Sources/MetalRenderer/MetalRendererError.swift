@@ -9,6 +9,7 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
     case commandBufferUnavailable
     case renderEncoderUnavailable
     case commandFailed(String)
+    case pendingDabCapacityExceeded(Int)
 
     public var errorDescription: String? {
         switch self {
@@ -28,6 +29,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
             "Metal render encoder creation failed."
         case let .commandFailed(message):
             "Metal command execution failed: \(message)"
+        case let .pendingDabCapacityExceeded(capacity):
+            "Pending dab capacity \(capacity) was exceeded."
         }
     }
 }

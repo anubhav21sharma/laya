@@ -20,7 +20,28 @@ typedef struct PatternFrameUniforms {
     PatternFloat2 inverseDrawableSize;
 } PatternFrameUniforms;
 
+typedef struct PatternGridFrameUniforms {
+    PatternFloat2 drawableSize;
+    PatternFloat2 worldCenter;
+    PatternFloat2 tileSize;
+    float zoom;
+    float gridLineWidth;
+    PatternUInt32 showGridLines;
+    PatternUInt32 liveVisible;
+} PatternGridFrameUniforms;
+
+typedef struct PatternDabInstance {
+    PatternFloat2 center;
+    float radius;
+    float padding;
+} PatternDabInstance;
+
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexFrameUniforms = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexGridFrameUniforms = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexDabInstances = 2;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexCanonical = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexLive = 1;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireGrid = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireHalfDrop = 1;
