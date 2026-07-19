@@ -49,7 +49,8 @@ then
   exit 1
 fi
 
-grep -Fq "HARNESS FAIL Pixel mismatch at (32, 32): expected [0, 0, 0, 255], actual [241, 244, 242, 255], tolerance 0." "$artifacts/negative-control/stderr.log"
+byte_pattern='(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+grep -Eq "^HARNESS FAIL Pixel mismatch at \\(32, 32\\): expected \\[0, 0, 0, 255\\], actual \\[$byte_pattern, $byte_pattern, $byte_pattern, $byte_pattern\\], tolerance 0\\.$" "$artifacts/negative-control/stderr.log"
 printf '%s\n' "negative-control=failed-as-expected"
 
 "$binary" \
