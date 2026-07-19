@@ -92,6 +92,10 @@ final class InteractiveMetalView: MTKView {
             )
             dragMode = .panning(last: point)
         case .drawing:
+            guard gridRenderer.hasActiveStroke else {
+                dragMode = nil
+                return
+            }
             gridRenderer.handle(
                 .mouse(position: point, timestamp: event.timestamp, phase: .moved)
             )
@@ -103,6 +107,7 @@ final class InteractiveMetalView: MTKView {
     override func mouseUp(with event: NSEvent) {
         defer { dragMode = nil }
         guard case .drawing = dragMode else { return }
+        guard gridRenderer.hasActiveStroke else { return }
         gridRenderer.handle(
             .mouse(
                 position: backingPoint(event),
