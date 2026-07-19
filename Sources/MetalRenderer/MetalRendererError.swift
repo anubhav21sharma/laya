@@ -12,6 +12,9 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
     case renderEncoderUnavailable
     case commandFailed(String)
     case pendingDabCapacityExceeded(Int)
+    case invalidStrokeLifecycle
+    case commitPendingInput
+    case invalidDrawableSize
 
     public var errorDescription: String? {
         switch self {
@@ -37,6 +40,12 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
             "Metal command execution failed: \(message)"
         case let .pendingDabCapacityExceeded(capacity):
             "Pending dab capacity \(capacity) was exceeded."
+        case .invalidStrokeLifecycle:
+            "The requested stroke transition is invalid."
+        case .commitPendingInput:
+            "A canonical commit is still pending."
+        case .invalidDrawableSize:
+            "The drawable size is invalid."
         }
     }
 }
