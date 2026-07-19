@@ -29,7 +29,7 @@ public struct WorldPoint: Equatable, Sendable {
     public var simd: SIMD2<Float> { SIMD2(x, y) }
 }
 
-public struct CanonicalPoint: Equatable, Sendable {
+public struct CanonicalPoint: Hashable, Sendable {
     public var x: Float
     public var y: Float
 
