@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "name": "blank-canvas",
+  "width": 64,
+  "height": 64,
+  "checks": [
+    {
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [241, 244, 242, 255],
+      "tolerance": 1
+    },
+    {
+      "x": 32,
+      "y": 32,
+      "expectedBGRA": [241, 244, 242, 255],
+      "tolerance": 1
+    },
+    {
+      "x": 63,
+      "y": 63,
+      "expectedBGRA": [241, 244, 242, 255],
+      "tolerance": 1
+    }
+  ]
+}
