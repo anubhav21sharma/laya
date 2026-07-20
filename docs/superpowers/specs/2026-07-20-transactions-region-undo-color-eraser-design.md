@@ -19,8 +19,10 @@ The slice adds:
 - top-left-anchored crop/fill tile resizing without scaling;
 - straight-sRGB ink color;
 - a live and committed destination-out eraser;
+- configurable hard-round diameter and grid visibility;
 - platform-independent commands and key mapping;
-- minimal draw, erase, color, history, clear, tiling, and size controls.
+- minimal draw, erase, size, color, grid, history, clear, tiling, and tile
+  controls.
 
 Slice 3 does not add professional brush dynamics, brush assets, layers,
 selection interaction, transforms, persistence, export, or iPad device
@@ -32,9 +34,12 @@ acceptance.
 feature documents are historical input and apply only where they do not
 conflict with that approved rebuild.
 
-Slice 2 remains `Pending Performance And Manual Acceptance`. Its functional
-implementation and regression coverage permit Slice 3 work to start, but this
-does not mark Slice 2 accepted or weaken any Slice 2 performance threshold.
+Slice 2 remains `Pending Performance And Manual Acceptance`. The user
+explicitly authorized Slice 3 to start before that gate closes. This
+start-gate override follows the governing decision precedence; Slice 2
+functional implementation and regression coverage remain mandatory inputs.
+The override does not mark Slice 2 accepted or weaken any Slice 2 performance
+threshold.
 
 The following recovered decisions remain valid:
 
@@ -59,8 +64,17 @@ The following recovered decisions are superseded:
   replacement commands;
 - resizing never scales artwork;
 - eraser strength never inherits neutral mouse pressure;
+- tile dimensions use the governing `64...4096` range instead of the
+  recovered `64...1024` cap;
+- brush diameter uses the governing tile-dependent upper bound instead of a
+  static `2000` cap;
 - renderer-owned or view-owned lifecycle guards are removed;
 - per-dab blend-mode packing is replaced by a per-stroke composite mode.
+
+The reference key map applies to Slice 3 for clear, brush size, tile size,
+grid, draw, erase, tiling, undo, redo, Escape, and Space-pan. Selection,
+transform, and transform-confirm keys remain reserved until Slice 7 exposes
+those tools.
 
 Explicit user decisions for this slice:
 
@@ -88,8 +102,8 @@ Explicit user decisions for this slice:
 10. Live draw and erase compositing uses the same MSL function as commit.
 11. Pointer-up changes no visible color, opacity, or edge coverage beyond one
     8-bit value.
-12. Tool and color values are captured at stroke start and cannot change
-    inside a stroke.
+12. Tool, color, and brush diameter values are captured at stroke start and
+    cannot change inside a stroke.
 13. History never exceeds 100 commands or 200 MB of retained raster payload
     after a successful operation.
 14. A new successful mutation clears redo; a failed mutation does not.
@@ -119,7 +133,8 @@ EditorCore owns intent and order:
 - semantic editor commands and platform-independent key mapping;
 - `DocumentHistory`, including undo/redo cursor movement and pruning;
 - typed history commands containing metadata or opaque raster revision IDs;
-- observable tool, color, tile, tiling, busy, and history enable-state.
+- observable tool, color, hard-round diameter, grid visibility, tile, tiling,
+  busy, and history enable-state.
 
 EditorCore never captures, restores, or interprets raster bytes.
 
@@ -200,6 +215,8 @@ Events cover:
 - pointer began, moved, ended, and cancelled;
 - tool intent;
 - color intent;
+- brush-diameter intent;
+- grid-visibility intent;
 - clear, undo, and redo;
 - tiling intent;
 - tile-size intent;
@@ -232,6 +249,7 @@ Effects include:
 - change tiling;
 - replace tile-size resources;
 - update color or active tool;
+- update hard-round diameter or grid visibility;
 - clear future selection state;
 - report a typed user-facing failure.
 
@@ -246,6 +264,8 @@ Ordered behavior is load-bearing:
   `cancelStroke`, then `updateTool`;
 - color change during collecting:
   `cancelStroke`, then `updateColor`;
+- brush-diameter change during collecting:
+  `cancelStroke`, then `updateBrushDiameter`;
 - undo/redo/clear during collecting:
   `cancelStroke`, then requested command;
 - tiling or resize during collecting:
@@ -430,9 +450,20 @@ Ink color is a finite straight-sRGB RGBA value with components in `0...1`.
 Default is `(0, 0, 0, 1)`. The app uses native SwiftUI `ColorPicker` with
 opacity support.
 
-Color is captured at stroke begin. Every projected GPU stamp instance carries
-an aligned `float4 color`, preserving the future per-dab color-adjustment seam.
-CPU and MSL layout tests guard size, stride, alignment, and every field offset.
+Hard-round diameter defaults to `20` pixels and remains within:
+
+```text
+2...min(2000, 8 × min(tileWidth, tileHeight))
+```
+
+Increasing diameter multiplies by `1.25` and rounds; decreasing divides by
+`1.25` and rounds. A successful tile resize clamps diameter to the new maximum
+when required. Diameter is editor configuration, not document history.
+
+Color and diameter are captured at stroke begin. Radius is half the
+user-facing diameter. Every projected GPU stamp instance carries an aligned
+`float4 color`, preserving the future per-dab color-adjustment seam. CPU and
+MSL layout tests guard size, stride, alignment, and every field offset.
 
 The hard-round fragment emits:
 
@@ -475,8 +506,9 @@ visible eraser result.
 Slice 3 introduces minimal product structure:
 
 - stable left rail: Draw and Erase;
-- compact top bar: ink color, undo, redo, and clear;
-- right inspector: tiling plus tile width/height and explicit Apply;
+- compact top bar: brush diameter, ink color, undo, redo, and clear;
+- right inspector: tiling, grid visibility, plus tile width/height and
+  explicit Apply;
 - typed error presentation without replacing the committed canvas.
 
 Tile size remains outside the top bar. Width and height are edited as a draft;
@@ -490,19 +522,38 @@ Platform-independent key mapping:
 | `B` | select Draw |
 | `E` | select Erase |
 | `0` | clear |
+| `+` or `=` | increase brush diameter geometrically |
+| `-` | decrease brush diameter geometrically |
+| `>` | increase both committed tile dimensions by 32 |
+| `<` | decrease both committed tile dimensions by 32 |
+| `G` | toggle grid visibility |
 | `1...7` | select tiling by stable index |
 | `Command-Z` | undo |
 | `Command-Shift-Z` | redo |
 | Escape | cancel active transient edit |
 | Space drag | pan, unchanged |
 
-Toolbar, inspector, keyboard, and macOS menu commands terminate in the same
-semantic intent methods. Native adapters may inspect native events only to
-construct platform-free key values and modifiers.
+The tile shortcuts preserve the current width/height difference, clamp each
+dimension independently to `64...4096`, and produce one resize command when
+at least one dimension changes. Width/height fields remain the path for
+independent rectangular edits.
 
-Undo, redo, clear, tiling, size Apply, and tool changes disable while submitted
-GPU work is pending. `canUndo` and `canRedo` derive from history position plus
-transaction busy state.
+SwiftUI `.onKeyPress` is the sole owner of semantic shortcuts and Space-key
+down/up state on both platforms. The native Metal view owns pointer and
+gesture delivery but does not override `keyDown` or become a competing key
+responder. Toolbar, inspector, keyboard, and macOS menu commands terminate in
+the same semantic intent methods. Native adapters may inspect pointer events
+only to construct platform-free input values.
+
+Alphabetic key matching is case-insensitive after platform-independent
+normalization.
+
+`S`, `T`, and Return remain reserved for selection, transform, and transform
+confirmation in Slice 7. They are not consumed by Slice 3.
+
+Tool, color, brush, grid, undo, redo, clear, tiling, and size controls disable
+while submitted GPU work is pending. `canUndo` and `canRedo` derive from
+history position plus transaction busy state.
 
 ## 11. Error And State Safety
 
@@ -553,6 +604,9 @@ EditorCore and PatternEngine tests cover:
 - top-left shrink crop and growth transparent fill;
 - exact resize intersection preservation;
 - color validation and default values;
+- brush diameter range, geometric stepping, resize clamping, and radius
+  conversion;
+- grid visibility and complete Slice 3 key mapping;
 - fixed independent eraser strength;
 - platform-free key mapping.
 
@@ -597,8 +651,10 @@ target assertion fails. Broken behavior is never retained.
 ### 12.5 Manual Mac Gate
 
 - Draw and Erase controls remain in stable positions.
-- `B`, `E`, `0`, `1...7`, `Command-Z`, and `Command-Shift-Z` work after
-  drawing and after clicking controls.
+- `B`, `E`, `0`, `+`, `=`, `-`, `<`, `>`, `G`, `1...7`, `Command-Z`, and
+  `Command-Shift-Z` work after drawing and after clicking controls.
+- Toolbar, keyboard, and menu paths keep brush diameter and grid visibility
+  synchronized.
 - Color picker changes draw RGB and opacity.
 - Eraser removes artwork live with no pointer-up change.
 - Undo/redo works for draw, erase, clear, tiling, and resize.
