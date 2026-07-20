@@ -11,6 +11,16 @@ public struct ScreenPoint: Equatable, Sendable {
     }
 
     public var simd: SIMD2<Float> { SIMD2(x, y) }
+
+    public func mapped(
+        from sourceSize: PatternSize,
+        to destinationSize: PatternSize
+    ) -> ScreenPoint {
+        ScreenPoint(
+            x: x / sourceSize.width * destinationSize.width,
+            y: y / sourceSize.height * destinationSize.height
+        )
+    }
 }
 
 public struct WorldPoint: Equatable, Sendable {

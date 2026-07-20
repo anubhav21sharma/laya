@@ -162,8 +162,20 @@ final class InteractiveMetalView: MTKView {
 
     private func backingPoint(_ event: NSEvent) -> ScreenPoint {
         let local = convert(event.locationInWindow, from: nil)
-        let backing = convertToBacking(local)
-        return ScreenPoint(x: Float(backing.x), y: Float(backing.y))
+        let localPoint = ScreenPoint(
+            x: Float(local.x - bounds.minX),
+            y: Float(local.y - bounds.minY)
+        )
+        return localPoint.mapped(
+            from: PatternSize(
+                width: Float(bounds.width),
+                height: Float(bounds.height)
+            ),
+            to: PatternSize(
+                width: Float(drawableSize.width),
+                height: Float(drawableSize.height)
+            )
+        )
     }
 
     private func cancelActiveAndResetGestureState() {

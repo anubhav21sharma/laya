@@ -93,3 +93,22 @@ func normalizedMouseSampleCarriesRecoveredNeutralPressure() {
     #expect(sample.pressure == 0.5)
     #expect(sample.source == .mouse)
 }
+
+@Test
+func localViewPointMapsToDrawableWithoutReversingYAxis() {
+    let viewSize = PatternSize(width: 400, height: 300)
+    let drawableSize = PatternSize(width: 800, height: 600)
+
+    let lower = ScreenPoint(x: 100, y: 75).mapped(
+        from: viewSize,
+        to: drawableSize
+    )
+    let upper = ScreenPoint(x: 100, y: 50).mapped(
+        from: viewSize,
+        to: drawableSize
+    )
+
+    #expect(lower == ScreenPoint(x: 200, y: 150))
+    #expect(upper == ScreenPoint(x: 200, y: 100))
+    #expect(upper.y < lower.y)
+}
