@@ -464,6 +464,34 @@ func schemaThreeRejectsProgramTilingDisagreement() {
     }
 }
 
+@Test(
+    arguments: [
+        TilingHarnessProgram.gridInterior,
+        .gridBoundary,
+        .previewCommit,
+        .cancelPreservesCanonical,
+        .fiveHundredDabs,
+        .longStroke,
+    ]
+)
+func schemaThreeRequiresGridForEveryLegacyProgram(
+    program: TilingHarnessProgram
+) {
+    let data = schemaThreeData(
+        tiling: Int(TilingKind.halfDrop.rawValue),
+        program: program.rawValue
+    )
+
+    #expect(
+        throws: HarnessSceneError.programTilingMismatch(
+            program: program,
+            tiling: .halfDrop
+        )
+    ) {
+        try HarnessScene.decode(data)
+    }
+}
+
 @Test
 func schemaThreeRejectsInteractiveDiagnosticMode() {
     let data = schemaThreeData(
@@ -480,6 +508,98 @@ func schemaThreeRejectsInteractiveDiagnosticMode() {
     ) {
         try HarnessScene.decode(data)
     }
+}
+
+@Test(
+    arguments: [
+        (TilingHarnessProgram.gridInterior, TilingKind.grid),
+        (.gridBoundary, .grid),
+        (.previewCommit, .grid),
+        (.cancelPreservesCanonical, .grid),
+        (.fiveHundredDabs, .grid),
+        (.longStroke, .grid),
+        (.generalizedGrid, .grid),
+        (.halfDropInterior, .halfDrop),
+        (.halfDropEdge, .halfDrop),
+        (.halfDropCorner, .halfDrop),
+        (.brickTranspose, .brick),
+        (.rotationalFixedPoint, .rotational),
+        (.largeFootprint, .grid),
+        (.rectangularTile, .grid),
+        (.noncentralVisibleCell, .grid),
+        (.metadataTilingSwitch, .grid),
+        (.projectedLiveCommit, .halfDrop),
+        (.projectedLongStroke, .halfDrop),
+    ]
+)
+func schemaThreeHardRoundProgramsRejectIgnoredDiagnosticModes(
+    program: TilingHarnessProgram,
+    tiling: TilingKind
+) {
+    let unsupportedModes: [HarnessDiagnosticMode] = [
+        .asymmetricCoverage,
+        .canonicalCoordinates,
+        .brushLocalCoordinates,
+    ]
+
+    for diagnosticMode in unsupportedModes {
+        let data = schemaThreeData(
+            tiling: Int(tiling.rawValue),
+            diagnosticMode: diagnosticMode.rawValue,
+            program: program.rawValue
+        )
+
+        #expect(
+            throws: HarnessSceneError.interactiveDiagnosticRequiresHardRound(
+                program: program,
+                diagnosticMode: diagnosticMode
+            )
+        ) {
+            try HarnessScene.decode(data)
+        }
+    }
+}
+
+@Test(
+    arguments: [
+        (
+            TilingHarnessProgram.mirrorX,
+            TilingKind.mirrorX,
+            HarnessDiagnosticMode.asymmetricCoverage
+        ),
+        (.mirrorY, .mirrorY, .asymmetricCoverage),
+        (.mirrorXY, .mirrorXY, .asymmetricCoverage),
+        (.rotationalGenerator, .rotational, .asymmetricCoverage),
+        (.rotationalOrientation, .rotational, .asymmetricCoverage),
+        (.asymmetricFootprint, .rotational, .asymmetricCoverage),
+        (
+            .canonicalCoordinateContinuity,
+            .halfDrop,
+            .canonicalCoordinates
+        ),
+        (
+            .brushLocalCoordinateContinuity,
+            .mirrorXY,
+            .brushLocalCoordinates
+        ),
+    ]
+)
+func schemaThreeAcceptsTaskSevenDiagnosticProgramModes(
+    program: TilingHarnessProgram,
+    tiling: TilingKind,
+    diagnosticMode: HarnessDiagnosticMode
+) throws {
+    let scene = try HarnessScene.decode(
+        schemaThreeData(
+            tiling: Int(tiling.rawValue),
+            diagnosticMode: diagnosticMode.rawValue,
+            program: program.rawValue
+        )
+    )
+
+    #expect(scene.program == program)
+    #expect(scene.tiling == tiling)
+    #expect(scene.diagnosticMode == diagnosticMode)
 }
 
 @Test(arguments: ["tileWidth", "tileHeight", "tiling", "diagnosticMode"])

@@ -50,7 +50,7 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
         switch self {
         case .gridInterior, .gridBoundary, .previewCommit,
              .cancelPreservesCanonical, .fiveHundredDabs, .longStroke:
-            nil
+            .grid
         case .generalizedGrid, .largeFootprint, .rectangularTile,
              .metadataTilingSwitch:
             .grid
@@ -76,7 +76,12 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
 
     var requiresInteractiveHardRound: Bool {
         switch self {
-        case .noncentralVisibleCell, .metadataTilingSwitch,
+        case .gridInterior, .gridBoundary, .previewCommit,
+             .cancelPreservesCanonical, .fiveHundredDabs, .longStroke,
+             .generalizedGrid, .halfDropInterior, .halfDropEdge,
+             .halfDropCorner, .brickTranspose, .rotationalFixedPoint,
+             .largeFootprint, .rectangularTile, .noncentralVisibleCell,
+             .metadataTilingSwitch,
              .projectedLiveCommit, .projectedLongStroke:
             true
         default:
