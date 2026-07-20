@@ -22,7 +22,11 @@ struct RasterRevisionStoreTests {
         )
         let unknownBuffer = try #require(queue.makeCommandBuffer())
         #expect(throws: MetalRendererError.missingRasterRevision) {
-            try store.encodeRestore(unknown, into: texture, on: unknownBuffer)
+            let _ = try store.encodeRestore(
+                unknown,
+                into: texture,
+                on: unknownBuffer
+            )
         }
 
         let pair = try store.allocatePair(
@@ -34,7 +38,11 @@ struct RasterRevisionStoreTests {
         store.discard(pair)
         let staleBuffer = try #require(queue.makeCommandBuffer())
         #expect(throws: MetalRendererError.missingRasterRevision) {
-            try store.encodeRestore(pair.before, into: texture, on: staleBuffer)
+            let _ = try store.encodeRestore(
+                pair.before,
+                into: texture,
+                on: staleBuffer
+            )
         }
     }
 
@@ -65,7 +73,11 @@ struct RasterRevisionStoreTests {
                 actualHeight: 64
             )
         ) {
-            try store.encodeCapture(pair.before, from: wrongSize, on: sizeBuffer)
+            let _ = try store.encodeCapture(
+                pair.before,
+                from: wrongSize,
+                on: sizeBuffer
+            )
         }
 
         let wrongFormat = try makeTexture(
@@ -75,7 +87,7 @@ struct RasterRevisionStoreTests {
         )
         let formatBuffer = try #require(queue.makeCommandBuffer())
         #expect(throws: MetalRendererError.invalidRasterRevisionTextureFormat) {
-            try store.encodeCapture(
+            let _ = try store.encodeCapture(
                 pair.before,
                 from: wrongFormat,
                 on: formatBuffer
@@ -167,15 +179,65 @@ struct RasterRevisionStoreTests {
         #expect(throws: MetalRendererError.invalidRasterRevisionOperationToken) {
             try store.finalize(failed, as: .failed)
         }
-        #expect(throws: MetalRendererError.invalidRasterRevisionOperationToken) {
-            try store.finalize(
-                RasterRevisionOperationToken(rawValue: .max),
-                as: .failed
-            )
-        }
 
         store.discard(pair)
         #expect(store.residentBytes == 0)
+    }
+
+    @Test
+    func operationTokensAreOpaqueAndBoundToTheirCreatingStore() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let firstStore = RasterRevisionStore(device: device)
+        let secondStore = RasterRevisionStore(device: device)
+        let size = PixelSize(width: 64, height: 64)
+        let regions = regionSet(size: size)
+        let firstPair = try firstStore.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let secondPair = try secondStore.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let texture = try makeTexture(device: device, size: size)
+        let queue = try #require(device.makeCommandQueue())
+        let firstBuffer = try #require(queue.makeCommandBuffer())
+        let secondBuffer = try #require(queue.makeCommandBuffer())
+
+        let firstToken = try firstStore.encodeCapture(
+            firstPair.before,
+            from: texture,
+            on: firstBuffer
+        )
+        let secondToken = try secondStore.encodeCapture(
+            secondPair.before,
+            from: texture,
+            on: secondBuffer
+        )
+
+        #expect(firstToken != secondToken)
+        #expect(throws: MetalRendererError.invalidRasterRevisionOperationToken) {
+            try secondStore.finalize(firstToken, as: .cancelled)
+        }
+        #expect(secondStore.residentBytes == secondPair.retainedBytes)
+
+        try firstStore.finalize(firstToken, as: .cancelled)
+        try secondStore.finalize(secondToken, as: .cancelled)
+        #expect(throws: MetalRendererError.invalidRasterRevisionOperationToken) {
+            try firstStore.finalize(firstToken, as: .cancelled)
+        }
+        #expect(throws: MetalRendererError.invalidRasterRevisionOperationToken) {
+            try secondStore.finalize(secondToken, as: .cancelled)
+        }
+
+        firstStore.discard(firstPair)
+        secondStore.discard(secondPair)
+        #expect(firstStore.residentBytes == 0)
+        #expect(secondStore.residentBytes == 0)
     }
 
     @Test
@@ -248,7 +310,7 @@ struct RasterRevisionStoreTests {
         #expect(store.residentBytes == pair.before.retainedBytes)
         let missingAfter = try #require(queue.makeCommandBuffer())
         #expect(throws: MetalRendererError.missingRasterRevision) {
-            try store.encodeRestore(
+            let _ = try store.encodeRestore(
                 pair.after,
                 into: texture,
                 on: missingAfter
@@ -265,7 +327,7 @@ struct RasterRevisionStoreTests {
         #expect(store.residentBytes == pair.before.retainedBytes)
         let logicallyReleased = try #require(queue.makeCommandBuffer())
         #expect(throws: MetalRendererError.missingRasterRevision) {
-            try store.encodeRestore(
+            let _ = try store.encodeRestore(
                 pair.before,
                 into: texture,
                 on: logicallyReleased
@@ -279,7 +341,7 @@ struct RasterRevisionStoreTests {
 
         let staleBefore = try #require(queue.makeCommandBuffer())
         #expect(throws: MetalRendererError.missingRasterRevision) {
-            try store.encodeRestore(
+            let _ = try store.encodeRestore(
                 pair.before,
                 into: texture,
                 on: staleBefore

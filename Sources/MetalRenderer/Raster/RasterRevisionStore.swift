@@ -3,12 +3,14 @@ import Metal
 import PatternEngine
 
 public struct RasterRevisionOperationToken:
-    RawRepresentable, Hashable, Sendable
+    Hashable, Sendable
 {
-    public let rawValue: UInt64
+    private let storeIdentity: UInt64
+    private let sequence: UInt64
 
-    public init(rawValue: UInt64) {
-        self.rawValue = rawValue
+    fileprivate init(storeIdentity: UInt64, sequence: UInt64) {
+        self.storeIdentity = storeIdentity
+        self.sequence = sequence
     }
 }
 
@@ -85,6 +87,8 @@ public final class RasterRevisionStore: @unchecked Sendable {
     }
 
     private let device: any MTLDevice
+    private let operationStoreIdentity =
+        RasterRevisionStoreIdentitySource.shared.makeIdentity()
     private let lock = NSLock()
     private var entries: [StoredRasterRevisionID: Entry] = [:]
     private var operations: [RasterRevisionOperationToken: Operation] = [:]
@@ -203,7 +207,6 @@ public final class RasterRevisionStore: @unchecked Sendable {
         }
     }
 
-    @discardableResult
     public func encodeCapture(
         _ reference: RasterRevisionReference,
         from texture: any MTLTexture,
@@ -270,7 +273,6 @@ public final class RasterRevisionStore: @unchecked Sendable {
         return reservation.1
     }
 
-    @discardableResult
     public func encodeRestore(
         _ reference: RasterRevisionReference,
         into texture: any MTLTexture,
@@ -546,7 +548,10 @@ public final class RasterRevisionStore: @unchecked Sendable {
             nextOperationToken < UInt64.max,
             "Raster revision operation identity space exhausted."
         )
-        let token = RasterRevisionOperationToken(rawValue: nextOperationToken)
+        let token = RasterRevisionOperationToken(
+            storeIdentity: operationStoreIdentity,
+            sequence: nextOperationToken
+        )
         nextOperationToken += 1
         return token
     }
@@ -607,5 +612,24 @@ public final class RasterRevisionStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return try body()
+    }
+}
+
+private final class RasterRevisionStoreIdentitySource: @unchecked Sendable {
+    static let shared = RasterRevisionStoreIdentitySource()
+
+    private let lock = NSLock()
+    private var nextIdentity: UInt64 = 1
+
+    func makeIdentity() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        precondition(
+            nextIdentity < UInt64.max,
+            "Raster revision store identity space exhausted."
+        )
+        let identity = nextIdentity
+        nextIdentity += 1
+        return identity
     }
 }
