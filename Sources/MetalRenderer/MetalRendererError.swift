@@ -17,6 +17,18 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
     case invalidStrokeLifecycle
     case commitPendingInput
     case invalidDrawableSize
+    case rasterRevisionBufferAllocationFailed
+    case rasterRevisionStorageOverflow
+    case emptyRasterRevisionRegions
+    case rasterRevisionRegionOutOfBounds
+    case invalidRasterRevisionTextureFormat
+    case rasterRevisionTextureSizeMismatch(
+        expectedWidth: Int,
+        expectedHeight: Int,
+        actualWidth: Int,
+        actualHeight: Int
+    )
+    case missingRasterRevision
 
     public var errorDescription: String? {
         switch self {
@@ -52,6 +64,29 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
             "A canonical commit is still pending."
         case .invalidDrawableSize:
             "The drawable size is invalid."
+        case .rasterRevisionBufferAllocationFailed:
+            "Metal raster-revision buffer allocation failed."
+        case .rasterRevisionStorageOverflow:
+            "Raster-revision storage size overflowed."
+        case .emptyRasterRevisionRegions:
+            "A raster revision requires at least one pixel region."
+        case .rasterRevisionRegionOutOfBounds:
+            "A raster-revision region lies outside its pixel dimensions."
+        case .invalidRasterRevisionTextureFormat:
+            "Raster revisions require a BGRA8-unorm texture."
+        case let .rasterRevisionTextureSizeMismatch(
+            expectedWidth,
+            expectedHeight,
+            actualWidth,
+            actualHeight
+        ):
+            """
+            Raster-revision texture size mismatch: expected \
+            \(expectedWidth)x\(expectedHeight), got \
+            \(actualWidth)x\(actualHeight).
+            """
+        case .missingRasterRevision:
+            "The requested raster revision is no longer resident."
         }
     }
 }
