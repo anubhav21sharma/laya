@@ -90,13 +90,11 @@ done
 
 test -s "$artifacts/positive/five-hundred-dabs/five-hundred-dabs.live.screen.png"
 
-if [[ "${PATTERN_SKIP_PERFORMANCE:-0}" == "1" ]]; then
-  printf '%s\n' "slice1-performance=skipped-explicit-user-override"
-else
-swift - "$artifacts/positive" <<'SWIFT'
+swift - "$artifacts/positive" "${PATTERN_SKIP_PERFORMANCE:-0}" <<'SWIFT'
 import Foundation
 
 let root = URL(fileURLWithPath: CommandLine.arguments[1])
+let skipPerformance = CommandLine.arguments[2] == "1"
 let names = [
     "grid-interior",
     "grid-boundary",
@@ -138,20 +136,24 @@ let frameBudget = records.compactMap {
     $0["displayFrameBudgetMilliseconds"] as? Double
 }.min()!
 
-guard p95(allBrush) < 2 else { fatalError("brush p95 budget failed") }
-guard p95(allGrid) < 2 else { fatalError("grid p95 budget failed") }
-guard dab < 3 else { fatalError("500-dab GPU budget failed") }
-guard Double(missed) / Double(frameCount) < 0.01 else {
-    fatalError("missed-frame budget failed")
+if !skipPerformance {
+    guard p95(allBrush) < 2 else { fatalError("brush p95 budget failed") }
+    guard p95(allGrid) < 2 else { fatalError("grid p95 budget failed") }
+    guard dab < 3 else { fatalError("500-dab GPU budget failed") }
+    guard Double(missed) / Double(frameCount) < 0.01 else {
+        fatalError("missed-frame budget failed")
+    }
+    guard (commitPending.max() ?? 0) < frameBudget else {
+        fatalError("commit-pending frame budget failed")
+    }
 }
 guard zip(newCounts, totals).allSatisfy({ $0 <= $1 }) else {
     fatalError("instance counter ordering failed")
 }
-guard (commitPending.max() ?? 0) < frameBudget else {
-    fatalError("commit-pending frame budget failed")
+if skipPerformance {
+    print("slice1-performance=skipped-explicit-user-override")
 }
 SWIFT
-fi
 
 if tracked_project="$(
   git ls-files --error-unmatch App/PatternSpike.xcodeproj 2>&1

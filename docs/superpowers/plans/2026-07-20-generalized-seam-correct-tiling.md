@@ -202,16 +202,16 @@ PATTERN_SKIP_PERFORMANCE=1 ./scripts/verify-slice1.sh
 Expected: FAIL at the existing performance evaluator, proving the new flag is
 not implemented yet. All functional stages before that evaluator must pass.
 
-- [ ] **Step 2: Add an explicit performance-only bypass**
+- [ ] **Step 2: Add an explicit performance-assertion-only bypass**
 
-Wrap only the inline Swift performance evaluator in:
+Run the inline Swift evaluator unconditionally and pass
+`"${PATTERN_SKIP_PERFORMANCE:-0}"` as its second argument. Inside that
+evaluator, skip only timing/performance assertions when the argument is `"1"`;
+the instance-counter ordering assertion remains unconditional. In skip mode,
+the evaluator prints:
 
-```bash
-if [[ "${PATTERN_SKIP_PERFORMANCE:-0}" == "1" ]]; then
-  printf '%s\n' "slice1-performance=skipped-explicit-user-override"
-else
-  # Existing inline Swift performance evaluator remains byte-for-byte here.
-fi
+```text
+slice1-performance=skipped-explicit-user-override
 ```
 
 Keep Slice 0, Swift tests, both app builds, all six negative controls, all six
