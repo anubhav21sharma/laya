@@ -279,6 +279,130 @@ struct TilingCoverageOracleTests {
         #expect(withinTolerance.holeCount == 0)
         #expect(withinTolerance.phantomCount == 0)
         #expect(withinTolerance.maximumDelta == 1)
+
+        let partialCoverage = TilingCoverageOracle.compare(
+            expected: OracleCoverage(
+                pixelSize: pixelSize,
+                bytes: [100, 50, 0, 0]
+            ),
+            actual: OracleCoverage(
+                pixelSize: pixelSize,
+                bytes: [50, 100, 0, 0]
+            ),
+            boundaryTolerance: 0
+        )
+        #expect(partialCoverage.holeCount == 0)
+        #expect(partialCoverage.phantomCount == 0)
+        #expect(partialCoverage.maximumDelta == 50)
+
+        let presenceTransitions = TilingCoverageOracle.compare(
+            expected: OracleCoverage(
+                pixelSize: pixelSize,
+                bytes: [1, 0, 0, 0]
+            ),
+            actual: OracleCoverage(
+                pixelSize: pixelSize,
+                bytes: [0, 1, 0, 0]
+            ),
+            boundaryTolerance: 0
+        )
+        #expect(presenceTransitions.holeCount == 1)
+        #expect(presenceTransitions.phantomCount == 1)
+        #expect(presenceTransitions.maximumDelta == 1)
+
+        let suppressedTransitions = TilingCoverageOracle.compare(
+            expected: OracleCoverage(
+                pixelSize: pixelSize,
+                bytes: [1, 0, 0, 0]
+            ),
+            actual: OracleCoverage(
+                pixelSize: pixelSize,
+                bytes: [0, 1, 0, 0]
+            ),
+            boundaryTolerance: 1
+        )
+        #expect(suppressedTransitions.holeCount == 0)
+        #expect(suppressedTransitions.phantomCount == 0)
+        #expect(suppressedTransitions.maximumDelta == 1)
+    }
+
+    @Test
+    func supersamplingFourThroughEightCoversEveryTilingKind() {
+        let tileSize = PixelSize(width: 65, height: 67)
+        let tilings: [(String, TilingKind)] = [
+            ("grid", .grid),
+            ("half-drop", .halfDrop),
+            ("brick", .brick),
+            ("mirror-x", .mirrorX),
+            ("mirror-y", .mirrorY),
+            ("mirror-xy", .mirrorXY),
+            ("rotational", .rotational),
+        ]
+
+        for supersampling in 4...8 {
+            for (name, tiling) in tilings {
+                let testCase = OraclePropertyCase(
+                    name: "\(name) ss\(supersampling)",
+                    footprint: .hardRound(radius: 2),
+                    brushToWorld: unitTransform(
+                        center: SIMD2(70.31, 72.27)
+                    ),
+                    tileSize: tileSize,
+                    tiling: tiling,
+                    supersampling: supersampling
+                )
+                let expected = TilingCoverageOracle.renderCanonical(
+                    footprint: testCase.footprint,
+                    brushToWorld: testCase.brushToWorld,
+                    tileSize: tileSize,
+                    tiling: tiling,
+                    supersampling: supersampling
+                )
+                let actual = rasterizeProductionFragments(testCase)
+                let comparison = TilingCoverageOracle.compare(
+                    expected: expected.coverage,
+                    actual: actual.coverage,
+                    boundaryTolerance: 1
+                )
+                #expect(comparison.holeCount == 0, "\(testCase.name)")
+                #expect(comparison.phantomCount == 0, "\(testCase.name)")
+                #expect(comparison.maximumDelta <= 1, "\(testCase.name)")
+            }
+        }
+    }
+
+    @Test
+    func supersamplingEightUsesBitSixtyThreeAndMaximumDiagnosticSum() {
+        let tileSize = PixelSize(width: 64, height: 64)
+        let result = TilingCoverageOracle.renderCanonical(
+            footprint: .hardRound(radius: 1),
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(32, 0),
+                yAxis: SIMD2(0, 256),
+                translation: SIMD2(0.5, 1)
+            ),
+            tileSize: tileSize,
+            tiling: .grid,
+            supersampling: 8
+        )
+
+        #expect(result.coverage.bytes[0] == 255)
+        #expect(
+            diagnosticPixel(
+                result.canonicalCoordinatesBGRA,
+                x: 0,
+                y: 0,
+                width: tileSize.width
+            )[3] == 255
+        )
+        #expect(
+            diagnosticPixel(
+                result.brushLocalCoordinatesBGRA,
+                x: 0,
+                y: 0,
+                width: tileSize.width
+            ) == [0, 255, 128, 255]
+        )
     }
 
     @Test
@@ -358,6 +482,127 @@ struct TilingCoverageOracleTests {
     }
 
     @Test
+    func rotationalBrushDiagnosticsFollowSourceOverCandidateOrder() {
+        let tileSize = PixelSize(width: 65, height: 97)
+        let center = SIMD2<Float>(32.5, 48.5)
+        let centeredHardRound = OraclePropertyCase(
+            name: "centered rotational hard-round",
+            footprint: .hardRound(radius: 8),
+            brushToWorld: unitTransform(center: center),
+            tileSize: tileSize,
+            tiling: .rotational,
+            supersampling: 1
+        )
+        let centeredExpected = TilingCoverageOracle.renderCanonical(
+            footprint: centeredHardRound.footprint,
+            brushToWorld: centeredHardRound.brushToWorld,
+            tileSize: tileSize,
+            tiling: .rotational,
+            supersampling: 1
+        )
+        let centeredActual = rasterizeProductionFragments(centeredHardRound)
+        #expect(
+            centeredExpected.brushLocalCoordinatesBGRA
+                == centeredActual.brushLocalCoordinatesBGRA
+        )
+        #expect(
+            diagnosticPixel(
+                centeredExpected.brushLocalCoordinatesBGRA,
+                x: 32,
+                y: 44,
+                width: tileSize.width
+            ) == [0, 64, 128, 255]
+        )
+        #expect(
+            diagnosticPixel(
+                centeredExpected.brushLocalCoordinatesBGRA,
+                x: 32,
+                y: 52,
+                width: tileSize.width
+            ) == [0, 191, 128, 255]
+        )
+
+        let boundaryFixedRound = OraclePropertyCase(
+            name: "boundary-fixed rotational hard-round",
+            footprint: .hardRound(radius: 8),
+            brushToWorld: unitTransform(center: SIMD2(0, 48.5)),
+            tileSize: tileSize,
+            tiling: .rotational,
+            supersampling: 1
+        )
+        let boundaryExpected = TilingCoverageOracle.renderCanonical(
+            footprint: boundaryFixedRound.footprint,
+            brushToWorld: boundaryFixedRound.brushToWorld,
+            tileSize: tileSize,
+            tiling: .rotational,
+            supersampling: 1
+        )
+        let boundaryActual = rasterizeProductionFragments(boundaryFixedRound)
+        let boundaryProbe = diagnosticPixel(
+            boundaryExpected.brushLocalCoordinatesBGRA,
+            x: 4,
+            y: 48,
+            width: tileSize.width
+        )
+        #expect(boundaryProbe == [0, 128, 56, 255])
+        #expect(
+            boundaryProbe == diagnosticPixel(
+                boundaryActual.brushLocalCoordinatesBGRA,
+                x: 4,
+                y: 48,
+                width: tileSize.width
+            )
+        )
+
+        let orientedOverlap = OraclePropertyCase(
+            name: "overlapping rotational triangle",
+            footprint: .asymmetricTriangle,
+            brushToWorld: scaledTransform(scale: 20, center: center),
+            tileSize: tileSize,
+            tiling: .rotational,
+            supersampling: 1
+        )
+        let orientedExpected = TilingCoverageOracle.renderCanonical(
+            footprint: orientedOverlap.footprint,
+            brushToWorld: orientedOverlap.brushToWorld,
+            tileSize: tileSize,
+            tiling: .rotational,
+            supersampling: 1
+        )
+        let orientedActual = rasterizeProductionFragments(orientedOverlap)
+        let orientedTop = diagnosticPixel(
+            orientedExpected.brushLocalCoordinatesBGRA,
+            x: 32,
+            y: 44,
+            width: tileSize.width
+        )
+        let orientedBottom = diagnosticPixel(
+            orientedExpected.brushLocalCoordinatesBGRA,
+            x: 32,
+            y: 52,
+            width: tileSize.width
+        )
+        #expect(orientedTop == [0, 153, 128, 255])
+        #expect(orientedBottom == [0, 102, 128, 255])
+        #expect(
+            orientedTop == diagnosticPixel(
+                orientedActual.brushLocalCoordinatesBGRA,
+                x: 32,
+                y: 44,
+                width: tileSize.width
+            )
+        )
+        #expect(
+            orientedBottom == diagnosticPixel(
+                orientedActual.brushLocalCoordinatesBGRA,
+                x: 32,
+                y: 52,
+                width: tileSize.width
+            )
+        )
+    }
+
+    @Test
     func propertyHarnessNegativeControlsDetectCoverageAndDiagnosticCorruption() {
         let testCase = oraclePropertyMatrix.first {
             $0.name == "grid interior"
@@ -431,6 +676,7 @@ struct TilingCoverageOracleTests {
             ("coverageByteCount", "OracleCoverage byte count must equal pixel area"),
             ("coverageAreaOverflow", "OracleCoverage pixel area must be Int-representable"),
             ("canonicalByteCount", "Oracle canonical BGRA byte count must equal pixel area times four"),
+            ("brushLocalByteCount", "Oracle brush-local BGRA byte count must equal pixel area times four"),
             ("tileTooSmall", "TilingCoverageOracle tile width must be in 64...4096"),
             ("tileTooLarge", "TilingCoverageOracle tile height must be in 64...4096"),
             ("supersamplingZero", "TilingCoverageOracle supersampling must be in 1...8"),
@@ -438,6 +684,11 @@ struct TilingCoverageOracleTests {
             ("radiusTooSmall", "TilingCoverageOracle radius must be finite and at least 1"),
             ("radiusTooLarge", "TilingCoverageOracle radius exceeds the supported tile-relative maximum"),
             ("singularTransform", "TilingCoverageOracle brush-to-world transform must be nonsingular"),
+            ("illConditionedTransform", "TilingCoverageOracle brush-to-world transform must be nonsingular"),
+            ("nonfiniteInverse", "TilingCoverageOracle inverse transform must be finite"),
+            ("oversizedHardRound", "TilingCoverageOracle transformed hard-round dimensions exceed supported diameter"),
+            ("oversizedTriangle", "TilingCoverageOracle transformed triangle dimensions exceed supported diameter"),
+            ("unrepresentableWorldBounds", "TilingCoverageOracle world sample bounds must be Int-representable"),
             ("comparisonSize", "Coverage comparison requires equal pixel sizes"),
             ("boundaryTolerance", "Coverage comparison boundary tolerance must be 0 or 1"),
         ]
@@ -452,6 +703,18 @@ struct TilingCoverageOracleTests {
                     "Precondition failed: \(expectedMessage)"
                 ),
                 "\(validationCase): \(result.standardError)"
+            )
+        }
+
+        for survivor in [
+            "uniformSmallScale",
+            "uniformSubnormalScale",
+            "rotatedMaximumFootprint",
+        ] {
+            let result = try runOracleValidationSubprocess(for: survivor)
+            #expect(
+                result.status == 0,
+                "\(survivor): \(result.standardError)"
             )
         }
     }
@@ -747,7 +1010,6 @@ private func rasterizeProductionFragments(
                             )
                         {
                             owningBrushPoint = brushPoint
-                            break
                         }
                     }
                     guard let brushPoint = owningBrushPoint else {
@@ -810,6 +1072,16 @@ private func rasterizeProductionFragments(
         canonicalCoordinatesBGRA: canonicalBGRA,
         brushLocalCoordinatesBGRA: brushBGRA
     )
+}
+
+private func diagnosticPixel(
+    _ bytes: [UInt8],
+    x: Int,
+    y: Int,
+    width: Int
+) -> [UInt8] {
+    let offset = (y * width + x) * 4
+    return Array(bytes[offset..<(offset + 4)])
 }
 
 private struct ProductionFragmentSample {
@@ -956,6 +1228,15 @@ private func exerciseOracleValidation(named validationCase: String) {
                 count: 64 * 96 * 4
             )
         )
+    case "brushLocalByteCount":
+        _ = OracleRasterResult(
+            coverage: validCoverage,
+            canonicalCoordinatesBGRA: [UInt8](
+                repeating: 0,
+                count: 64 * 96 * 4
+            ),
+            brushLocalCoordinatesBGRA: []
+        )
     case "tileTooSmall":
         _ = validatedOracleRender(
             tileSize: PixelSize(width: 63, height: 96)
@@ -979,6 +1260,105 @@ private func exerciseOracleValidation(named validationCase: String) {
                 yAxis: SIMD2(2, 0),
                 translation: SIMD2(0, 0)
             )
+        )
+    case "illConditionedTransform":
+        _ = validatedOracleRender(
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(256, 256),
+                yAxis: SIMD2(0, 2.9802322e-8),
+                translation: SIMD2(32, 48)
+            )
+        )
+    case "nonfiniteInverse":
+        _ = validatedOracleRender(
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(Float.leastNonzeroMagnitude, 0),
+                yAxis: SIMD2(0, Float.leastNonzeroMagnitude),
+                translation: SIMD2(32, 48)
+            )
+        )
+    case "oversizedHardRound":
+        _ = validatedOracleRender(
+            footprint: .hardRound(radius: 1),
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(300, 0),
+                yAxis: SIMD2(0, 300),
+                translation: SIMD2(32, 48)
+            )
+        )
+    case "oversizedTriangle":
+        _ = validatedOracleRender(
+            footprint: .asymmetricTriangle,
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(400, 0),
+                yAxis: SIMD2(0, 400),
+                translation: SIMD2(32, 48)
+            )
+        )
+    case "unrepresentableWorldBounds":
+        _ = validatedOracleRender(
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(1, 0),
+                yAxis: SIMD2(0, 1),
+                translation: SIMD2(
+                    Float.greatestFiniteMagnitude,
+                    Float.greatestFiniteMagnitude
+                )
+            )
+        )
+    case "uniformSmallScale":
+        let result = validatedOracleRender(
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(0.0001, 0),
+                yAxis: SIMD2(0, 0.0001),
+                translation: SIMD2(32.5, 48.5)
+            )
+        )
+        precondition(
+            result.coverage.bytes.reduce(0, { $0 + Int($1) }) == 255,
+            "Uniform small scale must cover exactly one sample"
+        )
+        let offset = (48 * 64 + 32) * 4
+        precondition(
+            Array(result.brushLocalCoordinatesBGRA[offset..<(offset + 4)])
+                == [0, 128, 128, 255],
+            "Uniform small scale must preserve exact brush diagnostics"
+        )
+    case "uniformSubnormalScale":
+        let result = validatedOracleRender(
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(1e-30, 0),
+                yAxis: SIMD2(0, 1e-30),
+                translation: SIMD2(0.5, 0.5)
+            )
+        )
+        precondition(
+            result.coverage.bytes.reduce(0, { $0 + Int($1) }) == 255,
+            "Uniform subnormal scale must cover exactly one sample"
+        )
+        precondition(
+            diagnosticPixel(
+                result.brushLocalCoordinatesBGRA,
+                x: 0,
+                y: 0,
+                width: validSize.width
+            ) == [0, 128, 128, 255],
+            "Uniform subnormal scale must preserve finite diagnostics"
+        )
+    case "rotatedMaximumFootprint":
+        let diagonal = Float(0.5).squareRoot()
+        let result = validatedOracleRender(
+            footprint: .hardRound(radius: 256),
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(diagonal, diagonal),
+                yAxis: SIMD2(-diagonal, diagonal),
+                translation: SIMD2(0, 0)
+            ),
+            tileSize: PixelSize(width: 64, height: 64)
+        )
+        precondition(
+            result.coverage.bytes.allSatisfy { $0 == 255 },
+            "Maximum rotated footprint must cover the canonical tile"
         )
     case "comparisonSize":
         _ = TilingCoverageOracle.compare(

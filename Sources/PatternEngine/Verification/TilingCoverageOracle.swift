@@ -96,17 +96,20 @@ public enum TilingCoverageOracle {
             tileSize,
             message: "TilingCoverageOracle pixel area must be Int-representable"
         )
-        let inverse = brushToWorld.inverted()
-        let localBounds = bounds(for: footprint)
-        let worldBounds = transformedBounds(
-            localBounds,
+        let inverse = invertedBrushTransform(brushToWorld)
+        let worldBounds = transformedFootprintBounds(
+            footprint,
             by: brushToWorld
         )
         let worldPixelBounds = integerPixelBounds(worldBounds)
+        validateSampleWork(
+            worldPixelBounds,
+            tileSize: tileSize,
+            supersampling: supersampling
+        )
         let samplesPerPixel = supersampling * supersampling
         var sampleMasks = [UInt64](repeating: 0, count: area)
-        var brushRedSums = [UInt16](repeating: 0, count: area)
-        var brushGreenSums = [UInt16](repeating: 0, count: area)
+        var candidateCells: Set<DirectCell> = []
 
         for worldPixelY in worldPixelBounds.minimumY..<worldPixelBounds.maximumY {
             for worldPixelX in worldPixelBounds.minimumX..<worldPixelBounds.maximumX {
@@ -125,9 +128,12 @@ public enum TilingCoverageOracle {
                         guard contains(brushLocal, footprint: footprint) else {
                             continue
                         }
-                        let normalizedBrushLocal = normalizedBrushCoordinate(
-                            brushLocal,
-                            footprint: footprint
+                        candidateCells.insert(
+                            directCell(
+                                containing: world,
+                                tileSize: tileSize,
+                                tiling: tiling
+                            )
                         )
                         let destinations = directFoldDestinations(
                             world,
@@ -146,18 +152,22 @@ public enum TilingCoverageOracle {
                                 continue
                             }
                             sampleMasks[address.pixelIndex] |= bit
-                            brushRedSums[address.pixelIndex] += UInt16(
-                                encodeSigned(normalizedBrushLocal.x)
-                            )
-                            brushGreenSums[address.pixelIndex] += UInt16(
-                                encodeSigned(normalizedBrushLocal.y)
-                            )
                         }
                     }
                 }
             }
         }
 
+        let brushSums = brushCoordinateSums(
+            sampleMasks: sampleMasks,
+            candidateCells: candidateCells,
+            footprint: footprint,
+            brushToWorld: brushToWorld,
+            worldToBrush: inverse,
+            tileSize: tileSize,
+            tiling: tiling,
+            supersampling: supersampling
+        )
         var coverageBytes = [UInt8](repeating: 0, count: area)
         var canonicalBGRA = [UInt8](repeating: 0, count: area * 4)
         var brushBGRA = [UInt8](repeating: 0, count: area * 4)
@@ -185,11 +195,11 @@ public enum TilingCoverageOracle {
             )
             canonicalBGRA[byteOffset + 3] = alpha
             brushBGRA[byteOffset + 1] = averagedByte(
-                sum: Int(brushGreenSums[pixelIndex]),
+                sum: Int(brushSums.green[pixelIndex]),
                 divisor: samplesPerPixel
             )
             brushBGRA[byteOffset + 2] = averagedByte(
-                sum: Int(brushRedSums[pixelIndex]),
+                sum: Int(brushSums.red[pixelIndex]),
                 divisor: samplesPerPixel
             )
             brushBGRA[byteOffset + 3] = alpha
@@ -229,9 +239,9 @@ public enum TilingCoverageOracle {
             guard delta > boundaryTolerance else {
                 continue
             }
-            if signedDelta > 0 {
+            if expectedByte > 0 && actualByte == 0 {
                 holeCount += 1
-            } else {
+            } else if expectedByte == 0 && actualByte > 0 {
                 phantomCount += 1
             }
         }
@@ -258,6 +268,21 @@ private struct IntegerPixelBounds {
 private struct SampleAddress {
     let pixelIndex: Int
     let bitIndex: Int
+}
+
+private struct DirectCell: Hashable {
+    let column: Int
+    let row: Int
+}
+
+private struct DirectCandidate {
+    let cell: DirectCell
+    let imageOrdinal: UInt8
+}
+
+private struct DirectCoverageCenterKey: Hashable {
+    let x: UInt32
+    let y: UInt32
 }
 
 private func checkedPixelArea(
@@ -304,11 +329,23 @@ private func validateRenderInputs(
         )
     }
 
-    let determinant = brushToWorld.xAxis.x * brushToWorld.yAxis.y
-        - brushToWorld.xAxis.y * brushToWorld.yAxis.x
+    let firstRow = normalizedVector(
+        SIMD2(brushToWorld.xAxis.x, brushToWorld.yAxis.x)
+    )
+    let secondRow = normalizedVector(
+        SIMD2(brushToWorld.xAxis.y, brushToWorld.yAxis.y)
+    )
+    let normalizedDeterminant = firstRow.x * secondRow.y
+        - firstRow.y * secondRow.x
     precondition(
-        determinant.isFinite && abs(determinant) >= Float.ulpOfOne,
+        normalizedDeterminant.isFinite
+            && abs(normalizedDeterminant) >= Float.ulpOfOne,
         "TilingCoverageOracle brush-to-world transform must be nonsingular"
+    )
+    validateTransformedFootprint(
+        footprint,
+        brushToWorld: brushToWorld,
+        tileSize: tileSize
     )
     _ = checkedPixelArea(
         tileSize,
@@ -316,41 +353,168 @@ private func validateRenderInputs(
     )
 }
 
-private func bounds(for footprint: OracleFootprint) -> FloatBounds {
+private func normalizedVector(_ value: SIMD2<Float>) -> SIMD2<Float> {
+    let scale = max(abs(value.x), abs(value.y))
+    precondition(
+        scale.isFinite && scale > 0,
+        "TilingCoverageOracle brush-to-world transform must be nonsingular"
+    )
+    let scaled = value / scale
+    let length = sqrt(simd_dot(scaled, scaled))
+    precondition(
+        length.isFinite && length > 0,
+        "TilingCoverageOracle brush-to-world transform must be nonsingular"
+    )
+    return scaled / length
+}
+
+private func vectorMagnitude(_ value: SIMD2<Float>) -> Float {
+    let scale = max(abs(value.x), abs(value.y))
+    guard scale > 0 else {
+        return 0
+    }
+    let scaled = value / scale
+    return scale * sqrt(simd_dot(scaled, scaled))
+}
+
+private func validateTransformedFootprint(
+    _ footprint: OracleFootprint,
+    brushToWorld: Affine2D,
+    tileSize: PixelSize
+) {
+    let supportedDiameter = min(
+        Float(2_000),
+        8 * Float(min(tileSize.width, tileSize.height))
+    )
     switch footprint {
     case let .hardRound(radius):
-        return FloatBounds(
-            minimum: SIMD2(repeating: -radius),
-            maximum: SIMD2(repeating: radius)
+        let firstRow = SIMD2(
+            brushToWorld.xAxis.x,
+            brushToWorld.yAxis.x
+        )
+        let secondRow = SIMD2(
+            brushToWorld.xAxis.y,
+            brushToWorld.yAxis.y
+        )
+        let width = 2 * radius * vectorMagnitude(firstRow)
+        let height = 2 * radius * vectorMagnitude(secondRow)
+        precondition(
+            width.isFinite && height.isFinite
+                && width <= supportedDiameter
+                && height <= supportedDiameter,
+            "TilingCoverageOracle transformed hard-round dimensions exceed supported diameter"
         )
     case .asymmetricTriangle:
-        return FloatBounds(
-            minimum: SIMD2(-0.75, -0.60),
-            maximum: SIMD2(0.85, 0.90)
+        let vertices = [
+            SIMD2<Float>(-0.75, -0.60),
+            SIMD2<Float>(0.85, -0.20),
+            SIMD2<Float>(-0.10, 0.90),
+        ].map {
+            brushToWorld.xAxis * $0.x
+                + brushToWorld.yAxis * $0.y
+        }
+        let minimumX = vertices.map(\.x).min()!
+        let maximumX = vertices.map(\.x).max()!
+        let minimumY = vertices.map(\.y).min()!
+        let maximumY = vertices.map(\.y).max()!
+        let width = maximumX - minimumX
+        let height = maximumY - minimumY
+        precondition(
+            width.isFinite && height.isFinite
+                && width <= supportedDiameter
+                && height <= supportedDiameter,
+            "TilingCoverageOracle transformed triangle dimensions exceed supported diameter"
         )
     }
 }
 
-private func transformedBounds(
-    _ bounds: FloatBounds,
+private func invertedBrushTransform(_ affine: Affine2D) -> Affine2D {
+    let firstX = Double(affine.xAxis.x)
+    let firstY = Double(affine.xAxis.y)
+    let secondX = Double(affine.yAxis.x)
+    let secondY = Double(affine.yAxis.y)
+    let determinant = firstX * secondY - firstY * secondX
+    precondition(
+        determinant.isFinite && determinant != 0,
+        "TilingCoverageOracle inverse transform must be finite"
+    )
+    let inverseFirstX = secondY / determinant
+    let inverseFirstY = -firstY / determinant
+    let inverseSecondX = -secondX / determinant
+    let inverseSecondY = firstX / determinant
+    let inverseTranslationX = -(
+        inverseFirstX * Double(affine.translation.x)
+            + inverseSecondX * Double(affine.translation.y)
+    )
+    let inverseTranslationY = -(
+        inverseFirstY * Double(affine.translation.x)
+            + inverseSecondY * Double(affine.translation.y)
+    )
+    let inverseXAxis = SIMD2(
+        Float(inverseFirstX),
+        Float(inverseFirstY)
+    )
+    let inverseYAxis = SIMD2(
+        Float(inverseSecondX),
+        Float(inverseSecondY)
+    )
+    let inverseTranslation = SIMD2(
+        Float(inverseTranslationX),
+        Float(inverseTranslationY)
+    )
+    precondition(
+        inverseXAxis.x.isFinite && inverseXAxis.y.isFinite
+            && inverseYAxis.x.isFinite && inverseYAxis.y.isFinite
+            && inverseTranslation.x.isFinite
+            && inverseTranslation.y.isFinite,
+        "TilingCoverageOracle inverse transform must be finite"
+    )
+    return Affine2D(
+        xAxis: inverseXAxis,
+        yAxis: inverseYAxis,
+        translation: inverseTranslation
+    )
+}
+
+private func transformedFootprintBounds(
+    _ footprint: OracleFootprint,
     by affine: Affine2D
 ) -> FloatBounds {
-    let corners = [
-        bounds.minimum,
-        SIMD2(bounds.maximum.x, bounds.minimum.y),
-        bounds.maximum,
-        SIMD2(bounds.minimum.x, bounds.maximum.y),
-    ].map { affine.applying(to: $0) }
-    return FloatBounds(
-        minimum: SIMD2(
-            corners.map(\.x).min()!,
-            corners.map(\.y).min()!
-        ),
-        maximum: SIMD2(
-            corners.map(\.x).max()!,
-            corners.map(\.y).max()!
+    switch footprint {
+    case let .hardRound(radius):
+        let firstRow = SIMD2(
+            affine.xAxis.x,
+            affine.yAxis.x
         )
-    )
+        let secondRow = SIMD2(
+            affine.xAxis.y,
+            affine.yAxis.y
+        )
+        let halfExtents = SIMD2(
+            radius * vectorMagnitude(firstRow),
+            radius * vectorMagnitude(secondRow)
+        )
+        return FloatBounds(
+            minimum: affine.translation - halfExtents,
+            maximum: affine.translation + halfExtents
+        )
+    case .asymmetricTriangle:
+        let vertices = [
+            SIMD2<Float>(-0.75, -0.60),
+            SIMD2<Float>(0.85, -0.20),
+            SIMD2<Float>(-0.10, 0.90),
+        ].map { affine.applying(to: $0) }
+        return FloatBounds(
+            minimum: SIMD2(
+                vertices.map(\.x).min()!,
+                vertices.map(\.y).min()!
+            ),
+            maximum: SIMD2(
+                vertices.map(\.x).max()!,
+                vertices.map(\.y).max()!
+            )
+        )
+    }
 }
 
 private func integerPixelBounds(
@@ -388,6 +552,42 @@ private func integerPixelBounds(
         maximumX: paddedMaximumX,
         minimumY: paddedMinimumY,
         maximumY: paddedMaximumY
+    )
+}
+
+private func validateSampleWork(
+    _ bounds: IntegerPixelBounds,
+    tileSize: PixelSize,
+    supersampling: Int
+) {
+    let (width, widthOverflowed) = bounds.maximumX
+        .subtractingReportingOverflow(bounds.minimumX)
+    let (height, heightOverflowed) = bounds.maximumY
+        .subtractingReportingOverflow(bounds.minimumY)
+    precondition(
+        !widthOverflowed && !heightOverflowed && width >= 0 && height >= 0,
+        "TilingCoverageOracle padded world sample span must be Int-representable"
+    )
+    let (maximumWidth, maximumWidthOverflowed) = tileSize.width
+        .multipliedReportingOverflow(by: 9)
+    let (maximumHeight, maximumHeightOverflowed) = tileSize.height
+        .multipliedReportingOverflow(by: 9)
+    precondition(
+        !maximumWidthOverflowed && !maximumHeightOverflowed
+            && width <= maximumWidth && height <= maximumHeight,
+        "TilingCoverageOracle padded world sample span exceeds supported reach"
+    )
+    let (pixelWork, pixelWorkOverflowed) = width
+        .multipliedReportingOverflow(by: height)
+    let (samplesPerPixel, samplesPerPixelOverflowed) = supersampling
+        .multipliedReportingOverflow(by: supersampling)
+    let (_, sampleWorkOverflowed) = pixelWork
+        .multipliedReportingOverflow(by: samplesPerPixel)
+    precondition(
+        !pixelWorkOverflowed
+            && !samplesPerPixelOverflowed
+            && !sampleWorkOverflowed,
+        "TilingCoverageOracle supersample work must be Int-representable"
     )
 }
 
@@ -569,6 +769,207 @@ private func directFoldDestinations(
     }
 }
 
+private func directCell(
+    containing world: SIMD2<Float>,
+    tileSize: PixelSize,
+    tiling: TilingKind
+) -> DirectCell {
+    let width = Float(tileSize.width)
+    let height = Float(tileSize.height)
+    switch tiling {
+    case .halfDrop:
+        let column = cellIndex(world.x, extent: width)
+        let phaseY = column.isMultiple(of: 2) ? 0 : height * 0.5
+        return DirectCell(
+            column: column,
+            row: cellIndex(world.y - phaseY, extent: height)
+        )
+    case .brick:
+        let row = cellIndex(world.y, extent: height)
+        let phaseX = row.isMultiple(of: 2) ? 0 : width * 0.5
+        return DirectCell(
+            column: cellIndex(world.x - phaseX, extent: width),
+            row: row
+        )
+    case .grid, .mirrorX, .mirrorY, .mirrorXY, .rotational:
+        return DirectCell(
+            column: cellIndex(world.x, extent: width),
+            row: cellIndex(world.y, extent: height)
+        )
+    }
+}
+
+private func brushCoordinateSums(
+    sampleMasks: [UInt64],
+    candidateCells: Set<DirectCell>,
+    footprint: OracleFootprint,
+    brushToWorld: Affine2D,
+    worldToBrush: Affine2D,
+    tileSize: PixelSize,
+    tiling: TilingKind,
+    supersampling: Int
+) -> (red: [UInt16], green: [UInt16]) {
+    let candidates = directCandidates(
+        cells: candidateCells,
+        footprint: footprint,
+        brushToWorld: brushToWorld,
+        tileSize: tileSize,
+        tiling: tiling
+    )
+    var redSums = [UInt16](repeating: 0, count: sampleMasks.count)
+    var greenSums = [UInt16](repeating: 0, count: sampleMasks.count)
+
+    for pixelIndex in sampleMasks.indices {
+        var remaining = sampleMasks[pixelIndex]
+        while remaining != 0 {
+            let bitIndex = remaining.trailingZeroBitCount
+            remaining &= remaining &- 1
+            let canonical = canonicalSample(
+                pixelIndex: pixelIndex,
+                bitIndex: bitIndex,
+                tileSize: tileSize,
+                supersampling: supersampling
+            )
+            var owningBrushLocal: SIMD2<Float>?
+            for candidate in candidates {
+                let world = candidateWorldSample(
+                    canonical,
+                    candidate: candidate,
+                    tileSize: tileSize,
+                    tiling: tiling
+                )
+                let brushLocal = worldToBrush.applying(to: world)
+                if contains(brushLocal, footprint: footprint) {
+                    owningBrushLocal = brushLocal
+                }
+            }
+            precondition(
+                owningBrushLocal != nil,
+                "TilingCoverageOracle covered sample must have a diagnostic owner"
+            )
+            let normalized = normalizedBrushCoordinate(
+                owningBrushLocal!,
+                footprint: footprint
+            )
+            redSums[pixelIndex] += UInt16(encodeSigned(normalized.x))
+            greenSums[pixelIndex] += UInt16(encodeSigned(normalized.y))
+        }
+    }
+    return (redSums, greenSums)
+}
+
+private func directCandidates(
+    cells: Set<DirectCell>,
+    footprint: OracleFootprint,
+    brushToWorld: Affine2D,
+    tileSize: PixelSize,
+    tiling: TilingKind
+) -> [DirectCandidate] {
+    let sortedCells = cells.sorted {
+        if $0.row != $1.row {
+            return $0.row < $1.row
+        }
+        return $0.column < $1.column
+    }
+    var candidates: [DirectCandidate] = []
+    for cell in sortedCells {
+        candidates.append(
+            DirectCandidate(cell: cell, imageOrdinal: 0)
+        )
+        if tiling == .rotational {
+            candidates.append(
+                DirectCandidate(cell: cell, imageOrdinal: 1)
+            )
+        }
+    }
+    guard tiling == .rotational, case .hardRound = footprint else {
+        return candidates
+    }
+    var seenCenters: Set<DirectCoverageCenterKey> = []
+    return candidates.filter { candidate in
+        let origin = directCellOrigin(
+            candidate.cell,
+            tileSize: tileSize,
+            tiling: tiling
+        )
+        let canonicalCenter: SIMD2<Float>
+        if candidate.imageOrdinal == 0 {
+            canonicalCenter = brushToWorld.translation - origin
+        } else {
+            canonicalCenter = origin
+                + SIMD2(
+                    Float(tileSize.width),
+                    Float(tileSize.height)
+                )
+                - brushToWorld.translation
+        }
+        let key = DirectCoverageCenterKey(
+            x: normalizedZeroBitPattern(canonicalCenter.x),
+            y: normalizedZeroBitPattern(canonicalCenter.y)
+        )
+        return seenCenters.insert(key).inserted
+    }
+}
+
+private func normalizedZeroBitPattern(_ value: Float) -> UInt32 {
+    (value == 0 ? Float(0) : value).bitPattern
+}
+
+private func candidateWorldSample(
+    _ canonical: SIMD2<Float>,
+    candidate: DirectCandidate,
+    tileSize: PixelSize,
+    tiling: TilingKind
+) -> SIMD2<Float> {
+    let width = Float(tileSize.width)
+    let height = Float(tileSize.height)
+    let origin = directCellOrigin(
+        candidate.cell,
+        tileSize: tileSize,
+        tiling: tiling
+    )
+    if tiling == .rotational && candidate.imageOrdinal == 1 {
+        return origin + SIMD2(width, height) - canonical
+    }
+
+    let reflectsX = (tiling == .mirrorX || tiling == .mirrorXY)
+        && !candidate.cell.column.isMultiple(of: 2)
+    let reflectsY = (tiling == .mirrorY || tiling == .mirrorXY)
+        && !candidate.cell.row.isMultiple(of: 2)
+    return origin + SIMD2(
+        reflectsX ? width - canonical.x : canonical.x,
+        reflectsY ? height - canonical.y : canonical.y
+    )
+}
+
+private func directCellOrigin(
+    _ cell: DirectCell,
+    tileSize: PixelSize,
+    tiling: TilingKind
+) -> SIMD2<Float> {
+    let width = Float(tileSize.width)
+    let height = Float(tileSize.height)
+    switch tiling {
+    case .halfDrop:
+        return SIMD2(
+            Float(cell.column) * width,
+            Float(cell.row) * height
+                + (cell.column.isMultiple(of: 2) ? 0 : height * 0.5)
+        )
+    case .brick:
+        return SIMD2(
+            Float(cell.column) * width
+                + (cell.row.isMultiple(of: 2) ? 0 : width * 0.5),
+            Float(cell.row) * height
+        )
+    case .grid, .mirrorX, .mirrorY, .mirrorXY, .rotational:
+        return SIMD2(
+            Float(cell.column) * width,
+            Float(cell.row) * height
+        )
+    }
+}
+
 private func positiveFold(_ value: Float, extent: Float) -> Float {
     let remainder = value.truncatingRemainder(dividingBy: extent)
     if remainder == 0 {
@@ -652,6 +1053,26 @@ private func canonicalCoordinateSums(
         green += Int(encodeUnit(canonicalY / Float(tileSize.height)))
     }
     return (red, green)
+}
+
+private func canonicalSample(
+    pixelIndex: Int,
+    bitIndex: Int,
+    tileSize: PixelSize,
+    supersampling: Int
+) -> SIMD2<Float> {
+    SIMD2(
+        Float(pixelIndex % tileSize.width)
+            + sampleOffset(
+                subpixel: bitIndex % supersampling,
+                supersampling: supersampling
+            ),
+        Float(pixelIndex / tileSize.width)
+            + sampleOffset(
+                subpixel: bitIndex / supersampling,
+                supersampling: supersampling
+            )
+    )
 }
 
 private func encodeUnit(_ value: Float) -> UInt8 {
