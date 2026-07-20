@@ -14,6 +14,16 @@ public struct GridStructuralCounters: Equatable, Sendable {
     public init() {}
 }
 
+struct HarnessDiagnosticRenderedFrame {
+    let canonical: any MTLTexture
+    let screen: any MTLTexture
+    let displayValidationCanonical: any MTLTexture
+    let displayValidationScreen: any MTLTexture
+    let gridLinesScreen: any MTLTexture
+    let fragments: [CellFragment]
+    let metrics: GPUFrameMetrics
+}
+
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
     public let device: any MTLDevice
@@ -32,6 +42,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private let commandQueue: any MTLCommandQueue
+    private let library: any MTLLibrary
     private let pipelines: GridPipelineLibrary
     private let canonical: CanonicalRaster
     private let liveTile: PersistentLiveTile
@@ -81,6 +92,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         self.device = device
         self.pixelSize = pixelSize
         self.commandQueue = commandQueue
+        self.library = library
         self.tileSize = tileSize
         tilingStrategy = TilingStrategy(kind: tiling, tileSize: tileSize)
         pipelines = try GridPipelineLibrary(device: device, library: library)
@@ -336,6 +348,165 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
+    func renderDiagnosticFootprintForHarness(
+        footprint: StampFootprint,
+        radius: Float,
+        diagnosticMode: UInt32,
+        width: Int,
+        height: Int
+    ) throws -> HarnessDiagnosticRenderedFrame {
+        guard (1...4096).contains(width), (1...4096).contains(height) else {
+            throw MetalRendererError.invalidDrawableSize
+        }
+        precondition(
+            diagnosticMode == PatternDiagnosticWireAsymmetricCoverage
+                || diagnosticMode == PatternDiagnosticWireCanonicalCoordinates
+                || diagnosticMode == PatternDiagnosticWireBrushLocalCoordinates,
+            "Harness diagnostic mode must use a shared nonzero wire value"
+        )
+
+        let fragments = TilingProjection.fragments(
+            for: footprint,
+            using: tilingStrategy
+        )
+        let instances = fragments.map {
+            PatternProjectedStampInstance(fragment: $0, radius: radius)
+        }
+        guard
+            !instances.isEmpty,
+            instances.count <= GridCanvasContract.pendingCapacity
+        else {
+            throw MetalRendererError.projectedInstanceCapacityExceeded(
+                GridCanvasContract.pendingCapacity
+            )
+        }
+        let instanceByteCount =
+            instances.count * MemoryLayout<PatternProjectedStampInstance>.stride
+        guard let instanceBuffer = device.makeBuffer(
+            length: instanceByteCount,
+            options: .storageModeShared
+        ) else {
+            throw MetalRendererError.instanceBufferAllocationFailed
+        }
+        instances.withUnsafeBytes { bytes in
+            instanceBuffer.contents().copyMemory(
+                from: bytes.baseAddress!,
+                byteCount: bytes.count
+            )
+        }
+
+        let canonicalTexture = try makeHarnessTexture(
+            width: pixelSize.width,
+            height: pixelSize.height
+        )
+        let screenTexture = try makeHarnessTexture(
+            width: width,
+            height: height
+        )
+        let displayValidationCanonical =
+            try makeHarnessDisplayValidationTexture()
+        let displayValidationScreen = try makeHarnessTexture(
+            width: width,
+            height: height
+        )
+        let gridLinesScreen = try makeHarnessTexture(
+            width: width,
+            height: height
+        )
+        let diagnosticPipeline =
+            try GridPipelineLibrary.makeHarnessDiagnosticPipeline(
+                device: device,
+                library: library
+            )
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw MetalRendererError.commandBufferUnavailable
+        }
+
+        let start = CFAbsoluteTimeGetCurrent()
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = canonicalTexture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(
+            descriptor: pass
+        ) else {
+            throw MetalRendererError.renderEncoderUnavailable
+        }
+        encoder.label = "Harness Diagnostic Projected Footprint"
+        encoder.setRenderPipelineState(diagnosticPipeline)
+        var uniforms = frameUniforms(
+            drawableSize: tileSize,
+            showGridLines: false,
+            liveVisible: false,
+            diagnosticMode: diagnosticMode
+        )
+        encoder.setVertexBytes(
+            &uniforms,
+            length: MemoryLayout<PatternGridFrameUniforms>.stride,
+            index: Int(PatternBufferIndexGridFrameUniforms)
+        )
+        encoder.setFragmentBytes(
+            &uniforms,
+            length: MemoryLayout<PatternGridFrameUniforms>.stride,
+            index: Int(PatternBufferIndexGridFrameUniforms)
+        )
+        encoder.setVertexBuffer(
+            instanceBuffer,
+            offset: 0,
+            index: Int(PatternBufferIndexDabInstances)
+        )
+        encoder.drawPrimitives(
+            type: .triangle,
+            vertexStart: 0,
+            vertexCount: 6,
+            instanceCount: instances.count
+        )
+        encoder.endEncoding()
+
+        try encodeDisplay(
+            into: screenTexture,
+            commandBuffer: commandBuffer,
+            showGridLines: false,
+            liveVisible: false,
+            canonicalTexture: canonicalTexture
+        )
+        try encodeDisplay(
+            into: displayValidationScreen,
+            commandBuffer: commandBuffer,
+            showGridLines: false,
+            liveVisible: false,
+            canonicalTexture: displayValidationCanonical
+        )
+        try encodeDisplay(
+            into: gridLinesScreen,
+            commandBuffer: commandBuffer,
+            showGridLines: true,
+            liveVisible: false,
+            canonicalTexture: displayValidationCanonical
+        )
+        let cpuMilliseconds = elapsedMilliseconds(since: start)
+        commandBuffer.commit()
+        do {
+            try waitForHarnessCommand(commandBuffer)
+        } catch let error as MetalRendererError {
+            failTransiently(error)
+            throw error
+        }
+        return HarnessDiagnosticRenderedFrame(
+            canonical: canonicalTexture,
+            screen: screenTexture,
+            displayValidationCanonical: displayValidationCanonical,
+            displayValidationScreen: displayValidationScreen,
+            gridLinesScreen: gridLinesScreen,
+            fragments: fragments,
+            metrics: metrics(
+                commandBuffer: commandBuffer,
+                cpuMilliseconds: cpuMilliseconds
+            )
+        )
+    }
+
     func finishCommitForHarness() throws -> GPUFrameMetrics {
         drainFrameOutcomes()
         drainCompletedUploadRanges()
@@ -445,13 +616,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    func injectHarnessDab(at world: WorldPoint) throws {
+    @discardableResult
+    func injectHarnessDab(
+        at world: WorldPoint,
+        radius requestedRadius: Float = GridCanvasContract.brushRadius
+    ) throws -> [CellFragment] {
         try lifecycle.begin()
         counters = GridStructuralCounters()
         counters.newDabsThisEvent = 1
         counters.totalDabsThisStroke = 1
-        try appendProjectedFragments(at: world)
+        let fragments = try appendProjectedFragments(
+            at: world,
+            requestedRadius: requestedRadius
+        )
         try lifecycle.requestCommit()
+        return fragments
     }
 
     private func appendWorldDab(_ point: WorldPoint) throws {
@@ -460,9 +639,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try appendProjectedFragments(at: point)
     }
 
-    private func appendProjectedFragments(at point: WorldPoint) throws {
+    @discardableResult
+    private func appendProjectedFragments(
+        at point: WorldPoint,
+        requestedRadius: Float = GridCanvasContract.brushRadius
+    ) throws -> [CellFragment] {
         let radius = TilingProjection.clampedRadius(
-            requested: GridCanvasContract.brushRadius,
+            requested: requestedRadius,
             tileSize: tileSize
         )
         let footprint = StampFootprint(
@@ -489,12 +672,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             try liveStroke.append(instance)
             counters.totalInstancesThisStroke += 1
         }
+        return fragments
     }
 
     private func frameUniforms(
         drawableSize: PatternSize,
         showGridLines: Bool,
-        liveVisible: Bool
+        liveVisible: Bool,
+        diagnosticMode: UInt32 = PatternDiagnosticWireNone
     ) -> PatternGridFrameUniforms {
         PatternGridFrameUniforms(
             drawableSize: drawableSize.simd,
@@ -505,8 +690,65 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             showGridLines: showGridLines ? 1 : 0,
             liveVisible: liveVisible ? 1 : 0,
             tilingKind: tilingStrategy.kind.rawValue,
-            diagnosticMode: PatternDiagnosticWireNone
+            diagnosticMode: diagnosticMode
         )
+    }
+
+    private func makeHarnessTexture(
+        width: Int,
+        height: Int
+    ) throws -> any MTLTexture {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .shared
+        descriptor.usage = [.renderTarget, .shaderRead]
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw MetalRendererError.textureAllocationFailed
+        }
+        return texture
+    }
+
+    private func makeHarnessDisplayValidationTexture()
+        throws -> any MTLTexture
+    {
+        let texture = try makeHarnessTexture(
+            width: pixelSize.width,
+            height: pixelSize.height
+        )
+        let bytesPerRow = pixelSize.width * 4
+        var bytes = [UInt8](
+            repeating: 0,
+            count: bytesPerRow * pixelSize.height
+        )
+        for y in 0..<pixelSize.height {
+            for x in 0..<pixelSize.width {
+                let offset = y * bytesPerRow + x * 4
+                bytes[offset] = UInt8(
+                    truncatingIfNeeded: x &* 37 &+ y &* 17
+                )
+                bytes[offset + 1] = UInt8(truncatingIfNeeded: y)
+                bytes[offset + 2] = UInt8(truncatingIfNeeded: x)
+                bytes[offset + 3] = 255
+            }
+        }
+        bytes.withUnsafeBytes { buffer in
+            texture.replace(
+                region: MTLRegionMake2D(
+                    0,
+                    0,
+                    pixelSize.width,
+                    pixelSize.height
+                ),
+                mipmapLevel: 0,
+                withBytes: buffer.baseAddress!,
+                bytesPerRow: bytesPerRow
+            )
+        }
+        return texture
     }
 
     private func clearInitialTextures() throws {
@@ -718,7 +960,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         into texture: any MTLTexture,
         commandBuffer: any MTLCommandBuffer,
         showGridLines: Bool,
-        liveVisible: Bool
+        liveVisible: Bool,
+        canonicalTexture: (any MTLTexture)? = nil
     ) throws {
         guard texture.width > 0, texture.height > 0 else {
             throw MetalRendererError.invalidDrawableSize
@@ -759,7 +1002,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             index: Int(PatternBufferIndexGridFrameUniforms)
         )
         encoder.setFragmentTexture(
-            canonical.front,
+            canonicalTexture ?? canonical.front,
             index: Int(PatternTextureIndexCanonical)
         )
         encoder.setFragmentTexture(

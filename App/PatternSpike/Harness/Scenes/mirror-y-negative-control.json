@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 3,
+  "name": "mirror-y-negative-control",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 256,
+  "tileHeight": 256,
+  "tiling": 4,
+  "diagnosticMode": "asymmetricCoverage",
+  "program": "mirrorY",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "transformMismatchCount", "relation": "equal", "value": 1},
+    {"metric": "oracleHoleCount", "relation": "equal", "value": 0},
+    {"metric": "oraclePhantomCount", "relation": "equal", "value": 0},
+    {"metric": "oracleMaximumDelta", "relation": "lessThanOrEqual", "value": 1}
+  ]
+}

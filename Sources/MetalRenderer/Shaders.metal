@@ -114,31 +114,40 @@ vertex PatternProjectedStampOut patternProjectedStampVertex(
     return output;
 }
 
-fragment float4 patternHardRoundStampFragment(
-    PatternProjectedStampOut input [[stage_in]]
+static bool patternProjectedStampInsideClip(
+    PatternProjectedStampOut input
 ) {
     if (
         input.clipCount > 0
         && dot(input.clip0.xy, input.brushLocal) < input.clip0.z
     ) {
-        discard_fragment();
+        return false;
     }
     if (
         input.clipCount > 1
         && dot(input.clip1.xy, input.brushLocal) < input.clip1.z
     ) {
-        discard_fragment();
+        return false;
     }
     if (
         input.clipCount > 2
         && dot(input.clip2.xy, input.brushLocal) < input.clip2.z
     ) {
-        discard_fragment();
+        return false;
     }
     if (
         input.clipCount > 3
         && dot(input.clip3.xy, input.brushLocal) < input.clip3.z
     ) {
+        return false;
+    }
+    return true;
+}
+
+fragment float4 patternHardRoundStampFragment(
+    PatternProjectedStampOut input [[stage_in]]
+) {
+    if (!patternProjectedStampInsideClip(input)) {
         discard_fragment();
     }
 
@@ -151,13 +160,69 @@ fragment float4 patternHardRoundStampFragment(
     return float4(0.0, 0.0, 0.0, coverage);
 }
 
+static float patternSignedTriangleEdge(
+    float2 start,
+    float2 end,
+    float2 point
+) {
+    const float2 edge = end - start;
+    const float2 relative = point - start;
+    return edge.x * relative.y - edge.y * relative.x;
+}
+
+static bool patternInsideAsymmetricTriangle(float2 point) {
+    const float2 first = float2(-0.75, -0.60);
+    const float2 second = float2(0.85, -0.20);
+    const float2 third = float2(-0.10, 0.90);
+    return patternSignedTriangleEdge(first, second, point) >= 0.0
+        && patternSignedTriangleEdge(second, third, point) >= 0.0
+        && patternSignedTriangleEdge(third, first, point) >= 0.0;
+}
+
+fragment float4 patternDiagnosticFootprintFragment(
+    PatternProjectedStampOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]]
+) {
+    if (
+        !patternProjectedStampInsideClip(input)
+        || !patternInsideAsymmetricTriangle(input.brushLocal)
+    ) {
+        discard_fragment();
+    }
+
+    switch (frame.diagnosticMode) {
+    case PatternDiagnosticWireAsymmetricCoverage:
+        return float4(0.0, 0.0, 0.0, 1.0);
+    case PatternDiagnosticWireCanonicalCoordinates:
+        return float4(
+            clamp(input.canonical / frame.tileSize, 0.0, 1.0),
+            0.0,
+            1.0
+        );
+    case PatternDiagnosticWireBrushLocalCoordinates:
+        return float4(
+            clamp(input.brushLocal * 0.5 + 0.5, 0.0, 1.0),
+            0.0,
+            1.0
+        );
+    default:
+        return float4(1.0, 0.0, 1.0, 1.0);
+    }
+}
+
 static float2 patternPositiveFold(float2 world, float2 tileSize) {
     return world - floor(world / tileSize) * tileSize;
+}
+
+static float patternPositiveFold(float coordinate, float extent) {
+    return coordinate - floor(coordinate / extent) * extent;
 }
 
 struct PatternDisplayMapping {
     float2 canonicalPixel;
     float2 phasedCellLocal;
+    bool valid;
 };
 
 static PatternDisplayMapping patternDisplayMapping(
@@ -173,7 +238,7 @@ static PatternDisplayMapping patternDisplayMapping(
             float2(world.x, world.y - phaseY),
             tileSize
         );
-        return {folded, folded};
+        return {folded, folded, true};
     }
     case PatternTilingWireBrick: {
         const int row = int(floor(world.y / tileSize.y));
@@ -182,13 +247,46 @@ static PatternDisplayMapping patternDisplayMapping(
             float2(world.x - phaseX, world.y),
             tileSize
         );
-        return {folded, folded};
+        return {folded, folded, true};
     }
-    case PatternTilingWireGrid:
-    default: {
+    case PatternTilingWireMirrorX:
+    case PatternTilingWireMirrorY:
+    case PatternTilingWireMirrorXY: {
+        const int column = int(floor(world.x / tileSize.x));
+        const int row = int(floor(world.y / tileSize.y));
+        const float2 local = patternPositiveFold(world, tileSize);
+        const bool reflectsX =
+            (
+                tilingKind == PatternTilingWireMirrorX
+                || tilingKind == PatternTilingWireMirrorXY
+            )
+            && (column & 1) != 0;
+        const bool reflectsY =
+            (
+                tilingKind == PatternTilingWireMirrorY
+                || tilingKind == PatternTilingWireMirrorXY
+            )
+            && (row & 1) != 0;
+        const float2 canonical = float2(
+            reflectsX
+                ? patternPositiveFold(tileSize.x - local.x, tileSize.x)
+                : local.x,
+            reflectsY
+                ? patternPositiveFold(tileSize.y - local.y, tileSize.y)
+                : local.y
+        );
+        return {canonical, local, true};
+    }
+    case PatternTilingWireRotational: {
         const float2 folded = patternPositiveFold(world, tileSize);
-        return {folded, folded};
+        return {folded, folded, true};
     }
+    case PatternTilingWireGrid: {
+        const float2 folded = patternPositiveFold(world, tileSize);
+        return {folded, folded, true};
+    }
+    default:
+        return {float2(0.0), float2(0.0), false};
     }
 }
 
@@ -216,6 +314,9 @@ fragment float4 patternGridFragment(
         frame.tileSize,
         frame.tilingKind
     );
+    if (!mapping.valid) {
+        return float4(1.0, 0.0, 1.0, 1.0);
+    }
     const float2 uv = mapping.canonicalPixel / frame.tileSize;
     const float4 base = canonical.sample(tileSampler, uv);
     const float4 overlay = frame.liveVisible == 0

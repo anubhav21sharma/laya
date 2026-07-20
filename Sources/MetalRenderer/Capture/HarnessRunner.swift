@@ -1,7 +1,9 @@
+import CShaderTypes
 import Darwin
 import Foundation
 import Metal
 import PatternEngine
+import simd
 
 public struct HarnessRunResult: Equatable, Sendable {
     public let imageURL: URL
@@ -22,11 +24,46 @@ struct TranslationHarnessInput: Equatable, Sendable {
     let capturesPhasedGridLines: Bool
 }
 
+struct TaskSevenHarnessInput: Equatable, Sendable {
+    let brushToWorld: Affine2D
+    let oracleFootprint: OracleFootprint
+    let stampFootprint: StampFootprint
+    let radius: Float
+    let diagnosticMode: HarnessDiagnosticMode
+    let requiresDistantCells: Bool
+}
+
+private struct FixedPointCoverageKey: Hashable {
+    let centerX: UInt32
+    let centerY: UInt32
+    let xAxisLength: UInt32
+    let yAxisLength: UInt32
+}
+
 struct HarnessOracleMetrics: Codable, Equatable, Sendable {
     let oracleHoleCount: Int
     let oraclePhantomCount: Int
     let oracleMaximumDelta: Int
     let transformMismatchCount: Int
+    let duplicateFixedPointWriteCount: Int?
+    let coordinateContinuityMismatchCount: Int?
+
+    init(
+        oracleHoleCount: Int,
+        oraclePhantomCount: Int,
+        oracleMaximumDelta: Int,
+        transformMismatchCount: Int,
+        duplicateFixedPointWriteCount: Int? = nil,
+        coordinateContinuityMismatchCount: Int? = nil
+    ) {
+        self.oracleHoleCount = oracleHoleCount
+        self.oraclePhantomCount = oraclePhantomCount
+        self.oracleMaximumDelta = oracleMaximumDelta
+        self.transformMismatchCount = transformMismatchCount
+        self.duplicateFixedPointWriteCount = duplicateFixedPointWriteCount
+        self.coordinateContinuityMismatchCount =
+            coordinateContinuityMismatchCount
+    }
 
     static func encode(_ metrics: HarnessOracleMetrics) throws -> Data {
         let encoder = JSONEncoder()
@@ -194,6 +231,67 @@ public final class HarnessRunner {
         }
     }
 
+    nonisolated static func taskSevenInput(
+        for program: TilingHarnessProgram
+    ) -> TaskSevenHarnessInput? {
+        switch program {
+        case .mirrorX:
+            return asymmetricTaskSevenInput(
+                center: SIMD2(256, 96),
+                diagnosticMode: .asymmetricCoverage
+            )
+        case .mirrorY:
+            return asymmetricTaskSevenInput(
+                center: SIMD2(96, 256),
+                diagnosticMode: .asymmetricCoverage
+            )
+        case .mirrorXY:
+            return asymmetricTaskSevenInput(
+                center: SIMD2(256, 256),
+                diagnosticMode: .asymmetricCoverage
+            )
+        case .rotationalGenerator, .rotationalOrientation:
+            return asymmetricTaskSevenInput(
+                center: SIMD2(64, 80),
+                diagnosticMode: .asymmetricCoverage
+            )
+        case .rotationalFixedPoint:
+            return hardRoundTaskSevenInput(
+                center: SIMD2(128, 128),
+                radius: 10
+            )
+        case .largeFootprint:
+            return hardRoundTaskSevenInput(
+                center: SIMD2(0, 0),
+                radius: 256,
+                requiresDistantCells: true
+            )
+        case .asymmetricFootprint:
+            let angle: Float = 0.37
+            let scale: Float = 40
+            return asymmetricTaskSevenInput(
+                brushToWorld: Affine2D(
+                    xAxis: SIMD2(cos(angle), sin(angle)) * scale,
+                    yAxis: SIMD2(-sin(angle), cos(angle)) * scale,
+                    translation: SIMD2(250, 128)
+                ),
+                diagnosticMode: .asymmetricCoverage
+            )
+        case .canonicalCoordinateContinuity:
+            return asymmetricTaskSevenInput(
+                center: SIMD2(288, 96),
+                diagnosticMode: .canonicalCoordinates
+            )
+        case .brushLocalCoordinateContinuity:
+            return asymmetricTaskSevenInput(
+                center: SIMD2(256, 256),
+                diagnosticMode: .brushLocalCoordinates
+            )
+        default:
+            return nil
+        }
+    }
+
     nonisolated static func configuration(
         for scene: HarnessScene
     ) -> HarnessRenderConfiguration {
@@ -205,6 +303,91 @@ public final class HarnessRunner {
             tiling: scene.tiling ?? .grid,
             diagnosticMode: scene.diagnosticMode ?? .hardRound
         )
+    }
+
+    private nonisolated static func asymmetricTaskSevenInput(
+        center: SIMD2<Float>,
+        diagnosticMode: HarnessDiagnosticMode
+    ) -> TaskSevenHarnessInput {
+        asymmetricTaskSevenInput(
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(40, 0),
+                yAxis: SIMD2(0, 40),
+                translation: center
+            ),
+            diagnosticMode: diagnosticMode
+        )
+    }
+
+    private nonisolated static func asymmetricTaskSevenInput(
+        brushToWorld: Affine2D,
+        diagnosticMode: HarnessDiagnosticMode
+    ) -> TaskSevenHarnessInput {
+        let radius = max(
+            simd_length(brushToWorld.xAxis),
+            simd_length(brushToWorld.yAxis)
+        )
+        return TaskSevenHarnessInput(
+            brushToWorld: brushToWorld,
+            oracleFootprint: .asymmetricTriangle,
+            stampFootprint: StampFootprint(
+                brushToWorld: brushToWorld,
+                localBounds: AxisAlignedRect(
+                    minimum: SIMD2(-0.75, -0.60),
+                    maximum: SIMD2(0.85, 0.90)
+                ),
+                coverageSymmetry: .oriented
+            ),
+            radius: radius,
+            diagnosticMode: diagnosticMode,
+            requiresDistantCells: false
+        )
+    }
+
+    private nonisolated static func hardRoundTaskSevenInput(
+        center: SIMD2<Float>,
+        radius: Float,
+        requiresDistantCells: Bool = false
+    ) -> TaskSevenHarnessInput {
+        let brushToWorld = Affine2D(
+            xAxis: SIMD2(1, 0),
+            yAxis: SIMD2(0, 1),
+            translation: center
+        )
+        return TaskSevenHarnessInput(
+            brushToWorld: brushToWorld,
+            oracleFootprint: .hardRound(radius: radius),
+            stampFootprint: StampFootprint(
+                brushToWorld: Affine2D(
+                    xAxis: SIMD2(radius, 0),
+                    yAxis: SIMD2(0, radius),
+                    translation: center
+                ),
+                localBounds: AxisAlignedRect(
+                    minimum: SIMD2(-1, -1),
+                    maximum: SIMD2(1, 1)
+                ),
+                coverageSymmetry: .halfTurnInvariant
+            ),
+            radius: radius,
+            diagnosticMode: .hardRound,
+            requiresDistantCells: requiresDistantCells
+        )
+    }
+
+    private nonisolated static func diagnosticWire(
+        for mode: HarnessDiagnosticMode
+    ) -> UInt32? {
+        switch mode {
+        case .hardRound:
+            nil
+        case .asymmetricCoverage:
+            PatternDiagnosticWireAsymmetricCoverage
+        case .canonicalCoordinates:
+            PatternDiagnosticWireCanonicalCoordinates
+        case .brushLocalCoordinates:
+            PatternDiagnosticWireBrushLocalCoordinates
+        }
     }
 
     nonisolated static func productionCoverage(
@@ -240,6 +423,289 @@ public final class HarnessRunner {
         )
     }
 
+    nonisolated static func coordinateContinuityMismatchCount(
+        productionBGRA: [UInt8],
+        oracleBGRA: [UInt8],
+        usesCircularRGDistance: Bool
+    ) -> Int {
+        precondition(
+            productionBGRA.count == oracleBGRA.count
+                && productionBGRA.count.isMultiple(of: 4),
+            "Coordinate comparison requires equal BGRA buffers"
+        )
+        var mismatchCount = 0
+        for offset in stride(
+            from: 0,
+            to: productionBGRA.count,
+            by: 4
+        ) {
+            let productionCovered = productionBGRA[offset + 3] > 0
+            let oracleCovered = oracleBGRA[offset + 3] > 0
+            guard productionCovered || oracleCovered else {
+                continue
+            }
+            guard productionCovered && oracleCovered else {
+                mismatchCount += 1
+                continue
+            }
+
+            let redDistance = channelDistance(
+                productionBGRA[offset + 2],
+                oracleBGRA[offset + 2],
+                circular: usesCircularRGDistance
+            )
+            let greenDistance = channelDistance(
+                productionBGRA[offset + 1],
+                oracleBGRA[offset + 1],
+                circular: usesCircularRGDistance
+            )
+            if redDistance > 1 || greenDistance > 1 {
+                mismatchCount += 1
+            }
+        }
+        return mismatchCount
+    }
+
+    nonisolated static func displayFoldMismatchCount(
+        productionScreenBGRA: [UInt8],
+        canonicalBGRA: [UInt8],
+        screenSize: PixelSize,
+        tileSize: PixelSize,
+        tiling: TilingKind
+    ) -> Int {
+        precondition(
+            productionScreenBGRA.count
+                == screenSize.width * screenSize.height * 4,
+            "Display comparison screen bytes must match the drawable"
+        )
+        precondition(
+            canonicalBGRA.count == tileSize.width * tileSize.height * 4,
+            "Display comparison canonical bytes must match the tile"
+        )
+        precondition(
+            tiling == .mirrorX || tiling == .mirrorY
+                || tiling == .mirrorXY || tiling == .rotational,
+            "Task 7 display comparison accepts mirror or rotational tiling"
+        )
+
+        var mismatchCount = 0
+        for y in 0..<screenSize.height {
+            for x in 0..<screenSize.width {
+                let expectedOffset = independentDisplaySampleOffset(
+                    screenX: x,
+                    screenY: y,
+                    screenSize: screenSize,
+                    tileSize: tileSize,
+                    tiling: tiling
+                )
+                let actualOffset = (y * screenSize.width + x) * 4
+                if pixelDiffers(
+                    productionScreenBGRA,
+                    at: actualOffset,
+                    from: canonicalBGRA,
+                    at: expectedOffset,
+                    tolerance: 0
+                ) {
+                    mismatchCount += 1
+                }
+            }
+        }
+        return mismatchCount
+    }
+
+    nonisolated static func gridLineLatticeMismatchCount(
+        productionGridBGRA: [UInt8],
+        productionBaseBGRA: [UInt8],
+        screenSize: PixelSize,
+        tileSize: PixelSize
+    ) -> Int {
+        let expectedByteCount = screenSize.width * screenSize.height * 4
+        precondition(
+            productionGridBGRA.count == expectedByteCount
+                && productionBaseBGRA.count == expectedByteCount,
+            "Grid-line comparison bytes must match the drawable"
+        )
+
+        var mismatchCount = 0
+        let tileWidth = Float(tileSize.width)
+        let tileHeight = Float(tileSize.height)
+        for y in 0..<screenSize.height {
+            for x in 0..<screenSize.width {
+                let world = independentDisplayWorld(
+                    screenX: x,
+                    screenY: y,
+                    screenSize: screenSize,
+                    tileSize: tileSize
+                )
+                let localX = positiveDisplayFold(world.x, tileWidth)
+                let localY = positiveDisplayFold(world.y, tileHeight)
+                let edgeDistance = min(
+                    min(localX, tileWidth - localX),
+                    min(localY, tileHeight - localY)
+                )
+                let smoothInput = min(1, max(0, edgeDistance - 1))
+                let smooth = smoothInput * smoothInput
+                    * (3 - 2 * smoothInput)
+                let alpha = Float(0.22) * (1 - smooth)
+                let gridBGRA: [Float] = [
+                    0.19 * alpha,
+                    0.20 * alpha,
+                    0.18 * alpha,
+                    alpha,
+                ]
+                let offset = (y * screenSize.width + x) * 4
+                var differs = false
+                for channel in 0..<4 {
+                    let base = Float(
+                        productionBaseBGRA[offset + channel]
+                    ) / 255
+                    let expected = unormByte(
+                        gridBGRA[channel] + base * (1 - alpha)
+                    )
+                    if abs(
+                        Int(productionGridBGRA[offset + channel])
+                            - Int(expected)
+                    ) > 1 {
+                        differs = true
+                    }
+                }
+                mismatchCount += differs ? 1 : 0
+            }
+        }
+        return mismatchCount
+    }
+
+    nonisolated static func rotationalGeneratorWorldProbes(
+        input: TaskSevenHarnessInput,
+        tileSize: PixelSize
+    ) -> [WorldPoint] {
+        let center = input.brushToWorld.translation
+        let tile = SIMD2(Float(tileSize.width), Float(tileSize.height))
+        return [
+            WorldPoint(center),
+            WorldPoint(center + SIMD2(tile.x, 0)),
+            WorldPoint(center + SIMD2(0, tile.y)),
+            WorldPoint(tile - center),
+        ]
+    }
+
+    nonisolated static func displayProbeMismatchCount(
+        productionScreenBGRA: [UInt8],
+        canonicalBGRA: [UInt8],
+        screenSize: PixelSize,
+        tileSize: PixelSize,
+        tiling: TilingKind,
+        worldPoints: [WorldPoint]
+    ) -> Int {
+        var mismatchCount = 0
+        for point in worldPoints {
+            let screenX = Int(floor(
+                point.x - Float(tileSize.width) * 0.5
+                    + Float(screenSize.width) * 0.5
+            ))
+            let screenY = Int(floor(
+                point.y - Float(tileSize.height) * 0.5
+                    + Float(screenSize.height) * 0.5
+            ))
+            guard
+                (0..<screenSize.width).contains(screenX),
+                (0..<screenSize.height).contains(screenY)
+            else {
+                mismatchCount += 1
+                continue
+            }
+            let expectedOffset = independentDisplaySampleOffset(
+                screenX: screenX,
+                screenY: screenY,
+                screenSize: screenSize,
+                tileSize: tileSize,
+                tiling: tiling
+            )
+            let actualOffset =
+                (screenY * screenSize.width + screenX) * 4
+            if pixelDiffers(
+                productionScreenBGRA,
+                at: actualOffset,
+                from: canonicalBGRA,
+                at: expectedOffset,
+                tolerance: 0
+            ) {
+                mismatchCount += 1
+            }
+        }
+        return mismatchCount
+    }
+
+    nonisolated static func independentTransformMismatchCount(
+        fragments: [CellFragment],
+        brushToWorld: Affine2D,
+        tileSize: PixelSize,
+        tiling: TilingKind
+    ) -> Int {
+        var mismatchCount = 0
+        var ordinalsByCell: [CellIndex: Set<UInt8>] = [:]
+        for fragment in fragments {
+            ordinalsByCell[fragment.cell, default: []].insert(
+                fragment.imageOrdinal
+            )
+            guard let expectedWorldToCanonical =
+                    independentWorldToCanonical(
+                        cell: fragment.cell,
+                        ordinal: fragment.imageOrdinal,
+                        tileSize: tileSize,
+                        tiling: tiling
+                    )
+            else {
+                mismatchCount += 1
+                continue
+            }
+            let expected = brushToWorld.concatenating(
+                expectedWorldToCanonical
+            )
+            if !affinesMatch(
+                fragment.canonicalFromBrush,
+                expected,
+                tolerance: 0.0001
+            ) {
+                mismatchCount += 1
+            }
+        }
+
+        let expectedOrdinals: Set<UInt8> = tiling == .rotational
+            ? [0, 1]
+            : [0]
+        for ordinals in ordinalsByCell.values {
+            mismatchCount += ordinals.symmetricDifference(
+                expectedOrdinals
+            ).count
+        }
+        return mismatchCount
+    }
+
+    nonisolated static func duplicateFixedPointWriteCount(
+        fragments: [CellFragment]
+    ) -> Int {
+        var seen: Set<FixedPointCoverageKey> = []
+        var duplicates = 0
+        for fragment in fragments {
+            let affine = fragment.canonicalFromBrush
+            let key = FixedPointCoverageKey(
+                centerX: normalizedZero(affine.translation.x).bitPattern,
+                centerY: normalizedZero(affine.translation.y).bitPattern,
+                xAxisLength: normalizedZero(
+                    simd_length(affine.xAxis)
+                ).bitPattern,
+                yAxisLength: normalizedZero(
+                    simd_length(affine.yAxis)
+                ).bitPattern
+            )
+            if !seen.insert(key).inserted {
+                duplicates += 1
+            }
+        }
+        return duplicates
+    }
+
     nonisolated static func isPhasedGridLineVisible(
         line: SIMD4<UInt8>,
         offLine: SIMD4<UInt8>
@@ -255,6 +721,9 @@ public final class HarnessRunner {
         var committedScreen: (any MTLTexture)?
         var canonical: (any MTLTexture)?
         var phasedGridScreen: (any MTLTexture)?
+        var displayValidationCanonical: (any MTLTexture)?
+        var displayValidationScreen: (any MTLTexture)?
+        var displayValidationGridLinesScreen: (any MTLTexture)?
         var oracle: OracleRasterResult?
         var oracleMetrics: HarnessOracleMetrics?
 
@@ -472,6 +941,8 @@ public final class HarnessRunner {
         var artifacts = GridArtifacts()
         var revisionStart = gridRenderer.harnessRevision.rawValue
         var canonicalBefore: [UInt8]?
+        var taskSevenHarnessInput: TaskSevenHarnessInput?
+        var taskSevenFragments: [CellFragment] = []
 
         switch program {
         case .gridInterior:
@@ -765,6 +1236,103 @@ public final class HarnessRunner {
                 tiling: configuration.tiling,
                 supersampling: 1
             )
+        case .mirrorX, .mirrorY, .mirrorXY,
+             .rotationalGenerator, .rotationalFixedPoint,
+             .rotationalOrientation, .largeFootprint,
+             .asymmetricFootprint, .canonicalCoordinateContinuity,
+             .brushLocalCoordinateContinuity:
+            guard let input = Self.taskSevenInput(for: program),
+                  input.diagnosticMode == configuration.diagnosticMode,
+                  gridRenderer.harnessTiling == configuration.tiling
+            else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "Task 7 program and renderer configuration disagree"
+                )
+            }
+            taskSevenHarnessInput = input
+
+            if input.diagnosticMode == .hardRound {
+                taskSevenFragments = try gridRenderer.injectHarnessDab(
+                    at: WorldPoint(input.brushToWorld.translation),
+                    radius: input.radius
+                )
+                try flushPending(
+                    scene: scene,
+                    renderer: gridRenderer,
+                    measurements: &measurements
+                )
+                artifacts.liveScreen = try captureDisplay(
+                    scene: scene,
+                    renderer: gridRenderer,
+                    measurements: &measurements
+                )
+                try captureCommittedAndCanonical(
+                    scene: scene,
+                    renderer: gridRenderer,
+                    artifacts: &artifacts,
+                    measurements: &measurements
+                )
+            } else {
+                guard let diagnosticWire = Self.diagnosticWire(
+                    for: input.diagnosticMode
+                ) else {
+                    throw HarnessRunError.counterInvariant(
+                        sceneName: scene.name,
+                        message: "diagnostic program resolved to hard-round wire"
+                    )
+                }
+                let frame = try gridRenderer
+                    .renderDiagnosticFootprintForHarness(
+                        footprint: input.stampFootprint,
+                        radius: input.radius,
+                        diagnosticMode: diagnosticWire,
+                        width: scene.width,
+                        height: scene.height
+                    )
+                taskSevenFragments = frame.fragments
+                artifacts.liveScreen = frame.screen
+                artifacts.canonical = frame.canonical
+                artifacts.displayValidationCanonical =
+                    frame.displayValidationCanonical
+                artifacts.displayValidationScreen =
+                    frame.displayValidationScreen
+                artifacts.displayValidationGridLinesScreen =
+                    frame.gridLinesScreen
+                measurements.cpuEncodeMilliseconds.append(
+                    frame.metrics.cpuEncodeMilliseconds
+                )
+                measurements.gpuMilliseconds.append(
+                    frame.metrics.gpuMilliseconds
+                )
+                measurements.dabGPUMilliseconds.append(
+                    frame.metrics.gpuMilliseconds
+                )
+                measurements.newInstanceCounts.append(
+                    frame.fragments.count
+                )
+                measurements.totalStrokeInstanceCounts.append(
+                    frame.fragments.count
+                )
+            }
+
+            if input.requiresDistantCells,
+               !taskSevenFragments.contains(where: {
+                   abs($0.cell.column) > 1 || abs($0.cell.row) > 1
+               })
+            {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "large footprint did not cross beyond immediate neighbors"
+                )
+            }
+            artifacts.oracle = TilingCoverageOracle.renderCanonical(
+                footprint: input.oracleFootprint,
+                brushToWorld: input.brushToWorld,
+                tileSize: configuration.pixelSize,
+                tiling: configuration.tiling,
+                supersampling: 1
+            )
         default:
             throw HarnessRunError.counterInvariant(
                 sceneName: scene.name,
@@ -774,8 +1342,74 @@ public final class HarnessRunner {
 
         let oracleComparison: CoverageComparison?
         let transformMismatchCount: Int?
-        if let oracle = artifacts.oracle, let canonical = artifacts.canonical {
-            let canonicalBytes = textureBytes(canonical)
+        let duplicateFixedPointWrites: Int?
+        let coordinateContinuityMismatches: Int?
+        let productionCanonicalBytes = artifacts.canonical.map(textureBytes)
+        let validatesTaskSevenDisplay: Bool
+        switch program {
+        case .mirrorX, .mirrorY, .mirrorXY, .rotationalGenerator:
+            validatesTaskSevenDisplay = true
+        default:
+            validatesTaskSevenDisplay = false
+        }
+        var displaySemanticMismatchCount: Int
+        if validatesTaskSevenDisplay {
+            guard
+                let validationCanonical =
+                    artifacts.displayValidationCanonical,
+                let validationScreen = artifacts.displayValidationScreen,
+                let validationGridLines =
+                    artifacts.displayValidationGridLinesScreen
+            else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "Task 7 display validation textures are missing"
+                )
+            }
+            let screenSize = PixelSize(
+                width: scene.width,
+                height: scene.height
+            )
+            let canonicalBytes = textureBytes(validationCanonical)
+            let screenBytes = textureBytes(validationScreen)
+            let gridLineBytes = textureBytes(validationGridLines)
+            displaySemanticMismatchCount =
+                Self.displayFoldMismatchCount(
+                    productionScreenBGRA: screenBytes,
+                    canonicalBGRA: canonicalBytes,
+                    screenSize: screenSize,
+                    tileSize: configuration.pixelSize,
+                    tiling: configuration.tiling
+                )
+                + Self.gridLineLatticeMismatchCount(
+                    productionGridBGRA: gridLineBytes,
+                    productionBaseBGRA: screenBytes,
+                    screenSize: screenSize,
+                    tileSize: configuration.pixelSize
+                )
+            if program == .rotationalGenerator,
+               let input = taskSevenHarnessInput
+            {
+                displaySemanticMismatchCount +=
+                    Self.displayProbeMismatchCount(
+                        productionScreenBGRA: screenBytes,
+                        canonicalBGRA: canonicalBytes,
+                        screenSize: screenSize,
+                        tileSize: configuration.pixelSize,
+                        tiling: configuration.tiling,
+                        worldPoints:
+                            Self.rotationalGeneratorWorldProbes(
+                                input: input,
+                                tileSize: configuration.pixelSize
+                            )
+                    )
+            }
+        } else {
+            displaySemanticMismatchCount = 0
+        }
+        if let oracle = artifacts.oracle,
+           let canonicalBytes = productionCanonicalBytes
+        {
             let actualCoverage = Self.productionCoverage(
                 fromBGRA: canonicalBytes,
                 pixelSize: oracle.coverage.pixelSize
@@ -792,16 +1426,60 @@ public final class HarnessRunner {
             ).reduce(0) {
                 $0 + ($1.0 == $1.1 ? 0 : 1)
             }
-            transformMismatchCount = mismatchCount
+            if let input = taskSevenHarnessInput,
+               input.diagnosticMode != .hardRound
+            {
+                transformMismatchCount =
+                    Self.independentTransformMismatchCount(
+                        fragments: taskSevenFragments,
+                        brushToWorld: input.brushToWorld,
+                        tileSize: oracle.coverage.pixelSize,
+                        tiling: configuration.tiling
+                    ) + mismatchCount + displaySemanticMismatchCount
+            } else {
+                transformMismatchCount =
+                    mismatchCount + displaySemanticMismatchCount
+            }
+            if program == .rotationalFixedPoint {
+                duplicateFixedPointWrites =
+                    Self.duplicateFixedPointWriteCount(
+                        fragments: taskSevenFragments
+                    )
+            } else {
+                duplicateFixedPointWrites = nil
+            }
+            switch configuration.diagnosticMode {
+            case .canonicalCoordinates:
+                coordinateContinuityMismatches =
+                    Self.coordinateContinuityMismatchCount(
+                        productionBGRA: canonicalBytes,
+                        oracleBGRA: oracle.canonicalCoordinatesBGRA,
+                        usesCircularRGDistance: true
+                    )
+            case .brushLocalCoordinates:
+                coordinateContinuityMismatches =
+                    Self.coordinateContinuityMismatchCount(
+                        productionBGRA: canonicalBytes,
+                        oracleBGRA: oracle.brushLocalCoordinatesBGRA,
+                        usesCircularRGDistance: false
+                    )
+            case .hardRound, .asymmetricCoverage:
+                coordinateContinuityMismatches = nil
+            }
             artifacts.oracleMetrics = HarnessOracleMetrics(
                 oracleHoleCount: comparison.holeCount,
                 oraclePhantomCount: comparison.phantomCount,
                 oracleMaximumDelta: Int(comparison.maximumDelta),
-                transformMismatchCount: mismatchCount
+                transformMismatchCount: transformMismatchCount ?? 0,
+                duplicateFixedPointWriteCount: duplicateFixedPointWrites,
+                coordinateContinuityMismatchCount:
+                    coordinateContinuityMismatches
             )
         } else {
             oracleComparison = nil
             transformMismatchCount = nil
+            duplicateFixedPointWrites = nil
+            coordinateContinuityMismatches = nil
         }
 
         let revisionDelta = Int(
@@ -848,6 +1526,14 @@ public final class HarnessRunner {
         if let transformMismatchCount {
             structuralValues[.transformMismatchCount] =
                 transformMismatchCount
+        }
+        if let duplicateFixedPointWrites {
+            structuralValues[.duplicateFixedPointWriteCount] =
+                duplicateFixedPointWrites
+        }
+        if let coordinateContinuityMismatches {
+            structuralValues[.coordinateContinuityMismatchCount] =
+                coordinateContinuityMismatches
         }
 
         let processInfo = ProcessInfo.processInfo
@@ -1342,6 +2028,27 @@ public final class HarnessRunner {
             try PNGWriter.write(texture: texture, to: url)
             artifactURLs.append(url)
         }
+        if let texture = artifacts.displayValidationCanonical {
+            let url = outputDirectory.appendingPathComponent(
+                "\(scene.name).display-validation.canonical.png"
+            )
+            try PNGWriter.write(texture: texture, to: url)
+            artifactURLs.append(url)
+        }
+        if let texture = artifacts.displayValidationScreen {
+            let url = outputDirectory.appendingPathComponent(
+                "\(scene.name).display-validation.screen.png"
+            )
+            try PNGWriter.write(texture: texture, to: url)
+            artifactURLs.append(url)
+        }
+        if let texture = artifacts.displayValidationGridLinesScreen {
+            let url = outputDirectory.appendingPathComponent(
+                "\(scene.name).display-validation.grid-lines.screen.png"
+            )
+            try PNGWriter.write(texture: texture, to: url)
+            artifactURLs.append(url)
+        }
         if let oracle = artifacts.oracle {
             let coverageURL = outputDirectory.appendingPathComponent(
                 "\(scene.name).oracle.coverage.png"
@@ -1466,4 +2173,169 @@ public final class HarnessRunner {
         }
         return UInt64(usage.ru_maxrss)
     }
+}
+
+private func independentDisplaySampleOffset(
+    screenX: Int,
+    screenY: Int,
+    screenSize: PixelSize,
+    tileSize: PixelSize,
+    tiling: TilingKind
+) -> Int {
+    let world = independentDisplayWorld(
+        screenX: screenX,
+        screenY: screenY,
+        screenSize: screenSize,
+        tileSize: tileSize
+    )
+    let tileWidth = Float(tileSize.width)
+    let tileHeight = Float(tileSize.height)
+    let localX = positiveDisplayFold(world.x, tileWidth)
+    let localY = positiveDisplayFold(world.y, tileHeight)
+    let column = Int(floor(world.x / tileWidth))
+    let row = Int(floor(world.y / tileHeight))
+    let reflectsX = (tiling == .mirrorX || tiling == .mirrorXY)
+        && (column & 1) != 0
+    let reflectsY = (tiling == .mirrorY || tiling == .mirrorXY)
+        && (row & 1) != 0
+    let canonicalX = reflectsX
+        ? positiveDisplayFold(tileWidth - localX, tileWidth)
+        : localX
+    let canonicalY = reflectsY
+        ? positiveDisplayFold(tileHeight - localY, tileHeight)
+        : localY
+    let sampleX = positiveIntegerModulo(
+        Int(floor(canonicalX)),
+        tileSize.width
+    )
+    let sampleY = positiveIntegerModulo(
+        Int(floor(canonicalY)),
+        tileSize.height
+    )
+    return (sampleY * tileSize.width + sampleX) * 4
+}
+
+private func independentDisplayWorld(
+    screenX: Int,
+    screenY: Int,
+    screenSize: PixelSize,
+    tileSize: PixelSize
+) -> SIMD2<Float> {
+    SIMD2(
+        Float(screenX) + 0.5
+            - Float(screenSize.width) * 0.5
+            + Float(tileSize.width) * 0.5,
+        Float(screenY) + 0.5
+            - Float(screenSize.height) * 0.5
+            + Float(tileSize.height) * 0.5
+    )
+}
+
+private func positiveDisplayFold(_ coordinate: Float, _ extent: Float)
+    -> Float
+{
+    coordinate - floor(coordinate / extent) * extent
+}
+
+private func positiveIntegerModulo(_ value: Int, _ modulus: Int) -> Int {
+    let remainder = value % modulus
+    return remainder < 0 ? remainder + modulus : remainder
+}
+
+private func pixelDiffers(
+    _ lhs: [UInt8],
+    at lhsOffset: Int,
+    from rhs: [UInt8],
+    at rhsOffset: Int,
+    tolerance: Int
+) -> Bool {
+    (0..<4).contains {
+        abs(Int(lhs[lhsOffset + $0]) - Int(rhs[rhsOffset + $0]))
+            > tolerance
+    }
+}
+
+private func unormByte(_ value: Float) -> UInt8 {
+    UInt8(
+        clamping: Int(
+            (min(1, max(0, value)) * 255).rounded()
+        )
+    )
+}
+
+private func channelDistance(
+    _ lhs: UInt8,
+    _ rhs: UInt8,
+    circular: Bool
+) -> Int {
+    let linear = abs(Int(lhs) - Int(rhs))
+    return circular ? min(linear, 256 - linear) : linear
+}
+
+private func independentWorldToCanonical(
+    cell: CellIndex,
+    ordinal: UInt8,
+    tileSize: PixelSize,
+    tiling: TilingKind
+) -> Affine2D? {
+    let width = Float(tileSize.width)
+    let height = Float(tileSize.height)
+    let phaseX = tiling == .brick && (cell.row & 1) != 0
+        ? width * 0.5
+        : 0
+    let phaseY = tiling == .halfDrop && (cell.column & 1) != 0
+        ? height * 0.5
+        : 0
+    let origin = SIMD2(
+        Float(cell.column) * width + phaseX,
+        Float(cell.row) * height + phaseY
+    )
+
+    if tiling == .rotational {
+        switch ordinal {
+        case 0:
+            return Affine2D(
+                xAxis: SIMD2(1, 0),
+                yAxis: SIMD2(0, 1),
+                translation: -origin
+            )
+        case 1:
+            return Affine2D(
+                xAxis: SIMD2(-1, 0),
+                yAxis: SIMD2(0, -1),
+                translation: origin + SIMD2(width, height)
+            )
+        default:
+            return nil
+        }
+    }
+    guard ordinal == 0 else {
+        return nil
+    }
+    let reflectsX = (tiling == .mirrorX || tiling == .mirrorXY)
+        && (cell.column & 1) != 0
+    let reflectsY = (tiling == .mirrorY || tiling == .mirrorXY)
+        && (cell.row & 1) != 0
+    return Affine2D(
+        xAxis: SIMD2(reflectsX ? -1 : 1, 0),
+        yAxis: SIMD2(0, reflectsY ? -1 : 1),
+        translation: SIMD2(
+            reflectsX ? origin.x + width : -origin.x,
+            reflectsY ? origin.y + height : -origin.y
+        )
+    )
+}
+
+private func affinesMatch(
+    _ lhs: Affine2D,
+    _ rhs: Affine2D,
+    tolerance: Float
+) -> Bool {
+    simd_distance(lhs.xAxis, rhs.xAxis) <= tolerance
+        && simd_distance(lhs.yAxis, rhs.yAxis) <= tolerance
+        && simd_distance(lhs.translation, rhs.translation) <= tolerance
+}
+
+private func normalizedZero(_ value: Float) -> Float {
+    value == 0 ? 0 : value
 }

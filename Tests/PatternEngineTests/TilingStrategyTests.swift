@@ -580,6 +580,178 @@ func rawImageTransformsMatchIndependentCoordinateFixtures() {
     }
 }
 
+@Test
+func mirrorAndRotationalDisplayFoldsMatchIndependentMSLFormulaFixtures() {
+    let fixtures: [(TilingKind, PatternSize, WorldPoint)] = [
+        (.mirrorX, .init(width: 288, height: 192), .init(x: 288, y: 20)),
+        (.mirrorX, .init(width: 288, height: 192), .init(x: -1, y: -193)),
+        (.mirrorY, .init(width: 288, height: 192), .init(x: 20, y: 192)),
+        (.mirrorY, .init(width: 288, height: 192), .init(x: -289, y: -1)),
+        (.mirrorXY, .init(width: 288, height: 192), .init(x: 288, y: 192)),
+        (.mirrorXY, .init(width: 288, height: 192), .init(x: -1, y: -1)),
+        (
+            .mirrorXY,
+            .init(width: 256, height: 128),
+            .init(x: 255_999_808, y: -127_999_840)
+        ),
+        (
+            .mirrorXY,
+            .init(width: 256, height: 128),
+            .init(x: -255_999_680, y: 127_999_904)
+        ),
+        (.rotational, .init(width: 288, height: 192), .init(x: 288, y: 192)),
+        (.rotational, .init(width: 288, height: 192), .init(x: -1, y: -1)),
+        (
+            .rotational,
+            .init(width: 256, height: 128),
+            .init(x: 255_999_808, y: -127_999_840)
+        ),
+    ]
+
+    for (kind, tileSize, world) in fixtures {
+        let strategy = TilingStrategy(kind: kind, tileSize: tileSize)
+        let mapping = independentMSLDisplayMapping(
+            world: world,
+            tileSize: tileSize,
+            kind: kind
+        )
+
+        #expect(strategy.displayFold(world) == mapping.canonical)
+        #expect(mapping.gridLineLocal.x >= 0)
+        #expect(mapping.gridLineLocal.x < tileSize.width)
+        #expect(mapping.gridLineLocal.y >= 0)
+        #expect(mapping.gridLineLocal.y < tileSize.height)
+    }
+}
+
+@Test
+func mirrorGridLinesUseTranslationLatticeWhileRotationalUsesP2TranslationLattice() {
+    let tileSize = PatternSize(width: 288, height: 192)
+    let probes: [(TilingKind, WorldPoint, CanonicalPoint, SIMD2<Float>)] = [
+        (
+            .mirrorX,
+            .init(x: 300, y: 20),
+            .init(x: 276, y: 20),
+            SIMD2(12, 20)
+        ),
+        (
+            .mirrorY,
+            .init(x: 20, y: 200),
+            .init(x: 20, y: 184),
+            SIMD2(20, 8)
+        ),
+        (
+            .mirrorXY,
+            .init(x: -1, y: -1),
+            .init(x: 1, y: 1),
+            SIMD2(287, 191)
+        ),
+        (
+            .rotational,
+            .init(x: 300, y: 200),
+            .init(x: 12, y: 8),
+            SIMD2(12, 8)
+        ),
+    ]
+
+    for (kind, world, expectedCanonical, expectedGridLocal) in probes {
+        let mapping = independentMSLDisplayMapping(
+            world: world,
+            tileSize: tileSize,
+            kind: kind
+        )
+        #expect(mapping.canonical == expectedCanonical)
+        #expect(mapping.gridLineLocal == expectedGridLocal)
+    }
+}
+
+@Test
+func rotationalMSLFixtureUsesGeneratorsAndHalfTurnWithoutCheckerboardParity() {
+    let tileSize = PatternSize(width: 288, height: 192)
+    let point = SIMD2<Float>(37, 51)
+    let translatedX = point + SIMD2(tileSize.width, 0)
+    let translatedY = point + SIMD2(0, tileSize.height)
+    let rotated = SIMD2(
+        tileSize.width - point.x,
+        tileSize.height - point.y
+    )
+
+    let base = independentMSLDisplayMapping(
+        world: WorldPoint(point),
+        tileSize: tileSize,
+        kind: .rotational
+    )
+    let xRepeat = independentMSLDisplayMapping(
+        world: WorldPoint(translatedX),
+        tileSize: tileSize,
+        kind: .rotational
+    )
+    let yRepeat = independentMSLDisplayMapping(
+        world: WorldPoint(translatedY),
+        tileSize: tileSize,
+        kind: .rotational
+    )
+
+    #expect(base.canonical == xRepeat.canonical)
+    #expect(base.canonical == yRepeat.canonical)
+    #expect(rotated == SIMD2<Float>(251, 141))
+    #expect(
+        SIMD2(
+            tileSize.width - rotated.x,
+            tileSize.height - rotated.y
+        ) == point
+    )
+}
+
+private struct IndependentMSLDisplayMapping {
+    let canonical: CanonicalPoint
+    let gridLineLocal: SIMD2<Float>
+}
+
+private func independentMSLDisplayMapping(
+    world: WorldPoint,
+    tileSize: PatternSize,
+    kind: TilingKind
+) -> IndependentMSLDisplayMapping {
+    let local = SIMD2(
+        independentPositiveMSLFold(world.x, tileSize.width),
+        independentPositiveMSLFold(world.y, tileSize.height)
+    )
+    let column = Int(floor(world.x / tileSize.width))
+    let row = Int(floor(world.y / tileSize.height))
+    let reflectsX = (kind == .mirrorX || kind == .mirrorXY)
+        && (column & 1) != 0
+    let reflectsY = (kind == .mirrorY || kind == .mirrorXY)
+        && (row & 1) != 0
+    let canonical: SIMD2<Float>
+    switch kind {
+    case .mirrorX, .mirrorY, .mirrorXY:
+        canonical = SIMD2(
+            reflectsX
+                ? independentPositiveMSLFold(tileSize.width - local.x, tileSize.width)
+                : local.x,
+            reflectsY
+                ? independentPositiveMSLFold(tileSize.height - local.y, tileSize.height)
+                : local.y
+        )
+    case .rotational:
+        canonical = local
+    case .grid, .halfDrop, .brick:
+        preconditionFailure("Fixture accepts only Task 7 tilings")
+    }
+    return IndependentMSLDisplayMapping(
+        canonical: CanonicalPoint(x: canonical.x, y: canonical.y),
+        gridLineLocal: local
+    )
+}
+
+private func independentPositiveMSLFold(
+    _ coordinate: Float,
+    _ extent: Float
+) -> Float {
+    coordinate - floor(coordinate / extent) * extent
+}
+
 private func rect(
     minimum: SIMD2<Float>,
     maximum: SIMD2<Float>

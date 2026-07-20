@@ -47,6 +47,26 @@ public struct GridPipelineLibrary {
         )
     }
 
+    static func makeHarnessDiagnosticPipeline(
+        device: any MTLDevice,
+        library: any MTLLibrary
+    ) throws -> any MTLRenderPipelineState {
+        try makePipeline(
+            device: device,
+            library: library,
+            label: "Harness Diagnostic Projected Footprint",
+            vertex: "patternProjectedStampVertex",
+            fragment: "patternDiagnosticFootprintFragment",
+            configure: { attachment in
+                attachment.isBlendingEnabled = true
+                attachment.sourceRGBBlendFactor = .sourceAlpha
+                attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                attachment.sourceAlphaBlendFactor = .one
+                attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            }
+        )
+    }
+
     private static func makePipeline(
         device: any MTLDevice,
         library: any MTLLibrary,

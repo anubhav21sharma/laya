@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 3,
+  "name": "large-footprint",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 64,
+  "tileHeight": 96,
+  "tiling": 0,
+  "diagnosticMode": "hardRound",
+  "program": "largeFootprint",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "oracleHoleCount", "relation": "equal", "value": 0},
+    {"metric": "oracleHoleCount", "relation": "equal", "value": 0},
+    {"metric": "oraclePhantomCount", "relation": "equal", "value": 0},
+    {"metric": "oracleMaximumDelta", "relation": "lessThanOrEqual", "value": 1}
+  ]
+}

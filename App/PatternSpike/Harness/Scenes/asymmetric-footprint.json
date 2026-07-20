@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 3,
+  "name": "asymmetric-footprint",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 256,
+  "tileHeight": 256,
+  "tiling": 6,
+  "diagnosticMode": "asymmetricCoverage",
+  "program": "asymmetricFootprint",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "transformMismatchCount", "relation": "equal", "value": 0},
+    {"metric": "oracleHoleCount", "relation": "equal", "value": 0},
+    {"metric": "oraclePhantomCount", "relation": "equal", "value": 0},
+    {"metric": "oracleMaximumDelta", "relation": "lessThanOrEqual", "value": 1}
+  ]
+}

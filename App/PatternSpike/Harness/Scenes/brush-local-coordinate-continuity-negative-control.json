@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 3,
+  "name": "brush-local-coordinate-continuity-negative-control",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 256,
+  "tileHeight": 256,
+  "tiling": 5,
+  "diagnosticMode": "brushLocalCoordinates",
+  "program": "brushLocalCoordinateContinuity",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "coordinateContinuityMismatchCount", "relation": "equal", "value": 1},
+    {"metric": "oracleHoleCount", "relation": "equal", "value": 0},
+    {"metric": "oraclePhantomCount", "relation": "equal", "value": 0},
+    {"metric": "oracleMaximumDelta", "relation": "lessThanOrEqual", "value": 1}
+  ]
+}

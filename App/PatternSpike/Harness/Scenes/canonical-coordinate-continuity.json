@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 3,
+  "name": "canonical-coordinate-continuity",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 288,
+  "tileHeight": 192,
+  "tiling": 1,
+  "diagnosticMode": "canonicalCoordinates",
+  "program": "canonicalCoordinateContinuity",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "coordinateContinuityMismatchCount", "relation": "equal", "value": 0},
+    {"metric": "oracleHoleCount", "relation": "equal", "value": 0},
+    {"metric": "oraclePhantomCount", "relation": "equal", "value": 0},
+    {"metric": "oracleMaximumDelta", "relation": "lessThanOrEqual", "value": 1}
+  ]
+}
