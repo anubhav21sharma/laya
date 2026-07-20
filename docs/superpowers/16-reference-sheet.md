@@ -105,7 +105,7 @@ All enabled pipelines use `rgbBlendOperation = .add`, `alphaBlendOperation = .ad
 | `grainAsset` | nil | nil | "grain-paper" | nil |
 | `shapeAsset` | nil | nil | nil | nil |
 
-Seed PNGs in `App/PatternSpike/Assets.xcassets`: `grain-paper` (1024², used by Chalk) and `tip` (512², committed but unreferenced — no preset sets `shapeAsset`; see `BACKLOG.md`).
+Seed PNGs in `App/PatternSpike/Assets.xcassets`: `grain-paper` (1024², used by Chalk) and `tip` (512², committed but unreferenced — no preset sets `shapeAsset`; see `archive/legacy-backlog-2026-07-13.md`).
 
 ## Keymap (EditorCore/EditorKeymap.swift)
 

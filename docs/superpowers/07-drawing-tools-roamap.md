@@ -37,7 +37,9 @@ Steps 1–5 are DONE and on `main`. After the raster brush the work was the **pr
 
 **Layers (step 6) is the next feature.** It is a pure consumer of seams already installed — per-dab attributes (step 1), snapshot undo at the commit seam (step 3), the shared provisional channel + affine composite (step 4), and the hardened edit-transaction lifecycle (`14`). It multiplies canvas state but introduces no new engine mechanism.
 
-Open bugs, verification gaps, and accepted limitations that survive into the layers era are tracked in `BACKLOG.md`.
+Open bugs, verification gaps, and accepted limitations from that lost
+implementation are preserved as historical evidence in
+`archive/legacy-backlog-2026-07-13.md`. They are not the rebuild roadmap.
 
 ## Per step — seam installed, change, what later steps reuse
 

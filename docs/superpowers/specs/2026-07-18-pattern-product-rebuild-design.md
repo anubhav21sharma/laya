@@ -952,6 +952,6 @@ The rebuild is ready for V1 release when:
 - `14-edit-transaction-module-design.md`
 - `15-professional-brush-design.md`
 - `16-reference-sheet.md`
-- `backlog.md`
+- `archive/legacy-backlog-2026-07-13.md`
 - `notes/live-tile-perf-promotion-undo.md`
 - `notes/halfdrop-edge-dab-clipping.md`

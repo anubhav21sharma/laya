@@ -59,7 +59,7 @@
 │       ├── 14-edit-transaction-module-design.md
 │       ├── 15-professional-brush-engine.md
 │       ├── 16-reference-sheet.md
-│       ├── BACKLOG.md
+│       ├── archive/legacy-backlog-2026-07-13.md
 │       ├── notes
 │       │   ├── 2026-06-22-live-tile-perf-promotion-undo.md
 │       │   └── 2026-06-23-halfdrop-edge-dab-clipping.md

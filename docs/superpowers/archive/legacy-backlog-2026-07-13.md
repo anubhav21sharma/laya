@@ -1,4 +1,12 @@
-# Backlog — known issues & deferred follow-ups
+# Archived Backlog — 2026-07-13
+
+> **Historical evidence only.** This backlog describes the lost pre-rebuild
+> implementation and its former delivery order. It is not an active roadmap
+> for the rebuild. Current scope and sequence come from
+> `specs/2026-07-18-pattern-product-rebuild-design.md` and its slice-specific
+> specs and plans.
+
+## Original backlog
 
 Open work that has no design-spec home: bugs to fix, verification gaps, deferred fast-follows, and intrinsic limitations we accepted on purpose. Distilled from working notes 2026-07-13. Each item says whether it is a fix, a gap, or an accepted limitation, and where it was last confirmed in code.
 
