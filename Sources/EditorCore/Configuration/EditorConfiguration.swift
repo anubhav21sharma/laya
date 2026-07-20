@@ -46,12 +46,18 @@ public enum EditorConfiguration {
             guard value < maximumTileDimension else {
                 return maximumTileDimension
             }
-            return max(minimumTileDimension, value + 32)
+            return min(
+                maximumTileDimension,
+                max(minimumTileDimension, value + 32)
+            )
         }
 
         guard value > minimumTileDimension else {
             return minimumTileDimension
         }
-        return min(maximumTileDimension, value - 32)
+        return max(
+            minimumTileDimension,
+            min(maximumTileDimension, value - 32)
+        )
     }
 }

@@ -116,4 +116,16 @@ func tileStepsPreserveRectangularDifferenceAndClampEachDimension() {
             larger: true
         ) == PixelSize(width: 4_096, height: 4_096)
     )
+    #expect(
+        EditorConfiguration.stepTile(
+            PixelSize(width: 4_095, height: 4_095),
+            larger: true
+        ) == PixelSize(width: 4_096, height: 4_096)
+    )
+    #expect(
+        EditorConfiguration.stepTile(
+            PixelSize(width: 65, height: 65),
+            larger: false
+        ) == PixelSize(width: 64, height: 64)
+    )
 }
