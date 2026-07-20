@@ -38,7 +38,8 @@ public final class DabInstanceBufferPool {
 
         var entries: [Entry] = []
         entries.reserveCapacity(GridCanvasContract.inFlightBufferCount)
-        let length = capacity * MemoryLayout<PatternDabInstance>.stride
+        let length = capacity
+            * MemoryLayout<PatternProjectedStampInstance>.stride
 
         for index in 0..<GridCanvasContract.inFlightBufferCount {
             guard let buffer = device.makeBuffer(
@@ -47,7 +48,7 @@ public final class DabInstanceBufferPool {
             ) else {
                 throw MetalRendererError.instanceBufferAllocationFailed
             }
-            buffer.label = "Dab Instances \(index)"
+            buffer.label = "Projected Stamp Instances \(index)"
             entries.append(Entry(buffer: buffer))
         }
 
@@ -68,7 +69,8 @@ public final class DabInstanceBufferPool {
         return Lease(
             slot: reservation.slot,
             buffer: buffer,
-            capacity: buffer.length / MemoryLayout<PatternDabInstance>.stride,
+            capacity: buffer.length
+                / MemoryLayout<PatternProjectedStampInstance>.stride,
             signalValue: reservation.signalValue,
             reservation: reservation
         )
@@ -85,7 +87,7 @@ public final class DabInstanceBufferPool {
 
         let destination = lease.buffer.contents()
             .bindMemory(
-                to: PatternDabInstance.self,
+                to: PatternProjectedStampInstance.self,
                 capacity: lease.capacity
             )
         for (offset, dab) in instances.enumerated() {

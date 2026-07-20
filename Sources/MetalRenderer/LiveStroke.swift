@@ -2,7 +2,7 @@ import CShaderTypes
 
 public struct IdentifiedDab {
     public let identity: UInt64
-    public let instance: PatternDabInstance
+    public let instance: PatternProjectedStampInstance
 }
 
 public struct LiveStroke {
@@ -19,9 +19,13 @@ public struct LiveStroke {
         pending.reserveCapacity(capacity)
     }
 
-    public mutating func append(_ instance: PatternDabInstance) throws {
+    public mutating func append(
+        _ instance: PatternProjectedStampInstance
+    ) throws {
         guard pending.count < capacity else {
-            throw MetalRendererError.pendingDabCapacityExceeded(capacity)
+            throw MetalRendererError.projectedInstanceCapacityExceeded(
+                capacity
+            )
         }
         pending.append(IdentifiedDab(identity: nextIdentity, instance: instance))
         nextIdentity &+= 1

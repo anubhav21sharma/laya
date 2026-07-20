@@ -28,13 +28,27 @@ typedef struct PatternGridFrameUniforms {
     float gridLineWidth;
     PatternUInt32 showGridLines;
     PatternUInt32 liveVisible;
+    PatternUInt32 tilingKind;
+    PatternUInt32 diagnosticMode;
 } PatternGridFrameUniforms;
 
-typedef struct PatternDabInstance {
-    PatternFloat2 center;
-    float radius;
+typedef struct PatternClipHalfPlane {
+    PatternFloat2 normal;
+    float offset;
     float padding;
-} PatternDabInstance;
+} PatternClipHalfPlane;
+
+typedef struct PatternProjectedStampInstance {
+    PatternFloat2 canonicalXAxis;
+    PatternFloat2 canonicalYAxis;
+    PatternFloat2 canonicalTranslation;
+    float radius;
+    PatternUInt32 clipCount;
+    PatternClipHalfPlane clip0;
+    PatternClipHalfPlane clip1;
+    PatternClipHalfPlane clip2;
+    PatternClipHalfPlane clip3;
+} PatternProjectedStampInstance;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexFrameUniforms = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexGridFrameUniforms = 1;
@@ -50,6 +64,11 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireMirrorX = 3;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireMirrorY = 4;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireMirrorXY = 5;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireRotational = 6;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireNone = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireAsymmetricCoverage = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireCanonicalCoordinates = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireBrushLocalCoordinates = 3;
 
 #undef PATTERN_WIRE_CONSTANT
 

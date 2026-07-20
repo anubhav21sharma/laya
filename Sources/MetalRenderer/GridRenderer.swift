@@ -17,6 +17,7 @@ public struct GridStructuralCounters: Equatable, Sendable {
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
     public let device: any MTLDevice
+    public let pixelSize: PixelSize
     public private(set) var lastError: MetalRendererError?
     public var onError: ((MetalRendererError) -> Void)?
     public private(set) var viewport: ViewportTransform
@@ -36,7 +37,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private let liveTile: PersistentLiveTile
     private let instancePool: DabInstanceBufferPool
     private let completionMailbox = GridRenderCompletionMailbox()
-    private let tileSize = PatternSize(width: 256, height: 256)
+    private let tileSize: PatternSize
+    private let tilingStrategy: TilingStrategy
     private var lifecycle = GridStrokeLifecycle()
     private var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
     private var liveStroke = LiveStroke()
@@ -45,38 +47,55 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     public convenience init(
         device: any MTLDevice,
-        drawableSize: PatternSize
+        drawableSize: PatternSize,
+        pixelSize: PixelSize = GridCanvasContract.defaultPixelSize
     ) throws {
         guard let library = device.makeDefaultLibrary() else {
             throw MetalRendererError.defaultLibraryUnavailable
         }
-        try self.init(device: device, library: library, drawableSize: drawableSize)
+        try self.init(
+            device: device,
+            library: library,
+            drawableSize: drawableSize,
+            pixelSize: pixelSize
+        )
     }
 
     public init(
         device: any MTLDevice,
         library: any MTLLibrary,
-        drawableSize: PatternSize
+        drawableSize: PatternSize,
+        pixelSize: PixelSize = GridCanvasContract.defaultPixelSize
     ) throws {
         ShaderABI.preconditionValid()
         guard let commandQueue = device.makeCommandQueue() else {
             throw MetalRendererError.commandQueueUnavailable
         }
+        let tileSize = PatternSize(
+            width: Float(pixelSize.width),
+            height: Float(pixelSize.height)
+        )
         self.device = device
+        self.pixelSize = pixelSize
         self.commandQueue = commandQueue
+        self.tileSize = tileSize
+        tilingStrategy = TilingStrategy(kind: .grid, tileSize: tileSize)
         pipelines = try GridPipelineLibrary(device: device, library: library)
         canonical = try CanonicalRaster(
             device: device,
-            pixelSize: PixelSize(width: 256, height: 256)
+            pixelSize: pixelSize
         )
         liveTile = try PersistentLiveTile(
             device: device,
-            pixelSize: PixelSize(width: 256, height: 256)
+            pixelSize: pixelSize
         )
         instancePool = try DabInstanceBufferPool(device: device)
         viewport = ViewportTransform(
             drawableSize: drawableSize,
-            worldCenter: WorldPoint(x: 128, y: 128),
+            worldCenter: WorldPoint(
+                x: tileSize.width * 0.5,
+                y: tileSize.height * 0.5
+            ),
             zoom: 1
         )
         completedUploadRanges.reserveCapacity(
@@ -412,30 +431,48 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
         for row in 0..<25 {
             for column in 0..<20 {
-                try liveStroke.append(
-                    PatternDabInstance(
-                        center: SIMD2(
-                            32 + Float(column) * 8,
-                            32 + Float(row) * 7
-                        ),
-                        radius: GridCanvasContract.brushRadius,
-                        padding: 0
+                try appendProjectedFragments(
+                    at: WorldPoint(
+                        x: 32 + Float(column) * 8,
+                        y: 32 + Float(row) * 7
                     )
                 )
-                counters.totalInstancesThisStroke += 1
             }
         }
     }
 
     private func appendWorldDab(_ point: WorldPoint) throws {
-        let instances = LegacyGridDabBridge.instances(
-            center: point,
-            radius: GridCanvasContract.brushRadius,
-            tileSize: tileSize
-        )
         counters.newDabsThisEvent += 1
         counters.totalDabsThisStroke += 1
-        for instance in instances {
+        try appendProjectedFragments(at: point)
+    }
+
+    private func appendProjectedFragments(at point: WorldPoint) throws {
+        let radius = TilingProjection.clampedRadius(
+            requested: GridCanvasContract.brushRadius,
+            tileSize: tileSize
+        )
+        let footprint = StampFootprint(
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(radius, 0),
+                yAxis: SIMD2(0, radius),
+                translation: point.simd
+            ),
+            localBounds: AxisAlignedRect(
+                minimum: SIMD2(-1, -1),
+                maximum: SIMD2(1, 1)
+            ),
+            coverageSymmetry: .halfTurnInvariant
+        )
+        let fragments = TilingProjection.fragments(
+            for: footprint,
+            using: tilingStrategy
+        )
+        for fragment in fragments {
+            let instance = PatternProjectedStampInstance(
+                fragment: fragment,
+                radius: radius
+            )
             try liveStroke.append(instance)
             counters.totalInstancesThisStroke += 1
         }
@@ -453,7 +490,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             zoom: viewport.zoom,
             gridLineWidth: 1,
             showGridLines: showGridLines ? 1 : 0,
-            liveVisible: liveVisible ? 1 : 0
+            liveVisible: liveVisible ? 1 : 0,
+            tilingKind: tilingStrategy.kind.rawValue,
+            diagnosticMode: PatternDiagnosticWireNone
         )
     }
 

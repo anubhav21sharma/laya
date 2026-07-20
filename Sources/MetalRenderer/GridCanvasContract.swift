@@ -1,5 +1,11 @@
+import PatternEngine
+
 public enum GridCanvasContract {
     public static let tileSize: Float = 256
+    public static let defaultPixelSize = PixelSize(
+        width: Int(tileSize),
+        height: Int(tileSize)
+    )
     public static let brushRadius: Float = 10
     public static let dabSpacing: Float = 2.5
     public static let zoomRange: ClosedRange<Float> = 0.25...8

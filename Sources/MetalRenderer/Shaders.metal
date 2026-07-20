@@ -28,10 +28,16 @@ struct PatternFullscreenOut {
     float2 screenPixel;
 };
 
-struct PatternDabOut {
+struct PatternProjectedStampOut {
     float4 position [[position]];
-    float2 offsetPixels;
-    float radius;
+    float2 canonical;
+    float2 brushLocal;
+    float radius [[flat]];
+    uint clipCount [[flat]];
+    float4 clip0 [[flat]];
+    float4 clip1 [[flat]];
+    float4 clip2 [[flat]];
+    float4 clip3 [[flat]];
 };
 
 vertex PatternFullscreenOut patternFullscreenVertex(
@@ -54,38 +60,91 @@ vertex PatternFullscreenOut patternFullscreenVertex(
     return output;
 }
 
-vertex PatternDabOut patternDabVertex(
+vertex PatternProjectedStampOut patternProjectedStampVertex(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant PatternGridFrameUniforms& frame
         [[buffer(PatternBufferIndexGridFrameUniforms)]],
-    const device PatternDabInstance* dabs
+    const device PatternProjectedStampInstance* instances
         [[buffer(PatternBufferIndexDabInstances)]]
 ) {
     const float2 corners[6] = {
         float2(-1, -1), float2(1, -1), float2(-1, 1),
         float2(-1, 1), float2(1, -1), float2(1, 1)
     };
-    const PatternDabInstance dab = dabs[instanceID];
-    const float expandedRadius = dab.radius + 1.0;
-    const float2 offset = corners[vertexID] * expandedRadius;
-    const float2 pixel = dab.center + offset;
+    const PatternProjectedStampInstance instance = instances[instanceID];
+    const float normalizedExpansion = 1.0 + 1.0 / instance.radius;
+    const float2 brushLocal = corners[vertexID] * normalizedExpansion;
+    const float2 canonical =
+        instance.canonicalTranslation
+        + instance.canonicalXAxis * brushLocal.x
+        + instance.canonicalYAxis * brushLocal.y;
 
-    PatternDabOut output;
+    PatternProjectedStampOut output;
     output.position = float4(
-        pixel.x / frame.tileSize.x * 2.0 - 1.0,
-        1.0 - pixel.y / frame.tileSize.y * 2.0,
+        canonical.x / frame.tileSize.x * 2.0 - 1.0,
+        1.0 - canonical.y / frame.tileSize.y * 2.0,
         0.0,
         1.0
     );
-    output.offsetPixels = offset;
-    output.radius = dab.radius;
+    output.canonical = canonical;
+    output.brushLocal = brushLocal;
+    output.radius = instance.radius;
+    output.clipCount = instance.clipCount;
+    output.clip0 = float4(
+        instance.clip0.normal,
+        instance.clip0.offset,
+        0.0
+    );
+    output.clip1 = float4(
+        instance.clip1.normal,
+        instance.clip1.offset,
+        0.0
+    );
+    output.clip2 = float4(
+        instance.clip2.normal,
+        instance.clip2.offset,
+        0.0
+    );
+    output.clip3 = float4(
+        instance.clip3.normal,
+        instance.clip3.offset,
+        0.0
+    );
     return output;
 }
 
-fragment float4 patternDabFragment(PatternDabOut input [[stage_in]]) {
+fragment float4 patternHardRoundStampFragment(
+    PatternProjectedStampOut input [[stage_in]]
+) {
+    if (
+        input.clipCount > 0
+        && dot(input.clip0.xy, input.brushLocal) < input.clip0.z
+    ) {
+        discard_fragment();
+    }
+    if (
+        input.clipCount > 1
+        && dot(input.clip1.xy, input.brushLocal) < input.clip1.z
+    ) {
+        discard_fragment();
+    }
+    if (
+        input.clipCount > 2
+        && dot(input.clip2.xy, input.brushLocal) < input.clip2.z
+    ) {
+        discard_fragment();
+    }
+    if (
+        input.clipCount > 3
+        && dot(input.clip3.xy, input.brushLocal) < input.clip3.z
+    ) {
+        discard_fragment();
+    }
+
+    const float2 offsetPixels = input.brushLocal * input.radius;
     const float coverage = clamp(
-        input.radius + 0.5 - length(input.offsetPixels),
+        input.radius + 0.5 - length(offsetPixels),
         0.0,
         1.0
     );

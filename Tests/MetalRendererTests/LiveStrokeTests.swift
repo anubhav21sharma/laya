@@ -2,11 +2,22 @@ import CShaderTypes
 import MetalRenderer
 import Testing
 
-private func instance(_ x: Float) -> PatternDabInstance {
-    PatternDabInstance(
-        center: SIMD2<Float>(x, 0),
-        radius: 10,
+private func instance(_ x: Float) -> PatternProjectedStampInstance {
+    let zeroClip = PatternClipHalfPlane(
+        normal: .zero,
+        offset: 0,
         padding: 0
+    )
+    return PatternProjectedStampInstance(
+        canonicalXAxis: SIMD2<Float>(10, 0),
+        canonicalYAxis: SIMD2<Float>(0, 10),
+        canonicalTranslation: SIMD2<Float>(x, 0),
+        radius: 10,
+        clipCount: 0,
+        clip0: zeroClip,
+        clip1: zeroClip,
+        clip2: zeroClip,
+        clip3: zeroClip
     )
 }
 
@@ -40,7 +51,7 @@ func liveStrokeRejectsGrowthBeyondItsPreallocatedCapacity() throws {
     try stroke.append(instance(1))
     try stroke.append(instance(2))
 
-    #expect(throws: MetalRendererError.pendingDabCapacityExceeded(2)) {
+    #expect(throws: MetalRendererError.projectedInstanceCapacityExceeded(2)) {
         try stroke.append(instance(3))
     }
     #expect(stroke.pending.map(\.identity) == [0, 1])

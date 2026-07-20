@@ -10,9 +10,9 @@ public struct GridPipelineLibrary {
         stamp = try Self.makePipeline(
             device: device,
             library: library,
-            label: "Hard Round Stamp",
-            vertex: "patternDabVertex",
-            fragment: "patternDabFragment",
+            label: "Projected Hard Round Stamp",
+            vertex: "patternProjectedStampVertex",
+            fragment: "patternHardRoundStampFragment",
             configure: { attachment in
                 attachment.isBlendingEnabled = true
                 attachment.sourceRGBBlendFactor = .sourceAlpha

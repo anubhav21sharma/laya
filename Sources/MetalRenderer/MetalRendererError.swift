@@ -11,7 +11,7 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
     case commandBufferUnavailable
     case renderEncoderUnavailable
     case commandFailed(String)
-    case pendingDabCapacityExceeded(Int)
+    case projectedInstanceCapacityExceeded(Int)
     case invalidStrokeLifecycle
     case commitPendingInput
     case invalidDrawableSize
@@ -38,8 +38,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
             "Metal render encoder creation failed."
         case let .commandFailed(message):
             "Metal command execution failed: \(message)"
-        case let .pendingDabCapacityExceeded(capacity):
-            "Pending dab capacity \(capacity) was exceeded."
+        case let .projectedInstanceCapacityExceeded(capacity):
+            "Projected-instance capacity \(capacity) was exceeded."
         case .invalidStrokeLifecycle:
             "The requested stroke transition is invalid."
         case .commitPendingInput:
