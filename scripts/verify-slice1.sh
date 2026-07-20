@@ -149,12 +149,28 @@ guard (commitPending.max() ?? 0) < frameBudget else {
 }
 SWIFT
 
-if git ls-files --error-unmatch App/PatternSpike.xcodeproj >/dev/null 2>&1; then
+if tracked_project="$(
+  git ls-files --error-unmatch App/PatternSpike.xcodeproj 2>&1
+)"; then
   printf '%s\n' "Generated Xcode project is tracked."
+  exit 1
+else
+  status=$?
+  if [[ "$status" -ne 1 ]]; then
+    printf 'Unable to inspect generated-project tracking: %s\n' \
+      "$tracked_project"
+    exit 1
+  fi
+fi
+
+if ! artifact_status="$(
+  git status --short -- .build App/PatternSpike.xcodeproj
+)"; then
+  printf '%s\n' "Unable to inspect generated build artifacts."
   exit 1
 fi
 
-if git status --short -- .build App/PatternSpike.xcodeproj | grep -q .; then
+if [[ -n "$artifact_status" ]]; then
   printf '%s\n' "Generated build artifacts escaped ignore rules."
   exit 1
 fi
