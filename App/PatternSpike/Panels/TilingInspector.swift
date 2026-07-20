@@ -6,15 +6,18 @@ import SwiftUI
 struct TilingInspector: View {
     let controller: EditorSessionController
     @Binding var runtimeError: MetalRendererError?
+    let requestEditorFocus: @MainActor () -> Void
     @State private var widthDraft: String
     @State private var heightDraft: String
 
     init(
         controller: EditorSessionController,
-        runtimeError: Binding<MetalRendererError?>
+        runtimeError: Binding<MetalRendererError?>,
+        requestEditorFocus: @escaping @MainActor () -> Void
     ) {
         self.controller = controller
         _runtimeError = runtimeError
+        self.requestEditorFocus = requestEditorFocus
         _widthDraft = State(initialValue: String(controller.model.pixelSize.width))
         _heightDraft = State(initialValue: String(controller.model.pixelSize.height))
     }
@@ -41,12 +44,14 @@ struct TilingInspector: View {
                     TextField("Width", text: $widthDraft)
                         .multilineTextAlignment(.trailing)
                         .frame(minHeight: editorControlExtent)
+                        .onSubmit { requestEditorFocus() }
                 }
                 GridRow {
                     Text("Height")
                     TextField("Height", text: $heightDraft)
                         .multilineTextAlignment(.trailing)
                         .frame(minHeight: editorControlExtent)
+                        .onSubmit { requestEditorFocus() }
                 }
             }
             .textFieldStyle(.roundedBorder)
@@ -84,6 +89,7 @@ struct TilingInspector: View {
             set: { tiling in
                 runtimeError = nil
                 controller.handleTiling(tiling)
+                requestEditorFocus()
             }
         )
     }
@@ -94,11 +100,13 @@ struct TilingInspector: View {
             set: { visible in
                 runtimeError = nil
                 controller.handleGridVisibility(visible)
+                requestEditorFocus()
             }
         )
     }
 
     private func applyDraftSize() {
+        defer { requestEditorFocus() }
         let width = Int(widthDraft.trimmingCharacters(in: .whitespacesAndNewlines))
         let height = Int(heightDraft.trimmingCharacters(in: .whitespacesAndNewlines))
         guard

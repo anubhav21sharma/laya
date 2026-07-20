@@ -13,15 +13,22 @@ final class InteractiveMetalView: MTKView {
 
     let controller: EditorSessionController
     let gridRenderer: GridRenderer
+    private let requestEditorFocus: @MainActor () -> Void
     private var dragMode: DragMode?
+    private var lastPointerCancellationGeneration: UInt
+    private var screenObserver: NSObjectProtocol?
 
     init(
         frame: CGRect,
         controller: EditorSessionController,
-        renderer: GridRenderer
+        renderer: GridRenderer,
+        requestEditorFocus: @escaping @MainActor () -> Void,
+        pointerCancellationGeneration: UInt
     ) {
         self.controller = controller
         gridRenderer = renderer
+        self.requestEditorFocus = requestEditorFocus
+        lastPointerCancellationGeneration = pointerCancellationGeneration
         super.init(frame: frame, device: renderer.device)
     }
 
@@ -32,7 +39,28 @@ final class InteractiveMetalView: MTKView {
     override var acceptsFirstResponder: Bool { false }
     override var isFlipped: Bool { true }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let screenObserver {
+            NotificationCenter.default.removeObserver(screenObserver)
+            self.screenObserver = nil
+        }
+        guard let window else { return }
+        updateRefreshRate(for: window)
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeScreenNotification,
+            object: window,
+            queue: .main
+        ) { [weak self, weak window] _ in
+            MainActor.assumeIsolated {
+                guard let self, let window else { return }
+                self.updateRefreshRate(for: window)
+            }
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
+        requestEditorFocus()
         let local = localPoint(event)
         guard let coordinateTransform else {
             dragMode = nil
@@ -104,11 +132,22 @@ final class InteractiveMetalView: MTKView {
     }
 
     override func magnify(with event: NSEvent) {
+        requestEditorFocus()
         guard let coordinateTransform else { return }
         controller.zoom(
             by: max(0.01, 1 + Float(event.magnification)),
             anchor: coordinateTransform.map(localPoint(event))
         )
+    }
+
+    func applyPointerCancellation(generation: UInt) {
+        guard generation != lastPointerCancellationGeneration else { return }
+        lastPointerCancellationGeneration = generation
+        dragMode = nil
+    }
+
+    var hasActivePointerInteractionForTesting: Bool {
+        dragMode != nil
     }
 
     private func localPoint(_ event: NSEvent) -> ScreenPoint {
@@ -142,6 +181,11 @@ final class InteractiveMetalView: MTKView {
             )
         )
         dragMode = nil
+    }
+
+    private func updateRefreshRate(for window: NSWindow) {
+        preferredFramesPerSecond =
+            window.screen?.maximumFramesPerSecond ?? 60
     }
 }
 #endif

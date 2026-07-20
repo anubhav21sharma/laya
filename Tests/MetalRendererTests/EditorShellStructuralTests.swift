@@ -36,6 +36,55 @@ struct EditorShellStructuralTests {
     }
 
     @Test
+    func controlsAndCanvasExplicitlyReturnFocusToTheKeyOwner() throws {
+        let content = try source("App/PatternSpike/ContentView.swift")
+        let canvas = try source("App/PatternSpike/Canvas/MetalCanvas.swift")
+        let native = try source(
+            "App/PatternSpike/Canvas/InteractiveMetalView.swift"
+        )
+        let rail = try source("App/PatternSpike/Panels/ToolRail.swift")
+        let topBar = try source("App/PatternSpike/Panels/EditorTopBar.swift")
+        let inspector = try source(
+            "App/PatternSpike/Panels/TilingInspector.swift"
+        )
+
+        #expect(content.contains("requestEditorFocus"))
+        #expect(content.contains("editorFocused = true"))
+        #expect(canvas.contains("requestEditorFocus"))
+        #expect(native.contains("requestEditorFocus()"))
+        #expect(rail.contains("requestEditorFocus()"))
+        #expect(topBar.contains("requestEditorFocus()"))
+        #expect(inspector.contains("requestEditorFocus()"))
+    }
+
+    @Test
+    func focusCancellationBridgesIntoNativePointerState() throws {
+        let content = try source("App/PatternSpike/ContentView.swift")
+        let canvas = try source("App/PatternSpike/Canvas/MetalCanvas.swift")
+        let native = try source(
+            "App/PatternSpike/Canvas/InteractiveMetalView.swift"
+        )
+
+        #expect(content.contains("pointerCancellationGeneration"))
+        #expect(content.contains("cancelEditorInteraction"))
+        #expect(canvas.contains("applyPointerCancellation("))
+        #expect(native.contains("lastPointerCancellationGeneration"))
+        #expect(native.contains("dragMode = nil"))
+    }
+
+    @Test
+    func nativeViewTracksTheWindowScreenRefreshRate() throws {
+        let native = try source(
+            "App/PatternSpike/Canvas/InteractiveMetalView.swift"
+        )
+
+        #expect(native.contains("override func viewDidMoveToWindow()"))
+        #expect(native.contains("NSWindow.didChangeScreenNotification"))
+        #expect(native.contains("maximumFramesPerSecond"))
+        #expect(!native.contains("makeFirstResponder"))
+    }
+
+    @Test
     func macMenusUseFocusedControllerClosures() throws {
         let commands = try source(
             "App/PatternSpike/Commands/EditorFocusedCommands.swift"

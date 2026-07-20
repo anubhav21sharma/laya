@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ToolRail: View {
     let controller: EditorSessionController
+    let requestEditorFocus: @MainActor () -> Void
 
     var body: some View {
         VStack(spacing: 6) {
@@ -31,6 +32,7 @@ struct ToolRail: View {
     ) -> some View {
         Button {
             controller.handleTool(tool)
+            requestEditorFocus()
         } label: {
             Image(systemName: systemImage)
                 .frame(

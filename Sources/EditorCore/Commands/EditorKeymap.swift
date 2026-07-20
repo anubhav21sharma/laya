@@ -6,6 +6,10 @@ public enum EditorKeymap {
     ) -> EditorShortcut? {
         let normalized = key.rawValue.lowercased()
 
+        if normalized == " ", phase == .up {
+            return .spaceChanged(false)
+        }
+
         if modifiers == .command {
             guard phase == .down, normalized == "z" else { return nil }
             return .undo

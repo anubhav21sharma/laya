@@ -60,7 +60,7 @@ let package = Package(
             path: "App",
             exclude: [
                 "PatternSpike/Assets.xcassets",
-                "PatternSpike/Canvas",
+                "PatternSpike/Canvas/MetalCanvas.swift",
                 "PatternSpike/Commands",
                 "PatternSpike/ContentView.swift",
                 "PatternSpike/Harness",
@@ -70,6 +70,7 @@ let package = Package(
             ],
             sources: [
                 "PatternSpike/EditorSessionController.swift",
+                "PatternSpike/Canvas/InteractiveMetalView.swift",
                 "Tests/EditorSessionControllerTests.swift",
             ]
         ),

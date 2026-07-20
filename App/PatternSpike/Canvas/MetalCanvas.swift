@@ -28,18 +28,26 @@ import AppKit
 struct MetalCanvas: NSViewRepresentable {
     let controller: EditorSessionController
     let renderer: GridRenderer
+    let requestEditorFocus: @MainActor () -> Void
+    let pointerCancellationGeneration: UInt
 
     func makeNSView(context: Context) -> InteractiveMetalView {
         let view = InteractiveMetalView(
             frame: .zero,
             controller: controller,
-            renderer: renderer
+            renderer: renderer,
+            requestEditorFocus: requestEditorFocus,
+            pointerCancellationGeneration: pointerCancellationGeneration
         )
         configure(view, renderer: renderer)
         return view
     }
 
-    func updateNSView(_ view: InteractiveMetalView, context: Context) {}
+    func updateNSView(_ view: InteractiveMetalView, context: Context) {
+        view.applyPointerCancellation(
+            generation: pointerCancellationGeneration
+        )
+    }
 }
 #else
 import UIKit
@@ -47,6 +55,8 @@ import UIKit
 struct MetalCanvas: UIViewRepresentable {
     let controller: EditorSessionController
     let renderer: GridRenderer
+    let requestEditorFocus: @MainActor () -> Void
+    let pointerCancellationGeneration: UInt
 
     func makeUIView(context: Context) -> MTKView {
         let view = MTKView(frame: .zero, device: renderer.device)

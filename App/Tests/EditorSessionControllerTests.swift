@@ -4,6 +4,10 @@ import Metal
 import PatternEngine
 import Testing
 
+#if os(macOS)
+import AppKit
+#endif
+
 @MainActor
 private func makeControllerRenderer() throws -> GridRenderer? {
     guard let device = MTLCreateSystemDefaultDevice() else { return nil }
@@ -480,6 +484,59 @@ func focusLossPairsSpaceReleaseAndCancelsTheActivePointer() throws {
     #expect(!renderer.hasActiveStroke)
     #expect(renderer.isIdle)
 }
+
+#if os(macOS)
+@Test
+@MainActor
+func nativePointerCancellationStopsAnActivePan() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    var focusRequestCount = 0
+    let view = InteractiveMetalView(
+        frame: CGRect(x: 0, y: 0, width: 64, height: 64),
+        controller: controller,
+        renderer: renderer,
+        requestEditorFocus: { focusRequestCount += 1 },
+        pointerCancellationGeneration: 0
+    )
+    view.drawableSize = CGSize(width: 64, height: 64)
+    controller.handleShortcut(.spaceChanged(true))
+
+    let down = try #require(
+        pointerEvent(type: .leftMouseDown, location: CGPoint(x: 16, y: 16))
+    )
+    view.mouseDown(with: down)
+    #expect(focusRequestCount == 1)
+    #expect(view.hasActivePointerInteractionForTesting)
+
+    view.applyPointerCancellation(generation: 1)
+    let viewportAfterCancellation = renderer.viewport
+    let drag = try #require(
+        pointerEvent(type: .leftMouseDragged, location: CGPoint(x: 48, y: 48))
+    )
+    view.mouseDragged(with: drag)
+
+    #expect(!view.hasActivePointerInteractionForTesting)
+    #expect(renderer.viewport == viewportAfterCancellation)
+}
+
+private func pointerEvent(
+    type: NSEvent.EventType,
+    location: CGPoint
+) -> NSEvent? {
+    NSEvent.mouseEvent(
+        with: type,
+        location: location,
+        modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: 0,
+        context: nil,
+        eventNumber: 0,
+        clickCount: 1,
+        pressure: 1
+    )
+}
+#endif
 
 @MainActor
 private func canonicalBytes(_ renderer: GridRenderer) throws -> [UInt8] {

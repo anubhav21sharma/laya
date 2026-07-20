@@ -20,6 +20,7 @@ struct ContentView: View {
 
     private let state: CanvasState
     @State private var runtimeError: MetalRendererError?
+    @State private var pointerCancellationGeneration: UInt = 0
     @FocusState private var editorFocused: Bool
 
     init() {
@@ -66,20 +67,30 @@ struct ContentView: View {
         _ controller: EditorSessionController
     ) -> some View {
         VStack(spacing: 0) {
-            EditorTopBar(controller: controller)
+            EditorTopBar(
+                controller: controller,
+                requestEditorFocus: requestEditorFocus
+            )
             Divider()
             HStack(spacing: 0) {
-                ToolRail(controller: controller)
+                ToolRail(
+                    controller: controller,
+                    requestEditorFocus: requestEditorFocus
+                )
                 Divider()
                 MetalCanvas(
                     controller: controller,
-                    renderer: controller.renderer
+                    renderer: controller.renderer,
+                    requestEditorFocus: requestEditorFocus,
+                    pointerCancellationGeneration:
+                        pointerCancellationGeneration
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
                 TilingInspector(
                     controller: controller,
-                    runtimeError: $runtimeError
+                    runtimeError: $runtimeError,
+                    requestEditorFocus: requestEditorFocus
                 )
             }
         }
@@ -87,6 +98,7 @@ struct ContentView: View {
             if let runtimeError {
                 ErrorBanner(error: runtimeError) {
                     self.runtimeError = nil
+                    requestEditorFocus()
                 }
                 .padding(.top, editorControlExtent + 16)
             }
@@ -95,14 +107,14 @@ struct ContentView: View {
         .focused($editorFocused)
         .onChange(of: editorFocused) { _, isFocused in
             if !isFocused {
-                controller.handleFocusLoss()
+                cancelEditorInteraction(controller)
             }
         }
         .onKeyPress(phases: .all) { press in
             handleKeyPress(press, controller: controller)
         }
         .onAppear {
-            editorFocused = true
+            requestEditorFocus()
             controller.onError = {
                 runtimeError = $0
             }
@@ -111,19 +123,19 @@ struct ContentView: View {
             }
         }
         .onDisappear {
-            controller.handleFocusLoss()
+            cancelEditorInteraction(controller)
             controller.onError = nil
             controller.renderer.onError = nil
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
-                controller.handleFocusLoss()
+                cancelEditorInteraction(controller)
             }
         }
         #if os(macOS)
         .onChange(of: controlActiveState) { _, activeState in
             if activeState != .key {
-                controller.handleFocusLoss()
+                cancelEditorInteraction(controller)
             }
         }
         .focusedSceneValue(
@@ -131,6 +143,17 @@ struct ContentView: View {
             commandActions(for: controller)
         )
         #endif
+    }
+
+    private func requestEditorFocus() {
+        editorFocused = true
+    }
+
+    private func cancelEditorInteraction(
+        _ controller: EditorSessionController
+    ) {
+        controller.handleFocusLoss()
+        pointerCancellationGeneration &+= 1
     }
 
     private func handleKeyPress(
@@ -201,11 +224,26 @@ struct ContentView: View {
         for controller: EditorSessionController
     ) -> EditorCommandActions {
         EditorCommandActions(
-            undo: { controller.undo() },
-            redo: { controller.redo() },
-            clear: { controller.clear() },
-            selectDraw: { controller.handleTool(.draw) },
-            selectErase: { controller.handleTool(.erase) },
+            undo: {
+                controller.undo()
+                requestEditorFocus()
+            },
+            redo: {
+                controller.redo()
+                requestEditorFocus()
+            },
+            clear: {
+                controller.clear()
+                requestEditorFocus()
+            },
+            selectDraw: {
+                controller.handleTool(.draw)
+                requestEditorFocus()
+            },
+            selectErase: {
+                controller.handleTool(.erase)
+                requestEditorFocus()
+            },
             canUndo: controller.model.canUndo,
             canRedo: controller.model.canRedo,
             canEdit: !controller.model.isBusy

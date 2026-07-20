@@ -11,11 +11,13 @@ import UIKit
 
 struct EditorTopBar: View {
     let controller: EditorSessionController
+    let requestEditorFocus: @MainActor () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
             Button {
                 controller.stepBrush(larger: false)
+                requestEditorFocus()
             } label: {
                 Image(systemName: "minus")
             }
@@ -28,6 +30,7 @@ struct EditorTopBar: View {
 
             Button {
                 controller.stepBrush(larger: true)
+                requestEditorFocus()
             } label: {
                 Image(systemName: "plus")
             }
@@ -47,6 +50,7 @@ struct EditorTopBar: View {
 
             Button {
                 controller.undo()
+                requestEditorFocus()
             } label: {
                 Image(systemName: "arrow.uturn.backward")
             }
@@ -56,6 +60,7 @@ struct EditorTopBar: View {
 
             Button {
                 controller.redo()
+                requestEditorFocus()
             } label: {
                 Image(systemName: "arrow.uturn.forward")
             }
@@ -65,6 +70,7 @@ struct EditorTopBar: View {
 
             Button(role: .destructive) {
                 controller.clear()
+                requestEditorFocus()
             } label: {
                 Image(systemName: "trash")
             }
@@ -97,6 +103,7 @@ struct EditorTopBar: View {
                 )
             },
             set: { color in
+                defer { requestEditorFocus() }
                 guard let inkColor = Self.sRGBInkColor(from: color) else {
                     return
                 }

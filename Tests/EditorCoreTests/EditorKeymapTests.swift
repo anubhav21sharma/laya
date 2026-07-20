@@ -85,3 +85,23 @@ func repeatsAndUnrelatedKeyUpEventsDoNotRepeatTransitions() {
     #expect(shortcut("b", phase: .repeat) == nil)
     #expect(shortcut("b", phase: .up) == nil)
 }
+
+@Test
+func spaceReleaseIgnoresModifierChangesAfterKeyDown() {
+    let modifierSets: [EditorKeyModifiers] = [
+        .shift,
+        .command,
+        .option,
+        .control,
+        [.command, .shift],
+        [.command, .option, .control],
+    ]
+
+    for modifiers in modifierSets {
+        #expect(shortcut(" ", phase: .down) == .spaceChanged(true))
+        #expect(
+            shortcut(" ", modifiers: modifiers, phase: .up)
+                == .spaceChanged(false)
+        )
+    }
+}
