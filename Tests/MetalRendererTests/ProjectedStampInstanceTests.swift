@@ -24,13 +24,15 @@ func reflectedFragmentPacksEveryAffineAndActiveClipScalar() {
 
     let instance = PatternProjectedStampInstance(
         fragment: fragment,
-        radius: 10
+        radius: 10,
+        color: InkColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 0.8)!
     )
 
     #expect(instance.canonicalXAxis == SIMD2<Float>(-10, 0))
     #expect(instance.canonicalYAxis == SIMD2<Float>(0, 10))
     #expect(instance.canonicalTranslation == SIMD2<Float>(251, 19))
     #expect(instance.radius == 10)
+    #expect(instance.color == SIMD4<Float>(0.2, 0.4, 0.6, 0.8))
     #expect(instance.clipCount == 2)
     #expect(instance.clip0.normal == SIMD2<Float>(1, 0))
     #expect(instance.clip0.offset == -0.25)

@@ -779,7 +779,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             showGridLines: showGridLines ? 1 : 0,
             liveVisible: liveVisible ? 1 : 0,
             tilingKind: tilingStrategy.kind.rawValue,
-            diagnosticMode: diagnosticMode
+            diagnosticMode: diagnosticMode,
+            compositeMode: PatternCompositeWireDraw,
+            padding: 0
         )
     }
 

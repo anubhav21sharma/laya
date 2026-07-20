@@ -34,6 +34,7 @@ struct PatternProjectedStampOut {
     float2 brushLocal;
     float radius [[flat]];
     uint clipCount [[flat]];
+    float4 color [[flat]];
     float4 clip0 [[flat]];
     float4 clip1 [[flat]];
     float4 clip2 [[flat]];
@@ -91,6 +92,7 @@ vertex PatternProjectedStampOut patternProjectedStampVertex(
     output.brushLocal = brushLocal;
     output.radius = instance.radius;
     output.clipCount = instance.clipCount;
+    output.color = instance.color;
     output.clip0 = float4(
         instance.clip0.normal,
         instance.clip0.offset,
@@ -157,7 +159,7 @@ fragment float4 patternHardRoundStampFragment(
         0.0,
         1.0
     );
-    return float4(0.0, 0.0, 0.0, coverage);
+    return float4(input.color.rgb, input.color.a * coverage);
 }
 
 static float patternSignedTriangleEdge(
@@ -294,6 +296,17 @@ static float4 patternSourceOver(float4 source, float4 destination) {
     return source + destination * (1.0 - source.a);
 }
 
+static float4 patternCompositeLive(
+    float4 live,
+    float4 canonical,
+    uint compositeMode
+) {
+    if (compositeMode == PatternCompositeWireErase) {
+        return canonical * (1.0 - live.a);
+    }
+    return patternSourceOver(live, canonical);
+}
+
 fragment float4 patternGridFragment(
     PatternFullscreenOut input [[stage_in]],
     constant PatternGridFrameUniforms& frame
@@ -322,7 +335,11 @@ fragment float4 patternGridFragment(
     const float4 overlay = frame.liveVisible == 0
         ? float4(0.0)
         : live.sample(tileSampler, uv);
-    float4 result = patternSourceOver(overlay, base);
+    float4 result = patternCompositeLive(
+        overlay,
+        base,
+        frame.compositeMode
+    );
 
     if (frame.showGridLines != 0) {
         const float2 edgeDistance = min(
@@ -358,8 +375,9 @@ fragment float4 patternCommitFragment(
         filter::nearest
     );
     const float2 uv = input.screenPixel / frame.tileSize;
-    return patternSourceOver(
+    return patternCompositeLive(
         live.sample(tileSampler, uv),
-        canonical.sample(tileSampler, uv)
+        canonical.sample(tileSampler, uv),
+        frame.compositeMode
     );
 }

@@ -14,6 +14,7 @@ private func instance(_ x: Float) -> PatternProjectedStampInstance {
         canonicalTranslation: SIMD2<Float>(x, 0),
         radius: 10,
         clipCount: 0,
+        color: SIMD4<Float>(0, 0, 0, 1),
         clip0: zeroClip,
         clip1: zeroClip,
         clip2: zeroClip,

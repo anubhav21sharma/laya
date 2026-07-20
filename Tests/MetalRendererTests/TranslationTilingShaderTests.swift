@@ -25,6 +25,18 @@ struct TranslationTilingShaderTests {
         ))
     }
 
+    @Test
+    func displayUsesTheSharedLiveCompositeFunction() throws {
+        let source = try normalizedShaderSource()
+
+        #expect(source.contains(
+            "static float4 patternCompositeLive( float4 live, float4 canonical, uint compositeMode )"
+        ))
+        #expect(source.contains(
+            "float4 result = patternCompositeLive( overlay, base, frame.compositeMode );"
+        ))
+    }
+
     private func normalizedShaderSource() throws -> String {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

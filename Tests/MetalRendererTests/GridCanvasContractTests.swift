@@ -30,11 +30,11 @@ func physicalStrokePayloadHasAClosedUpperBound() {
 }
 
 @Test
-func projectedInstanceBufferBytesUseTheExactNinetySixByteStride() {
+func projectedInstanceBufferBytesUseTheExactOneHundredTwelveByteStride() {
     #expect(
         GridCanvasContract.instanceCapacity
             * MemoryLayout<PatternProjectedStampInstance>.stride
-            == 393_216
+            == 458_752
     )
 }
 

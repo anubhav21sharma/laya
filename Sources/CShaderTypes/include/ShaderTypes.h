@@ -6,12 +6,14 @@
 using namespace metal;
 typedef uint PatternUInt32;
 typedef float2 PatternFloat2;
+typedef float4 PatternFloat4;
 #define PATTERN_WIRE_CONSTANT constant
 #else
 #include <stdint.h>
 #include <simd/simd.h>
 typedef uint32_t PatternUInt32;
 typedef vector_float2 PatternFloat2;
+typedef vector_float4 PatternFloat4;
 #define PATTERN_WIRE_CONSTANT static const
 #endif
 
@@ -30,6 +32,8 @@ typedef struct PatternGridFrameUniforms {
     PatternUInt32 liveVisible;
     PatternUInt32 tilingKind;
     PatternUInt32 diagnosticMode;
+    PatternUInt32 compositeMode;
+    PatternUInt32 padding;
 } PatternGridFrameUniforms;
 
 typedef struct PatternClipHalfPlane {
@@ -44,6 +48,7 @@ typedef struct PatternProjectedStampInstance {
     PatternFloat2 canonicalTranslation;
     float radius;
     PatternUInt32 clipCount;
+    PatternFloat4 color;
     PatternClipHalfPlane clip0;
     PatternClipHalfPlane clip1;
     PatternClipHalfPlane clip2;
@@ -69,6 +74,9 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireNone = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireAsymmetricCoverage = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireCanonicalCoordinates = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireBrushLocalCoordinates = 3;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternCompositeWireDraw = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternCompositeWireErase = 1;
 
 #undef PATTERN_WIRE_CONSTANT
 

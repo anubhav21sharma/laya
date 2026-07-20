@@ -2,7 +2,11 @@ import CShaderTypes
 import PatternEngine
 
 public extension PatternProjectedStampInstance {
-    init(fragment: CellFragment, radius: Float) {
+    init(
+        fragment: CellFragment,
+        radius: Float,
+        color: InkColor = .black
+    ) {
         precondition(
             radius.isFinite && (1...1_000).contains(radius),
             "Projected stamp radius must be finite and within 1...1000"
@@ -49,6 +53,7 @@ public extension PatternProjectedStampInstance {
             canonicalTranslation: fragment.canonicalFromBrush.translation,
             radius: radius,
             clipCount: UInt32(fragment.brushClip.halfPlanes.count),
+            color: color.simd,
             clip0: clip0,
             clip1: clip1,
             clip2: clip2,

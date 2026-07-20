@@ -32,9 +32,15 @@ func diagnosticWireValuesAreAppendOnly() {
 }
 
 @Test
+func compositeWireValuesAreAppendOnly() {
+    #expect(PatternCompositeWireDraw == 0)
+    #expect(PatternCompositeWireErase == 1)
+}
+
+@Test
 func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
-    #expect(MemoryLayout<PatternGridFrameUniforms>.size == 48)
-    #expect(MemoryLayout<PatternGridFrameUniforms>.stride == 48)
+    #expect(MemoryLayout<PatternGridFrameUniforms>.size == 56)
+    #expect(MemoryLayout<PatternGridFrameUniforms>.stride == 56)
     #expect(MemoryLayout<PatternGridFrameUniforms>.alignment == 8)
     #expect(MemoryLayout<PatternGridFrameUniforms>.offset(of: \.drawableSize) == 0)
     #expect(MemoryLayout<PatternGridFrameUniforms>.offset(of: \.worldCenter) == 8)
@@ -48,6 +54,8 @@ func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
         MemoryLayout<PatternGridFrameUniforms>.offset(of: \.diagnosticMode)
             == 44
     )
+    #expect(MemoryLayout<PatternGridFrameUniforms>.offset(of: \.compositeMode) == 48)
+    #expect(MemoryLayout<PatternGridFrameUniforms>.offset(of: \.padding) == 52)
 
     #expect(MemoryLayout<PatternClipHalfPlane>.size == 16)
     #expect(MemoryLayout<PatternClipHalfPlane>.stride == 16)
@@ -56,9 +64,9 @@ func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
     #expect(MemoryLayout<PatternClipHalfPlane>.offset(of: \.offset) == 8)
     #expect(MemoryLayout<PatternClipHalfPlane>.offset(of: \.padding) == 12)
 
-    #expect(MemoryLayout<PatternProjectedStampInstance>.size == 96)
-    #expect(MemoryLayout<PatternProjectedStampInstance>.stride == 96)
-    #expect(MemoryLayout<PatternProjectedStampInstance>.alignment == 8)
+    #expect(MemoryLayout<PatternProjectedStampInstance>.size == 112)
+    #expect(MemoryLayout<PatternProjectedStampInstance>.stride == 112)
+    #expect(MemoryLayout<PatternProjectedStampInstance>.alignment == 16)
     #expect(
         MemoryLayout<PatternProjectedStampInstance>.offset(
             of: \.canonicalXAxis
@@ -83,20 +91,24 @@ func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
             == 28
     )
     #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip0)
+        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.color)
             == 32
     )
     #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip1)
+        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip0)
             == 48
     )
     #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip2)
+        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip1)
             == 64
     )
     #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip3)
+        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip2)
             == 80
+    )
+    #expect(
+        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip3)
+            == 96
     )
     #expect(ShaderABI.isValid)
 }

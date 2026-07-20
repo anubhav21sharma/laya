@@ -76,6 +76,22 @@ struct ReflectedRotationalShaderTests {
     }
 
     @Test
+    func commitUsesTheSharedLiveCompositeFunction() throws {
+        let source = try normalizedSource("Sources/MetalRenderer/Shaders.metal")
+
+        #expect(source.contains(
+            "return patternCompositeLive( live.sample(tileSampler, uv), canonical.sample(tileSampler, uv), frame.compositeMode );"
+        ))
+        #expect(source.contains(
+            "return canonical * (1.0 - live.a);"
+        ))
+        #expect(
+            source.components(separatedBy: "canonical * (1.0 - live.a)").count
+                == 2
+        )
+    }
+
+    @Test
     func harnessComputesDiagnosticMetricsFromCapturesAndTransforms() throws {
         let runner = try normalizedSource(
             "Sources/MetalRenderer/Capture/HarnessRunner.swift"
