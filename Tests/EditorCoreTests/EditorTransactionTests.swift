@@ -411,6 +411,23 @@ func matchingCompletionsReleaseBusyStateAndReportFailure() {
 }
 
 @Test
+func matchingRendererFailureTerminatesCollectingTransaction() {
+    var transaction = collectingDrawTransaction()
+    guard case let .drawing(drawing) = transaction.state else {
+        Issue.record("Expected collecting drawing transaction")
+        return
+    }
+
+    #expect(
+        transaction.apply(
+            .operationCompleted(drawing.token, succeeded: false)
+        ) == [.reportOperationFailure]
+    )
+    #expect(transaction.state == .idle)
+    #expect(!transaction.isBusy)
+}
+
+@Test
 func everyStateAndEventPairIsTotal() {
     let transactions = [
         EditorTransaction(),

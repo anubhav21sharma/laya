@@ -185,6 +185,54 @@ func submittedFailureReturnsNoReceiptAndRetainsCanonicalFront() throws {
 
 @Test
 @MainActor
+func failedLiveUploadTerminatesOperationAndReclaimsTransientState() throws {
+    guard let renderer = try makeRenderer() else { return }
+    let token = RendererOperationToken(rawValue: 10)
+    var completions: [RendererOperationCompletion] = []
+    renderer.onOperationCompleted = { completions.append($0) }
+    let initialSnapshot = renderer.harnessTilingMutationSnapshot
+
+    try renderer.beginStroke(
+        token: token,
+        sample: strokeSample(.began),
+        style: drawStyle
+    )
+    try renderer.requestStrokeCommit(
+        token: token,
+        sample: strokeSample(.ended, x: 40),
+        maximumRetainedBytes: 1_000_000
+    )
+    #expect(renderer.harnessRasterRevisionResidentBytes > 0)
+
+    #expect(
+        throws: MetalRendererError.commandFailed(
+            "injected harness command-buffer failure"
+        )
+    ) {
+        _ = try renderer.flushPendingLiveForHarness(forceFailure: true)
+    }
+
+    #expect(renderer.isIdle)
+    #expect(renderer.harnessRevision == initialSnapshot.revision)
+    #expect(
+        renderer.harnessTilingMutationSnapshot.canonicalFront
+            == initialSnapshot.canonicalFront
+    )
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    #expect(renderer.harnessReservedInstanceBufferCount == 0)
+    #expect(renderer.harnessTilingMutationSnapshot.pendingInstanceCount == 0)
+    #expect(renderer.harnessTilingMutationSnapshot.bakedHighWater == 0)
+    #expect(renderer.harnessTilingMutationSnapshot.emittedHighWater == 0)
+    #expect(completions.count == 1)
+    guard case let .failure(completedToken, _) = completions.first else {
+        Issue.record("Expected one renderer failure and no raster receipt")
+        return
+    }
+    #expect(completedToken == token)
+}
+
+@Test
+@MainActor
 func historyLimitFailureCleansProvisionalRevisionsBeforeSubmission() throws {
     guard let renderer = try makeRenderer() else { return }
     let token = RendererOperationToken(rawValue: 11)

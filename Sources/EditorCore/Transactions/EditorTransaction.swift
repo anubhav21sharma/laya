@@ -159,9 +159,11 @@ public struct EditorTransaction: Equatable, Sendable {
         }
 
         if case let .drawing(drawing) = state,
-           drawing.phase == .commitPending,
            drawing.token == token
         {
+            guard drawing.phase == .commitPending || !succeeded else {
+                return []
+            }
             state = .idle
             return succeeded ? [] : [.reportOperationFailure]
         }

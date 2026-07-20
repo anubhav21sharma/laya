@@ -8,6 +8,7 @@ final class GridRenderCompletionMailbox: @unchecked Sendable {
     }
 
     struct Outcome: Sendable {
+        let operationToken: RendererOperationToken?
         let rasterCommit: RasterCommit?
         let uploadSubmissions: [DabBufferSubmissionIdentity]
         let succeeded: Bool

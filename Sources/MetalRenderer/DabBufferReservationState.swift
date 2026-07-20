@@ -16,6 +16,17 @@ struct DabBufferReservationState {
     private var nextSignalValue: UInt64 = 1
     private var searchStart = 0
 
+    var unavailableSlotCount: Int {
+        slots.reduce(into: 0) { count, state in
+            switch state {
+            case .available:
+                break
+            case .reserved, .inFlight:
+                count += 1
+            }
+        }
+    }
+
     init(slotCount: Int) {
         precondition(slotCount > 0)
         slots = Array(repeating: .available, count: slotCount)

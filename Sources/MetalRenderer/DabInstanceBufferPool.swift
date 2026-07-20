@@ -76,6 +76,10 @@ public final class DabInstanceBufferPool {
         )
     }
 
+    var unavailableSlotCount: Int {
+        reservationState.unavailableSlotCount
+    }
+
     public func write(
         _ instances: ArraySlice<IdentifiedDab>,
         into lease: Lease

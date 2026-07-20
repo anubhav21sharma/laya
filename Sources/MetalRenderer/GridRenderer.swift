@@ -375,13 +375,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             return
         }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            report(.commandBufferUnavailable)
+            failActiveOperationIfNeeded(.commandBufferUnavailable)
             return
         }
 
         var uploads: [FrameUpload] = []
         var rasterCommit: EncodedRasterCommit?
         do {
+            let hasEarlierPendingUploads = !completedUploadRanges.isEmpty
             let encodedClear = needsLiveClear
             if encodedClear {
                 try encodeLiveClear(commandBuffer)
@@ -391,6 +392,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 ?? liveStroke.bakedHighWater
             let shouldEncodeCommit = activeStroke?.commitRequested == true
                 && plannedThrough == liveStroke.emittedHighWater
+                && !hasEarlierPendingUploads
             if shouldEncodeCommit {
                 rasterCommit = try encodeCommit(
                     commandBuffer,
@@ -417,11 +419,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         } catch let error as MetalRendererError {
             abandon(uploads)
             abandon(rasterCommit)
-            failRequestedCommitIfNeeded(error)
+            failActiveOperationIfNeeded(error)
         } catch {
             abandon(uploads)
             abandon(rasterCommit)
-            failRequestedCommitIfNeeded(
+            failActiveOperationIfNeeded(
                 .commandFailed(error.localizedDescription)
             )
         }
@@ -442,12 +444,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    func flushPendingLiveForHarness() throws -> HarnessLiveFlushResult {
+    func flushPendingLiveForHarness(
+        forceFailure: Bool = false
+    ) throws -> HarnessLiveFlushResult {
         drainFrameOutcomes()
         drainCompletedUploadRanges()
         try clearLiveForHarnessIfNeeded()
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
+            let error = MetalRendererError.commandBufferUnavailable
+            failActiveOperationIfNeeded(error)
+            throw error
         }
 
         var uploads: [FrameUpload] = []
@@ -460,7 +466,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 encodedClear: false,
                 uploads: uploads,
                 rasterCommit: nil,
-                commandBuffer: commandBuffer
+                commandBuffer: commandBuffer,
+                forceFailure: forceFailure
             )
             didFinalize = true
             if activeStroke != nil {
@@ -492,6 +499,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         } catch {
             if !didFinalize {
                 abandon(uploads)
+                failActiveOperationIfNeeded(
+                    (error as? MetalRendererError)
+                        ?? .commandFailed(error.localizedDescription)
+                )
             }
             throw error
         }
@@ -517,7 +528,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.textureAllocationFailed
         }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
+            let error = MetalRendererError.commandBufferUnavailable
+            failActiveOperationIfNeeded(error)
+            throw error
         }
 
         let start = CFAbsoluteTimeGetCurrent()
@@ -615,7 +628,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 library: library
             )
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
+            let error = MetalRendererError.commandBufferUnavailable
+            failActiveOperationIfNeeded(error)
+            throw error
         }
 
         let start = CFAbsoluteTimeGetCurrent()
@@ -720,7 +735,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
+            let error = MetalRendererError.commandBufferUnavailable
+            failActiveOperationIfNeeded(error)
+            throw error
         }
 
         let start = CFAbsoluteTimeGetCurrent()
@@ -805,6 +822,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     var harnessTiling: TilingKind { tilingStrategy.kind }
     var harnessRasterRevisionResidentBytes: Int {
         revisionStore.residentBytes
+    }
+    var harnessReservedInstanceBufferCount: Int {
+        instancePool.unavailableSlotCount
     }
     var harnessInterpolatorSpacing: Float { interpolator.spacing }
     var harnessCompositeMode: StrokeCompositeMode? {
@@ -1090,15 +1110,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             return
         }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
+            let error = MetalRendererError.commandBufferUnavailable
+            failActiveOperationIfNeeded(error)
+            throw error
         }
-        try encodeLiveClear(commandBuffer)
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
         do {
+            try encodeLiveClear(commandBuffer)
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
             try validateHarnessCommand(commandBuffer)
         } catch let error as MetalRendererError {
-            report(error)
+            failActiveOperationIfNeeded(error)
             throw error
         }
         liveTile.markCleared()
@@ -1393,6 +1415,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             liveTile.markStamped()
         }
 
+        let submittedOperationToken = activeStroke?.token
         let submittedUploads = uploadSubmissions
         let submittedCommit = rasterCommit.map {
             GridRenderCompletionMailbox.RasterCommit(
@@ -1402,10 +1425,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         commandBuffer.addCompletedHandler {
-            [completionMailbox, submittedCommit, submittedUploads] buffer in
+            [
+                completionMailbox,
+                submittedCommit,
+                submittedOperationToken,
+                submittedUploads,
+            ] buffer in
             let completed = buffer.status == .completed && !forceFailure
             completionMailbox.push(
                 .init(
+                    operationToken: submittedOperationToken,
                     rasterCommit: submittedCommit,
                     uploadSubmissions: submittedUploads,
                     succeeded: completed,
@@ -1435,8 +1464,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func drainFrameOutcomes() -> MetalRendererError? {
         var latestError: MetalRendererError?
         for outcome in completionMailbox.drain() {
-            let wasIdle = isIdle
-            defer { notifyIdleStateIfChanged(from: wasIdle) }
             if !outcome.succeeded {
                 instancePool.reclaimTerminalFailure(
                     outcome.uploadSubmissions
@@ -1448,7 +1475,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                         outcome.errorMessage
                             ?? "unknown command-buffer error"
                     )
-                    report(error)
+                    if let token = outcome.operationToken {
+                        terminateActiveOperation(token: token, error: error)
+                    } else {
+                        report(error)
+                    }
                     latestError = error
                 }
                 continue
@@ -1474,6 +1505,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func finalizeRasterCommitSuccess(
         _ commit: GridRenderCompletionMailbox.RasterCommit
     ) -> MetalRendererError? {
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
         guard activeStrokeMatchesSubmittedCommit(commit) else {
             let error = MetalRendererError.invalidRendererOperationToken
             finalizeCaptureTokens(commit.captureTokens, as: .failed)
@@ -1528,11 +1561,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) -> MetalRendererError {
         let error = MetalRendererError.commandFailed(message)
         finalizeCaptureTokens(commit.captureTokens, as: .failed)
-        discardSubmittedPairIfPossible(commit.revisions)
-        activeStroke = nil
-        resetLiveState()
-        report(error)
-        onOperationCompleted?(.failure(commit.token, error))
+        if !terminateActiveOperation(token: commit.token, error: error) {
+            revisionStore.discard(commit.revisions)
+        }
         return error
     }
 
@@ -1600,14 +1631,31 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         finalizeCaptureTokens(commit.captureTokens, as: .cancelled)
     }
 
-    private func failRequestedCommitIfNeeded(_ error: MetalRendererError) {
-        report(error)
-        guard activeStroke?.commitRequested == true else { return }
-        let token = activeStroke!.token
+    @discardableResult
+    private func terminateActiveOperation(
+        token: RendererOperationToken,
+        error: MetalRendererError
+    ) -> Bool {
+        guard activeStroke?.token == token else {
+            report(error)
+            return false
+        }
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
         discardPendingRevisionsIfPossible()
         activeStroke = nil
         resetLiveState()
+        report(error)
         onOperationCompleted?(.failure(token, error))
+        return true
+    }
+
+    private func failActiveOperationIfNeeded(_ error: MetalRendererError) {
+        guard let token = activeStroke?.token else {
+            report(error)
+            return
+        }
+        terminateActiveOperation(token: token, error: error)
     }
 
     private func waitForHarnessCommand(
