@@ -74,6 +74,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let style: StrokeRenderStyle
         var commitRequested: Bool
         var pendingRevisions: PendingRasterRevisionPair?
+
+        var isCommitSubmitted: Bool {
+            !commitRequested && pendingRevisions != nil
+        }
     }
 
     private struct EncodedRasterCommit {
@@ -771,6 +775,46 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    func submitDisplayOnlyForHarness(
+        forceFailure: Bool
+    ) throws {
+        let texture = try makeHarnessTexture(width: 64, height: 64)
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw MetalRendererError.commandBufferUnavailable
+        }
+        try encodeDisplay(
+            into: texture,
+            commandBuffer: commandBuffer,
+            showGridLines: false,
+            liveVisible: false
+        )
+        _ = try finalizeFrameEncoding(
+            encodedClear: false,
+            uploads: [],
+            rasterCommit: nil,
+            commandBuffer: commandBuffer,
+            forceFailure: forceFailure
+        )
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try validateHarnessCommand(commandBuffer)
+    }
+
+    func prioritizeLatestFrameOutcomeForHarness() {
+        completionMailbox.prioritizeLastForHarness()
+    }
+
+    func drainNextCompletedOperationForHarness() throws {
+        guard let outcome = completionMailbox.drainFirstForHarness() else {
+            return
+        }
+        let submittedError = processFrameOutcome(outcome)
+        drainCompletedUploadRanges()
+        if let submittedError {
+            throw submittedError
+        }
+    }
+
     func copyCanonicalForHarness() throws -> any MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
@@ -1415,7 +1459,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             liveTile.markStamped()
         }
 
-        let submittedOperationToken = activeStroke?.token
+        let submittedOperationToken: RendererOperationToken?
+        if let rasterCommit {
+            submittedOperationToken = rasterCommit.token
+        } else if let execution = activeStroke,
+                  !execution.isCommitSubmitted
+        {
+            submittedOperationToken = execution.token
+        } else {
+            submittedOperationToken = nil
+        }
         let submittedUploads = uploadSubmissions
         let submittedCommit = rasterCommit.map {
             GridRenderCompletionMailbox.RasterCommit(
@@ -1464,42 +1517,43 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func drainFrameOutcomes() -> MetalRendererError? {
         var latestError: MetalRendererError?
         for outcome in completionMailbox.drain() {
-            if !outcome.succeeded {
-                instancePool.reclaimTerminalFailure(
-                    outcome.uploadSubmissions
-                )
-            }
-            guard let commit = outcome.rasterCommit else {
-                if !outcome.succeeded {
-                    let error = MetalRendererError.commandFailed(
-                        outcome.errorMessage
-                            ?? "unknown command-buffer error"
-                    )
-                    if let token = outcome.operationToken {
-                        terminateActiveOperation(token: token, error: error)
-                    } else {
-                        report(error)
-                    }
-                    latestError = error
-                }
-                continue
-            }
-
-            let error: MetalRendererError?
-            if outcome.succeeded {
-                error = finalizeRasterCommitSuccess(commit)
-            } else {
-                error = finalizeRasterCommitFailure(
-                    commit,
-                    message: outcome.errorMessage
-                        ?? "unknown command-buffer error"
-                )
-            }
+            let error = processFrameOutcome(outcome)
             if let error {
                 latestError = error
             }
         }
         return latestError
+    }
+
+    private func processFrameOutcome(
+        _ outcome: GridRenderCompletionMailbox.Outcome
+    ) -> MetalRendererError? {
+        if !outcome.succeeded {
+            instancePool.reclaimTerminalFailure(
+                outcome.uploadSubmissions
+            )
+        }
+        guard let commit = outcome.rasterCommit else {
+            guard !outcome.succeeded else { return nil }
+            let error = MetalRendererError.commandFailed(
+                outcome.errorMessage ?? "unknown command-buffer error"
+            )
+            if let token = outcome.operationToken {
+                terminateActiveOperation(token: token, error: error)
+            } else {
+                report(error)
+            }
+            return error
+        }
+
+        if outcome.succeeded {
+            return finalizeRasterCommitSuccess(commit)
+        }
+        return finalizeRasterCommitFailure(
+            commit,
+            message: outcome.errorMessage
+                ?? "unknown command-buffer error"
+        )
     }
 
     private func finalizeRasterCommitSuccess(
@@ -1651,11 +1705,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func failActiveOperationIfNeeded(_ error: MetalRendererError) {
-        guard let token = activeStroke?.token else {
+        guard let execution = activeStroke else {
             report(error)
             return
         }
-        terminateActiveOperation(token: token, error: error)
+        guard !execution.isCommitSubmitted else {
+            report(error)
+            return
+        }
+        terminateActiveOperation(token: execution.token, error: error)
     }
 
     private func waitForHarnessCommand(

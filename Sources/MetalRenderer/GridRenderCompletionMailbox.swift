@@ -32,4 +32,21 @@ final class GridRenderCompletionMailbox: @unchecked Sendable {
         lock.unlock()
         return result
     }
+
+    @MainActor
+    func drainFirstForHarness() -> Outcome? {
+        lock.lock()
+        let result = outcomes.isEmpty ? nil : outcomes.removeFirst()
+        lock.unlock()
+        return result
+    }
+
+    @MainActor
+    func prioritizeLastForHarness() {
+        lock.lock()
+        if outcomes.count > 1 {
+            outcomes.insert(outcomes.removeLast(), at: 0)
+        }
+        lock.unlock()
+    }
 }

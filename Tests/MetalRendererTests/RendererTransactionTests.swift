@@ -139,6 +139,75 @@ func submittedCommitPublishesExactlyOneReceiptOnlyAfterCompletionDrain()
 
 @Test
 @MainActor
+func submittedCommitAloneOwnsTerminalStateAfterLaterDisplayFailure() throws {
+    guard let renderer = try makeRenderer() else { return }
+    let token = RendererOperationToken(rawValue: 8)
+    var completions: [RendererOperationCompletion] = []
+    var reportedErrors: [MetalRendererError] = []
+    renderer.onOperationCompleted = { completions.append($0) }
+    renderer.onError = { reportedErrors.append($0) }
+    let initialSnapshot = renderer.harnessTilingMutationSnapshot
+
+    try renderer.beginStroke(
+        token: token,
+        sample: strokeSample(.began),
+        style: drawStyle
+    )
+    try renderer.requestStrokeCommit(
+        token: token,
+        sample: strokeSample(.ended, x: 40),
+        maximumRetainedBytes: 1_000_000
+    )
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.submitCommitForHarness()
+    let provisionalBytes = renderer.harnessRasterRevisionResidentBytes
+
+    try renderer.submitDisplayOnlyForHarness(forceFailure: true)
+    renderer.prioritizeLatestFrameOutcomeForHarness()
+
+    #expect(
+        throws: MetalRendererError.commandFailed(
+            "injected harness command-buffer failure"
+        )
+    ) {
+        try renderer.drainNextCompletedOperationForHarness()
+    }
+
+    #expect(!renderer.isIdle)
+    #expect(completions.isEmpty)
+    #expect(renderer.harnessRevision == initialSnapshot.revision)
+    #expect(
+        renderer.harnessTilingMutationSnapshot.canonicalFront
+            == initialSnapshot.canonicalFront
+    )
+    #expect(renderer.harnessRasterRevisionResidentBytes == provisionalBytes)
+    #expect(reportedErrors.count == 1)
+
+    try renderer.drainCompletedOperationsForHarness()
+
+    #expect(renderer.isIdle)
+    #expect(renderer.harnessRevision == initialSnapshot.revision.advanced())
+    #expect(
+        renderer.harnessTilingMutationSnapshot.canonicalFront
+            == initialSnapshot.canonicalScratch
+    )
+    #expect(completions.count == 1)
+    guard case let .rasterSuccess(receipt) = completions.first else {
+        Issue.record("Expected exactly one eventual raster success")
+        return
+    }
+    #expect(receipt.token == token)
+    #expect(
+        renderer.harnessRasterRevisionResidentBytes
+            == receipt.before.retainedBytes + receipt.after.retainedBytes
+    )
+
+    renderer.releaseRasterRevisions([receipt.before.id, receipt.after.id])
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+}
+
+@Test
+@MainActor
 func submittedFailureReturnsNoReceiptAndRetainsCanonicalFront() throws {
     guard let renderer = try makeRenderer() else { return }
     let token = RendererOperationToken(rawValue: 9)
