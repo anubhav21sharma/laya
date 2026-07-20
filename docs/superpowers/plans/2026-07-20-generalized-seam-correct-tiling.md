@@ -41,13 +41,13 @@ changes.
 
 ---
 
-## Hard Start Gate
+## Explicit Start-Gate Override
 
-Slice 2 production code must not start while
-`docs/superpowers/milestones/01-measured-grid-drawing-kernel.md` says
-`Pending Performance Acceptance`. Planning and documentation may proceed.
-Task 0 must pass before Task 1 begins. Do not weaken Slice 1 budgets, relabel a
-paravirtual diagnostic run as accepted, or substitute CPU rendering.
+The user explicitly decided on 2026-07-20 that Slice 1's pending performance
+acceptance does not block Slice 2 implementation. Task 0 preserves the full
+Slice 1 functional gate while allowing only its performance evaluator to be
+skipped. Do not weaken or relabel Slice 1 measurements, skip functional
+regressions, or substitute CPU rendering.
 
 ---
 
@@ -186,27 +186,59 @@ Responsibility boundaries:
 
 ---
 
-### Task 0: Prove The Slice 1 Start Gate
+### Task 0: Preserve Slice 1 Functional Regression Coverage
 
 **Files:**
-- Inspect:
-  `docs/superpowers/milestones/01-measured-grid-drawing-kernel.md`
-- Run: `scripts/verify-slice1.sh`
-- Modify: none
+- Modify: `scripts/verify-slice1.sh`
 
-- [ ] **Step 1: Confirm the milestone is explicitly accepted**
+- [ ] **Step 1: Prove the override flag does not bypass performance yet**
 
 Run:
 
 ```bash
-grep -Fqx '**Status:** Accepted' \
-  docs/superpowers/milestones/01-measured-grid-drawing-kernel.md
+PATTERN_SKIP_PERFORMANCE=1 ./scripts/verify-slice1.sh
 ```
 
-Expected: exit `0`. If it exits nonzero, stop this plan without touching
-production code and report the exact remaining Slice 1 acceptance work.
+Expected: FAIL at the existing performance evaluator, proving the new flag is
+not implemented yet. All functional stages before that evaluator must pass.
 
-- [ ] **Step 2: Re-run the accepted Slice 1 gate on the implementation base**
+- [ ] **Step 2: Add an explicit performance-only bypass**
+
+Wrap only the inline Swift performance evaluator in:
+
+```bash
+if [[ "${PATTERN_SKIP_PERFORMANCE:-0}" == "1" ]]; then
+  printf '%s\n' "slice1-performance=skipped-explicit-user-override"
+else
+  # Existing inline Swift performance evaluator remains byte-for-byte here.
+fi
+```
+
+Keep Slice 0, Swift tests, both app builds, all six negative controls, all six
+positive scenes, artifact checks, structural checks, and hygiene checks
+unconditional. In skip mode replace only the final full-gate line with:
+
+```text
+SLICE1 FUNCTIONAL GATE PASS
+```
+
+Normal mode retains `SLICE1 AUTOMATED GATE PASS` and all existing budgets.
+
+- [ ] **Step 3: Run the functional gate**
+
+Run:
+
+```bash
+PATTERN_SKIP_PERFORMANCE=1 ./scripts/verify-slice1.sh
+```
+
+Expected final line:
+
+```text
+SLICE1 FUNCTIONAL GATE PASS
+```
+
+- [ ] **Step 4: Confirm normal mode still enforces performance**
 
 Run:
 
@@ -214,43 +246,19 @@ Run:
 ./scripts/verify-slice1.sh
 ```
 
-Expected final line:
+Expected on the current paravirtual environment: nonzero exit from the existing
+unchanged performance budget check after all functional stages pass. If it
+passes on stable hardware, preserve that accepted baseline as described in
+Task 10.
 
-```text
-SLICE1 AUTOMATED GATE PASS
-```
+- [ ] **Step 5: Review and commit**
 
-- [ ] **Step 3: Preserve the accepted baseline before Slice 2 edits**
-
-Run:
+Review that the flag guards only performance evaluation. Then:
 
 ```bash
-base_commit="$(git rev-parse HEAD)"
-baseline_root=".build/accepted-baselines/slice1-$base_commit"
-test ! -e "$baseline_root"
-mkdir -p "$baseline_root"
-cp -R .build/slice1-artifacts/positive "$baseline_root/positive"
-(
-  cd "$baseline_root"
-  find positive -type f -print \
-    | LC_ALL=C sort \
-    | while IFS= read -r file
-      do shasum -a 256 "$file"
-      done > SHA256SUMS
-  shasum -a 256 -c SHA256SUMS
-)
-chmod -R a-w "$baseline_root"
-printf '%s\n' "$baseline_root" \
-  > .build/accepted-baselines/current-slice1
-git status --short
+git add scripts/verify-slice1.sh
+git commit -m "ci: allow Slice 1 functional gate"
 ```
-
-Expected: checksum verification prints `OK` for every accepted artifact and
-Git status is clean. Copy the commit, immutable baseline path, hardware, OS,
-configuration, and five Slice 1 budget values into the Task 10 working notes.
-Later `verify-slice1.sh` runs may delete and recreate
-`.build/slice1-artifacts`; they must never write inside
-`.build/accepted-baselines`. Do not commit generated artifacts.
 
 ---
 
@@ -1137,12 +1145,12 @@ xcodebuild -project App/PatternSpike.xcodeproj \
 xcodebuild -project App/PatternSpike.xcodeproj \
   -scheme PatternSpikePad -configuration Debug \
   -destination 'generic/platform=iOS Simulator' build
-./scripts/verify-slice1.sh
+PATTERN_SKIP_PERFORMANCE=1 ./scripts/verify-slice1.sh
 ```
 
 Expected: all current Slice 0/1 negative controls fail for their recorded
 reason, all positives pass, and final line is
-`SLICE1 AUTOMATED GATE PASS`.
+`SLICE1 FUNCTIONAL GATE PASS`.
 
 - [ ] **Step 10: Review and commit**
 
@@ -1448,7 +1456,7 @@ xcodebuild -project App/PatternSpike.xcodeproj \
 xcodebuild -project App/PatternSpike.xcodeproj \
   -scheme PatternSpikePad -configuration Debug \
   -destination 'generic/platform=iOS Simulator' build
-./scripts/verify-slice1.sh
+PATTERN_SKIP_PERFORMANCE=1 ./scripts/verify-slice1.sh
 ```
 
 Then run:
@@ -1598,7 +1606,7 @@ run_pair large-footprint grid oracleHoleCount
 run_pair asymmetric-footprint rotational transformMismatchCount
 run_pair canonical-coordinate-continuity halfDrop coordinateContinuityMismatchCount
 run_pair brush-local-coordinate-continuity mirrorXY coordinateContinuityMismatchCount
-./scripts/verify-slice1.sh
+PATTERN_SKIP_PERFORMANCE=1 ./scripts/verify-slice1.sh
 ```
 
 Expected: every negative matches its exact stderr, every positive passes, and
@@ -2066,7 +2074,7 @@ Run:
 
 ```bash
 swift test
-./scripts/verify-slice1.sh
+PATTERN_SKIP_PERFORMANCE=1 ./scripts/verify-slice1.sh
 ```
 
 Expected: all legacy tests/scenes pass and no old JSON file changes.
@@ -2098,7 +2106,7 @@ git commit -m "test: complete Slice 2 GPU matrix"
 
 `verify-slice2.sh` must:
 
-1. run `scripts/verify-slice1.sh`;
+1. run `PATTERN_SKIP_PERFORMANCE=1 scripts/verify-slice1.sh`;
 2. run `swift test`;
 3. generate the Xcode project;
 4. build macOS Debug and generic iPadOS Simulator;
@@ -2122,10 +2130,11 @@ Require:
 - long-stroke late CPU/dab-GPU p95 is at most
   `max(earlyP95 * 1.15, earlyP95 + 0.10 ms)`;
 - long-stroke CPU and dab-GPU slopes are each `<= 0.001 ms/frame`;
-- no unexplained p95 regression greater than `15%` from the accepted Slice 1
-  baseline on matching hardware, OS, and configuration.
+- when a stable accepted Slice 1 baseline exists on matching hardware, OS, and
+  configuration, no unexplained p95 regression greater than `15%`.
 
-Invoke with the accepted baseline directory:
+When an accepted baseline exists, preserve it outside the mutable
+`.build/slice1-artifacts` directory, write a checksum manifest, and invoke:
 
 ```bash
 baseline_root="$(cat .build/accepted-baselines/current-slice1)"
@@ -2137,11 +2146,14 @@ SLICE1_BASELINE_DIR="$baseline_root/positive" \
   ./scripts/verify-slice2.sh
 ```
 
-If hardware, OS, or configuration differs, fail with a typed baseline mismatch
-instead of comparing incomparable timings. `verify-slice2.sh` must reject a
-baseline path under mutable `.build/slice1-artifacts` and must verify the
-immutable checksum manifest both before and after its internal Slice 1
-regression run.
+If no accepted baseline exists, invoke `./scripts/verify-slice2.sh` without
+`SLICE1_BASELINE_DIR`; the absolute Slice 2 budgets remain mandatory and the
+milestone records `slice1Comparison: unavailable-user-waived`. If a baseline
+is supplied but hardware, OS, or configuration differs, fail with a typed
+baseline mismatch instead of comparing incomparable timings.
+`verify-slice2.sh` rejects a supplied baseline path under mutable
+`.build/slice1-artifacts` and verifies its immutable checksum manifest before
+and after its internal Slice 1 functional regression run.
 
 - [ ] **Step 3: Run the complete automated gate**
 
@@ -2211,7 +2223,8 @@ git push origin main
 
 ## Final Acceptance Checklist
 
-- [ ] Slice 1 was accepted before the first production edit.
+- [ ] The explicit Slice 1 performance-gate override is recorded, and its
+  functional regression gate remains green.
 - [ ] All seven tilings use `TilingProjection`; no production grid shortcut
   remains.
 - [ ] CPU oracle implementation is source-level independent.
@@ -2225,8 +2238,9 @@ git push origin main
 - [ ] Long strokes encode only newly projected fragments.
 - [ ] ABI sizes, offsets, raw values, and indices match exactly.
 - [ ] Legacy Slice 0/1 scenes and both app builds remain green.
-- [ ] Slice 2 performance stays inside fixed budgets and the 15% baseline
-  comparison.
+- [ ] Slice 2 performance stays inside fixed absolute budgets; the 15-percent
+  Slice 1 comparison passes when a stable accepted baseline is available, or
+  its user-waived absence is recorded.
 - [ ] Manual Mac acceptance is recorded.
 - [ ] No Slice 3 behavior entered scope.
 - [ ] The measured Slice 2 milestone is marked `Accepted` and pushed.

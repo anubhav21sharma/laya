@@ -90,6 +90,9 @@ done
 
 test -s "$artifacts/positive/five-hundred-dabs/five-hundred-dabs.live.screen.png"
 
+if [[ "${PATTERN_SKIP_PERFORMANCE:-0}" == "1" ]]; then
+  printf '%s\n' "slice1-performance=skipped-explicit-user-override"
+else
 swift - "$artifacts/positive" <<'SWIFT'
 import Foundation
 
@@ -148,6 +151,7 @@ guard (commitPending.max() ?? 0) < frameBudget else {
     fatalError("commit-pending frame budget failed")
 }
 SWIFT
+fi
 
 if tracked_project="$(
   git ls-files --error-unmatch App/PatternSpike.xcodeproj 2>&1
@@ -181,4 +185,8 @@ printf '%s\n' "macos-build=passed"
 printf '%s\n' "ipados-simulator-build=passed"
 printf '%s\n' "grid-negative-controls=passed"
 printf '%s\n' "grid-positive-scenes=passed"
-printf '%s\n' "SLICE1 AUTOMATED GATE PASS"
+if [[ "${PATTERN_SKIP_PERFORMANCE:-0}" == "1" ]]; then
+  printf '%s\n' "SLICE1 FUNCTIONAL GATE PASS"
+else
+  printf '%s\n' "SLICE1 AUTOMATED GATE PASS"
+fi

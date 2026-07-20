@@ -108,12 +108,20 @@ one active when they were drawn. The switch is reversible reinterpretation,
 not seam repair. New strokes are seam-correct for the tiling active while they
 are drawn.
 
-### 2.5 Slice 1 acceptance still gates implementation
+### 2.5 Slice 1 performance acceptance does not gate implementation
 
-This design and its implementation plan may be completed while Slice 1
-performance evidence is unavailable. Slice 2 production code does not start
-until `01-measured-grid-drawing-kernel.md` becomes `Accepted`, as required by
-the rebuild delivery sequence.
+Explicit user decision on 2026-07-20 overrides the earlier delivery-sequence
+gate: Slice 2 implementation may proceed while
+`01-measured-grid-drawing-kernel.md` remains `Pending Performance Acceptance`.
+Slice 1's functional tests, real-metallib scenes, builds, and interaction
+regressions remain mandatory. Its unstable paravirtual-GPU measurements remain
+diagnostic evidence and are not relabeled as accepted.
+
+If a stable accepted Slice 1 baseline becomes available before Slice 2
+performance acceptance, Slice 2 performs the planned 15-percent comparison.
+Its absence does not block implementation; the Slice 2 milestone records the
+missing comparison explicitly while retaining Slice 2's absolute performance
+budgets.
 
 ## 3. Coordinate And Boundary Rules
 
