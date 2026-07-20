@@ -207,36 +207,56 @@ func tilingStrategyCoordinateValidationRunsInSubprocesses() throws {
             "TilingStrategy maximum y bound must be finite"
         ),
         (
-            "pointXAboveSafeIndex",
-            "TilingStrategy x cell index exceeds Float-resolvable range"
+            "grid96PositiveExtentTrap",
+            "TilingStrategy x cell extent must be preserved"
         ),
         (
-            "pointXBelowSafeIndex",
-            "TilingStrategy x cell index exceeds Float-resolvable range"
+            "grid96NegativeExtentTrap",
+            "TilingStrategy x cell extent must be preserved"
         ),
         (
-            "pointYAboveSafeIndex",
-            "TilingStrategy y cell index exceeds Float-resolvable range"
+            "grid86PositiveExtentTrap",
+            "TilingStrategy x cell extent must be preserved"
         ),
         (
-            "pointYBelowSafeIndex",
-            "TilingStrategy y cell index exceeds Float-resolvable range"
+            "grid86NegativeExtentTrap",
+            "TilingStrategy x cell extent must be preserved"
         ),
         (
-            "boundsXAboveSafeIndex",
-            "TilingStrategy x cell index exceeds Float-resolvable range"
+            "halfDrop64PositiveExtentTrap",
+            "TilingStrategy y cell extent must be preserved"
         ),
         (
-            "boundsXBelowSafeIndex",
-            "TilingStrategy x cell index exceeds Float-resolvable range"
+            "halfDrop64NegativePhaseTrap",
+            "TilingStrategy y cell phase must be preserved"
         ),
         (
-            "boundsYAboveSafeIndex",
-            "TilingStrategy y cell index exceeds Float-resolvable range"
+            "brick64PositiveExtentTrap",
+            "TilingStrategy x cell extent must be preserved"
         ),
         (
-            "boundsYBelowSafeIndex",
-            "TilingStrategy y cell index exceeds Float-resolvable range"
+            "brick64NegativePhaseTrap",
+            "TilingStrategy x cell phase must be preserved"
+        ),
+        (
+            "grid64PositiveRoundTripTrap",
+            "TilingStrategy x cell boundaries must round-trip half-open"
+        ),
+        (
+            "grid64ExactIndexTrap",
+            "TilingStrategy x cell index must be exactly representable as Float"
+        ),
+        (
+            "grid64NegativeExtentTrap",
+            "TilingStrategy x cell extent must be preserved"
+        ),
+        (
+            "boundsGrid96PositiveExtentTrap",
+            "TilingStrategy x cell extent must be preserved"
+        ),
+        (
+            "boundsHalfDrop64PositiveExtentTrap",
+            "TilingStrategy y cell extent must be preserved"
         ),
     ]
     for (validationCase, expectedMessage) in invalidCases {
@@ -547,7 +567,9 @@ private struct RawTransformFixture: Sendable {
 }
 
 private let rawTransformFixtures =
-    standardRawTransformFixtures + largeRawTransformFixtures
+    standardRawTransformFixtures
+        + largeRawTransformFixtures
+        + operationalBoundaryFixtures
 
 private let standardRawTransformFixtures: [RawTransformFixture] = [
     fixture(
@@ -824,6 +846,109 @@ private let largeRawTransformFixtures: [RawTransformFixture] = [
     ),
 ]
 
+private let operationalBoundaryFixtures: [RawTransformFixture] = [
+    fixture(
+        .grid, tileSize: .init(width: 96, height: 64),
+        point: .init(x: 536_870_912, y: 32),
+        cell: .init(column: 5_592_405, row: 0),
+        minimum: SIMD2(536_870_880, 0),
+        maximum: SIMD2(536_870_976, 64),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-536_870_880, 0),
+        raw: SIMD2(32, 32), fold: .init(x: 32, y: 32)
+    ),
+    fixture(
+        .grid, tileSize: .init(width: 96, height: 64),
+        point: .init(x: -536_870_912, y: 32),
+        cell: .init(column: -5_592_406, row: 0),
+        minimum: SIMD2(-536_870_976, 0),
+        maximum: SIMD2(-536_870_880, 64),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(536_870_976, 0),
+        raw: SIMD2(64, 32), fold: .init(x: 64, y: 32)
+    ),
+    fixture(
+        .grid, tileSize: .init(width: 86, height: 64),
+        point: .init(x: 33_554_364, y: 32),
+        cell: .init(column: 390_167, row: 0),
+        minimum: SIMD2(33_554_362, 0),
+        maximum: SIMD2(33_554_448, 64),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-33_554_362, 0),
+        raw: SIMD2(2, 32), fold: .init(x: 2, y: 32)
+    ),
+    fixture(
+        .grid, tileSize: .init(width: 86, height: 64),
+        point: .init(x: -33_554_444, y: 32),
+        cell: .init(column: -390_168, row: 0),
+        minimum: SIMD2(-33_554_448, 0),
+        maximum: SIMD2(-33_554_362, 64),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(33_554_448, 0),
+        raw: SIMD2(4, 32), fold: .init(x: 4, y: 32)
+    ),
+    fixture(
+        .halfDrop, tileSize: .init(width: 64, height: 64),
+        point: .init(x: 96, y: 536_870_848),
+        cell: .init(column: 1, row: 8_388_606),
+        minimum: SIMD2(64, 536_870_816),
+        maximum: SIMD2(128, 536_870_880),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-64, -536_870_816),
+        raw: SIMD2(32, 32), fold: .init(x: 32, y: 32)
+    ),
+    fixture(
+        .halfDrop, tileSize: .init(width: 64, height: 64),
+        point: .init(x: 96, y: -536_870_848),
+        cell: .init(column: 1, row: -8_388_608),
+        minimum: SIMD2(64, -536_870_880),
+        maximum: SIMD2(128, -536_870_816),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-64, 536_870_880),
+        raw: SIMD2(32, 32), fold: .init(x: 32, y: 32)
+    ),
+    fixture(
+        .brick, tileSize: .init(width: 64, height: 64),
+        point: .init(x: 536_870_848, y: 96),
+        cell: .init(column: 8_388_606, row: 1),
+        minimum: SIMD2(536_870_816, 64),
+        maximum: SIMD2(536_870_880, 128),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-536_870_816, -64),
+        raw: SIMD2(32, 32), fold: .init(x: 32, y: 32)
+    ),
+    fixture(
+        .brick, tileSize: .init(width: 64, height: 64),
+        point: .init(x: -536_870_848, y: 96),
+        cell: .init(column: -8_388_608, row: 1),
+        minimum: SIMD2(-536_870_880, 64),
+        maximum: SIMD2(-536_870_816, 128),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(536_870_880, -64),
+        raw: SIMD2(32, 32), fold: .init(x: 32, y: 32)
+    ),
+    fixture(
+        .grid, tileSize: .init(width: 64, height: 64),
+        point: .init(x: 1_073_741_696, y: 32),
+        cell: .init(column: 16_777_214, row: 0),
+        minimum: SIMD2(1_073_741_696, 0),
+        maximum: SIMD2(1_073_741_760, 64),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-1_073_741_696, 0),
+        raw: SIMD2(0, 32), fold: .init(x: 0, y: 32)
+    ),
+    fixture(
+        .grid, tileSize: .init(width: 64, height: 64),
+        point: .init(x: -1_073_741_824, y: 32),
+        cell: .init(column: -16_777_216, row: 0),
+        minimum: SIMD2(-1_073_741_824, 0),
+        maximum: SIMD2(-1_073_741_760, 64),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(1_073_741_824, 0),
+        raw: SIMD2(0, 32), fold: .init(x: 0, y: 32)
+    ),
+]
+
 private func fixture(
     _ kind: TilingKind,
     tileSize: PatternSize = standardTileSize,
@@ -893,11 +1018,8 @@ private func exerciseCoordinateValidation(named validationCase: String) {
     let tileSize = PatternSize(width: 64, height: 64)
     let strategy = TilingStrategy(kind: .grid, tileSize: tileSize)
     let safeIndex = (1 << Float.significandBitCount) - 1
-    let firstUnsafeIndex = safeIndex + 1
     let positiveSafeOrigin = Float(safeIndex) * tileSize.width
     let negativeSafeOrigin = -positiveSafeOrigin
-    let positiveUnsafeOrigin = Float(firstUnsafeIndex) * tileSize.width
-    let negativeUnsafeOrigin = -positiveUnsafeOrigin
 
     switch validationCase {
     case "cellXNaN":
@@ -946,41 +1068,76 @@ private func exerciseCoordinateValidation(named validationCase: String) {
             minimum: SIMD2(0, 0),
             maximum: SIMD2(1, .infinity)
         ))
-    case "pointXAboveSafeIndex":
-        _ = strategy.cell(
-            containing: WorldPoint(x: positiveUnsafeOrigin, y: 0)
+    case "grid96PositiveExtentTrap":
+        let strategy = TilingStrategy(
+            kind: .grid,
+            tileSize: PatternSize(width: 96, height: 64)
         )
-    case "pointXBelowSafeIndex":
-        _ = strategy.cell(
-            containing: WorldPoint(x: negativeUnsafeOrigin, y: 0)
+        _ = strategy.cell(containing: WorldPoint(x: 536_870_976, y: 0))
+    case "grid96NegativeExtentTrap":
+        let strategy = TilingStrategy(
+            kind: .grid,
+            tileSize: PatternSize(width: 96, height: 64)
         )
-    case "pointYAboveSafeIndex":
-        _ = strategy.cell(
-            containing: WorldPoint(x: 0, y: positiveUnsafeOrigin)
+        _ = strategy.cell(containing: WorldPoint(x: -536_871_040, y: 0))
+    case "grid86PositiveExtentTrap":
+        let strategy = TilingStrategy(
+            kind: .grid,
+            tileSize: PatternSize(width: 86, height: 64)
         )
-    case "pointYBelowSafeIndex":
-        _ = strategy.cell(
-            containing: WorldPoint(x: 0, y: negativeUnsafeOrigin)
+        _ = strategy.cell(containing: WorldPoint(x: 33_554_448, y: 0))
+    case "grid86NegativeExtentTrap":
+        let strategy = TilingStrategy(
+            kind: .grid,
+            tileSize: PatternSize(width: 86, height: 64)
         )
-    case "boundsXAboveSafeIndex":
+        _ = strategy.cell(containing: WorldPoint(x: -33_554_536, y: 0))
+    case "halfDrop64PositiveExtentTrap":
+        let strategy = TilingStrategy(kind: .halfDrop, tileSize: tileSize)
+        _ = strategy.cell(
+            containing: WorldPoint(x: 64, y: 536_870_880)
+        )
+    case "halfDrop64NegativePhaseTrap":
+        let strategy = TilingStrategy(kind: .halfDrop, tileSize: tileSize)
+        _ = strategy.cell(
+            containing: WorldPoint(x: 64, y: -536_870_912)
+        )
+    case "brick64PositiveExtentTrap":
+        let strategy = TilingStrategy(kind: .brick, tileSize: tileSize)
+        _ = strategy.cell(
+            containing: WorldPoint(x: 536_870_880, y: 64)
+        )
+    case "brick64NegativePhaseTrap":
+        let strategy = TilingStrategy(kind: .brick, tileSize: tileSize)
+        _ = strategy.cell(
+            containing: WorldPoint(x: -536_870_912, y: 64)
+        )
+    case "grid64PositiveRoundTripTrap":
+        _ = strategy.cell(
+            containing: WorldPoint(x: 1_073_741_760, y: 0)
+        )
+    case "grid64ExactIndexTrap":
+        _ = strategy.cell(
+            containing: WorldPoint(x: 1_073_741_824, y: 0)
+        )
+    case "grid64NegativeExtentTrap":
+        _ = strategy.cell(
+            containing: WorldPoint(x: -1_073_741_952, y: 0)
+        )
+    case "boundsGrid96PositiveExtentTrap":
+        let strategy = TilingStrategy(
+            kind: .grid,
+            tileSize: PatternSize(width: 96, height: 64)
+        )
         _ = strategy.images(intersecting: rect(
-            minimum: SIMD2(positiveUnsafeOrigin, 0),
-            maximum: SIMD2(positiveUnsafeOrigin + tileSize.width, 1)
+            minimum: SIMD2(536_870_976, 0),
+            maximum: SIMD2(536_871_040, 1)
         ))
-    case "boundsXBelowSafeIndex":
+    case "boundsHalfDrop64PositiveExtentTrap":
+        let strategy = TilingStrategy(kind: .halfDrop, tileSize: tileSize)
         _ = strategy.images(intersecting: rect(
-            minimum: SIMD2(negativeUnsafeOrigin, 0),
-            maximum: SIMD2(negativeUnsafeOrigin + tileSize.width, 1)
-        ))
-    case "boundsYAboveSafeIndex":
-        _ = strategy.images(intersecting: rect(
-            minimum: SIMD2(0, positiveUnsafeOrigin),
-            maximum: SIMD2(1, positiveUnsafeOrigin + tileSize.height)
-        ))
-    case "boundsYBelowSafeIndex":
-        _ = strategy.images(intersecting: rect(
-            minimum: SIMD2(0, negativeUnsafeOrigin),
-            maximum: SIMD2(1, negativeUnsafeOrigin + tileSize.height)
+            minimum: SIMD2(64, 536_870_880),
+            maximum: SIMD2(65, 536_870_912)
         ))
     case "pointAtPositiveSafeIndex":
         _ = strategy.cell(containing: WorldPoint(

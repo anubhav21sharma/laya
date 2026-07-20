@@ -368,12 +368,105 @@ private enum CoordinateAxis: String {
     case y
 }
 
-// Beyond this symmetric magnitude, Float spacing can no longer preserve the
-// half-cell phase independently from the lattice index.
-private let maximumFloatResolvableCellIndex =
-    (1 << Float.significandBitCount) - 1
-
 private func checkedCellIndex(
+    coordinate: Float,
+    extent: Float,
+    phase: Float,
+    axis: CoordinateAxis
+) -> Int {
+    let candidateIndex = resolvedCellIndex(
+        coordinate: coordinate,
+        extent: extent,
+        phase: phase,
+        axis: axis
+    )
+    let floatIndex = Float(candidateIndex)
+    precondition(
+        exactCellIndex(floatIndex, axis: axis) == candidateIndex,
+        "TilingStrategy \(axis.rawValue) cell index must be exactly representable as Float"
+    )
+
+    let unphasedOrigin = floatIndex * extent
+    let origin = unphasedOrigin + phase
+    let boundary = origin + extent
+    precondition(
+        unphasedOrigin.isFinite && origin.isFinite && boundary.isFinite,
+        "TilingStrategy \(axis.rawValue) cell boundaries must be finite"
+    )
+    precondition(
+        phase == 0 || origin - unphasedOrigin == phase,
+        "TilingStrategy \(axis.rawValue) cell phase must be preserved"
+    )
+    precondition(
+        boundary - origin == extent,
+        "TilingStrategy \(axis.rawValue) cell extent must be preserved"
+    )
+
+    let (successorIndex, successorOverflowed) =
+        candidateIndex.addingReportingOverflow(1)
+    precondition(
+        !successorOverflowed
+            && resolvedCellIndex(
+                coordinate: origin,
+                extent: extent,
+                phase: phase,
+                axis: axis
+            ) == candidateIndex
+            && resolvedCellIndex(
+                coordinate: boundary.nextDown,
+                extent: extent,
+                phase: phase,
+                axis: axis
+            ) == candidateIndex
+            && resolvedCellIndex(
+                coordinate: boundary,
+                extent: extent,
+                phase: phase,
+                axis: axis
+            ) == successorIndex,
+        "TilingStrategy \(axis.rawValue) cell boundaries must round-trip half-open"
+    )
+    precondition(
+        coordinate >= origin && coordinate < boundary,
+        "TilingStrategy \(axis.rawValue) coordinate must resolve inside its cell"
+    )
+    return candidateIndex
+}
+
+private func resolvedCellIndex(
+    coordinate: Float,
+    extent: Float,
+    phase: Float,
+    axis: CoordinateAxis
+) -> Int {
+    var candidateIndex = quotientCellIndex(
+        coordinate: coordinate,
+        extent: extent,
+        phase: phase,
+        axis: axis
+    )
+    let origin = Float(candidateIndex) * extent + phase
+    let boundary = origin + extent
+    if coordinate < origin {
+        let (previousIndex, overflowed) =
+            candidateIndex.subtractingReportingOverflow(1)
+        precondition(
+            !overflowed,
+            "TilingStrategy \(axis.rawValue) cell index must be Int-representable"
+        )
+        candidateIndex = previousIndex
+    } else if coordinate >= boundary {
+        let (nextIndex, overflowed) = candidateIndex.addingReportingOverflow(1)
+        precondition(
+            !overflowed,
+            "TilingStrategy \(axis.rawValue) cell index must be Int-representable"
+        )
+        candidateIndex = nextIndex
+    }
+    return candidateIndex
+}
+
+private func quotientCellIndex(
     coordinate: Float,
     extent: Float,
     phase: Float,
@@ -393,30 +486,28 @@ private func checkedCellIndex(
         phasedCoordinate.isFinite,
         "TilingStrategy \(axis.rawValue) phase subtraction must be finite"
     )
-
     let quotient = phasedCoordinate / extent
     precondition(
         quotient.isFinite,
         "TilingStrategy \(axis.rawValue) cell quotient must be finite"
     )
-    let flooredQuotient = floor(quotient)
+    return exactCellIndex(floor(quotient), axis: axis)
+}
+
+private func exactCellIndex(
+    _ value: Float,
+    axis: CoordinateAxis
+) -> Int {
     precondition(
-        flooredQuotient >= Float(Int.min)
-            && flooredQuotient < Float(Int.max),
+        value >= Float(Int.min) && value < Float(Int.max),
         "TilingStrategy \(axis.rawValue) cell index must be Int-representable"
     )
-    precondition(
-        abs(flooredQuotient) <= Float(maximumFloatResolvableCellIndex),
-        "TilingStrategy \(axis.rawValue) cell index exceeds Float-resolvable range"
-    )
-
-    let origin = flooredQuotient * extent + phase
-    let boundary = origin + extent
-    precondition(
-        origin.isFinite && boundary.isFinite && origin < boundary,
-        "TilingStrategy \(axis.rawValue) cell boundaries must be finite and distinct"
-    )
-    return Int(flooredQuotient)
+    guard let index = Int(exactly: value) else {
+        preconditionFailure(
+            "TilingStrategy \(axis.rawValue) cell index must be exactly representable as Float"
+        )
+    }
+    return index
 }
 
 private func intersectingIndices(
