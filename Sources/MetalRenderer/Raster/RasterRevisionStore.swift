@@ -2,6 +2,22 @@ import Foundation
 import Metal
 import PatternEngine
 
+public struct RasterRevisionOperationToken:
+    RawRepresentable, Hashable, Sendable
+{
+    public let rawValue: UInt64
+
+    public init(rawValue: UInt64) {
+        self.rawValue = rawValue
+    }
+}
+
+public enum RasterRevisionOperationOutcome: Equatable, Sendable {
+    case succeeded
+    case failed
+    case cancelled
+}
+
 public struct PendingRasterRevisionPair: Equatable, Sendable {
     public let before: RasterRevisionReference
     public let after: RasterRevisionReference
@@ -30,6 +46,11 @@ public final class RasterRevisionStore: @unchecked Sendable {
         case published
     }
 
+    private enum OperationKind {
+        case capture
+        case restore
+    }
+
     private struct Slice {
         let region: PixelRect
         let bufferOffset: Int
@@ -51,15 +72,24 @@ public final class RasterRevisionStore: @unchecked Sendable {
     private struct Entry {
         let payload: Payload
         var lifetime: Lifetime
-        var captureEncoded: Bool
+        var capturePending: Bool
+        var captureSucceeded: Bool
         var inFlightCount: Int
         var releaseRequested: Bool
+    }
+
+    private struct Operation {
+        let revisionID: StoredRasterRevisionID
+        let kind: OperationKind
+        let commandBuffer: any MTLCommandBuffer
     }
 
     private let device: any MTLDevice
     private let lock = NSLock()
     private var entries: [StoredRasterRevisionID: Entry] = [:]
+    private var operations: [RasterRevisionOperationToken: Operation] = [:]
     private var nextID: UInt64 = 1
+    private var nextOperationToken: UInt64 = 1
     private var residentByteCount = 0
 
     public init(device: any MTLDevice) {
@@ -152,14 +182,16 @@ public final class RasterRevisionStore: @unchecked Sendable {
             entries[beforeID] = Entry(
                 payload: beforePayload,
                 lifetime: .provisional,
-                captureEncoded: false,
+                capturePending: false,
+                captureSucceeded: false,
                 inFlightCount: 0,
                 releaseRequested: false
             )
             entries[afterID] = Entry(
                 payload: afterPayload,
                 lifetime: .provisional,
-                captureEncoded: false,
+                capturePending: false,
+                captureSucceeded: false,
                 inFlightCount: 0,
                 releaseRequested: false
             )
@@ -171,12 +203,13 @@ public final class RasterRevisionStore: @unchecked Sendable {
         }
     }
 
+    @discardableResult
     public func encodeCapture(
         _ reference: RasterRevisionReference,
         from texture: any MTLTexture,
         on commandBuffer: any MTLCommandBuffer
-    ) throws {
-        let payload = try withLock {
+    ) throws -> RasterRevisionOperationToken {
+        let reservation = try withLock {
             guard
                 var entry = entries[reference.id],
                 entry.payload.reference == reference,
@@ -190,23 +223,29 @@ public final class RasterRevisionStore: @unchecked Sendable {
                 "Published raster revisions are immutable."
             )
             precondition(
-                !entry.captureEncoded,
-                "A raster revision can be captured only once."
+                !entry.capturePending && !entry.captureSucceeded,
+                "A raster revision can have only one successful capture."
             )
-            entry.captureEncoded = true
+            entry.capturePending = true
             entry.inFlightCount += 1
             entries[reference.id] = entry
-            return entry.payload
+            let token = makeOperationToken()
+            operations[token] = Operation(
+                revisionID: reference.id,
+                kind: .capture,
+                commandBuffer: commandBuffer
+            )
+            return (entry.payload, token)
         }
 
         guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
-            cancelCaptureReservation(reference.id)
+            finalizeAfterEncodingFailure(reservation.1)
             throw MetalRendererError.commandFailed(
                 "Metal blit encoder creation failed."
             )
         }
         encoder.label = "Capture Raster Revision"
-        for slice in payload.slices {
+        for slice in reservation.0.slices {
             encoder.copy(
                 from: texture,
                 sourceSlice: 0,
@@ -221,22 +260,23 @@ public final class RasterRevisionStore: @unchecked Sendable {
                     height: slice.region.height,
                     depth: 1
                 ),
-                to: payload.buffer,
+                to: reservation.0.buffer,
                 destinationOffset: slice.bufferOffset,
                 destinationBytesPerRow: slice.bytesPerRow,
                 destinationBytesPerImage: slice.bytesPerImage
             )
         }
         encoder.endEncoding()
-        hold(reference.id, until: commandBuffer)
+        return reservation.1
     }
 
+    @discardableResult
     public func encodeRestore(
         _ reference: RasterRevisionReference,
         into texture: any MTLTexture,
         on commandBuffer: any MTLCommandBuffer
-    ) throws {
-        let payload = try withLock {
+    ) throws -> RasterRevisionOperationToken {
+        let reservation = try withLock {
             guard
                 var entry = entries[reference.id],
                 entry.payload.reference == reference,
@@ -250,24 +290,30 @@ public final class RasterRevisionStore: @unchecked Sendable {
                 "Only published raster revisions may be restored."
             )
             precondition(
-                entry.captureEncoded,
+                entry.captureSucceeded,
                 "An uncaptured raster revision cannot be restored."
             )
             entry.inFlightCount += 1
             entries[reference.id] = entry
-            return entry.payload
+            let token = makeOperationToken()
+            operations[token] = Operation(
+                revisionID: reference.id,
+                kind: .restore,
+                commandBuffer: commandBuffer
+            )
+            return (entry.payload, token)
         }
 
         guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
-            finishInFlight(reference.id)
+            finalizeAfterEncodingFailure(reservation.1)
             throw MetalRendererError.commandFailed(
                 "Metal blit encoder creation failed."
             )
         }
         encoder.label = "Restore Raster Revision"
-        for slice in payload.slices {
+        for slice in reservation.0.slices {
             encoder.copy(
-                from: payload.buffer,
+                from: reservation.0.buffer,
                 sourceOffset: slice.bufferOffset,
                 sourceBytesPerRow: slice.bytesPerRow,
                 sourceBytesPerImage: slice.bytesPerImage,
@@ -287,7 +333,38 @@ public final class RasterRevisionStore: @unchecked Sendable {
             )
         }
         encoder.endEncoding()
-        hold(reference.id, until: commandBuffer)
+        return reservation.1
+    }
+
+    public func finalize(
+        _ token: RasterRevisionOperationToken,
+        as outcome: RasterRevisionOperationOutcome
+    ) throws {
+        let successWasRejected = try withLock {
+            guard let operation = operations[token] else {
+                throw MetalRendererError.invalidRasterRevisionOperationToken
+            }
+            switch operation.commandBuffer.status {
+            case .enqueued, .committed, .scheduled:
+                throw MetalRendererError.rasterRevisionOperationDidNotComplete
+            case .notEnqueued, .completed, .error:
+                break
+            @unknown default:
+                throw MetalRendererError.rasterRevisionOperationDidNotComplete
+            }
+            let succeeded: Bool
+            if outcome == .succeeded {
+                succeeded = operation.commandBuffer.status == .completed
+            } else {
+                succeeded = false
+            }
+            finishOperation(token, operation: operation, succeeded: succeeded)
+            return outcome == .succeeded && !succeeded
+        }
+
+        if successWasRejected {
+            throw MetalRendererError.rasterRevisionOperationDidNotComplete
+        }
     }
 
     public func publish(_ pair: PendingRasterRevisionPair) {
@@ -313,7 +390,7 @@ public final class RasterRevisionStore: @unchecked Sendable {
                     "Cannot publish an in-flight raster revision."
                 )
                 precondition(
-                    entry.captureEncoded,
+                    entry.captureSucceeded,
                     "Cannot publish an uncaptured raster revision."
                 )
             }
@@ -464,34 +541,57 @@ public final class RasterRevisionStore: @unchecked Sendable {
         }
     }
 
-    private func hold(
-        _ id: StoredRasterRevisionID,
-        until commandBuffer: any MTLCommandBuffer
+    private func makeOperationToken() -> RasterRevisionOperationToken {
+        precondition(
+            nextOperationToken < UInt64.max,
+            "Raster revision operation identity space exhausted."
+        )
+        let token = RasterRevisionOperationToken(rawValue: nextOperationToken)
+        nextOperationToken += 1
+        return token
+    }
+
+    private func finalizeAfterEncodingFailure(
+        _ token: RasterRevisionOperationToken
     ) {
-        commandBuffer.addCompletedHandler { [weak self] _ in
-            self?.finishInFlight(id)
-        }
-    }
-
-    private func cancelCaptureReservation(_ id: StoredRasterRevisionID) {
         withLock {
-            guard var entry = entries[id] else { return }
-            precondition(entry.inFlightCount > 0)
-            entry.captureEncoded = false
-            entry.inFlightCount -= 1
-            entries[id] = entry
-        }
-    }
-
-    private func finishInFlight(_ id: StoredRasterRevisionID) {
-        withLock {
-            guard var entry = entries[id] else { return }
-            precondition(entry.inFlightCount > 0)
-            entry.inFlightCount -= 1
-            entries[id] = entry
-            if entry.inFlightCount == 0, entry.releaseRequested {
-                remove(id)
+            guard let operation = operations[token] else {
+                preconditionFailure(
+                    "A just-created raster revision operation must be valid."
+                )
             }
+            finishOperation(token, operation: operation, succeeded: false)
+        }
+    }
+
+    private func finishOperation(
+        _ token: RasterRevisionOperationToken,
+        operation: Operation,
+        succeeded: Bool
+    ) {
+        guard operations.removeValue(forKey: token) != nil else {
+            preconditionFailure("Raster revision operation was already final.")
+        }
+        guard var entry = entries[operation.revisionID] else {
+            preconditionFailure(
+                "An in-flight raster revision cannot disappear."
+            )
+        }
+        precondition(entry.inFlightCount > 0)
+
+        switch operation.kind {
+        case .capture:
+            precondition(entry.capturePending)
+            entry.capturePending = false
+            entry.captureSucceeded = succeeded
+        case .restore:
+            break
+        }
+
+        entry.inFlightCount -= 1
+        entries[operation.revisionID] = entry
+        if entry.inFlightCount == 0, entry.releaseRequested {
+            remove(operation.revisionID)
         }
     }
 

@@ -29,6 +29,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
         actualHeight: Int
     )
     case missingRasterRevision
+    case invalidRasterRevisionOperationToken
+    case rasterRevisionOperationDidNotComplete
 
     public var errorDescription: String? {
         switch self {
@@ -87,6 +89,10 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
             """
         case .missingRasterRevision:
             "The requested raster revision is no longer resident."
+        case .invalidRasterRevisionOperationToken:
+            "The raster-revision operation token is invalid or stale."
+        case .rasterRevisionOperationDidNotComplete:
+            "The raster-revision GPU operation did not complete successfully."
         }
     }
 }

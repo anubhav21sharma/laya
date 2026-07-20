@@ -97,6 +97,12 @@ struct RasterRevisionStoreTests {
         let expected = regions.rectangles.reduce(into: 0) { result, rect in
             result += align(rect.width * 4, to: alignment) * rect.height
         }
+        let estimated = try store.retainedBytes(
+            pixelSize: size,
+            regions: regions
+        )
+        #expect(estimated == expected)
+        #expect(store.residentBytes == 0)
 
         let first = try store.allocatePair(
             beforePixelSize: size,
@@ -123,7 +129,90 @@ struct RasterRevisionStoreTests {
     }
 
     @Test
-    func releaseRemovesPublishedIDsAndDefersAnInFlightRevision() throws {
+    func cancelledAndFailedCapturesUnwindAndRemainProvisional() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = RasterRevisionStore(device: device)
+        let size = PixelSize(width: 64, height: 64)
+        let regions = regionSet(size: size)
+        let pair = try store.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let texture = try makeTexture(device: device, size: size)
+        let queue = try #require(device.makeCommandQueue())
+        let pairBytes = pair.retainedBytes
+
+        let abandonedBuffer = try #require(queue.makeCommandBuffer())
+        let abandoned = try store.encodeCapture(
+            pair.before,
+            from: texture,
+            on: abandonedBuffer
+        )
+        try store.finalize(abandoned, as: .cancelled)
+        #expect(store.residentBytes == pairBytes)
+        #expect(throws: MetalRendererError.invalidRasterRevisionOperationToken) {
+            try store.finalize(abandoned, as: .cancelled)
+        }
+
+        let failedBuffer = try #require(queue.makeCommandBuffer())
+        let failed = try store.encodeCapture(
+            pair.before,
+            from: texture,
+            on: failedBuffer
+        )
+        try store.finalize(failed, as: .failed)
+        #expect(store.residentBytes == pairBytes)
+        #expect(throws: MetalRendererError.invalidRasterRevisionOperationToken) {
+            try store.finalize(failed, as: .failed)
+        }
+        #expect(throws: MetalRendererError.invalidRasterRevisionOperationToken) {
+            try store.finalize(
+                RasterRevisionOperationToken(rawValue: .max),
+                as: .failed
+            )
+        }
+
+        store.discard(pair)
+        #expect(store.residentBytes == 0)
+    }
+
+    @Test
+    func prematureSuccessFailsTypedAndUnwindsCapture() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = RasterRevisionStore(device: device)
+        let size = PixelSize(width: 64, height: 64)
+        let regions = regionSet(size: size)
+        let pair = try store.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let texture = try makeTexture(device: device, size: size)
+        let queue = try #require(device.makeCommandQueue())
+        let commandBuffer = try #require(queue.makeCommandBuffer())
+        let token = try store.encodeCapture(
+            pair.before,
+            from: texture,
+            on: commandBuffer
+        )
+
+        #expect(
+            throws: MetalRendererError.rasterRevisionOperationDidNotComplete
+        ) {
+            try store.finalize(token, as: .succeeded)
+        }
+        #expect(throws: MetalRendererError.invalidRasterRevisionOperationToken) {
+            try store.finalize(token, as: .failed)
+        }
+        store.discard(pair)
+        #expect(store.residentBytes == 0)
+    }
+
+    @Test
+    func failedRestoreFinalizationCompletesDeferredRelease() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let store = RasterRevisionStore(device: device)
         let size = PixelSize(width: 64, height: 64)
@@ -138,11 +227,21 @@ struct RasterRevisionStoreTests {
         let queue = try #require(device.makeCommandQueue())
 
         let capture = try #require(queue.makeCommandBuffer())
-        try store.encodeCapture(pair.before, from: texture, on: capture)
-        try store.encodeCapture(pair.after, from: texture, on: capture)
+        let beforeCapture = try store.encodeCapture(
+            pair.before,
+            from: texture,
+            on: capture
+        )
+        let afterCapture = try store.encodeCapture(
+            pair.after,
+            from: texture,
+            on: capture
+        )
         capture.commit()
         capture.waitUntilCompleted()
         try requireCompleted(capture)
+        try store.finalize(beforeCapture, as: .succeeded)
+        try store.finalize(afterCapture, as: .succeeded)
         store.publish(pair)
 
         store.release(Set([pair.after.id]))
@@ -157,7 +256,11 @@ struct RasterRevisionStoreTests {
         }
 
         let restore = try #require(queue.makeCommandBuffer())
-        try store.encodeRestore(pair.before, into: texture, on: restore)
+        let restoreToken = try store.encodeRestore(
+            pair.before,
+            into: texture,
+            on: restore
+        )
         store.release(Set([pair.before.id]))
         #expect(store.residentBytes == pair.before.retainedBytes)
         let logicallyReleased = try #require(queue.makeCommandBuffer())
@@ -168,10 +271,11 @@ struct RasterRevisionStoreTests {
                 on: logicallyReleased
             )
         }
-        restore.commit()
-        restore.waitUntilCompleted()
-        try requireCompleted(restore)
+        try store.finalize(restoreToken, as: .failed)
         #expect(store.residentBytes == 0)
+        #expect(throws: MetalRendererError.invalidRasterRevisionOperationToken) {
+            try store.finalize(restoreToken, as: .failed)
+        }
 
         let staleBefore = try #require(queue.makeCommandBuffer())
         #expect(throws: MetalRendererError.missingRasterRevision) {
@@ -205,19 +309,34 @@ struct RasterRevisionStoreTests {
             afterRegions: regions
         )
         let capture = try #require(queue.makeCommandBuffer())
-        try store.encodeCapture(pair.before, from: texture, on: capture)
-        try store.encodeCapture(pair.after, from: texture, on: capture)
+        let beforeCapture = try store.encodeCapture(
+            pair.before,
+            from: texture,
+            on: capture
+        )
+        let afterCapture = try store.encodeCapture(
+            pair.after,
+            from: texture,
+            on: capture
+        )
         capture.commit()
         capture.waitUntilCompleted()
         try requireCompleted(capture)
+        try store.finalize(beforeCapture, as: .succeeded)
+        try store.finalize(afterCapture, as: .succeeded)
         store.publish(pair)
 
         replace(texture: texture, bytes: overwritten, size: size)
         let restore = try #require(queue.makeCommandBuffer())
-        try store.encodeRestore(pair.before, into: texture, on: restore)
+        let restoreToken = try store.encodeRestore(
+            pair.before,
+            into: texture,
+            on: restore
+        )
         restore.commit()
         restore.waitUntilCompleted()
         try requireCompleted(restore)
+        try store.finalize(restoreToken, as: .succeeded)
 
         let actual = read(texture: texture, size: size)
         for y in 0..<size.height {
