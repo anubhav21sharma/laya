@@ -1,4 +1,5 @@
 import CShaderTypes
+import PatternEngine
 
 public struct IdentifiedDab {
     public let identity: UInt64
@@ -12,6 +13,7 @@ public struct LiveStroke {
     public var emittedHighWater: UInt64 { nextIdentity }
 
     private var nextIdentity: UInt64 = 0
+    private var dirtyRectangles: [PixelRect] = []
 
     public init(capacity: Int = GridCanvasContract.pendingCapacity) {
         precondition(capacity > 0)
@@ -22,12 +24,33 @@ public struct LiveStroke {
     public mutating func append(
         _ instance: PatternProjectedStampInstance
     ) throws {
+        try append(instance, dirtyRect: nil)
+    }
+
+    public mutating func append(
+        _ instance: PatternProjectedStampInstance,
+        dirtyRect: PixelRect
+    ) throws {
+        try append(instance, dirtyRect: Optional(dirtyRect))
+    }
+
+    public func dirtyRegions(clippedTo pixelSize: PixelSize) -> PixelRegionSet {
+        PixelRegionSet(dirtyRectangles, clippedTo: pixelSize)
+    }
+
+    private mutating func append(
+        _ instance: PatternProjectedStampInstance,
+        dirtyRect: PixelRect?
+    ) throws {
         guard pending.count < capacity else {
             throw MetalRendererError.projectedInstanceCapacityExceeded(
                 capacity
             )
         }
         pending.append(IdentifiedDab(identity: nextIdentity, instance: instance))
+        if let dirtyRect {
+            dirtyRectangles.append(dirtyRect)
+        }
         nextIdentity &+= 1
     }
 
@@ -44,6 +67,7 @@ public struct LiveStroke {
 
     public mutating func reset() {
         pending.removeAll(keepingCapacity: true)
+        dirtyRectangles.removeAll(keepingCapacity: true)
         bakedHighWater = 0
         nextIdentity = 0
     }

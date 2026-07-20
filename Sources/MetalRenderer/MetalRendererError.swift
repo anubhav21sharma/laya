@@ -1,6 +1,6 @@
 import Foundation
 
-public enum MetalRendererError: Error, Equatable, LocalizedError {
+public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case commandQueueUnavailable
     case defaultLibraryUnavailable
     case shaderFunctionUnavailable(String)
@@ -15,6 +15,7 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
     case invalidTileDimensions(width: Int, height: Int)
     case tilingChangeRequiresIdle
     case invalidStrokeLifecycle
+    case invalidRendererOperationToken
     case commitPendingInput
     case invalidDrawableSize
     case rasterRevisionBufferAllocationFailed
@@ -31,6 +32,7 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
     case missingRasterRevision
     case invalidRasterRevisionOperationToken
     case rasterRevisionOperationDidNotComplete
+    case rasterRevisionStorageLimitExceeded
 
     public var errorDescription: String? {
         switch self {
@@ -62,6 +64,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
             "Tiling can only change while the renderer is idle."
         case .invalidStrokeLifecycle:
             "The requested stroke transition is invalid."
+        case .invalidRendererOperationToken:
+            "The renderer operation token does not match the active operation."
         case .commitPendingInput:
             "A canonical commit is still pending."
         case .invalidDrawableSize:
@@ -93,6 +97,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
             "The raster-revision operation token is invalid or stale."
         case .rasterRevisionOperationDidNotComplete:
             "The raster-revision GPU operation did not complete successfully."
+        case .rasterRevisionStorageLimitExceeded:
+            "The raster mutation exceeds the retained-history byte limit."
         }
     }
 }

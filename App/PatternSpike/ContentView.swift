@@ -6,8 +6,6 @@ import SwiftUI
 
 struct ContentView: View {
     private let state: CanvasState
-    @State private var editorModel = EditorModel()
-    @State private var rendererIsIdle = true
     @State private var runtimeError: MetalRendererError?
 
     init() {
@@ -21,12 +19,13 @@ struct ContentView: View {
                 pixelSize: GridCanvasContract.defaultPixelSize,
                 tiling: .grid
             )
+            let renderer = try GridRenderer(
+                device: device,
+                drawableSize: PatternSize(width: 1, height: 1),
+                configuration: configuration
+            )
             state = .ready(
-                try GridRenderer(
-                    device: device,
-                    drawableSize: PatternSize(width: 1, height: 1),
-                    configuration: configuration
-                )
+                EditorSessionController(renderer: renderer)
             )
         } catch {
             state = .unavailable(error.localizedDescription)
@@ -36,23 +35,25 @@ struct ContentView: View {
     var body: some View {
         Group {
             switch state {
-            case let .ready(renderer):
-                MetalCanvas(renderer: renderer)
+            case let .ready(controller):
+                MetalCanvas(
+                    controller: controller,
+                    renderer: controller.renderer
+                )
                     .onAppear {
-                        renderer.onError = {
+                        controller.onError = {
                             runtimeError = $0
                         }
-                        renderer.onIdleStateChange = {
-                            rendererIsIdle = $0
+                        controller.renderer.onError = {
+                            runtimeError = $0
                         }
-                        rendererIsIdle = renderer.isIdle
                     }
                     .onDisappear {
-                        renderer.onError = nil
-                        renderer.onIdleStateChange = nil
+                        controller.onError = nil
+                        controller.renderer.onError = nil
                     }
                     .overlay(alignment: .topLeading) {
-                        tilingPicker(renderer: renderer)
+                        tilingPicker(controller: controller)
                     }
                     .overlay(alignment: .top) {
                         if let runtimeError {
@@ -77,23 +78,16 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func tilingPicker(renderer: GridRenderer) -> some View {
+    private func tilingPicker(
+        controller: EditorSessionController
+    ) -> some View {
         Picker(
             "Tiling",
             selection: Binding(
-                get: { editorModel.tiling },
+                get: { controller.model.tiling },
                 set: { candidate in
-                    do {
-                        try renderer.setTiling(candidate)
-                        editorModel.confirmTiling(candidate)
-                        runtimeError = nil
-                    } catch let error as MetalRendererError {
-                        runtimeError = error
-                    } catch {
-                        runtimeError = .commandFailed(
-                            error.localizedDescription
-                        )
-                    }
+                    runtimeError = nil
+                    controller.handleTiling(candidate)
                 }
             )
         ) {
@@ -104,7 +98,7 @@ struct ContentView: View {
         .labelsHidden()
         .pickerStyle(.menu)
         .controlSize(.small)
-        .disabled(!rendererIsIdle)
+        .disabled(controller.model.isBusy)
         .padding(8)
     }
 
@@ -128,7 +122,7 @@ struct ContentView: View {
     }
 
     private enum CanvasState {
-        case ready(GridRenderer)
+        case ready(EditorSessionController)
         case unavailable(String)
     }
 }

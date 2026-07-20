@@ -26,10 +26,15 @@ private func configure(
 import AppKit
 
 struct MetalCanvas: NSViewRepresentable {
+    let controller: EditorSessionController
     let renderer: GridRenderer
 
     func makeNSView(context: Context) -> InteractiveMetalView {
-        let view = InteractiveMetalView(frame: .zero, renderer: renderer)
+        let view = InteractiveMetalView(
+            frame: .zero,
+            controller: controller,
+            renderer: renderer
+        )
         configure(view, renderer: renderer)
         return view
     }
@@ -40,6 +45,7 @@ struct MetalCanvas: NSViewRepresentable {
 import UIKit
 
 struct MetalCanvas: UIViewRepresentable {
+    let controller: EditorSessionController
     let renderer: GridRenderer
 
     func makeUIView(context: Context) -> MTKView {

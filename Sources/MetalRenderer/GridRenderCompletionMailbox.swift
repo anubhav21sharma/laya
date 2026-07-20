@@ -1,8 +1,14 @@
 import Foundation
 
 final class GridRenderCompletionMailbox: @unchecked Sendable {
+    struct RasterCommit: Sendable {
+        let token: RendererOperationToken
+        let revisions: PendingRasterRevisionPair
+        let captureTokens: [RasterRevisionOperationToken]
+    }
+
     struct Outcome: Sendable {
-        let commitToken: UInt64?
+        let rasterCommit: RasterCommit?
         let uploadSubmissions: [DabBufferSubmissionIdentity]
         let succeeded: Bool
         let errorMessage: String?

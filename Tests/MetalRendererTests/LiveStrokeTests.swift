@@ -1,5 +1,6 @@
 import CShaderTypes
 import MetalRenderer
+import PatternEngine
 import Testing
 
 private func instance(_ x: Float) -> PatternProjectedStampInstance {
@@ -71,4 +72,35 @@ func resetKeepsCapacityButRestoresPerStrokeIdentity() throws {
     #expect(stroke.bakedHighWater == 0)
     #expect(stroke.emittedHighWater == 1)
     #expect(stroke.capacity == 4)
+}
+
+@Test
+func dirtyRegionsSurviveEncodedPrefixReleaseUntilReset() throws {
+    var stroke = LiveStroke(capacity: 4)
+    let first = PixelRect(minX: -2, minY: 4, maxX: 8, maxY: 12)!
+    let touching = PixelRect(minX: 8, minY: 6, maxX: 14, maxY: 16)!
+    let separate = PixelRect(minX: 24, minY: 24, maxX: 28, maxY: 28)!
+    let pixelSize = PixelSize(width: 32, height: 32)
+
+    try stroke.append(instance(1), dirtyRect: first)
+    try stroke.append(instance(2), dirtyRect: touching)
+    try stroke.append(instance(3), dirtyRect: separate)
+    stroke.markEncoded(throughExclusive: stroke.emittedHighWater)
+    stroke.releaseEncodedPrefix(throughExclusive: stroke.emittedHighWater)
+
+    #expect(stroke.pending.isEmpty)
+    #expect(
+        stroke.dirtyRegions(clippedTo: pixelSize)
+            == PixelRegionSet(
+                [
+                    PixelRect(minX: 0, minY: 4, maxX: 14, maxY: 16)!,
+                    separate,
+                ],
+                clippedTo: pixelSize
+            )
+    )
+
+    stroke.reset()
+
+    #expect(stroke.dirtyRegions(clippedTo: pixelSize).rectangles.isEmpty)
 }

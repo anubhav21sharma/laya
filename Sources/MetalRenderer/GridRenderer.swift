@@ -51,10 +51,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public private(set) var lastError: MetalRendererError?
     public var onError: ((MetalRendererError) -> Void)?
     public var onIdleStateChange: ((Bool) -> Void)?
+    public var onOperationCompleted: ((RendererOperationCompletion) -> Void)?
     public private(set) var viewport: ViewportTransform
     public private(set) var counters = GridStructuralCounters()
-    public var isIdle: Bool { lifecycle.state == .idle }
-    public var hasActiveStroke: Bool { lifecycle.state == .active }
+    public var isIdle: Bool { activeStroke == nil }
+    public var hasActiveStroke: Bool {
+        guard let activeStroke else { return false }
+        return !activeStroke.commitRequested
+            && activeStroke.pendingRevisions == nil
+    }
     public var tiling: TilingKind { tilingStrategy.kind }
 
     private struct FrameUpload {
@@ -64,20 +69,35 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let count: Int
     }
 
+    private struct ActiveStrokeExecution {
+        let token: RendererOperationToken
+        let style: StrokeRenderStyle
+        var commitRequested: Bool
+        var pendingRevisions: PendingRasterRevisionPair?
+    }
+
+    private struct EncodedRasterCommit {
+        let token: RendererOperationToken
+        let revisions: PendingRasterRevisionPair
+        let captureTokens: [RasterRevisionOperationToken]
+    }
+
     private let commandQueue: any MTLCommandQueue
     private let library: any MTLLibrary
     private let pipelines: GridPipelineLibrary
     private let canonical: CanonicalRaster
     private let liveTile: PersistentLiveTile
     private let instancePool: DabInstanceBufferPool
+    private let revisionStore: RasterRevisionStore
     private let completionMailbox = GridRenderCompletionMailbox()
     private let tileSize: PatternSize
     private var tilingStrategy: TilingStrategy
-    private var lifecycle = GridStrokeLifecycle()
+    private var activeStroke: ActiveStrokeExecution?
     private var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
     private var liveStroke = LiveStroke()
     private var completedUploadRanges: [(signal: UInt64, throughExclusive: UInt64)] = []
     private var needsLiveClear = true
+    private var nextHarnessTokenRawValue: UInt64 = 1
 
     public convenience init(
         device: any MTLDevice,
@@ -128,6 +148,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             pixelSize: configuration.pixelSize
         )
         instancePool = try DabInstanceBufferPool(device: device)
+        revisionStore = RasterRevisionStore(device: device)
         viewport = ViewportTransform(
             drawableSize: drawableSize,
             worldCenter: WorldPoint(
@@ -144,65 +165,192 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     public func setTiling(_ tiling: TilingKind) throws {
-        let accepted = try lifecycle.validatedTilingChange(to: tiling)
+        guard activeStroke == nil else {
+            throw MetalRendererError.tilingChangeRequiresIdle
+        }
         tilingStrategy = TilingStrategy(
-            kind: accepted,
+            kind: tiling,
             tileSize: tileSize
         )
     }
 
-    public func handle(_ sample: StrokeSample) {
-        if lifecycle.state == .commitRequested {
-            return
-        }
-        if case .commitPending = lifecycle.state {
-            return
-        }
-
+    public func beginStroke(
+        token: RendererOperationToken,
+        sample: StrokeSample,
+        style: StrokeRenderStyle
+    ) throws {
         let wasIdle = isIdle
         defer { notifyIdleStateIfChanged(from: wasIdle) }
+        guard sample.phase == .began, activeStroke == nil else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+
+        counters = GridStructuralCounters()
+        resetLiveState()
+        interpolator = CentripetalCatmullRomStrokeInterpolator(
+            radius: style.diameter / 2
+        )
+        activeStroke = ActiveStrokeExecution(
+            token: token,
+            style: style,
+            commitRequested: false,
+            pendingRevisions: nil
+        )
         do {
             counters.newDabsThisEvent = 0
-            switch sample.phase {
-            case .began:
-                try lifecycle.begin()
-                counters = GridStructuralCounters()
-                let world = viewport.screenToWorld(sample.position)
-                try interpolator.begin(at: world, emit: appendWorldDab)
-            case .moved:
-                guard lifecycle.state == .active else {
-                    throw MetalRendererError.invalidStrokeLifecycle
-                }
-                let world = viewport.screenToWorld(sample.position)
-                try interpolator.append(world, emit: appendWorldDab)
-            case .ended:
-                guard lifecycle.state == .active else {
-                    throw MetalRendererError.invalidStrokeLifecycle
-                }
-                let world = viewport.screenToWorld(sample.position)
-                try interpolator.finish(at: world, emit: appendWorldDab)
-                try lifecycle.requestCommit()
-            case .cancelled:
-                try cancelActiveStrokeState()
-            }
-        } catch MetalRendererError.commitPendingInput {
-            return
-        } catch let error as MetalRendererError {
-            failTransiently(error)
+            let world = viewport.screenToWorld(sample.position)
+            try interpolator.begin(at: world, emit: appendWorldDab)
         } catch {
-            failTransiently(.commandFailed(error.localizedDescription))
+            activeStroke = nil
+            resetLiveState()
+            throw error
         }
     }
 
-    public func cancelActiveStroke() throws {
-        let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
-        try cancelActiveStrokeState()
+    public func appendStroke(
+        token: RendererOperationToken,
+        sample: StrokeSample
+    ) throws {
+        guard sample.phase == .moved else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        try requireCollectingStroke(token: token)
+        counters.newDabsThisEvent = 0
+        let world = viewport.screenToWorld(sample.position)
+        try interpolator.append(world, emit: appendWorldDab)
     }
 
-    private func cancelActiveStrokeState() throws {
-        try lifecycle.cancelActive()
+    public func requestStrokeCommit(
+        token: RendererOperationToken,
+        sample: StrokeSample,
+        maximumRetainedBytes: Int
+    ) throws {
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        guard sample.phase == .ended else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        try requireCollectingStroke(token: token)
+
+        do {
+            counters.newDabsThisEvent = 0
+            let world = viewport.screenToWorld(sample.position)
+            try interpolator.finish(at: world, emit: appendWorldDab)
+            try prepareCurrentStrokeCommit(
+                maximumRetainedBytes: maximumRetainedBytes
+            )
+        } catch {
+            discardPendingRevisionsIfPossible()
+            activeStroke = nil
+            resetLiveState()
+            throw error
+        }
+    }
+
+    public func cancelStroke(token: RendererOperationToken) throws {
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        try requireCollectingStroke(token: token)
+        activeStroke = nil
         resetLiveState()
+    }
+
+    public func releaseRasterRevisions(
+        _ ids: Set<StoredRasterRevisionID>
+    ) {
+        guard !ids.isEmpty else { return }
+        revisionStore.release(ids)
+    }
+
+    private func requireCollectingStroke(
+        token: RendererOperationToken
+    ) throws {
+        guard let activeStroke else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        guard activeStroke.token == token else {
+            throw MetalRendererError.invalidRendererOperationToken
+        }
+        guard
+            !activeStroke.commitRequested,
+            activeStroke.pendingRevisions == nil
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+    }
+
+    private func prepareCurrentStrokeCommit(
+        maximumRetainedBytes: Int
+    ) throws {
+        guard var execution = activeStroke else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        guard
+            !execution.commitRequested,
+            execution.pendingRevisions == nil
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        guard maximumRetainedBytes >= 0 else {
+            throw MetalRendererError.rasterRevisionStorageLimitExceeded
+        }
+
+        let regions = liveStroke.dirtyRegions(clippedTo: pixelSize)
+        let oneRevisionBytes = try revisionStore.retainedBytes(
+            pixelSize: pixelSize,
+            regions: regions
+        )
+        let (pairBytes, overflow) = oneRevisionBytes.multipliedReportingOverflow(
+            by: 2
+        )
+        guard !overflow, pairBytes <= maximumRetainedBytes else {
+            throw MetalRendererError.rasterRevisionStorageLimitExceeded
+        }
+
+        let pair = try revisionStore.allocatePair(
+            beforePixelSize: pixelSize,
+            beforeRegions: regions,
+            afterPixelSize: pixelSize,
+            afterRegions: regions
+        )
+        precondition(
+            pair.retainedBytes == pairBytes,
+            "Raster revision preflight and allocation must agree."
+        )
+        execution.commitRequested = true
+        execution.pendingRevisions = pair
+        activeStroke = execution
+    }
+
+    private func discardPendingRevisionsIfPossible() {
+        guard let pair = activeStroke?.pendingRevisions else { return }
+        revisionStore.discard(pair)
+        activeStroke?.pendingRevisions = nil
+    }
+
+    private func beginHarnessExecution(radius: Float) throws {
+        guard activeStroke == nil else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let token = RendererOperationToken(rawValue: nextHarnessTokenRawValue)
+        nextHarnessTokenRawValue &+= 1
+        if nextHarnessTokenRawValue == 0 {
+            nextHarnessTokenRawValue = 1
+        }
+        let style = StrokeRenderStyle(
+            color: .black,
+            diameter: radius * 2,
+            compositeMode: .draw,
+            eraserStrength: 1
+        )
+        resetLiveState()
+        interpolator = CentripetalCatmullRomStrokeInterpolator(radius: radius)
+        activeStroke = ActiveStrokeExecution(
+            token: token,
+            style: style,
+            commitRequested: false,
+            pendingRevisions: nil
+        )
     }
 
     public func pan(byScreenDelta delta: SIMD2<Float>) {
@@ -232,6 +380,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
 
         var uploads: [FrameUpload] = []
+        var rasterCommit: EncodedRasterCommit?
         do {
             let encodedClear = needsLiveClear
             if encodedClear {
@@ -240,10 +389,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             uploads = try encodePendingLiveDabs(commandBuffer)
             let plannedThrough = uploads.last?.throughExclusive
                 ?? liveStroke.bakedHighWater
-            let encodedCommit = lifecycle.state == .commitRequested
+            let shouldEncodeCommit = activeStroke?.commitRequested == true
                 && plannedThrough == liveStroke.emittedHighWater
-            if encodedCommit {
-                try encodeCommit(
+            if shouldEncodeCommit {
+                rasterCommit = try encodeCommit(
                     commandBuffer,
                     liveVisible: liveTile.isVisible || !uploads.isEmpty
                 )
@@ -257,20 +406,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             _ = try finalizeFrameEncoding(
                 encodedClear: encodedClear,
                 uploads: uploads,
-                encodedCommit: encodedCommit,
+                rasterCommit: rasterCommit,
                 commandBuffer: commandBuffer
             )
             commandBuffer.present(drawable)
-            if lifecycle.state != .idle {
+            if activeStroke != nil {
                 counters.renderedFramesThisStroke += 1
             }
             commandBuffer.commit()
         } catch let error as MetalRendererError {
             abandon(uploads)
-            report(error)
+            abandon(rasterCommit)
+            failRequestedCommitIfNeeded(error)
         } catch {
             abandon(uploads)
-            report(.commandFailed(error.localizedDescription))
+            abandon(rasterCommit)
+            failRequestedCommitIfNeeded(
+                .commandFailed(error.localizedDescription)
+            )
         }
     }
 
@@ -306,11 +459,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             submissions = try finalizeFrameEncoding(
                 encodedClear: false,
                 uploads: uploads,
-                encodedCommit: false,
+                rasterCommit: nil,
                 commandBuffer: commandBuffer
             )
             didFinalize = true
-            if lifecycle.state != .idle {
+            if activeStroke != nil {
                 counters.renderedFramesThisStroke += 1
             }
             let cpuMilliseconds = elapsedMilliseconds(since: start)
@@ -325,7 +478,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 try validateHarnessCommand(commandBuffer)
             } catch let error as MetalRendererError {
                 instancePool.reclaimTerminalFailure(submissions)
-                failTransiently(error)
+                report(error)
                 throw error
             }
             return HarnessLiveFlushResult(
@@ -379,7 +532,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         do {
             try waitForHarnessCommand(commandBuffer)
         } catch let error as MetalRendererError {
-            failTransiently(error)
+            report(error)
             throw error
         }
         return RenderedFrame(
@@ -533,7 +686,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         do {
             try waitForHarnessCommand(commandBuffer)
         } catch let error as MetalRendererError {
-            failTransiently(error)
+            report(error)
             throw error
         }
         return HarnessDiagnosticRenderedFrame(
@@ -551,9 +704,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     func finishCommitForHarness() throws -> GPUFrameMetrics {
+        let metrics = try submitCommitForHarness()
+        try drainCompletedOperationsForHarness()
+        return metrics
+    }
+
+    func submitCommitForHarness(
+        forceFailure: Bool = false
+    ) throws -> GPUFrameMetrics {
         drainFrameOutcomes()
         drainCompletedUploadRanges()
-        guard lifecycle.state == .commitRequested,
+        guard activeStroke?.commitRequested == true,
               liveStroke.bakedHighWater == liveStroke.emittedHighWater
         else {
             throw MetalRendererError.invalidStrokeLifecycle
@@ -563,32 +724,34 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
 
         let start = CFAbsoluteTimeGetCurrent()
-        try encodeCommit(commandBuffer, liveVisible: liveTile.isVisible)
+        let rasterCommit = try encodeCommit(
+            commandBuffer,
+            liveVisible: liveTile.isVisible
+        )
         _ = try finalizeFrameEncoding(
             encodedClear: false,
             uploads: [],
-            encodedCommit: true,
-            commandBuffer: commandBuffer
+            rasterCommit: rasterCommit,
+            commandBuffer: commandBuffer,
+            forceFailure: forceFailure
         )
         counters.renderedFramesThisStroke += 1
         let cpuMilliseconds = elapsedMilliseconds(since: start)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        try validateHarnessCommand(commandBuffer)
+        return metrics(
+            commandBuffer: commandBuffer,
+            cpuMilliseconds: cpuMilliseconds
+        )
+    }
+
+    func drainCompletedOperationsForHarness() throws {
         let submittedError = drainFrameOutcomes()
         drainCompletedUploadRanges()
         if let submittedError {
             throw submittedError
         }
-        do {
-            try validateHarnessCommand(commandBuffer)
-        } catch let error as MetalRendererError {
-            failTransiently(error)
-            throw error
-        }
-        return metrics(
-            commandBuffer: commandBuffer,
-            cpuMilliseconds: cpuMilliseconds
-        )
     }
 
     func copyCanonicalForHarness() throws -> any MTLTexture {
@@ -631,7 +794,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         do {
             try waitForHarnessCommand(commandBuffer)
         } catch let error as MetalRendererError {
-            failTransiently(error)
+            report(error)
             throw error
         }
         return texture
@@ -640,6 +803,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     var harnessCounters: GridStructuralCounters { counters }
     var harnessRevision: RasterRevision { canonical.revision }
     var harnessTiling: TilingKind { tilingStrategy.kind }
+    var harnessRasterRevisionResidentBytes: Int {
+        revisionStore.residentBytes
+    }
+    var harnessInterpolatorSpacing: Float { interpolator.spacing }
+    var harnessCompositeMode: StrokeCompositeMode? {
+        activeStroke?.style.compositeMode
+    }
+    var harnessPendingInstanceColors: [SIMD4<Float>] {
+        liveStroke.pending.map(\.instance.color)
+    }
     var harnessTilingMutationSnapshot: HarnessTilingMutationSnapshot {
         HarnessTilingMutationSnapshot(
             canonicalFront: ObjectIdentifier(canonical.front as AnyObject),
@@ -657,7 +830,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     func injectFiveHundredInteriorDabsIntoOneFrame() throws {
-        try lifecycle.begin()
+        try beginHarnessExecution(radius: GridCanvasContract.brushRadius)
         counters = GridStructuralCounters()
         counters.newDabsThisEvent = 500
         counters.totalDabsThisStroke = 500
@@ -679,7 +852,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         at world: WorldPoint,
         radius requestedRadius: Float = GridCanvasContract.brushRadius
     ) throws -> [CellFragment] {
-        try lifecycle.begin()
+        try beginHarnessExecution(radius: requestedRadius)
         counters = GridStructuralCounters()
         counters.newDabsThisEvent = 1
         counters.totalDabsThisStroke = 1
@@ -687,7 +860,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             at: world,
             requestedRadius: requestedRadius
         )
-        try lifecycle.requestCommit()
+        try prepareCurrentStrokeCommit(maximumRetainedBytes: Int.max)
         return fragments
     }
 
@@ -695,7 +868,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func beginFixedProjectedStrokeForHarness(
         at world: WorldPoint
     ) throws -> [CellFragment] {
-        try lifecycle.begin()
+        try beginHarnessExecution(radius: GridCanvasContract.brushRadius)
         counters = GridStructuralCounters()
         counters.newDabsThisEvent = 1
         counters.totalDabsThisStroke = 1
@@ -706,7 +879,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func appendFixedProjectedSegmentForHarness(
         to world: WorldPoint
     ) throws -> [CellFragment] {
-        guard lifecycle.state == .active else {
+        guard hasActiveStroke else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         counters.newDabsThisEvent = 1
@@ -715,11 +888,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     func endFixedProjectedStrokeForHarness() throws {
-        guard lifecycle.state == .active else {
+        guard hasActiveStroke else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         counters.newDabsThisEvent = 0
-        try lifecycle.requestCommit()
+        try prepareCurrentStrokeCommit(maximumRetainedBytes: Int.max)
     }
 
     private func appendWorldDab(_ point: WorldPoint) throws {
@@ -731,10 +904,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     @discardableResult
     private func appendProjectedFragments(
         at point: WorldPoint,
-        requestedRadius: Float = GridCanvasContract.brushRadius
+        requestedRadius: Float? = nil
     ) throws -> [CellFragment] {
+        guard let activeStroke else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
         let radius = TilingProjection.clampedRadius(
-            requested: requestedRadius,
+            requested: requestedRadius ?? activeStroke.style.diameter / 2,
             tileSize: tileSize
         )
         let footprint = StampFootprint(
@@ -753,12 +929,31 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             for: footprint,
             using: tilingStrategy
         )
+        let color: InkColor
+        switch activeStroke.style.compositeMode {
+        case .draw:
+            color = activeStroke.style.color
+        case .erase:
+            color = InkColor(
+                red: 0,
+                green: 0,
+                blue: 0,
+                alpha: activeStroke.style.eraserStrength
+            )!
+        }
         for fragment in fragments {
             let instance = PatternProjectedStampInstance(
                 fragment: fragment,
-                radius: radius
+                radius: radius,
+                color: color
             )
-            try liveStroke.append(instance)
+            try liveStroke.append(
+                instance,
+                dirtyRect: TilingProjection.dirtyPixelRect(
+                    for: fragment,
+                    radius: radius
+                )
+            )
             counters.totalInstancesThisStroke += 1
         }
         return fragments
@@ -770,7 +965,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         liveVisible: Bool,
         diagnosticMode: UInt32 = PatternDiagnosticWireNone
     ) -> PatternGridFrameUniforms {
-        PatternGridFrameUniforms(
+        let compositeMode = activeStroke?.style.compositeMode.rawValue
+            ?? PatternCompositeWireDraw
+        return PatternGridFrameUniforms(
             drawableSize: drawableSize.simd,
             worldCenter: viewport.worldCenter.simd,
             tileSize: tileSize.simd,
@@ -780,7 +977,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             liveVisible: liveVisible ? 1 : 0,
             tilingKind: tilingStrategy.kind.rawValue,
             diagnosticMode: diagnosticMode,
-            compositeMode: PatternCompositeWireDraw,
+            compositeMode: compositeMode,
             padding: 0
         )
     }
@@ -901,7 +1098,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         do {
             try validateHarnessCommand(commandBuffer)
         } catch let error as MetalRendererError {
-            failTransiently(error)
+            report(error)
             throw error
         }
         liveTile.markCleared()
@@ -1007,47 +1204,82 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func encodeCommit(
         _ commandBuffer: any MTLCommandBuffer,
         liveVisible: Bool
-    ) throws {
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = canonical.scratch
-        pass.colorAttachments[0].loadAction = .dontCare
-        pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
+    ) throws -> EncodedRasterCommit {
+        guard
+            let execution = activeStroke,
+            execution.commitRequested,
+            let revisions = execution.pendingRevisions
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
         }
-        encoder.label = "Canonical Scratch Commit"
-        encoder.setRenderPipelineState(pipelines.commit)
-        var uniforms = frameUniforms(
-            drawableSize: tileSize,
-            showGridLines: false,
-            liveVisible: liveVisible
-        )
-        encoder.setVertexBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setFragmentBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setFragmentTexture(
-            canonical.front,
-            index: Int(PatternTextureIndexCanonical)
-        )
-        encoder.setFragmentTexture(
-            liveTile.texture,
-            index: Int(PatternTextureIndexLive)
-        )
-        encoder.drawPrimitives(
-            type: .triangle,
-            vertexStart: 0,
-            vertexCount: 3
-        )
-        encoder.endEncoding()
+
+        var captureTokens: [RasterRevisionOperationToken] = []
+        do {
+            captureTokens.append(
+                try revisionStore.encodeCapture(
+                    revisions.before,
+                    from: canonical.front,
+                    on: commandBuffer
+                )
+            )
+
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = canonical.scratch
+            pass.colorAttachments[0].loadAction = .dontCare
+            pass.colorAttachments[0].storeAction = .store
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(
+                descriptor: pass
+            ) else {
+                throw MetalRendererError.renderEncoderUnavailable
+            }
+            encoder.label = "Canonical Scratch Commit"
+            encoder.setRenderPipelineState(pipelines.commit)
+            var uniforms = frameUniforms(
+                drawableSize: tileSize,
+                showGridLines: false,
+                liveVisible: liveVisible
+            )
+            encoder.setVertexBytes(
+                &uniforms,
+                length: MemoryLayout<PatternGridFrameUniforms>.stride,
+                index: Int(PatternBufferIndexGridFrameUniforms)
+            )
+            encoder.setFragmentBytes(
+                &uniforms,
+                length: MemoryLayout<PatternGridFrameUniforms>.stride,
+                index: Int(PatternBufferIndexGridFrameUniforms)
+            )
+            encoder.setFragmentTexture(
+                canonical.front,
+                index: Int(PatternTextureIndexCanonical)
+            )
+            encoder.setFragmentTexture(
+                liveTile.texture,
+                index: Int(PatternTextureIndexLive)
+            )
+            encoder.drawPrimitives(
+                type: .triangle,
+                vertexStart: 0,
+                vertexCount: 3
+            )
+            encoder.endEncoding()
+
+            captureTokens.append(
+                try revisionStore.encodeCapture(
+                    revisions.after,
+                    from: canonical.scratch,
+                    on: commandBuffer
+                )
+            )
+            return EncodedRasterCommit(
+                token: execution.token,
+                revisions: revisions,
+                captureTokens: captureTokens
+            )
+        } catch {
+            finalizeCaptureTokens(captureTokens, as: .cancelled)
+            throw error
+        }
     }
 
     private func encodeDisplay(
@@ -1114,12 +1346,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func finalizeFrameEncoding(
         encodedClear: Bool,
         uploads: [FrameUpload],
-        encodedCommit: Bool,
-        commandBuffer: any MTLCommandBuffer
+        rasterCommit: EncodedRasterCommit?,
+        commandBuffer: any MTLCommandBuffer,
+        forceFailure: Bool = false
     ) throws -> [DabBufferSubmissionIdentity] {
-        let commitToken: UInt64? = encodedCommit
-            ? try lifecycle.markCommitSubmitted()
-            : nil
+        if let rasterCommit {
+            guard
+                var execution = activeStroke,
+                execution.token == rasterCommit.token,
+                execution.commitRequested,
+                execution.pendingRevisions == rasterCommit.revisions
+            else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            execution.commitRequested = false
+            activeStroke = execution
+        }
 
         if encodedClear {
             liveTile.markCleared()
@@ -1152,14 +1394,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
 
         let submittedUploads = uploadSubmissions
+        let submittedCommit = rasterCommit.map {
+            GridRenderCompletionMailbox.RasterCommit(
+                token: $0.token,
+                revisions: $0.revisions,
+                captureTokens: $0.captureTokens
+            )
+        }
         commandBuffer.addCompletedHandler {
-            [completionMailbox, submittedUploads] buffer in
+            [completionMailbox, submittedCommit, submittedUploads] buffer in
+            let completed = buffer.status == .completed && !forceFailure
             completionMailbox.push(
                 .init(
-                    commitToken: commitToken,
+                    rasterCommit: submittedCommit,
                     uploadSubmissions: submittedUploads,
-                    succeeded: buffer.status == .completed,
-                    errorMessage: buffer.error?.localizedDescription
+                    succeeded: completed,
+                    errorMessage: forceFailure
+                        ? "injected harness command-buffer failure"
+                        : buffer.error?.localizedDescription
                 )
             )
         }
@@ -1185,36 +1437,138 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         for outcome in completionMailbox.drain() {
             let wasIdle = isIdle
             defer { notifyIdleStateIfChanged(from: wasIdle) }
-            guard outcome.succeeded else {
-                let error = MetalRendererError.commandFailed(
-                    outcome.errorMessage ?? "unknown command-buffer error"
-                )
+            if !outcome.succeeded {
                 instancePool.reclaimTerminalFailure(
                     outcome.uploadSubmissions
                 )
-                failTransiently(error)
-                latestError = error
+            }
+            guard let commit = outcome.rasterCommit else {
+                if !outcome.succeeded {
+                    let error = MetalRendererError.commandFailed(
+                        outcome.errorMessage
+                            ?? "unknown command-buffer error"
+                    )
+                    report(error)
+                    latestError = error
+                }
                 continue
             }
-            guard let token = outcome.commitToken else {
-                continue
-            }
-            do {
-                try lifecycle.completeCommit(token: token, succeeded: true)
-                canonical.acceptScratchCommit()
-                resetLiveState()
-            } catch let error as MetalRendererError {
-                failTransiently(error)
-                latestError = error
-            } catch {
-                let rendererError = MetalRendererError.commandFailed(
-                    error.localizedDescription
+
+            let error: MetalRendererError?
+            if outcome.succeeded {
+                error = finalizeRasterCommitSuccess(commit)
+            } else {
+                error = finalizeRasterCommitFailure(
+                    commit,
+                    message: outcome.errorMessage
+                        ?? "unknown command-buffer error"
                 )
-                failTransiently(rendererError)
-                latestError = rendererError
+            }
+            if let error {
+                latestError = error
             }
         }
         return latestError
+    }
+
+    private func finalizeRasterCommitSuccess(
+        _ commit: GridRenderCompletionMailbox.RasterCommit
+    ) -> MetalRendererError? {
+        guard activeStrokeMatchesSubmittedCommit(commit) else {
+            let error = MetalRendererError.invalidRendererOperationToken
+            finalizeCaptureTokens(commit.captureTokens, as: .failed)
+            revisionStore.discard(commit.revisions)
+            activeStroke = nil
+            resetLiveState()
+            report(error)
+            onOperationCompleted?(.failure(commit.token, error))
+            return error
+        }
+
+        do {
+            for token in commit.captureTokens {
+                try revisionStore.finalize(token, as: .succeeded)
+            }
+            canonical.acceptScratchCommit()
+            revisionStore.publish(commit.revisions)
+            let receipt = RasterMutationReceipt(
+                token: commit.token,
+                before: commit.revisions.before,
+                after: commit.revisions.after
+            )
+            activeStroke = nil
+            resetLiveState()
+            onOperationCompleted?(.rasterSuccess(receipt))
+            return nil
+        } catch let error as MetalRendererError {
+            finalizeCaptureTokens(commit.captureTokens, as: .failed)
+            discardSubmittedPairIfPossible(commit.revisions)
+            activeStroke = nil
+            resetLiveState()
+            report(error)
+            onOperationCompleted?(.failure(commit.token, error))
+            return error
+        } catch {
+            let rendererError = MetalRendererError.commandFailed(
+                error.localizedDescription
+            )
+            finalizeCaptureTokens(commit.captureTokens, as: .failed)
+            discardSubmittedPairIfPossible(commit.revisions)
+            activeStroke = nil
+            resetLiveState()
+            report(rendererError)
+            onOperationCompleted?(.failure(commit.token, rendererError))
+            return rendererError
+        }
+    }
+
+    private func finalizeRasterCommitFailure(
+        _ commit: GridRenderCompletionMailbox.RasterCommit,
+        message: String
+    ) -> MetalRendererError {
+        let error = MetalRendererError.commandFailed(message)
+        finalizeCaptureTokens(commit.captureTokens, as: .failed)
+        discardSubmittedPairIfPossible(commit.revisions)
+        activeStroke = nil
+        resetLiveState()
+        report(error)
+        onOperationCompleted?(.failure(commit.token, error))
+        return error
+    }
+
+    private func activeStrokeMatchesSubmittedCommit(
+        _ commit: GridRenderCompletionMailbox.RasterCommit
+    ) -> Bool {
+        guard let execution = activeStroke else { return false }
+        return execution.token == commit.token
+            && !execution.commitRequested
+            && execution.pendingRevisions == commit.revisions
+    }
+
+    private func finalizeCaptureTokens(
+        _ tokens: [RasterRevisionOperationToken],
+        as outcome: RasterRevisionOperationOutcome
+    ) {
+        for token in tokens {
+            do {
+                try revisionStore.finalize(token, as: outcome)
+            } catch MetalRendererError.invalidRasterRevisionOperationToken {
+                continue
+            } catch {
+                report(
+                    (error as? MetalRendererError)
+                        ?? .commandFailed(error.localizedDescription)
+                )
+            }
+        }
+    }
+
+    private func discardSubmittedPairIfPossible(
+        _ pair: PendingRasterRevisionPair
+    ) {
+        if activeStroke?.pendingRevisions == pair {
+            revisionStore.discard(pair)
+        }
     }
 
     private func resetLiveState() {
@@ -1223,12 +1577,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         completedUploadRanges.removeAll(keepingCapacity: true)
         liveStroke.reset()
         needsLiveClear = true
-    }
-
-    private func failTransiently(_ error: MetalRendererError) {
-        report(error)
-        lifecycle.resetTransiently()
-        resetLiveState()
     }
 
     private func report(_ error: MetalRendererError) {
@@ -1245,6 +1593,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         for upload in uploads {
             instancePool.abandon(upload.lease)
         }
+    }
+
+    private func abandon(_ commit: EncodedRasterCommit?) {
+        guard let commit else { return }
+        finalizeCaptureTokens(commit.captureTokens, as: .cancelled)
+    }
+
+    private func failRequestedCommitIfNeeded(_ error: MetalRendererError) {
+        report(error)
+        guard activeStroke?.commitRequested == true else { return }
+        let token = activeStroke!.token
+        discardPendingRevisionsIfPossible()
+        activeStroke = nil
+        resetLiveState()
+        onOperationCompleted?(.failure(token, error))
     }
 
     private func waitForHarnessCommand(

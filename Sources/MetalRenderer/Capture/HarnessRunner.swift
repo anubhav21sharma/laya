@@ -231,6 +231,13 @@ public enum HarnessRunError: Error, Equatable, LocalizedError {
 
 @MainActor
 public final class HarnessRunner {
+    private static let defaultStrokeStyle = StrokeRenderStyle(
+        color: .black,
+        diameter: GridCanvasContract.brushRadius * 2,
+        compositeMode: .draw,
+        eraserStrength: 1
+    )
+
     nonisolated static func translationInput(
         for program: TilingHarnessProgram
     ) -> TranslationHarnessInput? {
@@ -1144,6 +1151,8 @@ public final class HarnessRunner {
 
     private struct GridMeasurements {
         var timestamp: TimeInterval = 0
+        var nextOperationRawValue: UInt64 = 1
+        var activeOperationToken: RendererOperationToken?
         var pendingEventStart: CFAbsoluteTime?
         var brushProcessingMilliseconds: [Double] = []
         var eventToSubmitMilliseconds: [Double] = []
@@ -1917,12 +1926,15 @@ public final class HarnessRunner {
             let activeProbe = gridRenderer.viewport.worldToScreen(
                 WorldPoint(x: 96, y: 96)
             )
-            gridRenderer.handle(
-                .mouse(
+            let activeToken = RendererOperationToken(rawValue: UInt64.max)
+            try gridRenderer.beginStroke(
+                token: activeToken,
+                sample: .mouse(
                     position: activeProbe,
                     timestamp: 0,
                     phase: .began
-                )
+                ),
+                style: Self.defaultStrokeStyle
             )
             let rejectedState =
                 gridRenderer.harnessTilingMutationSnapshot
@@ -1943,7 +1955,7 @@ public final class HarnessRunner {
                     )
                 }
             }
-            try gridRenderer.cancelActiveStroke()
+            try gridRenderer.cancelStroke(token: activeToken)
             let unchangedState =
                 gridRenderer.harnessTilingMutationSnapshot
 
@@ -2517,13 +2529,57 @@ public final class HarnessRunner {
         if measurements.pendingEventStart == nil {
             measurements.pendingEventStart = start
         }
-        renderer.handle(
-            StrokeSample.mouse(
-                position: ScreenPoint(x: x, y: y),
-                timestamp: measurements.timestamp,
-                phase: phase
-            )
+        let sample = StrokeSample.mouse(
+            position: ScreenPoint(x: x, y: y),
+            timestamp: measurements.timestamp,
+            phase: phase
         )
+        do {
+            switch phase {
+            case .began:
+                let token = RendererOperationToken(
+                    rawValue: measurements.nextOperationRawValue
+                )
+                measurements.nextOperationRawValue &+= 1
+                try renderer.beginStroke(
+                    token: token,
+                    sample: sample,
+                    style: Self.defaultStrokeStyle
+                )
+                measurements.activeOperationToken = token
+            case .moved:
+                guard let token = measurements.activeOperationToken else {
+                    preconditionFailure(
+                        "Harness move requires an active renderer token."
+                    )
+                }
+                try renderer.appendStroke(token: token, sample: sample)
+            case .ended:
+                guard let token = measurements.activeOperationToken else {
+                    preconditionFailure(
+                        "Harness end requires an active renderer token."
+                    )
+                }
+                try renderer.requestStrokeCommit(
+                    token: token,
+                    sample: sample,
+                    maximumRetainedBytes: 200 * 1_024 * 1_024
+                )
+                measurements.activeOperationToken = nil
+            case .cancelled:
+                guard let token = measurements.activeOperationToken else {
+                    preconditionFailure(
+                        "Harness cancel requires an active renderer token."
+                    )
+                }
+                try renderer.cancelStroke(token: token)
+                measurements.activeOperationToken = nil
+            }
+        } catch {
+            preconditionFailure(
+                "Harness renderer input failed: \(error.localizedDescription)"
+            )
+        }
         measurements.timestamp += 1.0 / 120.0
         measurements.brushProcessingMilliseconds.append(
             elapsedMilliseconds(since: start)

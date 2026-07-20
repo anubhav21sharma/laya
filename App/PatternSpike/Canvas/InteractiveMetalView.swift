@@ -11,13 +11,19 @@ final class InteractiveMetalView: MTKView {
         case panning(lastLocal: ScreenPoint)
     }
 
+    let controller: EditorSessionController
     let gridRenderer: GridRenderer
     private var dragMode: DragMode?
     private var spaceIsDown = false
     private var resignObserver: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
 
-    init(frame: CGRect, renderer: GridRenderer) {
+    init(
+        frame: CGRect,
+        controller: EditorSessionController,
+        renderer: GridRenderer
+    ) {
+        self.controller = controller
         gridRenderer = renderer
         super.init(frame: frame, device: renderer.device)
     }
@@ -68,10 +74,6 @@ final class InteractiveMetalView: MTKView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        guard gridRenderer.isIdle else {
-            dragMode = nil
-            return
-        }
         let local = localPoint(event)
         guard let coordinateTransform else {
             dragMode = nil
@@ -80,14 +82,14 @@ final class InteractiveMetalView: MTKView {
         if spaceIsDown {
             dragMode = .panning(lastLocal: local)
         } else {
-            gridRenderer.handle(
+            controller.handleStrokeSample(
                 .mouse(
                     position: coordinateTransform.map(local),
                     timestamp: event.timestamp,
                     phase: .began
                 )
             )
-            dragMode = gridRenderer.hasActiveStroke ? .drawing : nil
+            dragMode = .drawing
         }
     }
 
@@ -99,18 +101,14 @@ final class InteractiveMetalView: MTKView {
         }
         switch dragMode {
         case let .panning(lastLocal):
-            gridRenderer.pan(
+            controller.pan(
                 byScreenDelta: coordinateTransform.mapDelta(
                     local.simd - lastLocal.simd
                 )
             )
             dragMode = .panning(lastLocal: local)
         case .drawing:
-            guard gridRenderer.hasActiveStroke else {
-                dragMode = nil
-                return
-            }
-            gridRenderer.handle(
+            controller.handleStrokeSample(
                 .mouse(
                     position: coordinateTransform.map(local),
                     timestamp: event.timestamp,
@@ -125,12 +123,11 @@ final class InteractiveMetalView: MTKView {
     override func mouseUp(with event: NSEvent) {
         defer { dragMode = nil }
         guard case .drawing = dragMode else { return }
-        guard gridRenderer.hasActiveStroke else { return }
         guard let coordinateTransform else {
             cancelActiveAndResetGestureState()
             return
         }
-        gridRenderer.handle(
+        controller.handleStrokeSample(
             .mouse(
                 position: coordinateTransform.map(localPoint(event)),
                 timestamp: event.timestamp,
@@ -140,16 +137,16 @@ final class InteractiveMetalView: MTKView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard gridRenderer.isIdle, let coordinateTransform else { return }
-        gridRenderer.zoom(
+        guard let coordinateTransform else { return }
+        controller.zoom(
             by: exp(Float(-event.scrollingDeltaY) * 0.01),
             anchor: coordinateTransform.map(localPoint(event))
         )
     }
 
     override func magnify(with event: NSEvent) {
-        guard gridRenderer.isIdle, let coordinateTransform else { return }
-        gridRenderer.zoom(
+        guard let coordinateTransform else { return }
+        controller.zoom(
             by: max(0.01, 1 + Float(event.magnification)),
             anchor: coordinateTransform.map(localPoint(event))
         )
@@ -211,8 +208,7 @@ final class InteractiveMetalView: MTKView {
     }
 
     private func cancelIfActive() {
-        guard gridRenderer.hasActiveStroke else { return }
-        gridRenderer.handle(
+        controller.handleStrokeSample(
             .mouse(
                 position: ScreenPoint(x: 0, y: 0),
                 timestamp: ProcessInfo.processInfo.systemUptime,
