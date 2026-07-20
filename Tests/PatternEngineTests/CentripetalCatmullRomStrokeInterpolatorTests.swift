@@ -65,9 +65,12 @@ func cancelResetsIdentityAndCarry() throws {
     try interpolator.begin(at: WorldPoint(x: -8, y: 0)) { emitted.append($0) }
     try interpolator.append(WorldPoint(x: -6, y: 0)) { emitted.append($0) }
     interpolator.cancel()
-    try interpolator.begin(at: WorldPoint(x: 40, y: 20)) { emitted.append($0) }
+    try interpolator.append(WorldPoint(x: 40, y: 20)) { emitted.append($0) }
 
-    #expect(emitted.last == WorldPoint(x: 40, y: 20))
+    #expect(emitted == [
+        WorldPoint(x: -8, y: 0),
+        WorldPoint(x: 40, y: 20),
+    ])
 }
 
 @Test

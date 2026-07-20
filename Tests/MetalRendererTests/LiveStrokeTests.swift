@@ -43,6 +43,9 @@ func liveStrokeRejectsGrowthBeyondItsPreallocatedCapacity() throws {
     #expect(throws: MetalRendererError.pendingDabCapacityExceeded(2)) {
         try stroke.append(instance(3))
     }
+    #expect(stroke.pending.map(\.identity) == [0, 1])
+    #expect(stroke.bakedHighWater == 0)
+    #expect(stroke.emittedHighWater == 2)
 }
 
 @Test
@@ -53,5 +56,7 @@ func resetKeepsCapacityButRestoresPerStrokeIdentity() throws {
     try stroke.append(instance(2))
 
     #expect(stroke.pending.map(\.identity) == [0])
+    #expect(stroke.bakedHighWater == 0)
+    #expect(stroke.emittedHighWater == 1)
     #expect(stroke.capacity == 4)
 }
