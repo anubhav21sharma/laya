@@ -6,6 +6,61 @@ import Testing
 private let standardTileSize = PatternSize(width: 288, height: 192)
 
 @Test
+func migratedGridFoldUsesPositiveHalfOpenModulo() {
+    let strategy = TilingStrategy(
+        kind: .grid,
+        tileSize: PatternSize(width: 256, height: 256)
+    )
+    let cases = [
+        (WorldPoint(x: 0, y: 0), CanonicalPoint(x: 0, y: 0)),
+        (WorldPoint(x: 256, y: 256), CanonicalPoint(x: 0, y: 0)),
+        (WorldPoint(x: -1, y: -257), CanonicalPoint(x: 255, y: 255)),
+        (WorldPoint(x: 513, y: 510), CanonicalPoint(x: 1, y: 254)),
+    ]
+
+    for (world, expected) in cases {
+        #expect(strategy.displayFold(world) == expected)
+    }
+}
+
+@Test
+func migratedGridFoldPreservesSafeHighMagnitudeRemainders() {
+    let strategy = TilingStrategy(
+        kind: .grid,
+        tileSize: PatternSize(width: 96, height: 96)
+    )
+    let cases = [
+        (
+            WorldPoint(x: 536_870_912, y: 536_870_912),
+            CanonicalPoint(x: 32, y: 32)
+        ),
+        (
+            WorldPoint(x: -536_870_912, y: -536_870_912),
+            CanonicalPoint(x: 64, y: 64)
+        ),
+    ]
+
+    for (world, expected) in cases {
+        #expect(strategy.displayFold(world) == expected)
+    }
+}
+
+@Test
+func migratedGridFoldKeepsTinyNegativeRemainderHalfOpen() {
+    let extent: Float = 64
+    let strategy = TilingStrategy(
+        kind: .grid,
+        tileSize: PatternSize(width: extent, height: extent)
+    )
+    let folded = strategy.displayFold(WorldPoint(x: -1e-8, y: -1e-8))
+    let expected = extent.nextDown
+
+    #expect(folded == CanonicalPoint(x: expected, y: expected))
+    #expect(folded.x >= 0 && folded.x < extent)
+    #expect(folded.y >= 0 && folded.y < extent)
+}
+
+@Test
 func tilingKindRawValuesAndDisplayFoldMatchTheGoverningTable() {
     #expect(TilingKind.allCases.map(\.rawValue) == Array(0...6).map(UInt32.init))
 
