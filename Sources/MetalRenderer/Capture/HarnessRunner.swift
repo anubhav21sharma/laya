@@ -39,6 +39,10 @@ public enum HarnessRunError: Error, Equatable, LocalizedError {
         expectedValue: Int,
         actualValue: Int
     )
+    case missingStructuralMetric(
+        sceneName: String,
+        metric: HarnessStructuralMetric
+    )
     case counterInvariant(sceneName: String, message: String)
 
     public var errorDescription: String? {
@@ -67,6 +71,8 @@ public enum HarnessRunError: Error, Equatable, LocalizedError {
             actual
         ):
             "Grid scene '\(sceneName)' structural mismatch \(metric.rawValue): expected \(relation.rawValue) \(expected), actual \(actual)."
+        case let .missingStructuralMetric(sceneName, metric):
+            "Grid scene '\(sceneName)' cannot measure structural metric \(metric.rawValue)."
         case let .counterInvariant(sceneName, message):
             "Grid scene '\(sceneName)' counter invariant failed: \(message)"
         }
@@ -115,13 +121,17 @@ public final class HarnessRunner {
         let displayFrameBudgetMilliseconds = 1_000.0 / 60.0
     }
 
+    private let device: any MTLDevice
+    private let library: any MTLLibrary
     private let blankRenderer: BlankRenderer
-    private let gridRenderer: GridRenderer
+    private var gridRenderer: GridRenderer
 
     public init(device: any MTLDevice) throws {
         guard let library = device.makeDefaultLibrary() else {
             throw MetalRendererError.defaultLibraryUnavailable
         }
+        self.device = device
+        self.library = library
         blankRenderer = try BlankRenderer(device: device, library: library)
         gridRenderer = try GridRenderer(
             device: device,
@@ -169,11 +179,7 @@ public final class HarnessRunner {
         try PNGWriter.write(texture: frame.texture, to: imageURL)
 
         for check in scene.checks {
-            let actual = PNGWriter.pixel(
-                in: frame.texture,
-                x: check.x,
-                y: check.y
-            )
+            let actual = try checkedPixel(in: frame.texture, check: check)
             let expected = SIMD4(
                 check.expectedBGRA[0],
                 check.expectedBGRA[1],
@@ -235,6 +241,15 @@ public final class HarnessRunner {
         guard let program = scene.program else {
             throw HarnessSceneError.missingProgram
         }
+
+        // A public runner may execute more than one scene. Each grid program
+        // starts from transparent canonical pixels, revision zero, and idle
+        // lifecycle state just like the one-process CLI harness.
+        gridRenderer = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 512, height: 512)
+        )
 
         var measurements = GridMeasurements()
         var artifacts = GridArtifacts()
@@ -393,15 +408,21 @@ public final class HarnessRunner {
         }
 
         let counters = gridRenderer.harnessCounters
-        let structuralValues: [HarnessStructuralMetric: Int] = [
+        var structuralValues: [HarnessStructuralMetric: Int] = [
             .emittedDabCount: counters.totalDabsThisStroke,
             .encodedInstanceCount: measurements.newInstanceCounts.reduce(0, +),
             .restampedInstanceCount: measurements.restampedInstanceCount,
-            .canonicalRevisionDelta: revisionDelta,
-            .previewCommitMaximumDelta: previewCommitDelta,
-            .canonicalByteDelta: canonicalByteDelta,
             .missedFrameCount: measurements.missedFrameCount,
         ]
+        if artifacts.canonical != nil {
+            structuralValues[.canonicalRevisionDelta] = revisionDelta
+        }
+        if artifacts.liveScreen != nil, artifacts.committedScreen != nil {
+            structuralValues[.previewCommitMaximumDelta] = previewCommitDelta
+        }
+        if canonicalBefore != nil, artifacts.canonical != nil {
+            structuralValues[.canonicalByteDelta] = canonicalByteDelta
+        }
 
         let processInfo = ProcessInfo.processInfo
         let record = BenchmarkRecord(
@@ -637,11 +658,7 @@ public final class HarnessRunner {
                     channel: check.channel
                 )
             }
-            let actual = PNGWriter.pixel(
-                in: texture,
-                x: check.x,
-                y: check.y
-            )
+            let actual = try checkedPixel(in: texture, check: check)
             let expected = SIMD4(
                 check.expectedBGRA[0],
                 check.expectedBGRA[1],
@@ -671,7 +688,12 @@ public final class HarnessRunner {
         values: [HarnessStructuralMetric: Int]
     ) throws {
         for check in scene.structuralChecks {
-            let actual = values[check.metric] ?? 0
+            guard let actual = values[check.metric] else {
+                throw HarnessRunError.missingStructuralMetric(
+                    sceneName: scene.name,
+                    metric: check.metric
+                )
+            }
             let passed: Bool
             switch check.relation {
             case .equal:
@@ -689,6 +711,22 @@ public final class HarnessRunner {
                 )
             }
         }
+    }
+
+    private func checkedPixel(
+        in texture: any MTLTexture,
+        check: HarnessPixelCheck
+    ) throws -> SIMD4<UInt8> {
+        guard
+            (0..<texture.width).contains(check.x),
+            (0..<texture.height).contains(check.y)
+        else {
+            throw HarnessSceneError.invalidCheckCoordinate(
+                x: check.x,
+                y: check.y
+            )
+        }
+        return PNGWriter.pixel(in: texture, x: check.x, y: check.y)
     }
 
     private func writeGridArtifacts(

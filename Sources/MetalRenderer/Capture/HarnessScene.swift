@@ -66,6 +66,17 @@ public struct HarnessPixelCheck: Codable, Equatable, Sendable {
         )
         tolerance = try values.decode(UInt8.self, forKey: .tolerance)
     }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        if channel != .screen {
+            try values.encode(channel, forKey: .channel)
+        }
+        try values.encode(x, forKey: .x)
+        try values.encode(y, forKey: .y)
+        try values.encode(expectedBGRA, forKey: .expectedBGRA)
+        try values.encode(tolerance, forKey: .tolerance)
+    }
 }
 
 public struct HarnessScene: Codable, Equatable, Sendable {
@@ -107,6 +118,19 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         ) ?? []
     }
 
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(schemaVersion, forKey: .schemaVersion)
+        try values.encode(name, forKey: .name)
+        try values.encode(width, forKey: .width)
+        try values.encode(height, forKey: .height)
+        try values.encode(checks, forKey: .checks)
+        try values.encodeIfPresent(program, forKey: .program)
+        if !structuralChecks.isEmpty {
+            try values.encode(structuralChecks, forKey: .structuralChecks)
+        }
+    }
+
     public static func decode(_ data: Data) throws -> HarnessScene {
         let scene = try JSONDecoder().decode(HarnessScene.self, from: data)
         try scene.validate()
@@ -140,7 +164,16 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         }
 
         for check in checks {
-            guard (0..<width).contains(check.x), (0..<height).contains(check.y) else {
+            let artifactWidth = check.channel == .canonical
+                ? Int(GridCanvasContract.tileSize)
+                : width
+            let artifactHeight = check.channel == .canonical
+                ? Int(GridCanvasContract.tileSize)
+                : height
+            guard
+                (0..<artifactWidth).contains(check.x),
+                (0..<artifactHeight).contains(check.y)
+            else {
                 throw HarnessSceneError.invalidCheckCoordinate(x: check.x, y: check.y)
             }
             guard check.expectedBGRA.count == 4 else {

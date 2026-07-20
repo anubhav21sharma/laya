@@ -240,3 +240,66 @@ func structuralAssertionsRejectNegativeValues() {
         try HarnessScene.decode(data)
     }
 }
+
+@Test
+func canonicalChecksRejectCoordinatesOutsideTheTileArtifact() {
+    let data = Data(
+        """
+        {
+          "schemaVersion": 2,
+          "name": "canonical-out-of-bounds",
+          "width": 512,
+          "height": 512,
+          "program": "gridBoundary",
+          "checks": [
+            {
+              "channel": "canonical",
+              "x": 256,
+              "y": 0,
+              "expectedBGRA": [0, 0, 0, 255],
+              "tolerance": 1
+            }
+          ]
+        }
+        """.utf8
+    )
+
+    #expect(
+        throws: HarnessSceneError.invalidCheckCoordinate(x: 256, y: 0)
+    ) {
+        try HarnessScene.decode(data)
+    }
+}
+
+@Test
+func schemaOneEncodingPreservesTheLegacyShape() throws {
+    let data = Data(
+        """
+        {
+          "schemaVersion": 1,
+          "name": "blank-canvas",
+          "width": 64,
+          "height": 64,
+          "checks": [
+            {
+              "x": 32,
+              "y": 32,
+              "expectedBGRA": [241, 244, 242, 255],
+              "tolerance": 1
+            }
+          ]
+        }
+        """.utf8
+    )
+    let scene = try HarnessScene.decode(data)
+
+    let encoded = try JSONEncoder().encode(scene)
+    let object = try #require(
+        JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+    )
+    let checks = try #require(object["checks"] as? [[String: Any]])
+
+    #expect(object["program"] == nil)
+    #expect(object["structuralChecks"] == nil)
+    #expect(checks[0]["channel"] == nil)
+}
