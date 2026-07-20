@@ -10,6 +10,31 @@ private let normalizedBrushBounds = AxisAlignedRect(
 )
 
 @Test
+func dirtyPixelRectIncludesShaderExpansionAtCanonicalEdge() {
+    let fragment = CellFragment(
+        cell: CellIndex(column: 0, row: 0),
+        imageOrdinal: 0,
+        canonicalFromBrush: Affine2D(
+            xAxis: SIMD2(10, 0),
+            yAxis: SIMD2(0, 10),
+            translation: SIMD2(4, 96)
+        ),
+        brushClip: ConvexClip(halfPlanes: [])
+    )
+
+    let dirtyRect = TilingProjection.dirtyPixelRect(for: fragment, radius: 10)
+    let clipped = PixelRegionSet(
+        [dirtyRect],
+        clippedTo: PixelSize(width: 256, height: 192)
+    )
+
+    #expect(dirtyRect == PixelRect(minX: -7, minY: 85, maxX: 15, maxY: 107))
+    #expect(clipped.rectangles == [
+        PixelRect(minX: 0, minY: 85, maxX: 15, maxY: 107)!,
+    ])
+}
+
+@Test
 func gridCornerFootprintEmitsFourExactOwnedFragments() {
     let footprint = squareFootprint(center: SIMD2(3, 3), radius: 10)
     let strategy = TilingStrategy(kind: .grid, tileSize: projectionTileSize)

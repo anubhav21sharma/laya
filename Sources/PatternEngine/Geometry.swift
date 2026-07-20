@@ -92,7 +92,7 @@ public struct PatternSize: Equatable, Sendable {
     public var simd: SIMD2<Float> { SIMD2(width, height) }
 }
 
-public struct PixelSize: Equatable, Sendable {
+public struct PixelSize: Hashable, Sendable {
     public var width: Int
     public var height: Int
 

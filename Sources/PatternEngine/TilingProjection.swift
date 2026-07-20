@@ -1,3 +1,4 @@
+import Foundation
 import simd
 
 public struct CellFragment: Equatable, Sendable {
@@ -20,6 +21,26 @@ public struct CellFragment: Equatable, Sendable {
 }
 
 public enum TilingProjection {
+    public static func dirtyPixelRect(
+        for fragment: CellFragment,
+        radius: Float
+    ) -> PixelRect {
+        precondition(radius.isFinite && radius >= 1)
+        let expansion = 1 + 1 / radius
+        let corners = [
+            SIMD2(-expansion, -expansion),
+            SIMD2(expansion, -expansion),
+            SIMD2(-expansion, expansion),
+            SIMD2(expansion, expansion),
+        ].map(fragment.canonicalFromBrush.applying)
+        return PixelRect(
+            minX: Int(floor(corners.map(\.x).min()!)),
+            minY: Int(floor(corners.map(\.y).min()!)),
+            maxX: Int(ceil(corners.map(\.x).max()!)),
+            maxY: Int(ceil(corners.map(\.y).max()!))
+        )!
+    }
+
     public static func clampedRadius(
         requested: Float,
         tileSize: PatternSize
