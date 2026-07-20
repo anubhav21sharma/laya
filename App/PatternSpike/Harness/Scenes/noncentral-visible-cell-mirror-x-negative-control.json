@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 3,
+  "name": "noncentral-visible-cell-mirror-x-negative-control",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 256,
+  "tileHeight": 256,
+  "tiling": 3,
+  "diagnosticMode": "hardRound",
+  "program": "noncentralVisibleCell",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "visibleCellCanonicalByteDelta", "relation": "equal", "value": 1}
+  ]
+}

@@ -29,6 +29,8 @@ targets:
       - package: PatternModules
         product: PatternEngine
       - package: PatternModules
+        product: EditorCore
+      - package: PatternModules
         product: MetalRenderer
     settings:
       base:
@@ -51,6 +53,8 @@ targets:
     dependencies:
       - package: PatternModules
         product: PatternEngine
+      - package: PatternModules
+        product: EditorCore
       - package: PatternModules
         product: MetalRenderer
     settings:

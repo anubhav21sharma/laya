@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 3,
+  "name": "noncentral-visible-cell-rotational",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 256,
+  "tileHeight": 256,
+  "tiling": 6,
+  "diagnosticMode": "hardRound",
+  "program": "noncentralVisibleCell",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "visibleCellCanonicalByteDelta", "relation": "equal", "value": 0}
+  ]
+}

@@ -12,6 +12,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
     case renderEncoderUnavailable
     case commandFailed(String)
     case projectedInstanceCapacityExceeded(Int)
+    case invalidTileDimensions(width: Int, height: Int)
+    case tilingChangeRequiresIdle
     case invalidStrokeLifecycle
     case commitPendingInput
     case invalidDrawableSize
@@ -40,6 +42,10 @@ public enum MetalRendererError: Error, Equatable, LocalizedError {
             "Metal command execution failed: \(message)"
         case let .projectedInstanceCapacityExceeded(capacity):
             "Projected-instance capacity \(capacity) was exceeded."
+        case let .invalidTileDimensions(width, height):
+            "Tile dimensions \(width)x\(height) are outside 64...4096."
+        case .tilingChangeRequiresIdle:
+            "Tiling can only change while the renderer is idle."
         case .invalidStrokeLifecycle:
             "The requested stroke transition is invalid."
         case .commitPendingInput:

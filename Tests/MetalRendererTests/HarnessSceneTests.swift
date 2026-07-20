@@ -1699,6 +1699,277 @@ func fixedPointMetricCountsDuplicateCoverageDomainsFromTransforms() {
     )
 }
 
+@Test
+func taskEightNoncentralInputsUseApprovedParityDistinctVisibleCells() {
+    let expected: [
+        (TilingKind, PixelSize, WorldPoint, WorldPoint, CellIndex)
+    ] = [
+        (
+            .grid,
+            PixelSize(width: 256, height: 256),
+            WorldPoint(x: 64, y: 64),
+            WorldPoint(x: 320, y: 64),
+            CellIndex(column: 1, row: 0)
+        ),
+        (
+            .halfDrop,
+            PixelSize(width: 288, height: 192),
+            WorldPoint(x: 64, y: 64),
+            WorldPoint(x: 352, y: 160),
+            CellIndex(column: 1, row: 0)
+        ),
+        (
+            .brick,
+            PixelSize(width: 288, height: 192),
+            WorldPoint(x: 64, y: 64),
+            WorldPoint(x: 208, y: 256),
+            CellIndex(column: 0, row: 1)
+        ),
+        (
+            .mirrorX,
+            PixelSize(width: 256, height: 256),
+            WorldPoint(x: 64, y: 64),
+            WorldPoint(x: 448, y: 64),
+            CellIndex(column: 1, row: 0)
+        ),
+        (
+            .mirrorY,
+            PixelSize(width: 256, height: 256),
+            WorldPoint(x: 64, y: 64),
+            WorldPoint(x: 64, y: 448),
+            CellIndex(column: 0, row: 1)
+        ),
+        (
+            .mirrorXY,
+            PixelSize(width: 256, height: 256),
+            WorldPoint(x: 64, y: 64),
+            WorldPoint(x: 448, y: 448),
+            CellIndex(column: 1, row: 1)
+        ),
+        (
+            .rotational,
+            PixelSize(width: 256, height: 256),
+            WorldPoint(x: 64, y: 80),
+            WorldPoint(x: 320, y: 80),
+            CellIndex(column: 1, row: 0)
+        ),
+    ]
+
+    for (tiling, tileSize, central, visible, visibleCell) in expected {
+        let input = HarnessRunner.taskEightNoncentralInput(for: tiling)
+
+        #expect(input.tileSize == tileSize, "\(tiling)")
+        #expect(input.central == central, "\(tiling)")
+        #expect(input.visible == visible, "\(tiling)")
+        #expect(input.visibleCell == visibleCell, "\(tiling)")
+    }
+}
+
+@Test
+func taskEightByteMetricsMeasureActualDifferencesAndParityTolerance() {
+    let baseline: [UInt8] = [
+        0, 0, 0, 255,
+        10, 20, 30, 255,
+    ]
+    var changed = baseline
+    changed[1] = 2
+    changed[6] = 31
+
+    #expect(
+        HarnessRunner.differingByteCount(
+            baseline,
+            changed
+        ) == 2
+    )
+    #expect(
+        HarnessRunner.maximumByteDelta(
+            baseline,
+            changed
+        ) == 2
+    )
+    #expect(
+        HarnessRunner.previewCommitViolationCount(
+            baseline,
+            changed,
+            tolerance: 1
+        ) == 1
+    )
+}
+
+@Test
+func taskEightProgramsUseApprovedFixedInputs() {
+    #expect(
+        HarnessRunner.taskEightRectangularCenter
+            == WorldPoint(x: 318, y: 190)
+    )
+    #expect(
+        HarnessRunner.taskEightMetadataCenter
+            == WorldPoint(x: 64, y: 64)
+    )
+    #expect(
+        HarnessRunner.taskEightLiveCommitPoints == [
+            WorldPoint(x: 278, y: 90),
+            WorldPoint(x: 298, y: 110),
+        ]
+    )
+
+    let points = HarnessRunner.taskEightLongStrokePoints
+    #expect(points.count == 401)
+    for pair in zip(points, points.dropFirst()) {
+        #expect(pair.0.y == pair.1.y)
+        #expect(abs(pair.1.x - pair.0.x) == 32)
+    }
+}
+
+@Test
+func taskEightScenePairsUseTheExactApprovedMatrixAndOneNegativeMetric()
+    throws
+{
+    struct Expected {
+        let name: String
+        let program: TilingHarnessProgram
+        let tileSize: PixelSize
+        let tiling: TilingKind
+        let negativeMetric: HarnessStructuralMetric
+    }
+    let expected = [
+        Expected(
+            name: "rectangular-tile",
+            program: .rectangularTile,
+            tileSize: PixelSize(width: 320, height: 192),
+            tiling: .grid,
+            negativeMetric: .oracleHoleCount
+        ),
+        Expected(
+            name: "noncentral-visible-cell-grid",
+            program: .noncentralVisibleCell,
+            tileSize: PixelSize(width: 256, height: 256),
+            tiling: .grid,
+            negativeMetric: .visibleCellCanonicalByteDelta
+        ),
+        Expected(
+            name: "noncentral-visible-cell-halfdrop",
+            program: .noncentralVisibleCell,
+            tileSize: PixelSize(width: 288, height: 192),
+            tiling: .halfDrop,
+            negativeMetric: .visibleCellCanonicalByteDelta
+        ),
+        Expected(
+            name: "noncentral-visible-cell-brick",
+            program: .noncentralVisibleCell,
+            tileSize: PixelSize(width: 288, height: 192),
+            tiling: .brick,
+            negativeMetric: .visibleCellCanonicalByteDelta
+        ),
+        Expected(
+            name: "noncentral-visible-cell-mirror-x",
+            program: .noncentralVisibleCell,
+            tileSize: PixelSize(width: 256, height: 256),
+            tiling: .mirrorX,
+            negativeMetric: .visibleCellCanonicalByteDelta
+        ),
+        Expected(
+            name: "noncentral-visible-cell-mirror-y",
+            program: .noncentralVisibleCell,
+            tileSize: PixelSize(width: 256, height: 256),
+            tiling: .mirrorY,
+            negativeMetric: .visibleCellCanonicalByteDelta
+        ),
+        Expected(
+            name: "noncentral-visible-cell-mirror-xy",
+            program: .noncentralVisibleCell,
+            tileSize: PixelSize(width: 256, height: 256),
+            tiling: .mirrorXY,
+            negativeMetric: .visibleCellCanonicalByteDelta
+        ),
+        Expected(
+            name: "noncentral-visible-cell-rotational",
+            program: .noncentralVisibleCell,
+            tileSize: PixelSize(width: 256, height: 256),
+            tiling: .rotational,
+            negativeMetric: .visibleCellCanonicalByteDelta
+        ),
+        Expected(
+            name: "metadata-tiling-switch",
+            program: .metadataTilingSwitch,
+            tileSize: PixelSize(width: 256, height: 256),
+            tiling: .grid,
+            negativeMetric: .canonicalByteDelta
+        ),
+        Expected(
+            name: "projected-live-commit",
+            program: .projectedLiveCommit,
+            tileSize: PixelSize(width: 288, height: 192),
+            tiling: .halfDrop,
+            negativeMetric: .previewCommitViolationCount
+        ),
+        Expected(
+            name: "projected-long-stroke",
+            program: .projectedLongStroke,
+            tileSize: PixelSize(width: 288, height: 192),
+            tiling: .halfDrop,
+            negativeMetric: .restampedInstanceCount
+        ),
+    ]
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let scenesDirectory = repositoryRoot
+        .appendingPathComponent("App/PatternSpike/Harness/Scenes")
+
+    for item in expected {
+        let positiveURL = scenesDirectory.appendingPathComponent(
+            "\(item.name).json"
+        )
+        let negativeURL = scenesDirectory.appendingPathComponent(
+            "\(item.name)-negative-control.json"
+        )
+        let positive = try HarnessScene.decode(
+            Data(contentsOf: positiveURL)
+        )
+        let negative = try HarnessScene.decode(
+            Data(contentsOf: negativeURL)
+        )
+
+        #expect(positive.name == item.name)
+        #expect(negative.name == "\(item.name)-negative-control")
+        #expect(positive.program == item.program)
+        #expect(positive.tileWidth == item.tileSize.width)
+        #expect(positive.tileHeight == item.tileSize.height)
+        #expect(positive.tiling == item.tiling)
+        #expect(positive.diagnosticMode == .hardRound)
+
+        let positiveObject = try taskSevenSceneObject(at: positiveURL)
+        let negativeObject = try taskSevenSceneObject(at: negativeURL)
+        var normalizedPositive = positiveObject
+        var normalizedNegative = negativeObject
+        normalizedPositive["name"] = "<name>"
+        normalizedNegative["name"] = "<name>"
+        let positiveChecks = try #require(
+            normalizedPositive["structuralChecks"] as? [[String: Any]]
+        )
+        var negativeChecks = try #require(
+            normalizedNegative["structuralChecks"] as? [[String: Any]]
+        )
+        let intendedIndex = try #require(
+            positiveChecks.firstIndex {
+                $0["metric"] as? String == item.negativeMetric.rawValue
+            }
+        )
+        #expect(positiveChecks[intendedIndex]["value"] as? Int == 0)
+        #expect(negativeChecks[intendedIndex]["value"] as? Int == 1)
+        negativeChecks[intendedIndex]["value"] = 0
+        normalizedPositive["structuralChecks"] = positiveChecks
+        normalizedNegative["structuralChecks"] = negativeChecks
+
+        #expect(
+            NSDictionary(dictionary: normalizedPositive)
+                .isEqual(to: normalizedNegative)
+        )
+    }
+}
+
 private func taskSevenSceneObject(
     at url: URL
 ) throws -> [String: Any] {

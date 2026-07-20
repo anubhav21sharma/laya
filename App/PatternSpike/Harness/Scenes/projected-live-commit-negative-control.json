@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 3,
+  "name": "projected-live-commit-negative-control",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 288,
+  "tileHeight": 192,
+  "tiling": 1,
+  "diagnosticMode": "hardRound",
+  "program": "projectedLiveCommit",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "previewCommitViolationCount", "relation": "equal", "value": 1}
+  ]
+}

@@ -33,6 +33,13 @@ struct TaskSevenHarnessInput: Equatable, Sendable {
     let requiresDistantCells: Bool
 }
 
+struct TaskEightNoncentralInput: Equatable, Sendable {
+    let tileSize: PixelSize
+    let central: WorldPoint
+    let visible: WorldPoint
+    let visibleCell: CellIndex
+}
+
 private struct FixedPointCoverageKey: Hashable {
     let centerX: UInt32
     let centerY: UInt32
@@ -289,6 +296,123 @@ public final class HarnessRunner {
             )
         default:
             return nil
+        }
+    }
+
+    nonisolated static func taskEightNoncentralInput(
+        for tiling: TilingKind
+    ) -> TaskEightNoncentralInput {
+        switch tiling {
+        case .grid:
+            TaskEightNoncentralInput(
+                tileSize: PixelSize(width: 256, height: 256),
+                central: WorldPoint(x: 64, y: 64),
+                visible: WorldPoint(x: 320, y: 64),
+                visibleCell: CellIndex(column: 1, row: 0)
+            )
+        case .halfDrop:
+            TaskEightNoncentralInput(
+                tileSize: PixelSize(width: 288, height: 192),
+                central: WorldPoint(x: 64, y: 64),
+                visible: WorldPoint(x: 352, y: 160),
+                visibleCell: CellIndex(column: 1, row: 0)
+            )
+        case .brick:
+            TaskEightNoncentralInput(
+                tileSize: PixelSize(width: 288, height: 192),
+                central: WorldPoint(x: 64, y: 64),
+                visible: WorldPoint(x: 208, y: 256),
+                visibleCell: CellIndex(column: 0, row: 1)
+            )
+        case .mirrorX:
+            TaskEightNoncentralInput(
+                tileSize: PixelSize(width: 256, height: 256),
+                central: WorldPoint(x: 64, y: 64),
+                visible: WorldPoint(x: 448, y: 64),
+                visibleCell: CellIndex(column: 1, row: 0)
+            )
+        case .mirrorY:
+            TaskEightNoncentralInput(
+                tileSize: PixelSize(width: 256, height: 256),
+                central: WorldPoint(x: 64, y: 64),
+                visible: WorldPoint(x: 64, y: 448),
+                visibleCell: CellIndex(column: 0, row: 1)
+            )
+        case .mirrorXY:
+            TaskEightNoncentralInput(
+                tileSize: PixelSize(width: 256, height: 256),
+                central: WorldPoint(x: 64, y: 64),
+                visible: WorldPoint(x: 448, y: 448),
+                visibleCell: CellIndex(column: 1, row: 1)
+            )
+        case .rotational:
+            TaskEightNoncentralInput(
+                tileSize: PixelSize(width: 256, height: 256),
+                central: WorldPoint(x: 64, y: 80),
+                visible: WorldPoint(x: 320, y: 80),
+                visibleCell: CellIndex(column: 1, row: 0)
+            )
+        }
+    }
+
+    nonisolated static var taskEightRectangularCenter: WorldPoint {
+        WorldPoint(x: 318, y: 190)
+    }
+
+    nonisolated static var taskEightMetadataCenter: WorldPoint {
+        WorldPoint(x: 64, y: 64)
+    }
+
+    nonisolated static var taskEightLiveCommitPoints: [WorldPoint] {
+        [
+            WorldPoint(x: 278, y: 90),
+            WorldPoint(x: 298, y: 110),
+        ]
+    }
+
+    nonisolated static var taskEightLongStrokePoints: [WorldPoint] {
+        (0...400).map { index in
+            WorldPoint(
+                x: index.isMultiple(of: 2) ? 64 : 96,
+                y: 96
+            )
+        }
+    }
+
+    nonisolated static func differingByteCount(
+        _ lhs: [UInt8],
+        _ rhs: [UInt8]
+    ) -> Int {
+        guard lhs.count == rhs.count else {
+            return max(lhs.count, rhs.count)
+        }
+        return zip(lhs, rhs).reduce(0) {
+            $0 + ($1.0 == $1.1 ? 0 : 1)
+        }
+    }
+
+    nonisolated static func maximumByteDelta(
+        _ lhs: [UInt8],
+        _ rhs: [UInt8]
+    ) -> Int {
+        guard lhs.count == rhs.count else {
+            return 255
+        }
+        return zip(lhs, rhs).reduce(0) {
+            max($0, abs(Int($1.0) - Int($1.1)))
+        }
+    }
+
+    nonisolated static func previewCommitViolationCount(
+        _ live: [UInt8],
+        _ committed: [UInt8],
+        tolerance: UInt8
+    ) -> Int {
+        guard live.count == committed.count else {
+            return max(live.count, committed.count)
+        }
+        return zip(live, committed).reduce(0) {
+            $0 + (abs(Int($1.0) - Int($1.1)) > Int(tolerance) ? 1 : 0)
         }
     }
 
@@ -720,6 +844,9 @@ public final class HarnessRunner {
         var liveScreen: (any MTLTexture)?
         var committedScreen: (any MTLTexture)?
         var canonical: (any MTLTexture)?
+        var initialTilingScreen: (any MTLTexture)?
+        var alternateTilingScreen: (any MTLTexture)?
+        var restoredTilingScreen: (any MTLTexture)?
         var phasedGridScreen: (any MTLTexture)?
         var displayValidationCanonical: (any MTLTexture)?
         var displayValidationScreen: (any MTLTexture)?
@@ -809,7 +936,11 @@ public final class HarnessRunner {
         pristineGridRenderer = try GridRenderer(
             device: device,
             library: library,
-            drawableSize: PatternSize(width: 512, height: 512)
+            drawableSize: PatternSize(width: 512, height: 512),
+            configuration: try TilingCanvasConfiguration(
+                pixelSize: GridCanvasContract.defaultPixelSize,
+                tiling: .grid
+            )
         )
     }
 
@@ -932,8 +1063,10 @@ public final class HarnessRunner {
                     width: Float(scene.width),
                     height: Float(scene.height)
                 ),
-                pixelSize: configuration.pixelSize,
-                tiling: configuration.tiling
+                configuration: try TilingCanvasConfiguration(
+                    pixelSize: configuration.pixelSize,
+                    tiling: configuration.tiling
+                )
             )
         }
 
@@ -943,6 +1076,9 @@ public final class HarnessRunner {
         var canonicalBefore: [UInt8]?
         var taskSevenHarnessInput: TaskSevenHarnessInput?
         var taskSevenFragments: [CellFragment] = []
+        var visibleCellCanonicalByteDelta: Int?
+        var restoredDisplayMaximumDelta: Int?
+        var previewCommitViolationCount: Int?
 
         switch program {
         case .gridInterior:
@@ -1333,10 +1469,297 @@ public final class HarnessRunner {
                 tiling: configuration.tiling,
                 supersampling: 1
             )
-        default:
-            throw HarnessRunError.counterInvariant(
-                sceneName: scene.name,
-                message: "program \(program.rawValue) is not implemented by this task boundary"
+        case .rectangularTile:
+            let center = Self.taskEightRectangularCenter
+            try gridRenderer.injectHarnessDab(at: center)
+            try flushPending(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            artifacts.liveScreen = try captureDisplay(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            try captureCommittedAndCanonical(
+                scene: scene,
+                renderer: gridRenderer,
+                artifacts: &artifacts,
+                measurements: &measurements
+            )
+            artifacts.oracle = TilingCoverageOracle.renderCanonical(
+                footprint: .hardRound(
+                    radius: GridCanvasContract.brushRadius
+                ),
+                brushToWorld: Affine2D(
+                    xAxis: SIMD2(1, 0),
+                    yAxis: SIMD2(0, 1),
+                    translation: center.simd
+                ),
+                tileSize: configuration.pixelSize,
+                tiling: configuration.tiling,
+                supersampling: 1
+            )
+        case .noncentralVisibleCell:
+            let input = Self.taskEightNoncentralInput(
+                for: configuration.tiling
+            )
+            guard input.tileSize == configuration.pixelSize else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "noncentral input tile does not match scene tile"
+                )
+            }
+
+            let centralFragments = try gridRenderer.injectHarnessDab(
+                at: input.central
+            )
+            try flushPending(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            try finishCommit(
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            artifacts.committedScreen = try captureDisplay(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            let centralCanonical =
+                try gridRenderer.copyCanonicalForHarness()
+            artifacts.canonical = centralCanonical
+
+            let visibleRenderer = try makeGridRenderer(
+                scene: scene,
+                configuration: configuration
+            )
+            var visibleMeasurements = GridMeasurements()
+            let visibleFragments = try visibleRenderer.injectHarnessDab(
+                at: input.visible
+            )
+            try flushPending(
+                scene: scene,
+                renderer: visibleRenderer,
+                measurements: &visibleMeasurements
+            )
+            try finishCommit(
+                renderer: visibleRenderer,
+                measurements: &visibleMeasurements
+            )
+            let visibleCanonical =
+                try visibleRenderer.copyCanonicalForHarness()
+            visibleCellCanonicalByteDelta = Self.differingByteCount(
+                textureBytes(centralCanonical),
+                textureBytes(visibleCanonical)
+            )
+
+            guard visibleFragments.contains(where: {
+                $0.cell == input.visibleCell
+            }) else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "noncentral stroke did not project through approved visible cell"
+                )
+            }
+            if configuration.tiling == .rotational {
+                try validateRotationalVisibleCellPair(
+                    scene: scene,
+                    fragments: centralFragments,
+                    expectedCell: CellIndex(column: 0, row: 0)
+                )
+                try validateRotationalVisibleCellPair(
+                    scene: scene,
+                    fragments: visibleFragments,
+                    expectedCell: input.visibleCell
+                )
+            }
+        case .metadataTilingSwitch:
+            try gridRenderer.injectHarnessDab(
+                at: Self.taskEightMetadataCenter
+            )
+            try flushPending(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            try finishCommit(
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            let beforeCanonical =
+                try gridRenderer.copyCanonicalForHarness()
+            canonicalBefore = textureBytes(beforeCanonical)
+            revisionStart = gridRenderer.harnessRevision.rawValue
+            let beforeScreen = try captureDisplay(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+
+            let activeProbe = gridRenderer.viewport.worldToScreen(
+                WorldPoint(x: 96, y: 96)
+            )
+            gridRenderer.handle(
+                .mouse(
+                    position: activeProbe,
+                    timestamp: 0,
+                    phase: .began
+                )
+            )
+            let rejectedState =
+                gridRenderer.harnessTilingMutationSnapshot
+            do {
+                try gridRenderer.setTiling(.brick)
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "active-stroke tiling change unexpectedly succeeded"
+                )
+            } catch MetalRendererError.tilingChangeRequiresIdle {
+                guard gridRenderer.harnessTiling == .grid,
+                      gridRenderer.harnessTilingMutationSnapshot
+                        == rejectedState
+                else {
+                    throw HarnessRunError.counterInvariant(
+                        sceneName: scene.name,
+                        message: "rejected tiling change mutated renderer state"
+                    )
+                }
+            }
+            try gridRenderer.cancelActiveStroke()
+            let unchangedState =
+                gridRenderer.harnessTilingMutationSnapshot
+
+            try gridRenderer.setTiling(.mirrorXY)
+            guard gridRenderer.harnessTilingMutationSnapshot
+                    == unchangedState
+            else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "tiling switch changed resources, live state, counters, or revision"
+                )
+            }
+            let alternateScreen = try captureDisplay(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            let changedDisplayBytes = Self.differingByteCount(
+                textureBytes(beforeScreen),
+                textureBytes(alternateScreen)
+            )
+            guard changedDisplayBytes > 0 else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "mirrorXY switch did not change any display byte"
+                )
+            }
+
+            try gridRenderer.setTiling(.grid)
+            guard gridRenderer.harnessTilingMutationSnapshot
+                    == unchangedState
+            else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "restoring tiling changed resources, live state, counters, or revision"
+                )
+            }
+            let restoredScreen = try captureDisplay(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            restoredDisplayMaximumDelta = Self.maximumByteDelta(
+                textureBytes(beforeScreen),
+                textureBytes(restoredScreen)
+            )
+            artifacts.initialTilingScreen = beforeScreen
+            artifacts.alternateTilingScreen = alternateScreen
+            artifacts.restoredTilingScreen = restoredScreen
+            artifacts.committedScreen = restoredScreen
+            artifacts.canonical =
+                try gridRenderer.copyCanonicalForHarness()
+        case .projectedLiveCommit:
+            let points = Self.taskEightLiveCommitPoints
+            measureHandle(
+                .began,
+                world: points[0],
+                renderer: gridRenderer,
+                into: &measurements
+            )
+            measureHandle(
+                .ended,
+                world: points[1],
+                renderer: gridRenderer,
+                into: &measurements
+            )
+            try flushPending(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            artifacts.liveScreen = try captureDisplay(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            try captureCommittedAndCanonical(
+                scene: scene,
+                renderer: gridRenderer,
+                artifacts: &artifacts,
+                measurements: &measurements
+            )
+            previewCommitViolationCount =
+                Self.previewCommitViolationCount(
+                    textureBytes(artifacts.liveScreen!),
+                    textureBytes(artifacts.committedScreen!),
+                    tolerance: 1
+                )
+        case .projectedLongStroke:
+            let points = Self.taskEightLongStrokePoints
+            measureHandle(
+                .began,
+                world: points[0],
+                renderer: gridRenderer,
+                into: &measurements
+            )
+            for point in points.dropFirst() {
+                measureHandle(
+                    .moved,
+                    world: point,
+                    renderer: gridRenderer,
+                    into: &measurements
+                )
+                try flushPending(
+                    scene: scene,
+                    renderer: gridRenderer,
+                    measurements: &measurements
+                )
+            }
+            measureHandle(
+                .ended,
+                world: points[points.count - 1],
+                renderer: gridRenderer,
+                into: &measurements
+            )
+            try flushPending(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            artifacts.liveScreen = try captureDisplay(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
+            try captureCommittedAndCanonical(
+                scene: scene,
+                renderer: gridRenderer,
+                artifacts: &artifacts,
+                measurements: &measurements
             )
         }
 
@@ -1491,7 +1914,7 @@ public final class HarnessRunner {
         )
         let canonicalByteDelta: Int
         if let canonicalBefore, let canonical = artifacts.canonical {
-            canonicalByteDelta = differingByteCount(
+            canonicalByteDelta = Self.differingByteCount(
                 canonicalBefore,
                 textureBytes(canonical)
             )
@@ -1534,6 +1957,18 @@ public final class HarnessRunner {
         if let coordinateContinuityMismatches {
             structuralValues[.coordinateContinuityMismatchCount] =
                 coordinateContinuityMismatches
+        }
+        if let visibleCellCanonicalByteDelta {
+            structuralValues[.visibleCellCanonicalByteDelta] =
+                visibleCellCanonicalByteDelta
+        }
+        if let restoredDisplayMaximumDelta {
+            structuralValues[.restoredDisplayMaximumDelta] =
+                restoredDisplayMaximumDelta
+        }
+        if let previewCommitViolationCount {
+            structuralValues[.previewCommitViolationCount] =
+                previewCommitViolationCount
         }
 
         let processInfo = ProcessInfo.processInfo
@@ -1617,6 +2052,58 @@ public final class HarnessRunner {
         measurements.brushProcessingMilliseconds.append(
             elapsedMilliseconds(since: start)
         )
+    }
+
+    private func measureHandle(
+        _ phase: StrokePhase,
+        world: WorldPoint,
+        renderer: GridRenderer,
+        into measurements: inout GridMeasurements
+    ) {
+        let screen = renderer.viewport.worldToScreen(world)
+        measureHandle(
+            phase,
+            x: screen.x,
+            y: screen.y,
+            renderer: renderer,
+            into: &measurements
+        )
+    }
+
+    private func makeGridRenderer(
+        scene: HarnessScene,
+        configuration: HarnessRenderConfiguration
+    ) throws -> GridRenderer {
+        try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(
+                width: Float(scene.width),
+                height: Float(scene.height)
+            ),
+            configuration: TilingCanvasConfiguration(
+                pixelSize: configuration.pixelSize,
+                tiling: configuration.tiling
+            )
+        )
+    }
+
+    private func validateRotationalVisibleCellPair(
+        scene: HarnessScene,
+        fragments: [CellFragment],
+        expectedCell: CellIndex
+    ) throws {
+        let ordinals = Set(
+            fragments.lazy
+                .filter { $0.cell == expectedCell }
+                .map(\.imageOrdinal)
+        )
+        guard ordinals == Set([UInt8(0), UInt8(1)]) else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: scene.name,
+                message: "rotational visible cell \(expectedCell.column),\(expectedCell.row) did not contain the p2 image pair"
+            )
+        }
     }
 
     private func flushPending(
@@ -1997,6 +2484,7 @@ public final class HarnessRunner {
         var artifactURLs: [URL] = []
         var liveURL: URL?
         var committedURL: URL?
+        var restoredTilingURL: URL?
 
         if let texture = artifacts.liveScreen {
             let url = outputDirectory.appendingPathComponent(
@@ -2019,6 +2507,28 @@ public final class HarnessRunner {
                 "\(scene.name).canonical.png"
             )
             try PNGWriter.write(texture: texture, to: url)
+            artifactURLs.append(url)
+        }
+        if let texture = artifacts.initialTilingScreen {
+            let url = outputDirectory.appendingPathComponent(
+                "\(scene.name).initial-tiling.screen.png"
+            )
+            try PNGWriter.write(texture: texture, to: url)
+            artifactURLs.append(url)
+        }
+        if let texture = artifacts.alternateTilingScreen {
+            let url = outputDirectory.appendingPathComponent(
+                "\(scene.name).alternate-tiling.screen.png"
+            )
+            try PNGWriter.write(texture: texture, to: url)
+            artifactURLs.append(url)
+        }
+        if let texture = artifacts.restoredTilingScreen {
+            let url = outputDirectory.appendingPathComponent(
+                "\(scene.name).restored-tiling.screen.png"
+            )
+            try PNGWriter.write(texture: texture, to: url)
+            restoredTilingURL = url
             artifactURLs.append(url)
         }
         if let texture = artifacts.phasedGridScreen {
@@ -2099,7 +2609,9 @@ public final class HarnessRunner {
         )
         artifactURLs.append(benchmarkURL)
 
-        guard let primaryImageURL = committedURL ?? liveURL else {
+        guard let primaryImageURL =
+                restoredTilingURL ?? committedURL ?? liveURL
+        else {
             throw HarnessRunError.missingArtifact(
                 sceneName: scene.name,
                 channel: .screen
@@ -2122,18 +2634,6 @@ public final class HarnessRunner {
         }
         return zip(lhs, rhs).reduce(0) {
             max($0, abs(Int($1.0) - Int($1.1)))
-        }
-    }
-
-    private func differingByteCount(
-        _ lhs: [UInt8],
-        _ rhs: [UInt8]
-    ) -> Int {
-        guard lhs.count == rhs.count else {
-            return max(lhs.count, rhs.count)
-        }
-        return zip(lhs, rhs).reduce(0) {
-            $0 + ($1.0 == $1.1 ? 0 : 1)
         }
     }
 

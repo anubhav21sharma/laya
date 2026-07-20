@@ -1,5 +1,24 @@
 import PatternEngine
 
+public struct TilingCanvasConfiguration: Equatable, Sendable {
+    public let pixelSize: PixelSize
+    public let tiling: TilingKind
+
+    public init(pixelSize: PixelSize, tiling: TilingKind) throws {
+        guard
+            (64...4_096).contains(pixelSize.width),
+            (64...4_096).contains(pixelSize.height)
+        else {
+            throw MetalRendererError.invalidTileDimensions(
+                width: pixelSize.width,
+                height: pixelSize.height
+            )
+        }
+        self.pixelSize = pixelSize
+        self.tiling = tiling
+    }
+}
+
 public enum GridCanvasContract {
     public static let tileSize: Float = 256
     public static let defaultPixelSize = PixelSize(

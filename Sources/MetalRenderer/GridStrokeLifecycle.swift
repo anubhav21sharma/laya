@@ -1,3 +1,5 @@
+import PatternEngine
+
 public struct GridStrokeLifecycle: Sendable {
     public enum State: Equatable, Sendable {
         case idle
@@ -60,5 +62,14 @@ public struct GridStrokeLifecycle: Sendable {
 
     public mutating func resetTransiently() {
         state = .idle
+    }
+
+    public func validatedTilingChange(
+        to candidate: TilingKind
+    ) throws -> TilingKind {
+        guard state == .idle else {
+            throw MetalRendererError.tilingChangeRequiresIdle
+        }
+        return candidate
     }
 }

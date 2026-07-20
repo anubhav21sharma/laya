@@ -39,20 +39,66 @@ func projectedInstanceBufferBytesUseTheExactNinetySixByteStride() {
 }
 
 @Test
-func rendererInitializerAcceptsAnImmutableRectangularPixelSize() {
+func tilingCanvasConfigurationAcceptsIndependentBoundaryDimensions() throws {
+    let accepted = [
+        (PixelSize(width: 64, height: 64), TilingKind.grid),
+        (PixelSize(width: 320, height: 192), .halfDrop),
+        (PixelSize(width: 4_096, height: 64), .mirrorXY),
+        (PixelSize(width: 64, height: 4_096), .rotational),
+        (PixelSize(width: 4_096, height: 4_096), .brick),
+    ]
+
+    for (pixelSize, tiling) in accepted {
+        let configuration = try TilingCanvasConfiguration(
+            pixelSize: pixelSize,
+            tiling: tiling
+        )
+
+        #expect(configuration.pixelSize == pixelSize)
+        #expect(configuration.tiling == tiling)
+    }
+}
+
+@Test(
+    arguments: [
+        PixelSize(width: 63, height: 64),
+        PixelSize(width: 4_097, height: 64),
+        PixelSize(width: 64, height: 63),
+        PixelSize(width: 64, height: 4_097),
+    ]
+)
+func tilingCanvasConfigurationRejectsEachDimensionOutside64Through4096(
+    pixelSize: PixelSize
+) {
+    #expect(
+        throws: MetalRendererError.invalidTileDimensions(
+            width: pixelSize.width,
+            height: pixelSize.height
+        )
+    ) {
+        try TilingCanvasConfiguration(
+            pixelSize: pixelSize,
+            tiling: .grid
+        )
+    }
+}
+
+@Test
+func rendererInitializerAcceptsOneImmutableCanvasConfiguration() {
     let initializer: @MainActor (
         any MTLDevice,
         any MTLLibrary,
         PatternSize,
-        PixelSize
-    ) throws -> GridRenderer = { device, library, drawableSize, pixelSize in
+        TilingCanvasConfiguration
+    ) throws -> GridRenderer = { device, library, drawableSize, configuration in
         let renderer = try GridRenderer(
             device: device,
             library: library,
             drawableSize: drawableSize,
-            pixelSize: pixelSize
+            configuration: configuration
         )
-        #expect(renderer.pixelSize == pixelSize)
+        #expect(renderer.pixelSize == configuration.pixelSize)
+        #expect(renderer.tiling == configuration.tiling)
         return renderer
     }
 

@@ -24,16 +24,32 @@ struct HarnessDiagnosticRenderedFrame {
     let metrics: GPUFrameMetrics
 }
 
+struct HarnessTilingMutationSnapshot: Equatable {
+    let canonicalFront: ObjectIdentifier
+    let canonicalScratch: ObjectIdentifier
+    let liveTexture: ObjectIdentifier
+    let revision: RasterRevision
+    let liveVisible: Bool
+    let liveDirty: Bool
+    let needsLiveClear: Bool
+    let counters: GridStructuralCounters
+    let pendingInstanceCount: Int
+    let bakedHighWater: UInt64
+    let emittedHighWater: UInt64
+}
+
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
     public let device: any MTLDevice
     public let pixelSize: PixelSize
     public private(set) var lastError: MetalRendererError?
     public var onError: ((MetalRendererError) -> Void)?
+    public var onIdleStateChange: ((Bool) -> Void)?
     public private(set) var viewport: ViewportTransform
     public private(set) var counters = GridStructuralCounters()
     public var isIdle: Bool { lifecycle.state == .idle }
     public var hasActiveStroke: Bool { lifecycle.state == .active }
+    public var tiling: TilingKind { tilingStrategy.kind }
 
     private struct FrameUpload {
         let lease: DabInstanceBufferPool.Lease
@@ -49,7 +65,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private let instancePool: DabInstanceBufferPool
     private let completionMailbox = GridRenderCompletionMailbox()
     private let tileSize: PatternSize
-    private let tilingStrategy: TilingStrategy
+    private var tilingStrategy: TilingStrategy
     private var lifecycle = GridStrokeLifecycle()
     private var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
     private var liveStroke = LiveStroke()
@@ -59,8 +75,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public convenience init(
         device: any MTLDevice,
         drawableSize: PatternSize,
-        pixelSize: PixelSize = GridCanvasContract.defaultPixelSize,
-        tiling: TilingKind = .grid
+        configuration: TilingCanvasConfiguration
     ) throws {
         guard let library = device.makeDefaultLibrary() else {
             throw MetalRendererError.defaultLibraryUnavailable
@@ -69,8 +84,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             device: device,
             library: library,
             drawableSize: drawableSize,
-            pixelSize: pixelSize,
-            tiling: tiling
+            configuration: configuration
         )
     }
 
@@ -78,31 +92,33 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         device: any MTLDevice,
         library: any MTLLibrary,
         drawableSize: PatternSize,
-        pixelSize: PixelSize = GridCanvasContract.defaultPixelSize,
-        tiling: TilingKind = .grid
+        configuration: TilingCanvasConfiguration
     ) throws {
         ShaderABI.preconditionValid()
         guard let commandQueue = device.makeCommandQueue() else {
             throw MetalRendererError.commandQueueUnavailable
         }
         let tileSize = PatternSize(
-            width: Float(pixelSize.width),
-            height: Float(pixelSize.height)
+            width: Float(configuration.pixelSize.width),
+            height: Float(configuration.pixelSize.height)
         )
         self.device = device
-        self.pixelSize = pixelSize
+        pixelSize = configuration.pixelSize
         self.commandQueue = commandQueue
         self.library = library
         self.tileSize = tileSize
-        tilingStrategy = TilingStrategy(kind: tiling, tileSize: tileSize)
+        tilingStrategy = TilingStrategy(
+            kind: configuration.tiling,
+            tileSize: tileSize
+        )
         pipelines = try GridPipelineLibrary(device: device, library: library)
         canonical = try CanonicalRaster(
             device: device,
-            pixelSize: pixelSize
+            pixelSize: configuration.pixelSize
         )
         liveTile = try PersistentLiveTile(
             device: device,
-            pixelSize: pixelSize
+            pixelSize: configuration.pixelSize
         )
         instancePool = try DabInstanceBufferPool(device: device)
         viewport = ViewportTransform(
@@ -120,6 +136,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try clearInitialTextures()
     }
 
+    public func setTiling(_ tiling: TilingKind) throws {
+        let accepted = try lifecycle.validatedTilingChange(to: tiling)
+        tilingStrategy = TilingStrategy(
+            kind: accepted,
+            tileSize: tileSize
+        )
+    }
+
     public func handle(_ sample: StrokeSample) {
         if lifecycle.state == .commitRequested {
             return
@@ -128,6 +152,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             return
         }
 
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
         do {
             counters.newDabsThisEvent = 0
             switch sample.phase {
@@ -150,7 +176,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 try interpolator.finish(at: world, emit: appendWorldDab)
                 try lifecycle.requestCommit()
             case .cancelled:
-                try cancelActiveStroke()
+                try cancelActiveStrokeState()
             }
         } catch MetalRendererError.commitPendingInput {
             return
@@ -162,6 +188,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     public func cancelActiveStroke() throws {
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        try cancelActiveStrokeState()
+    }
+
+    private func cancelActiveStrokeState() throws {
         try lifecycle.cancelActive()
         resetLiveState()
     }
@@ -597,6 +629,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     var harnessCounters: GridStructuralCounters { counters }
     var harnessRevision: RasterRevision { canonical.revision }
     var harnessTiling: TilingKind { tilingStrategy.kind }
+    var harnessTilingMutationSnapshot: HarnessTilingMutationSnapshot {
+        HarnessTilingMutationSnapshot(
+            canonicalFront: ObjectIdentifier(canonical.front as AnyObject),
+            canonicalScratch: ObjectIdentifier(canonical.scratch as AnyObject),
+            liveTexture: ObjectIdentifier(liveTile.texture as AnyObject),
+            revision: canonical.revision,
+            liveVisible: liveTile.isVisible,
+            liveDirty: liveTile.isDirty,
+            needsLiveClear: needsLiveClear,
+            counters: counters,
+            pendingInstanceCount: liveStroke.pending.count,
+            bakedHighWater: liveStroke.bakedHighWater,
+            emittedHighWater: liveStroke.emittedHighWater
+        )
+    }
 
     func injectFiveHundredInteriorDabsIntoOneFrame() throws {
         try lifecycle.begin()
@@ -1089,6 +1136,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func drainFrameOutcomes() -> MetalRendererError? {
         var latestError: MetalRendererError?
         for outcome in completionMailbox.drain() {
+            let wasIdle = isIdle
+            defer { notifyIdleStateIfChanged(from: wasIdle) }
             guard outcome.succeeded else {
                 let error = MetalRendererError.commandFailed(
                     outcome.errorMessage ?? "unknown command-buffer error"
@@ -1138,6 +1187,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func report(_ error: MetalRendererError) {
         lastError = error
         onError?(error)
+    }
+
+    private func notifyIdleStateIfChanged(from wasIdle: Bool) {
+        guard wasIdle != isIdle else { return }
+        onIdleStateChange?(isIdle)
     }
 
     private func abandon(_ uploads: [FrameUpload]) {

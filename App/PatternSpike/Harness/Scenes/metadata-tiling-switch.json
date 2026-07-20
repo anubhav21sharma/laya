@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 3,
+  "name": "metadata-tiling-switch",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 256,
+  "tileHeight": 256,
+  "tiling": 0,
+  "diagnosticMode": "hardRound",
+  "program": "metadataTilingSwitch",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "canonicalByteDelta", "relation": "equal", "value": 0},
+    {"metric": "canonicalRevisionDelta", "relation": "equal", "value": 0},
+    {"metric": "restoredDisplayMaximumDelta", "relation": "equal", "value": 0}
+  ]
+}

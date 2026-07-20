@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 3,
+  "name": "noncentral-visible-cell-brick-negative-control",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 288,
+  "tileHeight": 192,
+  "tiling": 2,
+  "diagnosticMode": "hardRound",
+  "program": "noncentralVisibleCell",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "visibleCellCanonicalByteDelta", "relation": "equal", "value": 1}
+  ]
+}

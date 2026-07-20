@@ -1,4 +1,5 @@
 import MetalRenderer
+import PatternEngine
 import Testing
 
 @Test
@@ -38,4 +39,39 @@ func cancelOnlyAppliesToAnActiveStroke() throws {
     #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
         try lifecycle.cancelActive()
     }
+}
+
+@Test
+func tilingChangeSucceedsOnlyWhenIdleAndLeavesPriorTilingOnEveryRejection()
+    throws
+{
+    let idle = GridStrokeLifecycle()
+    var idleTiling = TilingKind.grid
+    idleTiling = try idle.validatedTilingChange(to: .mirrorXY)
+    #expect(idleTiling == .mirrorXY)
+
+    var active = GridStrokeLifecycle()
+    try active.begin()
+    var activeTiling = TilingKind.grid
+    #expect(throws: MetalRendererError.tilingChangeRequiresIdle) {
+        activeTiling = try active.validatedTilingChange(to: .halfDrop)
+    }
+    #expect(activeTiling == .grid)
+
+    var requested = GridStrokeLifecycle()
+    try requested.begin()
+    try requested.requestCommit()
+    var requestedTiling = TilingKind.grid
+    #expect(throws: MetalRendererError.tilingChangeRequiresIdle) {
+        requestedTiling = try requested.validatedTilingChange(to: .brick)
+    }
+    #expect(requestedTiling == .grid)
+
+    var pending = requested
+    _ = try pending.markCommitSubmitted()
+    var pendingTiling = TilingKind.grid
+    #expect(throws: MetalRendererError.tilingChangeRequiresIdle) {
+        pendingTiling = try pending.validatedTilingChange(to: .rotational)
+    }
+    #expect(pendingTiling == .grid)
 }
