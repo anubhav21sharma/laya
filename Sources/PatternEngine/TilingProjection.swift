@@ -116,27 +116,53 @@ public enum TilingProjection {
     ) -> [SIMD2<Float>] {
         clip(polygon, to: plane)
     }
+
+    static func canonicalPolygonKey(
+        _ polygon: [SIMD2<Float>]
+    ) -> [UInt32] {
+        var vertices = polygon.map(CanonicalVertex.init)
+        vertices = removingConsecutiveDuplicates(vertices)
+        guard !vertices.isEmpty else {
+            return []
+        }
+
+        var orientations = [vertices]
+        orientations.append(Array(vertices.reversed()))
+        var best: [CanonicalVertex]?
+        for orientation in orientations {
+            for startIndex in orientation.indices {
+                let rotated = Array(
+                    orientation[startIndex...] + orientation[..<startIndex]
+                )
+                if best == nil || verticesPrecede(rotated, best!) {
+                    best = rotated
+                }
+            }
+        }
+
+        return best!.flatMap { [$0.x.bitPattern, $0.y.bitPattern] }
+    }
 }
 
 private func validateBrushToWorld(_ affine: Affine2D) {
-    let xRowLength = simd_length(
-        SIMD2(affine.xAxis.x, affine.yAxis.x)
-    )
+    let xRow = SIMD2(affine.xAxis.x, affine.yAxis.x)
+    let xRowLength = simd_length(xRow)
     precondition(
         xRowLength.isFinite && xRowLength > 0,
         "TilingProjection brush-to-world x row must be finite and nonzero"
     )
 
-    let yRowLength = simd_length(
-        SIMD2(affine.xAxis.y, affine.yAxis.y)
-    )
+    let yRow = SIMD2(affine.xAxis.y, affine.yAxis.y)
+    let yRowLength = simd_length(yRow)
     precondition(
         yRowLength.isFinite && yRowLength > 0,
         "TilingProjection brush-to-world y row must be finite and nonzero"
     )
 
-    let determinant = affine.xAxis.x * affine.yAxis.y
-        - affine.xAxis.y * affine.yAxis.x
+    let normalizedXRow = xRow / xRowLength
+    let normalizedYRow = yRow / yRowLength
+    let determinant = normalizedXRow.x * normalizedYRow.y
+        - normalizedXRow.y * normalizedYRow.x
     precondition(
         determinant.isFinite && abs(determinant) >= Float.ulpOfOne,
         "TilingProjection brush-to-world determinant must be finite and nonsingular"
@@ -183,7 +209,7 @@ private struct CoverageDomainKey: Hashable {
         centerY = normalizedZero(affine.translation.y).bitPattern
         xAxisLength = normalizedZero(simd_length(affine.xAxis)).bitPattern
         yAxisLength = normalizedZero(simd_length(affine.yAxis)).bitPattern
-        polygon = canonicalPolygonKey(
+        polygon = TilingProjection.canonicalPolygonKey(
             candidate.localPolygon.map {
                 affine.applying(to: $0)
             }
@@ -385,32 +411,6 @@ private func removingCoverageEqualCandidates(
     return candidates.filter {
         seen.insert(CoverageDomainKey($0)).inserted
     }
-}
-
-private func canonicalPolygonKey(
-    _ polygon: [SIMD2<Float>]
-) -> [UInt32] {
-    var vertices = polygon.map(CanonicalVertex.init)
-    vertices = removingConsecutiveDuplicates(vertices)
-    guard !vertices.isEmpty else {
-        return []
-    }
-
-    var orientations = [vertices]
-    orientations.append(Array(vertices.reversed()))
-    var best: [CanonicalVertex]?
-    for orientation in orientations {
-        for startIndex in orientation.indices {
-            let rotated = Array(
-                orientation[startIndex...] + orientation[..<startIndex]
-            )
-            if best == nil || verticesPrecede(rotated, best!) {
-                best = rotated
-            }
-        }
-    }
-
-    return best!.flatMap { [$0.x.bitPattern, $0.y.bitPattern] }
 }
 
 private func removingConsecutiveDuplicates(

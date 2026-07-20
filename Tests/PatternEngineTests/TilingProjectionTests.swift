@@ -476,6 +476,60 @@ func rotationalFixedCoverageCanonicalizesCyclicWindingAndNegativeZeroVariants() 
 }
 
 @Test
+func canonicalPolygonKeyNormalizesOrderWindingAndNegativeZero() {
+    let polygon = [
+        SIMD2<Float>(0, 0),
+        SIMD2<Float>(3, 0),
+        SIMD2<Float>(2, 2),
+        SIMD2<Float>(0, 1),
+    ]
+    let reversed = Array(polygon.reversed())
+    let negativeZeroEquivalent = [
+        SIMD2<Float>(-0.0, -0.0),
+        SIMD2<Float>(3, -0.0),
+        SIMD2<Float>(2, 2),
+        SIMD2<Float>(-0.0, 1),
+    ]
+    let sameCenterDifferentPolygon = [
+        SIMD2<Float>(0, 0),
+        SIMD2<Float>(3, 0),
+        SIMD2<Float>(1, 2),
+        SIMD2<Float>(1, 1),
+    ]
+
+    let key = TilingProjection.canonicalPolygonKey(polygon)
+    let center = polygon.reduce(SIMD2<Float>.zero, +)
+        / Float(polygon.count)
+    let distinctCenter = sameCenterDifferentPolygon.reduce(
+        SIMD2<Float>.zero,
+        +
+    ) / Float(sameCenterDifferentPolygon.count)
+    var orderVariants: [[SIMD2<Float>]] = []
+    for orientation in [polygon, reversed] {
+        for startIndex in orientation.indices {
+            orderVariants.append(
+                Array(
+                    orientation[startIndex...] + orientation[..<startIndex]
+                )
+            )
+        }
+    }
+
+    for variant in orderVariants {
+        #expect(key == TilingProjection.canonicalPolygonKey(variant))
+    }
+    #expect(
+        key == TilingProjection.canonicalPolygonKey(negativeZeroEquivalent)
+    )
+    #expect(center == distinctCenter)
+    #expect(
+        key != TilingProjection.canonicalPolygonKey(
+            sameCenterDifferentPolygon
+        )
+    )
+}
+
+@Test
 func radiusUsesExactMinimumAndApprovedMaximumClamp() {
     let tileSize = PatternSize(width: 64, height: 96)
 
@@ -540,7 +594,11 @@ func footprintAffineValidationRunsBeforeProjectionInSubprocesses() throws {
         )
     }
 
-    for validationCase in ["identitySurvivor", "rotatedSurvivor"] {
+    for validationCase in [
+        "identitySurvivor",
+        "rotatedSurvivor",
+        "rescaledSurvivor",
+    ] {
         let result = try runFootprintAffineValidationSubprocess(
             for: validationCase
         )
@@ -919,6 +977,9 @@ private func exerciseFootprintAffineValidation(named validationCase: String) {
             yAxis: SIMD2(-8, 0),
             translation: SIMD2(32, 32)
         )
+    case "rescaledSurvivor":
+        exerciseRescaledFootprintAffineValidation()
+        return
     default:
         preconditionFailure(
             "Unknown footprint affine validation case: \(validationCase)"
@@ -939,6 +1000,71 @@ private func exerciseFootprintAffineValidation(named validationCase: String) {
     precondition(
         !fragments.isEmpty,
         "Valid footprint affine must survive projection"
+    )
+}
+
+private func exerciseRescaledFootprintAffineValidation() {
+    let strategy = TilingStrategy(
+        kind: .grid,
+        tileSize: PatternSize(width: 64, height: 64)
+    )
+    let identityFootprint = StampFootprint(
+        brushToWorld: Affine2D(
+            xAxis: SIMD2(1, 0),
+            yAxis: SIMD2(0, 1),
+            translation: SIMD2(32, 32)
+        ),
+        localBounds: AxisAlignedRect(
+            minimum: SIMD2(-1, -1),
+            maximum: SIMD2(1, 1)
+        ),
+        coverageSymmetry: .oriented
+    )
+    let rescaledFootprint = StampFootprint(
+        brushToWorld: Affine2D(
+            xAxis: SIMD2(0.0001, 0),
+            yAxis: SIMD2(0, 0.0001),
+            translation: SIMD2(32, 32)
+        ),
+        localBounds: AxisAlignedRect(
+            minimum: SIMD2(-10_000, -10_000),
+            maximum: SIMD2(10_000, 10_000)
+        ),
+        coverageSymmetry: .oriented
+    )
+
+    let identityFragments = TilingProjection.fragments(
+        for: identityFootprint,
+        using: strategy
+    )
+    let rescaledFragments = TilingProjection.fragments(
+        for: rescaledFootprint,
+        using: strategy
+    )
+    precondition(
+        identityFragments.count == 1 && rescaledFragments.count == 1,
+        "Equivalent footprint scales must project to one finite fragment"
+    )
+    precondition(
+        identityFragments[0].cell == rescaledFragments[0].cell,
+        "Equivalent footprint scales must project to the same cell"
+    )
+
+    let identitySquare = identityFootprint.localBounds.corners.map {
+        identityFragments[0].canonicalFromBrush.applying(to: $0)
+    }
+    let rescaledSquare = rescaledFootprint.localBounds.corners.map {
+        rescaledFragments[0].canonicalFromBrush.applying(to: $0)
+    }
+    precondition(
+        rescaledSquare.allSatisfy(\.isFinite),
+        "Rescaled footprint must produce finite canonical geometry"
+    )
+    precondition(
+        zip(identitySquare, rescaledSquare).allSatisfy {
+            simd_distance($0, $1) <= 0.000001
+        },
+        "Equivalent footprint scales must produce the same world square"
     )
 }
 
