@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import Metal
+import PatternEngine
 import UniformTypeIdentifiers
 
 public enum PNGWriter {
@@ -49,7 +50,25 @@ public enum PNGWriter {
                 mipmapLevel: 0
             )
         }
+        try writeBGRA(
+            bytes,
+            pixelSize: PixelSize(
+                width: texture.width,
+                height: texture.height
+            ),
+            to: url
+        )
+    }
 
+    public static func writeBGRA(
+        _ bytes: [UInt8],
+        pixelSize: PixelSize,
+        to url: URL
+    ) throws {
+        guard bytes.count == pixelSize.width * pixelSize.height * 4 else {
+            throw PNGWriterError.invalidByteCount(bytes.count)
+        }
+        let bytesPerRow = pixelSize.width * 4
         guard let provider = CGDataProvider(data: Data(bytes) as CFData) else {
             throw PNGWriterError.dataProviderCreationFailed
         }
@@ -57,8 +76,8 @@ public enum PNGWriter {
             CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
         )
         guard let image = CGImage(
-            width: texture.width,
-            height: texture.height,
+            width: pixelSize.width,
+            height: pixelSize.height,
             bitsPerComponent: 8,
             bitsPerPixel: 32,
             bytesPerRow: bytesPerRow,
@@ -85,10 +104,23 @@ public enum PNGWriter {
             throw PNGWriterError.finalizeFailed
         }
     }
+
+    public static func write(
+        coverage: OracleCoverage,
+        to url: URL
+    ) throws {
+        var bgra: [UInt8] = []
+        bgra.reserveCapacity(coverage.bytes.count * 4)
+        for byte in coverage.bytes {
+            bgra.append(contentsOf: [byte, byte, byte, 255])
+        }
+        try writeBGRA(bgra, pixelSize: coverage.pixelSize, to: url)
+    }
 }
 
 public enum PNGWriterError: Error, Equatable, LocalizedError {
     case unsupportedPixelFormat(UInt)
+    case invalidByteCount(Int)
     case dataProviderCreationFailed
     case imageCreationFailed
     case destinationCreationFailed
@@ -98,6 +130,8 @@ public enum PNGWriterError: Error, Equatable, LocalizedError {
         switch self {
         case let .unsupportedPixelFormat(rawValue):
             "Unsupported capture pixel format \(rawValue)."
+        case let .invalidByteCount(count):
+            "PNG BGRA input has invalid byte count \(count)."
         case .dataProviderCreationFailed:
             "PNG data provider creation failed."
         case .imageCreationFailed:

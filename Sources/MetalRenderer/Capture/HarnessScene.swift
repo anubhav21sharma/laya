@@ -1,20 +1,91 @@
 import Foundation
+import PatternEngine
 
 public enum HarnessPixelChannel: String, Codable, Equatable, Sendable {
     case screen
     case liveScreen
     case committedScreen
     case canonical
+    case oracleCoverage
+    case oracleCanonicalCoordinates
+    case oracleBrushLocalCoordinates
 }
 
-public enum GridHarnessProgram: String, Codable, Equatable, Sendable {
+public enum HarnessDiagnosticMode: String, Codable, Equatable, Sendable {
+    case hardRound
+    case asymmetricCoverage
+    case canonicalCoordinates
+    case brushLocalCoordinates
+}
+
+public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
     case gridInterior
     case gridBoundary
     case previewCommit
     case cancelPreservesCanonical
     case fiveHundredDabs
     case longStroke
+    case generalizedGrid
+    case halfDropInterior
+    case halfDropEdge
+    case halfDropCorner
+    case brickTranspose
+    case mirrorX
+    case mirrorY
+    case mirrorXY
+    case rotationalGenerator
+    case rotationalFixedPoint
+    case rotationalOrientation
+    case largeFootprint
+    case asymmetricFootprint
+    case canonicalCoordinateContinuity
+    case brushLocalCoordinateContinuity
+    case rectangularTile
+    case noncentralVisibleCell
+    case metadataTilingSwitch
+    case projectedLiveCommit
+    case projectedLongStroke
+
+    var requiredTiling: TilingKind? {
+        switch self {
+        case .gridInterior, .gridBoundary, .previewCommit,
+             .cancelPreservesCanonical, .fiveHundredDabs, .longStroke:
+            nil
+        case .generalizedGrid, .largeFootprint, .rectangularTile,
+             .metadataTilingSwitch:
+            .grid
+        case .halfDropInterior, .halfDropEdge, .halfDropCorner,
+             .canonicalCoordinateContinuity, .projectedLiveCommit,
+             .projectedLongStroke:
+            .halfDrop
+        case .brickTranspose:
+            .brick
+        case .mirrorX:
+            .mirrorX
+        case .mirrorY:
+            .mirrorY
+        case .mirrorXY, .brushLocalCoordinateContinuity:
+            .mirrorXY
+        case .rotationalGenerator, .rotationalFixedPoint,
+             .rotationalOrientation, .asymmetricFootprint:
+            .rotational
+        case .noncentralVisibleCell:
+            nil
+        }
+    }
+
+    var requiresInteractiveHardRound: Bool {
+        switch self {
+        case .noncentralVisibleCell, .metadataTilingSwitch,
+             .projectedLiveCommit, .projectedLongStroke:
+            true
+        default:
+            false
+        }
+    }
 }
+
+public typealias GridHarnessProgram = TilingHarnessProgram
 
 public enum HarnessStructuralMetric: String, Codable, Equatable, Sendable {
     case emittedDabCount
@@ -24,6 +95,15 @@ public enum HarnessStructuralMetric: String, Codable, Equatable, Sendable {
     case previewCommitMaximumDelta
     case canonicalByteDelta
     case missedFrameCount
+    case oracleHoleCount
+    case oraclePhantomCount
+    case oracleMaximumDelta
+    case restoredDisplayMaximumDelta
+    case transformMismatchCount
+    case duplicateFixedPointWriteCount
+    case coordinateContinuityMismatchCount
+    case visibleCellCanonicalByteDelta
+    case previewCommitViolationCount
 }
 
 public enum HarnessRelation: String, Codable, Equatable, Sendable {
@@ -85,8 +165,12 @@ public struct HarnessScene: Codable, Equatable, Sendable {
     public let width: Int
     public let height: Int
     public let checks: [HarnessPixelCheck]
-    public let program: GridHarnessProgram?
+    public let program: TilingHarnessProgram?
     public let structuralChecks: [HarnessStructuralCheck]
+    public let tileWidth: Int?
+    public let tileHeight: Int?
+    public let tiling: TilingKind?
+    public let diagnosticMode: HarnessDiagnosticMode?
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -96,6 +180,10 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         case checks
         case program
         case structuralChecks
+        case tileWidth
+        case tileHeight
+        case tiling
+        case diagnosticMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -109,13 +197,44 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             forKey: .checks
         ) ?? []
         program = try values.decodeIfPresent(
-            GridHarnessProgram.self,
+            TilingHarnessProgram.self,
             forKey: .program
         )
         structuralChecks = try values.decodeIfPresent(
             [HarnessStructuralCheck].self,
             forKey: .structuralChecks
         ) ?? []
+        if schemaVersion == 3 {
+            tileWidth = try Self.decodeRequiredSchemaThreeValue(
+                Int.self,
+                key: .tileWidth,
+                field: "tileWidth",
+                from: values
+            )
+            tileHeight = try Self.decodeRequiredSchemaThreeValue(
+                Int.self,
+                key: .tileHeight,
+                field: "tileHeight",
+                from: values
+            )
+            tiling = try Self.decodeRequiredSchemaThreeValue(
+                TilingKind.self,
+                key: .tiling,
+                field: "tiling",
+                from: values
+            )
+            diagnosticMode = try Self.decodeRequiredSchemaThreeValue(
+                HarnessDiagnosticMode.self,
+                key: .diagnosticMode,
+                field: "diagnosticMode",
+                from: values
+            )
+        } else {
+            tileWidth = nil
+            tileHeight = nil
+            tiling = nil
+            diagnosticMode = nil
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -128,6 +247,12 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         try values.encodeIfPresent(program, forKey: .program)
         if !structuralChecks.isEmpty {
             try values.encode(structuralChecks, forKey: .structuralChecks)
+        }
+        if schemaVersion == 3 {
+            try values.encode(tileWidth, forKey: .tileWidth)
+            try values.encode(tileHeight, forKey: .tileHeight)
+            try values.encode(tiling, forKey: .tiling)
+            try values.encode(diagnosticMode, forKey: .diagnosticMode)
         }
     }
 
@@ -147,6 +272,44 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             guard program != nil else {
                 throw HarnessSceneError.missingProgram
             }
+        case 3:
+            guard let program else {
+                throw HarnessSceneError.missingProgram
+            }
+            guard let tileWidth, let tileHeight else {
+                preconditionFailure(
+                    "Schema 3 required tile fields must be decoded before validation"
+                )
+            }
+            guard (64...4_096).contains(tileWidth),
+                  (64...4_096).contains(tileHeight)
+            else {
+                throw HarnessSceneError.invalidTileDimensions(
+                    width: tileWidth,
+                    height: tileHeight
+                )
+            }
+            guard let tiling, let diagnosticMode else {
+                preconditionFailure(
+                    "Schema 3 required tiling fields must be decoded before validation"
+                )
+            }
+            if let requiredTiling = program.requiredTiling,
+               requiredTiling != tiling
+            {
+                throw HarnessSceneError.programTilingMismatch(
+                    program: program,
+                    tiling: tiling
+                )
+            }
+            if program.requiresInteractiveHardRound,
+               diagnosticMode != .hardRound
+            {
+                throw HarnessSceneError.interactiveDiagnosticRequiresHardRound(
+                    program: program,
+                    diagnosticMode: diagnosticMode
+                )
+            }
         default:
             throw HarnessSceneError.unsupportedSchema(schemaVersion)
         }
@@ -159,16 +322,25 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         if schemaVersion == 1, checks.isEmpty {
             throw HarnessSceneError.missingPixelChecks
         }
-        if schemaVersion == 2, checks.isEmpty, structuralChecks.isEmpty {
+        if schemaVersion >= 2, checks.isEmpty, structuralChecks.isEmpty {
             throw HarnessSceneError.missingAssertions
         }
 
         for check in checks {
-            let artifactWidth = check.channel == .canonical
-                ? Int(GridCanvasContract.tileSize)
+            let usesTileDimensions: Bool
+            switch check.channel {
+            case .canonical, .oracleCoverage,
+                 .oracleCanonicalCoordinates,
+                 .oracleBrushLocalCoordinates:
+                usesTileDimensions = true
+            case .screen, .liveScreen, .committedScreen:
+                usesTileDimensions = false
+            }
+            let artifactWidth = usesTileDimensions
+                ? (tileWidth ?? Int(GridCanvasContract.tileSize))
                 : width
-            let artifactHeight = check.channel == .canonical
-                ? Int(GridCanvasContract.tileSize)
+            let artifactHeight = usesTileDimensions
+                ? (tileHeight ?? Int(GridCanvasContract.tileSize))
                 : height
             guard
                 (0..<artifactWidth).contains(check.x),
@@ -188,6 +360,20 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             }
         }
     }
+
+    private static func decodeRequiredSchemaThreeValue<Value: Decodable>(
+        _ type: Value.Type,
+        key: CodingKeys,
+        field: String,
+        from values: KeyedDecodingContainer<CodingKeys>
+    ) throws -> Value {
+        guard values.contains(key),
+              try !values.decodeNil(forKey: key)
+        else {
+            throw HarnessSceneError.missingSchemaThreeField(field)
+        }
+        return try values.decode(Value.self, forKey: key)
+    }
 }
 
 public enum HarnessSceneError: Error, Equatable, LocalizedError {
@@ -201,6 +387,16 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
     case programForbiddenForSchemaOne
     case missingAssertions
     case invalidStructuralValue(Int)
+    case missingSchemaThreeField(String)
+    case invalidTileDimensions(width: Int, height: Int)
+    case programTilingMismatch(
+        program: TilingHarnessProgram,
+        tiling: TilingKind
+    )
+    case interactiveDiagnosticRequiresHardRound(
+        program: TilingHarnessProgram,
+        diagnosticMode: HarnessDiagnosticMode
+    )
 
     public var errorDescription: String? {
         switch self {
@@ -224,6 +420,14 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
             "Schema 2 harness scene has no pixel or structural assertions."
         case let .invalidStructuralValue(value):
             "Harness structural assertion value \(value) is negative."
+        case let .missingSchemaThreeField(field):
+            "Schema 3 harness scene requires '\(field)'."
+        case let .invalidTileDimensions(width, height):
+            "Harness tile dimensions \(width)x\(height) are outside 64...4096."
+        case let .programTilingMismatch(program, tiling):
+            "Harness program \(program.rawValue) requires a different tiling than \(tiling)."
+        case let .interactiveDiagnosticRequiresHardRound(program, mode):
+            "Interactive harness program \(program.rawValue) cannot use diagnostic mode \(mode.rawValue)."
         }
     }
 }

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 3,
+  "name": "brick-transpose-negative-control",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 288,
+  "tileHeight": 192,
+  "tiling": 2,
+  "diagnosticMode": "hardRound",
+  "program": "brickTranspose",
+  "checks": [
+    {
+      "channel": "canonical",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [0, 0, 0, 255],
+      "tolerance": 1
+    }
+  ],
+  "structuralChecks": [
+    {
+      "metric": "transformMismatchCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "oracleHoleCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "oraclePhantomCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "oracleMaximumDelta",
+      "relation": "lessThanOrEqual",
+      "value": 1
+    }
+  ]
+}

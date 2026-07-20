@@ -155,6 +155,43 @@ static float2 patternPositiveFold(float2 world, float2 tileSize) {
     return world - floor(world / tileSize) * tileSize;
 }
 
+struct PatternDisplayMapping {
+    float2 canonicalPixel;
+    float2 phasedCellLocal;
+};
+
+static PatternDisplayMapping patternDisplayMapping(
+    float2 world,
+    float2 tileSize,
+    uint tilingKind
+) {
+    switch (tilingKind) {
+    case PatternTilingWireHalfDrop: {
+        const int column = int(floor(world.x / tileSize.x));
+        const float phaseY = (column & 1) * tileSize.y * 0.5;
+        const float2 folded = patternPositiveFold(
+            float2(world.x, world.y - phaseY),
+            tileSize
+        );
+        return {folded, folded};
+    }
+    case PatternTilingWireBrick: {
+        const int row = int(floor(world.y / tileSize.y));
+        const float phaseX = (row & 1) * tileSize.x * 0.5;
+        const float2 folded = patternPositiveFold(
+            float2(world.x - phaseX, world.y),
+            tileSize
+        );
+        return {folded, folded};
+    }
+    case PatternTilingWireGrid:
+    default: {
+        const float2 folded = patternPositiveFold(world, tileSize);
+        return {folded, folded};
+    }
+    }
+}
+
 static float4 patternSourceOver(float4 source, float4 destination) {
     return source + destination * (1.0 - source.a);
 }
@@ -174,8 +211,12 @@ fragment float4 patternGridFragment(
     const float2 screenCenter = frame.drawableSize * 0.5;
     const float2 world = (input.screenPixel - screenCenter) / frame.zoom
         + frame.worldCenter;
-    const float2 canonicalPixel = patternPositiveFold(world, frame.tileSize);
-    const float2 uv = canonicalPixel / frame.tileSize;
+    const PatternDisplayMapping mapping = patternDisplayMapping(
+        world,
+        frame.tileSize,
+        frame.tilingKind
+    );
+    const float2 uv = mapping.canonicalPixel / frame.tileSize;
     const float4 base = canonical.sample(tileSampler, uv);
     const float4 overlay = frame.liveVisible == 0
         ? float4(0.0)
@@ -184,8 +225,8 @@ fragment float4 patternGridFragment(
 
     if (frame.showGridLines != 0) {
         const float2 edgeDistance = min(
-            canonicalPixel,
-            frame.tileSize - canonicalPixel
+            mapping.phasedCellLocal,
+            frame.tileSize - mapping.phasedCellLocal
         ) * frame.zoom;
         const float coverage = 1.0 - smoothstep(
             frame.gridLineWidth,

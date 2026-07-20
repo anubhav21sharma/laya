@@ -48,7 +48,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public convenience init(
         device: any MTLDevice,
         drawableSize: PatternSize,
-        pixelSize: PixelSize = GridCanvasContract.defaultPixelSize
+        pixelSize: PixelSize = GridCanvasContract.defaultPixelSize,
+        tiling: TilingKind = .grid
     ) throws {
         guard let library = device.makeDefaultLibrary() else {
             throw MetalRendererError.defaultLibraryUnavailable
@@ -57,7 +58,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             device: device,
             library: library,
             drawableSize: drawableSize,
-            pixelSize: pixelSize
+            pixelSize: pixelSize,
+            tiling: tiling
         )
     }
 
@@ -65,7 +67,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         device: any MTLDevice,
         library: any MTLLibrary,
         drawableSize: PatternSize,
-        pixelSize: PixelSize = GridCanvasContract.defaultPixelSize
+        pixelSize: PixelSize = GridCanvasContract.defaultPixelSize,
+        tiling: TilingKind = .grid
     ) throws {
         ShaderABI.preconditionValid()
         guard let commandQueue = device.makeCommandQueue() else {
@@ -79,7 +82,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         self.pixelSize = pixelSize
         self.commandQueue = commandQueue
         self.tileSize = tileSize
-        tilingStrategy = TilingStrategy(kind: .grid, tileSize: tileSize)
+        tilingStrategy = TilingStrategy(kind: tiling, tileSize: tileSize)
         pipelines = try GridPipelineLibrary(device: device, library: library)
         canonical = try CanonicalRaster(
             device: device,
@@ -422,6 +425,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     var harnessCounters: GridStructuralCounters { counters }
     var harnessRevision: RasterRevision { canonical.revision }
+    var harnessTiling: TilingKind { tilingStrategy.kind }
 
     func injectFiveHundredInteriorDabsIntoOneFrame() throws {
         try lifecycle.begin()
@@ -439,6 +443,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 )
             }
         }
+    }
+
+    func injectHarnessDab(at world: WorldPoint) throws {
+        try lifecycle.begin()
+        counters = GridStructuralCounters()
+        counters.newDabsThisEvent = 1
+        counters.totalDabsThisStroke = 1
+        try appendProjectedFragments(at: world)
+        try lifecycle.requestCommit()
     }
 
     private func appendWorldDab(_ point: WorldPoint) throws {
