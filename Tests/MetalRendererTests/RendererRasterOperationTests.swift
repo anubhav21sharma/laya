@@ -102,6 +102,7 @@ func clearPublishesFullRegionReceiptAndRestoreUsesOperationSuccess() throws {
         Issue.record("Expected draw receipt")
         return
     }
+    let drawnCanonical = try canonicalBytes(renderer)
 
     let clearToken = RendererOperationToken(rawValue: 2)
     let revisionBeforeClear = renderer.harnessRevision
@@ -122,7 +123,9 @@ func clearPublishesFullRegionReceiptAndRestoreUsesOperationSuccess() throws {
     ])
     #expect(clearReceipt.before.regions == clearReceipt.after.regions)
     #expect(renderer.harnessRevision == revisionBeforeClear.advanced())
-    #expect(try centerBGRA(renderer) == [0, 0, 0, 0])
+    let clearedCanonical = try canonicalBytes(renderer)
+    #expect(clearedCanonical == [UInt8](repeating: 0, count: 64 * 64 * 4))
+    #expect(renderer.isIdle)
 
     completions.removeAll()
     let restoreToken = RendererOperationToken(rawValue: 3)
@@ -138,7 +141,8 @@ func clearPublishesFullRegionReceiptAndRestoreUsesOperationSuccess() throws {
         return
     }
     #expect(completedToken == restoreToken)
-    #expect(try centerBGRA(renderer)[3] == 255)
+    #expect(try canonicalBytes(renderer) == drawnCanonical)
+    #expect(renderer.isIdle)
 
     completions.removeAll()
     let redoToken = RendererOperationToken(rawValue: 4)
@@ -153,7 +157,8 @@ func clearPublishesFullRegionReceiptAndRestoreUsesOperationSuccess() throws {
         return
     }
     #expect(redoneToken == redoToken)
-    #expect(try centerBGRA(renderer) == [0, 0, 0, 0])
+    #expect(try canonicalBytes(renderer) == clearedCanonical)
+    #expect(renderer.isIdle)
 
     renderer.releaseRasterRevisions([
         drawReceipt.before.id,
@@ -230,7 +235,7 @@ func failedRestoreKeepsCanonicalFrontAndRevisionUnchanged() throws {
         return
     }
     let snapshot = renderer.harnessTilingMutationSnapshot
-    let before = try centerBGRA(renderer)
+    let before = try canonicalBytes(renderer)
 
     try renderer.requestRasterRestoreForHarness(
         token: RendererOperationToken(rawValue: 11),
@@ -248,7 +253,8 @@ func failedRestoreKeepsCanonicalFrontAndRevisionUnchanged() throws {
         renderer.harnessTilingMutationSnapshot.canonicalFront
             == snapshot.canonicalFront
     )
-    #expect(try centerBGRA(renderer) == before)
+    #expect(try canonicalBytes(renderer) == before)
+    #expect(renderer.isIdle)
     #expect(completions.count == 1)
     guard case let .failure(token, _) = completions.first else {
         Issue.record("Expected one restore failure")
@@ -350,6 +356,11 @@ private func centerBGRA(_ renderer: GridRenderer) throws -> [UInt8] {
     let bytes = textureBytes(texture)
     let offset = (32 * texture.width + 32) * 4
     return Array(bytes[offset..<(offset + 4)])
+}
+
+@MainActor
+private func canonicalBytes(_ renderer: GridRenderer) throws -> [UInt8] {
+    textureBytes(try renderer.copyCanonicalForHarness())
 }
 
 private func textureBytes(_ texture: any MTLTexture) -> [UInt8] {

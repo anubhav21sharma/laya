@@ -50,5 +50,27 @@ let package = Package(
             name: "PatternFileTests",
             dependencies: ["PatternFile"]
         ),
+        .testTarget(
+            name: "EditorSessionControllerTests",
+            dependencies: [
+                "EditorCore",
+                "MetalRenderer",
+                "PatternEngine",
+            ],
+            path: "App",
+            exclude: [
+                "PatternSpike/Assets.xcassets",
+                "PatternSpike/Canvas",
+                "PatternSpike/ContentView.swift",
+                "PatternSpike/Harness",
+                "PatternSpike/Panels",
+                "PatternSpike/PatternSpikeApp.swift",
+                "project.yml",
+            ],
+            sources: [
+                "PatternSpike/EditorSessionController.swift",
+                "Tests/EditorSessionControllerTests.swift",
+            ]
+        ),
     ]
 )

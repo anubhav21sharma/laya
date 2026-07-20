@@ -12,6 +12,12 @@ final class EditorSessionController {
     private var history = DocumentHistory()
     private var pendingRasterMutation: PendingRasterMutation?
     private var pendingHistoryNavigation: PendingHistoryNavigation?
+    private let releaseRasterRevisions: (Set<StoredRasterRevisionID>) -> Void
+    private let requestRasterRestore: (
+        RendererOperationToken,
+        RasterRevisionReference
+    ) throws -> Void
+    private(set) var lastRecordedRasterCommandForTesting: RasterHistoryCommand?
 
     private struct PendingRasterMutation {
         let token: EditorTransactionToken
@@ -23,13 +29,31 @@ final class EditorSessionController {
         let historyToken: UInt64
     }
 
-    init(model: EditorModel = EditorModel(), renderer: GridRenderer) {
+    init(
+        model: EditorModel = EditorModel(),
+        renderer: GridRenderer,
+        releaseRasterRevisions: ((Set<StoredRasterRevisionID>) -> Void)? = nil,
+        requestRasterRestore: ((
+            RendererOperationToken,
+            RasterRevisionReference
+        ) throws -> Void)? = nil
+    ) {
         self.model = model
         self.renderer = renderer
+        self.releaseRasterRevisions = releaseRasterRevisions ?? {
+            renderer.releaseRasterRevisions($0)
+        }
+        self.requestRasterRestore = requestRasterRestore ?? {
+            try renderer.requestRasterRestore(token: $0, revision: $1)
+        }
         renderer.onOperationCompleted = { [weak self] completion in
             self?.handleRendererCompletion(completion)
         }
         refreshDerivedModelState()
+    }
+
+    var historyAvailabilityForTesting: (canUndo: Bool, canRedo: Bool) {
+        (history.canUndo, history.canRedo)
     }
 
     func handleStrokeSample(_ sample: StrokeSample) {
@@ -237,9 +261,9 @@ final class EditorSessionController {
                 let revision = navigation.direction == .undo
                     ? command.before
                     : command.after
-                try renderer.requestRasterRestore(
-                    token: rendererToken(operationToken),
-                    revision: revision
+                try requestRasterRestore(
+                    rendererToken(operationToken),
+                    revision
                 )
             case .tiling, .tileResize:
                 throw MetalRendererError.commandFailed(
@@ -309,16 +333,14 @@ final class EditorSessionController {
                     "Renderer completed a raster mutation the controller did not accept."
                 )
             }
-            let released = history.appendSuccessful(
-                .raster(
-                    RasterHistoryCommand(
-                        kind: kind,
-                        before: receipt.before,
-                        after: receipt.after
-                    )
-                )
+            let command = RasterHistoryCommand(
+                kind: kind,
+                before: receipt.before,
+                after: receipt.after
             )
-            renderer.releaseRasterRevisions(released)
+            let released = history.appendSuccessful(.raster(command))
+            lastRecordedRasterCommandForTesting = command
+            releaseRasterRevisions(released)
             apply(
                 .operationCompleted(
                     completedToken,
