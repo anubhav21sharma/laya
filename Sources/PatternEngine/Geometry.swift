@@ -11,15 +11,45 @@ public struct ScreenPoint: Equatable, Sendable {
     }
 
     public var simd: SIMD2<Float> { SIMD2(x, y) }
+}
 
-    public func mapped(
-        from sourceSize: PatternSize,
-        to destinationSize: PatternSize
-    ) -> ScreenPoint {
+public struct DrawableCoordinateTransform: Equatable, Sendable {
+    public let viewOrigin: ScreenPoint
+    private let scale: SIMD2<Float>
+
+    public init?(
+        viewOrigin: ScreenPoint,
+        viewSize: SIMD2<Float>,
+        drawableSize: SIMD2<Float>
+    ) {
+        guard
+            viewOrigin.x.isFinite,
+            viewOrigin.y.isFinite,
+            viewSize.x.isFinite,
+            viewSize.y.isFinite,
+            drawableSize.x.isFinite,
+            drawableSize.y.isFinite,
+            viewSize.x > 0,
+            viewSize.y > 0,
+            drawableSize.x > 0,
+            drawableSize.y > 0
+        else {
+            return nil
+        }
+
+        self.viewOrigin = viewOrigin
+        scale = drawableSize / viewSize
+    }
+
+    public func map(_ point: ScreenPoint) -> ScreenPoint {
         ScreenPoint(
-            x: x / sourceSize.width * destinationSize.width,
-            y: y / sourceSize.height * destinationSize.height
+            x: (point.x - viewOrigin.x) * scale.x,
+            y: (point.y - viewOrigin.y) * scale.y
         )
+    }
+
+    public func mapDelta(_ delta: SIMD2<Float>) -> SIMD2<Float> {
+        delta * scale
     }
 }
 

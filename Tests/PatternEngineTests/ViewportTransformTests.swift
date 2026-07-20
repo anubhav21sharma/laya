@@ -95,20 +95,39 @@ func normalizedMouseSampleCarriesRecoveredNeutralPressure() {
 }
 
 @Test
-func localViewPointMapsToDrawableWithoutReversingYAxis() {
-    let viewSize = PatternSize(width: 400, height: 300)
-    let drawableSize = PatternSize(width: 800, height: 600)
-
-    let lower = ScreenPoint(x: 100, y: 75).mapped(
-        from: viewSize,
-        to: drawableSize
-    )
-    let upper = ScreenPoint(x: 100, y: 50).mapped(
-        from: viewSize,
-        to: drawableSize
+func drawableCoordinateTransformHandlesOffsetBoundsAndIndependentScales() throws {
+    let transform = try #require(
+        DrawableCoordinateTransform(
+            viewOrigin: ScreenPoint(x: 10, y: 20),
+            viewSize: SIMD2<Float>(400, 200),
+            drawableSize: SIMD2<Float>(800, 600)
+        )
     )
 
-    #expect(lower == ScreenPoint(x: 200, y: 150))
-    #expect(upper == ScreenPoint(x: 200, y: 100))
-    #expect(upper.y < lower.y)
+    #expect(
+        transform.map(ScreenPoint(x: 110, y: 70))
+            == ScreenPoint(x: 200, y: 150)
+    )
+    #expect(
+        transform.mapDelta(SIMD2<Float>(25, -10))
+            == SIMD2<Float>(50, -30)
+    )
+}
+
+@Test
+func drawableCoordinateTransformRejectsZeroSizedSpaces() {
+    #expect(
+        DrawableCoordinateTransform(
+            viewOrigin: ScreenPoint(x: 0, y: 0),
+            viewSize: SIMD2<Float>(0, 200),
+            drawableSize: SIMD2<Float>(800, 600)
+        ) == nil
+    )
+    #expect(
+        DrawableCoordinateTransform(
+            viewOrigin: ScreenPoint(x: 0, y: 0),
+            viewSize: SIMD2<Float>(400, 200),
+            drawableSize: SIMD2<Float>(800, 0)
+        ) == nil
+    )
 }

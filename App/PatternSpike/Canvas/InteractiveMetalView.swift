@@ -8,7 +8,7 @@ import PatternEngine
 final class InteractiveMetalView: MTKView {
     private enum DragMode {
         case drawing
-        case panning(last: ScreenPoint)
+        case panning(lastLocal: ScreenPoint)
     }
 
     let gridRenderer: GridRenderer
@@ -72,32 +72,50 @@ final class InteractiveMetalView: MTKView {
             dragMode = nil
             return
         }
-        let point = backingPoint(event)
+        let local = localPoint(event)
+        guard let coordinateTransform else {
+            dragMode = nil
+            return
+        }
         if spaceIsDown {
-            dragMode = .panning(last: point)
+            dragMode = .panning(lastLocal: local)
         } else {
             gridRenderer.handle(
-                .mouse(position: point, timestamp: event.timestamp, phase: .began)
+                .mouse(
+                    position: coordinateTransform.map(local),
+                    timestamp: event.timestamp,
+                    phase: .began
+                )
             )
             dragMode = gridRenderer.hasActiveStroke ? .drawing : nil
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        let point = backingPoint(event)
+        let local = localPoint(event)
+        guard let coordinateTransform else {
+            cancelActiveAndResetGestureState()
+            return
+        }
         switch dragMode {
-        case let .panning(last):
+        case let .panning(lastLocal):
             gridRenderer.pan(
-                byScreenDelta: SIMD2(point.x - last.x, point.y - last.y)
+                byScreenDelta: coordinateTransform.mapDelta(
+                    local.simd - lastLocal.simd
+                )
             )
-            dragMode = .panning(last: point)
+            dragMode = .panning(lastLocal: local)
         case .drawing:
             guard gridRenderer.hasActiveStroke else {
                 dragMode = nil
                 return
             }
             gridRenderer.handle(
-                .mouse(position: point, timestamp: event.timestamp, phase: .moved)
+                .mouse(
+                    position: coordinateTransform.map(local),
+                    timestamp: event.timestamp,
+                    phase: .moved
+                )
             )
         case nil:
             break
@@ -108,9 +126,13 @@ final class InteractiveMetalView: MTKView {
         defer { dragMode = nil }
         guard case .drawing = dragMode else { return }
         guard gridRenderer.hasActiveStroke else { return }
+        guard let coordinateTransform else {
+            cancelActiveAndResetGestureState()
+            return
+        }
         gridRenderer.handle(
             .mouse(
-                position: backingPoint(event),
+                position: coordinateTransform.map(localPoint(event)),
                 timestamp: event.timestamp,
                 phase: .ended
             )
@@ -118,18 +140,18 @@ final class InteractiveMetalView: MTKView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard gridRenderer.isIdle else { return }
+        guard gridRenderer.isIdle, let coordinateTransform else { return }
         gridRenderer.zoom(
             by: exp(Float(-event.scrollingDeltaY) * 0.01),
-            anchor: backingPoint(event)
+            anchor: coordinateTransform.map(localPoint(event))
         )
     }
 
     override func magnify(with event: NSEvent) {
-        guard gridRenderer.isIdle else { return }
+        guard gridRenderer.isIdle, let coordinateTransform else { return }
         gridRenderer.zoom(
             by: max(0.01, 1 + Float(event.magnification)),
-            anchor: backingPoint(event)
+            anchor: coordinateTransform.map(localPoint(event))
         )
     }
 
@@ -160,20 +182,24 @@ final class InteractiveMetalView: MTKView {
         return super.resignFirstResponder()
     }
 
-    private func backingPoint(_ event: NSEvent) -> ScreenPoint {
+    private func localPoint(_ event: NSEvent) -> ScreenPoint {
         let local = convert(event.locationInWindow, from: nil)
-        let localPoint = ScreenPoint(
-            x: Float(local.x - bounds.minX),
-            y: Float(local.y - bounds.minY)
-        )
-        return localPoint.mapped(
-            from: PatternSize(
-                width: Float(bounds.width),
-                height: Float(bounds.height)
+        return ScreenPoint(x: Float(local.x), y: Float(local.y))
+    }
+
+    private var coordinateTransform: DrawableCoordinateTransform? {
+        DrawableCoordinateTransform(
+            viewOrigin: ScreenPoint(
+                x: Float(bounds.minX),
+                y: Float(bounds.minY)
             ),
-            to: PatternSize(
-                width: Float(drawableSize.width),
-                height: Float(drawableSize.height)
+            viewSize: SIMD2(
+                Float(bounds.width),
+                Float(bounds.height)
+            ),
+            drawableSize: SIMD2(
+                Float(drawableSize.width),
+                Float(drawableSize.height)
             )
         )
     }
