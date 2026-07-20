@@ -1,5 +1,5 @@
 import Foundation
-import PatternEngine
+@testable import PatternEngine
 import simd
 import Testing
 
@@ -20,34 +20,22 @@ func gridCornerFootprintEmitsFourExactOwnedFragments() {
         expectedGridFragment(
             cell: CellIndex(column: -1, row: -1),
             canonicalCenter: SIMD2(259, 259),
-            minimumWorld: SIMD2(-256, -256),
-            maximumWorld: SIMD2(0, 0),
-            footprintCenter: SIMD2(3, 3),
-            radius: 10
+            clipOffsets: SIMD4(-25.9, 0.3, -25.9, 0.3)
         ),
         expectedGridFragment(
             cell: CellIndex(column: 0, row: -1),
             canonicalCenter: SIMD2(3, 259),
-            minimumWorld: SIMD2(0, -256),
-            maximumWorld: SIMD2(256, 0),
-            footprintCenter: SIMD2(3, 3),
-            radius: 10
+            clipOffsets: SIMD4(-0.3, -25.3, -25.9, 0.3)
         ),
         expectedGridFragment(
             cell: CellIndex(column: -1, row: 0),
             canonicalCenter: SIMD2(259, 3),
-            minimumWorld: SIMD2(-256, 0),
-            maximumWorld: SIMD2(0, 256),
-            footprintCenter: SIMD2(3, 3),
-            radius: 10
+            clipOffsets: SIMD4(-25.9, 0.3, -0.3, -25.3)
         ),
         expectedGridFragment(
             cell: CellIndex(column: 0, row: 0),
             canonicalCenter: SIMD2(3, 3),
-            minimumWorld: SIMD2(0, 0),
-            maximumWorld: SIMD2(256, 256),
-            footprintCenter: SIMD2(3, 3),
-            radius: 10
+            clipOffsets: SIMD4(-0.3, -25.3, -0.3, -25.3)
         ),
     ])
     #expect(fragments.allSatisfy { $0.brushClip.halfPlanes.count == 4 })
@@ -305,6 +293,26 @@ func exactConvexIntersectionRejectsPointOnlyCornerTangent() {
 }
 
 @Test
+func endpointDistanceWitnessClipsToFinitePositivePolygon() {
+    let normal = SIMD2<Float>(-0.8929465, -0.45016286)
+    let start = SIMD2<Float>(-0.07052188, -0.96007323)
+    let end = SIMD2<Float>(-0.07452252, -0.95213753)
+    let plane = HalfPlane2D(normal: normal, offset: 0.4951616)
+    let inside = start + normal * 0.25
+    let polygon = [end, start, inside]
+
+    let clipped = TilingProjection.clipPolygon(polygon, to: plane)
+
+    #expect(clipped.count == 4)
+    #expect(simd_distance(clipped[1], start) < 0.00001)
+    #expect(clipped.allSatisfy { $0.isFinite })
+    #expect(clipped.allSatisfy {
+        plane.contains($0, tolerance: 0.000001)
+    })
+    #expect(abs(testSignedArea(clipped)) > 0.0001)
+}
+
+@Test
 func rotationalFixedPointDeduplicatesOnlyHalfTurnInvariantCoverage() {
     let tileSize = PatternSize(width: 288, height: 288)
     let strategy = TilingStrategy(kind: .rotational, tileSize: tileSize)
@@ -343,6 +351,131 @@ func rotationalFixedPointDeduplicatesOnlyHalfTurnInvariantCoverage() {
 }
 
 @Test
+func rotationalEqualCentersKeepDifferentClippedCoverageDomains() {
+    let strategy = TilingStrategy(
+        kind: .rotational,
+        tileSize: PatternSize(width: 64, height: 64)
+    )
+    let footprint = StampFootprint(
+        brushToWorld: Affine2D(
+            xAxis: SIMD2(50, 0),
+            yAxis: SIMD2(0, 10),
+            translation: SIMD2(64, 32)
+        ),
+        localBounds: AxisAlignedRect(
+            minimum: SIMD2(-1, -1),
+            maximum: SIMD2(0.5, 1)
+        ),
+        coverageSymmetry: .halfTurnInvariant
+    )
+
+    let fragments = TilingProjection.fragments(
+        for: footprint,
+        using: strategy
+    )
+    let equalCenterFragments = fragments.filter {
+        $0.canonicalFromBrush.translation == SIMD2<Float>(0, 32)
+    }
+
+    #expect(equalCenterFragments.count == 2)
+    #expect(Set(equalCenterFragments.map(\.cell)) == Set([
+        CellIndex(column: 0, row: 0),
+        CellIndex(column: 1, row: 0),
+    ]))
+    #expect(Set(equalCenterFragments.map(\.imageOrdinal)) == Set([0, 1]))
+    #expect(equalCenterFragments.contains {
+        $0.brushClip.contains(SIMD2(-0.75, 0), tolerance: 0)
+    })
+    #expect(equalCenterFragments.contains {
+        $0.brushClip.contains(SIMD2(0.25, 0), tolerance: 0)
+    })
+}
+
+@Test
+func rotationalFixedCoverageCanonicalizesCyclicWindingAndNegativeZeroVariants() {
+    let tileSize = PatternSize(width: 64, height: 64)
+    let strategy = TilingStrategy(kind: .rotational, tileSize: tileSize)
+    let fixedAffines = [
+        Affine2D(
+            xAxis: SIMD2(10, 0),
+            yAxis: SIMD2(0, 10),
+            translation: SIMD2(32, 32)
+        ),
+        Affine2D(
+            xAxis: SIMD2(-10, 0),
+            yAxis: SIMD2(0, 10),
+            translation: SIMD2(32, 32)
+        ),
+        Affine2D(
+            xAxis: SIMD2(10, -0.0),
+            yAxis: SIMD2(-0.0, 10),
+            translation: SIMD2(32, 32)
+        ),
+    ]
+
+    for affine in fixedAffines {
+        let invariant = TilingProjection.fragments(
+            for: StampFootprint(
+                brushToWorld: affine,
+                localBounds: normalizedBrushBounds,
+                coverageSymmetry: .halfTurnInvariant
+            ),
+            using: strategy
+        )
+        let oriented = TilingProjection.fragments(
+            for: StampFootprint(
+                brushToWorld: affine,
+                localBounds: normalizedBrushBounds,
+                coverageSymmetry: .oriented
+            ),
+            using: strategy
+        )
+
+        #expect(invariant.count == 1)
+        #expect(oriented.count == 2)
+        let firstPolygon = normalizedBrushBounds.corners.map {
+            oriented[0].canonicalFromBrush.applying(to: $0)
+        }
+        let secondPolygon = normalizedBrushBounds.corners.map {
+            oriented[1].canonicalFromBrush.applying(to: $0)
+        }
+        #expect(firstPolygon != secondPolygon)
+        #expect(Set(firstPolygon) == Set(secondPolygon))
+    }
+
+    let negativeZeroSeam = Affine2D(
+        xAxis: SIMD2(10, 0),
+        yAxis: SIMD2(0, 10),
+        translation: SIMD2(-0.0, -0.0)
+    )
+    let orientedSeam = TilingProjection.fragments(
+        for: StampFootprint(
+            brushToWorld: negativeZeroSeam,
+            localBounds: normalizedBrushBounds,
+            coverageSymmetry: .oriented
+        ),
+        using: strategy
+    )
+    let invariantSeam = TilingProjection.fragments(
+        for: StampFootprint(
+            brushToWorld: negativeZeroSeam,
+            localBounds: normalizedBrushBounds,
+            coverageSymmetry: .halfTurnInvariant
+        ),
+        using: strategy
+    )
+    let zeroCentered = orientedSeam.filter {
+        $0.canonicalFromBrush.translation == SIMD2<Float>(0, 0)
+    }
+
+    #expect(orientedSeam.count == 8)
+    #expect(invariantSeam.count == 4)
+    #expect(zeroCentered.count == 2)
+    #expect(negativeZeroSeam.translation.x.bitPattern == 0x8000_0000)
+    #expect(negativeZeroSeam.translation.y.bitPattern == 0x8000_0000)
+}
+
+@Test
 func radiusUsesExactMinimumAndApprovedMaximumClamp() {
     let tileSize = PatternSize(width: 64, height: 96)
 
@@ -370,6 +503,49 @@ func radiusBelowMinimumIsRejectedBeforeProjection() throws {
             "Precondition failed: TilingProjection radius must be finite and at least 1"
         )
     )
+}
+
+@Test
+func footprintAffineValidationRunsBeforeProjectionInSubprocesses() throws {
+    if let validationCase = ProcessInfo.processInfo.environment[
+        "PATTERN_ENGINE_FOOTPRINT_AFFINE_CASE"
+    ] {
+        exerciseFootprintAffineValidation(named: validationCase)
+        return
+    }
+
+    let invalidCases = [
+        (
+            "axisCollapsed",
+            "TilingProjection brush-to-world x row must be finite and nonzero"
+        ),
+        (
+            "axisCollapsedY",
+            "TilingProjection brush-to-world y row must be finite and nonzero"
+        ),
+        (
+            "singular",
+            "TilingProjection brush-to-world determinant must be finite and nonsingular"
+        ),
+    ]
+    for (validationCase, expectedMessage) in invalidCases {
+        let result = try runFootprintAffineValidationSubprocess(
+            for: validationCase
+        )
+        #expect(result.status != 0)
+        #expect(
+            result.standardError.contains(
+                "Precondition failed: \(expectedMessage)"
+            )
+        )
+    }
+
+    for validationCase in ["identitySurvivor", "rotatedSurvivor"] {
+        let result = try runFootprintAffineValidationSubprocess(
+            for: validationCase
+        )
+        #expect(result.status == 0)
+    }
 }
 
 @Test
@@ -482,35 +658,32 @@ private func squareFootprint(
 private func expectedGridFragment(
     cell: CellIndex,
     canonicalCenter: SIMD2<Float>,
-    minimumWorld: SIMD2<Float>,
-    maximumWorld: SIMD2<Float>,
-    footprintCenter: SIMD2<Float>,
-    radius: Float
+    clipOffsets: SIMD4<Float>
 ) -> CellFragment {
     CellFragment(
         cell: cell,
         imageOrdinal: 0,
         canonicalFromBrush: Affine2D(
-            xAxis: SIMD2(radius, 0),
-            yAxis: SIMD2(0, radius),
+            xAxis: SIMD2(10, 0),
+            yAxis: SIMD2(0, 10),
             translation: canonicalCenter
         ),
         brushClip: ConvexClip(halfPlanes: [
             HalfPlane2D(
                 normal: SIMD2(1, 0),
-                offset: (minimumWorld.x - footprintCenter.x) / radius
+                offset: clipOffsets.x
             ),
             HalfPlane2D(
                 normal: SIMD2(-1, 0),
-                offset: (-maximumWorld.x + footprintCenter.x) / radius
+                offset: clipOffsets.y
             ),
             HalfPlane2D(
                 normal: SIMD2(0, 1),
-                offset: (minimumWorld.y - footprintCenter.y) / radius
+                offset: clipOffsets.z
             ),
             HalfPlane2D(
                 normal: SIMD2(0, -1),
-                offset: (-maximumWorld.y + footprintCenter.y) / radius
+                offset: clipOffsets.w
             ),
         ])
     )
@@ -626,6 +799,26 @@ private func normalizedZero(_ value: Float) -> Float {
     value == 0 ? 0 : value
 }
 
+private func testSignedArea(_ polygon: [SIMD2<Float>]) -> Float {
+    guard polygon.count >= 3 else {
+        return 0
+    }
+    let origin = polygon[0]
+    var twiceArea: Float = 0
+    for index in 1..<(polygon.count - 1) {
+        let first = polygon[index] - origin
+        let second = polygon[index + 1] - origin
+        twiceArea += first.x * second.y - first.y * second.x
+    }
+    return twiceArea * 0.5
+}
+
+private extension SIMD2 where Scalar == Float {
+    var isFinite: Bool {
+        x.isFinite && y.isFinite
+    }
+}
+
 private extension AxisAlignedRect {
     func containsClosed(_ point: SIMD2<Float>) -> Bool {
         point.x >= minimum.x
@@ -662,6 +855,91 @@ private func runRadiusValidationSubprocess()
         as: UTF8.self
     )
     return (process.terminationStatus, errorOutput)
+}
+
+private func runFootprintAffineValidationSubprocess(
+    for validationCase: String
+) throws -> (status: Int32, standardError: String) {
+    let testExecutablePath = projectionTestExecutablePath()
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.arguments = [
+        "--test-bundle-path", testExecutablePath,
+        "--filter", "footprintAffineValidationRunsBeforeProjectionInSubprocesses",
+        testExecutablePath,
+        "--testing-library", "swift-testing",
+    ]
+    process.environment = ProcessInfo.processInfo.environment.merging(
+        ["PATTERN_ENGINE_FOOTPRINT_AFFINE_CASE": validationCase],
+        uniquingKeysWith: { _, new in new }
+    )
+    process.standardOutput = FileHandle.nullDevice
+    let standardError = Pipe()
+    process.standardError = standardError
+
+    try process.run()
+    process.waitUntilExit()
+    let errorOutput = String(
+        decoding: standardError.fileHandleForReading.readDataToEndOfFile(),
+        as: UTF8.self
+    )
+    return (process.terminationStatus, errorOutput)
+}
+
+private func exerciseFootprintAffineValidation(named validationCase: String) {
+    let affine: Affine2D
+    switch validationCase {
+    case "axisCollapsed":
+        affine = Affine2D(
+            xAxis: SIMD2(0, 8),
+            yAxis: SIMD2(0, 4),
+            translation: SIMD2(32, 32)
+        )
+    case "singular":
+        affine = Affine2D(
+            xAxis: SIMD2(8, 8),
+            yAxis: SIMD2(4, 4),
+            translation: SIMD2(32, 32)
+        )
+    case "axisCollapsedY":
+        affine = Affine2D(
+            xAxis: SIMD2(8, 0),
+            yAxis: SIMD2(4, 0),
+            translation: SIMD2(32, 32)
+        )
+    case "identitySurvivor":
+        affine = Affine2D(
+            xAxis: SIMD2(8, 0),
+            yAxis: SIMD2(0, 8),
+            translation: SIMD2(32, 32)
+        )
+    case "rotatedSurvivor":
+        affine = Affine2D(
+            xAxis: SIMD2(0, 8),
+            yAxis: SIMD2(-8, 0),
+            translation: SIMD2(32, 32)
+        )
+    default:
+        preconditionFailure(
+            "Unknown footprint affine validation case: \(validationCase)"
+        )
+    }
+
+    let fragments = TilingProjection.fragments(
+        for: StampFootprint(
+            brushToWorld: affine,
+            localBounds: normalizedBrushBounds,
+            coverageSymmetry: .oriented
+        ),
+        using: TilingStrategy(
+            kind: .grid,
+            tileSize: PatternSize(width: 64, height: 64)
+        )
+    )
+    precondition(
+        !fragments.isEmpty,
+        "Valid footprint affine must survive projection"
+    )
 }
 
 private func projectionTestExecutablePath() -> String {

@@ -428,36 +428,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func appendWorldDab(_ point: WorldPoint) throws {
-        let radius = TilingProjection.clampedRadius(
-            requested: GridCanvasContract.brushRadius,
+        let instances = LegacyGridDabBridge.instances(
+            center: point,
+            radius: GridCanvasContract.brushRadius,
             tileSize: tileSize
-        )
-        let footprint = StampFootprint(
-            brushToWorld: Affine2D(
-                xAxis: SIMD2(radius, 0),
-                yAxis: SIMD2(0, radius),
-                translation: point.simd
-            ),
-            localBounds: AxisAlignedRect(
-                minimum: SIMD2(-1, -1),
-                maximum: SIMD2(1, 1)
-            ),
-            coverageSymmetry: .halfTurnInvariant
-        )
-        let fragments = TilingProjection.fragments(
-            for: footprint,
-            using: TilingStrategy(kind: .grid, tileSize: tileSize)
         )
         counters.newDabsThisEvent += 1
         counters.totalDabsThisStroke += 1
-        for fragment in fragments {
-            try liveStroke.append(
-                PatternDabInstance(
-                    center: fragment.canonicalFromBrush.translation,
-                    radius: radius,
-                    padding: 0
-                )
-            )
+        for instance in instances {
+            try liveStroke.append(instance)
             counters.totalInstancesThisStroke += 1
         }
     }

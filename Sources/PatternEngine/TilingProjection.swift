@@ -43,6 +43,7 @@ public enum TilingProjection {
         for footprint: StampFootprint,
         using strategy: TilingStrategy
     ) -> [CellFragment] {
+        validateBrushToWorld(footprint.brushToWorld)
         let worldCorners = footprint.localBounds.corners.map {
             footprint.brushToWorld.applying(to: $0)
         }
@@ -67,7 +68,7 @@ public enum TilingProjection {
             let localPolygon = planes.reduce(
                 footprint.localBounds.corners
             ) { polygon, plane in
-                clip(polygon, to: plane)
+                clipPolygon(polygon, to: plane)
             }
             guard localPolygon.count >= 3 else {
                 continue
@@ -108,6 +109,38 @@ public enum TilingProjection {
         }
         return candidates.map(\.fragment)
     }
+
+    static func clipPolygon(
+        _ polygon: [SIMD2<Float>],
+        to plane: HalfPlane2D
+    ) -> [SIMD2<Float>] {
+        clip(polygon, to: plane)
+    }
+}
+
+private func validateBrushToWorld(_ affine: Affine2D) {
+    let xRowLength = simd_length(
+        SIMD2(affine.xAxis.x, affine.yAxis.x)
+    )
+    precondition(
+        xRowLength.isFinite && xRowLength > 0,
+        "TilingProjection brush-to-world x row must be finite and nonzero"
+    )
+
+    let yRowLength = simd_length(
+        SIMD2(affine.xAxis.y, affine.yAxis.y)
+    )
+    precondition(
+        yRowLength.isFinite && yRowLength > 0,
+        "TilingProjection brush-to-world y row must be finite and nonzero"
+    )
+
+    let determinant = affine.xAxis.x * affine.yAxis.y
+        - affine.xAxis.y * affine.yAxis.x
+    precondition(
+        determinant.isFinite && abs(determinant) >= Float.ulpOfOne,
+        "TilingProjection brush-to-world determinant must be finite and nonsingular"
+    )
 }
 
 private struct FragmentCandidate {
@@ -237,49 +270,89 @@ private func clip(
     _ polygon: [SIMD2<Float>],
     to plane: HalfPlane2D
 ) -> [SIMD2<Float>] {
-    guard let last = polygon.last else {
+    let vertices = polygon.map {
+        ClipVertex(
+            point: $0,
+            distance: signedDistance(from: $0, to: plane)
+        )
+    }
+    guard let last = vertices.last else {
         return []
     }
 
     var result: [SIMD2<Float>] = []
     result.reserveCapacity(polygon.count + 1)
-    var start = last
-    var startInside = plane.contains(start, tolerance: 0)
+    var start = last.point
+    var startDistance = last.distance
+    var startInside = last.distance >= 0
 
-    for end in polygon {
-        let endInside = plane.contains(end, tolerance: 0)
+    for vertex in vertices {
+        let end = vertex.point
+        let endDistance = vertex.distance
+        let endInside = endDistance >= 0
         if endInside {
             if !startInside {
-                result.append(intersection(from: start, to: end, with: plane))
+                result.append(
+                    intersection(
+                        from: start,
+                        to: end,
+                        startDistance: startDistance,
+                        endDistance: endDistance
+                    )
+                )
             }
             result.append(end)
         } else if startInside {
-            result.append(intersection(from: start, to: end, with: plane))
+            result.append(
+                intersection(
+                    from: start,
+                    to: end,
+                    startDistance: startDistance,
+                    endDistance: endDistance
+                )
+            )
         }
         start = end
+        startDistance = endDistance
         startInside = endInside
     }
     return result
 }
 
+private struct ClipVertex {
+    let point: SIMD2<Float>
+    let distance: Float
+}
+
+private func signedDistance(
+    from point: SIMD2<Float>,
+    to plane: HalfPlane2D
+) -> Float {
+    let distance = simd_dot(plane.normal, point) - plane.offset
+    precondition(
+        distance.isFinite,
+        "TilingProjection clip endpoint distance must be finite"
+    )
+    return distance
+}
+
 private func intersection(
     from start: SIMD2<Float>,
     to end: SIMD2<Float>,
-    with plane: HalfPlane2D
+    startDistance: Float,
+    endDistance: Float
 ) -> SIMD2<Float> {
-    let direction = end - start
-    let denominator = simd_dot(plane.normal, direction)
+    let denominator = startDistance - endDistance
     precondition(
         denominator.isFinite && denominator != 0,
-        "TilingProjection clip intersection must be finite and nonparallel"
+        "TilingProjection clip distance denominator must be finite and nonzero"
     )
-    let distance = plane.offset - simd_dot(plane.normal, start)
-    let parameter = distance / denominator
+    let parameter = startDistance / denominator
     precondition(
         parameter.isFinite,
         "TilingProjection clip parameter must be finite"
     )
-    return start + direction * parameter
+    return start + (end - start) * parameter
 }
 
 private func signedArea(of polygon: [SIMD2<Float>]) -> Float {
