@@ -661,6 +661,115 @@ struct TilingCoverageOracleTests {
     }
 
     @Test
+    func rotatedAndReflectedMultiCellRoundsMatchFullProductionBrushBuffers() {
+        let tileSize = PixelSize(width: 64, height: 64)
+        let cases: [
+            (testCase: OraclePropertyCase, expectedFragmentCount: Int)
+        ] = [
+            (
+                OraclePropertyCase(
+                    name: "rotated radius-63 centered in tile",
+                    footprint: .hardRound(radius: 63),
+                    brushToWorld: Affine2D(
+                        xAxis: SIMD2(0.8, 0.6),
+                        yAxis: SIMD2(-0.6, 0.8),
+                        translation: SIMD2(32, 32)
+                    ),
+                    tileSize: tileSize,
+                    tiling: .rotational,
+                    supersampling: 1
+                ),
+                12
+            ),
+            (
+                OraclePropertyCase(
+                    name: "rotated radius-63 centered on cell corner",
+                    footprint: .hardRound(radius: 63),
+                    brushToWorld: Affine2D(
+                        xAxis: SIMD2(0.8, 0.6),
+                        yAxis: SIMD2(-0.6, 0.8),
+                        translation: SIMD2(0, 0)
+                    ),
+                    tileSize: tileSize,
+                    tiling: .rotational,
+                    supersampling: 1
+                ),
+                15
+            ),
+            (
+                OraclePropertyCase(
+                    name: "reflected radius-63 centered in tile",
+                    footprint: .hardRound(radius: 63),
+                    brushToWorld: Affine2D(
+                        xAxis: SIMD2(-0.8, 0.6),
+                        yAxis: SIMD2(0.6, 0.8),
+                        translation: SIMD2(32, 32)
+                    ),
+                    tileSize: tileSize,
+                    tiling: .rotational,
+                    supersampling: 1
+                ),
+                12
+            ),
+            (
+                OraclePropertyCase(
+                    name: "reflected radius-63 centered on cell corner",
+                    footprint: .hardRound(radius: 63),
+                    brushToWorld: Affine2D(
+                        xAxis: SIMD2(-0.8, 0.6),
+                        yAxis: SIMD2(0.6, 0.8),
+                        translation: SIMD2(0, 0)
+                    ),
+                    tileSize: tileSize,
+                    tiling: .rotational,
+                    supersampling: 1
+                ),
+                15
+            ),
+        ]
+
+        for entry in cases {
+            let testCase = entry.testCase
+            let fragments = productionFragments(for: testCase)
+            #expect(
+                fragments.count == entry.expectedFragmentCount,
+                "\(testCase.name): retained fragments"
+            )
+            let expected = TilingCoverageOracle.renderCanonical(
+                footprint: testCase.footprint,
+                brushToWorld: testCase.brushToWorld,
+                tileSize: tileSize,
+                tiling: .rotational,
+                supersampling: 1
+            )
+            let actual = rasterizeProductionFragments(testCase)
+            let repeated = TilingCoverageOracle.renderCanonical(
+                footprint: testCase.footprint,
+                brushToWorld: testCase.brushToWorld,
+                tileSize: tileSize,
+                tiling: .rotational,
+                supersampling: 1
+            )
+
+            #expect(expected == repeated, "\(testCase.name): deterministic")
+            #expect(
+                maximumByteDelta(
+                    expected.coverage.bytes,
+                    actual.coverage.bytes
+                ) == 0,
+                "\(testCase.name): coverage"
+            )
+            #expect(
+                maximumByteDelta(
+                    expected.brushLocalCoordinatesBGRA,
+                    actual.brushLocalCoordinatesBGRA
+                ) <= 1,
+                "\(testCase.name): full brush buffer"
+            )
+        }
+    }
+
+    @Test
     func rotatedLargeCoordinatesMatchFullProductionBrushBuffers() {
         let tileSize = PixelSize(width: 64, height: 96)
         let cases = [

@@ -996,10 +996,10 @@ private func directCoverageDomainKey(
         centerX: normalizedZeroBitPattern(canonicalCenter.x),
         centerY: normalizedZeroBitPattern(canonicalCenter.y),
         xAxisLength: normalizedZeroBitPattern(
-            vectorMagnitude(canonicalXAxis)
+            directCoverageMagnitude(canonicalXAxis)
         ),
         yAxisLength: normalizedZeroBitPattern(
-            vectorMagnitude(canonicalYAxis)
+            directCoverageMagnitude(canonicalYAxis)
         ),
         polygon: directCanonicalPolygonKey(canonicalPolygon)
     )
@@ -1056,7 +1056,7 @@ private func directBrushLocalPlane(
         simd_dot(worldNormal, yAxis)
     )
     let unscaledOffset = worldOffset - simd_dot(worldNormal, translation)
-    let length = vectorMagnitude(unscaledNormal)
+    let length = directCoverageMagnitude(unscaledNormal)
     precondition(
         length.isFinite && length > 0 && unscaledOffset.isFinite,
         "TilingCoverageOracle mapped cell plane must be finite and nonzero"
@@ -1065,6 +1065,14 @@ private func directBrushLocalPlane(
         normal: unscaledNormal / length,
         offset: unscaledOffset / length
     )
+}
+
+private func directCoverageMagnitude(_ value: SIMD2<Float>) -> Float {
+    let ordinary = simd_length(value)
+    if ordinary == 0 && (value.x != 0 || value.y != 0) {
+        return vectorMagnitude(value)
+    }
+    return ordinary
 }
 
 private func clipDirectLocalPolygon(
