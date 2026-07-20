@@ -280,9 +280,49 @@ private struct DirectCandidate {
     let imageOrdinal: UInt8
 }
 
-private struct DirectCoverageCenterKey: Hashable {
-    let x: UInt32
-    let y: UInt32
+private struct DirectCoverageDomainKey: Hashable {
+    let centerX: UInt32
+    let centerY: UInt32
+    let xAxisLength: UInt32
+    let yAxisLength: UInt32
+    let polygon: [UInt32]
+}
+
+private struct DirectCanonicalVertex: Equatable {
+    let x: Float
+    let y: Float
+
+    init(_ point: SIMD2<Float>) {
+        x = point.x == 0 ? 0 : point.x
+        y = point.y == 0 ? 0 : point.y
+    }
+}
+
+private struct DirectLocalPlane {
+    let normal: SIMD2<Float>
+    let offset: Float
+}
+
+private struct PreciseBrushInverse {
+    let firstRow: SIMD2<Double>
+    let secondRow: SIMD2<Double>
+    let worldTranslation: SIMD2<Double>
+
+    func applying(to world: SIMD2<Float>) -> SIMD2<Float> {
+        let delta = SIMD2(
+            Double(world.x) - worldTranslation.x,
+            Double(world.y) - worldTranslation.y
+        )
+        let localX = firstRow.x * delta.x + firstRow.y * delta.y
+        let localY = secondRow.x * delta.x + secondRow.y * delta.y
+        let local = SIMD2(Float(localX), Float(localY))
+        precondition(
+            localX.isFinite && localY.isFinite
+                && local.x.isFinite && local.y.isFinite,
+            "TilingCoverageOracle inverse transform must be finite"
+        )
+        return local
+    }
 }
 
 private func checkedPixelArea(
@@ -428,7 +468,9 @@ private func validateTransformedFootprint(
     }
 }
 
-private func invertedBrushTransform(_ affine: Affine2D) -> Affine2D {
+private func invertedBrushTransform(
+    _ affine: Affine2D
+) -> PreciseBrushInverse {
     let firstX = Double(affine.xAxis.x)
     let firstY = Double(affine.xAxis.y)
     let secondX = Double(affine.yAxis.x)
@@ -438,41 +480,31 @@ private func invertedBrushTransform(_ affine: Affine2D) -> Affine2D {
         determinant.isFinite && determinant != 0,
         "TilingCoverageOracle inverse transform must be finite"
     )
-    let inverseFirstX = secondY / determinant
-    let inverseFirstY = -firstY / determinant
-    let inverseSecondX = -secondX / determinant
-    let inverseSecondY = firstX / determinant
-    let inverseTranslationX = -(
-        inverseFirstX * Double(affine.translation.x)
-            + inverseSecondX * Double(affine.translation.y)
+    let firstRow = SIMD2(
+        secondY / determinant,
+        -secondX / determinant
     )
-    let inverseTranslationY = -(
-        inverseFirstY * Double(affine.translation.x)
-            + inverseSecondY * Double(affine.translation.y)
+    let secondRow = SIMD2(
+        -firstY / determinant,
+        firstX / determinant
     )
-    let inverseXAxis = SIMD2(
-        Float(inverseFirstX),
-        Float(inverseFirstY)
-    )
-    let inverseYAxis = SIMD2(
-        Float(inverseSecondX),
-        Float(inverseSecondY)
-    )
-    let inverseTranslation = SIMD2(
-        Float(inverseTranslationX),
-        Float(inverseTranslationY)
-    )
+    let maximumFloat = Double(Float.greatestFiniteMagnitude)
     precondition(
-        inverseXAxis.x.isFinite && inverseXAxis.y.isFinite
-            && inverseYAxis.x.isFinite && inverseYAxis.y.isFinite
-            && inverseTranslation.x.isFinite
-            && inverseTranslation.y.isFinite,
+        firstRow.x.isFinite && firstRow.y.isFinite
+            && secondRow.x.isFinite && secondRow.y.isFinite
+            && abs(firstRow.x) <= maximumFloat
+            && abs(firstRow.y) <= maximumFloat
+            && abs(secondRow.x) <= maximumFloat
+            && abs(secondRow.y) <= maximumFloat,
         "TilingCoverageOracle inverse transform must be finite"
     )
-    return Affine2D(
-        xAxis: inverseXAxis,
-        yAxis: inverseYAxis,
-        translation: inverseTranslation
+    return PreciseBrushInverse(
+        firstRow: firstRow,
+        secondRow: secondRow,
+        worldTranslation: SIMD2(
+            Double(affine.translation.x),
+            Double(affine.translation.y)
+        )
     )
 }
 
@@ -804,7 +836,7 @@ private func brushCoordinateSums(
     candidateCells: Set<DirectCell>,
     footprint: OracleFootprint,
     brushToWorld: Affine2D,
-    worldToBrush: Affine2D,
+    worldToBrush: PreciseBrushInverse,
     tileSize: PixelSize,
     tiling: TilingKind,
     supersampling: Int
@@ -885,30 +917,282 @@ private func directCandidates(
     guard tiling == .rotational, case .hardRound = footprint else {
         return candidates
     }
-    var seenCenters: Set<DirectCoverageCenterKey> = []
+    var seenDomains: Set<DirectCoverageDomainKey> = []
     return candidates.filter { candidate in
-        let origin = directCellOrigin(
-            candidate.cell,
+        let key = directCoverageDomainKey(
+            candidate,
+            footprint: footprint,
+            brushToWorld: brushToWorld,
             tileSize: tileSize,
             tiling: tiling
         )
-        let canonicalCenter: SIMD2<Float>
-        if candidate.imageOrdinal == 0 {
-            canonicalCenter = brushToWorld.translation - origin
-        } else {
-            canonicalCenter = origin
-                + SIMD2(
-                    Float(tileSize.width),
-                    Float(tileSize.height)
-                )
-                - brushToWorld.translation
-        }
-        let key = DirectCoverageCenterKey(
-            x: normalizedZeroBitPattern(canonicalCenter.x),
-            y: normalizedZeroBitPattern(canonicalCenter.y)
-        )
-        return seenCenters.insert(key).inserted
+        return seenDomains.insert(key).inserted
     }
+}
+
+private func directCoverageDomainKey(
+    _ candidate: DirectCandidate,
+    footprint: OracleFootprint,
+    brushToWorld: Affine2D,
+    tileSize: PixelSize,
+    tiling: TilingKind
+) -> DirectCoverageDomainKey {
+    guard case let .hardRound(radius) = footprint else {
+        preconditionFailure(
+            "TilingCoverageOracle coverage-domain keys require a hard round"
+        )
+    }
+    let origin = directCellOrigin(
+        candidate.cell,
+        tileSize: tileSize,
+        tiling: tiling
+    )
+    let tile = SIMD2(
+        Float(tileSize.width),
+        Float(tileSize.height)
+    )
+    let scaledXAxis = brushToWorld.xAxis * radius
+    let scaledYAxis = brushToWorld.yAxis * radius
+    let localPolygon = directBrushLocalPlanes(
+        origin: origin,
+        tile: tile,
+        xAxis: scaledXAxis,
+        yAxis: scaledYAxis,
+        translation: brushToWorld.translation
+    ).reduce(
+        [
+            SIMD2<Float>(-1, -1),
+            SIMD2<Float>(1, -1),
+            SIMD2<Float>(1, 1),
+            SIMD2<Float>(-1, 1),
+        ]
+    ) { polygon, plane in
+        clipDirectLocalPolygon(polygon, to: plane)
+    }
+    let worldToCanonicalXAxis: SIMD2<Float>
+    let worldToCanonicalYAxis: SIMD2<Float>
+    let worldToCanonicalTranslation: SIMD2<Float>
+    if candidate.imageOrdinal == 0 {
+        worldToCanonicalXAxis = SIMD2(1, 0)
+        worldToCanonicalYAxis = SIMD2(0, 1)
+        worldToCanonicalTranslation = -origin
+    } else {
+        worldToCanonicalXAxis = SIMD2(-1, 0)
+        worldToCanonicalYAxis = SIMD2(0, -1)
+        worldToCanonicalTranslation = origin + tile
+    }
+    let canonicalXAxis = worldToCanonicalXAxis * scaledXAxis.x
+        + worldToCanonicalYAxis * scaledXAxis.y
+    let canonicalYAxis = worldToCanonicalXAxis * scaledYAxis.x
+        + worldToCanonicalYAxis * scaledYAxis.y
+    let canonicalCenter = worldToCanonicalXAxis
+        * brushToWorld.translation.x
+        + worldToCanonicalYAxis * brushToWorld.translation.y
+        + worldToCanonicalTranslation
+    let canonicalPolygon = localPolygon.map {
+        canonicalXAxis * $0.x + canonicalYAxis * $0.y + canonicalCenter
+    }
+    return DirectCoverageDomainKey(
+        centerX: normalizedZeroBitPattern(canonicalCenter.x),
+        centerY: normalizedZeroBitPattern(canonicalCenter.y),
+        xAxisLength: normalizedZeroBitPattern(
+            vectorMagnitude(canonicalXAxis)
+        ),
+        yAxisLength: normalizedZeroBitPattern(
+            vectorMagnitude(canonicalYAxis)
+        ),
+        polygon: directCanonicalPolygonKey(canonicalPolygon)
+    )
+}
+
+private func directBrushLocalPlanes(
+    origin: SIMD2<Float>,
+    tile: SIMD2<Float>,
+    xAxis: SIMD2<Float>,
+    yAxis: SIMD2<Float>,
+    translation: SIMD2<Float>
+) -> [DirectLocalPlane] {
+    [
+        directBrushLocalPlane(
+            worldNormal: SIMD2(1, 0),
+            worldOffset: origin.x,
+            xAxis: xAxis,
+            yAxis: yAxis,
+            translation: translation
+        ),
+        directBrushLocalPlane(
+            worldNormal: SIMD2(-1, 0),
+            worldOffset: -(origin.x + tile.x),
+            xAxis: xAxis,
+            yAxis: yAxis,
+            translation: translation
+        ),
+        directBrushLocalPlane(
+            worldNormal: SIMD2(0, 1),
+            worldOffset: origin.y,
+            xAxis: xAxis,
+            yAxis: yAxis,
+            translation: translation
+        ),
+        directBrushLocalPlane(
+            worldNormal: SIMD2(0, -1),
+            worldOffset: -(origin.y + tile.y),
+            xAxis: xAxis,
+            yAxis: yAxis,
+            translation: translation
+        ),
+    ]
+}
+
+private func directBrushLocalPlane(
+    worldNormal: SIMD2<Float>,
+    worldOffset: Float,
+    xAxis: SIMD2<Float>,
+    yAxis: SIMD2<Float>,
+    translation: SIMD2<Float>
+) -> DirectLocalPlane {
+    let unscaledNormal = SIMD2<Float>(
+        simd_dot(worldNormal, xAxis),
+        simd_dot(worldNormal, yAxis)
+    )
+    let unscaledOffset = worldOffset - simd_dot(worldNormal, translation)
+    let length = vectorMagnitude(unscaledNormal)
+    precondition(
+        length.isFinite && length > 0 && unscaledOffset.isFinite,
+        "TilingCoverageOracle mapped cell plane must be finite and nonzero"
+    )
+    return DirectLocalPlane(
+        normal: unscaledNormal / length,
+        offset: unscaledOffset / length
+    )
+}
+
+private func clipDirectLocalPolygon(
+    _ polygon: [SIMD2<Float>],
+    to plane: DirectLocalPlane
+) -> [SIMD2<Float>] {
+    let distances = polygon.map {
+        let distance = simd_dot(plane.normal, $0) - plane.offset
+        precondition(
+            distance.isFinite,
+            "TilingCoverageOracle clip endpoint distance must be finite"
+        )
+        return distance
+    }
+    guard let lastPoint = polygon.last, let lastDistance = distances.last else {
+        return []
+    }
+    var result: [SIMD2<Float>] = []
+    var start = lastPoint
+    var startDistance = lastDistance
+    var startInside = startDistance >= 0
+
+    for (end, endDistance) in zip(polygon, distances) {
+        let endInside = endDistance >= 0
+        if endInside {
+            if !startInside {
+                result.append(
+                    directClipIntersection(
+                        start: start,
+                        end: end,
+                        startDistance: startDistance,
+                        endDistance: endDistance
+                    )
+                )
+            }
+            result.append(end)
+        } else if startInside {
+            result.append(
+                directClipIntersection(
+                    start: start,
+                    end: end,
+                    startDistance: startDistance,
+                    endDistance: endDistance
+                )
+            )
+        }
+        start = end
+        startDistance = endDistance
+        startInside = endInside
+    }
+    return result
+}
+
+private func directClipIntersection(
+    start: SIMD2<Float>,
+    end: SIMD2<Float>,
+    startDistance: Float,
+    endDistance: Float
+) -> SIMD2<Float> {
+    let denominator = startDistance - endDistance
+    precondition(
+        denominator.isFinite && denominator != 0,
+        "TilingCoverageOracle clip distance denominator must be finite and nonzero"
+    )
+    let parameter = startDistance / denominator
+    precondition(
+        parameter.isFinite,
+        "TilingCoverageOracle clip parameter must be finite"
+    )
+    return start + (end - start) * parameter
+}
+
+private func directCanonicalPolygonKey(
+    _ polygon: [SIMD2<Float>]
+) -> [UInt32] {
+    var vertices = polygon.map(DirectCanonicalVertex.init)
+    vertices = removingDirectConsecutiveDuplicates(vertices)
+    guard !vertices.isEmpty else {
+        return []
+    }
+
+    var best: [DirectCanonicalVertex]?
+    for orientation in [vertices, Array(vertices.reversed())] {
+        for startIndex in orientation.indices {
+            let rotated = Array(
+                orientation[startIndex...] + orientation[..<startIndex]
+            )
+            if best == nil || directVerticesPrecede(rotated, best!) {
+                best = rotated
+            }
+        }
+    }
+    return best!.flatMap { [$0.x.bitPattern, $0.y.bitPattern] }
+}
+
+private func removingDirectConsecutiveDuplicates(
+    _ vertices: [DirectCanonicalVertex]
+) -> [DirectCanonicalVertex] {
+    var result: [DirectCanonicalVertex] = []
+    for vertex in vertices where result.last != vertex {
+        result.append(vertex)
+    }
+    if result.count > 1 && result.first == result.last {
+        result.removeLast()
+    }
+    return result
+}
+
+private func directVerticesPrecede(
+    _ lhs: [DirectCanonicalVertex],
+    _ rhs: [DirectCanonicalVertex]
+) -> Bool {
+    for (left, right) in zip(lhs, rhs) {
+        if left.x != right.x {
+            return directFloatPrecedes(left.x, right.x)
+        }
+        if left.y != right.y {
+            return directFloatPrecedes(left.y, right.y)
+        }
+    }
+    return lhs.count < rhs.count
+}
+
+private func directFloatPrecedes(_ lhs: Float, _ rhs: Float) -> Bool {
+    if lhs != rhs {
+        return lhs < rhs
+    }
+    return lhs.bitPattern < rhs.bitPattern
 }
 
 private func normalizedZeroBitPattern(_ value: Float) -> UInt32 {

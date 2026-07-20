@@ -603,6 +603,121 @@ struct TilingCoverageOracleTests {
     }
 
     @Test
+    func rotationalMultiCellHardRoundsMatchFullProductionBrushBuffers() {
+        let tileSize = PixelSize(width: 64, height: 64)
+        let cases = [
+            OraclePropertyCase(
+                name: "radius-63 rotational hard-round",
+                footprint: .hardRound(radius: 63),
+                brushToWorld: unitTransform(center: SIMD2(32, 32)),
+                tileSize: tileSize,
+                tiling: .rotational,
+                supersampling: 1
+            ),
+            OraclePropertyCase(
+                name: "maximum rotational hard-round",
+                footprint: .hardRound(radius: 256),
+                brushToWorld: unitTransform(center: SIMD2(32, 32)),
+                tileSize: tileSize,
+                tiling: .rotational,
+                supersampling: 1
+            ),
+        ]
+        #expect(productionFragments(for: cases[0]).count == 14)
+
+        for testCase in cases {
+            let expected = TilingCoverageOracle.renderCanonical(
+                footprint: testCase.footprint,
+                brushToWorld: testCase.brushToWorld,
+                tileSize: tileSize,
+                tiling: .rotational,
+                supersampling: 1
+            )
+            let actual = rasterizeProductionFragments(testCase)
+            let repeated = TilingCoverageOracle.renderCanonical(
+                footprint: testCase.footprint,
+                brushToWorld: testCase.brushToWorld,
+                tileSize: tileSize,
+                tiling: .rotational,
+                supersampling: 1
+            )
+
+            #expect(expected == repeated, "\(testCase.name): deterministic")
+            #expect(
+                maximumByteDelta(
+                    expected.coverage.bytes,
+                    actual.coverage.bytes
+                ) == 0,
+                "\(testCase.name): coverage"
+            )
+            #expect(
+                maximumByteDelta(
+                    expected.brushLocalCoordinatesBGRA,
+                    actual.brushLocalCoordinatesBGRA
+                ) <= 1,
+                "\(testCase.name): full brush buffer"
+            )
+        }
+    }
+
+    @Test
+    func rotatedLargeCoordinatesMatchFullProductionBrushBuffers() {
+        let tileSize = PixelSize(width: 64, height: 96)
+        let cases = [
+            OraclePropertyCase(
+                name: "positive-x negative-y rotated hard-round",
+                footprint: .hardRound(radius: 6),
+                brushToWorld: Affine2D(
+                    xAxis: SIMD2(0.8, 0.6),
+                    yAxis: SIMD2(-0.6, 0.8),
+                    translation: SIMD2(640_000, -640_000)
+                ),
+                tileSize: tileSize,
+                tiling: .grid,
+                supersampling: 2
+            ),
+            OraclePropertyCase(
+                name: "negative-x positive-y rotated hard-round",
+                footprint: .hardRound(radius: 6),
+                brushToWorld: Affine2D(
+                    xAxis: SIMD2(-0.8, 0.6),
+                    yAxis: SIMD2(0.6, 0.8),
+                    translation: SIMD2(-640_000, 640_000)
+                ),
+                tileSize: tileSize,
+                tiling: .rotational,
+                supersampling: 2
+            ),
+        ]
+
+        for testCase in cases {
+            let expected = TilingCoverageOracle.renderCanonical(
+                footprint: testCase.footprint,
+                brushToWorld: testCase.brushToWorld,
+                tileSize: tileSize,
+                tiling: testCase.tiling,
+                supersampling: testCase.supersampling
+            )
+            let actual = rasterizeProductionFragments(testCase)
+
+            #expect(
+                maximumByteDelta(
+                    expected.coverage.bytes,
+                    actual.coverage.bytes
+                ) == 0,
+                "\(testCase.name): coverage"
+            )
+            #expect(
+                maximumByteDelta(
+                    expected.brushLocalCoordinatesBGRA,
+                    actual.brushLocalCoordinatesBGRA
+                ) <= 1,
+                "\(testCase.name): full brush buffer"
+            )
+        }
+    }
+
+    @Test
     func propertyHarnessNegativeControlsDetectCoverageAndDiagnosticCorruption() {
         let testCase = oraclePropertyMatrix.first {
             $0.name == "grid interior"
@@ -709,6 +824,7 @@ struct TilingCoverageOracleTests {
         for survivor in [
             "uniformSmallScale",
             "uniformSubnormalScale",
+            "rotationalUniformSubnormalScale",
             "rotatedMaximumFootprint",
         ] {
             let result = try runOracleValidationSubprocess(for: survivor)
@@ -951,18 +1067,7 @@ private func fullyCoveredPixels(
 private func rasterizeProductionFragments(
     _ testCase: OraclePropertyCase
 ) -> OracleRasterResult {
-    let setup = productionFootprint(for: testCase)
-    let strategy = TilingStrategy(
-        kind: testCase.tiling,
-        tileSize: PatternSize(
-            width: Float(testCase.tileSize.width),
-            height: Float(testCase.tileSize.height)
-        )
-    )
-    let fragments = TilingProjection.fragments(
-        for: setup.footprint,
-        using: strategy
-    )
+    let fragments = productionFragments(for: testCase)
     let inverseFragments = fragments.map {
         ProductionFragmentSample(
             canonicalToBrush: $0.canonicalFromBrush.inverted(),
@@ -1071,6 +1176,23 @@ private func rasterizeProductionFragments(
         ),
         canonicalCoordinatesBGRA: canonicalBGRA,
         brushLocalCoordinatesBGRA: brushBGRA
+    )
+}
+
+private func productionFragments(
+    for testCase: OraclePropertyCase
+) -> [CellFragment] {
+    let setup = productionFootprint(for: testCase)
+    let strategy = TilingStrategy(
+        kind: testCase.tiling,
+        tileSize: PatternSize(
+            width: Float(testCase.tileSize.width),
+            height: Float(testCase.tileSize.height)
+        )
+    )
+    return TilingProjection.fragments(
+        for: setup.footprint,
+        using: strategy
     )
 }
 
@@ -1345,6 +1467,37 @@ private func exerciseOracleValidation(named validationCase: String) {
             ) == [0, 128, 128, 255],
             "Uniform subnormal scale must preserve finite diagnostics"
         )
+    case "rotationalUniformSubnormalScale":
+        let result = validatedOracleRender(
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(1e-30, 0),
+                yAxis: SIMD2(0, 1e-30),
+                translation: SIMD2(0.5, 0.5)
+            ),
+            tiling: .rotational
+        )
+        precondition(
+            result.coverage.bytes.reduce(0, { $0 + Int($1) }) == 510,
+            "Rotational subnormal scale must cover two p2 samples"
+        )
+        precondition(
+            diagnosticPixel(
+                result.brushLocalCoordinatesBGRA,
+                x: 0,
+                y: 0,
+                width: validSize.width
+            ) == [0, 128, 128, 255],
+            "Rotational subnormal scale must preserve identity diagnostics"
+        )
+        precondition(
+            diagnosticPixel(
+                result.brushLocalCoordinatesBGRA,
+                x: 63,
+                y: 95,
+                width: validSize.width
+            ) == [0, 128, 128, 255],
+            "Rotational subnormal scale must preserve half-turn diagnostics"
+        )
     case "rotatedMaximumFootprint":
         let diagonal = Float(0.5).squareRoot()
         let result = validatedOracleRender(
@@ -1386,13 +1539,14 @@ private func validatedOracleRender(
     footprint: OracleFootprint = .hardRound(radius: 1),
     brushToWorld: Affine2D = .identity,
     tileSize: PixelSize = PixelSize(width: 64, height: 96),
+    tiling: TilingKind = .grid,
     supersampling: Int = 1
 ) -> OracleRasterResult {
     TilingCoverageOracle.renderCanonical(
         footprint: footprint,
         brushToWorld: brushToWorld,
         tileSize: tileSize,
-        tiling: .grid,
+        tiling: tiling,
         supersampling: supersampling
     )
 }
