@@ -1,7 +1,7 @@
 # Generalized Seam-Correct Tiling Design
 
 **Date:** 2026-07-20
-**Status:** Draft — awaiting written-spec approval
+**Status:** Approved
 **Slice:** 2
 **Parent specification:**
 `2026-07-18-pattern-product-rebuild-design.md`
@@ -298,22 +298,36 @@ images deterministically. `displayFold(_:)` and image transforms are tested
 against one another at boundaries, negative coordinates, parity changes, and
 large indices.
 
+`TilingStrategy` construction validates that both tile dimensions are finite
+integers in `64...4096`. Invalid strategy geometry fails before any fold or
+projection call; renderer-facing invalid dimensions additionally surface as
+the typed runtime error defined below.
+
 ### 5.3 Stamp footprint
 
 Projection consumes a conservative oriented footprint instead of a circle
 center:
 
 ```swift
+public enum FootprintCoverageSymmetry: UInt8, Equatable, Sendable {
+    case oriented
+    case halfTurnInvariant
+}
+
 public struct StampFootprint: Equatable, Sendable {
     public let brushToWorld: Affine2D
     public let localBounds: AxisAlignedRect
+    public let coverageSymmetry: FootprintCoverageSymmetry
 }
 ```
 
 The Slice 1 hard round uses a square local bound enclosing the circle.
 Diagnostic harness programs use an asymmetric oriented footprint to prove
 reflection, rotation, clipping, and brush-local continuity without shipping a
-new product brush.
+new product brush. The hard round declares `.halfTurnInvariant`; asymmetric
+coverage and coordinate diagnostics declare `.oriented`. This declaration is
+required to deduplicate p2 fixed-point coverage without incorrectly collapsing
+two opposite orientations of a future directional footprint.
 
 ### 5.4 Cell fragment
 
@@ -344,8 +358,15 @@ grain remain continuous across fragments.
 4. rejects images whose world bounds do not intersect the footprint bounds;
 5. maps each image's four boundaries into brush-local half-planes;
 6. emits one nonempty fragment per intersecting image;
-7. deduplicates equal transformed fragments;
+7. deduplicates equal transformed fragments and coverage-equivalent p2 fixed
+   images only when the footprint declares `.halfTurnInvariant`;
 8. sorts fragments by row, column, image ordinal, and transform.
+
+Nonempty means the transformed footprint quad and cell rectangle have a
+positive-area convex intersection, not merely overlapping axis-aligned
+bounds. Fixed-image deduplication compares canonical center, scale, and the
+canonicalized clipped coverage polygon. It never merges `.oriented`
+fragments merely because their centers match.
 
 The renderer clamps radius to
 `min(requestedRadius, 1000, 4 * min(tileWidth, tileHeight))` before creating a
@@ -457,6 +478,11 @@ app state. Its asymmetric coverage proves reflection and rotation orientation;
 the two coordinate modes prove that neither coordinate system resets or jumps
 across projected fragment seams. No product brush, grain asset, or material
 behavior enters Slice 2.
+
+Canonical-coordinate comparisons use circular channel distance so the valid
+normalized wrap from `255` to `0` is continuous modulo the tile. Brush-local
+coordinate comparisons use ordinary linear channel distance because
+brush-local coordinates must remain uninterrupted across fragments.
 
 ### 8.2 Display pass
 
