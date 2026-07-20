@@ -1,7 +1,7 @@
 # Generalized Seam-Correct Tiling Design
 
 **Date:** 2026-07-20
-**Status:** Approved
+**Status:** Draft — awaiting written-spec approval
 **Slice:** 2
 **Parent specification:**
 `2026-07-18-pattern-product-rebuild-design.md`
@@ -124,6 +124,9 @@ the rebuild delivery sequence.
 - Exact right and bottom boundaries belong to the next cell.
 - Positive modulo is used for negative and large world coordinates.
 - Tile width and height are independent values from `64...4096`.
+- Supported footprint diameter is
+  `2...min(2000, 8 * min(tileWidth, tileHeight))`; radius is half the
+  diameter. The interactive Slice 2 brush remains fixed at diameter `20`.
 - All production geometry uses `Float`; the oracle uses deterministic sample
   coordinates and explicit tolerances.
 - Cell indices use signed integers and remain stable for negative coordinates.
@@ -144,7 +147,7 @@ are already reserved in `ShaderTypes.h`:
 | mirror X | 3 | alternate X reflection |
 | mirror Y | 4 | alternate Y reflection |
 | mirror XY | 5 | independent alternating X/Y reflection |
-| rotational | 6 | alternate 180-degree cell rotation |
+| rotational | 6 | translation lattice plus tile-center 180° image |
 
 Raw values are append-only and must never be renumbered.
 
@@ -210,17 +213,25 @@ than folding only the stamp center.
 
 ### 4.5 Rotational
 
-Rotational tiling alternates cell orientation by checkerboard parity:
+The recovered documents pin the `p2` rotation center but do not define a
+checkerboard cell formula. Slice 2 therefore models the documented group
+directly instead of inventing parity:
 
 ```text
-rotated = parity(column + row) is odd
+translation generators = (width, 0), (0, height)
+rotation generator R(x, y) = (width - x, height - y)
 ```
 
-Rotated cells apply a 180-degree isometry around the cell center
-`(width / 2, height / 2)`. Tests verify fold consistency and the two-fold
-rotation centers. They do not assert mirror-style edge continuity, because
-`p2` continuity is defined by its rotational centers rather than reflection
-seams.
+`R` is the 180-degree isometry around `(width / 2, height / 2)`. Projection
+emits the identity and rotated images within the translation lattice and
+deduplicates a fixed image when both transforms produce the same fragment.
+Display repeats the resulting p2-symmetric canonical tile over the translation
+lattice.
+
+Tests verify the rotation generator, its translated centers, fixed points,
+deduplication, and fold consistency. They do not assert mirror-style edge
+continuity, because `p2` continuity is defined by its rotational centers rather
+than reflection seams.
 
 ## 5. PatternEngine Architecture
 
@@ -238,6 +249,13 @@ public struct Affine2D: Equatable, Sendable {
     public let xAxis: SIMD2<Float>
     public let yAxis: SIMD2<Float>
     public let translation: SIMD2<Float>
+}
+
+public struct TilingImage: Equatable, Sendable {
+    public let cell: CellIndex
+    public let ordinal: UInt8
+    public let worldBounds: AxisAlignedRect
+    public let worldToCanonical: Affine2D
 }
 
 public struct HalfPlane2D: Equatable, Sendable {
@@ -265,16 +283,18 @@ public struct TilingStrategy: Equatable, Sendable {
     public let tileSize: PatternSize
 
     public func cell(containing point: WorldPoint) -> CellIndex
-    public func worldBounds(of cell: CellIndex) -> AxisAlignedRect
-    public func worldToCanonicalTransform(
-        for cell: CellIndex
-    ) -> Affine2D
-    public func fold(_ point: WorldPoint) -> CanonicalPoint
+    public func images(
+        intersecting worldBounds: AxisAlignedRect
+    ) -> [TilingImage]
+    public func displayFold(_ point: WorldPoint) -> CanonicalPoint
 }
 ```
 
 The exact implementation may split formulas into private family helpers, but
-callers receive one closed contract. `fold(_:)` and cell transforms are tested
+callers receive one closed contract. Grid, half-drop, brick, and mirror return
+one image per intersected cell. Rotational returns identity ordinal `0` and
+rotated ordinal `1` for each intersected translation cell, then removes equal
+images deterministically. `displayFold(_:)` and image transforms are tested
 against one another at boundaries, negative coordinates, parity changes, and
 large indices.
 
@@ -302,6 +322,7 @@ Projection produces:
 ```swift
 public struct CellFragment: Equatable, Sendable {
     public let cell: CellIndex
+    public let imageOrdinal: UInt8
     public let canonicalFromBrush: Affine2D
     public let brushClip: ConvexClip
 }
@@ -319,14 +340,21 @@ grain remain continuous across fragments.
 
 1. transforms all footprint corners into world space;
 2. computes conservative world bounds;
-3. enumerates the finite cell-index range intersecting those bounds;
-4. rejects cells whose world bounds do not intersect the footprint bounds;
-5. maps each cell's four boundaries into brush-local half-planes;
-6. emits one nonempty fragment per intersecting cell;
-7. sorts fragments deterministically by row, column, and transform.
+3. asks the strategy for every finite `TilingImage` intersecting those bounds;
+4. rejects images whose world bounds do not intersect the footprint bounds;
+5. maps each image's four boundaries into brush-local half-planes;
+6. emits one nonempty fragment per intersecting image;
+7. deduplicates equal transformed fragments;
+8. sorts fragments by row, column, image ordinal, and transform.
 
-Enumeration is bounded from footprint extent and tile size. It performs no
-file I/O, GPU calls, waits, or unbounded recursion.
+The renderer clamps radius to
+`min(requestedRadius, 1000, 4 * min(tileWidth, tileHeight))` before creating a
+footprint. This is the radius form of the approved diameter bound and retains
+the recovered maximum four-tile reach. Enumeration is therefore finite and
+bounded; a square maximum-radius footprint intersects at most `9 x 9` cell
+positions before rotational images and deterministic deduplication.
+
+Projection performs no file I/O, GPU calls, waits, or unbounded recursion.
 
 ## 6. Independent Coverage Oracle
 
@@ -339,9 +367,12 @@ canonical coverage bytes. It:
 
 - directly evaluates world-space footprint coverage;
 - directly folds covered samples through its own tiling-kind switch;
+- emits both p2 group images and removes fixed-point duplicates;
 - writes canonical coverage without calling `TilingProjection`;
 - uses deterministic sampling and stable iteration order;
 - supports rectangular canonical output;
+- evaluates the fixed asymmetric diagnostic shape;
+- records canonical and brush-local diagnostic coordinates independently;
 - exposes comparison results as typed hole and phantom counts.
 
 A hole is oracle-covered but production-uncovered. A phantom is
@@ -398,7 +429,8 @@ The vertex shader:
 2. generates the stamp's local quad;
 3. applies `canonicalFromBrush`;
 4. converts canonical pixels into tile clip space;
-5. passes the original brush-local coordinate to the fragment stage.
+5. passes both canonical and original brush-local coordinates to the fragment
+   stage.
 
 The fragment shader:
 
@@ -408,6 +440,23 @@ The fragment shader:
 4. returns the existing opaque-black straight-alpha source.
 
 Existing source-over blend factors remain unchanged.
+
+The real-metallib harness also creates
+`patternDiagnosticFootprintFragment`, paired with the same production vertex
+function and projected instances. It has three fixed modes:
+
+- `asymmetricCoverage` renders the scalene brush-local triangle with vertices
+  `(-0.75, -0.60)`, `(0.85, -0.20)`, and `(-0.10, 0.90)`;
+- `canonicalCoordinates` encodes normalized canonical X/Y into red/green,
+  exercising the future texturized, canvas-fixed coordinate path;
+- `brushLocalCoordinates` encodes normalized brush-local X/Y into red/green,
+  exercising the future moving-grain coordinate path.
+
+The diagnostic fragment is harness-only and cannot be selected by interactive
+app state. Its asymmetric coverage proves reflection and rotation orientation;
+the two coordinate modes prove that neither coordinate system resets or jumps
+across projected fragment seams. No product brush, grain asset, or material
+behavior enters Slice 2.
 
 ### 8.2 Display pass
 
@@ -476,9 +525,11 @@ New programs cover:
 - half-drop interior, phased edge, and corner;
 - brick transpose;
 - mirror X, Y, and XY orientation;
-- rotational center and orientation;
+- rotational generator, fixed point, and orientation;
 - large footprint crossing multiple cells;
 - rotated asymmetric footprint;
+- canonical-coordinate continuity;
+- brush-local-coordinate continuity;
 - rectangular tile;
 - drawing from a noncentral visible cell;
 - metadata-only tiling switch;
@@ -527,12 +578,14 @@ Failure rules:
 - negative and large cell indices;
 - half-drop and brick parity/sign;
 - mirror axis transforms;
-- rotational center and checkerboard parity;
+- rotational generator, translated centers, and fixed-point deduplication;
 - affine inverse and round trips;
 - cell bounds and fragment enumeration;
 - four-plane clips;
 - rectangular tile dimensions;
+- exact minimum and capped maximum footprint sizes;
 - asymmetric, reflected, rotated, and large footprints;
+- canonical and brush-local coordinate continuity across fragments;
 - oracle zero-hole/zero-phantom comparisons;
 - deterministic fragment ordering;
 - tiling switch preserves canonical byte identity.
