@@ -10,5 +10,8 @@ struct PatternSpikeApp: App {
         WindowGroup {
             ContentView()
         }
+        #if os(macOS)
+        .commands { EditorFocusedCommands() }
+        #endif
     }
 }

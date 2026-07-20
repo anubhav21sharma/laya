@@ -340,6 +340,147 @@ func resizeAllocationFailureKeepsControllerHistoryAndCommittedModel() throws {
     #expect(try canonicalBytes(renderer) == bytes)
 }
 
+@Test
+@MainActor
+func semanticShortcutsUpdateToolBrushAndGridThroughControllerIntents() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    controller.handleShortcut(.selectTool(.erase))
+    controller.handleShortcut(.stepBrush(larger: true))
+    controller.handleShortcut(.toggleGrid)
+
+    #expect(controller.model.tool == .erase)
+    #expect(controller.model.brushDiameter == 25)
+    #expect(controller.model.showGrid)
+    #expect(renderer.interactiveGridVisibility)
+}
+
+@Test
+@MainActor
+func tilingShortcutsUseStableOneBasedTilingIndices() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    for index in 1...7 {
+        controller.handleShortcut(.selectTiling(index1: index))
+        #expect(controller.model.tiling.rawValue == UInt32(index - 1))
+        #expect(renderer.tiling.rawValue == UInt32(index - 1))
+    }
+}
+
+@Test
+@MainActor
+func tileStepShortcutSubmitsOneClampedTwoDimensionResize() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    controller.handleShortcut(.stepTile(larger: true))
+
+    #expect(controller.model.pixelSize == PixelSize(width: 64, height: 64))
+    #expect(controller.model.isBusy)
+    try renderer.finishRasterOperationForHarness()
+    #expect(controller.model.pixelSize == PixelSize(width: 96, height: 96))
+    #expect(!controller.model.isBusy)
+
+    let resize = try #require(controller.lastRecordedResizeCommandForTesting)
+    renderer.releaseRasterRevisions([resize.before.id, resize.after.id])
+}
+
+@Test
+@MainActor
+func busyControllerRejectsConflictingSemanticShortcuts() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    controller.handleShortcut(.stepTile(larger: true))
+    #expect(controller.model.isBusy)
+
+    controller.handleShortcut(.selectTool(.erase))
+    controller.handleShortcut(.stepBrush(larger: true))
+    controller.handleShortcut(.toggleGrid)
+    controller.handleShortcut(.selectTiling(index1: 2))
+    controller.handleShortcut(.clear)
+
+    #expect(controller.model.tool == .draw)
+    #expect(controller.model.brushDiameter == 20)
+    #expect(!controller.model.showGrid)
+    #expect(controller.model.tiling == .grid)
+
+    try renderer.finishRasterOperationForHarness()
+    let resize = try #require(controller.lastRecordedResizeCommandForTesting)
+    renderer.releaseRasterRevisions([resize.before.id, resize.after.id])
+}
+
+@Test
+@MainActor
+func commandShortcutsShareClearUndoAndRedoHistoryFlow() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    try commitControllerStroke(controller, renderer: renderer)
+    let stroke = try #require(controller.lastRecordedRasterCommandForTesting)
+
+    controller.handleShortcut(.clear)
+    #expect(controller.model.isBusy)
+    try renderer.finishRasterOperationForHarness()
+    let clear = try #require(controller.lastRecordedRasterCommandForTesting)
+    #expect(clear.kind == .clear)
+    #expect(controller.model.canUndo)
+
+    controller.handleShortcut(.undo)
+    try renderer.finishRasterOperationForHarness()
+    #expect(controller.model.canRedo)
+
+    controller.handleShortcut(.redo)
+    try renderer.finishRasterOperationForHarness()
+    #expect(!controller.model.canRedo)
+
+    renderer.releaseRasterRevisions(
+        Set(
+            [stroke, clear].flatMap {
+                [$0.before.id, $0.after.id]
+            }
+        )
+    )
+}
+
+@Test
+@MainActor
+func cancelShortcutCancelsStrokeWithoutCreatingHistory() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    controller.handleStrokeSample(controllerSample(.began))
+    #expect(renderer.hasActiveStroke)
+    controller.handleShortcut(.cancel)
+
+    #expect(renderer.isIdle)
+    #expect(!controller.model.canUndo)
+    #expect(controller.lastRecordedRasterCommandForTesting == nil)
+}
+
+@Test
+@MainActor
+func focusLossPairsSpaceReleaseAndCancelsTheActivePointer() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    controller.handleShortcut(.spaceChanged(true))
+    #expect(controller.isSpaceDown)
+    controller.handleShortcut(.spaceChanged(false))
+    #expect(!controller.isSpaceDown)
+    controller.handleShortcut(.spaceChanged(true))
+    controller.handleStrokeSample(controllerSample(.began))
+    #expect(controller.isSpaceDown)
+    #expect(renderer.hasActiveStroke)
+
+    controller.handleFocusLoss()
+
+    #expect(!controller.isSpaceDown)
+    #expect(!renderer.hasActiveStroke)
+    #expect(renderer.isIdle)
+}
+
 @MainActor
 private func canonicalBytes(_ renderer: GridRenderer) throws -> [UInt8] {
     textureBytes(try renderer.copyCanonicalForHarness())

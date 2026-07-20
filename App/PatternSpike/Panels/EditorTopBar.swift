@@ -19,6 +19,7 @@ struct EditorTopBar: View {
             } label: {
                 Image(systemName: "minus")
             }
+            .frame(width: editorControlExtent, height: editorControlExtent)
             .accessibilityLabel("Decrease Brush Size")
 
             Text("\(Int(controller.model.brushDiameter.rounded())) px")
@@ -30,6 +31,7 @@ struct EditorTopBar: View {
             } label: {
                 Image(systemName: "plus")
             }
+            .frame(width: editorControlExtent, height: editorControlExtent)
             .accessibilityLabel("Increase Brush Size")
 
             ColorPicker(
@@ -38,6 +40,7 @@ struct EditorTopBar: View {
                 supportsOpacity: true
             )
             .labelsHidden()
+            .frame(width: editorControlExtent, height: editorControlExtent)
 
             Divider()
                 .frame(height: 20)
@@ -47,6 +50,7 @@ struct EditorTopBar: View {
             } label: {
                 Image(systemName: "arrow.uturn.backward")
             }
+            .frame(width: editorControlExtent, height: editorControlExtent)
             .accessibilityLabel("Undo")
             .disabled(!controller.model.canUndo)
 
@@ -55,6 +59,7 @@ struct EditorTopBar: View {
             } label: {
                 Image(systemName: "arrow.uturn.forward")
             }
+            .frame(width: editorControlExtent, height: editorControlExtent)
             .accessibilityLabel("Redo")
             .disabled(!controller.model.canRedo)
 
@@ -63,15 +68,19 @@ struct EditorTopBar: View {
             } label: {
                 Image(systemName: "trash")
             }
+            .frame(width: editorControlExtent, height: editorControlExtent)
             .accessibilityLabel("Clear Canvas")
         }
         .buttonStyle(.bordered)
+        #if os(macOS)
         .controlSize(.small)
-        .padding(8)
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 10)
-        )
+        #else
+        .controlSize(.regular)
+        #endif
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .background(.bar)
         .disabled(controller.model.isBusy)
     }
 

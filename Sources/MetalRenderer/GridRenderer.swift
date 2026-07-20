@@ -54,6 +54,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var onOperationCompleted: ((RendererOperationCompletion) -> Void)?
     public private(set) var viewport: ViewportTransform
     public private(set) var counters = GridStructuralCounters()
+    public private(set) var interactiveGridVisibility = false
     public var isIdle: Bool {
         activeStroke == nil && pendingRasterOperation == nil
     }
@@ -849,6 +850,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         viewport = viewport.resized(to: size)
     }
 
+    public func setInteractiveGridVisibility(_ visible: Bool) {
+        interactiveGridVisibility = visible
+    }
+
     public func draw(in view: MTKView) {
         _ = drainRasterOperationOutcomes()
         drainFrameOutcomes()
@@ -885,7 +890,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             try encodeDisplay(
                 into: drawable.texture,
                 commandBuffer: commandBuffer,
-                showGridLines: false,
+                showGridLines: interactiveGridVisibility,
                 liveVisible: liveTile.isVisible || !uploads.isEmpty
             )
             _ = try finalizeFrameEncoding(

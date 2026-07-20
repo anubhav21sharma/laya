@@ -7,6 +7,7 @@ final class EditorSessionController {
     let model: EditorModel
     let renderer: GridRenderer
     var onError: ((MetalRendererError) -> Void)?
+    private(set) var isSpaceDown = false
 
     private var transaction = EditorTransaction()
     private var history = DocumentHistory()
@@ -85,6 +86,7 @@ final class EditorSessionController {
         }
         model.confirmPixelSize(renderer.pixelSize)
         model.confirmTiling(renderer.tiling)
+        renderer.setInteractiveGridVisibility(model.showGrid)
         renderer.onOperationCompleted = { [weak self] completion in
             self?.handleRendererCompletion(completion)
         }
@@ -158,6 +160,39 @@ final class EditorSessionController {
         apply(.brushDiameterIntent(diameter))
     }
 
+    func handleShortcut(_ shortcut: EditorShortcut) {
+        switch shortcut {
+        case let .selectTool(tool):
+            handleTool(tool)
+        case .clear:
+            clear()
+        case .undo:
+            undo()
+        case .redo:
+            redo()
+        case let .stepBrush(larger):
+            stepBrush(larger: larger)
+        case let .stepTile(larger):
+            handleTileSize(
+                EditorConfiguration.stepTile(
+                    model.pixelSize,
+                    larger: larger
+                )
+            )
+        case .toggleGrid:
+            handleGridVisibility(!model.showGrid)
+        case let .selectTiling(index1):
+            guard index1 > 0,
+                  let tiling = TilingKind(rawValue: UInt32(index1 - 1))
+            else { return }
+            handleTiling(tiling)
+        case .cancel:
+            cancelTransientEdit()
+        case let .spaceChanged(isDown):
+            isSpaceDown = isDown
+        }
+    }
+
     func clear() {
         apply(.command(.clear))
     }
@@ -172,6 +207,11 @@ final class EditorSessionController {
 
     func cancelTransientEdit() {
         apply(.pointerCancelled)
+    }
+
+    func handleFocusLoss() {
+        isSpaceDown = false
+        cancelTransientEdit()
     }
 
     func pan(byScreenDelta delta: SIMD2<Float>) {
@@ -250,6 +290,7 @@ final class EditorSessionController {
             model.confirmBrushDiameter(diameter)
         case let .updateGridVisibility(visible):
             model.confirmGridVisibility(visible)
+            renderer.setInteractiveGridVisibility(visible)
         case let .applyTiling(token, tiling):
             let before = model.tiling
             if before == tiling {

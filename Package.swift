@@ -61,6 +61,7 @@ let package = Package(
             exclude: [
                 "PatternSpike/Assets.xcassets",
                 "PatternSpike/Canvas",
+                "PatternSpike/Commands",
                 "PatternSpike/ContentView.swift",
                 "PatternSpike/Harness",
                 "PatternSpike/Panels",

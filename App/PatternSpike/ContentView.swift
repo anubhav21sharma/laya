@@ -4,9 +4,23 @@ import MetalRenderer
 import PatternEngine
 import SwiftUI
 
+#if os(macOS)
+let editorControlExtent: CGFloat = 32
+let editorInspectorWidth: CGFloat = 216
+#else
+let editorControlExtent: CGFloat = 44
+let editorInspectorWidth: CGFloat = 252
+#endif
+
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
+    #if os(macOS)
+    @Environment(\.controlActiveState) private var controlActiveState
+    #endif
+
     private let state: CanvasState
     @State private var runtimeError: MetalRendererError?
+    @FocusState private var editorFocused: Bool
 
     init() {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -36,60 +50,7 @@ struct ContentView: View {
         Group {
             switch state {
             case let .ready(controller):
-                ZStack {
-                    MetalCanvas(
-                        controller: controller,
-                        renderer: controller.renderer
-                    )
-                    ToolRail(controller: controller)
-                        .frame(
-                            maxWidth: .infinity,
-                            maxHeight: .infinity,
-                            alignment: .leading
-                        )
-                        .padding(12)
-                    EditorTopBar(controller: controller)
-                        .frame(
-                            maxWidth: .infinity,
-                            maxHeight: .infinity,
-                            alignment: .top
-                        )
-                        .padding(12)
-                    TilingInspector(
-                        controller: controller,
-                        runtimeError: $runtimeError
-                    )
-                        .frame(
-                            maxWidth: .infinity,
-                            maxHeight: .infinity,
-                            alignment: .topTrailing
-                        )
-                        .padding(12)
-                }
-                    .onAppear {
-                        controller.onError = {
-                            runtimeError = $0
-                        }
-                        controller.renderer.onError = {
-                            runtimeError = $0
-                        }
-                    }
-                    .onDisappear {
-                        controller.onError = nil
-                        controller.renderer.onError = nil
-                    }
-                    .overlay(alignment: .top) {
-                        if let runtimeError {
-                            Text(runtimeError.localizedDescription)
-                                .font(.caption)
-                                .padding(8)
-                                .background(
-                                    .regularMaterial,
-                                    in: RoundedRectangle(cornerRadius: 8)
-                                )
-                                .padding()
-                        }
-                    }
+                editorShell(controller)
             case let .unavailable(message):
                 ContentUnavailableView(
                     "Renderer Unavailable",
@@ -101,8 +62,182 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func editorShell(
+        _ controller: EditorSessionController
+    ) -> some View {
+        VStack(spacing: 0) {
+            EditorTopBar(controller: controller)
+            Divider()
+            HStack(spacing: 0) {
+                ToolRail(controller: controller)
+                Divider()
+                MetalCanvas(
+                    controller: controller,
+                    renderer: controller.renderer
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Divider()
+                TilingInspector(
+                    controller: controller,
+                    runtimeError: $runtimeError
+                )
+            }
+        }
+        .overlay(alignment: .top) {
+            if let runtimeError {
+                ErrorBanner(error: runtimeError) {
+                    self.runtimeError = nil
+                }
+                .padding(.top, editorControlExtent + 16)
+            }
+        }
+        .focusable()
+        .focused($editorFocused)
+        .onChange(of: editorFocused) { _, isFocused in
+            if !isFocused {
+                controller.handleFocusLoss()
+            }
+        }
+        .onKeyPress(phases: .all) { press in
+            handleKeyPress(press, controller: controller)
+        }
+        .onAppear {
+            editorFocused = true
+            controller.onError = {
+                runtimeError = $0
+            }
+            controller.renderer.onError = {
+                runtimeError = $0
+            }
+        }
+        .onDisappear {
+            controller.handleFocusLoss()
+            controller.onError = nil
+            controller.renderer.onError = nil
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                controller.handleFocusLoss()
+            }
+        }
+        #if os(macOS)
+        .onChange(of: controlActiveState) { _, activeState in
+            if activeState != .key {
+                controller.handleFocusLoss()
+            }
+        }
+        .focusedSceneValue(
+            \.editorCommandActions,
+            commandActions(for: controller)
+        )
+        #endif
+    }
+
+    private func handleKeyPress(
+        _ press: KeyPress,
+        controller: EditorSessionController
+    ) -> KeyPress.Result {
+        guard let phase = editorPhase(from: press.phase),
+              let shortcut = EditorKeymap.resolve(
+                editorKey(from: press),
+                modifiers: editorModifiers(from: press.modifiers),
+                phase: phase
+              )
+        else {
+            return .ignored
+        }
+
+        controller.handleShortcut(shortcut)
+        return .handled
+    }
+
+    private func editorKey(from press: KeyPress) -> EditorKey {
+        switch press.key {
+        case .escape:
+            .escape
+        case .space:
+            .space
+        case .return:
+            .returnKey
+        default:
+            EditorKey(rawValue: press.characters)
+        }
+    }
+
+    private func editorPhase(from phase: KeyPress.Phases) -> EditorKeyPhase? {
+        switch phase {
+        case .down:
+            .down
+        case .repeat:
+            .repeat
+        case .up:
+            .up
+        default:
+            nil
+        }
+    }
+
+    private func editorModifiers(
+        from modifiers: EventModifiers
+    ) -> EditorKeyModifiers {
+        var result: EditorKeyModifiers = []
+        if modifiers.contains(.command) {
+            result.insert(.command)
+        }
+        if modifiers.contains(.shift) {
+            result.insert(.shift)
+        }
+        if modifiers.contains(.option) {
+            result.insert(.option)
+        }
+        if modifiers.contains(.control) {
+            result.insert(.control)
+        }
+        return result
+    }
+
+    #if os(macOS)
+    private func commandActions(
+        for controller: EditorSessionController
+    ) -> EditorCommandActions {
+        EditorCommandActions(
+            undo: { controller.undo() },
+            redo: { controller.redo() },
+            clear: { controller.clear() },
+            selectDraw: { controller.handleTool(.draw) },
+            selectErase: { controller.handleTool(.erase) },
+            canUndo: controller.model.canUndo,
+            canRedo: controller.model.canRedo,
+            canEdit: !controller.model.isBusy
+        )
+    }
+    #endif
+
     private enum CanvasState {
         case ready(EditorSessionController)
         case unavailable(String)
+    }
+}
+
+private struct ErrorBanner: View {
+    let error: MetalRendererError
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+            Text(error.localizedDescription)
+                .font(.caption)
+                .lineLimit(2)
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss Error")
+        }
+        .padding(.horizontal, 10)
+        .frame(minHeight: editorControlExtent)
+        .foregroundStyle(.white)
+        .background(Color.red.opacity(0.92))
     }
 }

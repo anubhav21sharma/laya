@@ -16,12 +16,11 @@ struct ToolRail: View {
                 label: "Erase",
                 systemImage: "eraser"
             )
+            Spacer(minLength: 0)
         }
-        .padding(8)
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 10)
-        )
+        .padding(6)
+        .frame(width: editorControlExtent + 12)
+        .background(.bar)
         .disabled(controller.model.isBusy)
     }
 
@@ -33,18 +32,26 @@ struct ToolRail: View {
         Button {
             controller.handleTool(tool)
         } label: {
-            Label(label, systemImage: systemImage)
-                .frame(minWidth: 72, alignment: .leading)
+            Image(systemName: systemImage)
+                .frame(
+                    width: editorControlExtent,
+                    height: editorControlExtent
+                )
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.bordered)
+        .buttonStyle(.plain)
+        .foregroundStyle(
+            controller.model.tool == tool ? Color.accentColor : Color.primary
+        )
         .background(
             controller.model.tool == tool
-                ? Color.accentColor.opacity(0.2)
-                : Color.clear,
-            in: RoundedRectangle(cornerRadius: 6)
+                ? Color.accentColor.opacity(0.18)
+                : Color.clear
         )
+        .accessibilityLabel(label)
         .accessibilityAddTraits(
             controller.model.tool == tool ? .isSelected : []
         )
+        .help(label)
     }
 }

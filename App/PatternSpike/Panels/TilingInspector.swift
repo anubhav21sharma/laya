@@ -30,19 +30,23 @@ struct TilingInspector: View {
                 }
             }
             .pickerStyle(.menu)
+            .frame(minHeight: editorControlExtent)
 
             Toggle("Show Grid", isOn: gridBinding)
+                .frame(minHeight: editorControlExtent)
 
             Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 8) {
                 GridRow {
                     Text("Width")
                     TextField("Width", text: $widthDraft)
                         .multilineTextAlignment(.trailing)
+                        .frame(minHeight: editorControlExtent)
                 }
                 GridRow {
                     Text("Height")
                     TextField("Height", text: $heightDraft)
                         .multilineTextAlignment(.trailing)
+                        .frame(minHeight: editorControlExtent)
                 }
             }
             .textFieldStyle(.roundedBorder)
@@ -51,15 +55,18 @@ struct TilingInspector: View {
                 applyDraftSize()
             }
             .buttonStyle(.borderedProminent)
+            .frame(minHeight: editorControlExtent)
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
+        #if os(macOS)
         .controlSize(.small)
+        #else
+        .controlSize(.regular)
+        #endif
         .padding(10)
-        .frame(width: 190)
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 10)
-        )
+        .frame(width: editorInspectorWidth)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(.bar)
         .disabled(controller.model.isBusy)
         .onChange(of: controller.model.pixelSize) {
             resetDraftsToCommittedSize()

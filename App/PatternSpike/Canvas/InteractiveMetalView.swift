@@ -14,9 +14,6 @@ final class InteractiveMetalView: MTKView {
     let controller: EditorSessionController
     let gridRenderer: GridRenderer
     private var dragMode: DragMode?
-    private var spaceIsDown = false
-    private var resignObserver: NSObjectProtocol?
-    private var screenObserver: NSObjectProtocol?
 
     init(
         frame: CGRect,
@@ -32,54 +29,16 @@ final class InteractiveMetalView: MTKView {
         fatalError("InteractiveMetalView requires a GridRenderer")
     }
 
-    override var acceptsFirstResponder: Bool { true }
+    override var acceptsFirstResponder: Bool { false }
     override var isFlipped: Bool { true }
 
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if let resignObserver {
-            NotificationCenter.default.removeObserver(resignObserver)
-        }
-        if let screenObserver {
-            NotificationCenter.default.removeObserver(screenObserver)
-        }
-        guard let window else {
-            cancelActiveAndResetGestureState()
-            resignObserver = nil
-            screenObserver = nil
-            return
-        }
-        window.makeFirstResponder(self)
-        preferredFramesPerSecond = window.screen?.maximumFramesPerSecond ?? 60
-        resignObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didResignKeyNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.cancelActiveAndResetGestureState()
-            }
-        }
-        screenObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didChangeScreenNotification,
-            object: window,
-            queue: .main
-        ) { [weak self, weak window] _ in
-            MainActor.assumeIsolated {
-                self?.preferredFramesPerSecond =
-                    window?.screen?.maximumFramesPerSecond ?? 60
-            }
-        }
-    }
-
     override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
         let local = localPoint(event)
         guard let coordinateTransform else {
             dragMode = nil
             return
         }
-        if spaceIsDown {
+        if controller.isSpaceDown {
             dragMode = .panning(lastLocal: local)
         } else {
             controller.handleStrokeSample(
@@ -96,7 +55,7 @@ final class InteractiveMetalView: MTKView {
     override func mouseDragged(with event: NSEvent) {
         let local = localPoint(event)
         guard let coordinateTransform else {
-            cancelActiveAndResetGestureState()
+            cancelPointerInteraction()
             return
         }
         switch dragMode {
@@ -124,7 +83,7 @@ final class InteractiveMetalView: MTKView {
         defer { dragMode = nil }
         guard case .drawing = dragMode else { return }
         guard let coordinateTransform else {
-            cancelActiveAndResetGestureState()
+            cancelPointerInteraction()
             return
         }
         controller.handleStrokeSample(
@@ -152,33 +111,6 @@ final class InteractiveMetalView: MTKView {
         )
     }
 
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 49 {
-            spaceIsDown = true
-        } else if event.keyCode == 53 {
-            cancelIfActive()
-        } else {
-            super.keyDown(with: event)
-        }
-    }
-
-    override func keyUp(with event: NSEvent) {
-        if event.keyCode == 49 {
-            spaceIsDown = false
-        } else {
-            super.keyUp(with: event)
-        }
-    }
-
-    override func cancelOperation(_ sender: Any?) {
-        cancelIfActive()
-    }
-
-    override func resignFirstResponder() -> Bool {
-        cancelActiveAndResetGestureState()
-        return super.resignFirstResponder()
-    }
-
     private func localPoint(_ event: NSEvent) -> ScreenPoint {
         let local = convert(event.locationInWindow, from: nil)
         return ScreenPoint(x: Float(local.x), y: Float(local.y))
@@ -201,13 +133,7 @@ final class InteractiveMetalView: MTKView {
         )
     }
 
-    private func cancelActiveAndResetGestureState() {
-        cancelIfActive()
-        spaceIsDown = false
-        dragMode = nil
-    }
-
-    private func cancelIfActive() {
+    private func cancelPointerInteraction() {
         controller.handleStrokeSample(
             .mouse(
                 position: ScreenPoint(x: 0, y: 0),

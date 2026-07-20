@@ -307,6 +307,31 @@ static float4 patternCompositeLive(
     return patternSourceOver(live, canonical);
 }
 
+static float4 patternGridOverlay(
+    float4 color,
+    PatternDisplayMapping mapping,
+    constant PatternGridFrameUniforms& frame
+) {
+    if (frame.showGridLines != 0) {
+        const float2 edgeDistance = min(
+            mapping.phasedCellLocal,
+            frame.tileSize - mapping.phasedCellLocal
+        ) * frame.zoom;
+        const float coverage = 1.0 - smoothstep(
+            frame.gridLineWidth,
+            frame.gridLineWidth + 1.0,
+            min(edgeDistance.x, edgeDistance.y)
+        );
+        const float alpha = 0.22 * coverage;
+        const float4 grid = float4(
+            float3(0.18, 0.20, 0.19) * alpha,
+            alpha
+        );
+        return patternSourceOver(grid, color);
+    }
+    return color;
+}
+
 fragment float4 patternGridFragment(
     PatternFullscreenOut input [[stage_in]],
     constant PatternGridFrameUniforms& frame
@@ -341,25 +366,7 @@ fragment float4 patternGridFragment(
         frame.compositeMode
     );
 
-    if (frame.showGridLines != 0) {
-        const float2 edgeDistance = min(
-            mapping.phasedCellLocal,
-            frame.tileSize - mapping.phasedCellLocal
-        ) * frame.zoom;
-        const float coverage = 1.0 - smoothstep(
-            frame.gridLineWidth,
-            frame.gridLineWidth + 1.0,
-            min(edgeDistance.x, edgeDistance.y)
-        );
-        const float alpha = 0.22 * coverage;
-        const float4 grid = float4(
-            float3(0.18, 0.20, 0.19) * alpha,
-            alpha
-        );
-        result = patternSourceOver(grid, result);
-    }
-
-    return result;
+    return patternGridOverlay(result, mapping, frame);
 }
 
 fragment float4 patternCommitFragment(
