@@ -1,10 +1,71 @@
 import Foundation
 
+public enum HarnessPixelChannel: String, Codable, Equatable, Sendable {
+    case screen
+    case liveScreen
+    case committedScreen
+    case canonical
+}
+
+public enum GridHarnessProgram: String, Codable, Equatable, Sendable {
+    case gridInterior
+    case gridBoundary
+    case previewCommit
+    case cancelPreservesCanonical
+    case fiveHundredDabs
+    case longStroke
+}
+
+public enum HarnessStructuralMetric: String, Codable, Equatable, Sendable {
+    case emittedDabCount
+    case encodedInstanceCount
+    case restampedInstanceCount
+    case canonicalRevisionDelta
+    case previewCommitMaximumDelta
+    case canonicalByteDelta
+    case missedFrameCount
+}
+
+public enum HarnessRelation: String, Codable, Equatable, Sendable {
+    case equal
+    case lessThanOrEqual
+}
+
+public struct HarnessStructuralCheck: Codable, Equatable, Sendable {
+    public let metric: HarnessStructuralMetric
+    public let relation: HarnessRelation
+    public let value: Int
+}
+
 public struct HarnessPixelCheck: Codable, Equatable, Sendable {
+    public let channel: HarnessPixelChannel
     public let x: Int
     public let y: Int
     public let expectedBGRA: [UInt8]
     public let tolerance: UInt8
+
+    private enum CodingKeys: String, CodingKey {
+        case channel
+        case x
+        case y
+        case expectedBGRA
+        case tolerance
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        channel = try values.decodeIfPresent(
+            HarnessPixelChannel.self,
+            forKey: .channel
+        ) ?? .screen
+        x = try values.decode(Int.self, forKey: .x)
+        y = try values.decode(Int.self, forKey: .y)
+        expectedBGRA = try values.decode(
+            [UInt8].self,
+            forKey: .expectedBGRA
+        )
+        tolerance = try values.decode(UInt8.self, forKey: .tolerance)
+    }
 }
 
 public struct HarnessScene: Codable, Equatable, Sendable {
@@ -13,6 +74,38 @@ public struct HarnessScene: Codable, Equatable, Sendable {
     public let width: Int
     public let height: Int
     public let checks: [HarnessPixelCheck]
+    public let program: GridHarnessProgram?
+    public let structuralChecks: [HarnessStructuralCheck]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case name
+        case width
+        case height
+        case checks
+        case program
+        case structuralChecks
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        name = try values.decode(String.self, forKey: .name)
+        width = try values.decode(Int.self, forKey: .width)
+        height = try values.decode(Int.self, forKey: .height)
+        checks = try values.decodeIfPresent(
+            [HarnessPixelCheck].self,
+            forKey: .checks
+        ) ?? []
+        program = try values.decodeIfPresent(
+            GridHarnessProgram.self,
+            forKey: .program
+        )
+        structuralChecks = try values.decodeIfPresent(
+            [HarnessStructuralCheck].self,
+            forKey: .structuralChecks
+        ) ?? []
+    }
 
     public static func decode(_ data: Data) throws -> HarnessScene {
         let scene = try JSONDecoder().decode(HarnessScene.self, from: data)
@@ -21,7 +114,16 @@ public struct HarnessScene: Codable, Equatable, Sendable {
     }
 
     private func validate() throws {
-        guard schemaVersion == 1 else {
+        switch schemaVersion {
+        case 1:
+            guard program == nil else {
+                throw HarnessSceneError.programForbiddenForSchemaOne
+            }
+        case 2:
+            guard program != nil else {
+                throw HarnessSceneError.missingProgram
+            }
+        default:
             throw HarnessSceneError.unsupportedSchema(schemaVersion)
         }
         guard !name.isEmpty else {
@@ -30,8 +132,11 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         guard (1...4096).contains(width), (1...4096).contains(height) else {
             throw HarnessSceneError.invalidDimensions(width: width, height: height)
         }
-        guard !checks.isEmpty else {
+        if schemaVersion == 1, checks.isEmpty {
             throw HarnessSceneError.missingPixelChecks
+        }
+        if schemaVersion == 2, checks.isEmpty, structuralChecks.isEmpty {
+            throw HarnessSceneError.missingAssertions
         }
 
         for check in checks {
@@ -44,6 +149,11 @@ public struct HarnessScene: Codable, Equatable, Sendable {
                 )
             }
         }
+        for check in structuralChecks {
+            guard check.value >= 0 else {
+                throw HarnessSceneError.invalidStructuralValue(check.value)
+            }
+        }
     }
 }
 
@@ -54,6 +164,10 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
     case missingPixelChecks
     case invalidCheckCoordinate(x: Int, y: Int)
     case invalidExpectedPixelCount(Int)
+    case missingProgram
+    case programForbiddenForSchemaOne
+    case missingAssertions
+    case invalidStructuralValue(Int)
 
     public var errorDescription: String? {
         switch self {
@@ -69,6 +183,14 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
             "Harness check coordinate (\(x), \(y)) is outside the scene."
         case let .invalidExpectedPixelCount(count):
             "Expected BGRA pixel has \(count) components instead of 4."
+        case .missingProgram:
+            "Schema 2 harness scene requires a grid program."
+        case .programForbiddenForSchemaOne:
+            "Schema 1 harness scene cannot contain a grid program."
+        case .missingAssertions:
+            "Schema 2 harness scene has no pixel or structural assertions."
+        case let .invalidStructuralValue(value):
+            "Harness structural assertion value \(value) is negative."
         }
     }
 }

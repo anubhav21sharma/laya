@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "name": "five-hundred-dabs-negative-control",
+  "width": 512,
+  "height": 512,
+  "program": "fiveHundredDabs",
+  "checks": [],
+  "structuralChecks": [
+    {
+      "metric": "emittedDabCount",
+      "relation": "equal",
+      "value": 500
+    },
+    {
+      "metric": "encodedInstanceCount",
+      "relation": "equal",
+      "value": 499
+    },
+    {
+      "metric": "restampedInstanceCount",
+      "relation": "equal",
+      "value": 0
+    }
+  ]
+}

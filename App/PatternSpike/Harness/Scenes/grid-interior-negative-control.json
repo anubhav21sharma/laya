@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "name": "grid-interior-negative-control",
+  "width": 512,
+  "height": 512,
+  "program": "gridInterior",
+  "checks": [
+    {
+      "channel": "liveScreen",
+      "x": 200,
+      "y": 256,
+      "expectedBGRA": [241, 244, 242, 255],
+      "tolerance": 1
+    },
+    {
+      "channel": "committedScreen",
+      "x": 456,
+      "y": 256,
+      "expectedBGRA": [0, 0, 0, 255],
+      "tolerance": 1
+    }
+  ],
+  "structuralChecks": [
+    {
+      "metric": "restampedInstanceCount",
+      "relation": "equal",
+      "value": 0
+    }
+  ]
+}

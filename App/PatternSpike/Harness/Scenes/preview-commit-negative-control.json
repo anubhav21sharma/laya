@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 2,
+  "name": "preview-commit-negative-control",
+  "width": 512,
+  "height": 512,
+  "program": "previewCommit",
+  "checks": [
+    {
+      "channel": "liveScreen",
+      "x": 180,
+      "y": 220,
+      "expectedBGRA": [241, 244, 242, 255],
+      "tolerance": 1
+    }
+  ],
+  "structuralChecks": [
+    {
+      "metric": "previewCommitMaximumDelta",
+      "relation": "lessThanOrEqual",
+      "value": 1
+    },
+    {
+      "metric": "canonicalRevisionDelta",
+      "relation": "equal",
+      "value": 1
+    }
+  ]
+}

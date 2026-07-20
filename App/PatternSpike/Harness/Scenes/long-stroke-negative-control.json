@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "name": "long-stroke-negative-control",
+  "width": 512,
+  "height": 512,
+  "program": "longStroke",
+  "checks": [],
+  "structuralChecks": [
+    {
+      "metric": "restampedInstanceCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "missedFrameCount",
+      "relation": "lessThanOrEqual",
+      "value": 2
+    },
+    {
+      "metric": "previewCommitMaximumDelta",
+      "relation": "lessThanOrEqual",
+      "value": 1
+    }
+  ]
+}

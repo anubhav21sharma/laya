@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "name": "long-stroke",
+  "width": 512,
+  "height": 512,
+  "program": "longStroke",
+  "checks": [],
+  "structuralChecks": [
+    {
+      "metric": "restampedInstanceCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "missedFrameCount",
+      "relation": "lessThanOrEqual",
+      "value": 2
+    },
+    {
+      "metric": "previewCommitMaximumDelta",
+      "relation": "lessThanOrEqual",
+      "value": 1
+    }
+  ]
+}

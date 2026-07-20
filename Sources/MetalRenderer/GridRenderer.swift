@@ -404,6 +404,29 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     var harnessCounters: GridStructuralCounters { counters }
     var harnessRevision: RasterRevision { canonical.revision }
 
+    func injectFiveHundredInteriorDabsIntoOneFrame() throws {
+        try lifecycle.begin()
+        counters = GridStructuralCounters()
+        counters.newDabsThisEvent = 500
+        counters.totalDabsThisStroke = 500
+
+        for row in 0..<25 {
+            for column in 0..<20 {
+                try liveStroke.append(
+                    PatternDabInstance(
+                        center: SIMD2(
+                            32 + Float(column) * 8,
+                            32 + Float(row) * 7
+                        ),
+                        radius: GridCanvasContract.brushRadius,
+                        padding: 0
+                    )
+                )
+                counters.totalInstancesThisStroke += 1
+            }
+        }
+    }
+
     private func appendWorldDab(_ point: WorldPoint) throws {
         let placements = GridProjection.placements(
             center: point,
