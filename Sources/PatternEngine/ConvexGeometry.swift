@@ -28,7 +28,15 @@ public struct AxisAlignedRect: Equatable, Sendable {
     }
 
     public func intersects(_ other: AxisAlignedRect) -> Bool {
-        minimum.x < other.maximum.x
+        guard
+            maximum.x > minimum.x,
+            maximum.y > minimum.y,
+            other.maximum.x > other.minimum.x,
+            other.maximum.y > other.minimum.y
+        else {
+            return false
+        }
+        return minimum.x < other.maximum.x
             && other.minimum.x < maximum.x
             && minimum.y < other.maximum.y
             && other.minimum.y < maximum.y
@@ -81,7 +89,8 @@ public struct ConvexClip: Equatable, Sendable {
     }
 
     public func contains(_ point: SIMD2<Float>, tolerance: Float) -> Bool {
-        halfPlanes.allSatisfy { $0.contains(point, tolerance: tolerance) }
+        precondition(tolerance.isFinite && tolerance >= 0, "Tolerance must be finite and nonnegative")
+        return halfPlanes.allSatisfy { $0.contains(point, tolerance: tolerance) }
     }
 }
 
