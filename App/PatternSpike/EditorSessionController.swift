@@ -11,22 +11,40 @@ final class EditorSessionController {
     private var transaction = EditorTransaction()
     private var history = DocumentHistory()
     private var pendingRasterMutation: PendingRasterMutation?
+    private var pendingTileResize: PendingTileResize?
     private var pendingHistoryNavigation: PendingHistoryNavigation?
     private let releaseRasterRevisions: (Set<StoredRasterRevisionID>) -> Void
     private let requestRasterRestore: (
         RendererOperationToken,
         RasterRevisionReference
     ) throws -> Void
+    private let requestResize: (
+        RendererOperationToken,
+        PixelSize,
+        Int
+    ) throws -> Void
+    private let requestResizeRestore: (
+        RendererOperationToken,
+        RasterRevisionReference
+    ) throws -> Void
     private(set) var lastRecordedRasterCommandForTesting: RasterHistoryCommand?
+    private(set) var lastRecordedResizeCommandForTesting: TileResizeHistoryCommand?
 
     private struct PendingRasterMutation {
         let token: EditorTransactionToken
         let kind: RasterEditKind
     }
 
+    private struct PendingTileResize {
+        let token: EditorTransactionToken
+        let before: PixelSize
+        let after: PixelSize
+    }
+
     private struct PendingHistoryNavigation {
         let operationToken: EditorTransactionToken
         let historyToken: UInt64
+        let targetPixelSize: PixelSize?
     }
 
     init(
@@ -34,6 +52,15 @@ final class EditorSessionController {
         renderer: GridRenderer,
         releaseRasterRevisions: ((Set<StoredRasterRevisionID>) -> Void)? = nil,
         requestRasterRestore: ((
+            RendererOperationToken,
+            RasterRevisionReference
+        ) throws -> Void)? = nil,
+        requestResize: ((
+            RendererOperationToken,
+            PixelSize,
+            Int
+        ) throws -> Void)? = nil,
+        requestResizeRestore: ((
             RendererOperationToken,
             RasterRevisionReference
         ) throws -> Void)? = nil
@@ -46,6 +73,18 @@ final class EditorSessionController {
         self.requestRasterRestore = requestRasterRestore ?? {
             try renderer.requestRasterRestore(token: $0, revision: $1)
         }
+        self.requestResize = requestResize ?? {
+            try renderer.requestResize(
+                token: $0,
+                to: $1,
+                maximumRetainedBytes: $2
+            )
+        }
+        self.requestResizeRestore = requestResizeRestore ?? {
+            try renderer.requestResizeRestore(token: $0, revision: $1)
+        }
+        model.confirmPixelSize(renderer.pixelSize)
+        model.confirmTiling(renderer.tiling)
         renderer.onOperationCompleted = { [weak self] completion in
             self?.handleRendererCompletion(completion)
         }
@@ -83,6 +122,23 @@ final class EditorSessionController {
 
     func handleTiling(_ tiling: TilingKind) {
         apply(.tilingIntent(tiling))
+    }
+
+    func handleTileSize(_ pixelSize: PixelSize) {
+        guard EditorConfiguration.isValidTileSize(pixelSize) else {
+            report(
+                .invalidTileDimensions(
+                    width: pixelSize.width,
+                    height: pixelSize.height
+                )
+            )
+            return
+        }
+        apply(.tileSizeIntent(pixelSize))
+    }
+
+    func handleGridVisibility(_ visible: Bool) {
+        apply(.gridVisibilityIntent(visible))
     }
 
     func handleTool(_ tool: EditorTool) {
@@ -195,13 +251,44 @@ final class EditorSessionController {
         case let .updateGridVisibility(visible):
             model.confirmGridVisibility(visible)
         case let .applyTiling(token, tiling):
-            try renderer.setTiling(tiling)
+            let before = model.tiling
+            if before == tiling {
+                apply(.operationCompleted(token, succeeded: true))
+                return
+            }
+            try history.validateNewCommand(retainedBytes: 0)
+            try renderer.applyTiling(tiling)
             model.confirmTiling(tiling)
+            let released = history.appendSuccessful(
+                .tiling(MetadataChange(before: before, after: tiling))
+            )
+            if !released.isEmpty {
+                releaseRasterRevisions(released)
+            }
             apply(.operationCompleted(token, succeeded: true))
         case let .performCommand(token, command):
             try perform(command, token: token)
-        case let .applyTileSize(token, _):
-            apply(.operationCompleted(token, succeeded: false))
+        case let .applyTileSize(token, pixelSize):
+            if pixelSize == model.pixelSize {
+                apply(.operationCompleted(token, succeeded: true))
+                return
+            }
+            precondition(pendingTileResize == nil)
+            pendingTileResize = PendingTileResize(
+                token: token,
+                before: model.pixelSize,
+                after: pixelSize
+            )
+            do {
+                try requestResize(
+                    rendererToken(token),
+                    pixelSize,
+                    history.maximumBytes
+                )
+            } catch {
+                pendingTileResize = nil
+                throw error
+            }
         case .clearSelectionOverlay, .beginTransform, .cancelTransform,
              .busy, .reportOperationFailure:
             break
@@ -252,7 +339,15 @@ final class EditorSessionController {
         precondition(pendingHistoryNavigation == nil)
         pendingHistoryNavigation = PendingHistoryNavigation(
             operationToken: operationToken,
-            historyToken: navigation.token
+            historyToken: navigation.token,
+            targetPixelSize: {
+                guard case let .tileResize(command) = navigation.command else {
+                    return nil
+                }
+                return navigation.direction == .undo
+                    ? command.before.pixelSize
+                    : command.after.pixelSize
+            }()
         )
 
         do {
@@ -265,9 +360,25 @@ final class EditorSessionController {
                     rendererToken(operationToken),
                     revision
                 )
-            case .tiling, .tileResize:
-                throw MetalRendererError.commandFailed(
-                    "This history command is not available yet."
+            case let .tiling(change):
+                let target = navigation.direction == .undo
+                    ? change.before
+                    : change.after
+                try renderer.applyTiling(target)
+                model.confirmTiling(target)
+                try history.finishNavigation(
+                    token: navigation.token,
+                    succeeded: true
+                )
+                pendingHistoryNavigation = nil
+                apply(.operationCompleted(operationToken, succeeded: true))
+            case let .tileResize(command):
+                let revision = navigation.direction == .undo
+                    ? command.before
+                    : command.after
+                try requestResizeRestore(
+                    rendererToken(operationToken),
+                    revision
                 )
             }
         } catch {
@@ -301,6 +412,9 @@ final class EditorSessionController {
             if pendingRasterMutation?.token == token {
                 pendingRasterMutation = nil
             }
+            if pendingTileResize?.token == token {
+                pendingTileResize = nil
+            }
             apply(.operationCompleted(token, succeeded: false))
         case .cancelStroke, .updateTool, .updateColor,
              .updateBrushDiameter, .updateGridVisibility,
@@ -328,6 +442,31 @@ final class EditorSessionController {
             {
                 kind = pendingRasterMutation.kind
                 self.pendingRasterMutation = nil
+            } else if let pendingTileResize,
+                      pendingTileResize.token == completedToken
+            {
+                precondition(
+                    receipt.before.pixelSize == pendingTileResize.before
+                        && receipt.after.pixelSize == pendingTileResize.after,
+                    "Renderer resize receipt must match the pending resize."
+                )
+                self.pendingTileResize = nil
+                let command = TileResizeHistoryCommand(
+                    before: receipt.before,
+                    after: receipt.after
+                )
+                let released = history.appendSuccessful(.tileResize(command))
+                lastRecordedResizeCommandForTesting = command
+                releaseRasterRevisions(released)
+                confirmPixelSizeAndClampDiameter(receipt.after.pixelSize)
+                apply(
+                    .operationCompleted(
+                        completedToken,
+                        succeeded: true
+                    )
+                )
+                refreshDerivedModelState()
+                return
             } else {
                 preconditionFailure(
                     "Renderer completed a raster mutation the controller did not accept."
@@ -349,6 +488,11 @@ final class EditorSessionController {
             )
         case let .operationSuccess(token):
             let completedToken = editorToken(token)
+            if pendingHistoryNavigation?.operationToken == completedToken,
+               let targetPixelSize = pendingHistoryNavigation?.targetPixelSize
+            {
+                confirmPixelSizeAndClampDiameter(targetPixelSize)
+            }
             finishHistoryNavigationIfNeeded(
                 operationToken: completedToken,
                 succeeded: true
@@ -368,6 +512,9 @@ final class EditorSessionController {
             )
             if pendingRasterMutation?.token == completedToken {
                 pendingRasterMutation = nil
+            }
+            if pendingTileResize?.token == completedToken {
+                pendingTileResize = nil
             }
             apply(
                 .operationCompleted(
@@ -404,6 +551,16 @@ final class EditorSessionController {
         model.confirmHistoryAvailability(
             canUndo: history.canUndo && !transaction.isBusy,
             canRedo: history.canRedo && !transaction.isBusy
+        )
+    }
+
+    private func confirmPixelSizeAndClampDiameter(_ pixelSize: PixelSize) {
+        model.confirmPixelSize(pixelSize)
+        model.confirmBrushDiameter(
+            min(
+                model.brushDiameter,
+                EditorConfiguration.brushMaximum(for: pixelSize)
+            )
         )
     }
 

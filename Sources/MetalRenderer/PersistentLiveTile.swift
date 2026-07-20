@@ -3,11 +3,13 @@ import PatternEngine
 
 @MainActor
 public final class PersistentLiveTile {
+    public let pixelSize: PixelSize
     public let texture: any MTLTexture
     public private(set) var isVisible = false
     public private(set) var isDirty = false
 
     public init(device: any MTLDevice, pixelSize: PixelSize) throws {
+        self.pixelSize = pixelSize
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
             width: pixelSize.width,

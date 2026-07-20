@@ -55,7 +55,10 @@ struct ContentView: View {
                             alignment: .top
                         )
                         .padding(12)
-                    tilingPicker(controller: controller)
+                    TilingInspector(
+                        controller: controller,
+                        runtimeError: $runtimeError
+                    )
                         .frame(
                             maxWidth: .infinity,
                             maxHeight: .infinity,
@@ -96,49 +99,6 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func tilingPicker(
-        controller: EditorSessionController
-    ) -> some View {
-        Picker(
-            "Tiling",
-            selection: Binding(
-                get: { controller.model.tiling },
-                set: { candidate in
-                    runtimeError = nil
-                    controller.handleTiling(candidate)
-                }
-            )
-        ) {
-            ForEach(TilingKind.allCases, id: \.self) { tiling in
-                Text(label(for: tiling)).tag(tiling)
-            }
-        }
-        .labelsHidden()
-        .pickerStyle(.menu)
-        .controlSize(.small)
-        .disabled(controller.model.isBusy)
-        .padding(8)
-    }
-
-    private func label(for tiling: TilingKind) -> String {
-        switch tiling {
-        case .grid:
-            "Grid"
-        case .halfDrop:
-            "Half Drop"
-        case .brick:
-            "Brick"
-        case .mirrorX:
-            "Mirror X"
-        case .mirrorY:
-            "Mirror Y"
-        case .mirrorXY:
-            "Mirror XY"
-        case .rotational:
-            "Rotational"
-        }
     }
 
     private enum CanvasState {

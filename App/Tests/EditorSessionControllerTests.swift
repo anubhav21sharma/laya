@@ -210,6 +210,136 @@ func failureKeepsHistoryCursorAvailabilityAndWholeRasterUnchanged() throws {
     renderer.releaseRasterRevisions([command.before.id, command.after.id])
 }
 
+@Test
+@MainActor
+func tilingChangeUndoRedoIsMetadataOnly() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let originalBytes = try canonicalBytes(renderer)
+    let originalResources = renderer.harnessTilingMutationSnapshot
+
+    controller.handleTiling(.mirrorX)
+    #expect(controller.model.tiling == .mirrorX)
+    #expect(renderer.tiling == .mirrorX)
+    #expect(controller.historyAvailabilityForTesting.canUndo)
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+
+    controller.undo()
+    #expect(controller.model.tiling == .grid)
+    #expect(renderer.tiling == .grid)
+    #expect(controller.historyAvailabilityForTesting.canRedo)
+
+    controller.redo()
+    #expect(controller.model.tiling == .mirrorX)
+    #expect(renderer.tiling == .mirrorX)
+    #expect(!controller.historyAvailabilityForTesting.canRedo)
+    #expect(try canonicalBytes(renderer) == originalBytes)
+    #expect(
+        renderer.harnessTilingMutationSnapshot.canonicalFront
+            == originalResources.canonicalFront
+    )
+    #expect(renderer.harnessRevision == originalResources.revision)
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+}
+
+@Test
+@MainActor
+func tilingAfterUndoReleasesRasterRedoWithoutAllocatingMetadataPayload() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    var releaseCalls: [Set<StoredRasterRevisionID>] = []
+    let controller = EditorSessionController(
+        renderer: renderer,
+        releaseRasterRevisions: {
+            releaseCalls.append($0)
+            renderer.releaseRasterRevisions($0)
+        }
+    )
+    try commitControllerStroke(controller, renderer: renderer)
+    let raster = try #require(controller.lastRecordedRasterCommandForTesting)
+    controller.undo()
+    try renderer.finishRasterOperationForHarness()
+    releaseCalls.removeAll()
+
+    controller.handleTiling(.mirrorY)
+
+    #expect(releaseCalls == [[raster.before.id, raster.after.id]])
+    #expect(!controller.historyAvailabilityForTesting.canRedo)
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+}
+
+@Test
+@MainActor
+func resizeHistoryFinalizesOnlyAfterInstallAndRestoresExactBytes() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let before = try canonicalBytes(renderer)
+    let newSize = PixelSize(width: 96, height: 80)
+
+    controller.handleTileSize(newSize)
+    #expect(controller.model.pixelSize == PixelSize(width: 64, height: 64))
+    #expect(!controller.historyAvailabilityForTesting.canUndo)
+    #expect(controller.model.isBusy)
+    try renderer.finishRasterOperationForHarness()
+
+    #expect(controller.model.pixelSize == newSize)
+    #expect(controller.historyAvailabilityForTesting.canUndo)
+    #expect(!controller.historyAvailabilityForTesting.canRedo)
+    #expect(!controller.model.isBusy)
+    #expect(try canonicalBytes(renderer) == [UInt8](
+        repeating: 0,
+        count: newSize.width * newSize.height * 4
+    ))
+
+    controller.undo()
+    #expect(controller.model.pixelSize == newSize)
+    #expect(controller.historyAvailabilityForTesting.canUndo)
+    try renderer.finishRasterOperationForHarness()
+    #expect(controller.model.pixelSize == PixelSize(width: 64, height: 64))
+    #expect(try canonicalBytes(renderer) == before)
+    #expect(controller.historyAvailabilityForTesting.canRedo)
+
+    controller.redo()
+    try renderer.finishRasterOperationForHarness()
+    #expect(controller.model.pixelSize == newSize)
+    #expect(!controller.historyAvailabilityForTesting.canRedo)
+
+    let resize = try #require(controller.lastRecordedResizeCommandForTesting)
+    renderer.releaseRasterRevisions([resize.before.id, resize.after.id])
+}
+
+@Test
+@MainActor
+func resizeAllocationFailureKeepsControllerHistoryAndCommittedModel() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(
+        renderer: renderer,
+        requestResize: { token, size, maximumRetainedBytes in
+            try renderer.requestResizeForHarness(
+                token: token,
+                to: size,
+                maximumRetainedBytes: maximumRetainedBytes,
+                forceResourceAllocationFailure: true
+            )
+        }
+    )
+    var errors: [MetalRendererError] = []
+    controller.onError = { errors.append($0) }
+    let resources = renderer.harnessTilingMutationSnapshot
+    let viewport = renderer.viewport
+    let bytes = try canonicalBytes(renderer)
+
+    controller.handleTileSize(PixelSize(width: 96, height: 80))
+
+    #expect(errors == [.textureAllocationFailed])
+    #expect(controller.model.pixelSize == PixelSize(width: 64, height: 64))
+    #expect(!controller.historyAvailabilityForTesting.canUndo)
+    #expect(!controller.historyAvailabilityForTesting.canRedo)
+    #expect(!controller.model.isBusy)
+    #expect(renderer.harnessTilingMutationSnapshot == resources)
+    #expect(renderer.viewport == viewport)
+    #expect(try canonicalBytes(renderer) == bytes)
+}
+
 @MainActor
 private func canonicalBytes(_ renderer: GridRenderer) throws -> [UInt8] {
     textureBytes(try renderer.copyCanonicalForHarness())

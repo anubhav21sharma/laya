@@ -68,6 +68,40 @@ func metadataCommandsHaveNoRetainedRasterCost() throws {
 }
 
 @Test
+func tileResizeRetainsBothDifferentlySizedFullRasterRevisions() throws {
+    let beforeSize = PixelSize(width: 96, height: 80)
+    let afterSize = PixelSize(width: 64, height: 72)
+    let before = makeFullRasterReference(
+        id: 100,
+        pixelSize: beforeSize,
+        retainedBytes: 32_768
+    )
+    let after = makeFullRasterReference(
+        id: 101,
+        pixelSize: afterSize,
+        retainedBytes: 20_480
+    )
+    let command = TileResizeHistoryCommand(before: before, after: after)
+    let history = DocumentHistory(maximumBytes: 100_000)
+
+    try history.validateNewCommand(retainedBytes: command.retainedBytes)
+    let released = history.appendSuccessful(.tileResize(command))
+
+    #expect(command.before.pixelSize == beforeSize)
+    #expect(command.after.pixelSize == afterSize)
+    #expect(command.retainedBytes == 53_248)
+    #expect(history.retainedRasterBytes == 53_248)
+    #expect(released.isEmpty)
+
+    let undo = try #require(try history.beginUndo())
+    #expect(undo.command == .tileResize(command))
+    try history.finishNavigation(token: undo.token, succeeded: true)
+    let redo = try #require(try history.beginRedo())
+    #expect(redo.command == .tileResize(command))
+    try history.finishNavigation(token: redo.token, succeeded: false)
+}
+
+@Test
 func staleNavigationTokensFail() throws {
     let history = DocumentHistory()
     let command = makeRasterCommand(bytes: 64)
@@ -184,6 +218,30 @@ private func makeRasterCommand(
         afterID: seed * 2 + 1,
         kind: kind,
         bytes: bytes
+    )
+}
+
+private func makeFullRasterReference(
+    id: UInt64,
+    pixelSize: PixelSize,
+    retainedBytes: Int
+) -> RasterRevisionReference {
+    let regions = PixelRegionSet(
+        [
+            PixelRect(
+                minX: 0,
+                minY: 0,
+                maxX: pixelSize.width,
+                maxY: pixelSize.height
+            )!,
+        ],
+        clippedTo: pixelSize
+    )
+    return RasterRevisionReference(
+        id: StoredRasterRevisionID(rawValue: id),
+        pixelSize: pixelSize,
+        regions: regions,
+        retainedBytes: retainedBytes
     )
 }
 

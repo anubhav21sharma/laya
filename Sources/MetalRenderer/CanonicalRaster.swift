@@ -3,12 +3,17 @@ import PatternEngine
 
 public final class CanonicalRaster: RasterSurface {
     public let pixelSize: PixelSize
-    public private(set) var revision = RasterRevision(rawValue: 0)
+    public private(set) var revision: RasterRevision
     public private(set) var front: any MTLTexture
     public private(set) var scratch: any MTLTexture
 
-    public init(device: any MTLDevice, pixelSize: PixelSize) throws {
+    public init(
+        device: any MTLDevice,
+        pixelSize: PixelSize,
+        initialRevision: RasterRevision = RasterRevision(rawValue: 0)
+    ) throws {
         self.pixelSize = pixelSize
+        revision = initialRevision
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
