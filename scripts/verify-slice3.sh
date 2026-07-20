@@ -281,6 +281,42 @@ run_slice3_pair() {
   require_slice3_family "$name" "$family"
 }
 
+validate_strict_evidence() {
+  local build_log="$repo_root/.build/slice3-evidence-validator-build.log"
+  local evaluator_log="$repo_root/.build/slice3-strict-evidence.log"
+  local status validator
+
+  if ! swift build --product SliceThreeEvidenceGate >"$build_log" 2>&1; then
+    cat "$build_log" >&2
+    gate_error "strict Slice 3 evidence validator failed to build"
+    return 1
+  fi
+  validator="$repo_root/.build/debug/SliceThreeEvidenceGate"
+  [[ -x "$validator" ]] || {
+    gate_error "strict Slice 3 evidence validator executable is missing"
+    return 1
+  }
+
+  set +e
+  "$validator" \
+    "$artifacts/slice2" \
+    "$artifacts/positive" \
+    "$repo_root/.build/slice1-artifacts/positive" \
+    "$git_commit" \
+    >"$evaluator_log" 2>&1
+  status=$?
+  set -e
+  if [[ "$status" -ne 0 ]]; then
+    cat "$evaluator_log" >&2
+    if [[ "$status" -eq 2 ]]; then
+      gate_error "stable real-Metal performance acceptance remains pending"
+    else
+      gate_error "strict Slice 3 evidence validation failed"
+    fi
+    return 1
+  fi
+}
+
 evaluate_benchmarks() {
   local evaluator_log="$repo_root/.build/slice3-benchmark-evaluation.log"
   local status
@@ -660,6 +696,7 @@ run_gate() {
     run_slice3_pair "$name" "$metric" "$family" || return 1
   done < <(slice3_matrix)
 
+  validate_strict_evidence || return 1
   evaluate_benchmarks || return 1
   prove_generated_artifacts_ignored || return 1
   verify_tracked_source_state || return 1

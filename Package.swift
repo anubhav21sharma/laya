@@ -13,6 +13,10 @@ let package = Package(
         .library(name: "EditorCore", targets: ["EditorCore"]),
         .library(name: "CShaderTypes", targets: ["CShaderTypes"]),
         .library(name: "MetalRenderer", targets: ["MetalRenderer"]),
+        .executable(
+            name: "SliceThreeEvidenceGate",
+            targets: ["SliceThreeEvidenceGate"]
+        ),
         .library(name: "PatternFile", targets: ["PatternFile"]),
     ],
     targets: [
@@ -33,6 +37,10 @@ let package = Package(
         .target(
             name: "PatternFile",
             dependencies: ["PatternEngine"]
+        ),
+        .executableTarget(
+            name: "SliceThreeEvidenceGate",
+            dependencies: ["MetalRenderer"]
         ),
         .testTarget(
             name: "PatternEngineTests",

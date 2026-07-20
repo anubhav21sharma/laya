@@ -222,6 +222,7 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     public let schemaVersion: Int
     public let timestampUTC: String
     public let sceneName: String
+    public let program: String?
     public let hardware: BenchmarkHardware
     public let operatingSystem: String
     public let build: BenchmarkBuild
@@ -302,11 +303,13 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         revisionRestoreMilliseconds: [Double]? = nil,
         historyResidentBytes: Int? = nil,
         historyCommandCount: Int? = nil,
-        changedRegionCount: Int? = nil
+        changedRegionCount: Int? = nil,
+        program: String? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.timestampUTC = timestampUTC
         self.sceneName = sceneName
+        self.program = program
         self.hardware = hardware
         self.operatingSystem = operatingSystem
         self.build = build
@@ -384,6 +387,10 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
 
     private func validateSchemaFourMetrics() throws {
         guard schemaVersion == 4 else { return }
+
+        guard program != nil else {
+            throw BenchmarkRecordError.missingSchemaFourMetric("program")
+        }
 
         guard let revisionCaptureMilliseconds else {
             throw BenchmarkRecordError.missingSchemaFourMetric(

@@ -290,7 +290,8 @@ public final class SliceThreeHarnessRunner {
                 measurements.revisionRestoreMilliseconds,
             historyResidentBytes: result.historyResidentBytes,
             historyCommandCount: result.historyCommandCount,
-            changedRegionCount: result.changedRegionCount
+            changedRegionCount: result.changedRegionCount,
+            program: program.rawValue
         )
 
         var artifactURLs: [URL] = []
@@ -994,9 +995,15 @@ public final class SliceThreeHarnessRunner {
         )
         let eventDuration = elapsedMilliseconds(since: processingStart)
         measurements.brushProcessingMilliseconds.append(eventDuration)
-        measurements.eventToSubmitMilliseconds.append(eventDuration)
 
         let flush = try renderer.flushPendingLiveForHarness()
+        measurements.eventToSubmitMilliseconds.append(
+            HarnessSubmissionTiming.eventToSubmitMilliseconds(
+                eventProcessingMilliseconds: eventDuration,
+                flushThroughSubmissionMilliseconds:
+                    flush.metrics.cpuEncodeMilliseconds
+            )
+        )
         measurements.append(flush.metrics, category: .dab)
         let live = capturesLive
             ? try captureDisplay(

@@ -114,7 +114,8 @@ func sliceThreeBenchmarkRecordRoundTripsRequiredMetrics() throws {
         revisionRestoreMilliseconds: [0.50, 0.55],
         historyResidentBytes: 4_096,
         historyCommandCount: 1,
-        changedRegionCount: 2
+        changedRegionCount: 2,
+        program: "regionUndoSeam"
     )
 
     let data = try BenchmarkRecord.encode(record)
@@ -143,6 +144,21 @@ func sliceThreeBenchmarkParserRequiresEveryNewMetric(_ key: String) throws {
     object.removeValue(forKey: key)
 
     #expect(throws: BenchmarkRecordError.missingSchemaFourMetric(key)) {
+        try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+}
+
+@Test
+func sliceThreeBenchmarkParserRequiresProgramIdentity() throws {
+    let valid = try BenchmarkRecord.encode(sliceThreeBenchmarkFixture())
+    var object = try #require(
+        JSONSerialization.jsonObject(with: valid) as? [String: Any]
+    )
+    object.removeValue(forKey: "program")
+
+    #expect(throws: BenchmarkRecordError.missingSchemaFourMetric("program")) {
         try BenchmarkRecord.decode(
             JSONSerialization.data(withJSONObject: object)
         )
@@ -216,7 +232,8 @@ private func sliceThreeBenchmarkFixture(
         revisionRestoreMilliseconds: [0],
         historyResidentBytes: 0,
         historyCommandCount: 0,
-        changedRegionCount: 0
+        changedRegionCount: 0,
+        program: "coloredDraw"
     )
 }
 

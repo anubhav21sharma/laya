@@ -2668,8 +2668,12 @@ public final class HarnessRunner {
         )
         let flushResult = try renderer.flushPendingLiveForHarness()
         let metrics = flushResult.metrics
-        let submitMilliseconds = eventProcessingMilliseconds
-            + metrics.cpuEncodeMilliseconds
+        let submitMilliseconds = HarnessSubmissionTiming
+            .eventToSubmitMilliseconds(
+                eventProcessingMilliseconds: eventProcessingMilliseconds,
+                flushThroughSubmissionMilliseconds:
+                    metrics.cpuEncodeMilliseconds
+            )
         let counters = renderer.harnessCounters
         let identityAudit = try Self.auditEncodedInstanceIdentityRanges(
             sceneName: scene.name,

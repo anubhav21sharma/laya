@@ -961,8 +961,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             if activeStroke != nil {
                 counters.renderedFramesThisStroke += 1
             }
-            let cpuMilliseconds = elapsedMilliseconds(since: start)
-            commandBuffer.commit()
+            let cpuMilliseconds = HarnessSubmissionTiming
+                .measureThroughSubmission(
+                    since: start,
+                    submit: commandBuffer.commit
+                )
             commandBuffer.waitUntilCompleted()
             let submittedError = drainFrameOutcomes()
             drainCompletedUploadRanges()
