@@ -9,12 +9,12 @@ func navigationMovesCursorOnlyAfterSuccess() throws {
     try history.validateNewCommand(retainedBytes: command.retainedBytes)
     _ = history.appendSuccessful(command)
 
-    let undo = try #require(history.beginUndo())
+    let undo = try #require(try history.beginUndo())
     #expect(history.canUndo)
     try history.finishNavigation(token: undo.token, succeeded: false)
     #expect(history.canUndo)
 
-    let retry = try #require(history.beginUndo())
+    let retry = try #require(try history.beginUndo())
     try history.finishNavigation(token: retry.token, succeeded: true)
     #expect(!history.canUndo)
     #expect(history.canRedo)
@@ -56,7 +56,7 @@ func staleNavigationTokensFail() throws {
     try history.validateNewCommand(retainedBytes: command.retainedBytes)
     _ = history.appendSuccessful(command)
 
-    let undo = try #require(history.beginUndo())
+    let undo = try #require(try history.beginUndo())
     try history.finishNavigation(token: undo.token, succeeded: false)
 
     #expect(throws: DocumentHistoryError.staleNavigationToken) {
@@ -77,7 +77,7 @@ func appendReleasesRedoAndPrunedRevisionIDsWithoutDuplicates() throws {
         _ = history.appendSuccessful(command)
     }
 
-    let undo = try #require(history.beginUndo())
+    let undo = try #require(try history.beginUndo())
     try history.finishNavigation(token: undo.token, succeeded: true)
 
     try history.validateNewCommand(retainedBytes: replacement.retainedBytes)
@@ -92,17 +92,51 @@ func appendReleasesRedoAndPrunedRevisionIDsWithoutDuplicates() throws {
 }
 
 @Test
-func pendingNavigationRejectsPreflight() throws {
+func pendingNavigationRejectsPreflightAndBothNavigationStarts() throws {
     let history = DocumentHistory()
     let command = makeRasterCommand(bytes: 64)
     try history.validateNewCommand(retainedBytes: command.retainedBytes)
     _ = history.appendSuccessful(command)
 
-    _ = try #require(history.beginUndo())
+    let pendingUndo = try #require(try history.beginUndo())
 
     #expect(throws: DocumentHistoryError.navigationPending) {
         try history.validateNewCommand(retainedBytes: command.retainedBytes)
     }
+    #expect(throws: DocumentHistoryError.navigationPending) {
+        _ = try history.beginUndo()
+    }
+    #expect(throws: DocumentHistoryError.navigationPending) {
+        _ = try history.beginRedo()
+    }
+
+    try history.finishNavigation(token: pendingUndo.token, succeeded: true)
+    let pendingRedo = try #require(try history.beginRedo())
+
+    #expect(throws: DocumentHistoryError.navigationPending) {
+        _ = try history.beginUndo()
+    }
+    #expect(throws: DocumentHistoryError.navigationPending) {
+        _ = try history.beginRedo()
+    }
+
+    try history.finishNavigation(token: pendingRedo.token, succeeded: false)
+}
+
+@Test
+func zeroCommandLimitReleasesImmediatelyPrunedIncomingRevisions() throws {
+    let history = DocumentHistory(maximumCommands: 0, maximumBytes: 64)
+    let command = makeRasterCommand(beforeID: 10, afterID: 11, bytes: 64)
+
+    try history.validateNewCommand(retainedBytes: command.retainedBytes)
+    let released = history.appendSuccessful(command)
+
+    #expect(history.commandCount == 0)
+    #expect(history.retainedRasterBytes == 0)
+    #expect(released == [
+        StoredRasterRevisionID(rawValue: 10),
+        StoredRasterRevisionID(rawValue: 11),
+    ])
 }
 
 @Test

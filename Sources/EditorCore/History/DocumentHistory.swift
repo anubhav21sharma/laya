@@ -141,15 +141,15 @@ public final class DocumentHistory {
         cursor < commands.count
     }
 
-    public func beginUndo() -> HistoryNavigation? {
-        precondition(pendingNavigation == nil)
+    public func beginUndo() throws -> HistoryNavigation? {
+        try requireNoPendingNavigation()
         guard cursor > 0 else { return nil }
 
         return beginNavigation(direction: .undo, command: commands[cursor - 1])
     }
 
-    public func beginRedo() -> HistoryNavigation? {
-        precondition(pendingNavigation == nil)
+    public func beginRedo() throws -> HistoryNavigation? {
+        try requireNoPendingNavigation()
         guard cursor < commands.count else { return nil }
 
         return beginNavigation(direction: .redo, command: commands[cursor])
@@ -191,7 +191,7 @@ public final class DocumentHistory {
         precondition(pendingNavigation == nil)
         precondition(command.retainedBytes <= maximumBytes)
 
-        let oldReferencedIDs = referencedRevisionIDs
+        let candidateReleasedIDs = referencedRevisionIDs.union(command.revisionIDs)
         commands.removeSubrange(cursor..<commands.count)
         commands.append(command)
         cursor = commands.count
@@ -204,7 +204,7 @@ public final class DocumentHistory {
         }
 
         commandCount = commands.count
-        return oldReferencedIDs.subtracting(referencedRevisionIDs)
+        return candidateReleasedIDs.subtracting(referencedRevisionIDs)
     }
 
     private var referencedRevisionIDs: Set<StoredRasterRevisionID> {
