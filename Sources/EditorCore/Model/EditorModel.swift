@@ -40,6 +40,9 @@ public final class EditorModel {
     }
 
     public func confirmPixelSize(_ pixelSize: PixelSize) {
+        guard EditorConfiguration.isValidTileSize(pixelSize) else {
+            return
+        }
         self.pixelSize = pixelSize
     }
 

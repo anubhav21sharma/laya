@@ -6,9 +6,22 @@ public enum EditorKeymap {
     ) -> EditorShortcut? {
         let normalized = key.rawValue.lowercased()
 
-        if modifiers.contains(.command) {
+        if modifiers == .command {
             guard phase == .down, normalized == "z" else { return nil }
-            return modifiers.contains(.shift) ? .redo : .undo
+            return .undo
+        }
+        if modifiers == [.command, .shift] {
+            guard phase == .down, normalized == "z" else { return nil }
+            return .redo
+        }
+        guard modifiers.isEmpty || modifiers == .shift else {
+            return nil
+        }
+        if modifiers == .shift {
+            let shiftedCharacters = ["b", "e", "g", "s", "t", "+", "<", ">"]
+            guard shiftedCharacters.contains(normalized) else {
+                return nil
+            }
         }
 
         if normalized == " " {

@@ -63,3 +63,21 @@ func editorModelChangesCommittedReadStateOnlyThroughConfirmations() {
     #expect(!model.canRedo)
     #expect(model.isBusy)
 }
+
+@MainActor
+@Test
+func editorModelRejectsPixelSizesOutsideCentralBounds() {
+    let model = EditorModel()
+
+    model.confirmPixelSize(PixelSize(width: 63, height: 64))
+    #expect(model.pixelSize == PixelSize(width: 256, height: 256))
+
+    model.confirmPixelSize(PixelSize(width: 64, height: 64))
+    #expect(model.pixelSize == PixelSize(width: 64, height: 64))
+
+    model.confirmPixelSize(PixelSize(width: 4_096, height: 4_096))
+    #expect(model.pixelSize == PixelSize(width: 4_096, height: 4_096))
+
+    model.confirmPixelSize(PixelSize(width: 4_097, height: 4_096))
+    #expect(model.pixelSize == PixelSize(width: 4_096, height: 4_096))
+}

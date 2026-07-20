@@ -4,6 +4,8 @@ public enum EditorConfiguration {
     public static let defaultBrushDiameter: Float = 20
     public static let minimumBrushDiameter: Float = 2
     public static let maximumBrushDiameter: Float = 2_000
+    public static let minimumTileDimension = 64
+    public static let maximumTileDimension = 4_096
 
     public static func brushMaximum(for size: PixelSize) -> Float {
         min(maximumBrushDiameter, 8 * Float(min(size.width, size.height)))
@@ -25,10 +27,31 @@ public enum EditorConfiguration {
         _ size: PixelSize,
         larger: Bool
     ) -> PixelSize {
-        let delta = larger ? 32 : -32
         return PixelSize(
-            width: min(4_096, max(64, size.width + delta)),
-            height: min(4_096, max(64, size.height + delta))
+            width: stepTileDimension(size.width, larger: larger),
+            height: stepTileDimension(size.height, larger: larger)
         )
+    }
+
+    public static func isValidTileSize(_ size: PixelSize) -> Bool {
+        let range = minimumTileDimension...maximumTileDimension
+        return range.contains(size.width) && range.contains(size.height)
+    }
+
+    private static func stepTileDimension(
+        _ value: Int,
+        larger: Bool
+    ) -> Int {
+        if larger {
+            guard value < maximumTileDimension else {
+                return maximumTileDimension
+            }
+            return max(minimumTileDimension, value + 32)
+        }
+
+        guard value > minimumTileDimension else {
+            return minimumTileDimension
+        }
+        return min(maximumTileDimension, value - 32)
     }
 }

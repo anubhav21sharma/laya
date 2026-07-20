@@ -106,6 +106,36 @@ func strokeSamplesUseOneTokenThroughCommit() {
 }
 
 @Test
+func pointerEventsRejectMismatchedSamplePhasesWithoutAllocatingTokens() {
+    var idle = EditorTransaction()
+    let idleBefore = idle
+
+    #expect(
+        idle.apply(
+            .pointerBegan(sample(.moved), tool: .draw, style: style)
+        ) == []
+    )
+    #expect(idle == idleBefore)
+
+    let began = idle.apply(
+        .pointerBegan(sample(.began), tool: .draw, style: style)
+    )
+    guard case let .beginStroke(token, _, _, _) = began.first else {
+        Issue.record("Expected valid stroke after rejected mismatch")
+        return
+    }
+    #expect(token.rawValue == 1)
+
+    let collectingBefore = idle
+    #expect(idle.apply(.pointerMoved(sample(.ended))) == [])
+    #expect(idle == collectingBefore)
+    #expect(idle.apply(.pointerEnded(sample(.moved))) == [])
+    #expect(idle == collectingBefore)
+    #expect(idle.apply(.pointerMoved(sample(.cancelled))) == [])
+    #expect(idle == collectingBefore)
+}
+
+@Test
 func undoDuringCollectingCancelsBeforeCommand() {
     var transaction = collectingDrawTransaction()
     guard case let .drawing(drawing) = transaction.state else {
@@ -227,6 +257,51 @@ func transformInterruptionCancelsAndClearsBeforeCommand() {
 }
 
 @Test
+func transformGridChangeCancelsAndClearsBeforeConfigurationEffect() {
+    var transaction = transformingTransaction()
+
+    #expect(
+        transaction.apply(.gridVisibilityIntent(true))
+            == [
+                .cancelTransform,
+                .clearSelectionOverlay,
+                .updateGridVisibility(true),
+            ]
+    )
+    #expect(transaction.state == .idle)
+}
+
+@Test
+func invalidTileSizeIntentIsRejectedBeforeCancellationOrTokenAllocation() {
+    var idle = EditorTransaction()
+    let idleBefore = idle
+    #expect(
+        idle.apply(
+            .tileSizeIntent(PixelSize(width: 63, height: 64))
+        ) == []
+    )
+    #expect(idle == idleBefore)
+
+    let validEffects = idle.apply(
+        .tileSizeIntent(PixelSize(width: 64, height: 64))
+    )
+    guard case let .applyTileSize(token, _) = validEffects.first else {
+        Issue.record("Expected valid tile-size operation")
+        return
+    }
+    #expect(token.rawValue == 1)
+
+    var collecting = collectingDrawTransaction()
+    let collectingBefore = collecting
+    #expect(
+        collecting.apply(
+            .tileSizeIntent(PixelSize(width: 4_097, height: 4_096))
+        ) == []
+    )
+    #expect(collecting == collectingBefore)
+}
+
+@Test
 func selectionDraftSettlesOnlyWithARegionAndReadySelectionCanTransform() {
     var empty = selectingTransaction(nil)
     #expect(empty.state == .selectingDraft(nil))
@@ -336,7 +411,7 @@ func matchingCompletionsReleaseBusyStateAndReportFailure() {
 }
 
 @Test
-func everyStateAndEventPairReturnsWithoutTrapping() {
+func everyStateAndEventPairIsTotal() {
     let transactions = [
         EditorTransaction(),
         collectingDrawTransaction(),
@@ -377,4 +452,88 @@ func everyStateAndEventPairReturnsWithoutTrapping() {
     }
 
     #expect(pairCount == transactions.count * events.count)
+}
+
+private struct RejectedPair {
+    let transaction: EditorTransaction
+    let event: EditorTransactionEvent
+    let effects: [EditorTransactionEffect]
+}
+
+@Test
+func illegalStateEventPairsRejectWithoutMutationOrIllegalEffects() {
+    let idle = EditorTransaction()
+    let collecting = collectingDrawTransaction()
+    let commitPending = commitPendingTransaction()
+    let draft = selectingTransaction(region)
+    let ready = selectionReadyTransaction()
+    let transforming = transformingTransaction()
+    let pending = pendingCommandTransaction()
+
+    let pairs = [
+        RejectedPair(
+            transaction: idle,
+            event: .pointerMoved(sample(.moved)),
+            effects: []
+        ),
+        RejectedPair(
+            transaction: idle,
+            event: .pointerEnded(sample(.ended)),
+            effects: []
+        ),
+        RejectedPair(
+            transaction: collecting,
+            event: .pointerBegan(
+                sample(.began),
+                tool: .draw,
+                style: style
+            ),
+            effects: [.busy]
+        ),
+        RejectedPair(
+            transaction: collecting,
+            event: .pointerMoved(sample(.ended)),
+            effects: []
+        ),
+        RejectedPair(
+            transaction: collecting,
+            event: .pointerEnded(sample(.moved)),
+            effects: []
+        ),
+        RejectedPair(
+            transaction: commitPending,
+            event: .toolIntent(.erase),
+            effects: [.busy]
+        ),
+        RejectedPair(
+            transaction: draft,
+            event: .pointerBegan(
+                sample(.began),
+                tool: .draw,
+                style: style
+            ),
+            effects: []
+        ),
+        RejectedPair(
+            transaction: ready,
+            event: .pointerMoved(sample(.moved)),
+            effects: []
+        ),
+        RejectedPair(
+            transaction: transforming,
+            event: .pointerEnded(sample(.ended)),
+            effects: []
+        ),
+        RejectedPair(
+            transaction: pending,
+            event: .gridVisibilityIntent(true),
+            effects: [.busy]
+        ),
+    ]
+
+    for pair in pairs {
+        var transaction = pair.transaction
+        #expect(transaction.apply(pair.event) == pair.effects)
+        #expect(transaction == pair.transaction)
+    }
 }

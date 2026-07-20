@@ -53,6 +53,25 @@ func commandModifiersRouteBeforePlainKeys() {
 }
 
 @Test
+func onlyExactSupportedModifierSetsResolve() {
+    #expect(shortcut("B", modifiers: .shift) == .selectTool(.draw))
+    #expect(shortcut("+", modifiers: .shift) == .stepBrush(larger: true))
+    #expect(shortcut(">", modifiers: .shift) == .stepTile(larger: true))
+
+    #expect(shortcut("b", modifiers: .option) == nil)
+    #expect(shortcut("0", modifiers: .control) == nil)
+    #expect(shortcut("z", modifiers: [.command, .option]) == nil)
+    #expect(
+        shortcut(
+            "z",
+            modifiers: [.command, .shift, .control]
+        ) == nil
+    )
+    #expect(shortcut("0", modifiers: .shift) == nil)
+    #expect(shortcut(" ", modifiers: .shift) == nil)
+}
+
+@Test
 func reservedSliceSevenKeysRemainUnconsumed() {
     #expect(shortcut("s") == nil)
     #expect(shortcut("T") == nil)

@@ -118,6 +118,15 @@ public struct EditorTransaction: Equatable, Sendable {
     public mutating func apply(
         _ event: EditorTransactionEvent
     ) -> [EditorTransactionEffect] {
+        guard hasMatchingPointerPhase(event) else {
+            return []
+        }
+        if case let .tileSizeIntent(size) = event,
+           !EditorConfiguration.isValidTileSize(size)
+        {
+            return []
+        }
+
         if case let .operationCompleted(token, succeeded) = event {
             return completeOperation(token, succeeded: succeeded)
         }
@@ -372,7 +381,12 @@ public struct EditorTransaction: Equatable, Sendable {
                 .updateBrushDiameter(diameter),
             ]
         case let .gridVisibilityIntent(visible):
-            return [.updateGridVisibility(visible)]
+            state = .idle
+            return [
+                .cancelTransform,
+                .clearSelectionOverlay,
+                .updateGridVisibility(visible),
+            ]
         case let .command(command):
             state = .idle
             return [
@@ -403,6 +417,24 @@ public struct EditorTransaction: Equatable, Sendable {
         for region: SelectionRegion?
     ) -> [EditorTransactionEffect] {
         region == nil ? [] : [.clearSelectionOverlay]
+    }
+
+    private func hasMatchingPointerPhase(
+        _ event: EditorTransactionEvent
+    ) -> Bool {
+        switch event {
+        case let .pointerBegan(sample, _, _):
+            return sample.phase == .began
+        case let .pointerMoved(sample):
+            return sample.phase == .moved
+        case let .pointerEnded(sample):
+            return sample.phase == .ended
+        case .pointerCancelled, .toolIntent, .colorIntent,
+             .brushDiameterIntent, .gridVisibilityIntent, .command,
+             .tilingIntent, .tileSizeIntent, .selectionChanged,
+             .selectionEnded, .operationCompleted:
+            return true
+        }
     }
 
     private mutating func beginCommand(

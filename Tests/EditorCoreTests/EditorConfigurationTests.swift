@@ -20,6 +20,43 @@ func brushConfigurationUsesExactDefaultsAndTileDependentMaximum() {
 }
 
 @Test
+func tileConfigurationUsesExactBoundsAndValidatesBothDimensions() {
+    #expect(EditorConfiguration.minimumTileDimension == 64)
+    #expect(EditorConfiguration.maximumTileDimension == 4_096)
+
+    #expect(
+        !EditorConfiguration.isValidTileSize(
+            PixelSize(width: 63, height: 64)
+        )
+    )
+    #expect(
+        !EditorConfiguration.isValidTileSize(
+            PixelSize(width: 64, height: 63)
+        )
+    )
+    #expect(
+        EditorConfiguration.isValidTileSize(
+            PixelSize(width: 64, height: 64)
+        )
+    )
+    #expect(
+        EditorConfiguration.isValidTileSize(
+            PixelSize(width: 4_096, height: 4_096)
+        )
+    )
+    #expect(
+        !EditorConfiguration.isValidTileSize(
+            PixelSize(width: 4_097, height: 4_096)
+        )
+    )
+    #expect(
+        !EditorConfiguration.isValidTileSize(
+            PixelSize(width: 4_096, height: 4_097)
+        )
+    )
+}
+
+@Test
 func brushStepsRoundGeometricallyAndClamp() {
     let smallTile = PixelSize(width: 64, height: 128)
 
@@ -72,5 +109,11 @@ func tileStepsPreserveRectangularDifferenceAndClampEachDimension() {
             PixelSize(width: 64, height: 4_096),
             larger: true
         ) == PixelSize(width: 96, height: 4_096)
+    )
+    #expect(
+        EditorConfiguration.stepTile(
+            PixelSize(width: Int.max, height: Int.max - 1),
+            larger: true
+        ) == PixelSize(width: 4_096, height: 4_096)
     )
 }
