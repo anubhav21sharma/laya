@@ -54,8 +54,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var onOperationCompleted: ((RendererOperationCompletion) -> Void)?
     public private(set) var viewport: ViewportTransform
     public private(set) var counters = GridStructuralCounters()
-    public var isIdle: Bool { activeStroke == nil }
+    public var isIdle: Bool {
+        activeStroke == nil && pendingRasterOperation == nil
+    }
     public var hasActiveStroke: Bool {
+        guard pendingRasterOperation == nil else { return false }
         guard let activeStroke else { return false }
         return !activeStroke.commitRequested
             && activeStroke.pendingRevisions == nil
@@ -86,6 +89,54 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let captureTokens: [RasterRevisionOperationToken]
     }
 
+    private struct PendingClearOperation {
+        let submissionID: UInt64
+        let token: RendererOperationToken
+        let revisions: PendingRasterRevisionPair
+        let captureTokens: [RasterRevisionOperationToken]
+        let commandBuffer: any MTLCommandBuffer
+    }
+
+    private struct PendingRestoreOperation {
+        let submissionID: UInt64
+        let token: RendererOperationToken
+        let revision: RasterRevisionReference
+        let restoreToken: RasterRevisionOperationToken
+        let commandBuffer: any MTLCommandBuffer
+    }
+
+    private enum PendingRasterOperation {
+        case clear(PendingClearOperation)
+        case restore(PendingRestoreOperation)
+
+        var submissionID: UInt64 {
+            switch self {
+            case let .clear(operation):
+                operation.submissionID
+            case let .restore(operation):
+                operation.submissionID
+            }
+        }
+
+        var token: RendererOperationToken {
+            switch self {
+            case let .clear(operation):
+                operation.token
+            case let .restore(operation):
+                operation.token
+            }
+        }
+
+        var commandBuffer: any MTLCommandBuffer {
+            switch self {
+            case let .clear(operation):
+                operation.commandBuffer
+            case let .restore(operation):
+                operation.commandBuffer
+            }
+        }
+    }
+
     private let commandQueue: any MTLCommandQueue
     private let library: any MTLLibrary
     private let pipelines: GridPipelineLibrary
@@ -94,14 +145,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private let instancePool: DabInstanceBufferPool
     private let revisionStore: RasterRevisionStore
     private let completionMailbox = GridRenderCompletionMailbox()
+    private let rasterCompletionMailbox = RendererRasterCompletionMailbox()
     private let tileSize: PatternSize
     private var tilingStrategy: TilingStrategy
     private var activeStroke: ActiveStrokeExecution?
+    private var pendingRasterOperation: PendingRasterOperation?
     private var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
     private var liveStroke = LiveStroke()
     private var completedUploadRanges: [(signal: UInt64, throughExclusive: UInt64)] = []
     private var needsLiveClear = true
     private var nextHarnessTokenRawValue: UInt64 = 1
+    private var nextRasterSubmissionID: UInt64 = 1
 
     public convenience init(
         device: any MTLDevice,
@@ -169,7 +223,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     public func setTiling(_ tiling: TilingKind) throws {
-        guard activeStroke == nil else {
+        guard isIdle else {
             throw MetalRendererError.tilingChangeRequiresIdle
         }
         tilingStrategy = TilingStrategy(
@@ -185,7 +239,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) throws {
         let wasIdle = isIdle
         defer { notifyIdleStateIfChanged(from: wasIdle) }
-        guard sample.phase == .began, activeStroke == nil else {
+        guard sample.phase == .began, isIdle else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
 
@@ -264,6 +318,178 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) {
         guard !ids.isEmpty else { return }
         revisionStore.release(ids)
+    }
+
+    public func requestClear(
+        token: RendererOperationToken,
+        maximumRetainedBytes: Int
+    ) throws {
+        try requestClear(
+            token: token,
+            maximumRetainedBytes: maximumRetainedBytes,
+            forceFailure: false
+        )
+    }
+
+    public func requestRasterRestore(
+        token: RendererOperationToken,
+        revision: RasterRevisionReference
+    ) throws {
+        try requestRasterRestore(
+            token: token,
+            revision: revision,
+            forceFailure: false
+        )
+    }
+
+    private func requestClear(
+        token: RendererOperationToken,
+        maximumRetainedBytes: Int,
+        forceFailure: Bool
+    ) throws {
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        guard isIdle else {
+            throw MetalRendererError.commitPendingInput
+        }
+        guard maximumRetainedBytes >= 0 else {
+            throw MetalRendererError.rasterRevisionStorageLimitExceeded
+        }
+
+        let fullRegion = PixelRegionSet(
+            [
+                PixelRect(
+                    minX: 0,
+                    minY: 0,
+                    maxX: pixelSize.width,
+                    maxY: pixelSize.height
+                )!,
+            ],
+            clippedTo: pixelSize
+        )
+        let oneRevisionBytes = try revisionStore.retainedBytes(
+            pixelSize: pixelSize,
+            regions: fullRegion
+        )
+        let (pairBytes, overflow) = oneRevisionBytes.multipliedReportingOverflow(
+            by: 2
+        )
+        guard !overflow, pairBytes <= maximumRetainedBytes else {
+            throw MetalRendererError.rasterRevisionStorageLimitExceeded
+        }
+
+        let revisions = try revisionStore.allocatePair(
+            beforePixelSize: pixelSize,
+            beforeRegions: fullRegion,
+            afterPixelSize: pixelSize,
+            afterRegions: fullRegion
+        )
+        precondition(
+            revisions.retainedBytes == pairBytes,
+            "Raster revision preflight and allocation must agree."
+        )
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            revisionStore.discard(revisions)
+            throw MetalRendererError.commandBufferUnavailable
+        }
+
+        var captureTokens: [RasterRevisionOperationToken] = []
+        do {
+            captureTokens.append(
+                try revisionStore.encodeCapture(
+                    revisions.before,
+                    from: canonical.front,
+                    on: commandBuffer
+                )
+            )
+            try encodeTransparentClear(
+                of: canonical.scratch,
+                on: commandBuffer,
+                label: "Canonical Scratch Clear"
+            )
+            captureTokens.append(
+                try revisionStore.encodeCapture(
+                    revisions.after,
+                    from: canonical.scratch,
+                    on: commandBuffer
+                )
+            )
+        } catch {
+            finalizeCaptureTokens(captureTokens, as: .cancelled)
+            revisionStore.discard(revisions)
+            throw error
+        }
+
+        let submissionID = takeRasterSubmissionID()
+        pendingRasterOperation = .clear(
+            PendingClearOperation(
+                submissionID: submissionID,
+                token: token,
+                revisions: revisions,
+                captureTokens: captureTokens,
+                commandBuffer: commandBuffer
+            )
+        )
+        installRasterCompletionHandler(
+            on: commandBuffer,
+            submissionID: submissionID,
+            token: token,
+            forceFailure: forceFailure
+        )
+        commandBuffer.commit()
+    }
+
+    private func requestRasterRestore(
+        token: RendererOperationToken,
+        revision: RasterRevisionReference,
+        forceFailure: Bool
+    ) throws {
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        guard isIdle else {
+            throw MetalRendererError.commitPendingInput
+        }
+        guard revision.pixelSize == pixelSize else {
+            throw MetalRendererError.rasterRevisionTextureSizeMismatch(
+                expectedWidth: pixelSize.width,
+                expectedHeight: pixelSize.height,
+                actualWidth: revision.pixelSize.width,
+                actualHeight: revision.pixelSize.height
+            )
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw MetalRendererError.commandBufferUnavailable
+        }
+
+        try encodeCanonicalFrontCopy(to: canonical.scratch, on: commandBuffer)
+        let restoreToken: RasterRevisionOperationToken
+        do {
+            restoreToken = try revisionStore.encodeRestore(
+                revision,
+                into: canonical.scratch,
+                on: commandBuffer
+            )
+        } catch {
+            throw error
+        }
+
+        let submissionID = takeRasterSubmissionID()
+        pendingRasterOperation = .restore(
+            PendingRestoreOperation(
+                submissionID: submissionID,
+                token: token,
+                revision: revision,
+                restoreToken: restoreToken,
+                commandBuffer: commandBuffer
+            )
+        )
+        installRasterCompletionHandler(
+            on: commandBuffer,
+            submissionID: submissionID,
+            token: token,
+            forceFailure: forceFailure
+        )
+        commandBuffer.commit()
     }
 
     private func requireCollectingStroke(
@@ -372,6 +598,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     public func draw(in view: MTKView) {
+        _ = drainRasterOperationOutcomes()
         drainFrameOutcomes()
         drainCompletedUploadRanges()
 
@@ -726,6 +953,40 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let metrics = try submitCommitForHarness()
         try drainCompletedOperationsForHarness()
         return metrics
+    }
+
+    func requestRasterRestoreForHarness(
+        token: RendererOperationToken,
+        revision: RasterRevisionReference,
+        forceFailure: Bool
+    ) throws {
+        try requestRasterRestore(
+            token: token,
+            revision: revision,
+            forceFailure: forceFailure
+        )
+    }
+
+    func requestClearForHarness(
+        token: RendererOperationToken,
+        maximumRetainedBytes: Int,
+        forceFailure: Bool
+    ) throws {
+        try requestClear(
+            token: token,
+            maximumRetainedBytes: maximumRetainedBytes,
+            forceFailure: forceFailure
+        )
+    }
+
+    func finishRasterOperationForHarness() throws {
+        guard let operation = pendingRasterOperation else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        operation.commandBuffer.waitUntilCompleted()
+        if let error = drainRasterOperationOutcomes() {
+            throw error
+        }
     }
 
     func submitCommitForHarness(
@@ -1132,6 +1393,53 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         needsLiveClear = false
     }
 
+    private func encodeTransparentClear(
+        of texture: any MTLTexture,
+        on commandBuffer: any MTLCommandBuffer,
+        label: String
+    ) throws {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(
+            descriptor: pass
+        ) else {
+            throw MetalRendererError.renderEncoderUnavailable
+        }
+        encoder.label = label
+        encoder.endEncoding()
+    }
+
+    private func encodeCanonicalFrontCopy(
+        to destination: any MTLTexture,
+        on commandBuffer: any MTLCommandBuffer
+    ) throws {
+        guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
+            throw MetalRendererError.commandFailed(
+                "Metal blit encoder creation failed."
+            )
+        }
+        encoder.label = "Canonical Front To Scratch"
+        encoder.copy(
+            from: canonical.front,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: MTLSize(
+                width: pixelSize.width,
+                height: pixelSize.height,
+                depth: 1
+            ),
+            to: destination,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        encoder.endEncoding()
+    }
+
     private func encodeLiveClear(
         _ commandBuffer: any MTLCommandBuffer
     ) throws {
@@ -1510,6 +1818,159 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         completedUploadRanges.removeAll {
             $0.signal <= completedSignal
+        }
+    }
+
+    @discardableResult
+    private func drainRasterOperationOutcomes() -> MetalRendererError? {
+        var latestError: MetalRendererError?
+        for outcome in rasterCompletionMailbox.drain() {
+            if let error = processRasterOperationOutcome(outcome) {
+                latestError = error
+            }
+        }
+        return latestError
+    }
+
+    private func processRasterOperationOutcome(
+        _ outcome: RendererRasterSubmissionOutcome
+    ) -> MetalRendererError? {
+        guard
+            let pendingRasterOperation,
+            pendingRasterOperation.submissionID == outcome.submissionID,
+            pendingRasterOperation.token == outcome.token
+        else {
+            preconditionFailure(
+                "Renderer completed a raster operation it did not accept."
+            )
+        }
+
+        guard outcome.succeeded else {
+            return finalizeRasterOperationFailure(
+                pendingRasterOperation,
+                error: .commandFailed(
+                    outcome.errorMessage ?? "unknown command-buffer error"
+                )
+            )
+        }
+
+        switch pendingRasterOperation {
+        case let .clear(operation):
+            do {
+                for token in operation.captureTokens {
+                    try revisionStore.finalize(token, as: .succeeded)
+                }
+                canonical.acceptScratchCommit()
+                revisionStore.publish(operation.revisions)
+                self.pendingRasterOperation = nil
+                notifyIdleStateIfChanged(from: false)
+                onOperationCompleted?(
+                    .rasterSuccess(
+                        RasterMutationReceipt(
+                            token: operation.token,
+                            before: operation.revisions.before,
+                            after: operation.revisions.after
+                        )
+                    )
+                )
+                return nil
+            } catch {
+                let rendererError = (error as? MetalRendererError)
+                    ?? .commandFailed(error.localizedDescription)
+                finalizeCaptureTokens(operation.captureTokens, as: .failed)
+                revisionStore.discard(operation.revisions)
+                self.pendingRasterOperation = nil
+                notifyIdleStateIfChanged(from: false)
+                report(rendererError)
+                onOperationCompleted?(.failure(operation.token, rendererError))
+                return rendererError
+            }
+        case let .restore(operation):
+            do {
+                try revisionStore.finalize(
+                    operation.restoreToken,
+                    as: .succeeded
+                )
+                canonical.acceptScratchCommit()
+                self.pendingRasterOperation = nil
+                notifyIdleStateIfChanged(from: false)
+                onOperationCompleted?(.operationSuccess(operation.token))
+                return nil
+            } catch {
+                let rendererError = (error as? MetalRendererError)
+                    ?? .commandFailed(error.localizedDescription)
+                finalizeRestoreToken(operation.restoreToken, as: .failed)
+                self.pendingRasterOperation = nil
+                notifyIdleStateIfChanged(from: false)
+                report(rendererError)
+                onOperationCompleted?(.failure(operation.token, rendererError))
+                return rendererError
+            }
+        }
+    }
+
+    private func finalizeRasterOperationFailure(
+        _ operation: PendingRasterOperation,
+        error: MetalRendererError
+    ) -> MetalRendererError {
+        switch operation {
+        case let .clear(clear):
+            finalizeCaptureTokens(clear.captureTokens, as: .failed)
+            revisionStore.discard(clear.revisions)
+        case let .restore(restore):
+            finalizeRestoreToken(restore.restoreToken, as: .failed)
+        }
+        pendingRasterOperation = nil
+        notifyIdleStateIfChanged(from: false)
+        report(error)
+        onOperationCompleted?(.failure(operation.token, error))
+        return error
+    }
+
+    private func finalizeRestoreToken(
+        _ token: RasterRevisionOperationToken,
+        as outcome: RasterRevisionOperationOutcome
+    ) {
+        do {
+            try revisionStore.finalize(token, as: outcome)
+        } catch MetalRendererError.invalidRasterRevisionOperationToken {
+            return
+        } catch {
+            report(
+                (error as? MetalRendererError)
+                    ?? .commandFailed(error.localizedDescription)
+            )
+        }
+    }
+
+    private func takeRasterSubmissionID() -> UInt64 {
+        precondition(
+            nextRasterSubmissionID < UInt64.max,
+            "Renderer raster submission identity space exhausted."
+        )
+        let submissionID = nextRasterSubmissionID
+        nextRasterSubmissionID += 1
+        return submissionID
+    }
+
+    private func installRasterCompletionHandler(
+        on commandBuffer: any MTLCommandBuffer,
+        submissionID: UInt64,
+        token: RendererOperationToken,
+        forceFailure: Bool
+    ) {
+        commandBuffer.addCompletedHandler { [rasterCompletionMailbox] buffer in
+            let succeeded = buffer.status == .completed && !forceFailure
+            rasterCompletionMailbox.push(
+                RendererRasterSubmissionOutcome(
+                    submissionID: submissionID,
+                    token: token,
+                    succeeded: succeeded,
+                    errorMessage: forceFailure
+                        ? "injected harness command-buffer failure"
+                        : buffer.error?.localizedDescription
+                )
+            )
         }
     }
 

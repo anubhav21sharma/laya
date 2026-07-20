@@ -11,13 +11,31 @@ func navigationMovesCursorOnlyAfterSuccess() throws {
 
     let undo = try #require(try history.beginUndo())
     #expect(history.canUndo)
+    #expect(!history.canRedo)
     try history.finishNavigation(token: undo.token, succeeded: false)
     #expect(history.canUndo)
+    #expect(!history.canRedo)
 
     let retry = try #require(try history.beginUndo())
     try history.finishNavigation(token: retry.token, succeeded: true)
     #expect(!history.canUndo)
     #expect(history.canRedo)
+}
+
+@Test
+func eraseIsATypedRasterCommand() throws {
+    let history = DocumentHistory()
+    let erase = makeRasterCommand(kind: .erase, bytes: 64)
+    try history.validateNewCommand(retainedBytes: erase.retainedBytes)
+    _ = history.appendSuccessful(erase)
+
+    let undo = try #require(try history.beginUndo())
+    guard case let .raster(command) = undo.command else {
+        Issue.record("Expected erase to be wrapped in a raster command")
+        return
+    }
+    #expect(command.kind == .erase)
+    try history.finishNavigation(token: undo.token, succeeded: false)
 }
 
 @Test
@@ -83,6 +101,7 @@ func appendReleasesRedoAndPrunedRevisionIDsWithoutDuplicates() throws {
     try history.validateNewCommand(retainedBytes: replacement.retainedBytes)
     let released = history.appendSuccessful(replacement)
 
+    #expect(!history.canRedo)
     #expect(released == [
         StoredRasterRevisionID(rawValue: 2),
         StoredRasterRevisionID(rawValue: 6),
@@ -156,12 +175,14 @@ func preflightRejectsNegativeAndOversizedCommands() {
 
 private func makeRasterCommand(
     seed: UInt64 = 1,
+    kind: RasterEditKind = .draw,
     bytes: Int
 ) -> DocumentHistoryCommand {
     precondition(bytes.isMultiple(of: 2))
     return makeRasterCommand(
         beforeID: seed * 2,
         afterID: seed * 2 + 1,
+        kind: kind,
         bytes: bytes
     )
 }
@@ -169,6 +190,7 @@ private func makeRasterCommand(
 private func makeRasterCommand(
     beforeID: UInt64,
     afterID: UInt64,
+    kind: RasterEditKind = .draw,
     bytes: Int
 ) -> DocumentHistoryCommand {
     precondition(bytes.isMultiple(of: 2))
@@ -190,6 +212,6 @@ private func makeRasterCommand(
         retainedBytes: bytes / 2
     )
     return .raster(
-        RasterHistoryCommand(kind: .draw, before: before, after: after)
+        RasterHistoryCommand(kind: kind, before: before, after: after)
     )
 }

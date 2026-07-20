@@ -1,3 +1,4 @@
+import Foundation
 import PatternEngine
 
 public struct RendererOperationToken:
@@ -30,4 +31,31 @@ public enum RendererOperationCompletion: Sendable {
     case rasterSuccess(RasterMutationReceipt)
     case operationSuccess(RendererOperationToken)
     case failure(RendererOperationToken, MetalRendererError)
+}
+
+struct RendererRasterSubmissionOutcome: Sendable {
+    let submissionID: UInt64
+    let token: RendererOperationToken
+    let succeeded: Bool
+    let errorMessage: String?
+}
+
+final class RendererRasterCompletionMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var outcomes: [RendererRasterSubmissionOutcome] = []
+
+    func push(_ outcome: RendererRasterSubmissionOutcome) {
+        lock.lock()
+        outcomes.append(outcome)
+        lock.unlock()
+    }
+
+    @MainActor
+    func drain() -> [RendererRasterSubmissionOutcome] {
+        lock.lock()
+        let drained = outcomes
+        outcomes.removeAll(keepingCapacity: true)
+        lock.unlock()
+        return drained
+    }
 }

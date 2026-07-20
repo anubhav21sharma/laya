@@ -10,6 +10,18 @@ final class EditorSessionController {
 
     private var transaction = EditorTransaction()
     private var history = DocumentHistory()
+    private var pendingRasterMutation: PendingRasterMutation?
+    private var pendingHistoryNavigation: PendingHistoryNavigation?
+
+    private struct PendingRasterMutation {
+        let token: EditorTransactionToken
+        let kind: RasterEditKind
+    }
+
+    private struct PendingHistoryNavigation {
+        let operationToken: EditorTransactionToken
+        let historyToken: UInt64
+    }
 
     init(model: EditorModel = EditorModel(), renderer: GridRenderer) {
         self.model = model
@@ -47,6 +59,35 @@ final class EditorSessionController {
 
     func handleTiling(_ tiling: TilingKind) {
         apply(.tilingIntent(tiling))
+    }
+
+    func handleTool(_ tool: EditorTool) {
+        apply(.toolIntent(tool))
+    }
+
+    func handleInkColor(_ color: InkColor) {
+        apply(.colorIntent(color))
+    }
+
+    func stepBrush(larger: Bool) {
+        let diameter = EditorConfiguration.stepBrush(
+            model.brushDiameter,
+            larger: larger,
+            pixelSize: model.pixelSize
+        )
+        apply(.brushDiameterIntent(diameter))
+    }
+
+    func clear() {
+        apply(.command(.clear))
+    }
+
+    func undo() {
+        apply(.command(.undo))
+    }
+
+    func redo() {
+        apply(.command(.redo))
     }
 
     func cancelTransientEdit() {
@@ -133,12 +174,85 @@ final class EditorSessionController {
             try renderer.setTiling(tiling)
             model.confirmTiling(tiling)
             apply(.operationCompleted(token, succeeded: true))
-        case let .performCommand(token, _),
-             let .applyTileSize(token, _):
+        case let .performCommand(token, command):
+            try perform(command, token: token)
+        case let .applyTileSize(token, _):
             apply(.operationCompleted(token, succeeded: false))
         case .clearSelectionOverlay, .beginTransform, .cancelTransform,
              .busy, .reportOperationFailure:
             break
+        }
+    }
+
+    private func perform(
+        _ command: EditorCommand,
+        token: EditorTransactionToken
+    ) throws {
+        switch command {
+        case .clear:
+            precondition(pendingRasterMutation == nil)
+            pendingRasterMutation = PendingRasterMutation(
+                token: token,
+                kind: .clear
+            )
+            do {
+                try renderer.requestClear(
+                    token: rendererToken(token),
+                    maximumRetainedBytes: history.maximumBytes
+                )
+            } catch {
+                pendingRasterMutation = nil
+                throw error
+            }
+        case .undo:
+            try beginHistoryNavigation(
+                history.beginUndo(),
+                operationToken: token
+            )
+        case .redo:
+            try beginHistoryNavigation(
+                history.beginRedo(),
+                operationToken: token
+            )
+        }
+    }
+
+    private func beginHistoryNavigation(
+        _ navigation: HistoryNavigation?,
+        operationToken: EditorTransactionToken
+    ) throws {
+        guard let navigation else {
+            apply(.operationCompleted(operationToken, succeeded: true))
+            return
+        }
+        precondition(pendingHistoryNavigation == nil)
+        pendingHistoryNavigation = PendingHistoryNavigation(
+            operationToken: operationToken,
+            historyToken: navigation.token
+        )
+
+        do {
+            switch navigation.command {
+            case let .raster(command):
+                let revision = navigation.direction == .undo
+                    ? command.before
+                    : command.after
+                try renderer.requestRasterRestore(
+                    token: rendererToken(operationToken),
+                    revision: revision
+                )
+            case .tiling, .tileResize:
+                throw MetalRendererError.commandFailed(
+                    "This history command is not available yet."
+                )
+            }
+        } catch {
+            try history.finishNavigation(
+                token: navigation.token,
+                succeeded: false
+            )
+            pendingHistoryNavigation = nil
+            throw error
         }
     }
 
@@ -156,6 +270,13 @@ final class EditorSessionController {
              let .performCommand(token, _),
              let .applyTiling(token, _),
              let .applyTileSize(token, _):
+            finishHistoryNavigationIfNeeded(
+                operationToken: token,
+                succeeded: false
+            )
+            if pendingRasterMutation?.token == token {
+                pendingRasterMutation = nil
+            }
             apply(.operationCompleted(token, succeeded: false))
         case .cancelStroke, .updateTool, .updateColor,
              .updateBrushDiameter, .updateGridVisibility,
@@ -171,16 +292,23 @@ final class EditorSessionController {
     ) {
         switch completion {
         case let .rasterSuccess(receipt):
-            guard
-                case let .drawing(drawing) = transaction.state,
-                drawing.phase == .commitPending,
-                drawing.token.rawValue == receipt.token.rawValue
-            else {
+            let completedToken = editorToken(receipt.token)
+            let kind: RasterEditKind
+            if case let .drawing(drawing) = transaction.state,
+               drawing.phase == .commitPending,
+               drawing.token == completedToken
+            {
+                kind = drawing.tool == .draw ? .draw : .erase
+            } else if let pendingRasterMutation,
+                      pendingRasterMutation.token == completedToken
+            {
+                kind = pendingRasterMutation.kind
+                self.pendingRasterMutation = nil
+            } else {
                 preconditionFailure(
-                    "Renderer completed a raster operation the controller did not accept."
+                    "Renderer completed a raster mutation the controller did not accept."
                 )
             }
-            let kind: RasterEditKind = drawing.tool == .draw ? .draw : .erase
             let released = history.appendSuccessful(
                 .raster(
                     RasterHistoryCommand(
@@ -193,27 +321,60 @@ final class EditorSessionController {
             renderer.releaseRasterRevisions(released)
             apply(
                 .operationCompleted(
-                    editorToken(receipt.token),
+                    completedToken,
                     succeeded: true
                 )
             )
         case let .operationSuccess(token):
+            let completedToken = editorToken(token)
+            finishHistoryNavigationIfNeeded(
+                operationToken: completedToken,
+                succeeded: true
+            )
             apply(
                 .operationCompleted(
-                    editorToken(token),
+                    completedToken,
                     succeeded: true
                 )
             )
         case let .failure(token, error):
             report(error)
+            let completedToken = editorToken(token)
+            finishHistoryNavigationIfNeeded(
+                operationToken: completedToken,
+                succeeded: false
+            )
+            if pendingRasterMutation?.token == completedToken {
+                pendingRasterMutation = nil
+            }
             apply(
                 .operationCompleted(
-                    editorToken(token),
+                    completedToken,
                     succeeded: false
                 )
             )
         }
         refreshDerivedModelState()
+    }
+
+    private func finishHistoryNavigationIfNeeded(
+        operationToken: EditorTransactionToken,
+        succeeded: Bool
+    ) {
+        guard let pendingHistoryNavigation,
+              pendingHistoryNavigation.operationToken == operationToken
+        else { return }
+        do {
+            try history.finishNavigation(
+                token: pendingHistoryNavigation.historyToken,
+                succeeded: succeeded
+            )
+            self.pendingHistoryNavigation = nil
+        } catch {
+            preconditionFailure(
+                "Controller history navigation token became stale: \(error)"
+            )
+        }
     }
 
     private func refreshDerivedModelState() {

@@ -159,6 +159,26 @@ func undoDuringCollectingCancelsBeforeCommand() {
 }
 
 @Test
+func clearDuringCollectingCancelsBeforeClearCommand() {
+    var transaction = collectingDrawTransaction()
+    guard case let .drawing(drawing) = transaction.state else {
+        Issue.record("Expected collecting drawing transaction")
+        return
+    }
+
+    let effects = transaction.apply(.command(.clear))
+
+    #expect(effects.count == 2)
+    #expect(effects[0] == .cancelStroke(drawing.token))
+    guard case let .performCommand(token, .clear) = effects[1] else {
+        Issue.record("Expected clear after stroke cancellation")
+        return
+    }
+    #expect(transaction.state == .idle)
+    #expect(transaction.pendingOperation == token)
+}
+
+@Test
 func pointerEndStaysDrawingUntilMatchingCompletion() {
     var transaction = collectingDrawTransaction()
     _ = transaction.apply(.pointerEnded(sample(.ended)))

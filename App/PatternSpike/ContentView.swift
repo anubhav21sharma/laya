@@ -36,10 +36,33 @@ struct ContentView: View {
         Group {
             switch state {
             case let .ready(controller):
-                MetalCanvas(
-                    controller: controller,
-                    renderer: controller.renderer
-                )
+                ZStack {
+                    MetalCanvas(
+                        controller: controller,
+                        renderer: controller.renderer
+                    )
+                    ToolRail(controller: controller)
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: .leading
+                        )
+                        .padding(12)
+                    EditorTopBar(controller: controller)
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: .top
+                        )
+                        .padding(12)
+                    tilingPicker(controller: controller)
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: .topTrailing
+                        )
+                        .padding(12)
+                }
                     .onAppear {
                         controller.onError = {
                             runtimeError = $0
@@ -51,9 +74,6 @@ struct ContentView: View {
                     .onDisappear {
                         controller.onError = nil
                         controller.renderer.onError = nil
-                    }
-                    .overlay(alignment: .topLeading) {
-                        tilingPicker(controller: controller)
                     }
                     .overlay(alignment: .top) {
                         if let runtimeError {
