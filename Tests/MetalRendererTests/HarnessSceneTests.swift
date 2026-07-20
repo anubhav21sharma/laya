@@ -1,5 +1,5 @@
 import Foundation
-import MetalRenderer
+@testable import MetalRenderer
 import Testing
 
 @Test
@@ -302,4 +302,36 @@ func schemaOneEncodingPreservesTheLegacyShape() throws {
     #expect(object["program"] == nil)
     #expect(object["structuralChecks"] == nil)
     #expect(checks[0]["channel"] == nil)
+}
+
+@Test
+func unavailableStructuralMetricsFailInsteadOfReadingAsZero() throws {
+    let data = Data(
+        """
+        {
+          "schemaVersion": 2,
+          "name": "unavailable-metric",
+          "width": 512,
+          "height": 512,
+          "program": "fiveHundredDabs",
+          "structuralChecks": [
+            {
+              "metric": "previewCommitMaximumDelta",
+              "relation": "lessThanOrEqual",
+              "value": 0
+            }
+          ]
+        }
+        """.utf8
+    )
+    let scene = try HarnessScene.decode(data)
+
+    #expect(
+        throws: HarnessRunError.missingStructuralMetric(
+            sceneName: "unavailable-metric",
+            metric: .previewCommitMaximumDelta
+        )
+    ) {
+        try HarnessRunner.evaluateStructuralChecks(scene: scene, values: [:])
+    }
 }

@@ -124,7 +124,7 @@ public final class HarnessRunner {
     private let device: any MTLDevice
     private let library: any MTLLibrary
     private let blankRenderer: BlankRenderer
-    private var gridRenderer: GridRenderer
+    private var pristineGridRenderer: GridRenderer?
 
     public init(device: any MTLDevice) throws {
         guard let library = device.makeDefaultLibrary() else {
@@ -133,7 +133,7 @@ public final class HarnessRunner {
         self.device = device
         self.library = library
         blankRenderer = try BlankRenderer(device: device, library: library)
-        gridRenderer = try GridRenderer(
+        pristineGridRenderer = try GridRenderer(
             device: device,
             library: library,
             drawableSize: PatternSize(width: 512, height: 512)
@@ -242,14 +242,17 @@ public final class HarnessRunner {
             throw HarnessSceneError.missingProgram
         }
 
-        // A public runner may execute more than one scene. Each grid program
-        // starts from transparent canonical pixels, revision zero, and idle
-        // lifecycle state just like the one-process CLI harness.
-        gridRenderer = try GridRenderer(
-            device: device,
-            library: library,
-            drawableSize: PatternSize(width: 512, height: 512)
-        )
+        let gridRenderer: GridRenderer
+        if let initialRenderer = pristineGridRenderer {
+            pristineGridRenderer = nil
+            gridRenderer = initialRenderer
+        } else {
+            gridRenderer = try GridRenderer(
+                device: device,
+                library: library,
+                drawableSize: PatternSize(width: 512, height: 512)
+            )
+        }
 
         var measurements = GridMeasurements()
         var artifacts = GridArtifacts()
@@ -258,83 +261,182 @@ public final class HarnessRunner {
 
         switch program {
         case .gridInterior:
-            measureHandle(.began, x: 200, y: 256, into: &measurements)
-            measureHandle(.moved, x: 240, y: 256, into: &measurements)
+            measureHandle(
+                .began,
+                x: 200,
+                y: 256,
+                renderer: gridRenderer,
+                into: &measurements
+            )
+            measureHandle(
+                .moved,
+                x: 240,
+                y: 256,
+                renderer: gridRenderer,
+                into: &measurements
+            )
             try captureLive(
                 scene: scene,
+                renderer: gridRenderer,
                 artifacts: &artifacts,
                 measurements: &measurements
             )
-            measureHandle(.ended, x: 240, y: 256, into: &measurements)
+            measureHandle(
+                .ended,
+                x: 240,
+                y: 256,
+                renderer: gridRenderer,
+                into: &measurements
+            )
             try flushPending(
                 scene: scene,
+                renderer: gridRenderer,
                 measurements: &measurements
             )
             try captureCommittedAndCanonical(
                 scene: scene,
+                renderer: gridRenderer,
                 artifacts: &artifacts,
                 measurements: &measurements
             )
 
         case .gridBoundary:
-            measureHandle(.began, x: 128, y: 128, into: &measurements)
-            measureHandle(.moved, x: 160, y: 160, into: &measurements)
+            measureHandle(
+                .began,
+                x: 128,
+                y: 128,
+                renderer: gridRenderer,
+                into: &measurements
+            )
+            measureHandle(
+                .moved,
+                x: 160,
+                y: 160,
+                renderer: gridRenderer,
+                into: &measurements
+            )
             try captureLive(
                 scene: scene,
+                renderer: gridRenderer,
                 artifacts: &artifacts,
                 measurements: &measurements
             )
-            measureHandle(.ended, x: 160, y: 160, into: &measurements)
+            measureHandle(
+                .ended,
+                x: 160,
+                y: 160,
+                renderer: gridRenderer,
+                into: &measurements
+            )
             try flushPending(
                 scene: scene,
+                renderer: gridRenderer,
                 measurements: &measurements
             )
             try captureCommittedAndCanonical(
                 scene: scene,
+                renderer: gridRenderer,
                 artifacts: &artifacts,
                 measurements: &measurements
             )
 
         case .previewCommit:
-            measureHandle(.began, x: 180, y: 220, into: &measurements)
-            measureHandle(.moved, x: 260, y: 300, into: &measurements)
-            measureHandle(.ended, x: 260, y: 300, into: &measurements)
+            measureHandle(
+                .began,
+                x: 180,
+                y: 220,
+                renderer: gridRenderer,
+                into: &measurements
+            )
+            measureHandle(
+                .moved,
+                x: 260,
+                y: 300,
+                renderer: gridRenderer,
+                into: &measurements
+            )
+            measureHandle(
+                .ended,
+                x: 260,
+                y: 300,
+                renderer: gridRenderer,
+                into: &measurements
+            )
             try flushPending(
                 scene: scene,
+                renderer: gridRenderer,
                 measurements: &measurements
             )
             artifacts.liveScreen = try captureDisplay(
                 scene: scene,
+                renderer: gridRenderer,
                 measurements: &measurements
             )
             try captureCommittedAndCanonical(
                 scene: scene,
+                renderer: gridRenderer,
                 artifacts: &artifacts,
                 measurements: &measurements
             )
 
         case .cancelPreservesCanonical:
-            measureHandle(.began, x: 180, y: 180, into: &measurements)
-            measureHandle(.ended, x: 220, y: 180, into: &measurements)
+            measureHandle(
+                .began,
+                x: 180,
+                y: 180,
+                renderer: gridRenderer,
+                into: &measurements
+            )
+            measureHandle(
+                .ended,
+                x: 220,
+                y: 180,
+                renderer: gridRenderer,
+                into: &measurements
+            )
             try flushPending(
                 scene: scene,
+                renderer: gridRenderer,
                 measurements: &measurements
             )
-            try finishCommit(measurements: &measurements)
+            try finishCommit(
+                renderer: gridRenderer,
+                measurements: &measurements
+            )
             let beforeTexture = try gridRenderer.copyCanonicalForHarness()
             canonicalBefore = textureBytes(beforeTexture)
             revisionStart = gridRenderer.harnessRevision.rawValue
 
-            measureHandle(.began, x: 300, y: 300, into: &measurements)
-            measureHandle(.moved, x: 340, y: 320, into: &measurements)
+            measureHandle(
+                .began,
+                x: 300,
+                y: 300,
+                renderer: gridRenderer,
+                into: &measurements
+            )
+            measureHandle(
+                .moved,
+                x: 340,
+                y: 320,
+                renderer: gridRenderer,
+                into: &measurements
+            )
             try captureLive(
                 scene: scene,
+                renderer: gridRenderer,
                 artifacts: &artifacts,
                 measurements: &measurements
             )
-            measureHandle(.cancelled, x: 340, y: 320, into: &measurements)
+            measureHandle(
+                .cancelled,
+                x: 340,
+                y: 320,
+                renderer: gridRenderer,
+                into: &measurements
+            )
             artifacts.committedScreen = try captureDisplay(
                 scene: scene,
+                renderer: gridRenderer,
                 measurements: &measurements
             )
             artifacts.canonical = try gridRenderer.copyCanonicalForHarness()
@@ -348,6 +450,7 @@ public final class HarnessRunner {
             )
             try captureLive(
                 scene: scene,
+                renderer: gridRenderer,
                 artifacts: &artifacts,
                 measurements: &measurements
             )
@@ -355,10 +458,12 @@ public final class HarnessRunner {
         case .longStroke:
             try replayLongZigzag(
                 scene: scene,
+                renderer: gridRenderer,
                 measurements: &measurements
             )
             try captureLive(
                 scene: scene,
+                renderer: gridRenderer,
                 artifacts: &artifacts,
                 measurements: &measurements
             )
@@ -373,18 +478,22 @@ public final class HarnessRunner {
                 .ended,
                 x: last.x,
                 y: last.y,
+                renderer: gridRenderer,
                 into: &measurements
             )
             try flushPending(
                 scene: scene,
+                renderer: gridRenderer,
                 measurements: &measurements
             )
             artifacts.liveScreen = try captureDisplay(
                 scene: scene,
+                renderer: gridRenderer,
                 measurements: &measurements
             )
             try captureCommittedAndCanonical(
                 scene: scene,
+                renderer: gridRenderer,
                 artifacts: &artifacts,
                 measurements: &measurements
             )
@@ -467,7 +576,7 @@ public final class HarnessRunner {
             scene: scene,
             artifacts: artifacts
         )
-        try evaluateStructuralChecks(
+        try Self.evaluateStructuralChecks(
             scene: scene,
             values: structuralValues
         )
@@ -484,6 +593,7 @@ public final class HarnessRunner {
         _ phase: StrokePhase,
         x: Float,
         y: Float,
+        renderer: GridRenderer,
         into measurements: inout GridMeasurements
     ) {
         let start = CFAbsoluteTimeGetCurrent()
@@ -493,7 +603,7 @@ public final class HarnessRunner {
         if measurements.pendingEventStart == nil {
             measurements.pendingEventStart = start
         }
-        gridRenderer.handle(
+        renderer.handle(
             StrokeSample.mouse(
                 position: ScreenPoint(x: x, y: y),
                 timestamp: measurements.timestamp,
@@ -508,6 +618,7 @@ public final class HarnessRunner {
 
     private func flushPending(
         scene: HarnessScene,
+        renderer: GridRenderer,
         measurements: inout GridMeasurements
     ) throws {
         let submitStart = measurements.pendingEventStart
@@ -515,10 +626,10 @@ public final class HarnessRunner {
         let eventProcessingMilliseconds = elapsedMilliseconds(
             since: submitStart
         )
-        let metrics = try gridRenderer.flushPendingLiveForHarness()
+        let metrics = try renderer.flushPendingLiveForHarness()
         let submitMilliseconds = eventProcessingMilliseconds
             + metrics.cpuEncodeMilliseconds
-        let counters = gridRenderer.harnessCounters
+        let counters = renderer.harnessCounters
         let created = counters.totalInstancesThisStroke
             - measurements.totalInstancesAtPreviousFrame
 
@@ -565,21 +676,28 @@ public final class HarnessRunner {
 
     private func captureLive(
         scene: HarnessScene,
+        renderer: GridRenderer,
         artifacts: inout GridArtifacts,
         measurements: inout GridMeasurements
     ) throws {
-        try flushPending(scene: scene, measurements: &measurements)
+        try flushPending(
+            scene: scene,
+            renderer: renderer,
+            measurements: &measurements
+        )
         artifacts.liveScreen = try captureDisplay(
             scene: scene,
+            renderer: renderer,
             measurements: &measurements
         )
     }
 
     private func captureDisplay(
         scene: HarnessScene,
+        renderer: GridRenderer,
         measurements: inout GridMeasurements
     ) throws -> any MTLTexture {
-        let frame = try gridRenderer.renderOffscreenDisplayForHarness(
+        let frame = try renderer.renderOffscreenDisplayForHarness(
             width: scene.width,
             height: scene.height,
             showGridLines: false
@@ -593,10 +711,11 @@ public final class HarnessRunner {
     }
 
     private func finishCommit(
+        renderer: GridRenderer,
         measurements: inout GridMeasurements
     ) throws {
         let start = CFAbsoluteTimeGetCurrent()
-        let metrics = try gridRenderer.finishCommitForHarness()
+        let metrics = try renderer.finishCommitForHarness()
         measurements.commitPendingMilliseconds.append(
             elapsedMilliseconds(since: start)
         )
@@ -609,32 +728,46 @@ public final class HarnessRunner {
 
     private func captureCommittedAndCanonical(
         scene: HarnessScene,
+        renderer: GridRenderer,
         artifacts: inout GridArtifacts,
         measurements: inout GridMeasurements
     ) throws {
-        try finishCommit(measurements: &measurements)
-        artifacts.committedScreen = try captureDisplay(
-            scene: scene,
+        try finishCommit(
+            renderer: renderer,
             measurements: &measurements
         )
-        artifacts.canonical = try gridRenderer.copyCanonicalForHarness()
+        artifacts.committedScreen = try captureDisplay(
+            scene: scene,
+            renderer: renderer,
+            measurements: &measurements
+        )
+        artifacts.canonical = try renderer.copyCanonicalForHarness()
     }
 
     private func replayLongZigzag(
         scene: HarnessScene,
+        renderer: GridRenderer,
         measurements: inout GridMeasurements
     ) throws {
-        measureHandle(.began, x: 48, y: 48, into: &measurements)
+        measureHandle(
+            .began,
+            x: 48,
+            y: 48,
+            renderer: renderer,
+            into: &measurements
+        )
         for index in 0..<240 {
             let point = longZigzagPoint(index: index)
             measureHandle(
                 .moved,
                 x: point.x,
                 y: point.y,
+                renderer: renderer,
                 into: &measurements
             )
             try flushPending(
                 scene: scene,
+                renderer: renderer,
                 measurements: &measurements
             )
         }
@@ -683,7 +816,7 @@ public final class HarnessRunner {
         }
     }
 
-    private func evaluateStructuralChecks(
+    nonisolated static func evaluateStructuralChecks(
         scene: HarnessScene,
         values: [HarnessStructuralMetric: Int]
     ) throws {
