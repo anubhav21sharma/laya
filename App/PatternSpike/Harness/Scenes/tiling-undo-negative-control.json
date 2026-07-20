@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 4,
+  "name": "tiling-undo-negative-control",
+  "width": 256,
+  "height": 128,
+  "tileWidth": 128,
+  "tileHeight": 128,
+  "tiling": 0,
+  "diagnosticMode": "hardRound",
+  "program": "tilingUndo",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "metadataCanonicalByteDelta", "relation": "equal", "value": 1},
+    {"metric": "restoredDisplayMaximumDelta", "relation": "equal", "value": 0}
+  ]
+}

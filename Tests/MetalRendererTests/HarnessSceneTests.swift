@@ -39,7 +39,7 @@ func harnessSceneRejectsAnUnknownSchema() {
     let data = Data(
         """
         {
-          "schemaVersion": 4,
+          "schemaVersion": 5,
           "name": "future-scene",
           "width": 64,
           "height": 64,
@@ -55,9 +55,225 @@ func harnessSceneRejectsAnUnknownSchema() {
         """.utf8
     )
 
-    #expect(throws: HarnessSceneError.unsupportedSchema(4)) {
+    #expect(throws: HarnessSceneError.unsupportedSchema(5)) {
         try HarnessScene.decode(data)
     }
+}
+
+@Test(arguments: [
+    "coloredDraw",
+    "eraserLiveCommit",
+    "regionUndoSeam",
+    "clearUndo",
+    "tilingUndo",
+    "resizeCropFill",
+])
+func schemaFourDecodesOnlySliceThreePrograms(_ program: String) throws {
+    let scene = try HarnessScene.decode(
+        schemaFourData(program: program)
+    )
+
+    #expect(scene.schemaVersion == 4)
+    #expect(scene.program?.rawValue == program)
+    #expect(scene.tileWidth == 96)
+    #expect(scene.tileHeight == 80)
+    #expect(scene.tiling == .grid)
+    #expect(scene.diagnosticMode == .hardRound)
+}
+
+@Test(arguments: [
+    "tileWidth",
+    "tileHeight",
+    "tiling",
+    "diagnosticMode",
+    "program",
+])
+func schemaFourRequiresEverySchemaThreeProgramField(_ key: String) {
+    let text = String(decoding: schemaFourData(), as: UTF8.self)
+    let filtered = text
+        .split(whereSeparator: \.isNewline)
+        .filter { !$0.contains("\"\(key)\"") }
+        .joined(separator: "\n")
+
+    #expect(throws: HarnessSceneError.missingSchemaFourField(key)) {
+        try HarnessScene.decode(Data(filtered.utf8))
+    }
+}
+
+@Test
+func schemaFourRejectsLegacyProgramsAndLegacySchemasRejectSliceThreePrograms() {
+    #expect(
+        throws: HarnessSceneError.programUnavailableForSchema(
+            program: .halfDropEdge,
+            schemaVersion: 4
+        )
+    ) {
+        try HarnessScene.decode(schemaFourData(program: "halfDropEdge"))
+    }
+
+    for schemaVersion in [2, 3] {
+        let data = schemaVersion == 2
+            ? Data(
+                """
+                {
+                  "schemaVersion": 2,
+                  "name": "legacy-rejects-slice-three",
+                  "width": 96,
+                  "height": 80,
+                  "program": "coloredDraw",
+                  "checks": [],
+                  "structuralChecks": [
+                    {"metric":"oracleHoleCount","relation":"equal","value":0}
+                  ]
+                }
+                """.utf8
+            )
+            : schemaThreeData(
+                program: "coloredDraw",
+                checksJSON: "[]",
+                structuralChecksJSON: """
+                [
+                  {"metric":"oracleHoleCount","relation":"equal","value":0}
+                ]
+                """
+            )
+        #expect(
+            throws: HarnessSceneError.programUnavailableForSchema(
+                program: .coloredDraw,
+                schemaVersion: schemaVersion
+            )
+        ) {
+            try HarnessScene.decode(data)
+        }
+    }
+}
+
+@Test
+func legacySchemasRejectSliceThreeOnlyStructuralMetrics() {
+    #expect(
+        throws: HarnessSceneError.structuralMetricUnavailableForSchema(
+            metric: .historyCommandCount,
+            schemaVersion: 3
+        )
+    ) {
+        try HarnessScene.decode(
+            schemaThreeData(
+                checksJSON: "[]",
+                structuralChecksJSON: """
+                [
+                  {"metric":"historyCommandCount","relation":"equal","value":0}
+                ]
+                """
+            )
+        )
+    }
+}
+
+@Test
+func sliceThreeStructuralDiagnosticIsByteExact() {
+    let error = SliceThreeHarnessRunError.structuralMismatch(
+        sceneName: "colored-draw-negative-control",
+        metric: .undoCanonicalByteDelta,
+        expectedRelation: .equal,
+        expectedValue: 1,
+        actualValue: 0
+    )
+
+    #expect(
+        error.localizedDescription
+            == "Slice 3 scene 'colored-draw-negative-control' metric undoCanonicalByteDelta: expected equal 1, actual 0."
+    )
+}
+
+@Test
+func sliceThreeScenePairsAreSchemaFourAndDifferOnlyAtNamedExpectation() throws {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let directory = repositoryRoot
+        .appendingPathComponent("App/PatternSpike/Harness/Scenes")
+    let pairs: [(String, TilingHarnessProgram, HarnessStructuralMetric)] = [
+        ("colored-draw", .coloredDraw, .undoCanonicalByteDelta),
+        ("eraser-live-commit", .eraserLiveCommit, .undoCanonicalByteDelta),
+        ("region-undo-seam", .regionUndoSeam, .undoCanonicalByteDelta),
+        ("clear-undo", .clearUndo, .redoCanonicalByteDelta),
+        ("tiling-undo", .tilingUndo, .metadataCanonicalByteDelta),
+        ("resize-crop-fill", .resizeCropFill, .redoCanonicalByteDelta),
+    ]
+
+    for (name, program, metric) in pairs {
+        let positiveURL = directory.appendingPathComponent("\(name).json")
+        let negativeURL = directory.appendingPathComponent(
+            "\(name)-negative-control.json"
+        )
+        let positive = try HarnessScene.decode(Data(contentsOf: positiveURL))
+        let negative = try HarnessScene.decode(Data(contentsOf: negativeURL))
+
+        #expect(positive.schemaVersion == 4, "\(name)")
+        #expect(positive.program == program, "\(name)")
+        #expect(negative.name == "\(name)-negative-control", "\(name)")
+        #expect(positive.structuralChecks.count == negative.structuralChecks.count)
+        let positiveCheck = try #require(
+            positive.structuralChecks.first { $0.metric == metric }
+        )
+        let negativeCheck = try #require(
+            negative.structuralChecks.first { $0.metric == metric }
+        )
+        #expect(positiveCheck.relation == .equal)
+        #expect(positiveCheck.value == 0)
+        #expect(negativeCheck.relation == .equal)
+        #expect(negativeCheck.value == 1)
+
+        var normalizedNegative = try taskSevenSceneObject(at: negativeURL)
+        normalizedNegative["name"] = name
+        var checks = try #require(
+            normalizedNegative["structuralChecks"] as? [[String: Any]]
+        )
+        let index = try #require(
+            checks.firstIndex { $0["metric"] as? String == metric.rawValue }
+        )
+        checks[index]["value"] = 0
+        normalizedNegative["structuralChecks"] = checks
+        let positiveObject = try taskSevenSceneObject(at: positiveURL)
+        #expect(
+            NSDictionary(dictionary: normalizedNegative)
+                .isEqual(to: positiveObject),
+            "\(name)"
+        )
+    }
+}
+
+@Test
+func sliceThreeGatePinsNegativeFirstOrderAndApprovedProjectedABI() throws {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let gate = try String(
+        contentsOf: repositoryRoot.appendingPathComponent(
+            "scripts/verify-slice3.sh"
+        ),
+        encoding: .utf8
+    )
+    let expectedOrder = [
+        "colored-draw|undoCanonicalByteDelta",
+        "eraser-live-commit|undoCanonicalByteDelta",
+        "region-undo-seam|undoCanonicalByteDelta",
+        "clear-undo|redoCanonicalByteDelta",
+        "tiling-undo|metadataCanonicalByteDelta",
+        "resize-crop-fill|redoCanonicalByteDelta",
+    ]
+    var previous = gate.startIndex
+    for row in expectedOrder {
+        let range = try #require(gate.range(of: row, range: previous..<gate.endIndex))
+        previous = range.upperBound
+    }
+    #expect(gate.contains("bytes == fragments * 112"))
+    #expect(gate.contains("totalInstanceBytes == 448"))
+    #expect(gate.contains("SLICE3 GATE PASS"))
+    #expect(!gate.contains("retry"))
+    #expect(!gate.contains("warmup"))
 }
 
 @Test
@@ -2442,6 +2658,34 @@ private func schemaThreeData(
           "program": "\(program)",
           "checks": \(checksJSON),
           "structuralChecks": \(structuralChecksJSON)
+        }
+        """.utf8
+    )
+}
+
+private func schemaFourData(
+    program: String = "coloredDraw"
+) -> Data {
+    Data(
+        """
+        {
+          "schemaVersion": 4,
+          "name": "schema-four",
+          "width": 96,
+          "height": 80,
+          "tileWidth": 96,
+          "tileHeight": 80,
+          "tiling": 0,
+          "diagnosticMode": "hardRound",
+          "program": "\(program)",
+          "checks": [],
+          "structuralChecks": [
+            {
+              "metric": "undoCanonicalByteDelta",
+              "relation": "equal",
+              "value": 0
+            }
+          ]
         }
         """.utf8
     )

@@ -86,6 +86,140 @@ func sliceTwoBenchmarkRecordRoundTripsEveryAppendOnlyMetric() throws {
     #expect(decoded == record)
 }
 
+@Test
+func sliceThreeBenchmarkRecordRoundTripsRequiredMetrics() throws {
+    let record = BenchmarkRecord(
+        schemaVersion: 4,
+        timestampUTC: "2026-07-21T12:00:00Z",
+        sceneName: "region-undo-seam",
+        hardware: BenchmarkHardware(
+            gpuName: "Test GPU",
+            logicalProcessorCount: 8,
+            physicalMemoryBytes: 16_000_000_000
+        ),
+        operatingSystem: "macOS Test",
+        build: BenchmarkBuild(
+            configuration: "Debug",
+            gitCommit: "0123456789abcdef"
+        ),
+        frameCount: 4,
+        cpuEncodeMilliseconds: [0, 0.25],
+        gpuMilliseconds: [0, 0.50],
+        peakResidentBytes: 42_000_000,
+        tilingRawValue: 0,
+        tileWidth: 96,
+        tileHeight: 80,
+        diagnosticMode: "hardRound",
+        revisionCaptureMilliseconds: [0.75],
+        revisionRestoreMilliseconds: [0.50, 0.55],
+        historyResidentBytes: 4_096,
+        historyCommandCount: 1,
+        changedRegionCount: 2
+    )
+
+    let data = try BenchmarkRecord.encode(record)
+    let decoded = try BenchmarkRecord.decode(data)
+
+    #expect(decoded == record)
+    #expect(decoded.revisionCaptureMilliseconds == [0.75])
+    #expect(decoded.revisionRestoreMilliseconds == [0.50, 0.55])
+    #expect(decoded.historyResidentBytes == 4_096)
+    #expect(decoded.historyCommandCount == 1)
+    #expect(decoded.changedRegionCount == 2)
+}
+
+@Test(arguments: [
+    "revisionCaptureMilliseconds",
+    "revisionRestoreMilliseconds",
+    "historyResidentBytes",
+    "historyCommandCount",
+    "changedRegionCount",
+])
+func sliceThreeBenchmarkParserRequiresEveryNewMetric(_ key: String) throws {
+    let valid = try BenchmarkRecord.encode(sliceThreeBenchmarkFixture())
+    var object = try #require(
+        JSONSerialization.jsonObject(with: valid) as? [String: Any]
+    )
+    object.removeValue(forKey: key)
+
+    #expect(throws: BenchmarkRecordError.missingSchemaFourMetric(key)) {
+        try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+}
+
+@Test(arguments: [
+    "revisionCaptureMilliseconds",
+    "revisionRestoreMilliseconds",
+    "historyResidentBytes",
+    "historyCommandCount",
+    "changedRegionCount",
+])
+func sliceThreeBenchmarkParserRejectsNegativeMetrics(_ key: String) throws {
+    let valid = try BenchmarkRecord.encode(sliceThreeBenchmarkFixture())
+    var object = try #require(
+        JSONSerialization.jsonObject(with: valid) as? [String: Any]
+    )
+    if key.hasSuffix("Milliseconds") {
+        object[key] = [-0.01]
+    } else {
+        object[key] = -1
+    }
+
+    #expect(throws: BenchmarkRecordError.invalidNumericValue(field: key)) {
+        try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+}
+
+@Test
+func sliceThreeBenchmarkEncoderRejectsNonfiniteTiming() {
+    let record = sliceThreeBenchmarkFixture(capture: [.infinity])
+
+    #expect(
+        throws: BenchmarkRecordError.invalidNumericValue(
+            field: "revisionCaptureMilliseconds"
+        )
+    ) {
+        try BenchmarkRecord.encode(record)
+    }
+}
+
+private func sliceThreeBenchmarkFixture(
+    capture: [Double] = [0]
+) -> BenchmarkRecord {
+    BenchmarkRecord(
+        schemaVersion: 4,
+        timestampUTC: "2026-07-21T12:00:00Z",
+        sceneName: "fixture",
+        hardware: BenchmarkHardware(
+            gpuName: "Test GPU",
+            logicalProcessorCount: 8,
+            physicalMemoryBytes: 16_000_000_000
+        ),
+        operatingSystem: "macOS Test",
+        build: BenchmarkBuild(
+            configuration: "Debug",
+            gitCommit: "0123456789abcdef"
+        ),
+        frameCount: 1,
+        cpuEncodeMilliseconds: [0],
+        gpuMilliseconds: [0],
+        peakResidentBytes: 1,
+        tilingRawValue: 0,
+        tileWidth: 96,
+        tileHeight: 80,
+        diagnosticMode: "hardRound",
+        revisionCaptureMilliseconds: capture,
+        revisionRestoreMilliseconds: [0],
+        historyResidentBytes: 0,
+        historyCommandCount: 0,
+        changedRegionCount: 0
+    )
+}
+
 @Test(arguments: [1, 2])
 func legacyBenchmarkSchemasDecodeWithAbsentSliceTwoMetrics(
     schemaVersion: Int

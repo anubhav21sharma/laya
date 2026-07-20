@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 4,
+  "name": "colored-draw-negative-control",
+  "width": 128,
+  "height": 128,
+  "tileWidth": 128,
+  "tileHeight": 128,
+  "tiling": 0,
+  "diagnosticMode": "hardRound",
+  "program": "coloredDraw",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "undoCanonicalByteDelta", "relation": "equal", "value": 1},
+    {"metric": "redoCanonicalByteDelta", "relation": "equal", "value": 0},
+    {"metric": "historyCommandCount", "relation": "equal", "value": 1}
+  ]
+}

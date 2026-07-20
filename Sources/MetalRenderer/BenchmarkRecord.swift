@@ -255,6 +255,11 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     public let longStrokeLateDabGPUP95Milliseconds: Double?
     public let longStrokeCPUMillisecondsPerFrameSlope: Double?
     public let longStrokeDabGPUMillisecondsPerFrameSlope: Double?
+    public let revisionCaptureMilliseconds: [Double]?
+    public let revisionRestoreMilliseconds: [Double]?
+    public let historyResidentBytes: Int?
+    public let historyCommandCount: Int?
+    public let changedRegionCount: Int?
 
     public init(
         schemaVersion: Int,
@@ -292,7 +297,12 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         longStrokeEarlyDabGPUP95Milliseconds: Double? = nil,
         longStrokeLateDabGPUP95Milliseconds: Double? = nil,
         longStrokeCPUMillisecondsPerFrameSlope: Double? = nil,
-        longStrokeDabGPUMillisecondsPerFrameSlope: Double? = nil
+        longStrokeDabGPUMillisecondsPerFrameSlope: Double? = nil,
+        revisionCaptureMilliseconds: [Double]? = nil,
+        revisionRestoreMilliseconds: [Double]? = nil,
+        historyResidentBytes: Int? = nil,
+        historyCommandCount: Int? = nil,
+        changedRegionCount: Int? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.timestampUTC = timestampUTC
@@ -336,12 +346,24 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
             longStrokeCPUMillisecondsPerFrameSlope
         self.longStrokeDabGPUMillisecondsPerFrameSlope =
             longStrokeDabGPUMillisecondsPerFrameSlope
+        self.revisionCaptureMilliseconds = revisionCaptureMilliseconds
+        self.revisionRestoreMilliseconds = revisionRestoreMilliseconds
+        self.historyResidentBytes = historyResidentBytes
+        self.historyCommandCount = historyCommandCount
+        self.changedRegionCount = changedRegionCount
     }
 
     public static func encode(_ record: BenchmarkRecord) throws -> Data {
+        try record.validateSchemaFourMetrics()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         return try encoder.encode(record)
+    }
+
+    public static func decode(_ data: Data) throws -> BenchmarkRecord {
+        let record = try JSONDecoder().decode(BenchmarkRecord.self, from: data)
+        try record.validateSchemaFourMetrics()
+        return record
     }
 
     public static func percentile95(_ values: [Double]) -> Double {
@@ -358,5 +380,85 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
             return 0
         }
         return Double(missedFrameCount ?? 0) / Double(frameCount)
+    }
+
+    private func validateSchemaFourMetrics() throws {
+        guard schemaVersion == 4 else { return }
+
+        guard let revisionCaptureMilliseconds else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "revisionCaptureMilliseconds"
+            )
+        }
+        guard let revisionRestoreMilliseconds else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "revisionRestoreMilliseconds"
+            )
+        }
+        guard let historyResidentBytes else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "historyResidentBytes"
+            )
+        }
+        guard let historyCommandCount else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "historyCommandCount"
+            )
+        }
+        guard let changedRegionCount else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "changedRegionCount"
+            )
+        }
+
+        try Self.validateNonnegativeFinite(
+            cpuEncodeMilliseconds,
+            field: "cpuEncodeMilliseconds"
+        )
+        try Self.validateNonnegativeFinite(
+            gpuMilliseconds,
+            field: "gpuMilliseconds"
+        )
+        try Self.validateNonnegativeFinite(
+            revisionCaptureMilliseconds,
+            field: "revisionCaptureMilliseconds"
+        )
+        try Self.validateNonnegativeFinite(
+            revisionRestoreMilliseconds,
+            field: "revisionRestoreMilliseconds"
+        )
+        guard frameCount >= 0 else {
+            throw BenchmarkRecordError.invalidNumericValue(field: "frameCount")
+        }
+        for (field, value) in [
+            ("historyResidentBytes", historyResidentBytes),
+            ("historyCommandCount", historyCommandCount),
+            ("changedRegionCount", changedRegionCount),
+        ] where value < 0 {
+            throw BenchmarkRecordError.invalidNumericValue(field: field)
+        }
+    }
+
+    private static func validateNonnegativeFinite(
+        _ values: [Double],
+        field: String
+    ) throws {
+        guard values.allSatisfy({ $0.isFinite && $0 >= 0 }) else {
+            throw BenchmarkRecordError.invalidNumericValue(field: field)
+        }
+    }
+}
+
+public enum BenchmarkRecordError: Error, Equatable, LocalizedError {
+    case missingSchemaFourMetric(String)
+    case invalidNumericValue(field: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .missingSchemaFourMetric(field):
+            "Schema 4 benchmark record requires '\(field)'."
+        case let .invalidNumericValue(field):
+            "Schema 4 benchmark field '\(field)' contains a nonfinite or negative value."
+        }
     }
 }

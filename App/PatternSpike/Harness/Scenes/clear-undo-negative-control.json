@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 4,
+  "name": "clear-undo-negative-control",
+  "width": 128,
+  "height": 128,
+  "tileWidth": 128,
+  "tileHeight": 128,
+  "tiling": 0,
+  "diagnosticMode": "hardRound",
+  "program": "clearUndo",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "redoCanonicalByteDelta", "relation": "equal", "value": 1},
+    {"metric": "undoCanonicalByteDelta", "relation": "equal", "value": 0},
+    {"metric": "changedRegionCount", "relation": "equal", "value": 1}
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 4,
+  "name": "region-undo-seam",
+  "width": 128,
+  "height": 128,
+  "tileWidth": 128,
+  "tileHeight": 128,
+  "tiling": 0,
+  "diagnosticMode": "hardRound",
+  "program": "regionUndoSeam",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "undoCanonicalByteDelta", "relation": "equal", "value": 0},
+    {"metric": "redoCanonicalByteDelta", "relation": "equal", "value": 0},
+    {"metric": "changedRegionCount", "relation": "equal", "value": 2}
+  ]
+}

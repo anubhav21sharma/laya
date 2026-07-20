@@ -788,8 +788,8 @@ func run() throws {
         let fragments = try required(record.totalProjectedFragmentCount, "totalProjectedFragmentCount", scene: requirement.name)
         let maximum = try required(record.maximumFragmentsPerFootprint, "maximumFragmentsPerFootprint", scene: requirement.name)
         let bytes = try required(record.totalInstanceBytes, "totalInstanceBytes", scene: requirement.name)
-        guard fragments > 0, maximum > 0, maximum <= fragments, bytes == fragments * 96 else {
-            throw failure("\(requirement.name): projected fragment or 96-byte instance accounting is invalid")
+        guard fragments > 0, maximum > 0, maximum <= fragments, bytes == fragments * 112 else {
+            throw failure("\(requirement.name): projected fragment or 112-byte instance accounting is invalid")
         }
         if requirement.requiresOracle {
             let holes = try required(record.oracleHoleCount, "oracleHoleCount", scene: requirement.name)

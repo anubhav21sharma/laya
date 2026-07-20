@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 4,
+  "name": "resize-crop-fill-negative-control",
+  "width": 192,
+  "height": 192,
+  "tileWidth": 96,
+  "tileHeight": 80,
+  "tiling": 0,
+  "diagnosticMode": "hardRound",
+  "program": "resizeCropFill",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "redoCanonicalByteDelta", "relation": "equal", "value": 1},
+    {"metric": "undoCanonicalByteDelta", "relation": "equal", "value": 0},
+    {"metric": "restoredWidth", "relation": "equal", "value": 96},
+    {"metric": "restoredHeight", "relation": "equal", "value": 80}
+  ]
+}

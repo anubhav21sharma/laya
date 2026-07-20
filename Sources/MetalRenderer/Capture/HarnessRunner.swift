@@ -1213,6 +1213,16 @@ public final class HarnessRunner {
                 build: build
             )
         }
+        if scene.schemaVersion == 4 {
+            return try SliceThreeHarnessRunner(
+                device: device,
+                library: library
+            ).run(
+                scene: scene,
+                outputDirectory: outputDirectory,
+                build: build
+            )
+        }
         return try runGrid(
             scene: scene,
             outputDirectory: outputDirectory,
@@ -2164,6 +2174,12 @@ public final class HarnessRunner {
                 renderer: gridRenderer,
                 artifacts: &artifacts,
                 measurements: &measurements
+            )
+        case .coloredDraw, .eraserLiveCommit, .regionUndoSeam,
+             .clearUndo, .tilingUndo, .resizeCropFill:
+            throw HarnessSceneError.programUnavailableForSchema(
+                program: program,
+                schemaVersion: scene.schemaVersion
             )
         }
 

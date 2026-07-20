@@ -45,6 +45,12 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
     case metadataTilingSwitch
     case projectedLiveCommit
     case projectedLongStroke
+    case coloredDraw
+    case eraserLiveCommit
+    case regionUndoSeam
+    case clearUndo
+    case tilingUndo
+    case resizeCropFill
 
     var requiredTiling: TilingKind? {
         switch self {
@@ -71,6 +77,9 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
             .rotational
         case .noncentralVisibleCell:
             nil
+        case .coloredDraw, .eraserLiveCommit, .regionUndoSeam,
+             .clearUndo, .tilingUndo, .resizeCropFill:
+            nil
         }
     }
 
@@ -83,6 +92,16 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
              .largeFootprint, .rectangularTile, .noncentralVisibleCell,
              .metadataTilingSwitch,
              .projectedLiveCommit, .projectedLongStroke:
+            true
+        default:
+            false
+        }
+    }
+
+    var isSliceThreeProgram: Bool {
+        switch self {
+        case .coloredDraw, .eraserLiveCommit, .regionUndoSeam,
+             .clearUndo, .tilingUndo, .resizeCropFill:
             true
         default:
             false
@@ -109,6 +128,26 @@ public enum HarnessStructuralMetric: String, Codable, Equatable, Sendable {
     case coordinateContinuityMismatchCount
     case visibleCellCanonicalByteDelta
     case previewCommitViolationCount
+    case historyCommandCount
+    case historyResidentBytes
+    case changedRegionCount
+    case undoCanonicalByteDelta
+    case redoCanonicalByteDelta
+    case metadataCanonicalByteDelta
+    case restoredWidth
+    case restoredHeight
+
+    var isSliceThreeOnly: Bool {
+        switch self {
+        case .historyCommandCount, .historyResidentBytes,
+             .changedRegionCount, .undoCanonicalByteDelta,
+             .redoCanonicalByteDelta, .metadataCanonicalByteDelta,
+             .restoredWidth, .restoredHeight:
+            true
+        default:
+            false
+        }
+    }
 }
 
 public enum HarnessRelation: String, Codable, Equatable, Sendable {
@@ -209,29 +248,36 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             [HarnessStructuralCheck].self,
             forKey: .structuralChecks
         ) ?? []
-        if schemaVersion == 3 {
-            tileWidth = try Self.decodeRequiredSchemaThreeValue(
+        if schemaVersion == 3 || schemaVersion == 4 {
+            if schemaVersion == 4, program == nil {
+                throw HarnessSceneError.missingSchemaFourField("program")
+            }
+            tileWidth = try Self.decodeRequiredTilingValue(
                 Int.self,
                 key: .tileWidth,
                 field: "tileWidth",
+                schemaVersion: schemaVersion,
                 from: values
             )
-            tileHeight = try Self.decodeRequiredSchemaThreeValue(
+            tileHeight = try Self.decodeRequiredTilingValue(
                 Int.self,
                 key: .tileHeight,
                 field: "tileHeight",
+                schemaVersion: schemaVersion,
                 from: values
             )
-            tiling = try Self.decodeRequiredSchemaThreeValue(
+            tiling = try Self.decodeRequiredTilingValue(
                 TilingKind.self,
                 key: .tiling,
                 field: "tiling",
+                schemaVersion: schemaVersion,
                 from: values
             )
-            diagnosticMode = try Self.decodeRequiredSchemaThreeValue(
+            diagnosticMode = try Self.decodeRequiredTilingValue(
                 HarnessDiagnosticMode.self,
                 key: .diagnosticMode,
                 field: "diagnosticMode",
+                schemaVersion: schemaVersion,
                 from: values
             )
         } else {
@@ -253,7 +299,7 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         if !structuralChecks.isEmpty {
             try values.encode(structuralChecks, forKey: .structuralChecks)
         }
-        if schemaVersion == 3 {
+        if schemaVersion == 3 || schemaVersion == 4 {
             try values.encode(tileWidth, forKey: .tileWidth)
             try values.encode(tileHeight, forKey: .tileHeight)
             try values.encode(tiling, forKey: .tiling)
@@ -268,6 +314,16 @@ public struct HarnessScene: Codable, Equatable, Sendable {
     }
 
     private func validate() throws {
+        if (1...3).contains(schemaVersion),
+           let metric = structuralChecks.first(where: {
+               $0.metric.isSliceThreeOnly
+           })?.metric
+        {
+            throw HarnessSceneError.structuralMetricUnavailableForSchema(
+                metric: metric,
+                schemaVersion: schemaVersion
+            )
+        }
         switch schemaVersion {
         case 1:
             guard program == nil else {
@@ -277,9 +333,21 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             guard program != nil else {
                 throw HarnessSceneError.missingProgram
             }
+            guard program?.isSliceThreeProgram == false else {
+                throw HarnessSceneError.programUnavailableForSchema(
+                    program: program!,
+                    schemaVersion: schemaVersion
+                )
+            }
         case 3:
             guard let program else {
                 throw HarnessSceneError.missingProgram
+            }
+            guard !program.isSliceThreeProgram else {
+                throw HarnessSceneError.programUnavailableForSchema(
+                    program: program,
+                    schemaVersion: schemaVersion
+                )
             }
             guard let tileWidth, let tileHeight else {
                 preconditionFailure(
@@ -313,6 +381,34 @@ public struct HarnessScene: Codable, Equatable, Sendable {
                 throw HarnessSceneError.interactiveDiagnosticRequiresHardRound(
                     program: program,
                     diagnosticMode: diagnosticMode
+                )
+            }
+        case 4:
+            guard let program else {
+                throw HarnessSceneError.missingSchemaFourField("program")
+            }
+            guard program.isSliceThreeProgram else {
+                throw HarnessSceneError.programUnavailableForSchema(
+                    program: program,
+                    schemaVersion: schemaVersion
+                )
+            }
+            guard let tileWidth, let tileHeight else {
+                preconditionFailure(
+                    "Schema 4 required tile fields must be decoded before validation"
+                )
+            }
+            guard (64...4_096).contains(tileWidth),
+                  (64...4_096).contains(tileHeight)
+            else {
+                throw HarnessSceneError.invalidTileDimensions(
+                    width: tileWidth,
+                    height: tileHeight
+                )
+            }
+            guard tiling != nil, diagnosticMode != nil else {
+                preconditionFailure(
+                    "Schema 4 required tiling fields must be decoded before validation"
                 )
             }
         default:
@@ -366,16 +462,20 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         }
     }
 
-    private static func decodeRequiredSchemaThreeValue<Value: Decodable>(
+    private static func decodeRequiredTilingValue<Value: Decodable>(
         _ type: Value.Type,
         key: CodingKeys,
         field: String,
+        schemaVersion: Int,
         from values: KeyedDecodingContainer<CodingKeys>
     ) throws -> Value {
         guard values.contains(key),
               try !values.decodeNil(forKey: key)
         else {
-            throw HarnessSceneError.missingSchemaThreeField(field)
+            if schemaVersion == 3 {
+                throw HarnessSceneError.missingSchemaThreeField(field)
+            }
+            throw HarnessSceneError.missingSchemaFourField(field)
         }
         return try values.decode(Value.self, forKey: key)
     }
@@ -393,7 +493,16 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
     case missingAssertions
     case invalidStructuralValue(Int)
     case missingSchemaThreeField(String)
+    case missingSchemaFourField(String)
     case invalidTileDimensions(width: Int, height: Int)
+    case programUnavailableForSchema(
+        program: TilingHarnessProgram,
+        schemaVersion: Int
+    )
+    case structuralMetricUnavailableForSchema(
+        metric: HarnessStructuralMetric,
+        schemaVersion: Int
+    )
     case programTilingMismatch(
         program: TilingHarnessProgram,
         tiling: TilingKind
@@ -427,8 +536,14 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
             "Harness structural assertion value \(value) is negative."
         case let .missingSchemaThreeField(field):
             "Schema 3 harness scene requires '\(field)'."
+        case let .missingSchemaFourField(field):
+            "Schema 4 harness scene requires '\(field)'."
         case let .invalidTileDimensions(width, height):
             "Harness tile dimensions \(width)x\(height) are outside 64...4096."
+        case let .programUnavailableForSchema(program, schemaVersion):
+            "Harness program \(program.rawValue) is unavailable in schema \(schemaVersion)."
+        case let .structuralMetricUnavailableForSchema(metric, schemaVersion):
+            "Harness structural metric \(metric.rawValue) is unavailable in schema \(schemaVersion)."
         case let .programTilingMismatch(program, tiling):
             "Harness program \(program.rawValue) requires a different tiling than \(tiling)."
         case let .interactiveDiagnosticRequiresHardRound(program, mode):
