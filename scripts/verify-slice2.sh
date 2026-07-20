@@ -113,12 +113,14 @@ resolve_accepted_baseline() {
 validate_checksum_manifest() {
   local root="$1"
   local manifest="$root/SHA256SUMS"
-  local line hash relative count
+  local line hash relative count positive mutable entry_parent entry
 
   [[ -f "$manifest" && ! -L "$manifest" ]] || {
     gate_error "accepted baseline checksum manifest is missing or symlinked: $manifest"
     return 1
   }
+  positive="$(canonical_directory "$root/positive")" || return 1
+  mutable="$(canonical_directory "$mutable_slice1_artifacts")" || return 1
 
   count=0
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -152,6 +154,18 @@ validate_checksum_manifest() {
       gate_error "accepted baseline manifest entry is missing or symlinked: $relative"
       return 1
     }
+    entry_parent="$(
+      canonical_directory "$(dirname "$root/$relative")"
+    )" || return 1
+    entry="$entry_parent/${relative##*/}"
+    if ! path_is_within "$entry" "$positive"; then
+      gate_error "accepted baseline manifest entry escapes positive/: $relative"
+      return 1
+    fi
+    if path_is_within "$entry" "$mutable"; then
+      gate_error "accepted baseline manifest entry resolves under mutable Slice 1 artifacts: $relative"
+      return 1
+    fi
     count=$((count + 1))
   done <"$manifest"
 
@@ -191,6 +205,61 @@ verify_baseline_checksums() {
     gate_error "accepted Slice 1 baseline checksum verification failed: $root"
     return 1
   fi
+}
+
+baseline_manifest_digest() {
+  local root="$1"
+  local digest
+
+  digest="$(
+    shasum -a 256 "$root/SHA256SUMS" | awk '{ print $1 }'
+  )" || return 1
+  if ! printf '%s\n' "$digest" | grep -Eq '^[0-9A-Fa-f]{64}$'; then
+    gate_error "unable to pin accepted baseline checksum manifest: $root"
+    return 1
+  fi
+  printf '%s\n' "$digest"
+}
+
+verify_pinned_baseline() {
+  local root="$1"
+  local expected_digest="$2"
+  local before after
+
+  before="$(baseline_manifest_digest "$root")" || return 1
+  if [[ "$before" != "$expected_digest" ]]; then
+    gate_error "accepted baseline checksum manifest changed after it was pinned: $root"
+    return 1
+  fi
+  verify_baseline_checksums "$root" || return 1
+  after="$(baseline_manifest_digest "$root")" || return 1
+  if [[ "$after" != "$expected_digest" ]]; then
+    gate_error "accepted baseline checksum manifest changed during verification: $root"
+    return 1
+  fi
+}
+
+snapshot_baseline() {
+  local source_root="$1"
+  local snapshot_root="$2"
+  local expected_digest="$3"
+  local line hash relative
+
+  verify_pinned_baseline "$source_root" "$expected_digest" || return 1
+  rm -rf "$snapshot_root"
+  mkdir -p "$snapshot_root"
+  cp "$source_root/SHA256SUMS" "$snapshot_root/SHA256SUMS"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    hash="${line%% *}"
+    relative="${line#"$hash"}"
+    relative="${relative# }"
+    relative="${relative# }"
+    relative="${relative#\*}"
+    mkdir -p "$snapshot_root/$(dirname "$relative")"
+    cp "$source_root/$relative" "$snapshot_root/$relative"
+  done <"$source_root/SHA256SUMS"
+  verify_pinned_baseline "$source_root" "$expected_digest" || return 1
+  verify_pinned_baseline "$snapshot_root" "$expected_digest"
 }
 
 scene_matrix() {
@@ -288,6 +357,16 @@ require_artifact_family() {
   esac
 }
 
+stderr_matches_exact_line() {
+  local file="$1"
+  local expected="$2"
+
+  if printf '%s' "$expected" | cmp -s - "$file"; then
+    return 0
+  fi
+  printf '%s\n' "$expected" | cmp -s - "$file"
+}
+
 run_pair() {
   local name="$1"
   local tiling="$2"
@@ -311,7 +390,9 @@ run_pair() {
     return 1
   fi
   expected="HARNESS FAIL Tiling scene '$negative' tiling $tiling cell none metric $metric: expected equal 1, actual 0."
-  if ! grep -Fqx "$expected" "$negative_output/stderr.log"; then
+  if ! stderr_matches_exact_line \
+    "$negative_output/stderr.log" "$expected"
+  then
     cat "$negative_output/stderr.log" >&2
     gate_error "negative control stderr mismatch: $negative"
     return 1
@@ -807,7 +888,8 @@ prove_generated_artifacts_ignored() {
 }
 
 run_gate() {
-  local baseline_info baseline_root baseline_positive matrix_file
+  local baseline_info baseline_root baseline_positive baseline_manifest_hash
+  local baseline_snapshot_root matrix_file
   local slice1_log="$repo_root/.build/slice2-slice1-functional.log"
   local test_log="$repo_root/.build/slice2-swift-test.log"
   local xcodegen_log="$repo_root/.build/slice2-xcodegen.log"
@@ -821,10 +903,20 @@ run_gate() {
   baseline_info="$(resolve_accepted_baseline)" || return 1
   baseline_root=""
   baseline_positive="-"
+  baseline_manifest_hash=""
+  baseline_snapshot_root="$repo_root/.build/slice2-baseline-snapshot"
   if [[ -n "$baseline_info" ]]; then
     baseline_root="${baseline_info%%|*}"
     baseline_positive="${baseline_info#*|}"
     verify_baseline_checksums "$baseline_root" || return 1
+    baseline_manifest_hash="$(
+      baseline_manifest_digest "$baseline_root"
+    )" || return 1
+    snapshot_baseline \
+      "$baseline_root" \
+      "$baseline_snapshot_root" \
+      "$baseline_manifest_hash" || return 1
+    baseline_positive="$baseline_snapshot_root/positive"
   fi
 
   if ! PATTERN_SKIP_PERFORMANCE=1 ./scripts/verify-slice1.sh >"$slice1_log" 2>&1; then
@@ -834,7 +926,10 @@ run_gate() {
   fi
 
   if [[ -n "$baseline_root" ]]; then
-    verify_baseline_checksums "$baseline_root" || return 1
+    verify_pinned_baseline \
+      "$baseline_root" "$baseline_manifest_hash" || return 1
+    verify_pinned_baseline \
+      "$baseline_snapshot_root" "$baseline_manifest_hash" || return 1
   fi
 
   if ! swift test >"$test_log" 2>&1; then
@@ -883,6 +978,12 @@ run_gate() {
     run_pair "$name" "$tiling" "$metric" "$family" || return 1
   done <"$matrix_file"
 
+  if [[ -n "$baseline_root" ]]; then
+    verify_pinned_baseline \
+      "$baseline_root" "$baseline_manifest_hash" || return 1
+    verify_pinned_baseline \
+      "$baseline_snapshot_root" "$baseline_manifest_hash" || return 1
+  fi
   if ! evaluate_benchmark_json \
     "$artifacts/positive" \
     "$mutable_slice1_artifacts/positive" \
@@ -894,8 +995,20 @@ run_gate() {
     gate_error "Slice 2 benchmark evaluation failed"
     return 1
   fi
+  if [[ -n "$baseline_root" ]]; then
+    verify_pinned_baseline \
+      "$baseline_root" "$baseline_manifest_hash" || return 1
+    verify_pinned_baseline \
+      "$baseline_snapshot_root" "$baseline_manifest_hash" || return 1
+  fi
 
   prove_generated_artifacts_ignored || return 1
+  if [[ -n "$baseline_root" ]]; then
+    verify_pinned_baseline \
+      "$baseline_root" "$baseline_manifest_hash" || return 1
+    verify_pinned_baseline \
+      "$baseline_snapshot_root" "$baseline_manifest_hash" || return 1
+  fi
 
   printf '%s\n' 'slice0-regression=passed'
   printf '%s\n' 'slice1-regression=passed'

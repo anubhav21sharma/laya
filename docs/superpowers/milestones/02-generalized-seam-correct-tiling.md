@@ -30,6 +30,12 @@ slice1Comparison: unavailable-user-waived
 The waiver permits implementation to proceed; it does not waive Slice 2's
 absolute performance budgets.
 
+Post-run review hardened only gate verification semantics: negative stderr is
+now byte-exact, manifest entries are canonically confined, and an accepted
+baseline is read from a pinned private snapshot. Per the review instruction,
+the full one-shot gate was not rerun. The measurements and failure above
+remain the sole Task 10 gate evidence and are not upgraded by this hardening.
+
 ## Environment And Identity
 
 - GPU: `Apple Paravirtual device`
@@ -313,10 +319,15 @@ Every item remains pending and unclaimed:
   skip.
 - Keep the Slice 1 functional override explicit and limited to Slice 1.
 - Reject accepted baselines that resolve under mutable
-  `.build/slice1-artifacts`, including symlink aliases.
-- Verify any immutable baseline checksum manifest before and after the
-  internal Slice 1 run, then compare only matching hardware, OS, and Debug
-  configuration.
+  `.build/slice1-artifacts`, including symlink aliases and parent-directory
+  symlink escapes from manifest entries.
+- Pin the accepted manifest digest, copy every covered file into a verified
+  private snapshot, and read comparisons only from that snapshot.
+- Reverify both the original baseline and snapshot after the internal Slice 1
+  run, immediately around evaluation, and immediately before any final pass
+  output. Compare only matching hardware, OS, and Debug configuration.
+- Require a negative control's stderr to contain exactly its expected line,
+  with at most one conventional terminal newline.
 - Do not promote current diagnostics into `current-slice1` or create an
   accepted baseline from them.
 - Do not mark this milestone `Accepted` and do not push while performance and
