@@ -66,19 +66,49 @@ public struct TilingStrategy: Equatable, Sendable {
     public func cell(containing point: WorldPoint) -> CellIndex {
         switch kind {
         case .halfDrop:
-            let column = Int(floor(point.x / tileSize.width))
+            let column = checkedCellIndex(
+                coordinate: point.x,
+                extent: tileSize.width,
+                phase: 0,
+                axis: .x
+            )
             let phaseY = parity(column) * tileSize.height * 0.5
-            let row = Int(floor((point.y - phaseY) / tileSize.height))
+            let row = checkedCellIndex(
+                coordinate: point.y,
+                extent: tileSize.height,
+                phase: phaseY,
+                axis: .y
+            )
             return CellIndex(column: column, row: row)
         case .brick:
-            let row = Int(floor(point.y / tileSize.height))
+            let row = checkedCellIndex(
+                coordinate: point.y,
+                extent: tileSize.height,
+                phase: 0,
+                axis: .y
+            )
             let phaseX = parity(row) * tileSize.width * 0.5
-            let column = Int(floor((point.x - phaseX) / tileSize.width))
+            let column = checkedCellIndex(
+                coordinate: point.x,
+                extent: tileSize.width,
+                phase: phaseX,
+                axis: .x
+            )
             return CellIndex(column: column, row: row)
         case .grid, .mirrorX, .mirrorY, .mirrorXY, .rotational:
             return CellIndex(
-                column: Int(floor(point.x / tileSize.width)),
-                row: Int(floor(point.y / tileSize.height))
+                column: checkedCellIndex(
+                    coordinate: point.x,
+                    extent: tileSize.width,
+                    phase: 0,
+                    axis: .x
+                ),
+                row: checkedCellIndex(
+                    coordinate: point.y,
+                    extent: tileSize.height,
+                    phase: 0,
+                    axis: .y
+                )
             )
         }
     }
@@ -86,6 +116,22 @@ public struct TilingStrategy: Equatable, Sendable {
     public func images(
         intersecting worldBounds: AxisAlignedRect
     ) -> [TilingImage] {
+        precondition(
+            worldBounds.minimum.x.isFinite,
+            "TilingStrategy minimum x bound must be finite"
+        )
+        precondition(
+            worldBounds.minimum.y.isFinite,
+            "TilingStrategy minimum y bound must be finite"
+        )
+        precondition(
+            worldBounds.maximum.x.isFinite,
+            "TilingStrategy maximum x bound must be finite"
+        )
+        precondition(
+            worldBounds.maximum.y.isFinite,
+            "TilingStrategy maximum y bound must be finite"
+        )
         guard
             worldBounds.maximum.x > worldBounds.minimum.x,
             worldBounds.maximum.y > worldBounds.minimum.y
@@ -100,7 +146,8 @@ public struct TilingStrategy: Equatable, Sendable {
                 minimum: worldBounds.minimum.x,
                 maximum: worldBounds.maximum.x,
                 extent: tileSize.width,
-                phase: 0
+                phase: 0,
+                axis: .x
             ) else {
                 return []
             }
@@ -110,7 +157,8 @@ public struct TilingStrategy: Equatable, Sendable {
                     minimum: worldBounds.minimum.y,
                     maximum: worldBounds.maximum.y,
                     extent: tileSize.height,
-                    phase: phaseY
+                    phase: phaseY,
+                    axis: .y
                 ) else {
                     continue
                 }
@@ -123,7 +171,8 @@ public struct TilingStrategy: Equatable, Sendable {
                 minimum: worldBounds.minimum.y,
                 maximum: worldBounds.maximum.y,
                 extent: tileSize.height,
-                phase: 0
+                phase: 0,
+                axis: .y
             ) else {
                 return []
             }
@@ -133,7 +182,8 @@ public struct TilingStrategy: Equatable, Sendable {
                     minimum: worldBounds.minimum.x,
                     maximum: worldBounds.maximum.x,
                     extent: tileSize.width,
-                    phase: phaseX
+                    phase: phaseX,
+                    axis: .x
                 ) else {
                     continue
                 }
@@ -147,13 +197,15 @@ public struct TilingStrategy: Equatable, Sendable {
                     minimum: worldBounds.minimum.x,
                     maximum: worldBounds.maximum.x,
                     extent: tileSize.width,
-                    phase: 0
+                    phase: 0,
+                    axis: .x
                 ),
                 let rows = intersectingIndices(
                     minimum: worldBounds.minimum.y,
                     maximum: worldBounds.maximum.y,
                     extent: tileSize.height,
-                    phase: 0
+                    phase: 0,
+                    axis: .y
                 )
             else {
                 return []
@@ -183,6 +235,7 @@ public struct TilingStrategy: Equatable, Sendable {
     }
 
     public func displayFold(_ point: WorldPoint) -> CanonicalPoint {
+        let cell = cell(containing: point)
         switch kind {
         case .grid, .rotational:
             return CanonicalPoint(
@@ -190,21 +243,18 @@ public struct TilingStrategy: Equatable, Sendable {
                 y: positiveModulo(point.y, tileSize.height)
             )
         case .halfDrop:
-            let column = Int(floor(point.x / tileSize.width))
-            let phaseY = parity(column) * tileSize.height * 0.5
+            let phaseY = parity(cell.column) * tileSize.height * 0.5
             return CanonicalPoint(
                 x: positiveModulo(point.x, tileSize.width),
                 y: positiveModulo(point.y - phaseY, tileSize.height)
             )
         case .brick:
-            let row = Int(floor(point.y / tileSize.height))
-            let phaseX = parity(row) * tileSize.width * 0.5
+            let phaseX = parity(cell.row) * tileSize.width * 0.5
             return CanonicalPoint(
                 x: positiveModulo(point.x - phaseX, tileSize.width),
                 y: positiveModulo(point.y, tileSize.height)
             )
         case .mirrorX, .mirrorY, .mirrorXY:
-            let cell = cell(containing: point)
             let reflectsX = (kind == .mirrorX || kind == .mirrorXY)
                 && !cell.column.isMultiple(of: 2)
             let reflectsY = (kind == .mirrorY || kind == .mirrorXY)
@@ -313,13 +363,80 @@ private func parity(_ value: Int) -> Float {
     value.isMultiple(of: 2) ? 0 : 1
 }
 
+private enum CoordinateAxis: String {
+    case x
+    case y
+}
+
+// Beyond this symmetric magnitude, Float spacing can no longer preserve the
+// half-cell phase independently from the lattice index.
+private let maximumFloatResolvableCellIndex =
+    (1 << Float.significandBitCount) - 1
+
+private func checkedCellIndex(
+    coordinate: Float,
+    extent: Float,
+    phase: Float,
+    axis: CoordinateAxis
+) -> Int {
+    precondition(
+        coordinate.isFinite,
+        "TilingStrategy \(axis.rawValue) coordinate must be finite"
+    )
+    precondition(
+        phase.isFinite,
+        "TilingStrategy \(axis.rawValue) phase must be finite"
+    )
+
+    let phasedCoordinate = coordinate - phase
+    precondition(
+        phasedCoordinate.isFinite,
+        "TilingStrategy \(axis.rawValue) phase subtraction must be finite"
+    )
+
+    let quotient = phasedCoordinate / extent
+    precondition(
+        quotient.isFinite,
+        "TilingStrategy \(axis.rawValue) cell quotient must be finite"
+    )
+    let flooredQuotient = floor(quotient)
+    precondition(
+        flooredQuotient >= Float(Int.min)
+            && flooredQuotient < Float(Int.max),
+        "TilingStrategy \(axis.rawValue) cell index must be Int-representable"
+    )
+    precondition(
+        abs(flooredQuotient) <= Float(maximumFloatResolvableCellIndex),
+        "TilingStrategy \(axis.rawValue) cell index exceeds Float-resolvable range"
+    )
+
+    let origin = flooredQuotient * extent + phase
+    let boundary = origin + extent
+    precondition(
+        origin.isFinite && boundary.isFinite && origin < boundary,
+        "TilingStrategy \(axis.rawValue) cell boundaries must be finite and distinct"
+    )
+    return Int(flooredQuotient)
+}
+
 private func intersectingIndices(
     minimum: Float,
     maximum: Float,
     extent: Float,
-    phase: Float
+    phase: Float,
+    axis: CoordinateAxis
 ) -> ClosedRange<Int>? {
-    let first = Int(floor((minimum - phase) / extent))
-    let last = Int(ceil((maximum - phase) / extent)) - 1
+    let first = checkedCellIndex(
+        coordinate: minimum,
+        extent: extent,
+        phase: phase,
+        axis: axis
+    )
+    let last = checkedCellIndex(
+        coordinate: maximum.nextDown,
+        extent: extent,
+        phase: phase,
+        axis: axis
+    )
     return first <= last ? first...last : nil
 }

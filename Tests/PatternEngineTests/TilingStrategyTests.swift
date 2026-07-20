@@ -161,6 +161,106 @@ func tilingStrategyDimensionValidationRunsInSubprocesses() throws {
 }
 
 @Test
+func tilingStrategyCoordinateValidationRunsInSubprocesses() throws {
+    if let validationCase = ProcessInfo.processInfo.environment[
+        "PATTERN_ENGINE_TILING_COORDINATE_CASE"
+    ] {
+        exerciseCoordinateValidation(named: validationCase)
+        return
+    }
+
+    let invalidCases = [
+        ("cellXNaN", "TilingStrategy x coordinate must be finite"),
+        ("cellYInfinity", "TilingStrategy y coordinate must be finite"),
+        ("foldXInfinity", "TilingStrategy x coordinate must be finite"),
+        ("foldYNaN", "TilingStrategy y coordinate must be finite"),
+        (
+            "pointXBeyondInt",
+            "TilingStrategy x cell index must be Int-representable"
+        ),
+        (
+            "pointYBeyondInt",
+            "TilingStrategy y cell index must be Int-representable"
+        ),
+        (
+            "boundsXBeyondInt",
+            "TilingStrategy x cell index must be Int-representable"
+        ),
+        (
+            "boundsYBeyondInt",
+            "TilingStrategy y cell index must be Int-representable"
+        ),
+        (
+            "boundsMinimumXNaN",
+            "TilingStrategy minimum x bound must be finite"
+        ),
+        (
+            "boundsMinimumYNaN",
+            "TilingStrategy minimum y bound must be finite"
+        ),
+        (
+            "boundsMaximumXInfinity",
+            "TilingStrategy maximum x bound must be finite"
+        ),
+        (
+            "boundsMaximumYInfinity",
+            "TilingStrategy maximum y bound must be finite"
+        ),
+        (
+            "pointXAboveSafeIndex",
+            "TilingStrategy x cell index exceeds Float-resolvable range"
+        ),
+        (
+            "pointXBelowSafeIndex",
+            "TilingStrategy x cell index exceeds Float-resolvable range"
+        ),
+        (
+            "pointYAboveSafeIndex",
+            "TilingStrategy y cell index exceeds Float-resolvable range"
+        ),
+        (
+            "pointYBelowSafeIndex",
+            "TilingStrategy y cell index exceeds Float-resolvable range"
+        ),
+        (
+            "boundsXAboveSafeIndex",
+            "TilingStrategy x cell index exceeds Float-resolvable range"
+        ),
+        (
+            "boundsXBelowSafeIndex",
+            "TilingStrategy x cell index exceeds Float-resolvable range"
+        ),
+        (
+            "boundsYAboveSafeIndex",
+            "TilingStrategy y cell index exceeds Float-resolvable range"
+        ),
+        (
+            "boundsYBelowSafeIndex",
+            "TilingStrategy y cell index exceeds Float-resolvable range"
+        ),
+    ]
+    for (validationCase, expectedMessage) in invalidCases {
+        let result = try runCoordinateValidationSubprocess(for: validationCase)
+        #expect(result.status != 0)
+        #expect(
+            result.standardError.contains(
+                "Precondition failed: \(expectedMessage)"
+            )
+        )
+    }
+
+    for acceptedCase in [
+        "pointAtPositiveSafeIndex",
+        "pointAtNegativeSafeIndex",
+        "boundsAtPositiveSafeIndex",
+        "boundsAtNegativeSafeIndex",
+    ] {
+        let result = try runCoordinateValidationSubprocess(for: acceptedCase)
+        #expect(result.status == 0)
+    }
+}
+
+@Test
 func translationFamilyImagesHaveExactOriginsAndTransforms() {
     let grid = TilingStrategy(kind: .grid, tileSize: standardTileSize)
     let gridImages = grid.images(intersecting: rect(
@@ -382,39 +482,26 @@ func emptyBoundsProduceNoImagesForEveryTilingFamily() {
 }
 
 @Test
-func ordinalZeroImageTransformsAgreeWithDisplayFoldAcrossCoordinateClasses() {
-    for kind in TilingKind.allCases {
-        for point in [
-            WorldPoint(x: standardTileSize.width, y: 20),
-            WorldPoint(x: 20, y: standardTileSize.height),
-            WorldPoint(x: -1, y: -1),
-            WorldPoint(x: 300, y: 200),
-        ] {
-            expectImageTransformAgreement(
-                kind: kind,
-                tileSize: standardTileSize,
-                point: point
-            )
-        }
+func rawImageTransformsMatchIndependentCoordinateFixtures() {
+    for fixture in rawTransformFixtures {
+        let strategy = TilingStrategy(
+            kind: fixture.kind,
+            tileSize: fixture.tileSize
+        )
+        #expect(strategy.cell(containing: fixture.point) == fixture.expectedCell)
 
-        let largeTileSize = PatternSize(width: 256, height: 128)
-        for index in [999_999, -999_999] {
-            let odd = !index.isMultiple(of: 2)
-            let phaseX: Float = kind == .brick && odd
-                ? largeTileSize.width * 0.5
-                : 0
-            let phaseY: Float = kind == .halfDrop && odd
-                ? largeTileSize.height * 0.5
-                : 0
-            expectImageTransformAgreement(
-                kind: kind,
-                tileSize: largeTileSize,
-                point: WorldPoint(
-                    x: Float(index) * largeTileSize.width + phaseX + 64,
-                    y: Float(index) * largeTileSize.height + phaseY + 32
-                )
-            )
+        let image = strategy.images(
+            intersecting: probeBounds(at: fixture.point)
+        ).first {
+            $0.cell == fixture.expectedCell && $0.ordinal == 0
         }
+        #expect(image?.worldBounds == fixture.expectedWorldBounds)
+        #expect(image?.worldToCanonical == fixture.expectedAffine)
+        #expect(
+            image?.worldToCanonical.applying(to: fixture.point.simd)
+                == fixture.expectedRawTransformed
+        )
+        #expect(strategy.displayFold(fixture.point) == fixture.expectedFold)
     }
 }
 
@@ -448,39 +535,499 @@ private func hasNoEqualImages(_ images: [TilingImage]) -> Bool {
     return true
 }
 
-private func expectImageTransformAgreement(
-    kind: TilingKind,
-    tileSize: PatternSize,
-    point: WorldPoint
-) {
-    let strategy = TilingStrategy(kind: kind, tileSize: tileSize)
-    let cell = strategy.cell(containing: point)
-    let query = rect(
-        minimum: point.simd,
-        maximum: SIMD2(point.x.nextUp, point.y.nextUp)
-    )
-    let image = strategy.images(intersecting: query).first {
-        $0.cell == cell && $0.ordinal == 0
-    }
-    let transformed = image?.worldToCanonical.applying(to: point.simd)
-    let folded = strategy.displayFold(point)
+private struct RawTransformFixture: Sendable {
+    let kind: TilingKind
+    let tileSize: PatternSize
+    let point: WorldPoint
+    let expectedCell: CellIndex
+    let expectedWorldBounds: AxisAlignedRect
+    let expectedAffine: Affine2D
+    let expectedRawTransformed: SIMD2<Float>
+    let expectedFold: CanonicalPoint
+}
 
-    #expect(
-        transformed.map {
-            CanonicalPoint(
-                x: testPositiveModulo($0.x, tileSize.width),
-                y: testPositiveModulo($0.y, tileSize.height)
-            )
-        } == folded
+private let rawTransformFixtures =
+    standardRawTransformFixtures + largeRawTransformFixtures
+
+private let standardRawTransformFixtures: [RawTransformFixture] = [
+    fixture(
+        .grid, point: .init(x: 288, y: 20), cell: .init(column: 1, row: 0),
+        minimum: SIMD2(288, 0), maximum: SIMD2(576, 192),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(-288, 0),
+        raw: SIMD2(0, 20), fold: .init(x: 0, y: 20)
+    ),
+    fixture(
+        .halfDrop, point: .init(x: 288, y: 20), cell: .init(column: 1, row: -1),
+        minimum: SIMD2(288, -96), maximum: SIMD2(576, 96),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(-288, 96),
+        raw: SIMD2(0, 116), fold: .init(x: 0, y: 116)
+    ),
+    fixture(
+        .brick, point: .init(x: 288, y: 20), cell: .init(column: 1, row: 0),
+        minimum: SIMD2(288, 0), maximum: SIMD2(576, 192),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(-288, 0),
+        raw: SIMD2(0, 20), fold: .init(x: 0, y: 20)
+    ),
+    fixture(
+        .mirrorX, point: .init(x: 288, y: 20), cell: .init(column: 1, row: 0),
+        minimum: SIMD2(288, 0), maximum: SIMD2(576, 192),
+        xAxis: SIMD2(-1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(576, 0),
+        raw: SIMD2(288, 20), fold: .init(x: 0, y: 20)
+    ),
+    fixture(
+        .mirrorY, point: .init(x: 288, y: 20), cell: .init(column: 1, row: 0),
+        minimum: SIMD2(288, 0), maximum: SIMD2(576, 192),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(-288, 0),
+        raw: SIMD2(0, 20), fold: .init(x: 0, y: 20)
+    ),
+    fixture(
+        .mirrorXY, point: .init(x: 288, y: 20), cell: .init(column: 1, row: 0),
+        minimum: SIMD2(288, 0), maximum: SIMD2(576, 192),
+        xAxis: SIMD2(-1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(576, 0),
+        raw: SIMD2(288, 20), fold: .init(x: 0, y: 20)
+    ),
+    fixture(
+        .rotational, point: .init(x: 288, y: 20), cell: .init(column: 1, row: 0),
+        minimum: SIMD2(288, 0), maximum: SIMD2(576, 192),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(-288, 0),
+        raw: SIMD2(0, 20), fold: .init(x: 0, y: 20)
+    ),
+
+    fixture(
+        .grid, point: .init(x: 20, y: 192), cell: .init(column: 0, row: 1),
+        minimum: SIMD2(0, 192), maximum: SIMD2(288, 384),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(0, -192),
+        raw: SIMD2(20, 0), fold: .init(x: 20, y: 0)
+    ),
+    fixture(
+        .halfDrop, point: .init(x: 20, y: 192), cell: .init(column: 0, row: 1),
+        minimum: SIMD2(0, 192), maximum: SIMD2(288, 384),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(0, -192),
+        raw: SIMD2(20, 0), fold: .init(x: 20, y: 0)
+    ),
+    fixture(
+        .brick, point: .init(x: 20, y: 192), cell: .init(column: -1, row: 1),
+        minimum: SIMD2(-144, 192), maximum: SIMD2(144, 384),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(144, -192),
+        raw: SIMD2(164, 0), fold: .init(x: 164, y: 0)
+    ),
+    fixture(
+        .mirrorX, point: .init(x: 20, y: 192), cell: .init(column: 0, row: 1),
+        minimum: SIMD2(0, 192), maximum: SIMD2(288, 384),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(0, -192),
+        raw: SIMD2(20, 0), fold: .init(x: 20, y: 0)
+    ),
+    fixture(
+        .mirrorY, point: .init(x: 20, y: 192), cell: .init(column: 0, row: 1),
+        minimum: SIMD2(0, 192), maximum: SIMD2(288, 384),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, -1), translation: SIMD2(0, 384),
+        raw: SIMD2(20, 192), fold: .init(x: 20, y: 0)
+    ),
+    fixture(
+        .mirrorXY, point: .init(x: 20, y: 192), cell: .init(column: 0, row: 1),
+        minimum: SIMD2(0, 192), maximum: SIMD2(288, 384),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, -1), translation: SIMD2(0, 384),
+        raw: SIMD2(20, 192), fold: .init(x: 20, y: 0)
+    ),
+    fixture(
+        .rotational, point: .init(x: 20, y: 192), cell: .init(column: 0, row: 1),
+        minimum: SIMD2(0, 192), maximum: SIMD2(288, 384),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(0, -192),
+        raw: SIMD2(20, 0), fold: .init(x: 20, y: 0)
+    ),
+
+    fixture(
+        .grid, point: .init(x: -1, y: -1), cell: .init(column: -1, row: -1),
+        minimum: SIMD2(-288, -192), maximum: SIMD2(0, 0),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(288, 192),
+        raw: SIMD2(287, 191), fold: .init(x: 287, y: 191)
+    ),
+    fixture(
+        .halfDrop, point: .init(x: -1, y: -1), cell: .init(column: -1, row: -1),
+        minimum: SIMD2(-288, -96), maximum: SIMD2(0, 96),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(288, 96),
+        raw: SIMD2(287, 95), fold: .init(x: 287, y: 95)
+    ),
+    fixture(
+        .brick, point: .init(x: -1, y: -1), cell: .init(column: -1, row: -1),
+        minimum: SIMD2(-144, -192), maximum: SIMD2(144, 0),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(144, 192),
+        raw: SIMD2(143, 191), fold: .init(x: 143, y: 191)
+    ),
+    fixture(
+        .mirrorX, point: .init(x: -1, y: -1), cell: .init(column: -1, row: -1),
+        minimum: SIMD2(-288, -192), maximum: SIMD2(0, 0),
+        xAxis: SIMD2(-1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(0, 192),
+        raw: SIMD2(1, 191), fold: .init(x: 1, y: 191)
+    ),
+    fixture(
+        .mirrorY, point: .init(x: -1, y: -1), cell: .init(column: -1, row: -1),
+        minimum: SIMD2(-288, -192), maximum: SIMD2(0, 0),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, -1), translation: SIMD2(288, 0),
+        raw: SIMD2(287, 1), fold: .init(x: 287, y: 1)
+    ),
+    fixture(
+        .mirrorXY, point: .init(x: -1, y: -1), cell: .init(column: -1, row: -1),
+        minimum: SIMD2(-288, -192), maximum: SIMD2(0, 0),
+        xAxis: SIMD2(-1, 0), yAxis: SIMD2(0, -1), translation: SIMD2(0, 0),
+        raw: SIMD2(1, 1), fold: .init(x: 1, y: 1)
+    ),
+    fixture(
+        .rotational, point: .init(x: -1, y: -1), cell: .init(column: -1, row: -1),
+        minimum: SIMD2(-288, -192), maximum: SIMD2(0, 0),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1), translation: SIMD2(288, 192),
+        raw: SIMD2(287, 191), fold: .init(x: 287, y: 191)
+    ),
+]
+
+private let largeRawTransformFixtures: [RawTransformFixture] = [
+    fixture(
+        .grid, tileSize: .init(width: 256, height: 128),
+        point: .init(x: 255_999_808, y: 127_999_904),
+        cell: .init(column: 999_999, row: 999_999),
+        minimum: SIMD2(255_999_744, 127_999_872),
+        maximum: SIMD2(256_000_000, 128_000_000),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-255_999_744, -127_999_872),
+        raw: SIMD2(64, 32), fold: .init(x: 64, y: 32)
+    ),
+    fixture(
+        .halfDrop, tileSize: .init(width: 256, height: 128),
+        point: .init(x: 255_999_808, y: 127_999_968),
+        cell: .init(column: 999_999, row: 999_999),
+        minimum: SIMD2(255_999_744, 127_999_936),
+        maximum: SIMD2(256_000_000, 128_000_064),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-255_999_744, -127_999_936),
+        raw: SIMD2(64, 32), fold: .init(x: 64, y: 32)
+    ),
+    fixture(
+        .brick, tileSize: .init(width: 256, height: 128),
+        point: .init(x: 255_999_936, y: 127_999_904),
+        cell: .init(column: 999_999, row: 999_999),
+        minimum: SIMD2(255_999_872, 127_999_872),
+        maximum: SIMD2(256_000_128, 128_000_000),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-255_999_872, -127_999_872),
+        raw: SIMD2(64, 32), fold: .init(x: 64, y: 32)
+    ),
+    fixture(
+        .mirrorX, tileSize: .init(width: 256, height: 128),
+        point: .init(x: 255_999_808, y: 127_999_904),
+        cell: .init(column: 999_999, row: 999_999),
+        minimum: SIMD2(255_999_744, 127_999_872),
+        maximum: SIMD2(256_000_000, 128_000_000),
+        xAxis: SIMD2(-1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(256_000_000, -127_999_872),
+        raw: SIMD2(192, 32), fold: .init(x: 192, y: 32)
+    ),
+    fixture(
+        .mirrorY, tileSize: .init(width: 256, height: 128),
+        point: .init(x: 255_999_808, y: 127_999_904),
+        cell: .init(column: 999_999, row: 999_999),
+        minimum: SIMD2(255_999_744, 127_999_872),
+        maximum: SIMD2(256_000_000, 128_000_000),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, -1),
+        translation: SIMD2(-255_999_744, 128_000_000),
+        raw: SIMD2(64, 96), fold: .init(x: 64, y: 96)
+    ),
+    fixture(
+        .mirrorXY, tileSize: .init(width: 256, height: 128),
+        point: .init(x: 255_999_808, y: 127_999_904),
+        cell: .init(column: 999_999, row: 999_999),
+        minimum: SIMD2(255_999_744, 127_999_872),
+        maximum: SIMD2(256_000_000, 128_000_000),
+        xAxis: SIMD2(-1, 0), yAxis: SIMD2(0, -1),
+        translation: SIMD2(256_000_000, 128_000_000),
+        raw: SIMD2(192, 96), fold: .init(x: 192, y: 96)
+    ),
+    fixture(
+        .rotational, tileSize: .init(width: 256, height: 128),
+        point: .init(x: 255_999_808, y: 127_999_904),
+        cell: .init(column: 999_999, row: 999_999),
+        minimum: SIMD2(255_999_744, 127_999_872),
+        maximum: SIMD2(256_000_000, 128_000_000),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-255_999_744, -127_999_872),
+        raw: SIMD2(64, 32), fold: .init(x: 64, y: 32)
+    ),
+
+    fixture(
+        .grid, tileSize: .init(width: 256, height: 128),
+        point: .init(x: -255_999_680, y: -127_999_840),
+        cell: .init(column: -999_999, row: -999_999),
+        minimum: SIMD2(-255_999_744, -127_999_872),
+        maximum: SIMD2(-255_999_488, -127_999_744),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(255_999_744, 127_999_872),
+        raw: SIMD2(64, 32), fold: .init(x: 64, y: 32)
+    ),
+    fixture(
+        .halfDrop, tileSize: .init(width: 256, height: 128),
+        point: .init(x: -255_999_680, y: -127_999_776),
+        cell: .init(column: -999_999, row: -999_999),
+        minimum: SIMD2(-255_999_744, -127_999_808),
+        maximum: SIMD2(-255_999_488, -127_999_680),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(255_999_744, 127_999_808),
+        raw: SIMD2(64, 32), fold: .init(x: 64, y: 32)
+    ),
+    fixture(
+        .brick, tileSize: .init(width: 256, height: 128),
+        point: .init(x: -255_999_552, y: -127_999_840),
+        cell: .init(column: -999_999, row: -999_999),
+        minimum: SIMD2(-255_999_616, -127_999_872),
+        maximum: SIMD2(-255_999_360, -127_999_744),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(255_999_616, 127_999_872),
+        raw: SIMD2(64, 32), fold: .init(x: 64, y: 32)
+    ),
+    fixture(
+        .mirrorX, tileSize: .init(width: 256, height: 128),
+        point: .init(x: -255_999_680, y: -127_999_840),
+        cell: .init(column: -999_999, row: -999_999),
+        minimum: SIMD2(-255_999_744, -127_999_872),
+        maximum: SIMD2(-255_999_488, -127_999_744),
+        xAxis: SIMD2(-1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(-255_999_488, 127_999_872),
+        raw: SIMD2(192, 32), fold: .init(x: 192, y: 32)
+    ),
+    fixture(
+        .mirrorY, tileSize: .init(width: 256, height: 128),
+        point: .init(x: -255_999_680, y: -127_999_840),
+        cell: .init(column: -999_999, row: -999_999),
+        minimum: SIMD2(-255_999_744, -127_999_872),
+        maximum: SIMD2(-255_999_488, -127_999_744),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, -1),
+        translation: SIMD2(255_999_744, -127_999_744),
+        raw: SIMD2(64, 96), fold: .init(x: 64, y: 96)
+    ),
+    fixture(
+        .mirrorXY, tileSize: .init(width: 256, height: 128),
+        point: .init(x: -255_999_680, y: -127_999_840),
+        cell: .init(column: -999_999, row: -999_999),
+        minimum: SIMD2(-255_999_744, -127_999_872),
+        maximum: SIMD2(-255_999_488, -127_999_744),
+        xAxis: SIMD2(-1, 0), yAxis: SIMD2(0, -1),
+        translation: SIMD2(-255_999_488, -127_999_744),
+        raw: SIMD2(192, 96), fold: .init(x: 192, y: 96)
+    ),
+    fixture(
+        .rotational, tileSize: .init(width: 256, height: 128),
+        point: .init(x: -255_999_680, y: -127_999_840),
+        cell: .init(column: -999_999, row: -999_999),
+        minimum: SIMD2(-255_999_744, -127_999_872),
+        maximum: SIMD2(-255_999_488, -127_999_744),
+        xAxis: SIMD2(1, 0), yAxis: SIMD2(0, 1),
+        translation: SIMD2(255_999_744, 127_999_872),
+        raw: SIMD2(64, 32), fold: .init(x: 64, y: 32)
+    ),
+]
+
+private func fixture(
+    _ kind: TilingKind,
+    tileSize: PatternSize = standardTileSize,
+    point: WorldPoint,
+    cell: CellIndex,
+    minimum: SIMD2<Float>,
+    maximum: SIMD2<Float>,
+    xAxis: SIMD2<Float>,
+    yAxis: SIMD2<Float>,
+    translation: SIMD2<Float>,
+    raw: SIMD2<Float>,
+    fold: CanonicalPoint
+) -> RawTransformFixture {
+    RawTransformFixture(
+        kind: kind,
+        tileSize: tileSize,
+        point: point,
+        expectedCell: cell,
+        expectedWorldBounds: rect(minimum: minimum, maximum: maximum),
+        expectedAffine: Affine2D(
+            xAxis: xAxis,
+            yAxis: yAxis,
+            translation: translation
+        ),
+        expectedRawTransformed: raw,
+        expectedFold: fold
     )
 }
 
-private func testPositiveModulo(_ value: Float, _ extent: Float) -> Float {
-    let remainder = value.truncatingRemainder(dividingBy: extent)
-    if remainder == 0 {
-        return 0
+private func probeBounds(at point: WorldPoint) -> AxisAlignedRect {
+    rect(
+        minimum: point.simd,
+        maximum: SIMD2(point.x.nextUp, point.y.nextUp)
+    )
+}
+
+private func runCoordinateValidationSubprocess(
+    for validationCase: String
+) throws -> (status: Int32, standardError: String) {
+    let testExecutablePath = tilingTestExecutablePath()
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.arguments = [
+        "--test-bundle-path", testExecutablePath,
+        "--filter", "tilingStrategyCoordinateValidationRunsInSubprocesses",
+        testExecutablePath,
+        "--testing-library", "swift-testing",
+    ]
+    process.environment = ProcessInfo.processInfo.environment.merging(
+        ["PATTERN_ENGINE_TILING_COORDINATE_CASE": validationCase],
+        uniquingKeysWith: { _, new in new }
+    )
+    process.standardOutput = FileHandle.nullDevice
+    let standardError = Pipe()
+    process.standardError = standardError
+
+    try process.run()
+    process.waitUntilExit()
+    let errorOutput = String(
+        decoding: standardError.fileHandleForReading.readDataToEndOfFile(),
+        as: UTF8.self
+    )
+    return (process.terminationStatus, errorOutput)
+}
+
+private func exerciseCoordinateValidation(named validationCase: String) {
+    let tileSize = PatternSize(width: 64, height: 64)
+    let strategy = TilingStrategy(kind: .grid, tileSize: tileSize)
+    let safeIndex = (1 << Float.significandBitCount) - 1
+    let firstUnsafeIndex = safeIndex + 1
+    let positiveSafeOrigin = Float(safeIndex) * tileSize.width
+    let negativeSafeOrigin = -positiveSafeOrigin
+    let positiveUnsafeOrigin = Float(firstUnsafeIndex) * tileSize.width
+    let negativeUnsafeOrigin = -positiveUnsafeOrigin
+
+    switch validationCase {
+    case "cellXNaN":
+        _ = strategy.cell(containing: WorldPoint(x: .nan, y: 0))
+    case "cellYInfinity":
+        _ = strategy.cell(containing: WorldPoint(x: 0, y: .infinity))
+    case "foldXInfinity":
+        _ = strategy.displayFold(WorldPoint(x: .infinity, y: 0))
+    case "foldYNaN":
+        _ = strategy.displayFold(WorldPoint(x: 0, y: .nan))
+    case "pointXBeyondInt":
+        _ = strategy.cell(
+            containing: WorldPoint(x: .greatestFiniteMagnitude, y: 0)
+        )
+    case "pointYBeyondInt":
+        _ = strategy.cell(
+            containing: WorldPoint(x: 0, y: .greatestFiniteMagnitude)
+        )
+    case "boundsXBeyondInt":
+        _ = strategy.images(intersecting: rect(
+            minimum: SIMD2(Float.greatestFiniteMagnitude.nextDown, 0),
+            maximum: SIMD2(Float.greatestFiniteMagnitude, 1)
+        ))
+    case "boundsYBeyondInt":
+        _ = strategy.images(intersecting: rect(
+            minimum: SIMD2(0, Float.greatestFiniteMagnitude.nextDown),
+            maximum: SIMD2(1, Float.greatestFiniteMagnitude)
+        ))
+    case "boundsMinimumXNaN":
+        _ = strategy.images(intersecting: uncheckedRect(
+            minimum: SIMD2(.nan, 0),
+            maximum: SIMD2(1, 1)
+        ))
+    case "boundsMinimumYNaN":
+        _ = strategy.images(intersecting: uncheckedRect(
+            minimum: SIMD2(0, .nan),
+            maximum: SIMD2(1, 1)
+        ))
+    case "boundsMaximumXInfinity":
+        _ = strategy.images(intersecting: uncheckedRect(
+            minimum: SIMD2(0, 0),
+            maximum: SIMD2(.infinity, 1)
+        ))
+    case "boundsMaximumYInfinity":
+        _ = strategy.images(intersecting: uncheckedRect(
+            minimum: SIMD2(0, 0),
+            maximum: SIMD2(1, .infinity)
+        ))
+    case "pointXAboveSafeIndex":
+        _ = strategy.cell(
+            containing: WorldPoint(x: positiveUnsafeOrigin, y: 0)
+        )
+    case "pointXBelowSafeIndex":
+        _ = strategy.cell(
+            containing: WorldPoint(x: negativeUnsafeOrigin, y: 0)
+        )
+    case "pointYAboveSafeIndex":
+        _ = strategy.cell(
+            containing: WorldPoint(x: 0, y: positiveUnsafeOrigin)
+        )
+    case "pointYBelowSafeIndex":
+        _ = strategy.cell(
+            containing: WorldPoint(x: 0, y: negativeUnsafeOrigin)
+        )
+    case "boundsXAboveSafeIndex":
+        _ = strategy.images(intersecting: rect(
+            minimum: SIMD2(positiveUnsafeOrigin, 0),
+            maximum: SIMD2(positiveUnsafeOrigin + tileSize.width, 1)
+        ))
+    case "boundsXBelowSafeIndex":
+        _ = strategy.images(intersecting: rect(
+            minimum: SIMD2(negativeUnsafeOrigin, 0),
+            maximum: SIMD2(negativeUnsafeOrigin + tileSize.width, 1)
+        ))
+    case "boundsYAboveSafeIndex":
+        _ = strategy.images(intersecting: rect(
+            minimum: SIMD2(0, positiveUnsafeOrigin),
+            maximum: SIMD2(1, positiveUnsafeOrigin + tileSize.height)
+        ))
+    case "boundsYBelowSafeIndex":
+        _ = strategy.images(intersecting: rect(
+            minimum: SIMD2(0, negativeUnsafeOrigin),
+            maximum: SIMD2(1, negativeUnsafeOrigin + tileSize.height)
+        ))
+    case "pointAtPositiveSafeIndex":
+        _ = strategy.cell(containing: WorldPoint(
+            x: positiveSafeOrigin,
+            y: positiveSafeOrigin
+        ))
+        _ = strategy.displayFold(WorldPoint(
+            x: positiveSafeOrigin,
+            y: positiveSafeOrigin
+        ))
+    case "pointAtNegativeSafeIndex":
+        _ = strategy.cell(containing: WorldPoint(
+            x: negativeSafeOrigin,
+            y: negativeSafeOrigin
+        ))
+        _ = strategy.displayFold(WorldPoint(
+            x: negativeSafeOrigin,
+            y: negativeSafeOrigin
+        ))
+    case "boundsAtPositiveSafeIndex":
+        _ = strategy.images(intersecting: rect(
+            minimum: SIMD2(positiveSafeOrigin, positiveSafeOrigin),
+            maximum: SIMD2(
+                positiveSafeOrigin + tileSize.width,
+                positiveSafeOrigin + tileSize.height
+            )
+        ))
+    case "boundsAtNegativeSafeIndex":
+        _ = strategy.images(intersecting: rect(
+            minimum: SIMD2(negativeSafeOrigin, negativeSafeOrigin),
+            maximum: SIMD2(
+                negativeSafeOrigin + tileSize.width,
+                negativeSafeOrigin + tileSize.height
+            )
+        ))
+    default:
+        preconditionFailure(
+            "Unknown tiling coordinate validation case: \(validationCase)"
+        )
     }
-    return remainder < 0 ? min(remainder + extent, extent.nextDown) : remainder
+}
+
+private func uncheckedRect(
+    minimum: SIMD2<Float>,
+    maximum: SIMD2<Float>
+) -> AxisAlignedRect {
+    unsafeBitCast((minimum, maximum), to: AxisAlignedRect.self)
 }
 
 private func runDimensionValidationSubprocess(
