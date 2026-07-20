@@ -40,6 +40,38 @@ struct TaskEightNoncentralInput: Equatable, Sendable {
     let visibleCell: CellIndex
 }
 
+struct HarnessFragmentAudit: Equatable, Sendable {
+    let projectedFragmentCount: Int
+    let maximumClipPlaneCount: Int
+    let instanceBytes: Int
+}
+
+struct HarnessInstanceIdentityAudit: Equatable, Sendable {
+    let newlyEncodedInstanceCount: Int
+    let restampedInstanceCount: Int
+    let encodedHighWater: UInt64
+}
+
+private struct HarnessFragmentMeasurements {
+    var totalProjectedFragmentCount = 0
+    var maximumFragmentsPerFootprint = 0
+    var maximumClipPlaneCount = 0
+    var totalInstanceBytes = 0
+
+    mutating func append(_ audit: HarnessFragmentAudit) {
+        totalProjectedFragmentCount += audit.projectedFragmentCount
+        maximumFragmentsPerFootprint = max(
+            maximumFragmentsPerFootprint,
+            audit.projectedFragmentCount
+        )
+        maximumClipPlaneCount = max(
+            maximumClipPlaneCount,
+            audit.maximumClipPlaneCount
+        )
+        totalInstanceBytes += audit.instanceBytes
+    }
+}
+
 private struct FixedPointCoverageKey: Hashable {
     let centerX: UInt32
     let centerY: UInt32
@@ -416,6 +448,111 @@ public final class HarnessRunner {
         }
     }
 
+    nonisolated static func auditFragmentBatch(
+        sceneName: String,
+        fragments: [CellFragment],
+        repeatedFragments: [CellFragment],
+        pendingCapacity: Int = GridCanvasContract.pendingCapacity
+    ) throws -> HarnessFragmentAudit {
+        guard fragments == repeatedFragments else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: sceneName,
+                message: "fragment order changed across identical projection runs"
+            )
+        }
+        guard fragments.count <= pendingCapacity else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: sceneName,
+                message: "generated \(fragments.count) fragments beyond the fixed \(pendingCapacity) pending-instance capacity"
+            )
+        }
+        let maximumClipPlaneCount = fragments.lazy
+            .map(\.brushClip.halfPlanes.count)
+            .max() ?? 0
+        guard maximumClipPlaneCount <= 4 else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: sceneName,
+                message: "generated fragment contains \(maximumClipPlaneCount) clip planes instead of at most 4"
+            )
+        }
+        let (instanceBytes, overflow) = fragments.count
+            .multipliedReportingOverflow(
+                by: MemoryLayout<PatternProjectedStampInstance>.stride
+            )
+        guard !overflow else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: sceneName,
+                message: "projected instance-byte count overflowed"
+            )
+        }
+        return HarnessFragmentAudit(
+            projectedFragmentCount: fragments.count,
+            maximumClipPlaneCount: maximumClipPlaneCount,
+            instanceBytes: instanceBytes
+        )
+    }
+
+    nonisolated static func auditEncodedInstanceIdentityRanges(
+        sceneName: String,
+        previousEncodedHighWater: UInt64,
+        emittedHighWater: UInt64,
+        encodedIdentityRanges: [Range<UInt64>]
+    ) throws -> HarnessInstanceIdentityAudit {
+        guard emittedHighWater >= previousEncodedHighWater else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: sceneName,
+                message: "emitted projected-instance identity moved backward"
+            )
+        }
+        var encodedHighWater = previousEncodedHighWater
+        var newlyEncodedInstanceCount = 0
+        for range in encodedIdentityRanges {
+            guard range.lowerBound == encodedHighWater else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: sceneName,
+                    message: "encoded projected identity range \(range) did not begin at expected high-water \(encodedHighWater)"
+                )
+            }
+            guard
+                !range.isEmpty,
+                range.upperBound <= emittedHighWater
+            else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: sceneName,
+                    message: "encoded projected identity range \(range) exceeded emitted high-water \(emittedHighWater)"
+                )
+            }
+            newlyEncodedInstanceCount += range.count
+            encodedHighWater = range.upperBound
+        }
+        guard encodedHighWater == emittedHighWater else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: sceneName,
+                message: "encoded projected high-water \(encodedHighWater) did not reach emitted high-water \(emittedHighWater)"
+            )
+        }
+        return HarnessInstanceIdentityAudit(
+            newlyEncodedInstanceCount: newlyEncodedInstanceCount,
+            restampedInstanceCount: 0,
+            encodedHighWater: encodedHighWater
+        )
+    }
+
+    nonisolated static func performLongStrokeProductionThenAudit<
+        Value,
+        Measurement
+    >(
+        production: () throws -> (
+            value: Value,
+            measurement: Measurement
+        ),
+        audit: (Value) throws -> Void
+    ) rethrows -> (value: Value, measurement: Measurement) {
+        let result = try production()
+        try audit(result.value)
+        return result
+    }
+
     nonisolated static func configuration(
         for scene: HarnessScene
     ) -> HarnessRenderConfiguration {
@@ -497,6 +634,109 @@ public final class HarnessRunner {
             diagnosticMode: .hardRound,
             requiresDistantCells: requiresDistantCells
         )
+    }
+
+    private nonisolated static func hardRoundFragments(
+        at world: WorldPoint,
+        radius requestedRadius: Float,
+        configuration: HarnessRenderConfiguration
+    ) -> [CellFragment] {
+        let tileSize = PatternSize(
+            width: Float(configuration.pixelSize.width),
+            height: Float(configuration.pixelSize.height)
+        )
+        let radius = TilingProjection.clampedRadius(
+            requested: requestedRadius,
+            tileSize: tileSize
+        )
+        let footprint = StampFootprint(
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(radius, 0),
+                yAxis: SIMD2(0, radius),
+                translation: world.simd
+            ),
+            localBounds: AxisAlignedRect(
+                minimum: SIMD2(-1, -1),
+                maximum: SIMD2(1, 1)
+            ),
+            coverageSymmetry: .halfTurnInvariant
+        )
+        return TilingProjection.fragments(
+            for: footprint,
+            using: TilingStrategy(
+                kind: configuration.tiling,
+                tileSize: tileSize
+            )
+        )
+    }
+
+    private nonisolated static func repeatedFragments(
+        for footprint: StampFootprint,
+        configuration: HarnessRenderConfiguration
+    ) -> [CellFragment] {
+        TilingProjection.fragments(
+            for: footprint,
+            using: TilingStrategy(
+                kind: configuration.tiling,
+                tileSize: PatternSize(
+                    width: Float(configuration.pixelSize.width),
+                    height: Float(configuration.pixelSize.height)
+                )
+            )
+        )
+    }
+
+    private nonisolated static func appendFragmentAudit(
+        sceneName: String,
+        fragments: [CellFragment],
+        repeatedFragments: [CellFragment],
+        into measurements: inout HarnessFragmentMeasurements
+    ) throws {
+        measurements.append(
+            try auditFragmentBatch(
+                sceneName: sceneName,
+                fragments: fragments,
+                repeatedFragments: repeatedFragments
+            )
+        )
+    }
+
+    private nonisolated static func auditInterpolatedHardRoundStroke(
+        sceneName: String,
+        points: [WorldPoint],
+        configuration: HarnessRenderConfiguration,
+        into measurements: inout HarnessFragmentMeasurements
+    ) throws -> Int {
+        guard let first = points.first, let last = points.last else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: sceneName,
+                message: "interactive projection audit has no points"
+            )
+        }
+        let initialTotal = measurements.totalProjectedFragmentCount
+        var interpolator = CentripetalCatmullRomStrokeInterpolator(
+            radius: GridCanvasContract.brushRadius
+        )
+        let record: (WorldPoint) throws -> Void = { point in
+            let fragments = hardRoundFragments(
+                at: point,
+                radius: GridCanvasContract.brushRadius,
+                configuration: configuration
+            )
+            try appendFragmentAudit(
+                sceneName: sceneName,
+                fragments: fragments,
+                repeatedFragments: hardRoundFragments(
+                    at: point,
+                    radius: GridCanvasContract.brushRadius,
+                    configuration: configuration
+                ),
+                into: &measurements
+            )
+        }
+        try interpolator.begin(at: first, emit: record)
+        try interpolator.finish(at: last, emit: record)
+        return measurements.totalProjectedFragmentCount - initialTotal
     }
 
     private nonisolated static func diagnosticWire(
@@ -915,9 +1155,12 @@ public final class HarnessRunner {
         var commitPendingMilliseconds: [Double] = []
         var newInstanceCounts: [Int] = []
         var totalStrokeInstanceCounts: [Int] = []
-        var totalInstancesAtPreviousFrame = 0
+        var encodedInstanceHighWater: UInt64 = 0
         var restampedInstanceCount = 0
         var missedFrameCount = 0
+        var longStrokeCPUMilliseconds: [Double] = []
+        var longStrokeDabGPUMilliseconds: [Double] = []
+        var longStrokeProjectedInstanceCounts: [Int] = []
         let displayFrameBudgetMilliseconds = 1_000.0 / 60.0
     }
 
@@ -1079,6 +1322,7 @@ public final class HarnessRunner {
         var visibleCellCanonicalByteDelta: Int?
         var restoredDisplayMaximumDelta: Int?
         var previewCommitViolationCount: Int?
+        var fragmentMeasurements = HarnessFragmentMeasurements()
 
         switch program {
         case .gridInterior:
@@ -1329,7 +1573,19 @@ public final class HarnessRunner {
                     message: "translation program and renderer tiling disagree"
                 )
             }
-            try gridRenderer.injectHarnessDab(at: input.center)
+            let fragments = try gridRenderer.injectHarnessDab(
+                at: input.center
+            )
+            try Self.appendFragmentAudit(
+                sceneName: scene.name,
+                fragments: fragments,
+                repeatedFragments: Self.hardRoundFragments(
+                    at: input.center,
+                    radius: GridCanvasContract.brushRadius,
+                    configuration: configuration
+                ),
+                into: &fragmentMeasurements
+            )
             try flushPending(
                 scene: scene,
                 renderer: gridRenderer,
@@ -1393,6 +1649,15 @@ public final class HarnessRunner {
                     at: WorldPoint(input.brushToWorld.translation),
                     radius: input.radius
                 )
+                try Self.appendFragmentAudit(
+                    sceneName: scene.name,
+                    fragments: taskSevenFragments,
+                    repeatedFragments: Self.repeatedFragments(
+                        for: input.stampFootprint,
+                        configuration: configuration
+                    ),
+                    into: &fragmentMeasurements
+                )
                 try flushPending(
                     scene: scene,
                     renderer: gridRenderer,
@@ -1427,6 +1692,15 @@ public final class HarnessRunner {
                         height: scene.height
                     )
                 taskSevenFragments = frame.fragments
+                try Self.appendFragmentAudit(
+                    sceneName: scene.name,
+                    fragments: frame.fragments,
+                    repeatedFragments: Self.repeatedFragments(
+                        for: input.stampFootprint,
+                        configuration: configuration
+                    ),
+                    into: &fragmentMeasurements
+                )
                 artifacts.liveScreen = frame.screen
                 artifacts.canonical = frame.canonical
                 artifacts.displayValidationCanonical =
@@ -1471,7 +1745,17 @@ public final class HarnessRunner {
             )
         case .rectangularTile:
             let center = Self.taskEightRectangularCenter
-            try gridRenderer.injectHarnessDab(at: center)
+            let fragments = try gridRenderer.injectHarnessDab(at: center)
+            try Self.appendFragmentAudit(
+                sceneName: scene.name,
+                fragments: fragments,
+                repeatedFragments: Self.hardRoundFragments(
+                    at: center,
+                    radius: GridCanvasContract.brushRadius,
+                    configuration: configuration
+                ),
+                into: &fragmentMeasurements
+            )
             try flushPending(
                 scene: scene,
                 renderer: gridRenderer,
@@ -1515,6 +1799,16 @@ public final class HarnessRunner {
             let centralFragments = try gridRenderer.injectHarnessDab(
                 at: input.central
             )
+            try Self.appendFragmentAudit(
+                sceneName: scene.name,
+                fragments: centralFragments,
+                repeatedFragments: Self.hardRoundFragments(
+                    at: input.central,
+                    radius: GridCanvasContract.brushRadius,
+                    configuration: configuration
+                ),
+                into: &fragmentMeasurements
+            )
             try flushPending(
                 scene: scene,
                 renderer: gridRenderer,
@@ -1540,6 +1834,16 @@ public final class HarnessRunner {
             var visibleMeasurements = GridMeasurements()
             let visibleFragments = try visibleRenderer.injectHarnessDab(
                 at: input.visible
+            )
+            try Self.appendFragmentAudit(
+                sceneName: scene.name,
+                fragments: visibleFragments,
+                repeatedFragments: Self.hardRoundFragments(
+                    at: input.visible,
+                    radius: GridCanvasContract.brushRadius,
+                    configuration: configuration
+                ),
+                into: &fragmentMeasurements
             )
             try flushPending(
                 scene: scene,
@@ -1578,8 +1882,18 @@ public final class HarnessRunner {
                 )
             }
         case .metadataTilingSwitch:
-            try gridRenderer.injectHarnessDab(
+            let fragments = try gridRenderer.injectHarnessDab(
                 at: Self.taskEightMetadataCenter
+            )
+            try Self.appendFragmentAudit(
+                sceneName: scene.name,
+                fragments: fragments,
+                repeatedFragments: Self.hardRoundFragments(
+                    at: Self.taskEightMetadataCenter,
+                    radius: GridCanvasContract.brushRadius,
+                    configuration: configuration
+                ),
+                into: &fragmentMeasurements
             )
             try flushPending(
                 scene: scene,
@@ -1684,6 +1998,13 @@ public final class HarnessRunner {
                 try gridRenderer.copyCanonicalForHarness()
         case .projectedLiveCommit:
             let points = Self.taskEightLiveCommitPoints
+            let auditedFragmentCount =
+                try Self.auditInterpolatedHardRoundStroke(
+                    sceneName: scene.name,
+                    points: points,
+                    configuration: configuration,
+                    into: &fragmentMeasurements
+                )
             measureHandle(
                 .began,
                 world: points[0],
@@ -1718,38 +2039,109 @@ public final class HarnessRunner {
                     textureBytes(artifacts.committedScreen!),
                     tolerance: 1
                 )
-        case .projectedLongStroke:
-            let points = Self.taskEightLongStrokePoints
-            measureHandle(
-                .began,
-                world: points[0],
-                renderer: gridRenderer,
-                into: &measurements
-            )
-            for point in points.dropFirst() {
-                measureHandle(
-                    .moved,
-                    world: point,
-                    renderer: gridRenderer,
-                    into: &measurements
-                )
-                try flushPending(
-                    scene: scene,
-                    renderer: gridRenderer,
-                    measurements: &measurements
+            guard
+                measurements.newInstanceCounts.reduce(0, +)
+                    == auditedFragmentCount
+            else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "interactive projected-instance count disagrees with deterministic projection audit"
                 )
             }
-            measureHandle(
-                .ended,
-                world: points[points.count - 1],
-                renderer: gridRenderer,
-                into: &measurements
+        case .projectedLongStroke:
+            let points = Self.taskEightLongStrokePoints
+            guard points.count
+                    == BenchmarkLongStrokeMetrics.segmentCount + 1
+            else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "long-stroke program does not contain exactly 400 segments"
+                )
+            }
+            for (index, pair) in zip(
+                points,
+                points.dropFirst()
+            ).enumerated() {
+                guard pair.0.y == pair.1.y,
+                      abs(pair.1.x - pair.0.x) == 32
+                else {
+                    throw HarnessRunError.counterInvariant(
+                        sceneName: scene.name,
+                        message: "long-stroke segment \(index) is not an exact horizontal 32-pixel segment"
+                    )
+                }
+            }
+
+            var processingStart = CFAbsoluteTimeGetCurrent()
+            var fragments =
+                try gridRenderer.beginFixedProjectedStrokeForHarness(
+                    at: points[0]
+                )
+            measurements.brushProcessingMilliseconds.append(
+                elapsedMilliseconds(since: processingStart)
+            )
+            try Self.appendFragmentAudit(
+                sceneName: scene.name,
+                fragments: fragments,
+                repeatedFragments: Self.hardRoundFragments(
+                    at: points[0],
+                    radius: GridCanvasContract.brushRadius,
+                    configuration: configuration
+                ),
+                into: &fragmentMeasurements
             )
             try flushPending(
                 scene: scene,
                 renderer: gridRenderer,
                 measurements: &measurements
             )
+
+            for point in points.dropFirst() {
+                let frameResult = try Self
+                    .performLongStrokeProductionThenAudit(
+                        production: {
+                            processingStart = CFAbsoluteTimeGetCurrent()
+                            measurements.pendingEventStart =
+                                processingStart
+                            let producedFragments =
+                                try gridRenderer
+                                    .appendFixedProjectedSegmentForHarness(
+                                        to: point
+                                    )
+                            measurements.brushProcessingMilliseconds.append(
+                                elapsedMilliseconds(
+                                    since: processingStart
+                                )
+                            )
+                            let flushResult = try flushPending(
+                                scene: scene,
+                                renderer: gridRenderer,
+                                measurements: &measurements,
+                                recordsLongStrokeFrame: true
+                            )
+                            return (
+                                value: producedFragments,
+                                measurement: flushResult
+                            )
+                        },
+                        audit: { producedFragments in
+                            try Self.appendFragmentAudit(
+                                sceneName: scene.name,
+                                fragments: producedFragments,
+                                repeatedFragments:
+                                    Self.hardRoundFragments(
+                                        at: point,
+                                        radius:
+                                            GridCanvasContract.brushRadius,
+                                        configuration: configuration
+                                    ),
+                                into: &fragmentMeasurements
+                            )
+                        }
+                    )
+                fragments = frameResult.value
+            }
+            try gridRenderer.endFixedProjectedStrokeForHarness()
             artifacts.liveScreen = try captureDisplay(
                 scene: scene,
                 renderer: gridRenderer,
@@ -1905,6 +2297,29 @@ public final class HarnessRunner {
             coordinateContinuityMismatches = nil
         }
 
+        let longStrokeMetrics: BenchmarkLongStrokeMetrics?
+        if program == .projectedLongStroke {
+            do {
+                longStrokeMetrics =
+                    try BenchmarkLongStrokeMetrics.measure(
+                        cpuMilliseconds:
+                            measurements.longStrokeCPUMilliseconds,
+                        dabGPUMilliseconds:
+                            measurements.longStrokeDabGPUMilliseconds,
+                        projectedInstanceCounts:
+                            measurements
+                                .longStrokeProjectedInstanceCounts
+                    )
+            } catch {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: error.localizedDescription
+                )
+            }
+        } else {
+            longStrokeMetrics = nil
+        }
+
         let revisionDelta = Int(
             gridRenderer.harnessRevision.rawValue - revisionStart
         )
@@ -1971,9 +2386,19 @@ public final class HarnessRunner {
                 previewCommitViolationCount
         }
 
+        guard
+            scene.schemaVersion != 3
+                || fragmentMeasurements.totalProjectedFragmentCount > 0
+        else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: scene.name,
+                message: "projected-fragment metrics are unavailable"
+            )
+        }
+
         let processInfo = ProcessInfo.processInfo
         let record = BenchmarkRecord(
-            schemaVersion: 2,
+            schemaVersion: scene.schemaVersion == 3 ? 3 : 2,
             timestampUTC: ISO8601DateFormatter().string(from: Date()),
             sceneName: scene.name,
             hardware: BenchmarkHardware(
@@ -2001,7 +2426,45 @@ public final class HarnessRunner {
             newInstanceCounts: measurements.newInstanceCounts,
             totalStrokeInstanceCounts:
                 measurements.totalStrokeInstanceCounts,
-            missedFrameCount: measurements.missedFrameCount
+            missedFrameCount: measurements.missedFrameCount,
+            tilingRawValue: scene.schemaVersion == 3
+                ? configuration.tiling.rawValue
+                : nil,
+            tileWidth: scene.schemaVersion == 3
+                ? configuration.pixelSize.width
+                : nil,
+            tileHeight: scene.schemaVersion == 3
+                ? configuration.pixelSize.height
+                : nil,
+            totalProjectedFragmentCount: scene.schemaVersion == 3
+                ? fragmentMeasurements.totalProjectedFragmentCount
+                : nil,
+            maximumFragmentsPerFootprint: scene.schemaVersion == 3
+                ? fragmentMeasurements.maximumFragmentsPerFootprint
+                : nil,
+            totalInstanceBytes: scene.schemaVersion == 3
+                ? fragmentMeasurements.totalInstanceBytes
+                : nil,
+            oracleHoleCount: oracleComparison?.holeCount,
+            oraclePhantomCount: oracleComparison?.phantomCount,
+            oracleMaximumDelta: oracleComparison.map {
+                Int($0.maximumDelta)
+            },
+            diagnosticMode: scene.schemaVersion == 3
+                ? configuration.diagnosticMode.rawValue
+                : nil,
+            longStrokeEarlyCPUP95Milliseconds:
+                longStrokeMetrics?.earlyCPUP95Milliseconds,
+            longStrokeLateCPUP95Milliseconds:
+                longStrokeMetrics?.lateCPUP95Milliseconds,
+            longStrokeEarlyDabGPUP95Milliseconds:
+                longStrokeMetrics?.earlyDabGPUP95Milliseconds,
+            longStrokeLateDabGPUP95Milliseconds:
+                longStrokeMetrics?.lateDabGPUP95Milliseconds,
+            longStrokeCPUMillisecondsPerFrameSlope:
+                longStrokeMetrics?.cpuMillisecondsPerFrameSlope,
+            longStrokeDabGPUMillisecondsPerFrameSlope:
+                longStrokeMetrics?.dabGPUMillisecondsPerFrameSlope
         )
 
         let emitted = try writeGridArtifacts(
@@ -2009,6 +2472,19 @@ public final class HarnessRunner {
             artifacts: artifacts,
             record: record,
             outputDirectory: outputDirectory
+        )
+        try validateCoreTaskNineInvariants(
+            scene: scene,
+            program: program,
+            measurements: measurements,
+            fragmentMeasurements: fragmentMeasurements,
+            oracleComparison: oracleComparison,
+            revisionDelta: revisionDelta,
+            canonicalByteDelta: canonicalByteDelta,
+            restoredDisplayMaximumDelta: restoredDisplayMaximumDelta,
+            previewCommitViolationCount: previewCommitViolationCount,
+            longStrokeMetrics: longStrokeMetrics,
+            structuralValues: structuralValues
         )
         try evaluatePixelChecks(
             scene: scene,
@@ -2036,7 +2512,7 @@ public final class HarnessRunner {
     ) {
         let start = CFAbsoluteTimeGetCurrent()
         if phase == .began {
-            measurements.totalInstancesAtPreviousFrame = 0
+            measurements.encodedInstanceHighWater = 0
         }
         if measurements.pendingEventStart == nil {
             measurements.pendingEventStart = start
@@ -2106,29 +2582,31 @@ public final class HarnessRunner {
         }
     }
 
+    @discardableResult
     private func flushPending(
         scene: HarnessScene,
         renderer: GridRenderer,
-        measurements: inout GridMeasurements
-    ) throws {
+        measurements: inout GridMeasurements,
+        recordsLongStrokeFrame: Bool = false
+    ) throws -> HarnessLiveFlushResult {
         let submitStart = measurements.pendingEventStart
             ?? CFAbsoluteTimeGetCurrent()
         let eventProcessingMilliseconds = elapsedMilliseconds(
             since: submitStart
         )
-        let metrics = try renderer.flushPendingLiveForHarness()
+        let flushResult = try renderer.flushPendingLiveForHarness()
+        let metrics = flushResult.metrics
         let submitMilliseconds = eventProcessingMilliseconds
             + metrics.cpuEncodeMilliseconds
         let counters = renderer.harnessCounters
-        let created = counters.totalInstancesThisStroke
-            - measurements.totalInstancesAtPreviousFrame
+        let identityAudit = try Self.auditEncodedInstanceIdentityRanges(
+            sceneName: scene.name,
+            previousEncodedHighWater:
+                measurements.encodedInstanceHighWater,
+            emittedHighWater: flushResult.emittedHighWater,
+            encodedIdentityRanges: flushResult.encodedIdentityRanges
+        )
 
-        guard created >= 0 else {
-            throw HarnessRunError.counterInvariant(
-                sceneName: scene.name,
-                message: "total instances moved backward within a stroke"
-            )
-        }
         guard counters.newInstancesThisFrame <=
                 GridCanvasContract.pendingCapacity
         else {
@@ -2138,30 +2616,48 @@ public final class HarnessRunner {
             )
         }
 
-        measurements.restampedInstanceCount += max(
-            0,
-            counters.newInstancesThisFrame - created
-        )
+        guard counters.newInstancesThisFrame
+                == identityAudit.newlyEncodedInstanceCount
+        else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: scene.name,
+                message: "encoded projected-instance counter disagrees with encoded identity range"
+            )
+        }
+        measurements.restampedInstanceCount +=
+            identityAudit.restampedInstanceCount
         measurements.newInstanceCounts.append(
             counters.newInstancesThisFrame
         )
         measurements.totalStrokeInstanceCounts.append(
             counters.totalInstancesThisStroke
         )
-        measurements.totalInstancesAtPreviousFrame =
-            counters.totalInstancesThisStroke
+        measurements.encodedInstanceHighWater =
+            identityAudit.encodedHighWater
         measurements.eventToSubmitMilliseconds.append(submitMilliseconds)
         measurements.cpuEncodeMilliseconds.append(
             metrics.cpuEncodeMilliseconds
         )
         measurements.gpuMilliseconds.append(metrics.gpuMilliseconds)
         measurements.dabGPUMilliseconds.append(metrics.gpuMilliseconds)
+        if recordsLongStrokeFrame {
+            measurements.longStrokeCPUMilliseconds.append(
+                submitMilliseconds
+            )
+            measurements.longStrokeDabGPUMilliseconds.append(
+                metrics.gpuMilliseconds
+            )
+            measurements.longStrokeProjectedInstanceCounts.append(
+                counters.newInstancesThisFrame
+            )
+        }
         if submitMilliseconds >
             measurements.displayFrameBudgetMilliseconds
         {
             measurements.missedFrameCount += 1
         }
         measurements.pendingEventStart = nil
+        return flushResult
     }
 
     private func captureLive(
@@ -2409,6 +2905,129 @@ public final class HarnessRunner {
                         tolerance: check.tolerance
                     )
                 }
+            }
+        }
+    }
+
+    private func validateCoreTaskNineInvariants(
+        scene: HarnessScene,
+        program: TilingHarnessProgram,
+        measurements: GridMeasurements,
+        fragmentMeasurements: HarnessFragmentMeasurements,
+        oracleComparison: CoverageComparison?,
+        revisionDelta: Int,
+        canonicalByteDelta: Int,
+        restoredDisplayMaximumDelta: Int?,
+        previewCommitViolationCount: Int?,
+        longStrokeMetrics: BenchmarkLongStrokeMetrics?,
+        structuralValues: [HarnessStructuralMetric: Int]
+    ) throws {
+        guard scene.schemaVersion == 3 else {
+            return
+        }
+        guard fragmentMeasurements.maximumClipPlaneCount <= 4 else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: scene.name,
+                message: "a generated fragment exceeded four clip planes"
+            )
+        }
+        guard measurements.restampedInstanceCount == 0 else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: scene.name,
+                message: "restamped \(measurements.restampedInstanceCount) old projected instances"
+            )
+        }
+        if let primaryMetric = scene.structuralChecks.first?.metric {
+            guard let actual = structuralValues[primaryMetric] else {
+                throw HarnessRunError.missingStructuralMetric(
+                    sceneName: scene.name,
+                    metric: primaryMetric
+                )
+            }
+            guard actual == 0 else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "primary correctness metric \(primaryMetric.rawValue) is \(actual) instead of 0"
+                )
+            }
+        }
+
+        let requiresOracle: Bool
+        switch program {
+        case .generalizedGrid, .halfDropInterior, .halfDropEdge,
+             .halfDropCorner, .brickTranspose, .mirrorX, .mirrorY,
+             .mirrorXY, .rotationalGenerator, .rotationalFixedPoint,
+             .rotationalOrientation, .largeFootprint,
+             .asymmetricFootprint, .canonicalCoordinateContinuity,
+             .brushLocalCoordinateContinuity, .rectangularTile:
+            requiresOracle = true
+        default:
+            requiresOracle = false
+        }
+        if requiresOracle {
+            guard let oracleComparison else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "oracle metrics are unavailable"
+                )
+            }
+            guard oracleComparison.holeCount == 0 else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "oracle reported \(oracleComparison.holeCount) holes"
+                )
+            }
+            guard oracleComparison.phantomCount == 0 else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "oracle reported \(oracleComparison.phantomCount) phantoms"
+                )
+            }
+            guard oracleComparison.maximumDelta <= 1 else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "oracle maximum delta \(oracleComparison.maximumDelta) exceeds 1"
+                )
+            }
+        }
+
+        if program == .metadataTilingSwitch {
+            guard canonicalByteDelta == 0, revisionDelta == 0 else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "tiling switch changed canonical bytes or revision"
+                )
+            }
+            guard restoredDisplayMaximumDelta == 0 else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "restored tiling display did not match the initial display"
+                )
+            }
+        }
+        if program == .projectedLiveCommit {
+            guard previewCommitViolationCount == 0 else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "preview/commit channels differed by more than 1"
+                )
+            }
+        }
+        if program == .projectedLongStroke {
+            guard longStrokeMetrics != nil else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "long-stroke timing metrics are unavailable"
+                )
+            }
+            guard
+                measurements.longStrokeProjectedInstanceCounts.count
+                    == BenchmarkLongStrokeMetrics.segmentCount
+            else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "long-stroke measured-frame count is not exactly 400"
+                )
             }
         }
     }

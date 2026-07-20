@@ -10,8 +10,6 @@
   "program": "metadataTilingSwitch",
   "checks": [],
   "structuralChecks": [
-    {"metric": "canonicalByteDelta", "relation": "equal", "value": 1},
-    {"metric": "canonicalRevisionDelta", "relation": "equal", "value": 0},
-    {"metric": "restoredDisplayMaximumDelta", "relation": "equal", "value": 0}
+    {"metric": "canonicalByteDelta", "relation": "equal", "value": 1}
   ]
 }

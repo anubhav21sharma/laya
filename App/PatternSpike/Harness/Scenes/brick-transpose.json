@@ -8,15 +8,7 @@
   "tiling": 2,
   "diagnosticMode": "hardRound",
   "program": "brickTranspose",
-  "checks": [
-    {
-      "channel": "canonical",
-      "x": 0,
-      "y": 0,
-      "expectedBGRA": [0, 0, 0, 255],
-      "tolerance": 1
-    }
-  ],
+  "checks": [],
   "structuralChecks": [
     {
       "metric": "transformMismatchCount",

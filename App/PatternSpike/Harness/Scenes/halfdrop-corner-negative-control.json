@@ -8,16 +8,13 @@
   "tiling": 1,
   "diagnosticMode": "hardRound",
   "program": "halfDropCorner",
-  "checks": [
-    {
-      "channel": "canonical",
-      "x": 0,
-      "y": 0,
-      "expectedBGRA": [0, 0, 0, 255],
-      "tolerance": 1
-    }
-  ],
+  "checks": [],
   "structuralChecks": [
+    {
+      "metric": "oraclePhantomCount",
+      "relation": "equal",
+      "value": 1
+    },
     {
       "metric": "oracleHoleCount",
       "relation": "equal",
@@ -26,7 +23,7 @@
     {
       "metric": "oraclePhantomCount",
       "relation": "equal",
-      "value": 1
+      "value": 0
     },
     {
       "metric": "oracleMaximumDelta",

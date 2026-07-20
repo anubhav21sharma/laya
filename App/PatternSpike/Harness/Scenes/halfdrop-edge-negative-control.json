@@ -24,6 +24,11 @@
       "value": 1
     },
     {
+      "metric": "oracleHoleCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
       "metric": "oraclePhantomCount",
       "relation": "equal",
       "value": 0

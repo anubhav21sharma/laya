@@ -8,16 +8,13 @@
   "tiling": 0,
   "diagnosticMode": "hardRound",
   "program": "generalizedGrid",
-  "checks": [
-    {
-      "channel": "canonical",
-      "x": 254,
-      "y": 254,
-      "expectedBGRA": [0, 0, 0, 255],
-      "tolerance": 1
-    }
-  ],
+  "checks": [],
   "structuralChecks": [
+    {
+      "metric": "oracleHoleCount",
+      "relation": "equal",
+      "value": 0
+    },
     {
       "metric": "oracleHoleCount",
       "relation": "equal",

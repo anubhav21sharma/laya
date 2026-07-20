@@ -26,6 +26,198 @@ public struct BenchmarkBuild: Codable, Equatable, Sendable {
     }
 }
 
+public enum BenchmarkMetricError: Error, Equatable, LocalizedError {
+    case insufficientLongStrokeFrames(Int)
+    case nonFiniteMeasurement(series: String, frame: Int)
+    case nonPositiveMeasurement(series: String, frame: Int, value: Double)
+    case nonUniformProjectedInstanceCount(
+        frame: Int,
+        expected: Int,
+        actual: Int
+    )
+    case longStrokeP95Growth(
+        series: String,
+        early: Double,
+        late: Double,
+        limit: Double
+    )
+    case longStrokeSlopeGrowth(
+        series: String,
+        actual: Double,
+        limit: Double
+    )
+
+    public var errorDescription: String? {
+        switch self {
+        case let .insufficientLongStrokeFrames(count):
+            "Long-stroke metrics require exactly 400 measured frames; found \(count)."
+        case let .nonFiniteMeasurement(series, frame):
+            "Long-stroke \(series) measurement at frame \(frame) is not finite."
+        case let .nonPositiveMeasurement(series, frame, value):
+            "Long-stroke \(series) measurement at frame \(frame) is \(value) ms instead of a positive measured duration."
+        case let .nonUniformProjectedInstanceCount(frame, expected, actual):
+            "Long-stroke frame \(frame) emitted \(actual) projected instances instead of \(expected)."
+        case let .longStrokeP95Growth(series, early, late, limit):
+            "Long-stroke \(series) late p95 \(late) ms exceeds \(limit) ms from early p95 \(early) ms."
+        case let .longStrokeSlopeGrowth(series, actual, limit):
+            "Long-stroke \(series) slope \(actual) ms/frame exceeds \(limit) ms/frame."
+        }
+    }
+}
+
+public struct BenchmarkLongStrokeMetrics: Equatable, Sendable {
+    public static let segmentCount = 400
+    public static let earlyWindow = 40...119
+    public static let lateWindow = 280...359
+    public static let maximumSlopeMillisecondsPerFrame = 0.001
+
+    public let earlyCPUP95Milliseconds: Double
+    public let lateCPUP95Milliseconds: Double
+    public let earlyDabGPUP95Milliseconds: Double
+    public let lateDabGPUP95Milliseconds: Double
+    public let cpuMillisecondsPerFrameSlope: Double
+    public let dabGPUMillisecondsPerFrameSlope: Double
+
+    public static func measure(
+        cpuMilliseconds: [Double],
+        dabGPUMilliseconds: [Double],
+        projectedInstanceCounts: [Int]
+    ) throws -> BenchmarkLongStrokeMetrics {
+        let measuredCount = min(
+            cpuMilliseconds.count,
+            dabGPUMilliseconds.count,
+            projectedInstanceCounts.count
+        )
+        guard
+            cpuMilliseconds.count == segmentCount,
+            dabGPUMilliseconds.count == segmentCount,
+            projectedInstanceCounts.count == segmentCount
+        else {
+            throw BenchmarkMetricError.insufficientLongStrokeFrames(
+                measuredCount
+            )
+        }
+
+        try validateMeasurements(cpuMilliseconds, series: "cpu")
+        try validateMeasurements(dabGPUMilliseconds, series: "dabGPU")
+        guard let expectedCount = projectedInstanceCounts.first else {
+            throw BenchmarkMetricError.insufficientLongStrokeFrames(0)
+        }
+        for (frame, actualCount) in projectedInstanceCounts.enumerated()
+        where actualCount != expectedCount {
+            throw BenchmarkMetricError.nonUniformProjectedInstanceCount(
+                frame: frame,
+                expected: expectedCount,
+                actual: actualCount
+            )
+        }
+
+        let earlyCPU = BenchmarkRecord.percentile95(
+            Array(cpuMilliseconds[earlyWindow])
+        )
+        let lateCPU = BenchmarkRecord.percentile95(
+            Array(cpuMilliseconds[lateWindow])
+        )
+        let earlyDabGPU = BenchmarkRecord.percentile95(
+            Array(dabGPUMilliseconds[earlyWindow])
+        )
+        let lateDabGPU = BenchmarkRecord.percentile95(
+            Array(dabGPUMilliseconds[lateWindow])
+        )
+        try validateP95(
+            series: "cpu",
+            early: earlyCPU,
+            late: lateCPU
+        )
+        try validateP95(
+            series: "dabGPU",
+            early: earlyDabGPU,
+            late: lateDabGPU
+        )
+
+        let cpuSlope = leastSquaresSlope(cpuMilliseconds)
+        let dabGPUSlope = leastSquaresSlope(dabGPUMilliseconds)
+        try validateSlope(series: "cpu", slope: cpuSlope)
+        try validateSlope(series: "dabGPU", slope: dabGPUSlope)
+
+        return BenchmarkLongStrokeMetrics(
+            earlyCPUP95Milliseconds: earlyCPU,
+            lateCPUP95Milliseconds: lateCPU,
+            earlyDabGPUP95Milliseconds: earlyDabGPU,
+            lateDabGPUP95Milliseconds: lateDabGPU,
+            cpuMillisecondsPerFrameSlope: cpuSlope,
+            dabGPUMillisecondsPerFrameSlope: dabGPUSlope
+        )
+    }
+
+    public static func leastSquaresSlope(_ values: [Double]) -> Double {
+        guard values.count > 1 else {
+            return 0
+        }
+        let count = Double(values.count)
+        let meanX = Double(values.count - 1) * 0.5
+        let meanY = values.reduce(0, +) / count
+        var numerator = 0.0
+        var denominator = 0.0
+        for (index, value) in values.enumerated() {
+            let centeredX = Double(index) - meanX
+            numerator += centeredX * (value - meanY)
+            denominator += centeredX * centeredX
+        }
+        return numerator / denominator
+    }
+
+    private static func validateMeasurements(
+        _ values: [Double],
+        series: String
+    ) throws {
+        for (frame, value) in values.enumerated() {
+            guard value.isFinite else {
+                throw BenchmarkMetricError.nonFiniteMeasurement(
+                    series: series,
+                    frame: frame
+                )
+            }
+            guard value > 0 else {
+                throw BenchmarkMetricError.nonPositiveMeasurement(
+                    series: series,
+                    frame: frame,
+                    value: value
+                )
+            }
+        }
+    }
+
+    private static func validateP95(
+        series: String,
+        early: Double,
+        late: Double
+    ) throws {
+        let limit = max(early * 1.15, early + 0.10)
+        guard late <= limit else {
+            throw BenchmarkMetricError.longStrokeP95Growth(
+                series: series,
+                early: early,
+                late: late,
+                limit: limit
+            )
+        }
+    }
+
+    private static func validateSlope(
+        series: String,
+        slope: Double
+    ) throws {
+        guard slope <= maximumSlopeMillisecondsPerFrame else {
+            throw BenchmarkMetricError.longStrokeSlopeGrowth(
+                series: series,
+                actual: slope,
+                limit: maximumSlopeMillisecondsPerFrame
+            )
+        }
+    }
+}
+
 public struct BenchmarkRecord: Codable, Equatable, Sendable {
     public let schemaVersion: Int
     public let timestampUTC: String
@@ -47,6 +239,22 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     public let newInstanceCounts: [Int]?
     public let totalStrokeInstanceCounts: [Int]?
     public let missedFrameCount: Int?
+    public let tilingRawValue: UInt32?
+    public let tileWidth: Int?
+    public let tileHeight: Int?
+    public let totalProjectedFragmentCount: Int?
+    public let maximumFragmentsPerFootprint: Int?
+    public let totalInstanceBytes: Int?
+    public let oracleHoleCount: Int?
+    public let oraclePhantomCount: Int?
+    public let oracleMaximumDelta: Int?
+    public let diagnosticMode: String?
+    public let longStrokeEarlyCPUP95Milliseconds: Double?
+    public let longStrokeLateCPUP95Milliseconds: Double?
+    public let longStrokeEarlyDabGPUP95Milliseconds: Double?
+    public let longStrokeLateDabGPUP95Milliseconds: Double?
+    public let longStrokeCPUMillisecondsPerFrameSlope: Double?
+    public let longStrokeDabGPUMillisecondsPerFrameSlope: Double?
 
     public init(
         schemaVersion: Int,
@@ -68,7 +276,23 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         displayFrameBudgetMilliseconds: Double? = nil,
         newInstanceCounts: [Int]? = nil,
         totalStrokeInstanceCounts: [Int]? = nil,
-        missedFrameCount: Int? = nil
+        missedFrameCount: Int? = nil,
+        tilingRawValue: UInt32? = nil,
+        tileWidth: Int? = nil,
+        tileHeight: Int? = nil,
+        totalProjectedFragmentCount: Int? = nil,
+        maximumFragmentsPerFootprint: Int? = nil,
+        totalInstanceBytes: Int? = nil,
+        oracleHoleCount: Int? = nil,
+        oraclePhantomCount: Int? = nil,
+        oracleMaximumDelta: Int? = nil,
+        diagnosticMode: String? = nil,
+        longStrokeEarlyCPUP95Milliseconds: Double? = nil,
+        longStrokeLateCPUP95Milliseconds: Double? = nil,
+        longStrokeEarlyDabGPUP95Milliseconds: Double? = nil,
+        longStrokeLateDabGPUP95Milliseconds: Double? = nil,
+        longStrokeCPUMillisecondsPerFrameSlope: Double? = nil,
+        longStrokeDabGPUMillisecondsPerFrameSlope: Double? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.timestampUTC = timestampUTC
@@ -90,6 +314,28 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         self.newInstanceCounts = newInstanceCounts
         self.totalStrokeInstanceCounts = totalStrokeInstanceCounts
         self.missedFrameCount = missedFrameCount
+        self.tilingRawValue = tilingRawValue
+        self.tileWidth = tileWidth
+        self.tileHeight = tileHeight
+        self.totalProjectedFragmentCount = totalProjectedFragmentCount
+        self.maximumFragmentsPerFootprint = maximumFragmentsPerFootprint
+        self.totalInstanceBytes = totalInstanceBytes
+        self.oracleHoleCount = oracleHoleCount
+        self.oraclePhantomCount = oraclePhantomCount
+        self.oracleMaximumDelta = oracleMaximumDelta
+        self.diagnosticMode = diagnosticMode
+        self.longStrokeEarlyCPUP95Milliseconds =
+            longStrokeEarlyCPUP95Milliseconds
+        self.longStrokeLateCPUP95Milliseconds =
+            longStrokeLateCPUP95Milliseconds
+        self.longStrokeEarlyDabGPUP95Milliseconds =
+            longStrokeEarlyDabGPUP95Milliseconds
+        self.longStrokeLateDabGPUP95Milliseconds =
+            longStrokeLateDabGPUP95Milliseconds
+        self.longStrokeCPUMillisecondsPerFrameSlope =
+            longStrokeCPUMillisecondsPerFrameSlope
+        self.longStrokeDabGPUMillisecondsPerFrameSlope =
+            longStrokeDabGPUMillisecondsPerFrameSlope
     }
 
     public static func encode(_ record: BenchmarkRecord) throws -> Data {

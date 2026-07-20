@@ -1,4 +1,5 @@
 import Foundation
+import CShaderTypes
 @testable import MetalRenderer
 import PatternEngine
 import Testing
@@ -991,13 +992,19 @@ func translationScenePairsExistAndDifferByOnlyTheIntendedAssertion() throws {
         #expect(positive.checks == negative.checks)
         #expect(positive.structuralChecks.count == negative.structuralChecks.count)
 
-        for (positiveCheck, negativeCheck) in zip(
+        let intendedIndex = try #require(
+            positive.structuralChecks.firstIndex {
+                $0.metric == negativeMetric
+            }
+        )
+        for (index, pair) in zip(
             positive.structuralChecks,
             negative.structuralChecks
-        ) {
+        ).enumerated() {
+            let (positiveCheck, negativeCheck) = pair
             #expect(positiveCheck.metric == negativeCheck.metric)
             #expect(positiveCheck.relation == negativeCheck.relation)
-            if positiveCheck.metric == negativeMetric {
+            if index == intendedIndex {
                 #expect(positiveCheck.value == 0)
                 #expect(negativeCheck.value == 1)
             } else {
@@ -1037,8 +1044,36 @@ func halfDropEdgeFixtureHasTheExactApprovedShape() throws {
     #expect(object["program"] as? String == "halfDropEdge")
     #expect((object["checks"] as? [[String: Any]])?.count == 1)
     #expect(
-        (object["structuralChecks"] as? [[String: Any]])?.count == 3
+        (object["structuralChecks"] as? [[String: Any]])?.count == 4
     )
+}
+
+@Test(arguments: [
+    "halfdrop-edge",
+    "halfdrop-edge-negative-control",
+])
+func halfDropEdgePairDecodesOnlyTheExactCanonicalPixelCheck(
+    sceneName: String
+) throws {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let url = repositoryRoot.appendingPathComponent(
+        "App/PatternSpike/Harness/Scenes/\(sceneName).json"
+    )
+    let scene = try JSONDecoder().decode(
+        HarnessScene.self,
+        from: Data(contentsOf: url)
+    )
+
+    #expect(scene.checks.count == 1)
+    let check = try #require(scene.checks.first)
+    #expect(check.channel == .canonical)
+    #expect(check.x == 0)
+    #expect(check.y == 0)
+    #expect(check.expectedBGRA == [0, 0, 0, 255])
+    #expect(check.tolerance == 1)
 }
 
 @Test
@@ -1968,6 +2003,301 @@ func taskEightScenePairsUseTheExactApprovedMatrixAndOneNegativeMetric()
                 .isEqual(to: normalizedNegative)
         )
     }
+}
+
+@Test
+func taskNineScenePairsMatchTheCompleteFixedMatrixExactly() throws {
+    struct Expected {
+        let name: String
+        let program: TilingHarnessProgram
+        let tileSize: PixelSize
+        let tiling: TilingKind
+        let diagnosticMode: HarnessDiagnosticMode
+        let negativeMetric: HarnessStructuralMetric
+        let isCoverageProgram: Bool
+    }
+    let expected: [Expected] = [
+        .init(name: "generalized-grid", program: .generalizedGrid, tileSize: .init(width: 256, height: 256), tiling: .grid, diagnosticMode: .hardRound, negativeMetric: .oracleHoleCount, isCoverageProgram: true),
+        .init(name: "halfdrop-interior", program: .halfDropInterior, tileSize: .init(width: 288, height: 192), tiling: .halfDrop, diagnosticMode: .hardRound, negativeMetric: .oraclePhantomCount, isCoverageProgram: true),
+        .init(name: "halfdrop-edge", program: .halfDropEdge, tileSize: .init(width: 288, height: 192), tiling: .halfDrop, diagnosticMode: .hardRound, negativeMetric: .oracleHoleCount, isCoverageProgram: true),
+        .init(name: "halfdrop-corner", program: .halfDropCorner, tileSize: .init(width: 288, height: 192), tiling: .halfDrop, diagnosticMode: .hardRound, negativeMetric: .oraclePhantomCount, isCoverageProgram: true),
+        .init(name: "brick-transpose", program: .brickTranspose, tileSize: .init(width: 288, height: 192), tiling: .brick, diagnosticMode: .hardRound, negativeMetric: .transformMismatchCount, isCoverageProgram: true),
+        .init(name: "mirror-x", program: .mirrorX, tileSize: .init(width: 256, height: 256), tiling: .mirrorX, diagnosticMode: .asymmetricCoverage, negativeMetric: .transformMismatchCount, isCoverageProgram: true),
+        .init(name: "mirror-y", program: .mirrorY, tileSize: .init(width: 256, height: 256), tiling: .mirrorY, diagnosticMode: .asymmetricCoverage, negativeMetric: .transformMismatchCount, isCoverageProgram: true),
+        .init(name: "mirror-xy", program: .mirrorXY, tileSize: .init(width: 256, height: 256), tiling: .mirrorXY, diagnosticMode: .asymmetricCoverage, negativeMetric: .transformMismatchCount, isCoverageProgram: true),
+        .init(name: "rotational-generator", program: .rotationalGenerator, tileSize: .init(width: 256, height: 256), tiling: .rotational, diagnosticMode: .asymmetricCoverage, negativeMetric: .transformMismatchCount, isCoverageProgram: true),
+        .init(name: "rotational-fixed-point", program: .rotationalFixedPoint, tileSize: .init(width: 256, height: 256), tiling: .rotational, diagnosticMode: .hardRound, negativeMetric: .duplicateFixedPointWriteCount, isCoverageProgram: true),
+        .init(name: "rotational-orientation", program: .rotationalOrientation, tileSize: .init(width: 256, height: 256), tiling: .rotational, diagnosticMode: .asymmetricCoverage, negativeMetric: .transformMismatchCount, isCoverageProgram: true),
+        .init(name: "large-footprint", program: .largeFootprint, tileSize: .init(width: 64, height: 96), tiling: .grid, diagnosticMode: .hardRound, negativeMetric: .oracleHoleCount, isCoverageProgram: true),
+        .init(name: "asymmetric-footprint", program: .asymmetricFootprint, tileSize: .init(width: 256, height: 256), tiling: .rotational, diagnosticMode: .asymmetricCoverage, negativeMetric: .transformMismatchCount, isCoverageProgram: true),
+        .init(name: "canonical-coordinate-continuity", program: .canonicalCoordinateContinuity, tileSize: .init(width: 288, height: 192), tiling: .halfDrop, diagnosticMode: .canonicalCoordinates, negativeMetric: .coordinateContinuityMismatchCount, isCoverageProgram: true),
+        .init(name: "brush-local-coordinate-continuity", program: .brushLocalCoordinateContinuity, tileSize: .init(width: 256, height: 256), tiling: .mirrorXY, diagnosticMode: .brushLocalCoordinates, negativeMetric: .coordinateContinuityMismatchCount, isCoverageProgram: true),
+        .init(name: "rectangular-tile", program: .rectangularTile, tileSize: .init(width: 320, height: 192), tiling: .grid, diagnosticMode: .hardRound, negativeMetric: .oracleHoleCount, isCoverageProgram: true),
+        .init(name: "noncentral-visible-cell-grid", program: .noncentralVisibleCell, tileSize: .init(width: 256, height: 256), tiling: .grid, diagnosticMode: .hardRound, negativeMetric: .visibleCellCanonicalByteDelta, isCoverageProgram: false),
+        .init(name: "noncentral-visible-cell-halfdrop", program: .noncentralVisibleCell, tileSize: .init(width: 288, height: 192), tiling: .halfDrop, diagnosticMode: .hardRound, negativeMetric: .visibleCellCanonicalByteDelta, isCoverageProgram: false),
+        .init(name: "noncentral-visible-cell-brick", program: .noncentralVisibleCell, tileSize: .init(width: 288, height: 192), tiling: .brick, diagnosticMode: .hardRound, negativeMetric: .visibleCellCanonicalByteDelta, isCoverageProgram: false),
+        .init(name: "noncentral-visible-cell-mirror-x", program: .noncentralVisibleCell, tileSize: .init(width: 256, height: 256), tiling: .mirrorX, diagnosticMode: .hardRound, negativeMetric: .visibleCellCanonicalByteDelta, isCoverageProgram: false),
+        .init(name: "noncentral-visible-cell-mirror-y", program: .noncentralVisibleCell, tileSize: .init(width: 256, height: 256), tiling: .mirrorY, diagnosticMode: .hardRound, negativeMetric: .visibleCellCanonicalByteDelta, isCoverageProgram: false),
+        .init(name: "noncentral-visible-cell-mirror-xy", program: .noncentralVisibleCell, tileSize: .init(width: 256, height: 256), tiling: .mirrorXY, diagnosticMode: .hardRound, negativeMetric: .visibleCellCanonicalByteDelta, isCoverageProgram: false),
+        .init(name: "noncentral-visible-cell-rotational", program: .noncentralVisibleCell, tileSize: .init(width: 256, height: 256), tiling: .rotational, diagnosticMode: .hardRound, negativeMetric: .visibleCellCanonicalByteDelta, isCoverageProgram: false),
+        .init(name: "metadata-tiling-switch", program: .metadataTilingSwitch, tileSize: .init(width: 256, height: 256), tiling: .grid, diagnosticMode: .hardRound, negativeMetric: .canonicalByteDelta, isCoverageProgram: false),
+        .init(name: "projected-live-commit", program: .projectedLiveCommit, tileSize: .init(width: 288, height: 192), tiling: .halfDrop, diagnosticMode: .hardRound, negativeMetric: .previewCommitViolationCount, isCoverageProgram: false),
+        .init(name: "projected-long-stroke", program: .projectedLongStroke, tileSize: .init(width: 288, height: 192), tiling: .halfDrop, diagnosticMode: .hardRound, negativeMetric: .restampedInstanceCount, isCoverageProgram: false),
+    ]
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let scenesDirectory = repositoryRoot
+        .appendingPathComponent("App/PatternSpike/Harness/Scenes")
+
+    #expect(expected.count == 26)
+    for item in expected {
+        let positiveURL = scenesDirectory.appendingPathComponent(
+            "\(item.name).json"
+        )
+        let negativeURL = scenesDirectory.appendingPathComponent(
+            "\(item.name)-negative-control.json"
+        )
+        let positive = try HarnessScene.decode(Data(contentsOf: positiveURL))
+        let negative = try HarnessScene.decode(Data(contentsOf: negativeURL))
+
+        #expect(positive.schemaVersion == 3, "\(item.name)")
+        #expect(positive.width == 512, "\(item.name)")
+        #expect(positive.height == 512, "\(item.name)")
+        #expect(positive.program == item.program, "\(item.name)")
+        #expect(positive.tileWidth == item.tileSize.width, "\(item.name)")
+        #expect(positive.tileHeight == item.tileSize.height, "\(item.name)")
+        #expect(positive.tiling == item.tiling, "\(item.name)")
+        #expect(positive.diagnosticMode == item.diagnosticMode, "\(item.name)")
+        #expect(
+            positive.checks.isEmpty || item.name == "halfdrop-edge",
+            "\(item.name)"
+        )
+        #expect(positive.checks == negative.checks, "\(item.name)")
+
+        let expectedChecks: [HarnessStructuralCheck] = item.isCoverageProgram
+            ? [
+                .init(metric: item.negativeMetric, relation: .equal, value: 0),
+                .init(metric: .oracleHoleCount, relation: .equal, value: 0),
+                .init(metric: .oraclePhantomCount, relation: .equal, value: 0),
+                .init(metric: .oracleMaximumDelta, relation: .lessThanOrEqual, value: 1),
+            ]
+            : [
+                .init(metric: item.negativeMetric, relation: .equal, value: 0)
+            ]
+        #expect(positive.structuralChecks == expectedChecks, "\(item.name)")
+        var expectedNegativeChecks = expectedChecks
+        expectedNegativeChecks[0] = .init(
+            metric: item.negativeMetric,
+            relation: .equal,
+            value: 1
+        )
+        #expect(
+            negative.structuralChecks == expectedNegativeChecks,
+            "\(item.name)"
+        )
+    }
+}
+
+@Test
+func fragmentAuditRejectsCapacityAndOrderChanges() throws {
+    let first = CellFragment(
+        cell: CellIndex(column: 0, row: 0),
+        imageOrdinal: 0,
+        canonicalFromBrush: .identity,
+        brushClip: ConvexClip(halfPlanes: [])
+    )
+    let second = CellFragment(
+        cell: CellIndex(column: 1, row: 0),
+        imageOrdinal: 0,
+        canonicalFromBrush: .identity,
+        brushClip: ConvexClip(halfPlanes: [])
+    )
+
+    #expect(
+        throws: HarnessRunError.counterInvariant(
+            sceneName: "audit",
+            message: "generated 2 fragments beyond the fixed 1 pending-instance capacity"
+        )
+    ) {
+        try HarnessRunner.auditFragmentBatch(
+            sceneName: "audit",
+            fragments: [first, second],
+            repeatedFragments: [first, second],
+            pendingCapacity: 1
+        )
+    }
+    #expect(
+        throws: HarnessRunError.counterInvariant(
+            sceneName: "audit",
+            message: "fragment order changed across identical projection runs"
+        )
+    ) {
+        try HarnessRunner.auditFragmentBatch(
+            sceneName: "audit",
+            fragments: [first, second],
+            repeatedFragments: [second, first],
+            pendingCapacity: 2
+        )
+    }
+}
+
+@Test
+func fragmentAuditMeasuresCountsPlanesAndInstanceBytes() throws {
+    let fragment = CellFragment(
+        cell: CellIndex(column: 0, row: 0),
+        imageOrdinal: 0,
+        canonicalFromBrush: .identity,
+        brushClip: ConvexClip(
+            halfPlanes: [
+                HalfPlane2D(normal: SIMD2(1, 0), offset: 1),
+                HalfPlane2D(normal: SIMD2(0, 1), offset: 1),
+            ]
+        )
+    )
+
+    let audit = try HarnessRunner.auditFragmentBatch(
+        sceneName: "audit",
+        fragments: [fragment],
+        repeatedFragments: [fragment],
+        pendingCapacity: 1
+    )
+
+    #expect(audit.projectedFragmentCount == 1)
+    #expect(audit.maximumClipPlaneCount == 2)
+    #expect(
+        audit.instanceBytes
+            == MemoryLayout<PatternProjectedStampInstance>.stride
+    )
+}
+
+@Test
+func encodedIdentityRangeAuditAcceptsExactContiguousMultiRange() throws {
+    let audit = try HarnessRunner.auditEncodedInstanceIdentityRanges(
+        sceneName: "identity-audit",
+        previousEncodedHighWater: 7,
+        emittedHighWater: 10,
+        encodedIdentityRanges: [7..<8, 8..<10]
+    )
+
+    #expect(audit.newlyEncodedInstanceCount == 3)
+    #expect(audit.restampedInstanceCount == 0)
+    #expect(audit.encodedHighWater == 10)
+}
+
+@Test
+func encodedIdentityRangeAuditRejectsDuplicateOldAndEqualCountSubstitution() {
+    #expect(
+        throws: HarnessRunError.counterInvariant(
+            sceneName: "identity-audit",
+            message: "encoded projected identity range 6..<8 did not begin at expected high-water 7"
+        )
+    ) {
+        try HarnessRunner.auditEncodedInstanceIdentityRanges(
+            sceneName: "identity-audit",
+            previousEncodedHighWater: 7,
+            emittedHighWater: 10,
+            encodedIdentityRanges: [6..<8, 8..<10]
+        )
+    }
+    #expect(
+        throws: HarnessRunError.counterInvariant(
+            sceneName: "identity-audit",
+            message: "encoded projected identity range 6..<7 did not begin at expected high-water 7"
+        )
+    ) {
+        try HarnessRunner.auditEncodedInstanceIdentityRanges(
+            sceneName: "identity-audit",
+            previousEncodedHighWater: 7,
+            emittedHighWater: 10,
+            encodedIdentityRanges: [6..<7, 8..<10]
+        )
+    }
+}
+
+@Test
+func encodedIdentityRangeAuditRejectsDroppedGapAndOutOfOrderNewIdentity() {
+    #expect(
+        throws: HarnessRunError.counterInvariant(
+            sceneName: "identity-audit",
+            message: "encoded projected identity range 9..<10 did not begin at expected high-water 8"
+        )
+    ) {
+        try HarnessRunner.auditEncodedInstanceIdentityRanges(
+            sceneName: "identity-audit",
+            previousEncodedHighWater: 7,
+            emittedHighWater: 10,
+            encodedIdentityRanges: [7..<8, 9..<10]
+        )
+    }
+    #expect(
+        throws: HarnessRunError.counterInvariant(
+            sceneName: "identity-audit",
+            message: "encoded projected identity range 8..<10 did not begin at expected high-water 7"
+        )
+    ) {
+        try HarnessRunner.auditEncodedInstanceIdentityRanges(
+            sceneName: "identity-audit",
+            previousEncodedHighWater: 7,
+            emittedHighWater: 10,
+            encodedIdentityRanges: [8..<10, 7..<8]
+        )
+    }
+}
+
+@Test
+func encodedIdentityRangeAuditRejectsFinalMissingSuffixAndBackwardHighWater() {
+    #expect(
+        throws: HarnessRunError.counterInvariant(
+            sceneName: "identity-audit",
+            message: "encoded projected high-water 9 did not reach emitted high-water 10"
+        )
+    ) {
+        try HarnessRunner.auditEncodedInstanceIdentityRanges(
+            sceneName: "identity-audit",
+            previousEncodedHighWater: 7,
+            emittedHighWater: 10,
+            encodedIdentityRanges: [7..<9]
+        )
+    }
+    #expect(
+        throws: HarnessRunError.counterInvariant(
+            sceneName: "identity-audit",
+            message: "emitted projected-instance identity moved backward"
+        )
+    ) {
+        try HarnessRunner.auditEncodedInstanceIdentityRanges(
+            sceneName: "identity-audit",
+            previousEncodedHighWater: 10,
+            emittedHighWater: 9,
+            encodedIdentityRanges: []
+        )
+    }
+}
+
+@Test
+func longStrokeFrameRunsHarnessAuditAfterProductionSubmit() {
+    var events: [String] = []
+    var injectedClock = 10.0
+
+    let result = HarnessRunner
+        .performLongStrokeProductionThenAudit(
+            production: {
+                injectedClock += 0.25
+                events.append("production-submit")
+                return (value: 42, measurement: injectedClock - 10)
+            },
+            audit: { result in
+                injectedClock += 100
+                events.append("harness-audit-\(result)")
+            }
+        )
+
+    #expect(result.value == 42)
+    #expect(result.measurement == 0.25)
+    #expect(injectedClock == 110.25)
+    #expect(events == ["production-submit", "harness-audit-42"])
 }
 
 private func taskSevenSceneObject(

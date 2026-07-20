@@ -24,6 +24,12 @@ struct HarnessDiagnosticRenderedFrame {
     let metrics: GPUFrameMetrics
 }
 
+struct HarnessLiveFlushResult {
+    let metrics: GPUFrameMetrics
+    let emittedHighWater: UInt64
+    let encodedIdentityRanges: [Range<UInt64>]
+}
+
 struct HarnessTilingMutationSnapshot: Equatable {
     let canonicalFront: ObjectIdentifier
     let canonicalScratch: ObjectIdentifier
@@ -53,6 +59,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     private struct FrameUpload {
         let lease: DabInstanceBufferPool.Lease
+        let identityRange: Range<UInt64>
         let throughExclusive: UInt64
         let count: Int
     }
@@ -282,7 +289,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    func flushPendingLiveForHarness() throws -> GPUFrameMetrics {
+    func flushPendingLiveForHarness() throws -> HarnessLiveFlushResult {
         drainFrameOutcomes()
         drainCompletedUploadRanges()
         try clearLiveForHarnessIfNeeded()
@@ -321,9 +328,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 failTransiently(error)
                 throw error
             }
-            return metrics(
-                commandBuffer: commandBuffer,
-                cpuMilliseconds: cpuMilliseconds
+            return HarnessLiveFlushResult(
+                metrics: metrics(
+                    commandBuffer: commandBuffer,
+                    cpuMilliseconds: cpuMilliseconds
+                ),
+                emittedHighWater: liveStroke.emittedHighWater,
+                encodedIdentityRanges: uploads.map(\.identityRange)
             )
         } catch {
             if !didFinalize {
@@ -680,6 +691,37 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return fragments
     }
 
+    @discardableResult
+    func beginFixedProjectedStrokeForHarness(
+        at world: WorldPoint
+    ) throws -> [CellFragment] {
+        try lifecycle.begin()
+        counters = GridStructuralCounters()
+        counters.newDabsThisEvent = 1
+        counters.totalDabsThisStroke = 1
+        return try appendProjectedFragments(at: world)
+    }
+
+    @discardableResult
+    func appendFixedProjectedSegmentForHarness(
+        to world: WorldPoint
+    ) throws -> [CellFragment] {
+        guard lifecycle.state == .active else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        counters.newDabsThisEvent = 1
+        counters.totalDabsThisStroke += 1
+        return try appendProjectedFragments(at: world)
+    }
+
+    func endFixedProjectedStrokeForHarness() throws {
+        guard lifecycle.state == .active else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        counters.newDabsThisEvent = 0
+        try lifecycle.requestCommit()
+    }
+
     private func appendWorldDab(_ point: WorldPoint) throws {
         counters.newDabsThisEvent += 1
         counters.totalDabsThisStroke += 1
@@ -901,9 +943,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 }
                 let throughExclusive = chunk.last.map { $0.identity + 1 }
                     ?? liveStroke.bakedHighWater
+                let fromIdentity = chunk.first.map(\.identity)
+                    ?? throughExclusive
                 uploads.append(
                     FrameUpload(
                         lease: lease,
+                        identityRange: fromIdentity..<throughExclusive,
                         throughExclusive: throughExclusive,
                         count: chunk.count
                     )

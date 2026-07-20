@@ -8,16 +8,13 @@
   "tiling": 1,
   "diagnosticMode": "hardRound",
   "program": "halfDropInterior",
-  "checks": [
-    {
-      "channel": "canonical",
-      "x": 144,
-      "y": 48,
-      "expectedBGRA": [0, 0, 0, 255],
-      "tolerance": 1
-    }
-  ],
+  "checks": [],
   "structuralChecks": [
+    {
+      "metric": "oraclePhantomCount",
+      "relation": "equal",
+      "value": 0
+    },
     {
       "metric": "oracleHoleCount",
       "relation": "equal",
