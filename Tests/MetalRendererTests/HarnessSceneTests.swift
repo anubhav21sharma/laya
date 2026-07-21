@@ -350,6 +350,48 @@ func sliceThreeGatePreflightAllowsUnrelatedVSCodeFiles() throws {
 }
 
 @Test
+func sliceThreeGateDefersPerformancePendingUntilCompletionAudit() throws {
+    let result = try runSliceThreeGateCompletionSimulation(
+        ignoreAuditFails: false
+    )
+
+    #expect(result.status == 1)
+    #expect(result.standardOutput.isEmpty)
+    #expect(
+        result.standardError
+            == """
+            SLICE3 PERFORMANCE PENDING: unstable real-Metal timing environment 'Apple Paravirtual device'.
+            SLICE3 GATE ERROR: stable real-Metal performance acceptance remains pending
+
+            """
+    )
+    #expect(result.trace == [
+        "strict-validation",
+        "generated-artifact-ignore",
+        "source-provenance",
+    ])
+}
+
+@Test
+func sliceThreeGateAuditFailureOverridesDeferredPerformancePending() throws {
+    let result = try runSliceThreeGateCompletionSimulation(
+        ignoreAuditFails: true
+    )
+
+    #expect(result.status == 1)
+    #expect(result.standardOutput.isEmpty)
+    #expect(
+        result.standardError
+            == "SLICE3 GATE ERROR: simulated generated-artifact ignore failure\n"
+    )
+    #expect(result.trace == [
+        "strict-validation",
+        "generated-artifact-ignore",
+        "source-provenance",
+    ])
+}
+
+@Test
 func harnessSceneRejectsAnOutOfBoundsPixelCheck() {
     let data = Data(
         """
@@ -2641,6 +2683,90 @@ private func runSliceThreeGatePreflight(
             decoding: standardError.fileHandleForReading.readDataToEndOfFile(),
             as: UTF8.self
         )
+    )
+}
+
+private func runSliceThreeGateCompletionSimulation(
+    ignoreAuditFails: Bool
+) throws -> (
+    status: Int32,
+    standardOutput: String,
+    standardError: String,
+    trace: [String]
+) {
+    let temporaryDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(
+        at: temporaryDirectory,
+        withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+    let script = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("scripts/verify-slice3.sh")
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/bash")
+    process.arguments = [
+        "-c",
+        """
+        source "$1"
+        trace="$2/trace.log"
+        strict_evidence_log="$2/strict-evidence.log"
+        ignore_mode="$3"
+        validate_strict_evidence() {
+          printf '%s\\n' 'strict-validation' >> "$trace"
+          printf '%s\\n' \
+            "SLICE3 PERFORMANCE PENDING: unstable real-Metal timing environment 'Apple Paravirtual device'." \
+            > "$strict_evidence_log"
+          return 2
+        }
+        evaluate_benchmarks() {
+          printf '%s\\n' 'performance-budgets' >> "$trace"
+          return 0
+        }
+        prove_generated_artifacts_ignored() {
+          printf '%s\\n' 'generated-artifact-ignore' >> "$trace"
+          if [[ "$ignore_mode" == 'fail' ]]; then
+            gate_error 'simulated generated-artifact ignore failure'
+            return 1
+          fi
+        }
+        verify_source_provenance() {
+          printf '%s\\n' 'source-provenance' >> "$trace"
+        }
+        if complete_gate_after_harness; then
+          status=0
+        else
+          status=$?
+        fi
+        exit "$status"
+        """,
+        "bash",
+        script.path,
+        temporaryDirectory.path,
+        ignoreAuditFails ? "fail" : "pass",
+    ]
+    let standardOutput = Pipe()
+    let standardError = Pipe()
+    process.standardOutput = standardOutput
+    process.standardError = standardError
+    try process.run()
+    process.waitUntilExit()
+    let traceURL = temporaryDirectory.appendingPathComponent("trace.log")
+    let trace = (try? String(contentsOf: traceURL, encoding: .utf8)) ?? ""
+    return (
+        process.terminationStatus,
+        String(
+            decoding: standardOutput.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        ),
+        String(
+            decoding: standardError.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        ),
+        trace.split(separator: "\n").map(String.init)
     )
 }
 

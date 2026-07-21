@@ -8,6 +8,7 @@ derived_data="$repo_root/.build/DerivedData"
 pad_derived_data="$repo_root/.build/DerivedDataPad"
 binary="$derived_data/Build/Products/Debug/PatternSpike.app/Contents/MacOS/PatternSpike"
 git_commit=""
+strict_evidence_log="$repo_root/.build/slice3-strict-evidence.log"
 
 gate_error() {
   printf 'SLICE3 GATE ERROR: %s\n' "$*" >&2
@@ -313,7 +314,6 @@ run_slice3_pair() {
 
 validate_strict_evidence() {
   local build_log="$repo_root/.build/slice3-evidence-validator-build.log"
-  local evaluator_log="$repo_root/.build/slice3-strict-evidence.log"
   local status validator
 
   if ! swift build --product SliceThreeEvidenceGate >"$build_log" 2>&1; then
@@ -333,16 +333,15 @@ validate_strict_evidence() {
     "$artifacts/positive" \
     "$repo_root/.build/slice1-artifacts/positive" \
     "$git_commit" \
-    >"$evaluator_log" 2>&1
+    >"$strict_evidence_log" 2>&1
   status=$?
   set -e
+  if [[ "$status" -eq 2 ]]; then
+    return 2
+  fi
   if [[ "$status" -ne 0 ]]; then
-    cat "$evaluator_log" >&2
-    if [[ "$status" -eq 2 ]]; then
-      gate_error "stable real-Metal performance acceptance remains pending"
-    else
-      gate_error "strict Slice 3 evidence validation failed"
-    fi
+    cat "$strict_evidence_log" >&2
+    gate_error "strict Slice 3 evidence validation failed"
     return 1
   fi
 }
@@ -651,6 +650,50 @@ prove_generated_artifacts_ignored() {
   }
 }
 
+complete_gate_after_harness() {
+  local validation_status=0
+  local ignore_status=0
+  local provenance_status=0
+
+  if validate_strict_evidence; then
+    validation_status=0
+  else
+    validation_status=$?
+  fi
+  if [[ "$validation_status" -ne 0 && "$validation_status" -ne 2 ]]; then
+    return 1
+  fi
+
+  if prove_generated_artifacts_ignored; then
+    ignore_status=0
+  else
+    ignore_status=$?
+  fi
+  if verify_source_provenance; then
+    provenance_status=0
+  else
+    provenance_status=$?
+  fi
+  if [[ "$ignore_status" -ne 0 || "$provenance_status" -ne 0 ]]; then
+    return 1
+  fi
+
+  if [[ "$validation_status" -eq 2 ]]; then
+    cat "$strict_evidence_log" >&2
+    gate_error "stable real-Metal performance acceptance remains pending"
+    return 1
+  fi
+
+  evaluate_benchmarks || return 1
+
+  printf '%s\n' 'slice0-functional=passed'
+  printf '%s\n' 'slice1-functional=passed'
+  printf '%s\n' 'slice2-correctness=passed'
+  printf '%s\n' 'slice3-negative-controls=passed'
+  printf '%s\n' 'slice3-positive-scenes=passed'
+  printf '%s\n' 'SLICE3 GATE PASS'
+}
+
 run_gate() {
   local name family metric host_arch
   local slice0_log="$repo_root/.build/slice3-slice0-functional.log"
@@ -735,17 +778,7 @@ run_gate() {
     run_slice3_pair "$name" "$metric" "$family" || return 1
   done < <(slice3_matrix)
 
-  validate_strict_evidence || return 1
-  evaluate_benchmarks || return 1
-  prove_generated_artifacts_ignored || return 1
-  verify_source_provenance || return 1
-
-  printf '%s\n' 'slice0-functional=passed'
-  printf '%s\n' 'slice1-functional=passed'
-  printf '%s\n' 'slice2-correctness=passed'
-  printf '%s\n' 'slice3-negative-controls=passed'
-  printf '%s\n' 'slice3-positive-scenes=passed'
-  printf '%s\n' 'SLICE3 GATE PASS'
+  complete_gate_after_harness
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
