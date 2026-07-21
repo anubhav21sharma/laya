@@ -71,7 +71,8 @@ let package = Package(
                 "PatternSpike/Canvas/MetalCanvas.swift",
                 "PatternSpike/Commands",
                 "PatternSpike/ContentView.swift",
-                "PatternSpike/Harness",
+                "PatternSpike/Harness/HarnessLaunch.swift",
+                "PatternSpike/Harness/Scenes",
                 "PatternSpike/Panels",
                 "PatternSpike/PatternSpikeApp.swift",
                 "project.yml",
@@ -79,7 +80,10 @@ let package = Package(
             sources: [
                 "PatternSpike/EditorSessionController.swift",
                 "PatternSpike/Canvas/InteractiveMetalView.swift",
+                "PatternSpike/Harness/SliceThreeHarnessHistory.swift",
+                "PatternSpike/Harness/SliceThreeHarnessRunner.swift",
                 "Tests/EditorSessionControllerTests.swift",
+                "Tests/SliceThreeHarnessHistoryTests.swift",
             ]
         ),
     ]

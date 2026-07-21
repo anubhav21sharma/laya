@@ -24,10 +24,10 @@ struct HarnessDiagnosticRenderedFrame {
     let metrics: GPUFrameMetrics
 }
 
-struct HarnessLiveFlushResult {
-    let metrics: GPUFrameMetrics
-    let emittedHighWater: UInt64
-    let encodedIdentityRanges: [Range<UInt64>]
+public struct HarnessLiveFlushResult {
+    public let metrics: GPUFrameMetrics
+    public let emittedHighWater: UInt64
+    public let encodedIdentityRanges: [Range<UInt64>]
 }
 
 struct HarnessTilingMutationSnapshot: Equatable {
@@ -936,7 +936,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    func flushPendingLiveForHarness(
+    public func flushPendingLiveForHarness(
         forceFailure: Bool = false
     ) throws -> HarnessLiveFlushResult {
         drainFrameOutcomes()
@@ -1003,7 +1003,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    func renderOffscreenDisplayForHarness(
+    public func renderOffscreenDisplayForHarness(
         width: Int,
         height: Int,
         showGridLines: Bool
@@ -1213,7 +1213,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    func finishCommitForHarness() throws -> GPUFrameMetrics {
+    public func finishCommitForHarness() throws -> GPUFrameMetrics {
         let metrics = try submitCommitForHarness()
         try drainCompletedOperationsForHarness()
         return metrics
@@ -1271,7 +1271,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    func finishRasterOperationForHarness() throws {
+    public func finishRasterOperationForHarness() throws {
         guard let operation = pendingRasterOperation else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -1377,7 +1377,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    func copyCanonicalForHarness() throws -> any MTLTexture {
+    public func copyCanonicalForHarness() throws -> any MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
             width: canonical.pixelSize.width,
@@ -1423,7 +1423,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return texture
     }
 
-    func replaceCanonicalPixelsForHarness(_ bytes: [UInt8]) throws {
+    public func replaceCanonicalPixelsForHarness(_ bytes: [UInt8]) throws {
         let bytesPerRow = pixelSize.width * 4
         guard bytes.count == bytesPerRow * pixelSize.height else {
             throw MetalRendererError.commandFailed(
@@ -1468,7 +1468,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try waitForHarnessCommand(commandBuffer)
     }
 
-    var harnessCounters: GridStructuralCounters { counters }
+    public var harnessCounters: GridStructuralCounters { counters }
     var harnessRevision: RasterRevision { canonical.revision }
     var harnessTiling: TilingKind { tilingStrategy.kind }
     var harnessRasterRevisionResidentBytes: Int {

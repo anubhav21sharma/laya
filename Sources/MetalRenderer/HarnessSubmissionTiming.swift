@@ -1,7 +1,7 @@
 import Foundation
 
-enum HarnessSubmissionTiming {
-    static func measureThroughSubmission(
+public enum HarnessSubmissionTiming {
+    public static func measureThroughSubmission(
         since start: CFAbsoluteTime,
         submit: () -> Void,
         now: () -> CFAbsoluteTime = CFAbsoluteTimeGetCurrent
@@ -10,7 +10,7 @@ enum HarnessSubmissionTiming {
         return max(0, (now() - start) * 1_000)
     }
 
-    static func eventToSubmitMilliseconds(
+    public static func eventToSubmitMilliseconds(
         eventProcessingMilliseconds: Double,
         flushThroughSubmissionMilliseconds: Double
     ) -> Double {

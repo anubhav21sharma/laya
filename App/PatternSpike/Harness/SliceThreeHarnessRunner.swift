@@ -1,66 +1,12 @@
 import Darwin
-import CShaderTypes
+import EditorCore
 import Foundation
 import Metal
+import MetalRenderer
 import PatternEngine
-
-public enum SliceThreeHarnessRunError: Error, Equatable, LocalizedError {
-    case structuralMismatch(
-        sceneName: String,
-        metric: HarnessStructuralMetric,
-        expectedRelation: HarnessRelation,
-        expectedValue: Int,
-        actualValue: Int
-    )
-    case invariant(sceneName: String, message: String)
-    case missingCompletion(sceneName: String, token: RendererOperationToken)
-    case unexpectedCompletion(sceneName: String, token: RendererOperationToken)
-    case missingArtifact(sceneName: String, channel: HarnessPixelChannel)
-    case pixelMismatch(
-        sceneName: String,
-        channel: HarnessPixelChannel,
-        x: Int,
-        y: Int,
-        expected: [UInt8],
-        actual: [UInt8],
-        tolerance: UInt8
-    )
-
-    public var errorDescription: String? {
-        switch self {
-        case let .structuralMismatch(
-            sceneName,
-            metric,
-            relation,
-            expected,
-            actual
-        ):
-            "Slice 3 scene '\(sceneName)' metric \(metric.rawValue): expected \(relation.rawValue) \(expected), actual \(actual)."
-        case let .invariant(sceneName, message):
-            "Slice 3 scene '\(sceneName)' invariant failed: \(message)."
-        case let .missingCompletion(sceneName, token):
-            "Slice 3 scene '\(sceneName)' did not receive completion token \(token.rawValue)."
-        case let .unexpectedCompletion(sceneName, token):
-            "Slice 3 scene '\(sceneName)' received the wrong completion for token \(token.rawValue)."
-        case let .missingArtifact(sceneName, channel):
-            "Slice 3 scene '\(sceneName)' is missing artifact channel \(channel.rawValue)."
-        case let .pixelMismatch(
-            sceneName,
-            channel,
-            x,
-            y,
-            expected,
-            actual,
-            tolerance
-        ):
-            "Slice 3 scene '\(sceneName)' channel \(channel.rawValue) pixel mismatch at (\(x), \(y)): expected \(expected), actual \(actual), tolerance \(tolerance)."
-        }
-    }
-}
 
 @MainActor
 public final class SliceThreeHarnessRunner {
-    private static let historyLimitBytes = 200 * 1_024 * 1_024
     private static let displayFrameBudgetMilliseconds = 1_000.0 / 60.0
 
     private struct Measurements {
@@ -109,8 +55,7 @@ public final class SliceThreeHarnessRunner {
         let canonical: any MTLTexture
         let artifacts: [Artifact]
         let structuralValues: [HarnessStructuralMetric: Int]
-        let historyCommandCount: Int
-        let historyResidentBytes: Int
+        let historyEvidence: SliceThreeHarnessHistoryEvidence
         let changedRegionCount: Int
         let projectedFragmentCount: Int
     }
@@ -173,6 +118,13 @@ public final class SliceThreeHarnessRunner {
     private let library: any MTLLibrary
     private var nextTokenRawValue: UInt64 = 1
 
+    convenience init(device: any MTLDevice) throws {
+        guard let library = device.makeDefaultLibrary() else {
+            throw MetalRendererError.defaultLibraryUnavailable
+        }
+        self.init(device: device, library: library)
+    }
+
     init(device: any MTLDevice, library: any MTLLibrary) {
         self.device = device
         self.library = library
@@ -193,6 +145,9 @@ public final class SliceThreeHarnessRunner {
             withIntermediateDirectories: true
         )
         let renderer = try makeRenderer(scene: scene)
+        let history = SliceThreeHarnessHistory {
+            renderer.releaseRasterRevisions($0)
+        }
         let completions = CompletionQueue()
         renderer.onOperationCompleted = { completions.values.append($0) }
         var measurements = Measurements()
@@ -203,6 +158,7 @@ public final class SliceThreeHarnessRunner {
             result = try runColoredDraw(
                 scene: scene,
                 renderer: renderer,
+                history: history,
                 completions: completions,
                 measurements: &measurements
             )
@@ -210,6 +166,7 @@ public final class SliceThreeHarnessRunner {
             result = try runEraserLiveCommit(
                 scene: scene,
                 renderer: renderer,
+                history: history,
                 completions: completions,
                 measurements: &measurements
             )
@@ -217,6 +174,7 @@ public final class SliceThreeHarnessRunner {
             result = try runRegionUndoSeam(
                 scene: scene,
                 renderer: renderer,
+                history: history,
                 completions: completions,
                 measurements: &measurements
             )
@@ -224,6 +182,7 @@ public final class SliceThreeHarnessRunner {
             result = try runClearUndo(
                 scene: scene,
                 renderer: renderer,
+                history: history,
                 completions: completions,
                 measurements: &measurements
             )
@@ -231,6 +190,7 @@ public final class SliceThreeHarnessRunner {
             result = try runTilingUndo(
                 scene: scene,
                 renderer: renderer,
+                history: history,
                 completions: completions,
                 measurements: &measurements
             )
@@ -238,6 +198,7 @@ public final class SliceThreeHarnessRunner {
             result = try runResizeCropFill(
                 scene: scene,
                 renderer: renderer,
+                history: history,
                 completions: completions,
                 measurements: &measurements
             )
@@ -282,15 +243,26 @@ public final class SliceThreeHarnessRunner {
             maximumFragmentsPerFootprint:
                 result.projectedFragmentCount,
             totalInstanceBytes: result.projectedFragmentCount
-                * MemoryLayout<PatternProjectedStampInstance>.stride,
+                * ShaderABI.projectedStampInstanceStride,
             diagnosticMode: scene.diagnosticMode?.rawValue,
             revisionCaptureMilliseconds:
                 measurements.revisionCaptureMilliseconds,
             revisionRestoreMilliseconds:
                 measurements.revisionRestoreMilliseconds,
-            historyResidentBytes: result.historyResidentBytes,
-            historyCommandCount: result.historyCommandCount,
+            historyResidentBytes: result.historyEvidence.retainedRasterBytes,
+            historyCommandCount: result.historyEvidence.commandCount,
+            historyCanUndo: result.historyEvidence.canUndo,
+            historyCanRedo: result.historyEvidence.canRedo,
+            historyAppendCount: result.historyEvidence.appendCount,
+            historyNavigationFinishCount:
+                result.historyEvidence.navigationFinishCount,
+            historyReleasedRevisionCount:
+                result.historyEvidence.releasedRevisionIDs.count,
             changedRegionCount: result.changedRegionCount,
+            coloredOutputMismatchCount:
+                result.structuralValues[.coloredOutputMismatchCount] ?? 0,
+            previewCommitViolationCount:
+                result.structuralValues[.previewCommitViolationCount] ?? 0,
             program: program.rawValue
         )
 
@@ -334,6 +306,7 @@ public final class SliceThreeHarnessRunner {
     private func runColoredDraw(
         scene: HarnessScene,
         renderer: GridRenderer,
+        history: SliceThreeHarnessHistory,
         completions: CompletionQueue,
         measurements: inout Measurements
     ) throws -> ScenarioResult {
@@ -347,6 +320,7 @@ public final class SliceThreeHarnessRunner {
         let stroke = try commitStroke(
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
             point: centerPoint(scene),
             style: StrokeRenderStyle(
@@ -369,29 +343,24 @@ public final class SliceThreeHarnessRunner {
             unorm(color.red * color.alpha),
             unorm(color.alpha),
         ]
-        guard zip(center, expected).allSatisfy({
-            abs(Int($0.0) - Int($0.1)) <= 1
-        }), center[0] > 0, center[1] > 0, center[2] > 0,
-            center[3] > 0, center[3] < 255
-        else {
-            throw SliceThreeHarnessRunError.invariant(
-                sceneName: scene.name,
-                message: "colored canonical center \(center) does not match nonblack premultiplied BGRA \(expected)"
-            )
-        }
+        let coloredMismatchCount = zip(center, expected).filter {
+            abs(Int($0.0) - Int($0.1)) > 1
+        }.count
 
-        let undone = try restore(
+        let undone = try navigateRaster(
+            direction: .undo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: stroke.receipt.before,
             measurements: &measurements
         )
-        let redone = try restore(
+        let redone = try navigateRaster(
+            direction: .redo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: stroke.receipt.after,
             measurements: &measurements
         )
         let undoDelta = differingByteCount(before, undone)
@@ -406,6 +375,11 @@ public final class SliceThreeHarnessRunner {
             scene: scene,
             message: "colored draw redo did not restore committed bytes"
         )
+        try history.validateEvidence(
+            expectedCommandCount: 1,
+            expectedNavigationFinishCount: 2
+        )
+        let historyEvidence = history.evidence
         let live = stroke.live!
         return ScenarioResult(
             primary: stroke.committed,
@@ -420,17 +394,16 @@ public final class SliceThreeHarnessRunner {
                 Artifact(suffix: "canonical.png", texture: redone),
             ],
             structuralValues: structuralValues(
-                renderer: renderer,
-                historyCommandCount: 1,
+                historyEvidence: historyEvidence,
                 changedRegionCount:
                     stroke.receipt.before.regions.rectangles.count,
                 extras: [
+                    .coloredOutputMismatchCount: coloredMismatchCount,
                     .undoCanonicalByteDelta: undoDelta,
                     .redoCanonicalByteDelta: redoDelta,
                 ]
             ),
-            historyCommandCount: 1,
-            historyResidentBytes: renderer.harnessRasterRevisionResidentBytes,
+            historyEvidence: historyEvidence,
             changedRegionCount:
                 stroke.receipt.before.regions.rectangles.count,
             projectedFragmentCount: renderer.harnessCounters
@@ -441,6 +414,7 @@ public final class SliceThreeHarnessRunner {
     private func runEraserLiveCommit(
         scene: HarnessScene,
         renderer: GridRenderer,
+        history: SliceThreeHarnessHistory,
         completions: CompletionQueue,
         measurements: inout Measurements
     ) throws -> ScenarioResult {
@@ -448,6 +422,7 @@ public final class SliceThreeHarnessRunner {
         let seed = try commitStroke(
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
             point: point,
             style: drawStyle,
@@ -457,6 +432,7 @@ public final class SliceThreeHarnessRunner {
         let erase = try commitStroke(
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
             point: point,
             style: StrokeRenderStyle(
@@ -475,12 +451,11 @@ public final class SliceThreeHarnessRunner {
         )
         let live = erase.live!
         let previewDelta = maximumByteDelta(live, erase.committed)
-        guard previewDelta <= 1 else {
-            throw SliceThreeHarnessRunError.invariant(
-                sceneName: scene.name,
-                message: "eraser live/commit maximum delta \(previewDelta) exceeds 1"
-            )
-        }
+        let previewViolationCount = byteViolationCount(
+            live,
+            erase.committed,
+            tolerance: 1
+        )
         let center = pixel(
             in: erase.canonical,
             x: renderer.pixelSize.width / 2,
@@ -492,18 +467,20 @@ public final class SliceThreeHarnessRunner {
                 message: "destination-out center is \(center) instead of transparent"
             )
         }
-        let undone = try restore(
+        let undone = try navigateRaster(
+            direction: .undo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: erase.receipt.before,
             measurements: &measurements
         )
-        let redone = try restore(
+        let redone = try navigateRaster(
+            direction: .redo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: erase.receipt.after,
             measurements: &measurements
         )
         let undoDelta = differingByteCount(seed.canonical, undone)
@@ -514,6 +491,11 @@ public final class SliceThreeHarnessRunner {
             message: "eraser undo/redo did not restore exact canonical bytes"
         )
         let count = erase.receipt.before.regions.rectangles.count
+        try history.validateEvidence(
+            expectedCommandCount: 2,
+            expectedNavigationFinishCount: 2
+        )
+        let historyEvidence = history.evidence
         return ScenarioResult(
             primary: erase.committed,
             live: live,
@@ -527,17 +509,16 @@ public final class SliceThreeHarnessRunner {
                 Artifact(suffix: "canonical.png", texture: redone),
             ],
             structuralValues: structuralValues(
-                renderer: renderer,
-                historyCommandCount: 2,
+                historyEvidence: historyEvidence,
                 changedRegionCount: count,
                 extras: [
+                    .previewCommitViolationCount: previewViolationCount,
                     .previewCommitMaximumDelta: previewDelta,
                     .undoCanonicalByteDelta: undoDelta,
                     .redoCanonicalByteDelta: redoDelta,
                 ]
             ),
-            historyCommandCount: 2,
-            historyResidentBytes: renderer.harnessRasterRevisionResidentBytes,
+            historyEvidence: historyEvidence,
             changedRegionCount: count,
             projectedFragmentCount: renderer.harnessCounters
                 .totalInstancesThisStroke
@@ -547,6 +528,7 @@ public final class SliceThreeHarnessRunner {
     private func runRegionUndoSeam(
         scene: HarnessScene,
         renderer: GridRenderer,
+        history: SliceThreeHarnessHistory,
         completions: CompletionQueue,
         measurements: inout Measurements
     ) throws -> ScenarioResult {
@@ -554,6 +536,7 @@ public final class SliceThreeHarnessRunner {
         let stroke = try commitStroke(
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
             point: ScreenPoint(x: 0, y: Float(scene.height) * 0.5),
             style: StrokeRenderStyle(
@@ -572,18 +555,20 @@ public final class SliceThreeHarnessRunner {
                 message: "seam edit retained \(changedRegions) changed regions instead of 2"
             )
         }
-        let undone = try restore(
+        let undone = try navigateRaster(
+            direction: .undo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: stroke.receipt.before,
             measurements: &measurements
         )
-        let redone = try restore(
+        let redone = try navigateRaster(
+            direction: .redo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: stroke.receipt.after,
             measurements: &measurements
         )
         let undoDelta = differingByteCount(before, undone)
@@ -593,6 +578,11 @@ public final class SliceThreeHarnessRunner {
             scene: scene,
             message: "seam undo/redo changed canonical bytes"
         )
+        try history.validateEvidence(
+            expectedCommandCount: 1,
+            expectedNavigationFinishCount: 2
+        )
+        let historyEvidence = history.evidence
         let live = stroke.live!
         return ScenarioResult(
             primary: stroke.committed,
@@ -607,16 +597,14 @@ public final class SliceThreeHarnessRunner {
                 Artifact(suffix: "canonical.png", texture: redone),
             ],
             structuralValues: structuralValues(
-                renderer: renderer,
-                historyCommandCount: 1,
+                historyEvidence: historyEvidence,
                 changedRegionCount: changedRegions,
                 extras: [
                     .undoCanonicalByteDelta: undoDelta,
                     .redoCanonicalByteDelta: redoDelta,
                 ]
             ),
-            historyCommandCount: 1,
-            historyResidentBytes: renderer.harnessRasterRevisionResidentBytes,
+            historyEvidence: historyEvidence,
             changedRegionCount: changedRegions,
             projectedFragmentCount: renderer.harnessCounters
                 .totalInstancesThisStroke
@@ -626,12 +614,14 @@ public final class SliceThreeHarnessRunner {
     private func runClearUndo(
         scene: HarnessScene,
         renderer: GridRenderer,
+        history: SliceThreeHarnessHistory,
         completions: CompletionQueue,
         measurements: inout Measurements
     ) throws -> ScenarioResult {
         let seed = try commitStroke(
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
             point: centerPoint(scene),
             style: drawStyle,
@@ -642,7 +632,7 @@ public final class SliceThreeHarnessRunner {
         let start = CFAbsoluteTimeGetCurrent()
         try renderer.requestClear(
             token: token,
-            maximumRetainedBytes: Self.historyLimitBytes
+            maximumRetainedBytes: history.maximumBytes
         )
         try renderer.finishRasterOperationForHarness()
         measurements.revisionCaptureMilliseconds.append(
@@ -652,6 +642,7 @@ public final class SliceThreeHarnessRunner {
             sceneName: scene.name,
             token: token
         )
+        try history.appendRaster(kind: .clear, receipt: receipt)
         let cleared = try renderer.copyCanonicalForHarness()
         guard textureBytes(cleared).allSatisfy({ $0 == 0 }) else {
             throw SliceThreeHarnessRunError.invariant(
@@ -664,18 +655,20 @@ public final class SliceThreeHarnessRunner {
             renderer: renderer,
             measurements: &measurements
         )
-        let undone = try restore(
+        let undone = try navigateRaster(
+            direction: .undo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: receipt.before,
             measurements: &measurements
         )
-        let redone = try restore(
+        let redone = try navigateRaster(
+            direction: .redo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: receipt.after,
             measurements: &measurements
         )
         let undoDelta = differingByteCount(seed.canonical, undone)
@@ -692,6 +685,11 @@ public final class SliceThreeHarnessRunner {
                 message: "clear retained \(count) regions instead of one full raster"
             )
         }
+        try history.validateEvidence(
+            expectedCommandCount: 2,
+            expectedNavigationFinishCount: 2
+        )
+        let historyEvidence = history.evidence
         return ScenarioResult(
             primary: clearedScreen,
             live: nil,
@@ -706,16 +704,14 @@ public final class SliceThreeHarnessRunner {
                 Artifact(suffix: "canonical.png", texture: redone),
             ],
             structuralValues: structuralValues(
-                renderer: renderer,
-                historyCommandCount: 2,
+                historyEvidence: historyEvidence,
                 changedRegionCount: count,
                 extras: [
                     .undoCanonicalByteDelta: undoDelta,
                     .redoCanonicalByteDelta: redoDelta,
                 ]
             ),
-            historyCommandCount: 2,
-            historyResidentBytes: renderer.harnessRasterRevisionResidentBytes,
+            historyEvidence: historyEvidence,
             changedRegionCount: count,
             projectedFragmentCount: renderer.harnessCounters
                 .totalInstancesThisStroke
@@ -725,12 +721,14 @@ public final class SliceThreeHarnessRunner {
     private func runTilingUndo(
         scene: HarnessScene,
         renderer: GridRenderer,
+        history: SliceThreeHarnessHistory,
         completions: CompletionQueue,
         measurements: inout Measurements
     ) throws -> ScenarioResult {
         _ = try commitStroke(
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
             point: ScreenPoint(
                 x: Float(scene.width) * 0.31,
@@ -751,28 +749,40 @@ public final class SliceThreeHarnessRunner {
             ? .grid
             : .mirrorXY
         try renderer.applyTiling(alternateTiling)
+        try history.appendTiling(
+            before: originalTiling,
+            after: alternateTiling
+        )
         let alternateScreen = try captureDisplay(
             scene: scene,
             renderer: renderer,
             measurements: &measurements
         )
         let canonicalAfterChange = try renderer.copyCanonicalForHarness()
-        try renderer.applyTiling(originalTiling)
+        try navigateTiling(
+            direction: .undo,
+            scene: scene,
+            renderer: renderer,
+            history: history
+        )
         let restoredScreen = try captureDisplay(
             scene: scene,
             renderer: renderer,
             measurements: &measurements
         )
         let canonicalAfterUndo = try renderer.copyCanonicalForHarness()
-        try renderer.applyTiling(alternateTiling)
+        try navigateTiling(
+            direction: .redo,
+            scene: scene,
+            renderer: renderer,
+            history: history
+        )
         let redoneScreen = try captureDisplay(
             scene: scene,
             renderer: renderer,
             measurements: &measurements
         )
         let canonicalAfterRedo = try renderer.copyCanonicalForHarness()
-        try renderer.applyTiling(originalTiling)
-
         let metadataDelta = differingByteCount(
             canonicalBefore,
             canonicalAfterChange
@@ -789,6 +799,11 @@ public final class SliceThreeHarnessRunner {
                 message: "tiling undo/redo did not preserve canonical bytes and restore exact displays"
             )
         }
+        try history.validateEvidence(
+            expectedCommandCount: 2,
+            expectedNavigationFinishCount: 2
+        )
+        let historyEvidence = history.evidence
         return ScenarioResult(
             primary: restoredScreen,
             live: nil,
@@ -802,8 +817,7 @@ public final class SliceThreeHarnessRunner {
                 Artifact(suffix: "canonical.png", texture: canonicalAfterUndo),
             ],
             structuralValues: structuralValues(
-                renderer: renderer,
-                historyCommandCount: 2,
+                historyEvidence: historyEvidence,
                 changedRegionCount: 0,
                 extras: [
                     .metadataCanonicalByteDelta: metadataDelta,
@@ -811,8 +825,7 @@ public final class SliceThreeHarnessRunner {
                     .redoCanonicalByteDelta: redoneDelta,
                 ]
             ),
-            historyCommandCount: 2,
-            historyResidentBytes: renderer.harnessRasterRevisionResidentBytes,
+            historyEvidence: historyEvidence,
             changedRegionCount: 0,
             projectedFragmentCount: renderer.harnessCounters
                 .totalInstancesThisStroke
@@ -822,6 +835,7 @@ public final class SliceThreeHarnessRunner {
     private func runResizeCropFill(
         scene: HarnessScene,
         renderer: GridRenderer,
+        history: SliceThreeHarnessHistory,
         completions: CompletionQueue,
         measurements: inout Measurements
     ) throws -> ScenarioResult {
@@ -839,6 +853,7 @@ public final class SliceThreeHarnessRunner {
         let shrinkReceipt = try resize(
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
             to: shrinkSize,
             measurements: &measurements
@@ -860,6 +875,7 @@ public final class SliceThreeHarnessRunner {
         let growReceipt = try resize(
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
             to: growSize,
             measurements: &measurements
@@ -877,34 +893,38 @@ public final class SliceThreeHarnessRunner {
             )
         }
 
-        _ = try resizeRestore(
+        _ = try navigateResize(
+            direction: .undo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: growReceipt.before,
             measurements: &measurements
         )
-        let undoShrink = try resizeRestore(
+        let undoShrink = try navigateResize(
+            direction: .undo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: shrinkReceipt.before,
             measurements: &measurements
         )
         let restoredWidth = renderer.pixelSize.width
         let restoredHeight = renderer.pixelSize.height
-        _ = try resizeRestore(
+        _ = try navigateResize(
+            direction: .redo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: shrinkReceipt.after,
             measurements: &measurements
         )
-        let redone = try resizeRestore(
+        let redone = try navigateResize(
+            direction: .redo,
             scene: scene,
             renderer: renderer,
+            history: history,
             completions: completions,
-            revision: growReceipt.after,
             measurements: &measurements
         )
         let undoDelta = differingByteCount(original, undoShrink)
@@ -926,6 +946,11 @@ public final class SliceThreeHarnessRunner {
         )
         let regionCount = shrinkReceipt.before.regions.rectangles.count
             + growReceipt.before.regions.rectangles.count
+        try history.validateEvidence(
+            expectedCommandCount: 2,
+            expectedNavigationFinishCount: 4
+        )
+        let historyEvidence = history.evidence
         return ScenarioResult(
             primary: committed,
             live: nil,
@@ -941,8 +966,7 @@ public final class SliceThreeHarnessRunner {
                 Artifact(suffix: "canonical.png", texture: redone),
             ],
             structuralValues: structuralValues(
-                renderer: renderer,
-                historyCommandCount: 2,
+                historyEvidence: historyEvidence,
                 changedRegionCount: regionCount,
                 extras: [
                     .undoCanonicalByteDelta: undoDelta,
@@ -951,8 +975,7 @@ public final class SliceThreeHarnessRunner {
                     .restoredHeight: restoredHeight,
                 ]
             ),
-            historyCommandCount: 2,
-            historyResidentBytes: renderer.harnessRasterRevisionResidentBytes,
+            historyEvidence: historyEvidence,
             changedRegionCount: regionCount,
             projectedFragmentCount: 0
         )
@@ -961,6 +984,7 @@ public final class SliceThreeHarnessRunner {
     private func commitStroke(
         scene: HarnessScene,
         renderer: GridRenderer,
+        history: SliceThreeHarnessHistory,
         completions: CompletionQueue,
         point: ScreenPoint,
         style: StrokeRenderStyle,
@@ -991,7 +1015,7 @@ public final class SliceThreeHarnessRunner {
                 timestamp: timestamp,
                 phase: .ended
             ),
-            maximumRetainedBytes: Self.historyLimitBytes
+            maximumRetainedBytes: history.maximumBytes
         )
         let eventDuration = elapsedMilliseconds(since: processingStart)
         measurements.brushProcessingMilliseconds.append(eventDuration)
@@ -1022,6 +1046,10 @@ public final class SliceThreeHarnessRunner {
             sceneName: scene.name,
             token: token
         )
+        try history.appendRaster(
+            kind: style.compositeMode == .draw ? .draw : .erase,
+            receipt: receipt
+        )
         let committed = try captureDisplay(
             scene: scene,
             renderer: renderer,
@@ -1036,7 +1064,91 @@ public final class SliceThreeHarnessRunner {
         )
     }
 
-    private func restore(
+    private func navigateRaster(
+        direction: HistoryNavigation.Direction,
+        scene: HarnessScene,
+        renderer: GridRenderer,
+        history: SliceThreeHarnessHistory,
+        completions: CompletionQueue,
+        measurements: inout Measurements
+    ) throws -> any MTLTexture {
+        let pending: HistoryNavigation?
+        switch direction {
+        case .undo:
+            pending = try history.beginUndo()
+        case .redo:
+            pending = try history.beginRedo()
+        }
+        guard let navigation = pending,
+              case let .raster(command) = navigation.command
+        else {
+            throw SliceThreeHarnessRunError.invariant(
+                sceneName: scene.name,
+                message: "history did not select a raster command for \(direction)"
+            )
+        }
+        let revision = direction == .undo ? command.before : command.after
+        do {
+            let texture = try restoreRevision(
+                scene: scene,
+                renderer: renderer,
+                completions: completions,
+                revision: revision,
+                measurements: &measurements
+            )
+            try history.finishNavigation(
+                token: navigation.token,
+                succeeded: true
+            )
+            return texture
+        } catch {
+            try? history.finishNavigation(
+                token: navigation.token,
+                succeeded: false
+            )
+            throw error
+        }
+    }
+
+    private func navigateTiling(
+        direction: HistoryNavigation.Direction,
+        scene: HarnessScene,
+        renderer: GridRenderer,
+        history: SliceThreeHarnessHistory
+    ) throws {
+        let pending: HistoryNavigation?
+        switch direction {
+        case .undo:
+            pending = try history.beginUndo()
+        case .redo:
+            pending = try history.beginRedo()
+        }
+        guard let navigation = pending,
+              case let .tiling(change) = navigation.command
+        else {
+            throw SliceThreeHarnessRunError.invariant(
+                sceneName: scene.name,
+                message: "history did not select a tiling command for \(direction)"
+            )
+        }
+        do {
+            try renderer.applyTiling(
+                direction == .undo ? change.before : change.after
+            )
+            try history.finishNavigation(
+                token: navigation.token,
+                succeeded: true
+            )
+        } catch {
+            try? history.finishNavigation(
+                token: navigation.token,
+                succeeded: false
+            )
+            throw error
+        }
+    }
+
+    private func restoreRevision(
         scene: HarnessScene,
         renderer: GridRenderer,
         completions: CompletionQueue,
@@ -1060,6 +1172,7 @@ public final class SliceThreeHarnessRunner {
     private func resize(
         scene: HarnessScene,
         renderer: GridRenderer,
+        history: SliceThreeHarnessHistory,
         completions: CompletionQueue,
         to pixelSize: PixelSize,
         measurements: inout Measurements
@@ -1069,34 +1182,69 @@ public final class SliceThreeHarnessRunner {
         try renderer.requestResize(
             token: token,
             to: pixelSize,
-            maximumRetainedBytes: Self.historyLimitBytes
+            maximumRetainedBytes: history.maximumBytes
         )
         try renderer.finishRasterOperationForHarness()
         measurements.revisionCaptureMilliseconds.append(
             elapsedMilliseconds(since: start)
         )
-        return try completions.takeReceipt(sceneName: scene.name, token: token)
-    }
-
-    private func resizeRestore(
-        scene: HarnessScene,
-        renderer: GridRenderer,
-        completions: CompletionQueue,
-        revision: RasterRevisionReference,
-        measurements: inout Measurements
-    ) throws -> any MTLTexture {
-        let token = takeToken()
-        let start = CFAbsoluteTimeGetCurrent()
-        try renderer.requestResizeRestore(token: token, revision: revision)
-        try renderer.finishRasterOperationForHarness()
-        measurements.revisionRestoreMilliseconds.append(
-            elapsedMilliseconds(since: start)
-        )
-        try completions.takeOperationSuccess(
+        let receipt = try completions.takeReceipt(
             sceneName: scene.name,
             token: token
         )
-        return try renderer.copyCanonicalForHarness()
+        try history.appendResize(receipt: receipt)
+        return receipt
+    }
+
+    private func navigateResize(
+        direction: HistoryNavigation.Direction,
+        scene: HarnessScene,
+        renderer: GridRenderer,
+        history: SliceThreeHarnessHistory,
+        completions: CompletionQueue,
+        measurements: inout Measurements
+    ) throws -> any MTLTexture {
+        let pending: HistoryNavigation?
+        switch direction {
+        case .undo:
+            pending = try history.beginUndo()
+        case .redo:
+            pending = try history.beginRedo()
+        }
+        guard let navigation = pending,
+              case let .tileResize(command) = navigation.command
+        else {
+            throw SliceThreeHarnessRunError.invariant(
+                sceneName: scene.name,
+                message: "history did not select a resize command for \(direction)"
+            )
+        }
+        let revision = direction == .undo ? command.before : command.after
+        let token = takeToken()
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            try renderer.requestResizeRestore(token: token, revision: revision)
+            try renderer.finishRasterOperationForHarness()
+            measurements.revisionRestoreMilliseconds.append(
+                elapsedMilliseconds(since: start)
+            )
+            try completions.takeOperationSuccess(
+                sceneName: scene.name,
+                token: token
+            )
+            let texture = try renderer.copyCanonicalForHarness()
+            try history.finishNavigation(
+                token: navigation.token,
+                succeeded: true
+            )
+            return texture
+        } catch {
+            try? history.finishNavigation(
+                token: navigation.token,
+                succeeded: false
+            )
+            throw error
+        }
     }
 
     private func captureDisplay(
@@ -1157,15 +1305,14 @@ public final class SliceThreeHarnessRunner {
     }
 
     private func structuralValues(
-        renderer: GridRenderer,
-        historyCommandCount: Int,
+        historyEvidence: SliceThreeHarnessHistoryEvidence,
         changedRegionCount: Int,
         extras: [HarnessStructuralMetric: Int]
     ) -> [HarnessStructuralMetric: Int] {
         var values = extras
-        values[.historyCommandCount] = historyCommandCount
+        values[.historyCommandCount] = historyEvidence.commandCount
         values[.historyResidentBytes] =
-            renderer.harnessRasterRevisionResidentBytes
+            historyEvidence.retainedRasterBytes
         values[.changedRegionCount] = changedRegionCount
         return values
     }
@@ -1293,6 +1440,21 @@ public final class SliceThreeHarnessRunner {
         return zip(lhsBytes, rhsBytes).reduce(0) {
             max($0, abs(Int($1.0) - Int($1.1)))
         }
+    }
+
+    private func byteViolationCount(
+        _ lhs: any MTLTexture,
+        _ rhs: any MTLTexture,
+        tolerance: Int
+    ) -> Int {
+        let lhsBytes = textureBytes(lhs)
+        let rhsBytes = textureBytes(rhs)
+        guard lhsBytes.count == rhsBytes.count else {
+            return max(lhsBytes.count, rhsBytes.count)
+        }
+        return zip(lhsBytes, rhsBytes).filter {
+            abs(Int($0.0) - Int($0.1)) > tolerance
+        }.count
     }
 
     private func differingByteCount(

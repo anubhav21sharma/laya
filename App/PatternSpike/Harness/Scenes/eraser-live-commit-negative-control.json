@@ -8,10 +8,13 @@
   "tiling": 0,
   "diagnosticMode": "hardRound",
   "program": "eraserLiveCommit",
-  "checks": [],
+  "checks": [
+    {"channel": "canonical", "x": 64, "y": 64, "expectedBGRA": [0, 0, 0, 0], "tolerance": 0}
+  ],
   "structuralChecks": [
+    {"metric": "previewCommitViolationCount", "relation": "equal", "value": 1},
     {"metric": "previewCommitMaximumDelta", "relation": "lessThanOrEqual", "value": 1},
-    {"metric": "undoCanonicalByteDelta", "relation": "equal", "value": 1},
+    {"metric": "undoCanonicalByteDelta", "relation": "equal", "value": 0},
     {"metric": "redoCanonicalByteDelta", "relation": "equal", "value": 0}
   ]
 }

@@ -17,6 +17,7 @@ private struct SliceThreeArtifactFixtureTruth {
     let restoreCount: Int
     let historyBytes: Int
     let historyCommands: Int
+    let historyNavigationFinishes: Int
     let changedRegions: Int
     let fragments: Int
     let maximumFragments: Int
@@ -32,7 +33,14 @@ enum SliceThreeArtifactCorruption: CaseIterable {
     case scene
     case historyBytes
     case historyCommands
+    case historyCanUndo
+    case historyCanRedo
+    case historyAppendCount
+    case historyNavigationFinishCount
+    case historyReleasedRevisionCount
     case changedRegions
+    case coloredOutputMismatchCount
+    case previewCommitViolationCount
     case fragments
     case maximumFragments
     case instanceBytes
@@ -223,7 +231,14 @@ private func makeSliceThreeArtifactFixture() throws -> URL {
             "revisionRestoreMilliseconds": fixtureSeries(truth.restoreCount),
             "historyResidentBytes": truth.historyBytes,
             "historyCommandCount": truth.historyCommands,
+            "historyCanUndo": true,
+            "historyCanRedo": false,
+            "historyAppendCount": truth.historyCommands,
+            "historyNavigationFinishCount": truth.historyNavigationFinishes,
+            "historyReleasedRevisionCount": 0,
             "changedRegionCount": truth.changedRegions,
+            "coloredOutputMismatchCount": 0,
+            "previewCommitViolationCount": 0,
         ]
         try JSONSerialization.data(
             withJSONObject: record,
@@ -292,8 +307,22 @@ private func corruptSliceThreeArtifactFixture(
             record["historyResidentBytes"] = 4_225
         case .historyCommands:
             record["historyCommandCount"] = 2
+        case .historyCanUndo:
+            record["historyCanUndo"] = false
+        case .historyCanRedo:
+            record["historyCanRedo"] = true
+        case .historyAppendCount:
+            record["historyAppendCount"] = 2
+        case .historyNavigationFinishCount:
+            record["historyNavigationFinishCount"] = 1
+        case .historyReleasedRevisionCount:
+            record["historyReleasedRevisionCount"] = 1
         case .changedRegions:
             record["changedRegionCount"] = 2
+        case .coloredOutputMismatchCount:
+            record["coloredOutputMismatchCount"] = 1
+        case .previewCommitViolationCount:
+            record["previewCommitViolationCount"] = 1
         case .fragments:
             record["totalProjectedFragmentCount"] = 2
         case .maximumFragments:
@@ -333,7 +362,8 @@ private func sliceThreeArtifactFixtureTruths()
             program: "coloredDraw", tileWidth: 128, tileHeight: 128,
             frameCount: 4, brushCount: 2, eventCount: 1, dabCount: 1,
             gridCount: 2, commitCount: 1, captureCount: 1, restoreCount: 2,
-            historyBytes: 4_224, historyCommands: 1, changedRegions: 1,
+            historyBytes: 4_224, historyCommands: 1,
+            historyNavigationFinishes: 2, changedRegions: 1,
             fragments: 1, maximumFragments: 1, instanceBytes: 112,
             primarySuffix: "live.screen.png", pngSizes: strokePNGs
         ),
@@ -341,7 +371,8 @@ private func sliceThreeArtifactFixtureTruths()
             program: "eraserLiveCommit", tileWidth: 128, tileHeight: 128,
             frameCount: 7, brushCount: 4, eventCount: 2, dabCount: 2,
             gridCount: 3, commitCount: 2, captureCount: 2, restoreCount: 2,
-            historyBytes: 8_448, historyCommands: 2, changedRegions: 1,
+            historyBytes: 8_448, historyCommands: 2,
+            historyNavigationFinishes: 2, changedRegions: 1,
             fragments: 1, maximumFragments: 1, instanceBytes: 112,
             primarySuffix: "live.screen.png", pngSizes: strokePNGs
         ),
@@ -349,7 +380,8 @@ private func sliceThreeArtifactFixtureTruths()
             program: "regionUndoSeam", tileWidth: 128, tileHeight: 128,
             frameCount: 4, brushCount: 2, eventCount: 1, dabCount: 1,
             gridCount: 2, commitCount: 1, captureCount: 1, restoreCount: 2,
-            historyBytes: 1_792, historyCommands: 1, changedRegions: 2,
+            historyBytes: 1_792, historyCommands: 1,
+            historyNavigationFinishes: 2, changedRegions: 2,
             fragments: 2, maximumFragments: 2, instanceBytes: 224,
             primarySuffix: "live.screen.png", pngSizes: strokePNGs
         ),
@@ -357,7 +389,8 @@ private func sliceThreeArtifactFixtureTruths()
             program: "clearUndo", tileWidth: 128, tileHeight: 128,
             frameCount: 4, brushCount: 2, eventCount: 1, dabCount: 1,
             gridCount: 2, commitCount: 1, captureCount: 2, restoreCount: 2,
-            historyBytes: 135_296, historyCommands: 2, changedRegions: 1,
+            historyBytes: 135_296, historyCommands: 2,
+            historyNavigationFinishes: 2, changedRegions: 1,
             fragments: 1, maximumFragments: 1, instanceBytes: 112,
             primarySuffix: "committed.screen.png",
             pngSizes: [
@@ -373,7 +406,8 @@ private func sliceThreeArtifactFixtureTruths()
             program: "tilingUndo", tileWidth: 128, tileHeight: 128,
             frameCount: 7, brushCount: 2, eventCount: 1, dabCount: 1,
             gridCount: 5, commitCount: 1, captureCount: 1, restoreCount: 0,
-            historyBytes: 4_416, historyCommands: 2, changedRegions: 0,
+            historyBytes: 4_416, historyCommands: 2,
+            historyNavigationFinishes: 2, changedRegions: 0,
             fragments: 1, maximumFragments: 1, instanceBytes: 112,
             primarySuffix: "initial-tiling.screen.png",
             pngSizes: [
@@ -388,7 +422,8 @@ private func sliceThreeArtifactFixtureTruths()
             program: "resizeCropFill", tileWidth: 96, tileHeight: 80,
             frameCount: 1, brushCount: 0, eventCount: 0, dabCount: 0,
             gridCount: 1, commitCount: 0, captureCount: 2, restoreCount: 4,
-            historyBytes: 104_448, historyCommands: 2, changedRegions: 2,
+            historyBytes: 104_448, historyCommands: 2,
+            historyNavigationFinishes: 4, changedRegions: 2,
             fragments: 0, maximumFragments: 0, instanceBytes: 0,
             primarySuffix: "committed.screen.png",
             pngSizes: [

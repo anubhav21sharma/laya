@@ -10,6 +10,18 @@ public struct HarnessRunResult: Equatable, Sendable {
     public let benchmarkURL: URL
     public let benchmark: BenchmarkRecord
     public let artifactURLs: [URL]
+
+    public init(
+        imageURL: URL,
+        benchmarkURL: URL,
+        benchmark: BenchmarkRecord,
+        artifactURLs: [URL]
+    ) {
+        self.imageURL = imageURL
+        self.benchmarkURL = benchmarkURL
+        self.benchmark = benchmark
+        self.artifactURLs = artifactURLs
+    }
 }
 
 struct HarnessRenderConfiguration: Equatable, Sendable {
@@ -1208,16 +1220,6 @@ public final class HarnessRunner {
 
         if scene.schemaVersion == 1 {
             return try runBlank(
-                scene: scene,
-                outputDirectory: outputDirectory,
-                build: build
-            )
-        }
-        if scene.schemaVersion == 4 {
-            return try SliceThreeHarnessRunner(
-                device: device,
-                library: library
-            ).run(
                 scene: scene,
                 outputDirectory: outputDirectory,
                 build: build

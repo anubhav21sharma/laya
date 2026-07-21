@@ -114,7 +114,14 @@ func sliceThreeBenchmarkRecordRoundTripsRequiredMetrics() throws {
         revisionRestoreMilliseconds: [0.50, 0.55],
         historyResidentBytes: 4_096,
         historyCommandCount: 1,
+        historyCanUndo: true,
+        historyCanRedo: false,
+        historyAppendCount: 1,
+        historyNavigationFinishCount: 2,
+        historyReleasedRevisionCount: 0,
         changedRegionCount: 2,
+        coloredOutputMismatchCount: 0,
+        previewCommitViolationCount: 0,
         program: "regionUndoSeam"
     )
 
@@ -126,7 +133,14 @@ func sliceThreeBenchmarkRecordRoundTripsRequiredMetrics() throws {
     #expect(decoded.revisionRestoreMilliseconds == [0.50, 0.55])
     #expect(decoded.historyResidentBytes == 4_096)
     #expect(decoded.historyCommandCount == 1)
+    #expect(decoded.historyCanUndo == true)
+    #expect(decoded.historyCanRedo == false)
+    #expect(decoded.historyAppendCount == 1)
+    #expect(decoded.historyNavigationFinishCount == 2)
+    #expect(decoded.historyReleasedRevisionCount == 0)
     #expect(decoded.changedRegionCount == 2)
+    #expect(decoded.coloredOutputMismatchCount == 0)
+    #expect(decoded.previewCommitViolationCount == 0)
 }
 
 @Test(arguments: [
@@ -134,7 +148,14 @@ func sliceThreeBenchmarkRecordRoundTripsRequiredMetrics() throws {
     "revisionRestoreMilliseconds",
     "historyResidentBytes",
     "historyCommandCount",
+    "historyCanUndo",
+    "historyCanRedo",
+    "historyAppendCount",
+    "historyNavigationFinishCount",
+    "historyReleasedRevisionCount",
     "changedRegionCount",
+    "coloredOutputMismatchCount",
+    "previewCommitViolationCount",
 ])
 func sliceThreeBenchmarkParserRequiresEveryNewMetric(_ key: String) throws {
     let valid = try BenchmarkRecord.encode(sliceThreeBenchmarkFixture())
@@ -170,7 +191,12 @@ func sliceThreeBenchmarkParserRequiresProgramIdentity() throws {
     "revisionRestoreMilliseconds",
     "historyResidentBytes",
     "historyCommandCount",
+    "historyAppendCount",
+    "historyNavigationFinishCount",
+    "historyReleasedRevisionCount",
     "changedRegionCount",
+    "coloredOutputMismatchCount",
+    "previewCommitViolationCount",
 ])
 func sliceThreeBenchmarkParserRejectsNegativeMetrics(_ key: String) throws {
     let valid = try BenchmarkRecord.encode(sliceThreeBenchmarkFixture())
@@ -232,7 +258,14 @@ private func sliceThreeBenchmarkFixture(
         revisionRestoreMilliseconds: [0],
         historyResidentBytes: 0,
         historyCommandCount: 0,
+        historyCanUndo: false,
+        historyCanRedo: false,
+        historyAppendCount: 0,
+        historyNavigationFinishCount: 0,
+        historyReleasedRevisionCount: 0,
         changedRegionCount: 0,
+        coloredOutputMismatchCount: 0,
+        previewCommitViolationCount: 0,
         program: "coloredDraw"
     )
 }

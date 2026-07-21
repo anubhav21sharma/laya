@@ -34,6 +34,7 @@ public enum SliceThreeEvidenceValidator {
         let restoreCount: Int
         let historyBytes: Int
         let historyCommands: Int
+        let historyNavigationFinishes: Int
         let changedRegions: Int
         let fragments: Int
         let maximumFragments: Int
@@ -68,6 +69,9 @@ public enum SliceThreeEvidenceValidator {
         "totalInstanceBytes", "diagnosticMode",
         "revisionCaptureMilliseconds", "revisionRestoreMilliseconds",
         "historyResidentBytes", "historyCommandCount", "changedRegionCount",
+        "historyCanUndo", "historyCanRedo", "historyAppendCount",
+        "historyNavigationFinishCount", "historyReleasedRevisionCount",
+        "coloredOutputMismatchCount", "previewCommitViolationCount",
     ]
     private static let hardwareKeys: Set<String> = [
         "gpuName", "logicalProcessorCount", "physicalMemoryBytes",
@@ -571,7 +575,15 @@ public enum SliceThreeEvidenceValidator {
               record.revisionRestoreMilliseconds?.count == truth.restoreCount,
               record.historyResidentBytes == truth.historyBytes,
               record.historyCommandCount == truth.historyCommands,
-              record.changedRegionCount == truth.changedRegions
+              record.historyCanUndo == true,
+              record.historyCanRedo == false,
+              record.historyAppendCount == truth.historyCommands,
+              record.historyNavigationFinishCount
+                == truth.historyNavigationFinishes,
+              record.historyReleasedRevisionCount == 0,
+              record.changedRegionCount == truth.changedRegions,
+              record.coloredOutputMismatchCount == 0,
+              record.previewCommitViolationCount == 0
         else {
             throw invalid("\(name): benchmark values do not match the truth table")
         }
@@ -682,6 +694,7 @@ public enum SliceThreeEvidenceValidator {
                 frameCount: 4, brushCount: 2, eventCount: 1, dabCount: 1,
                 gridCount: 2, commitCount: 1, captureCount: 1,
                 restoreCount: 2, historyBytes: 4_224, historyCommands: 1,
+                historyNavigationFinishes: 2,
                 changedRegions: 1, fragments: 1, maximumFragments: 1,
                 instanceBytes: 112, primarySuffix: "live.screen.png",
                 pngSizes: strokePNGs
@@ -691,6 +704,7 @@ public enum SliceThreeEvidenceValidator {
                 frameCount: 7, brushCount: 4, eventCount: 2, dabCount: 2,
                 gridCount: 3, commitCount: 2, captureCount: 2,
                 restoreCount: 2, historyBytes: 8_448, historyCommands: 2,
+                historyNavigationFinishes: 2,
                 changedRegions: 1, fragments: 1, maximumFragments: 1,
                 instanceBytes: 112, primarySuffix: "live.screen.png",
                 pngSizes: strokePNGs
@@ -700,6 +714,7 @@ public enum SliceThreeEvidenceValidator {
                 frameCount: 4, brushCount: 2, eventCount: 1, dabCount: 1,
                 gridCount: 2, commitCount: 1, captureCount: 1,
                 restoreCount: 2, historyBytes: 1_792, historyCommands: 1,
+                historyNavigationFinishes: 2,
                 changedRegions: 2, fragments: 2, maximumFragments: 2,
                 instanceBytes: 224, primarySuffix: "live.screen.png",
                 pngSizes: strokePNGs
@@ -709,6 +724,7 @@ public enum SliceThreeEvidenceValidator {
                 frameCount: 4, brushCount: 2, eventCount: 1, dabCount: 1,
                 gridCount: 2, commitCount: 1, captureCount: 2,
                 restoreCount: 2, historyBytes: 135_296, historyCommands: 2,
+                historyNavigationFinishes: 2,
                 changedRegions: 1, fragments: 1, maximumFragments: 1,
                 instanceBytes: 112, primarySuffix: "committed.screen.png",
                 pngSizes: [
@@ -725,6 +741,7 @@ public enum SliceThreeEvidenceValidator {
                 frameCount: 7, brushCount: 2, eventCount: 1, dabCount: 1,
                 gridCount: 5, commitCount: 1, captureCount: 1,
                 restoreCount: 0, historyBytes: 4_416, historyCommands: 2,
+                historyNavigationFinishes: 2,
                 changedRegions: 0, fragments: 1, maximumFragments: 1,
                 instanceBytes: 112,
                 primarySuffix: "initial-tiling.screen.png",
@@ -741,6 +758,7 @@ public enum SliceThreeEvidenceValidator {
                 frameCount: 1, brushCount: 0, eventCount: 0, dabCount: 0,
                 gridCount: 1, commitCount: 0, captureCount: 2,
                 restoreCount: 4, historyBytes: 104_448, historyCommands: 2,
+                historyNavigationFinishes: 4,
                 changedRegions: 2, fragments: 0, maximumFragments: 0,
                 instanceBytes: 0, primarySuffix: "committed.screen.png",
                 pngSizes: [

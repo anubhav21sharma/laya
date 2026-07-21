@@ -1,6 +1,9 @@
 import CShaderTypes
 
 public enum ShaderABI {
+    public static let projectedStampInstanceStride =
+        MemoryLayout<PatternProjectedStampInstance>.stride
+
     public static var isValid: Bool {
         MemoryLayout<PatternFrameUniforms>.size == 16
             && MemoryLayout<PatternFrameUniforms>.stride == 16

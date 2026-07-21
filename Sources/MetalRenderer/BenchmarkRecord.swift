@@ -260,7 +260,14 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     public let revisionRestoreMilliseconds: [Double]?
     public let historyResidentBytes: Int?
     public let historyCommandCount: Int?
+    public let historyCanUndo: Bool?
+    public let historyCanRedo: Bool?
+    public let historyAppendCount: Int?
+    public let historyNavigationFinishCount: Int?
+    public let historyReleasedRevisionCount: Int?
     public let changedRegionCount: Int?
+    public let coloredOutputMismatchCount: Int?
+    public let previewCommitViolationCount: Int?
 
     public init(
         schemaVersion: Int,
@@ -303,7 +310,14 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         revisionRestoreMilliseconds: [Double]? = nil,
         historyResidentBytes: Int? = nil,
         historyCommandCount: Int? = nil,
+        historyCanUndo: Bool? = nil,
+        historyCanRedo: Bool? = nil,
+        historyAppendCount: Int? = nil,
+        historyNavigationFinishCount: Int? = nil,
+        historyReleasedRevisionCount: Int? = nil,
         changedRegionCount: Int? = nil,
+        coloredOutputMismatchCount: Int? = nil,
+        previewCommitViolationCount: Int? = nil,
         program: String? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -353,7 +367,14 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         self.revisionRestoreMilliseconds = revisionRestoreMilliseconds
         self.historyResidentBytes = historyResidentBytes
         self.historyCommandCount = historyCommandCount
+        self.historyCanUndo = historyCanUndo
+        self.historyCanRedo = historyCanRedo
+        self.historyAppendCount = historyAppendCount
+        self.historyNavigationFinishCount = historyNavigationFinishCount
+        self.historyReleasedRevisionCount = historyReleasedRevisionCount
         self.changedRegionCount = changedRegionCount
+        self.coloredOutputMismatchCount = coloredOutputMismatchCount
+        self.previewCommitViolationCount = previewCommitViolationCount
     }
 
     public static func encode(_ record: BenchmarkRecord) throws -> Data {
@@ -412,9 +433,44 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
                 "historyCommandCount"
             )
         }
+        guard historyCanUndo != nil else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "historyCanUndo"
+            )
+        }
+        guard historyCanRedo != nil else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "historyCanRedo"
+            )
+        }
+        guard let historyAppendCount else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "historyAppendCount"
+            )
+        }
+        guard let historyNavigationFinishCount else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "historyNavigationFinishCount"
+            )
+        }
+        guard let historyReleasedRevisionCount else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "historyReleasedRevisionCount"
+            )
+        }
         guard let changedRegionCount else {
             throw BenchmarkRecordError.missingSchemaFourMetric(
                 "changedRegionCount"
+            )
+        }
+        guard let coloredOutputMismatchCount else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "coloredOutputMismatchCount"
+            )
+        }
+        guard let previewCommitViolationCount else {
+            throw BenchmarkRecordError.missingSchemaFourMetric(
+                "previewCommitViolationCount"
             )
         }
 
@@ -440,7 +496,12 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         for (field, value) in [
             ("historyResidentBytes", historyResidentBytes),
             ("historyCommandCount", historyCommandCount),
+            ("historyAppendCount", historyAppendCount),
+            ("historyNavigationFinishCount", historyNavigationFinishCount),
+            ("historyReleasedRevisionCount", historyReleasedRevisionCount),
             ("changedRegionCount", changedRegionCount),
+            ("coloredOutputMismatchCount", coloredOutputMismatchCount),
+            ("previewCommitViolationCount", previewCommitViolationCount),
         ] where value < 0 {
             throw BenchmarkRecordError.invalidNumericValue(field: field)
         }

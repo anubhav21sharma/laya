@@ -23,14 +23,24 @@ enum HarnessLaunch {
 
             let sceneData = try Data(contentsOf: URL(fileURLWithPath: scenePath))
             let scene = try HarnessScene.decode(sceneData)
-            let result = try HarnessRunner(device: device).run(
-                scene: scene,
-                outputDirectory: URL(fileURLWithPath: outputPath),
-                build: BenchmarkBuild(
-                    configuration: configuration,
-                    gitCommit: gitCommit
-                )
+            let outputDirectory = URL(fileURLWithPath: outputPath)
+            let build = BenchmarkBuild(
+                configuration: configuration,
+                gitCommit: gitCommit
             )
+            let result = if scene.schemaVersion == 4 {
+                try SliceThreeHarnessRunner(device: device).run(
+                    scene: scene,
+                    outputDirectory: outputDirectory,
+                    build: build
+                )
+            } else {
+                try HarnessRunner(device: device).run(
+                    scene: scene,
+                    outputDirectory: outputDirectory,
+                    build: build
+                )
+            }
 
             print(
                 "HARNESS PASS scene=\(scene.name) image=\(result.imageURL.path) benchmark=\(result.benchmarkURL.path)"

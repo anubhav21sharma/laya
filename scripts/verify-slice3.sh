@@ -30,6 +30,36 @@ verify_tracked_source_state() {
   done < <(git status --porcelain --untracked-files=no)
 }
 
+verify_untracked_build_inputs() {
+  local path
+  while IFS= read -r -d '' path; do
+    gate_error "untracked build input is outside committed HEAD: $path"
+    return 1
+  done < <(git ls-files --others --exclude-standard -z -- \
+    Sources \
+    Tests \
+    App/PatternSpike \
+    Package.swift \
+    Package.resolved \
+    project.yml \
+    App/project.yml \
+    scripts \
+    .swiftpm \
+    .swift-version \
+    .xcode-version \
+    .swiftformat \
+    .swift-format \
+    .swiftlint.yml \
+    .github/workflows \
+    Config \
+    Configuration)
+}
+
+verify_source_provenance() {
+  verify_tracked_source_state || return 1
+  verify_untracked_build_inputs
+}
+
 slice2_matrix() {
   cat <<'MATRIX'
 generalized-grid|coverage-basic
@@ -63,8 +93,8 @@ MATRIX
 
 slice3_matrix() {
   cat <<'MATRIX'
-colored-draw|undoCanonicalByteDelta|stroke
-eraser-live-commit|undoCanonicalByteDelta|stroke
+colored-draw|coloredOutputMismatchCount|stroke
+eraser-live-commit|previewCommitViolationCount|stroke
 region-undo-seam|undoCanonicalByteDelta|stroke
 clear-undo|redoCanonicalByteDelta|clear
 tiling-undo|metadataCanonicalByteDelta|tiling
@@ -622,7 +652,7 @@ prove_generated_artifacts_ignored() {
 }
 
 run_gate() {
-  local name family metric
+  local name family metric host_arch
   local slice0_log="$repo_root/.build/slice3-slice0-functional.log"
   local slice1_log="$repo_root/.build/slice3-slice1-functional.log"
   local test_log="$repo_root/.build/slice3-swift-test.log"
@@ -632,8 +662,17 @@ run_gate() {
 
   cd "$repo_root"
   mkdir -p "$repo_root/.build"
-  verify_tracked_source_state || return 1
+  verify_source_provenance || return 1
   git_commit="$(git rev-parse HEAD)"
+  host_arch="$(uname -m)"
+  case "$host_arch" in
+    arm64|x86_64)
+      ;;
+    *)
+      gate_error "unsupported macOS host architecture: $host_arch"
+      return 1
+      ;;
+  esac
 
   if ! ./scripts/verify-slice0.sh >"$slice0_log" 2>&1; then
     cat "$slice0_log" >&2
@@ -660,7 +699,7 @@ run_gate() {
   if ! xcodebuild \
     -project App/PatternSpike.xcodeproj \
     -scheme PatternSpikeMac \
-    -destination 'platform=macOS' \
+    -destination "platform=macOS,arch=$host_arch" \
     -derivedDataPath "$derived_data" \
     build \
     CODE_SIGNING_ALLOWED=NO \
@@ -699,7 +738,7 @@ run_gate() {
   validate_strict_evidence || return 1
   evaluate_benchmarks || return 1
   prove_generated_artifacts_ignored || return 1
-  verify_tracked_source_state || return 1
+  verify_source_provenance || return 1
 
   printf '%s\n' 'slice0-functional=passed'
   printf '%s\n' 'slice1-functional=passed'

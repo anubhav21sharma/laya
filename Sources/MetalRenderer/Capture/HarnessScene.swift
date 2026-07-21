@@ -98,7 +98,7 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
         }
     }
 
-    var isSliceThreeProgram: Bool {
+    public var isSliceThreeProgram: Bool {
         switch self {
         case .coloredDraw, .eraserLiveCommit, .regionUndoSeam,
              .clearUndo, .tilingUndo, .resizeCropFill:
@@ -128,6 +128,7 @@ public enum HarnessStructuralMetric: String, Codable, Equatable, Sendable {
     case coordinateContinuityMismatchCount
     case visibleCellCanonicalByteDelta
     case previewCommitViolationCount
+    case coloredOutputMismatchCount
     case historyCommandCount
     case historyResidentBytes
     case changedRegionCount
@@ -139,7 +140,8 @@ public enum HarnessStructuralMetric: String, Codable, Equatable, Sendable {
 
     var isSliceThreeOnly: Bool {
         switch self {
-        case .historyCommandCount, .historyResidentBytes,
+        case .coloredOutputMismatchCount, .historyCommandCount,
+             .historyResidentBytes,
              .changedRegionCount, .undoCanonicalByteDelta,
              .redoCanonicalByteDelta, .metadataCanonicalByteDelta,
              .restoredWidth, .restoredHeight:

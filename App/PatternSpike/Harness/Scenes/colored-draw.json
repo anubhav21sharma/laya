@@ -8,8 +8,11 @@
   "tiling": 0,
   "diagnosticMode": "hardRound",
   "program": "coloredDraw",
-  "checks": [],
+  "checks": [
+    {"channel": "canonical", "x": 64, "y": 64, "expectedBGRA": [38, 77, 153, 191], "tolerance": 1}
+  ],
   "structuralChecks": [
+    {"metric": "coloredOutputMismatchCount", "relation": "equal", "value": 0},
     {"metric": "undoCanonicalByteDelta", "relation": "equal", "value": 0},
     {"metric": "redoCanonicalByteDelta", "relation": "equal", "value": 0},
     {"metric": "historyCommandCount", "relation": "equal", "value": 1}

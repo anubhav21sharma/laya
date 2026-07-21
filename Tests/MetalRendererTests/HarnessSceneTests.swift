@@ -173,7 +173,7 @@ func legacySchemasRejectSliceThreeOnlyStructuralMetrics() {
 func sliceThreeStructuralDiagnosticIsByteExact() {
     let error = SliceThreeHarnessRunError.structuralMismatch(
         sceneName: "colored-draw-negative-control",
-        metric: .undoCanonicalByteDelta,
+        metric: .coloredOutputMismatchCount,
         expectedRelation: .equal,
         expectedValue: 1,
         actualValue: 0
@@ -181,7 +181,7 @@ func sliceThreeStructuralDiagnosticIsByteExact() {
 
     #expect(
         error.localizedDescription
-            == "Slice 3 scene 'colored-draw-negative-control' metric undoCanonicalByteDelta: expected equal 1, actual 0."
+            == "Slice 3 scene 'colored-draw-negative-control' metric coloredOutputMismatchCount: expected equal 1, actual 0."
     )
 }
 
@@ -194,8 +194,8 @@ func sliceThreeScenePairsAreSchemaFourAndDifferOnlyAtNamedExpectation() throws {
     let directory = repositoryRoot
         .appendingPathComponent("App/PatternSpike/Harness/Scenes")
     let pairs: [(String, TilingHarnessProgram, HarnessStructuralMetric)] = [
-        ("colored-draw", .coloredDraw, .undoCanonicalByteDelta),
-        ("eraser-live-commit", .eraserLiveCommit, .undoCanonicalByteDelta),
+        ("colored-draw", .coloredDraw, .coloredOutputMismatchCount),
+        ("eraser-live-commit", .eraserLiveCommit, .previewCommitViolationCount),
         ("region-undo-seam", .regionUndoSeam, .undoCanonicalByteDelta),
         ("clear-undo", .clearUndo, .redoCanonicalByteDelta),
         ("tiling-undo", .tilingUndo, .metadataCanonicalByteDelta),
@@ -213,6 +213,23 @@ func sliceThreeScenePairsAreSchemaFourAndDifferOnlyAtNamedExpectation() throws {
         #expect(positive.schemaVersion == 4, "\(name)")
         #expect(positive.program == program, "\(name)")
         #expect(negative.name == "\(name)-negative-control", "\(name)")
+        if name == "colored-draw" {
+            let check = try #require(positive.checks.first)
+            #expect(positive.checks.count == 1)
+            #expect(check.channel == .canonical)
+            #expect(check.x == 64)
+            #expect(check.y == 64)
+            #expect(check.expectedBGRA == [38, 77, 153, 191])
+            #expect(check.tolerance == 1)
+        } else if name == "eraser-live-commit" {
+            let check = try #require(positive.checks.first)
+            #expect(positive.checks.count == 1)
+            #expect(check.channel == .canonical)
+            #expect(check.x == 64)
+            #expect(check.y == 64)
+            #expect(check.expectedBGRA == [0, 0, 0, 0])
+            #expect(check.tolerance == 0)
+        }
         #expect(positive.structuralChecks.count == negative.structuralChecks.count)
         let positiveCheck = try #require(
             positive.structuralChecks.first { $0.metric == metric }
@@ -245,6 +262,28 @@ func sliceThreeScenePairsAreSchemaFourAndDifferOnlyAtNamedExpectation() throws {
 }
 
 @Test
+func sliceThreeRunnerUsesTheAppLayerDocumentHistorySeam() throws {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let rendererRunner = repositoryRoot.appendingPathComponent(
+        "Sources/MetalRenderer/Capture/SliceThreeHarnessRunner.swift"
+    )
+    let appRunner = repositoryRoot.appendingPathComponent(
+        "App/PatternSpike/Harness/SliceThreeHarnessRunner.swift"
+    )
+
+    #expect(!FileManager.default.fileExists(atPath: rendererRunner.path))
+    let source = try String(contentsOf: appRunner, encoding: .utf8)
+    #expect(source.contains("SliceThreeHarnessHistory"))
+    #expect(source.contains("history.evidence"))
+    #expect(source.contains("history.beginUndo()"))
+    #expect(source.contains("history.beginRedo()"))
+    #expect(!source.contains("harnessRasterRevisionResidentBytes"))
+}
+
+@Test
 func sliceThreeGatePinsNegativeFirstOrderAndApprovedProjectedABI() throws {
     let repositoryRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -257,8 +296,8 @@ func sliceThreeGatePinsNegativeFirstOrderAndApprovedProjectedABI() throws {
         encoding: .utf8
     )
     let expectedOrder = [
-        "colored-draw|undoCanonicalByteDelta",
-        "eraser-live-commit|undoCanonicalByteDelta",
+        "colored-draw|coloredOutputMismatchCount",
+        "eraser-live-commit|previewCommitViolationCount",
         "region-undo-seam|undoCanonicalByteDelta",
         "clear-undo|redoCanonicalByteDelta",
         "tiling-undo|metadataCanonicalByteDelta",
@@ -274,6 +313,40 @@ func sliceThreeGatePinsNegativeFirstOrderAndApprovedProjectedABI() throws {
     #expect(gate.contains("SLICE3 GATE PASS"))
     #expect(!gate.contains("retry"))
     #expect(!gate.contains("warmup"))
+    #expect(gate.contains("host_arch=\"$(uname -m)\""))
+    #expect(gate.contains("platform=macOS,arch=$host_arch"))
+}
+
+@Test
+func sliceThreeGatePreflightRejectsUntrackedSwiftInput() throws {
+    let repository = try makeSliceThreeGatePreflightRepository()
+    defer { try? FileManager.default.removeItem(at: repository) }
+    let input = repository.appendingPathComponent(
+        "Sources/UntrackedGateInput.swift"
+    )
+    try "struct UntrackedGateInput {}\n".write(to: input, atomically: true, encoding: .utf8)
+
+    let result = try runSliceThreeGatePreflight(in: repository)
+
+    #expect(result.status == 1)
+    #expect(
+        result.standardError.contains(
+            "untracked build input is outside committed HEAD: Sources/UntrackedGateInput.swift"
+        )
+    )
+}
+
+@Test
+func sliceThreeGatePreflightAllowsUnrelatedVSCodeFiles() throws {
+    let repository = try makeSliceThreeGatePreflightRepository()
+    defer { try? FileManager.default.removeItem(at: repository) }
+    let settings = repository.appendingPathComponent(".vscode/launch.json")
+    try "{}\n".write(to: settings, atomically: true, encoding: .utf8)
+
+    let result = try runSliceThreeGatePreflight(in: repository)
+
+    #expect(result.status == 0)
+    #expect(result.standardError.isEmpty)
 }
 
 @Test
@@ -2514,6 +2587,82 @@ func longStrokeFrameRunsHarnessAuditAfterProductionSubmit() {
     #expect(result.measurement == 0.25)
     #expect(injectedClock == 110.25)
     #expect(events == ["production-submit", "harness-audit-42"])
+}
+
+private func makeSliceThreeGatePreflightRepository() throws -> URL {
+    let repository = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(
+        at: repository.appendingPathComponent("Sources"),
+        withIntermediateDirectories: true
+    )
+    try FileManager.default.createDirectory(
+        at: repository.appendingPathComponent(".vscode"),
+        withIntermediateDirectories: true
+    )
+    try "fixture\n".write(
+        to: repository.appendingPathComponent("README.md"),
+        atomically: true,
+        encoding: .utf8
+    )
+    try runGateFixtureCommand(["init", "--quiet"], in: repository)
+    try runGateFixtureCommand(["config", "user.email", "gate@example.invalid"], in: repository)
+    try runGateFixtureCommand(["config", "user.name", "Slice 3 Gate Fixture"], in: repository)
+    try runGateFixtureCommand(["add", "README.md"], in: repository)
+    try runGateFixtureCommand(["commit", "--quiet", "-m", "fixture"], in: repository)
+    return repository
+}
+
+private func runSliceThreeGatePreflight(
+    in repository: URL
+) throws -> (status: Int32, standardError: String) {
+    let script = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("scripts/verify-slice3.sh")
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/bash")
+    process.arguments = [
+        "-c",
+        "source \"$1\"; cd \"$2\"; verify_source_provenance",
+        "bash",
+        script.path,
+        repository.path,
+    ]
+    process.standardOutput = FileHandle.nullDevice
+    let standardError = Pipe()
+    process.standardError = standardError
+    try process.run()
+    process.waitUntilExit()
+    return (
+        process.terminationStatus,
+        String(
+            decoding: standardError.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
+    )
+}
+
+private func runGateFixtureCommand(
+    _ arguments: [String],
+    in repository: URL
+) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = arguments
+    process.currentDirectoryURL = repository
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        throw GateFixtureError.gitCommandFailed(arguments)
+    }
+}
+
+private enum GateFixtureError: Error {
+    case gitCommandFailed([String])
 }
 
 private func taskSevenSceneObject(
