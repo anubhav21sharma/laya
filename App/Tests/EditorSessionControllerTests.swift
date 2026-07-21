@@ -488,7 +488,7 @@ func focusLossPairsSpaceReleaseAndCancelsTheActivePointer() throws {
 #if os(macOS)
 @Test
 @MainActor
-func nativePointerCancellationStopsAnActivePan() throws {
+func escapeDuringActivePanCancelsNativeAndReducerState() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     var focusRequestCount = 0
@@ -509,7 +509,13 @@ func nativePointerCancellationStopsAnActivePan() throws {
     #expect(focusRequestCount == 1)
     #expect(view.hasActivePointerInteractionForTesting)
 
-    view.applyPointerCancellation(generation: 1)
+    var pointerCancellationGeneration: UInt = 0
+    handleEditorShortcut(
+        .cancel,
+        controller: controller,
+        pointerCancellationGeneration: &pointerCancellationGeneration
+    )
+    view.applyPointerCancellation(generation: pointerCancellationGeneration)
     let viewportAfterCancellation = renderer.viewport
     let drag = try #require(
         pointerEvent(type: .leftMouseDragged, location: CGPoint(x: 48, y: 48))
@@ -518,6 +524,9 @@ func nativePointerCancellationStopsAnActivePan() throws {
 
     #expect(!view.hasActivePointerInteractionForTesting)
     #expect(renderer.viewport == viewportAfterCancellation)
+    #expect(!controller.isSpaceDown)
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(renderer.isIdle)
 }
 
 private func pointerEvent(

@@ -18,6 +18,9 @@ struct EditorShellStructuralTests {
     @Test
     func swiftUIShellIsTheSingleSemanticKeyOwner() throws {
         let content = try source("App/PatternSpike/ContentView.swift")
+        let commands = try source(
+            "App/PatternSpike/Commands/EditorFocusedCommands.swift"
+        )
         let native = try source(
             "App/PatternSpike/Canvas/InteractiveMetalView.swift"
         )
@@ -29,10 +32,30 @@ struct EditorShellStructuralTests {
         #expect(content.contains("case .escape:"))
         #expect(content.contains("case .space:"))
         #expect(content.contains("case .return:"))
-        #expect(content.contains("controller.handleShortcut(shortcut)"))
+        #expect(content.contains("handleEditorShortcut("))
         #expect(content.contains(".onChange(of: editorFocused)"))
         #expect(content.contains("return .ignored"))
         #expect(keyPressOwnerCount(in: [content, native, canvas]) == 1)
+        #expect(!commands.contains(".keyboardShortcut("))
+        #expect(
+            keyPressOwnerCount(in: [content, commands, native, canvas]) == 1
+        )
+    }
+
+    @Test
+    func escapeUsesTheSharedAppCancellationBridge() throws {
+        let content = try source("App/PatternSpike/ContentView.swift")
+        let controller = try source(
+            "App/PatternSpike/EditorSessionController.swift"
+        )
+
+        #expect(content.contains("handleEditorShortcut("))
+        #expect(controller.contains("case .cancel:"))
+        #expect(controller.contains("controller.handleFocusLoss()"))
+        #expect(controller.contains("pointerCancellationGeneration &+= 1"))
+        #expect(
+            !controller.contains("func cancelEditorInteraction(")
+        )
     }
 
     @Test
@@ -66,7 +89,8 @@ struct EditorShellStructuralTests {
         )
 
         #expect(content.contains("pointerCancellationGeneration"))
-        #expect(content.contains("cancelEditorInteraction"))
+        #expect(content.contains("cancelCurrentInteraction"))
+        #expect(!content.contains("private func cancelEditorInteraction"))
         #expect(canvas.contains("applyPointerCancellation("))
         #expect(native.contains("lastPointerCancellationGeneration"))
         #expect(native.contains("dragMode = nil"))
@@ -98,6 +122,7 @@ struct EditorShellStructuralTests {
         #expect(commands.contains("actions?.clear()"))
         #expect(commands.contains("actions?.selectDraw()"))
         #expect(commands.contains("actions?.selectErase()"))
+        #expect(!commands.contains(".keyboardShortcut("))
         #expect(!commands.contains("GridRenderer"))
         #expect(app.contains(".commands { EditorFocusedCommands() }"))
     }

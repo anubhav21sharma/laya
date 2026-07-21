@@ -3,6 +3,21 @@ import MetalRenderer
 import PatternEngine
 
 @MainActor
+func handleEditorShortcut(
+    _ shortcut: EditorShortcut,
+    controller: EditorSessionController,
+    pointerCancellationGeneration: inout UInt
+) {
+    switch shortcut {
+    case .cancel:
+        controller.handleFocusLoss()
+        pointerCancellationGeneration &+= 1
+    default:
+        controller.handleShortcut(shortcut)
+    }
+}
+
+@MainActor
 final class EditorSessionController {
     let model: EditorModel
     let renderer: GridRenderer
@@ -95,6 +110,10 @@ final class EditorSessionController {
 
     var historyAvailabilityForTesting: (canUndo: Bool, canRedo: Bool) {
         (history.canUndo, history.canRedo)
+    }
+
+    var transactionStateForTesting: EditorTransactionState {
+        transaction.state
     }
 
     func handleStrokeSample(_ sample: StrokeSample) {

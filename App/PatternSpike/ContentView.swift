@@ -107,7 +107,7 @@ struct ContentView: View {
         .focused($editorFocused)
         .onChange(of: editorFocused) { _, isFocused in
             if !isFocused {
-                cancelEditorInteraction(controller)
+                cancelCurrentInteraction(controller)
             }
         }
         .onKeyPress(phases: .all) { press in
@@ -123,19 +123,19 @@ struct ContentView: View {
             }
         }
         .onDisappear {
-            cancelEditorInteraction(controller)
+            cancelCurrentInteraction(controller)
             controller.onError = nil
             controller.renderer.onError = nil
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
-                cancelEditorInteraction(controller)
+                cancelCurrentInteraction(controller)
             }
         }
         #if os(macOS)
         .onChange(of: controlActiveState) { _, activeState in
             if activeState != .key {
-                cancelEditorInteraction(controller)
+                cancelCurrentInteraction(controller)
             }
         }
         .focusedSceneValue(
@@ -149,11 +149,14 @@ struct ContentView: View {
         editorFocused = true
     }
 
-    private func cancelEditorInteraction(
+    private func cancelCurrentInteraction(
         _ controller: EditorSessionController
     ) {
-        controller.handleFocusLoss()
-        pointerCancellationGeneration &+= 1
+        handleEditorShortcut(
+            .cancel,
+            controller: controller,
+            pointerCancellationGeneration: &pointerCancellationGeneration
+        )
     }
 
     private func handleKeyPress(
@@ -170,7 +173,11 @@ struct ContentView: View {
             return .ignored
         }
 
-        controller.handleShortcut(shortcut)
+        handleEditorShortcut(
+            shortcut,
+            controller: controller,
+            pointerCancellationGeneration: &pointerCancellationGeneration
+        )
         return .handled
     }
 

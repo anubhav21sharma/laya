@@ -31,13 +31,11 @@ struct EditorFocusedCommands: Commands {
             Button("Undo") {
                 actions?.undo()
             }
-            .keyboardShortcut("z", modifiers: .command)
             .disabled(actions?.canUndo != true)
 
             Button("Redo") {
                 actions?.redo()
             }
-            .keyboardShortcut("z", modifiers: [.command, .shift])
             .disabled(actions?.canRedo != true)
         }
 
@@ -45,13 +43,11 @@ struct EditorFocusedCommands: Commands {
             Button("Draw") {
                 actions?.selectDraw()
             }
-            .keyboardShortcut("b", modifiers: [])
             .disabled(actions?.canEdit != true)
 
             Button("Erase") {
                 actions?.selectErase()
             }
-            .keyboardShortcut("e", modifiers: [])
             .disabled(actions?.canEdit != true)
 
             Divider()
@@ -59,7 +55,6 @@ struct EditorFocusedCommands: Commands {
             Button("Clear") {
                 actions?.clear()
             }
-            .keyboardShortcut("0", modifiers: [])
             .disabled(actions?.canEdit != true)
         }
     }
