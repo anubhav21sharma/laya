@@ -3,41 +3,42 @@
 - **Status:** Pending Performance And Manual Acceptance
 - **Date:** 2026-07-21
 - **Implementation evidence commit:**
-  `df14f9d0ae4b5a9992ed4e23e546d63a72c805ef`
-- **Review-hardening commit:**
-  `9951b6a87d22f4820565e1b20037565f5929c733`
+  `048fdcb6280b826734d541de4b7f2208a50b478a`
+- **Final evidence-hardening commit:**
+  `048fdcb6280b826734d541de4b7f2208a50b478a`
 - **Branch:** `main`
-- **Authorized base:** `e0c9adb`
+- **Authorized base:** `0587d2cecfae51cd6050193a00dd4cd87511abf3`
 
 ## Scope Delivered
 
 Slice 3 now has a strict schema-4 real-Metal acceptance harness and one-shot
-gate for the editor behavior implemented by Tasks 1–9. The schema adds the six
-focused programs and their structural assertions, while schema 1–3 decoding
-and validation remain strict. `SliceThreeHarnessRunner` exercises the public
-renderer transaction and revision APIs with synchronous harness waits instead
-of adding test-only editing paths.
+gate for the editor behavior implemented by Tasks 1–9. Schema 1–3 decoding and
+validation remain strict. The schema-4 runner lives in the app layer and drives
+the production `DocumentHistory` orchestration seam: successful raster,
+resize, and tiling edits append real commands; undo/redo use two-phase
+`beginUndo`/`beginRedo` and `finishNavigation`; discarded redo revision IDs
+are forwarded to the renderer release sink.
 
 The six families prove colored drawing, live/committed erasing, separated
 seam-region undo/redo, clear undo/redo, metadata-only tiling undo, and
 top-left crop/transparent-fill resize undo/redo. Schema-4 benchmark records
 require revision capture/restore times, retained history bytes and commands,
-and changed-region count. All required numeric values are finite and
-nonnegative.
+undo/redo availability, append and navigation-finalization counts, released
+revision count, family-specific mismatch counts, and changed-region count.
+Every required numeric value is finite and nonnegative.
 
 The gate also corrects the stale Slice 2 projected-instance ABI assertion from
 96 to 112 bytes. The four-fragment generalized-grid case is checked as exactly
 448 bytes.
 
-Post-review hardening replaces permissive file checks with a six-scene truth
-table. It requires exact stdout, schema/program/scene identity, record keys,
-structural counts, 112-byte instance accounting, exact PNG names/counts and
-dimensions, and real PNG decoding. Stable-hardware evaluation requires every
-brush, tiling, commit, event-to-submit, and missed-frame series with exact
-sample counts, common hardware/OS/configuration/commit provenance, the Slice 1
-500-dab record, and long-stroke instance identity before evaluating budgets.
-The event-to-submit CPU stop now occurs after command-buffer submission and
-includes the complete live-flush encode/submit span.
+Final evidence hardening adds family-specific negative controls for colored
+output and eraser preview/commit equivalence. It keeps a six-scene exact truth
+table, strict record keys, 112-byte instance accounting, exact PNG
+names/counts/dimensions, real PNG decoding, and common
+hardware/OS/configuration/commit provenance. The gate rejects untracked build
+inputs, permits unrelated `.vscode/` files, repeats provenance validation after
+artifact generation, and pins the macOS destination to the deterministic host
+architecture (`arm64` on this host).
 
 ## Environment And Provenance
 
@@ -46,10 +47,10 @@ includes the complete live-flush encode/submit span.
 - Logical processors: `8`
 - Physical memory: `8589934592` bytes
 - Build configuration: `Debug`
-- Harness timestamp: `2026-07-20T23:37:38Z` through
-  `2026-07-20T23:37:39Z`
+- Harness timestamp: `2026-07-21T01:21:14Z` through
+  `2026-07-21T01:21:16Z`
 - Every retained Slice 3 benchmark record identifies implementation commit
-  `9951b6a87d22f4820565e1b20037565f5929c733` and its exact schema-4
+  `048fdcb6280b826734d541de4b7f2208a50b478a` and its exact schema-4
   program identity.
 
 This device is a paravirtual GPU, so its real command-buffer timings are not a
@@ -58,17 +59,20 @@ are retained as exact diagnostics, not promoted or aggregated into a pass.
 
 ## Automated Evidence
 
-The authorized post-review invocation of `./scripts/verify-slice3.sh`
-completed every functional stage in fixed order:
+The single authorized final invocation of `./scripts/verify-slice3.sh`
+completed every functional stage in fixed order against committed HEAD
+`048fdcb6280b826734d541de4b7f2208a50b478a`:
 
 - Slice 0 automated gate: passed.
 - Slice 1 functional gate, including the Slice 0 regression: passed under its
   explicit functional-only performance override.
-- Swift tests: `303 tests in 5 suites` passed, including 17 corrupted artifact
-  fixtures, 9 incomplete/mixed performance fixtures, and 2 submission-timing
-  seam tests.
+- Swift tests: `319 tests in 5 suites` passed, including real
+  `DocumentHistory` append/navigation evidence tests, strict schema-4
+  corruption tests, gate provenance fixtures, and deterministic destination
+  assertions.
 - Xcode project generation: succeeded.
-- macOS Debug build: `BUILD SUCCEEDED`.
+- macOS Debug build for `platform=macOS,arch=arm64`: `BUILD SUCCEEDED`, with
+  no ambiguous-destination warning.
 - Generic iPadOS Simulator Debug build: `BUILD SUCCEEDED`.
 - Slice 2 correctness replay: `26 / 26` scenes passed and wrote benchmark
   records. This does not claim Slice 2 performance or manual acceptance.
@@ -76,10 +80,10 @@ completed every functional stage in fixed order:
   assertion, before their corresponding positives.
 - Slice 3 positives: `6 / 6` passed, wrote `33` PNG artifacts and `6`
   schema-4 benchmark records.
-- Artifact-family, schema-4 benchmark, provenance, finite/nonnegative,
-  112-byte instance-ABI, and generalized-grid 448-byte checks: passed before
-  the performance stop. Ignore and repository-hygiene checks passed
-  separately during final review.
+- Artifact-family, exact-key schema-4 benchmark, real history-state,
+  finite/nonnegative, 112-byte instance-ABI, generalized-grid 448-byte,
+  committed-source provenance, and ignore checks: passed before the
+  performance stop. The final source-provenance recheck also passed.
 
 The performance evaluator then stopped the one-shot gate with exactly:
 
@@ -97,18 +101,21 @@ structural value changing from `0` to `1`. Exit status was exactly 1 and stderr
 was exactly one of these lines:
 
 ```text
-HARNESS FAIL Slice 3 scene 'colored-draw-negative-control' metric undoCanonicalByteDelta: expected equal 1, actual 0.
-HARNESS FAIL Slice 3 scene 'eraser-live-commit-negative-control' metric undoCanonicalByteDelta: expected equal 1, actual 0.
+HARNESS FAIL Slice 3 scene 'colored-draw-negative-control' metric coloredOutputMismatchCount: expected equal 1, actual 0.
+HARNESS FAIL Slice 3 scene 'eraser-live-commit-negative-control' metric previewCommitViolationCount: expected equal 1, actual 0.
 HARNESS FAIL Slice 3 scene 'region-undo-seam-negative-control' metric undoCanonicalByteDelta: expected equal 1, actual 0.
 HARNESS FAIL Slice 3 scene 'clear-undo-negative-control' metric redoCanonicalByteDelta: expected equal 1, actual 0.
 HARNESS FAIL Slice 3 scene 'tiling-undo-negative-control' metric metadataCanonicalByteDelta: expected equal 1, actual 0.
 HARNESS FAIL Slice 3 scene 'resize-crop-fill-negative-control' metric redoCanonicalByteDelta: expected equal 1, actual 0.
 ```
 
-The eraser positive additionally enforces live/commit maximum byte delta
-`<= 1`. The region positive enforces two separated changed regions; the
-tiling positive enforces zero canonical delta; and all byte-exact undo/redo
-and resize-dimension assertions passed.
+The colored positive independently checks the committed canonical BGRA value
+and records zero `coloredOutputMismatchCount`. The eraser positive checks the
+transparent destination-out canonical pixel and records zero
+`previewCommitViolationCount` across all live/committed channels at tolerance
+1. The region positive enforces two separated changed regions; the tiling
+positive enforces zero canonical delta; and all byte-exact undo/redo and
+resize-dimension assertions passed.
 
 ## Exact Benchmark Diagnostics
 
@@ -118,95 +125,106 @@ aggregates. Empty arrays mean that operation is not part of that scene.
 
 ### `colored-draw`
 
-- brush processing ms: `[0.2720355987548828, 0.11897087097167969]`
-- dab GPU ms: `[1.2400833365973085]`
-- grid GPU ms: `[0.5533749936148524, 0.2988749911310151]`
-- commit GPU ms: `[0.5900833348277956]`
-- event-to-submit ms: `[0.30791759490966797]`
-- revision capture ms: `[0.865936279296875]`
-- revision restore ms: `[0.4420280456542969, 0.29098987579345703]`
-- history: `4224` bytes, `1` command, `1` changed region
-- frames/missed/peak resident: `4 / 0 / 22904832` bytes
+- brush processing ms: `[0.20897388458251953, 0.06902217864990234]`
+- dab GPU ms: `[1.0458749893587083]`
+- grid GPU ms: `[0.5049166647950187, 0.519041670486331]`
+- commit GPU ms: `[0.5908750026719645]`
+- event-to-submit ms: `[0.2840757369995117]`
+- revision capture ms: `[0.8150339126586914]`
+- revision restore ms: `[0.5650520324707031, 0.5260705947875977]`
+- history bytes/commands/appends/navigation finishes/releases:
+  `4224 / 1 / 1 / 2 / 0`; `canUndo=true`, `canRedo=false`
+- family-specific mismatch count / changed regions: `0 / 1`
+- frames/missed/peak resident: `4 / 0 / 22921216` bytes
 - projected fragments / maximum / instance bytes: `1 / 1 / 112`
 
 ### `eraser-live-commit`
 
-- brush processing ms: `[0.2529621124267578, 0.08797645568847656, 0.04589557647705078, 0.030994415283203125]`
-- dab GPU ms: `[0.9146249940386042, 0.380749988835305]`
-- grid GPU ms: `[0.4666250024456531, 0.2963333245133981, 0.3223749954486266]`
-- commit GPU ms: `[0.7471249991795048, 0.48800000513438135]`
-- event-to-submit ms: `[0.2460479736328125, 0.07605552673339844]`
-- revision capture ms: `[0.9959936141967773, 0.6181001663208008]`
-- revision restore ms: `[0.7120370864868164, 0.31495094299316406]`
-- history: `8448` bytes, `2` commands, `1` changed region
-- frames/missed/peak resident: `7 / 0 / 23134208` bytes
+- brush processing ms: `[0.25594234466552734, 0.08094310760498047, 0.05900859832763672, 0.029921531677246094]`
+- dab GPU ms: `[1.3571250019595027, 0.6505416677100584]`
+- grid GPU ms: `[0.5622500029858202, 0.5705000075977296, 0.5762083310401067]`
+- commit GPU ms: `[0.6302499969024211, 0.5383333336794749]`
+- event-to-submit ms: `[0.2799034118652344, 0.06985664367675781]`
+- revision capture ms: `[0.8399486541748047, 0.6340742111206055]`
+- revision restore ms: `[0.5810260772705078, 0.5210638046264648]`
+- history bytes/commands/appends/navigation finishes/releases:
+  `8448 / 2 / 2 / 2 / 0`; `canUndo=true`, `canRedo=false`
+- family-specific mismatch count / changed regions: `0 / 1`
+- frames/missed/peak resident: `7 / 0 / 22970368` bytes
 - projected fragments / maximum / instance bytes: `1 / 1 / 112`
 
 ### `region-undo-seam`
 
-- brush processing ms: `[0.2930164337158203, 0.08606910705566406]`
-- dab GPU ms: `[0.9867500048130751]`
-- grid GPU ms: `[0.5409166624303907, 0.5603750032605603]`
-- commit GPU ms: `[0.6158750038594007]`
-- event-to-submit ms: `[0.23615360260009766]`
-- revision capture ms: `[0.8310079574584961]`
-- revision restore ms: `[0.5829334259033203, 0.3590583801269531]`
-- history: `1792` bytes, `1` command, `2` changed regions
-- frames/missed/peak resident: `4 / 0 / 22904832` bytes
+- brush processing ms: `[0.22399425506591797, 0.06699562072753906]`
+- dab GPU ms: `[1.0531250009080395]`
+- grid GPU ms: `[1.2492916721384972, 0.5336666654329747]`
+- commit GPU ms: `[0.8394583419431001]`
+- event-to-submit ms: `[0.19800662994384766]`
+- revision capture ms: `[1.1060237884521484]`
+- revision restore ms: `[0.3609657287597656, 0.30100345611572266]`
+- history bytes/commands/appends/navigation finishes/releases:
+  `1792 / 1 / 1 / 2 / 0`; `canUndo=true`, `canRedo=false`
+- family-specific mismatch count / changed regions: `0 / 2`
+- frames/missed/peak resident: `4 / 0 / 22855680` bytes
 - projected fragments / maximum / instance bytes: `2 / 2 / 224`
 
 ### `clear-undo`
 
-- brush processing ms: `[0.2599954605102539, 0.13494491577148438]`
-- dab GPU ms: `[1.3986666599521413]`
-- grid GPU ms: `[0.5569583299802616, 0.6407500040950254]`
-- commit GPU ms: `[0.9464583417866379]`
-- event-to-submit ms: `[0.3489255905151367]`
-- revision capture ms: `[1.3850927352905273, 0.6810426712036133]`
-- revision restore ms: `[0.3669261932373047, 0.3540515899658203]`
-- history: `135296` bytes, `2` commands, `1` changed region
-- frames/missed/peak resident: `4 / 0 / 23035904` bytes
+- brush processing ms: `[0.1989603042602539, 0.0890493392944336]`
+- dab GPU ms: `[1.0687500034691766]`
+- grid GPU ms: `[0.4816250002477318, 0.5902499979129061]`
+- commit GPU ms: `[0.6311250035651028]`
+- event-to-submit ms: `[0.23305416107177734]`
+- revision capture ms: `[0.8620023727416992, 1.701951026916504]`
+- revision restore ms: `[0.532984733581543, 0.5069971084594727]`
+- history bytes/commands/appends/navigation finishes/releases:
+  `135296 / 2 / 2 / 2 / 0`; `canUndo=true`, `canRedo=false`
+- family-specific mismatch count / changed regions: `0 / 1`
+- frames/missed/peak resident: `4 / 0 / 22953984` bytes
 - projected fragments / maximum / instance bytes: `1 / 1 / 112`
 
 ### `tiling-undo`
 
-- brush processing ms: `[0.24402141571044922, 0.10097026824951172]`
-- dab GPU ms: `[1.5772500046296045]`
-- grid GPU ms: `[0.498249995871447, 1.1440000089351088, 0.5344166711438447, 0.3452499950071797, 0.40208332939073443]`
-- commit GPU ms: `[0.9293750044889748]`
-- event-to-submit ms: `[0.3229379653930664]`
-- revision capture ms: `[1.2350082397460938]`
+- brush processing ms: `[0.21207332611083984, 0.07903575897216797]`
+- dab GPU ms: `[1.1458333319751546]`
+- grid GPU ms: `[0.634291660389863, 0.3760000108741224, 0.37133332807570696, 0.3137500025331974, 0.30716667242813855]`
+- commit GPU ms: `[0.720124997314997]`
+- event-to-submit ms: `[0.21207332611083984]`
+- revision capture ms: `[0.9609460830688477]`
 - revision restore ms: `[]`
-- history: `4416` bytes, `2` commands, `0` changed regions
-- frames/missed/peak resident: `7 / 0 / 23461888` bytes
+- history bytes/commands/appends/navigation finishes/releases:
+  `4416 / 2 / 2 / 2 / 0`; `canUndo=true`, `canRedo=false`
+- family-specific mismatch count / changed regions: `0 / 0`
+- frames/missed/peak resident: `7 / 0 / 23478272` bytes
 - projected fragments / maximum / instance bytes: `1 / 1 / 112`
 
 ### `resize-crop-fill`
 
 - brush processing, dab GPU, commit GPU, and event-to-submit ms: `[]`
-- grid GPU ms: `[0.9996666631195694]`
-- revision capture ms: `[1.5000104904174805, 1.0451078414916992]`
-- revision restore ms: `[0.9059906005859375, 0.7929801940917969, 0.6719827651977539, 0.786900520324707]`
-- history: `104448` bytes, `2` commands, `2` changed regions
-- frames/missed/peak resident: `1 / 0 / 22953984` bytes
+- grid GPU ms: `[1.1141666618641466]`
+- revision capture ms: `[1.641988754272461, 1.0609626770019531]`
+- revision restore ms: `[0.7269382476806641, 1.043081283569336, 2.2439956665039062, 1.6820430755615234]`
+- history bytes/commands/appends/navigation finishes/releases:
+  `104448 / 2 / 2 / 4 / 0`; `canUndo=true`, `canRedo=false`
+- family-specific mismatch count / changed regions: `0 / 2`
+- frames/missed/peak resident: `1 / 0 / 22921216` bytes
 - projected fragments / maximum / instance bytes: `0 / 0 / 0`
 
 ## Retained Evidence
 
-- Post-review one-shot stdout: `.build/task10-review-gate.stdout.log`
-- Post-review one-shot stderr: `.build/task10-review-gate.stderr.log`
+- Final one-shot stdout: `.build/final-evidence-gate.stdout.log` (empty)
+- Final one-shot stderr: `.build/final-evidence-gate.stderr.log`
+- Final one-shot exit status: `.build/final-evidence-gate.exit` (`1`)
 - Stage logs: `.build/slice3-slice0-functional.log`,
   `.build/slice3-slice1-functional.log`, `.build/slice3-swift-test.log`,
   `.build/slice3-xcodegen.log`, `.build/slice3-macos-build.log`,
   `.build/slice3-ipados-build.log`, and
   `.build/slice3-evidence-validator-build.log` plus
   `.build/slice3-strict-evidence.log`
-- RED/GREEN focused evidence: `.build/task10-review-red-artifact.log`,
-  `.build/task10-review-red-performance.log`,
-  `.build/task10-review-red-submission.log`, and the corresponding
-  `green-*` logs
-- Standalone final-HEAD six-pair root:
-  `.build/task10-review-pairs-root.txt`
+- RED evidence: `.build/final-evidence-red.log` and
+  `.build/final-evidence-runner-red.log`
+- Focused GREEN evidence: `.build/final-evidence-history-green.log` and
+  `.build/final-evidence-focused-green.log`
 - Slice 2 correctness artifacts: `.build/slice3-artifacts/slice2/`
 - Exact negative stderr and negative artifacts:
   `.build/slice3-artifacts/negative-control/`
