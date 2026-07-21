@@ -87,7 +87,7 @@ public final class RasterRevisionStore: @unchecked Sendable {
     }
 
     private let device: any MTLDevice
-    private let operationStoreIdentity =
+    private let storeIdentity =
         RasterRevisionStoreIdentitySource.shared.makeIdentity()
     private let lock = NSLock()
     private var entries: [StoredRasterRevisionID: Entry] = [:]
@@ -157,8 +157,14 @@ public final class RasterRevisionStore: @unchecked Sendable {
                 nextID <= UInt64.max - 2,
                 "Raster revision identity space exhausted."
             )
-            let beforeID = StoredRasterRevisionID(rawValue: nextID)
-            let afterID = StoredRasterRevisionID(rawValue: nextID + 1)
+            let beforeID = StoredRasterRevisionID(
+                rawValue: nextID,
+                namespace: storeIdentity
+            )
+            let afterID = StoredRasterRevisionID(
+                rawValue: nextID + 1,
+                namespace: storeIdentity
+            )
             nextID += 2
 
             let beforeReference = RasterRevisionReference(
@@ -433,6 +439,9 @@ public final class RasterRevisionStore: @unchecked Sendable {
 
     public func release(_ ids: Set<StoredRasterRevisionID>) {
         withLock {
+            guard ids.allSatisfy({ $0.belongs(to: storeIdentity) }) else {
+                return
+            }
             for id in ids {
                 guard let entry = entries[id] else {
                     preconditionFailure(
@@ -549,7 +558,7 @@ public final class RasterRevisionStore: @unchecked Sendable {
             "Raster revision operation identity space exhausted."
         )
         let token = RasterRevisionOperationToken(
-            storeIdentity: operationStoreIdentity,
+            storeIdentity: storeIdentity,
             sequence: nextOperationToken
         )
         nextOperationToken += 1

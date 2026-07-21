@@ -241,6 +241,105 @@ struct RasterRevisionStoreTests {
     }
 
     @Test
+    func foreignSameLayoutReferenceCannotRestoreLocalPayload() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let firstStore = RasterRevisionStore(device: device)
+        let secondStore = RasterRevisionStore(device: device)
+        let size = PixelSize(width: 64, height: 64)
+        let regions = regionSet(size: size)
+        let firstPair = try firstStore.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let secondPair = try secondStore.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let texture = try makeTexture(device: device, size: size)
+        let queue = try #require(device.makeCommandQueue())
+        try captureAndPublish(
+            firstPair,
+            in: firstStore,
+            from: texture,
+            on: queue
+        )
+        try captureAndPublish(
+            secondPair,
+            in: secondStore,
+            from: texture,
+            on: queue
+        )
+
+        #expect(firstPair.before.id.rawValue == secondPair.before.id.rawValue)
+        #expect((firstPair.before.id == secondPair.before.id) == false)
+        #expect(firstPair.before.id != secondPair.before.id)
+        #expect(firstPair.before != secondPair.before)
+
+        let foreignRestore = try #require(queue.makeCommandBuffer())
+        #expect(throws: MetalRendererError.missingRasterRevision) {
+            let _ = try secondStore.encodeRestore(
+                firstPair.before,
+                into: texture,
+                on: foreignRestore
+            )
+        }
+
+        firstStore.release(firstPair.revisionIDs)
+        secondStore.release(secondPair.revisionIDs)
+    }
+
+    @Test
+    func foreignSameLayoutIDsDoNotReleaseLocalPayload() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let firstStore = RasterRevisionStore(device: device)
+        let secondStore = RasterRevisionStore(device: device)
+        let size = PixelSize(width: 64, height: 64)
+        let regions = regionSet(size: size)
+        let firstPair = try firstStore.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let secondPair = try secondStore.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let texture = try makeTexture(device: device, size: size)
+        let queue = try #require(device.makeCommandQueue())
+        try captureAndPublish(
+            firstPair,
+            in: firstStore,
+            from: texture,
+            on: queue
+        )
+        try captureAndPublish(
+            secondPair,
+            in: secondStore,
+            from: texture,
+            on: queue
+        )
+        let secondStoreBytes = secondStore.residentBytes
+
+        #expect(firstPair.revisionIDs != secondPair.revisionIDs)
+        secondStore.release(firstPair.revisionIDs)
+
+        #expect(secondStore.residentBytes == secondStoreBytes)
+        firstStore.release(firstPair.revisionIDs)
+        if secondStore.residentBytes == secondStoreBytes {
+            secondStore.release(secondPair.revisionIDs)
+        }
+        #expect(firstStore.residentBytes == 0)
+        #expect(secondStore.residentBytes == 0)
+    }
+
+    @Test
     func prematureSuccessFailsTypedAndUnwindsCapture() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let store = RasterRevisionStore(device: device)
@@ -429,6 +528,31 @@ private func regionSet(size: PixelSize) -> PixelRegionSet {
         ],
         clippedTo: size
     )
+}
+
+private func captureAndPublish(
+    _ pair: PendingRasterRevisionPair,
+    in store: RasterRevisionStore,
+    from texture: any MTLTexture,
+    on queue: any MTLCommandQueue
+) throws {
+    let commandBuffer = try #require(queue.makeCommandBuffer())
+    let beforeCapture = try store.encodeCapture(
+        pair.before,
+        from: texture,
+        on: commandBuffer
+    )
+    let afterCapture = try store.encodeCapture(
+        pair.after,
+        from: texture,
+        on: commandBuffer
+    )
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    try requireCompleted(commandBuffer)
+    try store.finalize(beforeCapture, as: .succeeded)
+    try store.finalize(afterCapture, as: .succeeded)
+    store.publish(pair)
 }
 
 private func align(_ value: Int, to alignment: Int) -> Int {

@@ -58,6 +58,11 @@ public struct PixelRegionSet: Equatable, Sendable {
                     current = current.union(pending.remove(at: index))
                     didMerge = true
                 }
+                for index in merged.indices.reversed()
+                where current.touchesOrOverlaps(merged[index]) {
+                    current = current.union(merged.remove(at: index))
+                    didMerge = true
+                }
             }
             merged.append(current)
         }

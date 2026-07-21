@@ -307,6 +307,88 @@ static float4 patternCompositeLive(
     return patternSourceOver(live, canonical);
 }
 
+static uint patternWrappedTexelIndex(int index, uint size) {
+    const int signedSize = int(size);
+    const int remainder = index % signedSize;
+    return uint(remainder < 0 ? remainder + signedSize : remainder);
+}
+
+static uint2 patternWrappedTexel(
+    int2 texel,
+    uint2 textureSize
+) {
+    return uint2(
+        patternWrappedTexelIndex(texel.x, textureSize.x),
+        patternWrappedTexelIndex(texel.y, textureSize.y)
+    );
+}
+
+static float4 patternCompositeThenBilinearSample(
+    texture2d<float> canonical,
+    texture2d<float> live,
+    float2 canonicalPixel,
+    uint compositeMode,
+    uint liveVisible
+) {
+    const float2 samplePosition = canonicalPixel - 0.5;
+    const int2 lower = int2(floor(samplePosition));
+    const float2 blend = fract(samplePosition);
+    const uint2 textureSize = uint2(
+        canonical.get_width(),
+        canonical.get_height()
+    );
+    const uint2 texel00 = patternWrappedTexel(lower, textureSize);
+    const uint2 texel10 = patternWrappedTexel(
+        lower + int2(1, 0),
+        textureSize
+    );
+    const uint2 texel01 = patternWrappedTexel(
+        lower + int2(0, 1),
+        textureSize
+    );
+    const uint2 texel11 = patternWrappedTexel(
+        lower + int2(1, 1),
+        textureSize
+    );
+    const float4 live00 = liveVisible == 0
+        ? float4(0.0)
+        : live.read(texel00);
+    const float4 live10 = liveVisible == 0
+        ? float4(0.0)
+        : live.read(texel10);
+    const float4 live01 = liveVisible == 0
+        ? float4(0.0)
+        : live.read(texel01);
+    const float4 live11 = liveVisible == 0
+        ? float4(0.0)
+        : live.read(texel11);
+    const float4 composite00 = patternCompositeLive(
+        live00,
+        canonical.read(texel00),
+        compositeMode
+    );
+    const float4 composite10 = patternCompositeLive(
+        live10,
+        canonical.read(texel10),
+        compositeMode
+    );
+    const float4 composite01 = patternCompositeLive(
+        live01,
+        canonical.read(texel01),
+        compositeMode
+    );
+    const float4 composite11 = patternCompositeLive(
+        live11,
+        canonical.read(texel11),
+        compositeMode
+    );
+    return mix(
+        mix(composite00, composite10, blend.x),
+        mix(composite01, composite11, blend.x),
+        blend.y
+    );
+}
+
 static float4 patternGridOverlay(
     float4 color,
     PatternDisplayMapping mapping,
@@ -339,11 +421,6 @@ fragment float4 patternGridFragment(
     texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]],
     texture2d<float> live [[texture(PatternTextureIndexLive)]]
 ) {
-    constexpr sampler tileSampler(
-        coord::normalized,
-        address::repeat,
-        filter::linear
-    );
     const float2 screenCenter = frame.drawableSize * 0.5;
     const float2 world = (input.screenPixel - screenCenter) / frame.zoom
         + frame.worldCenter;
@@ -355,15 +432,12 @@ fragment float4 patternGridFragment(
     if (!mapping.valid) {
         return float4(1.0, 0.0, 1.0, 1.0);
     }
-    const float2 uv = mapping.canonicalPixel / frame.tileSize;
-    const float4 base = canonical.sample(tileSampler, uv);
-    const float4 overlay = frame.liveVisible == 0
-        ? float4(0.0)
-        : live.sample(tileSampler, uv);
-    float4 result = patternCompositeLive(
-        overlay,
-        base,
-        frame.compositeMode
+    float4 result = patternCompositeThenBilinearSample(
+        canonical,
+        live,
+        mapping.canonicalPixel,
+        frame.compositeMode,
+        frame.liveVisible
     );
 
     return patternGridOverlay(result, mapping, frame);

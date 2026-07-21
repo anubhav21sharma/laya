@@ -17,10 +17,17 @@ final class GridRenderCompletionMailbox: @unchecked Sendable {
 
     private let lock = NSLock()
     private var outcomes: [Outcome] = []
+    private var deferredOutcomes: [Outcome] = []
+    private var shouldDeferNextOutcome = false
 
     func push(_ outcome: Outcome) {
         lock.lock()
-        outcomes.append(outcome)
+        if shouldDeferNextOutcome {
+            deferredOutcomes.append(outcome)
+            shouldDeferNextOutcome = false
+        } else {
+            outcomes.append(outcome)
+        }
         lock.unlock()
     }
 
@@ -47,6 +54,26 @@ final class GridRenderCompletionMailbox: @unchecked Sendable {
         if outcomes.count > 1 {
             outcomes.insert(outcomes.removeLast(), at: 0)
         }
+        lock.unlock()
+    }
+
+    @MainActor
+    func deferNextForHarness() {
+        lock.lock()
+        precondition(
+            !shouldDeferNextOutcome,
+            "A frame outcome is already deferred for the harness."
+        )
+        shouldDeferNextOutcome = true
+        lock.unlock()
+    }
+
+    @MainActor
+    func releaseDeferredForHarness() {
+        lock.lock()
+        shouldDeferNextOutcome = false
+        outcomes.append(contentsOf: deferredOutcomes)
+        deferredOutcomes.removeAll(keepingCapacity: true)
         lock.unlock()
     }
 }

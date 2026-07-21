@@ -22,6 +22,25 @@ private func strokeSample(
     )
 }
 
+@Test
+@MainActor
+func earlyHarnessReleaseDoesNotHoldTheNextFrameOutcome() {
+    let mailbox = GridRenderCompletionMailbox()
+    mailbox.deferNextForHarness()
+    mailbox.releaseDeferredForHarness()
+    mailbox.push(
+        .init(
+            operationToken: nil,
+            rasterCommit: nil,
+            uploadSubmissions: [],
+            succeeded: true,
+            errorMessage: nil
+        )
+    )
+
+    #expect(mailbox.drain().count == 1)
+}
+
 @MainActor
 private func makeRenderer() throws -> GridRenderer? {
     guard let device = MTLCreateSystemDefaultDevice() else { return nil }
@@ -204,6 +223,76 @@ func submittedCommitAloneOwnsTerminalStateAfterLaterDisplayFailure() throws {
 
     renderer.releaseRasterRevisions([receipt.before.id, receipt.after.id])
     #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+}
+
+@Test
+@MainActor
+func delayedPrecommitFrameFailureBlocksCommitAndTerminatesExactlyOnce() throws {
+    guard let renderer = try makeRenderer() else { return }
+    let token = RendererOperationToken(rawValue: 81)
+    var completions: [RendererOperationCompletion] = []
+    renderer.onOperationCompleted = { completions.append($0) }
+    let initialSnapshot = renderer.harnessTilingMutationSnapshot
+
+    try renderer.beginStroke(
+        token: token,
+        sample: strokeSample(.began),
+        style: drawStyle
+    )
+    try renderer.requestStrokeCommit(
+        token: token,
+        sample: strokeSample(.ended, x: 40),
+        maximumRetainedBytes: 1_000_000
+    )
+
+    renderer.deferNextFrameOutcomeForHarness()
+    _ = try renderer.flushPendingLiveForHarness(forceFailure: true)
+
+    do {
+        _ = try renderer.submitCommitForHarness()
+        Issue.record(
+            "Commit submitted before its token-bearing predecessor drained"
+        )
+        return
+    } catch let error as MetalRendererError {
+        #expect(error == .invalidStrokeLifecycle)
+    }
+
+    #expect(!renderer.isIdle)
+    #expect(completions.isEmpty)
+    #expect(renderer.harnessRevision == initialSnapshot.revision)
+    #expect(
+        renderer.harnessTilingMutationSnapshot.canonicalFront
+            == initialSnapshot.canonicalFront
+    )
+    #expect(renderer.harnessRasterRevisionResidentBytes > 0)
+
+    renderer.releaseDeferredFrameOutcomesForHarness()
+    #expect(
+        throws: MetalRendererError.commandFailed(
+            "injected harness command-buffer failure"
+        )
+    ) {
+        try renderer.drainCompletedOperationsForHarness()
+    }
+
+    #expect(renderer.isIdle)
+    #expect(renderer.harnessRevision == initialSnapshot.revision)
+    #expect(
+        renderer.harnessTilingMutationSnapshot.canonicalFront
+            == initialSnapshot.canonicalFront
+    )
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    #expect(renderer.harnessReservedInstanceBufferCount == 0)
+    #expect(renderer.harnessTilingMutationSnapshot.pendingInstanceCount == 0)
+    #expect(renderer.harnessTilingMutationSnapshot.bakedHighWater == 0)
+    #expect(renderer.harnessTilingMutationSnapshot.emittedHighWater == 0)
+    #expect(completions.count == 1)
+    guard case let .failure(completedToken, _) = completions.first else {
+        Issue.record("Expected exactly one terminal failure")
+        return
+    }
+    #expect(completedToken == token)
 }
 
 @Test

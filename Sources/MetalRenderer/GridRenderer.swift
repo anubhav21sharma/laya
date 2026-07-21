@@ -78,6 +78,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let style: StrokeRenderStyle
         var commitRequested: Bool
         var pendingRevisions: PendingRasterRevisionPair?
+        var pendingTokenBearingFrameCount: Int
 
         var isCommitSubmitted: Bool {
             !commitRequested && pendingRevisions != nil
@@ -289,7 +290,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             token: token,
             style: style,
             commitRequested: false,
-            pendingRevisions: nil
+            pendingRevisions: nil,
+            pendingTokenBearingFrameCount: 0
         )
         do {
             counters.newDabsThisEvent = 0
@@ -832,7 +834,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             token: token,
             style: style,
             commitRequested: false,
-            pendingRevisions: nil
+            pendingRevisions: nil,
+            pendingTokenBearingFrameCount: 0
         )
     }
 
@@ -881,6 +884,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             let shouldEncodeCommit = activeStroke?.commitRequested == true
                 && plannedThrough == liveStroke.emittedHighWater
                 && !hasEarlierPendingUploads
+                && activeStroke?.pendingTokenBearingFrameCount == 0
             if shouldEncodeCommit {
                 rasterCommit = try encodeCommit(
                     commandBuffer,
@@ -1283,6 +1287,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         drainFrameOutcomes()
         drainCompletedUploadRanges()
         guard activeStroke?.commitRequested == true,
+              activeStroke?.pendingTokenBearingFrameCount == 0,
               liveStroke.bakedHighWater == liveStroke.emittedHighWater
         else {
             throw MetalRendererError.invalidStrokeLifecycle
@@ -1351,6 +1356,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     func prioritizeLatestFrameOutcomeForHarness() {
         completionMailbox.prioritizeLastForHarness()
+    }
+
+    func deferNextFrameOutcomeForHarness() {
+        completionMailbox.deferNextForHarness()
+    }
+
+    func releaseDeferredFrameOutcomesForHarness() {
+        completionMailbox.releaseDeferredForHarness()
     }
 
     func drainNextCompletedOperationForHarness() throws {
@@ -2191,11 +2204,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         if let rasterCommit {
             submittedOperationToken = rasterCommit.token
         } else if let execution = activeStroke,
-                  !execution.isCommitSubmitted
+                  !execution.isCommitSubmitted,
+                  encodedClear || !uploads.isEmpty
         {
             submittedOperationToken = execution.token
         } else {
             submittedOperationToken = nil
+        }
+        if rasterCommit == nil, let submittedOperationToken {
+            guard
+                var execution = activeStroke,
+                execution.token == submittedOperationToken,
+                !execution.isCommitSubmitted
+            else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            execution.pendingTokenBearingFrameCount += 1
+            activeStroke = execution
         }
         let submittedUploads = uploadSubmissions
         let submittedCommit = rasterCommit.map {
@@ -2484,6 +2509,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         guard let commit = outcome.rasterCommit else {
+            if let token = outcome.operationToken {
+                finishTokenBearingFrame(token: token)
+            }
             guard !outcome.succeeded else { return nil }
             let error = MetalRendererError.commandFailed(
                 outcome.errorMessage ?? "unknown command-buffer error"
@@ -2504,6 +2532,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             message: outcome.errorMessage
                 ?? "unknown command-buffer error"
         )
+    }
+
+    private func finishTokenBearingFrame(token: RendererOperationToken) {
+        guard
+            var execution = activeStroke,
+            execution.token == token
+        else {
+            return
+        }
+        precondition(
+            execution.pendingTokenBearingFrameCount > 0,
+            "A token-bearing frame outcome drained more than once."
+        )
+        execution.pendingTokenBearingFrameCount -= 1
+        activeStroke = execution
     }
 
     private func finalizeRasterCommitSuccess(

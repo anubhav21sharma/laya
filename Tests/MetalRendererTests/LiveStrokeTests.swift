@@ -1,5 +1,5 @@
 import CShaderTypes
-import MetalRenderer
+@testable import MetalRenderer
 import PatternEngine
 import Testing
 
@@ -102,5 +102,50 @@ func dirtyRegionsSurviveEncodedPrefixReleaseUntilReset() throws {
 
     stroke.reset()
 
+    #expect(stroke.dirtyRegions(clippedTo: pixelSize).rectangles.isEmpty)
+}
+
+@Test
+func dirtyRegionRetentionStaysBoundedAcrossLongReleasedPrefix() throws {
+    var stroke = LiveStroke(capacity: 1)
+    let pixelSize = PixelSize(width: 1_024, height: 1_024)
+    let retainedLimit = LiveStroke.maximumRetainedDirtyRectangleCount
+    let emittedCount = retainedLimit * 8
+
+    for index in 0..<emittedCount {
+        let x = (index % 256) * 4
+        let y = (index / 256) * 4
+        let dirtyRect = PixelRect(
+            minX: x,
+            minY: y,
+            maxX: x + 1,
+            maxY: y + 1
+        )!
+
+        try stroke.append(instance(Float(index)), dirtyRect: dirtyRect)
+        stroke.markEncoded(throughExclusive: stroke.emittedHighWater)
+        stroke.releaseEncodedPrefix(
+            throughExclusive: stroke.emittedHighWater
+        )
+    }
+
+    #expect(stroke.pending.isEmpty)
+    #expect(stroke.emittedHighWater == UInt64(emittedCount))
+    #expect(stroke.retainedDirtyRectangleCount <= retainedLimit)
+    #expect(
+        stroke.dirtyRegions(clippedTo: pixelSize).rectangles
+            == [
+                PixelRect(
+                    minX: 0,
+                    minY: 0,
+                    maxX: pixelSize.width,
+                    maxY: pixelSize.height
+                )!,
+            ]
+    )
+
+    stroke.reset()
+
+    #expect(stroke.retainedDirtyRectangleCount == 0)
     #expect(stroke.dirtyRegions(clippedTo: pixelSize).rectangles.isEmpty)
 }

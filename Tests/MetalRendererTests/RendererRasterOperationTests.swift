@@ -350,6 +350,113 @@ func liveAndCommittedFixedStrengthEraserMatchAndClearCenter() throws {
     )
 }
 
+@Test
+@MainActor
+func fractionallySampledDrawPreviewMatchesCommittedNonuniformRaster() throws {
+    try fractionallySampledPreviewMatchesCommit(
+        style: StrokeRenderStyle(
+            color: InkColor(
+                red: 0.9,
+                green: 0.2,
+                blue: 0.65,
+                alpha: 0.72
+            )!,
+            diameter: 11,
+            compositeMode: .draw,
+            eraserStrength: 1
+        ),
+        token: RendererOperationToken(rawValue: 40)
+    )
+}
+
+@Test
+@MainActor
+func fractionallySampledEraserPreviewMatchesCommittedNonuniformRaster() throws {
+    try fractionallySampledPreviewMatchesCommit(
+        style: StrokeRenderStyle(
+            color: .black,
+            diameter: 11,
+            compositeMode: .erase,
+            eraserStrength: 1
+        ),
+        token: RendererOperationToken(rawValue: 41)
+    )
+}
+
+@MainActor
+private func fractionallySampledPreviewMatchesCommit(
+    style: StrokeRenderStyle,
+    token: RendererOperationToken
+) throws {
+    guard let renderer = try makeRasterOperationRenderer() else { return }
+    var receipt: RasterMutationReceipt?
+    renderer.onOperationCompleted = {
+        if case let .rasterSuccess(completed) = $0 {
+            receipt = completed
+        }
+    }
+    try renderer.replaceCanonicalPixelsForHarness(nonuniformCanonicalBytes())
+    renderer.pan(byScreenDelta: SIMD2<Float>(0.37, -0.61))
+    renderer.zoom(
+        by: 1.37,
+        anchor: ScreenPoint(x: 19.25, y: 23.75)
+    )
+
+    try renderer.beginStroke(
+        token: token,
+        sample: rasterSample(.began, x: 27.4, y: 29.2),
+        style: style
+    )
+    try renderer.requestStrokeCommit(
+        token: token,
+        sample: rasterSample(.ended, x: 38.6, y: 35.7),
+        maximumRetainedBytes: 1_000_000
+    )
+    _ = try renderer.flushPendingLiveForHarness()
+    let live = try renderer.renderOffscreenDisplayForHarness(
+        width: 79,
+        height: 73,
+        showGridLines: false
+    )
+
+    _ = try renderer.submitCommitForHarness()
+    try renderer.drainCompletedOperationsForHarness()
+    let committed = try renderer.renderOffscreenDisplayForHarness(
+        width: 79,
+        height: 73,
+        showGridLines: false
+    )
+
+    let maximumDelta = zip(
+        textureBytes(live.texture),
+        textureBytes(committed.texture)
+    ).reduce(0) {
+        max($0, abs(Int($1.0) - Int($1.1)))
+    }
+    #expect(maximumDelta <= 1)
+
+    let completed = try #require(receipt)
+    renderer.releaseRasterRevisions([
+        completed.before.id,
+        completed.after.id,
+    ])
+}
+
+private func nonuniformCanonicalBytes() -> [UInt8] {
+    var bytes = [UInt8](repeating: 0, count: 64 * 64 * 4)
+    for y in 0..<64 {
+        for x in 0..<64 {
+            let offset = (y * 64 + x) * 4
+            let checker = ((x + y) & 1) == 0
+            bytes[offset] = checker ? UInt8((x * 37 + y * 11) & 0xff) : 8
+            bytes[offset + 1] = checker ? 12 : UInt8((x * 17 + y * 43) & 0xff)
+            bytes[offset + 2] = checker ? 238 : UInt8((x * 29 + y * 7) & 0xff)
+            bytes[offset + 3] = 255
+        }
+    }
+    return bytes
+}
+
 @MainActor
 private func centerBGRA(_ renderer: GridRenderer) throws -> [UInt8] {
     let texture = try renderer.copyCanonicalForHarness()

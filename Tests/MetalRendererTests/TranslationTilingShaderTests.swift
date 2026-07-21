@@ -26,14 +26,20 @@ struct TranslationTilingShaderTests {
     }
 
     @Test
-    func displayUsesTheSharedLiveCompositeFunction() throws {
+    func displayCompositesNeighborsBeforeBilinearFiltering() throws {
         let source = try normalizedShaderSource()
 
         #expect(source.contains(
             "static float4 patternCompositeLive( float4 live, float4 canonical, uint compositeMode )"
         ))
         #expect(source.contains(
-            "float4 result = patternCompositeLive( overlay, base, frame.compositeMode );"
+            "static float4 patternCompositeThenBilinearSample( texture2d<float> canonical, texture2d<float> live, float2 canonicalPixel, uint compositeMode, uint liveVisible )"
+        ))
+        #expect(source.contains(
+            "const float4 composite00 = patternCompositeLive( live00, canonical.read(texel00), compositeMode );"
+        ))
+        #expect(source.contains(
+            "float4 result = patternCompositeThenBilinearSample( canonical, live, mapping.canonicalPixel, frame.compositeMode, frame.liveVisible );"
         ))
     }
 
