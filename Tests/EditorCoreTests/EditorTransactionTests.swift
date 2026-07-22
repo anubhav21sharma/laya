@@ -17,6 +17,8 @@ private let style = StrokeRenderStyle(
     eraserStrength: 1
 )
 
+private let capturedRecipe = AnchorBrushCatalog.dryPencil.recipe
+
 private let alternateColor = InkColor(
     red: 0.25,
     green: 0.5,
@@ -77,7 +79,13 @@ func strokeSamplesUseOneTokenThroughCommit() {
         .pointerBegan(sample(.began), tool: .draw, style: style)
     )
     guard
-        case let .beginStroke(token, beganSample, tool, beganStyle) = began.first
+        case let .beginStroke(
+            token,
+            beganSample,
+            tool,
+            beganStyle,
+            beganRecipe
+        ) = began.first
     else {
         Issue.record("Expected beginStroke")
         return
@@ -86,6 +94,7 @@ func strokeSamplesUseOneTokenThroughCommit() {
     #expect(beganSample == sample(.began))
     #expect(tool == .draw)
     #expect(beganStyle == style)
+    #expect(beganRecipe == AnchorBrushCatalog.defaultDraw.recipe)
 
     #expect(
         transaction.apply(.pointerMoved(sample(.moved)))
@@ -120,7 +129,7 @@ func pointerEventsRejectMismatchedSamplePhasesWithoutAllocatingTokens() {
     let began = idle.apply(
         .pointerBegan(sample(.began), tool: .draw, style: style)
     )
-    guard case let .beginStroke(token, _, _, _) = began.first else {
+    guard case let .beginStroke(token, _, _, _, _) = began.first else {
         Issue.record("Expected valid stroke after rejected mismatch")
         return
     }
@@ -133,6 +142,87 @@ func pointerEventsRejectMismatchedSamplePhasesWithoutAllocatingTokens() {
     #expect(idle == collectingBefore)
     #expect(idle.apply(.pointerMoved(sample(.cancelled))) == [])
     #expect(idle == collectingBefore)
+}
+
+@Test
+func pointerDownCapturesImmutableRecipeValueInStateAndEffect() {
+    var transaction = EditorTransaction()
+
+    let effects = transaction.apply(
+        .pointerBegan(
+            sample(.began),
+            tool: .draw,
+            style: style,
+            recipe: capturedRecipe
+        )
+    )
+
+    guard case let .beginStroke(_, _, _, effectStyle, effectRecipe) = effects.first
+    else {
+        Issue.record("Expected beginStroke with captured recipe")
+        return
+    }
+    guard case let .drawing(drawing) = transaction.state else {
+        Issue.record("Expected drawing transaction")
+        return
+    }
+    #expect(effectStyle == style)
+    #expect(effectRecipe == capturedRecipe)
+    #expect(drawing.recipe == capturedRecipe)
+}
+
+@Test
+func recipeIntentFollowsConfigurationOrderingAcrossStrokeStates() {
+    let recipeID = AnchorBrushCatalog.glazeMarker.id
+
+    var idle = EditorTransaction()
+    #expect(idle.apply(.recipeIntent(recipeID)) == [.updateRecipe(recipeID)])
+    #expect(idle.state == .idle)
+
+    var collecting = collectingDrawTransaction()
+    guard case let .drawing(drawing) = collecting.state else {
+        Issue.record("Expected collecting drawing transaction")
+        return
+    }
+    #expect(
+        collecting.apply(.recipeIntent(recipeID))
+            == [.cancelStroke(drawing.token), .updateRecipe(recipeID)]
+    )
+    #expect(collecting.state == .idle)
+
+    var pending = commitPendingTransaction()
+    let pendingState = pending.state
+    #expect(pending.apply(.recipeIntent(recipeID)) == [.busy])
+    #expect(pending.state == pendingState)
+}
+
+@Test
+func failedStrokeReturnsIdleWithoutChangingCapturedRecipe() {
+    var transaction = EditorTransaction()
+    let effects = transaction.apply(
+        .pointerBegan(
+            sample(.began),
+            tool: .draw,
+            style: style,
+            recipe: capturedRecipe
+        )
+    )
+    guard
+        case let .beginStroke(token, _, _, _, recipe) = effects.first,
+        case let .drawing(drawing) = transaction.state
+    else {
+        Issue.record("Expected captured drawing")
+        return
+    }
+    #expect(recipe == capturedRecipe)
+    #expect(drawing.recipe == capturedRecipe)
+
+    #expect(
+        transaction.apply(.operationCompleted(token, succeeded: false))
+            == [.reportOperationFailure]
+    )
+    #expect(transaction.state == .idle)
+    #expect(!transaction.isBusy)
 }
 
 @Test
@@ -467,6 +557,7 @@ func everyStateAndEventPairIsTotal() {
         .toolIntent(.erase),
         .colorIntent(alternateColor),
         .brushDiameterIntent(24),
+        .recipeIntent(AnchorBrushCatalog.glazeMarker.id),
         .gridVisibilityIntent(true),
         .command(.undo),
         .tilingIntent(.halfDrop),
@@ -564,6 +655,11 @@ func illegalStateEventPairsRejectWithoutMutationOrIllegalEffects() {
         RejectedPair(
             transaction: pending,
             event: .gridVisibilityIntent(true),
+            effects: [.busy]
+        ),
+        RejectedPair(
+            transaction: pending,
+            event: .recipeIntent(AnchorBrushCatalog.dryPencil.id),
             effects: [.busy]
         ),
     ]

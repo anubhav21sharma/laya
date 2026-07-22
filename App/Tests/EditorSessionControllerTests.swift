@@ -57,6 +57,21 @@ private func controllerSample(
     )
 }
 
+private func controllerMovedSample(
+    x: Float,
+    timestamp: TimeInterval,
+    kind: StrokeSampleKind
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x, y: 32),
+        pressure: 0.5,
+        timestamp: timestamp,
+        phase: .moved,
+        source: .mouse,
+        kind: kind
+    )
+}
+
 @MainActor
 private func commitControllerStroke(
     _ controller: EditorSessionController,
@@ -418,6 +433,115 @@ func brushChangeKeepsSubsequentEditorActionsCoherent() throws {
     let clear = try #require(controller.lastRecordedRasterCommandForTesting)
     retainedRevisionIDs.formUnion([clear.before.id, clear.after.id])
     renderer.releaseRasterRevisions(retainedRevisionIDs)
+}
+
+@Test
+@MainActor
+func pointerDownCapturesSelectedRecipeAndUniqueNonzeroSeed() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let sessionEntropy: UInt64 = 0xA5A5_1234_5678_9ABC
+    let controller = EditorSessionController(
+        renderer: renderer,
+        strokeSeedSessionEntropy: sessionEntropy
+    )
+
+    controller.handleRecipe(AnchorBrushCatalog.glazeMarker.id)
+    controller.handleStrokeSample(controllerSample(.began))
+    let first = try #require(renderer.harnessActiveStrokeStyle)
+    #expect(first.recipe == AnchorBrushCatalog.glazeMarker.recipe)
+    #expect(first.seed == EditorSessionController.derivedStrokeSeed(
+        sequence: 1,
+        sessionEntropy: sessionEntropy
+    ))
+    controller.handleStrokeSample(controllerSample(.cancelled))
+
+    controller.handleRecipe(AnchorBrushCatalog.boundedWash.id)
+    controller.handleStrokeSample(controllerSample(.began))
+    let second = try #require(renderer.harnessActiveStrokeStyle)
+    #expect(second.recipe == AnchorBrushCatalog.boundedWash.recipe)
+    #expect(second.seed == EditorSessionController.derivedStrokeSeed(
+        sequence: 2,
+        sessionEntropy: sessionEntropy
+    ))
+    #expect(second.seed != first.seed)
+    controller.handleStrokeSample(controllerSample(.cancelled))
+
+    controller.handleTool(.erase)
+    controller.handleStrokeSample(controllerSample(.began))
+    let eraser = try #require(renderer.harnessActiveStrokeStyle)
+    #expect(eraser.recipe == AnchorBrushCatalog.hardRoundEraser.recipe)
+    #expect(eraser.seed == EditorSessionController.derivedStrokeSeed(
+        sequence: 3,
+        sessionEntropy: sessionEntropy
+    ))
+    #expect(eraser.seed != second.seed)
+    #expect(eraser.compositeMode == .erase)
+    controller.handleStrokeSample(controllerSample(.cancelled))
+}
+
+@Test
+func strokeSeedDerivationIsDeterministicNonzeroAndSessionScoped() {
+    let firstEntropy: UInt64 = 0x0123_4567_89AB_CDEF
+    let secondEntropy: UInt64 = 0xFEDC_BA98_7654_3210
+    let first = (UInt64(1)...512).map {
+        EditorSessionController.derivedStrokeSeed(
+            sequence: $0,
+            sessionEntropy: firstEntropy
+        )
+    }
+    let repeated = (UInt64(1)...512).map {
+        EditorSessionController.derivedStrokeSeed(
+            sequence: $0,
+            sessionEntropy: firstEntropy
+        )
+    }
+    let secondSession = (UInt64(1)...512).map {
+        EditorSessionController.derivedStrokeSeed(
+            sequence: $0,
+            sessionEntropy: secondEntropy
+        )
+    }
+
+    #expect(first == repeated)
+    #expect(first.allSatisfy { $0 != 0 })
+    #expect(Set(first).count == first.count)
+    #expect(first != secondSession)
+}
+
+@Test
+@MainActor
+func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleRecipe(AnchorBrushCatalog.glazeMarker.id)
+    controller.handleStrokeSample(controllerSample(.began, x: 16, y: 32))
+
+    controller.handleStrokeSamples([
+        controllerMovedSample(x: 24, timestamp: 1, kind: .predicted),
+        controllerMovedSample(x: 40, timestamp: 2, kind: .predicted),
+    ])
+    #expect(renderer.transientStrokeBuffer?.predictedSampleCount == 2)
+    #expect(
+        renderer.transientStrokeBuffer?.predictedSamples.map(\.position.x)
+            == [24, 40]
+    )
+
+    controller.handleStrokeSamples([
+        controllerMovedSample(x: 28, timestamp: 1, kind: .predicted),
+        controllerMovedSample(x: 34, timestamp: 2, kind: .predicted),
+    ])
+    #expect(renderer.transientStrokeBuffer?.predictedSampleCount == 2)
+    #expect(
+        renderer.transientStrokeBuffer?.predictedSamples.map(\.position.x)
+            == [28, 34]
+    )
+
+    controller.handleStrokeSample(
+        controllerMovedSample(x: 30, timestamp: 2, kind: .actual)
+    )
+    #expect(renderer.transientStrokeBuffer?.predictedSampleCount == 0)
+    controller.handleStrokeSample(controllerSample(.cancelled))
+    #expect(renderer.isIdle)
 }
 
 @Test

@@ -8,12 +8,18 @@ public final class EditorModel {
     public private(set) var inkColor: InkColor = .black
     public private(set) var brushDiameter: Float = 20
     public private(set) var eraserStrength: Float = 1
+    public private(set) var selectedRecipeID = AnchorBrushCatalog.defaultDraw.id
     public private(set) var showGrid = false
     public private(set) var tiling: TilingKind = .grid
     public private(set) var pixelSize = PixelSize(width: 256, height: 256)
     public private(set) var canUndo = false
     public private(set) var canRedo = false
     public private(set) var isBusy = false
+
+    public var selectedRecipe: BrushRecipe {
+        AnchorBrushCatalog.drawEntry(for: selectedRecipeID)?.recipe
+            ?? AnchorBrushCatalog.defaultDraw.recipe
+    }
 
     public init(tiling: TilingKind = .grid) {
         self.tiling = tiling
@@ -25,6 +31,13 @@ public final class EditorModel {
 
     public func confirmInkColor(_ inkColor: InkColor) {
         self.inkColor = inkColor
+    }
+
+    public func confirmRecipe(_ recipeID: BrushRecipeID) {
+        guard AnchorBrushCatalog.drawEntry(for: recipeID) != nil else {
+            return
+        }
+        selectedRecipeID = recipeID
     }
 
     public func confirmBrushDiameter(_ brushDiameter: Float) {

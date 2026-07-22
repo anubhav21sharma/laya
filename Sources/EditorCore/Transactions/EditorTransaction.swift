@@ -29,15 +29,18 @@ public struct DrawingTransaction: Equatable, Sendable {
     public var token: EditorTransactionToken
     public var tool: StrokeTool
     public var phase: DrawingPhase
+    public var recipe: BrushRecipe
 
     public init(
         token: EditorTransactionToken,
         tool: StrokeTool,
-        phase: DrawingPhase
+        phase: DrawingPhase,
+        recipe: BrushRecipe
     ) {
         self.token = token
         self.tool = tool
         self.phase = phase
+        self.recipe = recipe
     }
 }
 
@@ -50,10 +53,14 @@ public enum EditorTransactionState: Equatable, Sendable {
 }
 
 public enum EditorTransactionEvent: Equatable, Sendable {
-    case pointerBegan(
+    /// Box the large immutable recipe/style payload. Keeping it inline makes
+    /// every small intent event inherit the maximum payload size and has
+    /// triggered invalid enum-copy code generation in current Swift runtimes.
+    indirect case pointerBegan(
         StrokeSample,
         tool: StrokeTool,
-        style: StrokeRenderStyle
+        style: StrokeRenderStyle,
+        recipe: BrushRecipe = AnchorBrushCatalog.defaultDraw.recipe
     )
     case pointerMoved(StrokeSample)
     case pointerEnded(StrokeSample)
@@ -61,6 +68,7 @@ public enum EditorTransactionEvent: Equatable, Sendable {
     case toolIntent(EditorTool)
     case colorIntent(InkColor)
     case brushDiameterIntent(Float)
+    case recipeIntent(BrushRecipeID)
     case gridVisibilityIntent(Bool)
     case command(EditorCommand)
     case tilingIntent(TilingKind)
@@ -71,11 +79,12 @@ public enum EditorTransactionEvent: Equatable, Sendable {
 }
 
 public enum EditorTransactionEffect: Equatable, Sendable {
-    case beginStroke(
+    indirect case beginStroke(
         EditorTransactionToken,
         StrokeSample,
         StrokeTool,
-        StrokeRenderStyle
+        StrokeRenderStyle,
+        BrushRecipe
     )
     case appendStroke(EditorTransactionToken, StrokeSample)
     case requestStrokeCommit(EditorTransactionToken, StrokeSample)
@@ -83,6 +92,7 @@ public enum EditorTransactionEffect: Equatable, Sendable {
     case updateTool(EditorTool)
     case updateColor(InkColor)
     case updateBrushDiameter(Float)
+    case updateRecipe(BrushRecipeID)
     case updateGridVisibility(Bool)
     case performCommand(EditorTransactionToken, EditorCommand)
     case applyTiling(EditorTransactionToken, TilingKind)
@@ -175,16 +185,17 @@ public struct EditorTransaction: Equatable, Sendable {
         _ event: EditorTransactionEvent
     ) -> [EditorTransactionEffect] {
         switch event {
-        case let .pointerBegan(sample, tool, style):
+        case let .pointerBegan(sample, tool, style, recipe):
             let token = takeToken()
             state = .drawing(
                 DrawingTransaction(
                     token: token,
                     tool: tool,
-                    phase: .collecting
+                    phase: .collecting,
+                    recipe: recipe
                 )
             )
-            return [.beginStroke(token, sample, tool, style)]
+            return [.beginStroke(token, sample, tool, style, recipe)]
         case .pointerMoved, .pointerEnded, .pointerCancelled:
             return []
         case let .toolIntent(tool):
@@ -193,6 +204,8 @@ public struct EditorTransaction: Equatable, Sendable {
             return [.updateColor(color)]
         case let .brushDiameterIntent(diameter):
             return [.updateBrushDiameter(diameter)]
+        case let .recipeIntent(recipeID):
+            return [.updateRecipe(recipeID)]
         case let .gridVisibilityIntent(visible):
             return [.updateGridVisibility(visible)]
         case let .command(command):
@@ -223,7 +236,8 @@ public struct EditorTransaction: Equatable, Sendable {
                 DrawingTransaction(
                     token: drawing.token,
                     tool: drawing.tool,
-                    phase: .commitPending
+                    phase: .commitPending,
+                    recipe: drawing.recipe
                 )
             )
             return [.requestStrokeCommit(drawing.token, sample)]
@@ -241,6 +255,12 @@ public struct EditorTransaction: Equatable, Sendable {
             return [
                 .cancelStroke(drawing.token),
                 .updateBrushDiameter(diameter),
+            ]
+        case let .recipeIntent(recipeID):
+            state = .idle
+            return [
+                .cancelStroke(drawing.token),
+                .updateRecipe(recipeID),
             ]
         case let .gridVisibilityIntent(visible):
             return [.updateGridVisibility(visible)]
@@ -280,6 +300,10 @@ public struct EditorTransaction: Equatable, Sendable {
             state = .idle
             return clearSelectionEffects(for: region)
                 + [.updateBrushDiameter(diameter)]
+        case let .recipeIntent(recipeID):
+            state = .idle
+            return clearSelectionEffects(for: region)
+                + [.updateRecipe(recipeID)]
         case let .gridVisibilityIntent(visible):
             return [.updateGridVisibility(visible)]
         case let .command(command):
@@ -330,6 +354,12 @@ public struct EditorTransaction: Equatable, Sendable {
             return [
                 .clearSelectionOverlay,
                 .updateBrushDiameter(diameter),
+            ]
+        case let .recipeIntent(recipeID):
+            state = .idle
+            return [
+                .clearSelectionOverlay,
+                .updateRecipe(recipeID),
             ]
         case let .gridVisibilityIntent(visible):
             return [.updateGridVisibility(visible)]
@@ -382,6 +412,13 @@ public struct EditorTransaction: Equatable, Sendable {
                 .clearSelectionOverlay,
                 .updateBrushDiameter(diameter),
             ]
+        case let .recipeIntent(recipeID):
+            state = .idle
+            return [
+                .cancelTransform,
+                .clearSelectionOverlay,
+                .updateRecipe(recipeID),
+            ]
         case let .gridVisibilityIntent(visible):
             state = .idle
             return [
@@ -425,14 +462,15 @@ public struct EditorTransaction: Equatable, Sendable {
         _ event: EditorTransactionEvent
     ) -> Bool {
         switch event {
-        case let .pointerBegan(sample, _, _):
+        case let .pointerBegan(sample, _, _, _):
             return sample.phase == .began
         case let .pointerMoved(sample):
             return sample.phase == .moved
         case let .pointerEnded(sample):
             return sample.phase == .ended
         case .pointerCancelled, .toolIntent, .colorIntent,
-             .brushDiameterIntent, .gridVisibilityIntent, .command,
+             .brushDiameterIntent, .recipeIntent, .gridVisibilityIntent,
+             .command,
              .tilingIntent, .tileSizeIntent, .selectionChanged,
              .selectionEnded, .operationCompleted:
             return true

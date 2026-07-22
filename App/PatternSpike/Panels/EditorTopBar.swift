@@ -15,6 +15,19 @@ struct EditorTopBar: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            Picker("Brush", selection: anchorRecipeBinding) {
+                ForEach(AnchorBrushCatalog.drawAnchors, id: \.id) { entry in
+                    Text(entry.displayName)
+                        .tag(entry.id)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(minWidth: 128, maxWidth: 160)
+            .accessibilityIdentifier("Brush Anchor")
+
+            Divider()
+                .frame(height: 20)
+
             Button {
                 controller.stepBrush(larger: false)
                 requestEditorFocus()
@@ -88,6 +101,16 @@ struct EditorTopBar: View {
         .frame(maxWidth: .infinity, alignment: .center)
         .background(.bar)
         .disabled(controller.model.isBusy)
+    }
+
+    var anchorRecipeBinding: Binding<BrushRecipeID> {
+        Binding(
+            get: { controller.model.selectedRecipeID },
+            set: { recipeID in
+                controller.handleRecipe(recipeID)
+                requestEditorFocus()
+            }
+        )
     }
 
     private var inkColorBinding: Binding<Color> {

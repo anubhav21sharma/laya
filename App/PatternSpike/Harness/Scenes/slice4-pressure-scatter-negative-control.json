@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 5,
+  "name": "slice4-pressure-scatter-negative-control",
+  "width": 192,
+  "height": 128,
+  "tileWidth": 192,
+  "tileHeight": 128,
+  "tiling": 2,
+  "diagnosticMode": "hardRound",
+  "program": "coloredDraw",
+  "recipeID": "anchor.ink-pressure-scatter",
+  "seed": 202,
+  "attributedSamples": [
+    {
+      "x": 24,
+      "y": 64,
+      "pressure": 0.1,
+      "timestamp": 0,
+      "phase": "began",
+      "source": "tablet",
+      "kind": "actual",
+      "capabilities": 1
+    },
+    {
+      "x": 72,
+      "y": 64,
+      "pressure": 0.35,
+      "timestamp": 0.01,
+      "phase": "moved",
+      "source": "tablet",
+      "kind": "coalesced",
+      "capabilities": 1
+    },
+    {
+      "x": 120,
+      "y": 64,
+      "pressure": 0.7,
+      "timestamp": 0.02,
+      "phase": "moved",
+      "source": "tablet",
+      "kind": "actual",
+      "capabilities": 1
+    },
+    {
+      "x": 168,
+      "y": 64,
+      "pressure": 1,
+      "timestamp": 0.03,
+      "phase": "ended",
+      "source": "tablet",
+      "kind": "actual",
+      "capabilities": 1
+    }
+  ],
+  "expectedMaterial": "ink",
+  "replayMode": "appendOnly",
+  "checks": [
+    {
+      "channel": "canonical",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "tolerance": 0
+    },
+    {
+      "channel": "committedScreen",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        241,
+        244,
+        242,
+        255
+      ],
+      "tolerance": 0
+    }
+  ],
+  "structuralChecks": [
+    {
+      "metric": "materialMismatchCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "assetIdentityMismatchCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "peakRetainedSampleCount",
+      "relation": "lessThanOrEqual",
+      "value": 256
+    },
+    {
+      "metric": "peakRetainedDabCount",
+      "relation": "lessThanOrEqual",
+      "value": 512
+    },
+    {
+      "metric": "sameSeedMaximumDelta",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "differentSeedChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 2147483647
+    },
+    {
+      "metric": "pressureResponseChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 1
+    },
+    {
+      "metric": "shapeHardnessChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 1
+    },
+    {
+      "metric": "drawEraseChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 1
+    }
+  ],
+  "negativeControls": [
+    {
+      "metric": "differentSeedChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 2147483647
+    },
+    {
+      "metric": "pressureResponseChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 2147483647
+    },
+    {
+      "metric": "sameSeedMaximumDelta",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "shapeHardnessChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 2147483647
+    },
+    {
+      "metric": "assetIdentityMismatchCount",
+      "relation": "equal",
+      "value": 1
+    }
+  ]
+}

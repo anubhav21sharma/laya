@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 5,
+  "name": "slice4-legacy-ink-parity",
+  "width": 128,
+  "height": 128,
+  "tileWidth": 128,
+  "tileHeight": 128,
+  "tiling": 0,
+  "diagnosticMode": "hardRound",
+  "program": "coloredDraw",
+  "recipeID": "anchor.legacy-ink",
+  "seed": 101,
+  "attributedSamples": [
+    {
+      "x": 32,
+      "y": 64,
+      "pressure": 1,
+      "timestamp": 0,
+      "phase": "began",
+      "source": "mouse",
+      "kind": "actual",
+      "capabilities": 0
+    },
+    {
+      "x": 64,
+      "y": 64,
+      "pressure": 1,
+      "timestamp": 0.01,
+      "phase": "moved",
+      "source": "mouse",
+      "kind": "actual",
+      "capabilities": 0
+    },
+    {
+      "x": 96,
+      "y": 64,
+      "pressure": 1,
+      "timestamp": 0.02,
+      "phase": "ended",
+      "source": "mouse",
+      "kind": "actual",
+      "capabilities": 0
+    }
+  ],
+  "expectedMaterial": "ink",
+  "replayMode": "appendOnly",
+  "checks": [
+    {
+      "channel": "canonical",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "tolerance": 0
+    },
+    {
+      "channel": "committedScreen",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        241,
+        244,
+        242,
+        255
+      ],
+      "tolerance": 0
+    }
+  ],
+  "structuralChecks": [
+    {
+      "metric": "materialMismatchCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "replayModeMismatchCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "previewCommitViolationCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "historyCommandCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "legacyParityMaximumDelta",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "anchorTilingMatrixPassCount",
+      "relation": "equal",
+      "value": 28
+    },
+    {
+      "metric": "anchorTilingNoncentralCount",
+      "relation": "equal",
+      "value": 28
+    },
+    {
+      "metric": "anchorTilingLiveCommitPassCount",
+      "relation": "equal",
+      "value": 28
+    },
+    {
+      "metric": "anchorTilingContinuityPassCount",
+      "relation": "equal",
+      "value": 28
+    },
+    {
+      "metric": "anchorTilingEraserAlphaPassCount",
+      "relation": "equal",
+      "value": 28
+    },
+    {
+      "metric": "anchorTilingEraserColorPassCount",
+      "relation": "equal",
+      "value": 28
+    },
+    {
+      "metric": "anchorCatalogEqualityCount",
+      "relation": "equal",
+      "value": 4
+    },
+    {
+      "metric": "drawEraseChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 1
+    }
+  ]
+}

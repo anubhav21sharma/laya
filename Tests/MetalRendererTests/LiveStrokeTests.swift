@@ -19,7 +19,8 @@ private func instance(_ x: Float) -> PatternProjectedStampInstance {
         clip0: zeroClip,
         clip1: zeroClip,
         clip2: zeroClip,
-        clip3: zeroClip
+        clip3: zeroClip,
+        brushAttributes: SIMD4(1, 1, 0, 0)
     )
 }
 
@@ -72,6 +73,23 @@ func resetKeepsCapacityButRestoresPerStrokeIdentity() throws {
     #expect(stroke.bakedHighWater == 0)
     #expect(stroke.emittedHighWater == 1)
     #expect(stroke.capacity == 4)
+}
+
+@Test
+func replacementEpochDoesNotReuseActiveStrokeIdentity() throws {
+    var stroke = LiveStroke(capacity: 4)
+    try stroke.append(instance(1))
+    stroke.beginReplacementEpoch(1)
+    try stroke.append(instance(2))
+    let firstReplacementIdentity = stroke.pending.first?.identity
+    stroke.beginReplacementEpoch(2)
+    try stroke.append(instance(3))
+
+    #expect(firstReplacementIdentity == 1)
+    #expect(stroke.pending.map(\.identity) == [2])
+    #expect(stroke.pending.map(\.renderEpoch) == [2])
+    #expect(stroke.bakedHighWater == 2)
+    #expect(stroke.emittedHighWater == 3)
 }
 
 @Test

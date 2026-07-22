@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 5,
+  "name": "slice4-stale-epoch-cancel-negative-control",
+  "width": 128,
+  "height": 128,
+  "tileWidth": 128,
+  "tileHeight": 128,
+  "tiling": 4,
+  "diagnosticMode": "canonicalCoordinates",
+  "program": "cancelPreservesCanonical",
+  "recipeID": "anchor.ink-stale-replay",
+  "seed": 707,
+  "attributedSamples": [
+    {
+      "x": 24,
+      "y": 32,
+      "pressure": 0.5,
+      "timestamp": 0,
+      "phase": "began",
+      "source": "mouse",
+      "kind": "actual",
+      "capabilities": 0
+    },
+    {
+      "x": 72,
+      "y": 72,
+      "pressure": 0.5,
+      "timestamp": 0.015,
+      "phase": "moved",
+      "source": "mouse",
+      "kind": "predicted",
+      "capabilities": 0
+    },
+    {
+      "x": 64,
+      "y": 64,
+      "pressure": 0.5,
+      "timestamp": 0.02,
+      "phase": "moved",
+      "source": "mouse",
+      "kind": "actual",
+      "capabilities": 0
+    },
+    {
+      "x": 96,
+      "y": 96,
+      "pressure": 0.5,
+      "timestamp": 0.03,
+      "phase": "cancelled",
+      "source": "mouse",
+      "kind": "actual",
+      "capabilities": 0
+    }
+  ],
+  "expectedMaterial": "ink",
+  "replayMode": "replayTail",
+  "checks": [
+    {
+      "channel": "canonical",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "tolerance": 0
+    },
+    {
+      "channel": "committedScreen",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        241,
+        244,
+        242,
+        255
+      ],
+      "tolerance": 0
+    }
+  ],
+  "structuralChecks": [
+    {
+      "metric": "staleReplayEpochViolationCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "canonicalByteDelta",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "historyCommandCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "replayModeMismatchCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "gpuFailurePreservedCanonicalCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "allocationFailurePreservedCanonicalCount",
+      "relation": "equal",
+      "value": 1
+    }
+  ],
+  "negativeControls": [
+    {
+      "metric": "staleReplayEpochViolationCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "canonicalByteDelta",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "gpuFailurePreservedCanonicalCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "allocationFailurePreservedCanonicalCount",
+      "relation": "equal",
+      "value": 0
+    }
+  ]
+}

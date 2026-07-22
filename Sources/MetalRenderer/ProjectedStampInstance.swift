@@ -5,11 +5,12 @@ public extension PatternProjectedStampInstance {
     init(
         fragment: CellFragment,
         radius: Float,
-        color: InkColor = .black
+        color: InkColor = .black,
+        brushAttributes: SIMD4<Float> = SIMD4(1, 1, 0, 0)
     ) {
         precondition(
-            radius.isFinite && (1...1_000).contains(radius),
-            "Projected stamp radius must be finite and within 1...1000"
+            radius.isFinite && radius > 0 && radius <= 1_000,
+            "Projected stamp radius must be finite and within (0, 1000]"
         )
         precondition(
             fragment.brushClip.halfPlanes.count <= 4,
@@ -57,7 +58,8 @@ public extension PatternProjectedStampInstance {
             clip0: clip0,
             clip1: clip1,
             clip2: clip2,
-            clip3: clip3
+            clip3: clip3,
+            brushAttributes: brushAttributes
         )
     }
 }

@@ -39,6 +39,7 @@ struct PatternProjectedStampOut {
     float4 clip1 [[flat]];
     float4 clip2 [[flat]];
     float4 clip3 [[flat]];
+    float4 brushAttributes [[flat]];
 };
 
 vertex PatternFullscreenOut patternFullscreenVertex(
@@ -113,6 +114,7 @@ vertex PatternProjectedStampOut patternProjectedStampVertex(
         instance.clip3.offset,
         0.0
     );
+    output.brushAttributes = instance.brushAttributes;
     return output;
 }
 
@@ -159,6 +161,103 @@ fragment float4 patternHardRoundStampFragment(
         0.0,
         1.0
     );
+    return float4(input.color.rgb, input.color.a * coverage);
+}
+
+fragment float4 patternBrushStampFragment(
+    PatternProjectedStampOut input [[stage_in]],
+    constant PatternBrushMaterialUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    texture2d<float> shapeTexture
+        [[texture(PatternTextureIndexBrushShape)]],
+    texture2d<float> grainTexture
+        [[texture(PatternTextureIndexBrushGrain)]]
+) {
+    if (!patternProjectedStampInsideClip(input)) {
+        discard_fragment();
+    }
+
+    const float2 shapeUV = input.brushLocal * 0.5 + 0.5;
+    if (any(shapeUV < 0.0) || any(shapeUV > 1.0)) {
+        discard_fragment();
+    }
+
+    constexpr sampler shapeSampler(
+        coord::normalized,
+        address::clamp_to_zero,
+        filter::linear,
+        mip_filter::linear
+    );
+    constexpr sampler grainSampler(
+        coord::normalized,
+        address::repeat,
+        filter::linear,
+        mip_filter::linear
+    );
+
+    const float hardness = clamp(input.brushAttributes.x, 0.0, 1.0);
+    float shapeCoverage;
+    if (material.shapeKind == PatternShapeWireHardRound) {
+        const float distance = length(input.brushLocal);
+        if (hardness >= 0.9999) {
+            const float2 offsetPixels = input.brushLocal * input.radius;
+            shapeCoverage = clamp(
+                input.radius + 0.5 - length(offsetPixels),
+                0.0,
+                1.0
+            );
+        } else {
+            const float softness = max(1.0 / input.radius, (1.0 - hardness) * 0.5);
+            shapeCoverage = 1.0 - smoothstep(
+                1.0 - softness,
+                1.0 + 0.5 / input.radius,
+                distance
+            );
+        }
+    } else {
+        const float rawShape = shapeTexture.sample(shapeSampler, shapeUV).r;
+        shapeCoverage = clamp(
+            (rawShape - (1.0 - hardness)) / max(hardness, 1.0 / 255.0),
+            0.0,
+            1.0
+        );
+    }
+
+    float grainCoverage = 1.0;
+    if (material.grainKind != PatternGrainWireOpaque) {
+        float2 baseGrainCoordinate;
+        if (
+            material.grainCoordinateMode
+                == PatternGrainCoordinateWireBrushLocal
+        ) {
+            baseGrainCoordinate = shapeUV;
+        } else {
+            baseGrainCoordinate = input.canonical / 64.0;
+        }
+        const float grainCosine = cos(material.grainRotation);
+        const float grainSine = sin(material.grainRotation);
+        const float2 grainCoordinate = float2(
+            grainCosine * baseGrainCoordinate.x
+                - grainSine * baseGrainCoordinate.y,
+            grainSine * baseGrainCoordinate.x
+                + grainCosine * baseGrainCoordinate.y
+        ) * input.brushAttributes.y + input.brushAttributes.zw;
+        grainCoverage = grainTexture.sample(
+            grainSampler,
+            grainCoordinate
+        ).r;
+    }
+
+    if (material.materialFamily == PatternMaterialWireBoundedWash) {
+        shapeCoverage = pow(clamp(shapeCoverage, 0.0, 1.0), 0.72);
+        grainCoverage = mix(
+            grainCoverage,
+            1.0,
+            clamp(material.wetness, 0.0, 1.0) * 0.45
+        );
+    }
+
+    const float coverage = shapeCoverage * grainCoverage;
     return float4(input.color.rgb, input.color.a * coverage);
 }
 
@@ -297,13 +396,30 @@ static float4 patternSourceOver(float4 source, float4 destination) {
 }
 
 static float4 patternCompositeLive(
-    float4 live,
+    float4 settledLive,
+    float4 replayLive,
     float4 canonical,
-    uint compositeMode
+    uint compositeMode,
+    float strokeOpacity,
+    float accumulationLimit,
+    float eraserStrength
 ) {
+    float4 live = patternSourceOver(replayLive, settledLive);
+    const float alpha = clamp(live.a, 0.0, 1.0);
+    const float limitedAlpha = min(
+        alpha,
+        clamp(accumulationLimit, 0.0, 1.0)
+    );
+    live = alpha <= 0.000001
+        ? float4(0.0)
+        : float4(max(live.rgb, float3(0.0)), alpha)
+            * (limitedAlpha / alpha);
     if (compositeMode == PatternCompositeWireErase) {
-        return canonical * (1.0 - live.a);
+        return canonical * (
+            1.0 - live.a * clamp(eraserStrength, 0.0, 1.0)
+        );
     }
+    live *= clamp(strokeOpacity, 0.0, 1.0);
     return patternSourceOver(live, canonical);
 }
 
@@ -323,12 +439,142 @@ static uint2 patternWrappedTexel(
     );
 }
 
+fragment float4 patternWashClearFragment(
+    PatternFullscreenOut input [[stage_in]]
+) {
+    return float4(0.0);
+}
+
+static bool patternWashRegionContains(
+    uint2 texel,
+    const device int4* regions,
+    uint regionCount
+) {
+    const int2 point = int2(texel);
+    for (uint index = 0; index < regionCount; ++index) {
+        const int4 region = regions[index];
+        if (
+            point.x >= region.x && point.y >= region.y
+            && point.x < region.z && point.y < region.w
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static float4 patternWashRead(
+    texture2d<float> source,
+    int2 texel,
+    const device int4* regions,
+    uint regionCount
+) {
+    const uint2 wrapped = patternWrappedTexel(
+        texel,
+        uint2(source.get_width(), source.get_height())
+    );
+    return patternWashRegionContains(wrapped, regions, regionCount)
+        ? source.read(wrapped)
+        : float4(0.0);
+}
+
+static float4 patternLimitWashAccumulation(
+    float4 value,
+    float accumulationLimit
+) {
+    const float alpha = clamp(value.a, 0.0, 1.0);
+    const float limitedAlpha = min(
+        alpha,
+        clamp(accumulationLimit, 0.0, 1.0)
+    );
+    if (alpha <= 0.000001) {
+        return float4(0.0);
+    }
+    return float4(
+        max(value.rgb, float3(0.0)) * (limitedAlpha / alpha),
+        limitedAlpha
+    );
+}
+
+fragment float4 patternWashSoftenFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternBrushMaterialUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    const device int4* processingRegions
+        [[buffer(PatternBufferIndexDabInstances)]],
+    texture2d<float> source [[texture(PatternTextureIndexCanonical)]]
+) {
+    const int2 centerTexel = int2(input.screenPixel);
+    const uint passCount = max(material.softenPasses, 1u);
+    const int radius = material.bleedRadius <= 0.0
+        ? 0
+        : max(1, int(ceil(material.bleedRadius / float(passCount))));
+    const int2 dx = int2(radius, 0);
+    const int2 dy = int2(0, radius);
+
+    const float4 center = patternWashRead(
+        source,
+        centerTexel,
+        processingRegions,
+        material.padding1
+    );
+    float4 softened = center * 4.0;
+    softened += patternWashRead(
+        source, centerTexel - dx, processingRegions, material.padding1
+    ) * 2.0;
+    softened += patternWashRead(
+        source, centerTexel + dx, processingRegions, material.padding1
+    ) * 2.0;
+    softened += patternWashRead(
+        source, centerTexel - dy, processingRegions, material.padding1
+    ) * 2.0;
+    softened += patternWashRead(
+        source, centerTexel + dy, processingRegions, material.padding1
+    ) * 2.0;
+    softened += patternWashRead(
+        source, centerTexel - dx - dy, processingRegions, material.padding1
+    );
+    softened += patternWashRead(
+        source, centerTexel + dx - dy, processingRegions, material.padding1
+    );
+    softened += patternWashRead(
+        source, centerTexel - dx + dy, processingRegions, material.padding1
+    );
+    softened += patternWashRead(
+        source, centerTexel + dx + dy, processingRegions, material.padding1
+    );
+    softened /= 16.0;
+
+    const float wetness = clamp(material.wetness, 0.0, 1.0);
+    return patternLimitWashAccumulation(
+        mix(center, softened, wetness),
+        material.accumulationLimit
+    );
+}
+
+fragment float4 patternWashResolveFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternBrushMaterialUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    texture2d<float> source [[texture(PatternTextureIndexCanonical)]]
+) {
+    const uint2 texel = uint2(input.screenPixel);
+    return patternLimitWashAccumulation(
+        source.read(texel),
+        material.accumulationLimit
+    );
+}
+
 static float4 patternCompositeThenBilinearSample(
     texture2d<float> canonical,
-    texture2d<float> live,
+    texture2d<float> settledLive,
+    texture2d<float> replayLive,
     float2 canonicalPixel,
     uint compositeMode,
-    uint liveVisible
+    uint liveVisible,
+    float strokeOpacity,
+    float accumulationLimit,
+    float eraserStrength
 ) {
     const float2 samplePosition = canonicalPixel - 0.5;
     const int2 lower = int2(floor(samplePosition));
@@ -352,35 +598,63 @@ static float4 patternCompositeThenBilinearSample(
     );
     const float4 live00 = liveVisible == 0
         ? float4(0.0)
-        : live.read(texel00);
+        : settledLive.read(texel00);
     const float4 live10 = liveVisible == 0
         ? float4(0.0)
-        : live.read(texel10);
+        : settledLive.read(texel10);
     const float4 live01 = liveVisible == 0
         ? float4(0.0)
-        : live.read(texel01);
+        : settledLive.read(texel01);
     const float4 live11 = liveVisible == 0
         ? float4(0.0)
-        : live.read(texel11);
+        : settledLive.read(texel11);
+    const float4 replay00 = liveVisible == 0
+        ? float4(0.0)
+        : replayLive.read(texel00);
+    const float4 replay10 = liveVisible == 0
+        ? float4(0.0)
+        : replayLive.read(texel10);
+    const float4 replay01 = liveVisible == 0
+        ? float4(0.0)
+        : replayLive.read(texel01);
+    const float4 replay11 = liveVisible == 0
+        ? float4(0.0)
+        : replayLive.read(texel11);
     const float4 composite00 = patternCompositeLive(
         live00,
+        replay00,
         canonical.read(texel00),
-        compositeMode
+        compositeMode,
+        strokeOpacity,
+        accumulationLimit,
+        eraserStrength
     );
     const float4 composite10 = patternCompositeLive(
         live10,
+        replay10,
         canonical.read(texel10),
-        compositeMode
+        compositeMode,
+        strokeOpacity,
+        accumulationLimit,
+        eraserStrength
     );
     const float4 composite01 = patternCompositeLive(
         live01,
+        replay01,
         canonical.read(texel01),
-        compositeMode
+        compositeMode,
+        strokeOpacity,
+        accumulationLimit,
+        eraserStrength
     );
     const float4 composite11 = patternCompositeLive(
         live11,
+        replay11,
         canonical.read(texel11),
-        compositeMode
+        compositeMode,
+        strokeOpacity,
+        accumulationLimit,
+        eraserStrength
     );
     return mix(
         mix(composite00, composite10, blend.x),
@@ -418,8 +692,11 @@ fragment float4 patternGridFragment(
     PatternFullscreenOut input [[stage_in]],
     constant PatternGridFrameUniforms& frame
         [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternBrushMaterialUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
     texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]],
-    texture2d<float> live [[texture(PatternTextureIndexLive)]]
+    texture2d<float> live [[texture(PatternTextureIndexLive)]],
+    texture2d<float> replayLive [[texture(PatternTextureIndexReplayLive)]]
 ) {
     const float2 screenCenter = frame.drawableSize * 0.5;
     const float2 world = (input.screenPixel - screenCenter) / frame.zoom
@@ -435,9 +712,13 @@ fragment float4 patternGridFragment(
     float4 result = patternCompositeThenBilinearSample(
         canonical,
         live,
+        replayLive,
         mapping.canonicalPixel,
         frame.compositeMode,
-        frame.liveVisible
+        frame.liveVisible,
+        material.strokeOpacity,
+        material.accumulationLimit,
+        material.materialStrength
     );
 
     return patternGridOverlay(result, mapping, frame);
@@ -447,8 +728,11 @@ fragment float4 patternCommitFragment(
     PatternFullscreenOut input [[stage_in]],
     constant PatternGridFrameUniforms& frame
         [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternBrushMaterialUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
     texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]],
-    texture2d<float> live [[texture(PatternTextureIndexLive)]]
+    texture2d<float> live [[texture(PatternTextureIndexLive)]],
+    texture2d<float> replayLive [[texture(PatternTextureIndexReplayLive)]]
 ) {
     constexpr sampler tileSampler(
         coord::normalized,
@@ -458,7 +742,11 @@ fragment float4 patternCommitFragment(
     const float2 uv = input.screenPixel / frame.tileSize;
     return patternCompositeLive(
         live.sample(tileSampler, uv),
+        replayLive.sample(tileSampler, uv),
         canonical.sample(tileSampler, uv),
-        frame.compositeMode
+        frame.compositeMode,
+        material.strokeOpacity,
+        material.accumulationLimit,
+        material.materialStrength
     );
 }

@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 5,
+  "name": "slice4-glaze-live-commit-negative-control",
+  "width": 192,
+  "height": 192,
+  "tileWidth": 192,
+  "tileHeight": 128,
+  "tiling": 1,
+  "diagnosticMode": "canonicalCoordinates",
+  "program": "projectedLiveCommit",
+  "recipeID": "anchor.glaze-soft",
+  "seed": 404,
+  "attributedSamples": [
+    {
+      "x": 32,
+      "y": 48,
+      "pressure": 0.4,
+      "timestamp": 0,
+      "phase": "began",
+      "source": "pencil",
+      "kind": "actual",
+      "capabilities": 1
+    },
+    {
+      "x": 96,
+      "y": 96,
+      "pressure": 0.65,
+      "timestamp": 0.02,
+      "phase": "moved",
+      "source": "pencil",
+      "kind": "actual",
+      "capabilities": 1
+    },
+    {
+      "x": 160,
+      "y": 144,
+      "pressure": 0.8,
+      "timestamp": 0.04,
+      "phase": "ended",
+      "source": "pencil",
+      "kind": "actual",
+      "capabilities": 1
+    }
+  ],
+  "expectedMaterial": "glaze",
+  "replayMode": "appendOnly",
+  "checks": [
+    {
+      "channel": "canonical",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "tolerance": 0
+    },
+    {
+      "channel": "committedScreen",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        241,
+        244,
+        242,
+        255
+      ],
+      "tolerance": 0
+    }
+  ],
+  "structuralChecks": [
+    {
+      "metric": "materialMismatchCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "previewCommitViolationCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "historyCommandCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "drawEraseChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 1
+    }
+  ],
+  "negativeControls": [
+    {
+      "metric": "previewCommitViolationCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "materialMismatchCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "historyCommandCount",
+      "relation": "equal",
+      "value": 0
+    }
+  ]
+}

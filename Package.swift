@@ -17,6 +17,10 @@ let package = Package(
             name: "SliceThreeEvidenceGate",
             targets: ["SliceThreeEvidenceGate"]
         ),
+        .executable(
+            name: "SliceFourEvidenceGate",
+            targets: ["SliceFourEvidenceGate"]
+        ),
         .library(name: "PatternFile", targets: ["PatternFile"]),
     ],
     targets: [
@@ -42,6 +46,10 @@ let package = Package(
             name: "SliceThreeEvidenceGate",
             dependencies: ["MetalRenderer"]
         ),
+        .executableTarget(
+            name: "SliceFourEvidenceGate",
+            dependencies: ["MetalRenderer"]
+        ),
         .testTarget(
             name: "PatternEngineTests",
             dependencies: ["PatternEngine"]
@@ -52,7 +60,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MetalRendererTests",
-            dependencies: ["MetalRenderer", "CShaderTypes"]
+            dependencies: ["MetalRenderer", "CShaderTypes", "EditorCore"]
         ),
         .testTarget(
             name: "PatternFileTests",
@@ -76,6 +84,7 @@ let package = Package(
             ],
             sources: [
                 "PatternSpike/EditorSessionController.swift",
+                "PatternSpike/Input/BrushInputAdapter.swift",
                 "PatternSpike/Canvas/InteractiveMetalView.swift",
                 "PatternSpike/Canvas/MetalCanvas.swift",
                 "PatternSpike/Commands/EditorFocusedCommands.swift",

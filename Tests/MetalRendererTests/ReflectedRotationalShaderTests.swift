@@ -82,13 +82,15 @@ struct ReflectedRotationalShaderTests {
         let source = try normalizedSource("Sources/MetalRenderer/Shaders.metal")
 
         #expect(source.contains(
-            "return patternCompositeLive( live.sample(tileSampler, uv), canonical.sample(tileSampler, uv), frame.compositeMode );"
+            "return patternCompositeLive( live.sample(tileSampler, uv), replayLive.sample(tileSampler, uv), canonical.sample(tileSampler, uv), frame.compositeMode, material.strokeOpacity, material.accumulationLimit, material.materialStrength );"
         ))
         #expect(source.contains(
-            "return canonical * (1.0 - live.a);"
+            "return canonical * ( 1.0 - live.a * clamp(eraserStrength, 0.0, 1.0) );"
         ))
         #expect(
-            source.components(separatedBy: "canonical * (1.0 - live.a)").count
+            source.components(
+                separatedBy: "canonical * ( 1.0 - live.a * clamp(eraserStrength, 0.0, 1.0) )"
+            ).count
                 == 2
         )
     }

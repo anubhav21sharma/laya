@@ -30,16 +30,16 @@ struct TranslationTilingShaderTests {
         let source = try normalizedShaderSource()
 
         #expect(source.contains(
-            "static float4 patternCompositeLive( float4 live, float4 canonical, uint compositeMode )"
+            "static float4 patternCompositeLive( float4 settledLive, float4 replayLive, float4 canonical, uint compositeMode, float strokeOpacity, float accumulationLimit, float eraserStrength )"
         ))
         #expect(source.contains(
-            "static float4 patternCompositeThenBilinearSample( texture2d<float> canonical, texture2d<float> live, float2 canonicalPixel, uint compositeMode, uint liveVisible )"
+            "static float4 patternCompositeThenBilinearSample( texture2d<float> canonical, texture2d<float> settledLive, texture2d<float> replayLive, float2 canonicalPixel, uint compositeMode, uint liveVisible, float strokeOpacity, float accumulationLimit, float eraserStrength )"
         ))
         #expect(source.contains(
-            "const float4 composite00 = patternCompositeLive( live00, canonical.read(texel00), compositeMode );"
+            "const float4 composite00 = patternCompositeLive( live00, replay00, canonical.read(texel00), compositeMode, strokeOpacity, accumulationLimit, eraserStrength );"
         ))
         #expect(source.contains(
-            "float4 result = patternCompositeThenBilinearSample( canonical, live, mapping.canonicalPixel, frame.compositeMode, frame.liveVisible );"
+            "float4 result = patternCompositeThenBilinearSample( canonical, live, replayLive, mapping.canonicalPixel, frame.compositeMode, frame.liveVisible, material.strokeOpacity, material.accumulationLimit, material.materialStrength );"
         ))
     }
 

@@ -228,9 +228,9 @@ public enum SliceThreeEvidenceValidator {
                   record.totalProjectedFragmentCount == truth.fragments,
                   record.maximumFragmentsPerFootprint == truth.maximumFragments,
                   record.totalInstanceBytes == truth.instanceBytes,
-                  truth.instanceBytes == truth.fragments * 112
+                  truth.instanceBytes == truth.fragments * 128
             else {
-                throw invalid("\(name): Slice 2 identity, count, or 112-byte ABI truth does not match")
+                throw invalid("\(name): Slice 2 identity, count, or 128-byte ABI truth does not match")
             }
             _ = try requireSeries(
                 record.brushProcessingMilliseconds,
@@ -609,9 +609,9 @@ public enum SliceThreeEvidenceValidator {
         }
         guard truth.instanceBytes == truth.fragments
                 * MemoryLayout<PatternProjectedStampInstance>.stride,
-              MemoryLayout<PatternProjectedStampInstance>.stride == 112
+              MemoryLayout<PatternProjectedStampInstance>.stride == 128
         else {
-            throw invalid("\(name): projected fragments violate the approved 112-byte ABI")
+            throw invalid("\(name): projected fragments violate the approved 128-byte ABI")
         }
         return record
     }
@@ -696,7 +696,7 @@ public enum SliceThreeEvidenceValidator {
                 restoreCount: 2, historyBytes: 4_224, historyCommands: 1,
                 historyNavigationFinishes: 2,
                 changedRegions: 1, fragments: 1, maximumFragments: 1,
-                instanceBytes: 112, primarySuffix: "live.screen.png",
+                instanceBytes: 128, primarySuffix: "live.screen.png",
                 pngSizes: strokePNGs
             ),
             "eraser-live-commit": Truth(
@@ -706,7 +706,7 @@ public enum SliceThreeEvidenceValidator {
                 restoreCount: 2, historyBytes: 8_448, historyCommands: 2,
                 historyNavigationFinishes: 2,
                 changedRegions: 1, fragments: 1, maximumFragments: 1,
-                instanceBytes: 112, primarySuffix: "live.screen.png",
+                instanceBytes: 128, primarySuffix: "live.screen.png",
                 pngSizes: strokePNGs
             ),
             "region-undo-seam": Truth(
@@ -716,7 +716,7 @@ public enum SliceThreeEvidenceValidator {
                 restoreCount: 2, historyBytes: 1_792, historyCommands: 1,
                 historyNavigationFinishes: 2,
                 changedRegions: 2, fragments: 2, maximumFragments: 2,
-                instanceBytes: 224, primarySuffix: "live.screen.png",
+                instanceBytes: 256, primarySuffix: "live.screen.png",
                 pngSizes: strokePNGs
             ),
             "clear-undo": Truth(
@@ -726,7 +726,7 @@ public enum SliceThreeEvidenceValidator {
                 restoreCount: 2, historyBytes: 135_296, historyCommands: 2,
                 historyNavigationFinishes: 2,
                 changedRegions: 1, fragments: 1, maximumFragments: 1,
-                instanceBytes: 112, primarySuffix: "committed.screen.png",
+                instanceBytes: 128, primarySuffix: "committed.screen.png",
                 pngSizes: [
                     "committed.screen.png": square,
                     "before-clear.canonical.png": square,
@@ -743,7 +743,7 @@ public enum SliceThreeEvidenceValidator {
                 restoreCount: 0, historyBytes: 4_416, historyCommands: 2,
                 historyNavigationFinishes: 2,
                 changedRegions: 0, fragments: 1, maximumFragments: 1,
-                instanceBytes: 112,
+                instanceBytes: 128,
                 primarySuffix: "initial-tiling.screen.png",
                 pngSizes: [
                     "initial-tiling.screen.png": PixelSize(width: 256, height: 128),
@@ -803,32 +803,32 @@ public enum SliceThreeEvidenceValidator {
             )
         }
         return [
-            "generalized-grid": truth(1, 4, 4, 0, 1, 1, 2, 1, 4, 4, 448),
-            "halfdrop-interior": truth(1, 5, 5, 0, 1, 1, 3, 1, 1, 1, 112),
-            "halfdrop-edge": truth(1, 5, 5, 0, 1, 1, 3, 1, 3, 3, 336),
-            "halfdrop-corner": truth(1, 5, 5, 0, 1, 1, 3, 1, 3, 3, 336),
-            "brick-transpose": truth(1, 5, 5, 0, 1, 1, 3, 1, 3, 3, 336),
-            "mirror-x": truth(1, 1, 1, 0, 0, 1, 0, 0, 2, 2, 224),
-            "mirror-y": truth(1, 1, 1, 0, 0, 1, 0, 0, 2, 2, 224),
-            "mirror-xy": truth(1, 1, 1, 0, 0, 1, 0, 0, 4, 4, 448),
-            "rotational-generator": truth(1, 1, 1, 0, 0, 1, 0, 0, 2, 2, 224),
-            "rotational-fixed-point": truth(1, 4, 4, 0, 1, 1, 2, 1, 1, 1, 112),
-            "rotational-orientation": truth(1, 1, 1, 0, 0, 1, 0, 0, 2, 2, 224),
-            "large-footprint": truth(1, 4, 4, 0, 1, 1, 2, 1, 48, 48, 5_376),
-            "asymmetric-footprint": truth(1, 1, 1, 0, 0, 1, 0, 0, 4, 4, 448),
-            "canonical-coordinate-continuity": truth(1, 1, 1, 0, 0, 1, 0, 0, 3, 3, 336),
-            "brush-local-coordinate-continuity": truth(1, 1, 1, 0, 0, 1, 0, 0, 4, 4, 448),
-            "rectangular-tile": truth(1, 4, 4, 0, 1, 1, 2, 1, 4, 4, 448),
-            "noncentral-visible-cell-grid": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 224),
-            "noncentral-visible-cell-halfdrop": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 224),
-            "noncentral-visible-cell-brick": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 224),
-            "noncentral-visible-cell-mirror-x": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 224),
-            "noncentral-visible-cell-mirror-y": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 224),
-            "noncentral-visible-cell-mirror-xy": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 224),
-            "noncentral-visible-cell-rotational": truth(1, 3, 3, 0, 1, 1, 1, 1, 4, 2, 448),
-            "metadata-tiling-switch": truth(1, 5, 5, 0, 1, 1, 3, 1, 1, 1, 112),
-            "projected-live-commit": truth(1, 4, 4, 2, 1, 1, 2, 1, 33, 3, 3_696),
-            "projected-long-stroke": truth(401, 404, 404, 401, 401, 401, 2, 1, 401, 1, 44_912),
+            "generalized-grid": truth(1, 4, 4, 0, 1, 1, 2, 1, 4, 4, 512),
+            "halfdrop-interior": truth(1, 5, 5, 0, 1, 1, 3, 1, 1, 1, 128),
+            "halfdrop-edge": truth(1, 5, 5, 0, 1, 1, 3, 1, 3, 3, 384),
+            "halfdrop-corner": truth(1, 5, 5, 0, 1, 1, 3, 1, 3, 3, 384),
+            "brick-transpose": truth(1, 5, 5, 0, 1, 1, 3, 1, 3, 3, 384),
+            "mirror-x": truth(1, 1, 1, 0, 0, 1, 0, 0, 2, 2, 256),
+            "mirror-y": truth(1, 1, 1, 0, 0, 1, 0, 0, 2, 2, 256),
+            "mirror-xy": truth(1, 1, 1, 0, 0, 1, 0, 0, 4, 4, 512),
+            "rotational-generator": truth(1, 1, 1, 0, 0, 1, 0, 0, 2, 2, 256),
+            "rotational-fixed-point": truth(1, 4, 4, 0, 1, 1, 2, 1, 1, 1, 128),
+            "rotational-orientation": truth(1, 1, 1, 0, 0, 1, 0, 0, 2, 2, 256),
+            "large-footprint": truth(1, 4, 4, 0, 1, 1, 2, 1, 48, 48, 6_144),
+            "asymmetric-footprint": truth(1, 1, 1, 0, 0, 1, 0, 0, 4, 4, 512),
+            "canonical-coordinate-continuity": truth(1, 1, 1, 0, 0, 1, 0, 0, 3, 3, 384),
+            "brush-local-coordinate-continuity": truth(1, 1, 1, 0, 0, 1, 0, 0, 4, 4, 512),
+            "rectangular-tile": truth(1, 4, 4, 0, 1, 1, 2, 1, 4, 4, 512),
+            "noncentral-visible-cell-grid": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 256),
+            "noncentral-visible-cell-halfdrop": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 256),
+            "noncentral-visible-cell-brick": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 256),
+            "noncentral-visible-cell-mirror-x": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 256),
+            "noncentral-visible-cell-mirror-y": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 256),
+            "noncentral-visible-cell-mirror-xy": truth(1, 3, 3, 0, 1, 1, 1, 1, 2, 1, 256),
+            "noncentral-visible-cell-rotational": truth(1, 3, 3, 0, 1, 1, 1, 1, 4, 2, 512),
+            "metadata-tiling-switch": truth(1, 5, 5, 0, 1, 1, 3, 1, 1, 1, 128),
+            "projected-live-commit": truth(1, 4, 4, 2, 1, 1, 2, 1, 33, 3, 4_224),
+            "projected-long-stroke": truth(401, 404, 404, 401, 401, 401, 2, 1, 401, 1, 51_328),
         ]
     }
 }

@@ -498,12 +498,12 @@ do {
             "totalInstanceBytes",
             scene: name
         )
-        guard fragments > 0, bytes == fragments * 112 else {
-            throw failure("\(name): projected fragment or 112-byte instance accounting is invalid")
+        guard fragments > 0, bytes == fragments * 128 else {
+            throw failure("\(name): projected fragment or 128-byte instance accounting is invalid")
         }
         if name == "generalized-grid" {
-            guard fragments == 4, record.totalInstanceBytes == 448 else {
-                throw failure("generalized-grid: four fragments must retain 448 instance bytes")
+            guard fragments == 4, record.totalInstanceBytes == 512 else {
+                throw failure("generalized-grid: four fragments must retain 512 instance bytes")
             }
         }
         if let prior = identity,

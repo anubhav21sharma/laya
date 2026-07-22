@@ -268,6 +268,21 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     public let changedRegionCount: Int?
     public let coloredOutputMismatchCount: Int?
     public let previewCommitViolationCount: Int?
+    public let recipeID: String?
+    public let material: String?
+    public let seed: UInt64?
+    public let replayMode: String?
+    public let peakRetainedSampleCount: Int?
+    public let peakRetainedDabCount: Int?
+    public let replayCount: Int?
+    public let promotedSettledPrefixCount: Int?
+    public let replayDegradationCount: Int?
+    public let assetResidentBytes: Int?
+    public let materialGPUMilliseconds: [Double]?
+    public let fiveHundredDabStressFrameIndex: Int?
+    public let fiveHundredDabStressNewDabCount: Int?
+    public let processedWashPixelCount: Int?
+    public let washWorkingBytes: Int?
 
     public init(
         schemaVersion: Int,
@@ -318,6 +333,21 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         changedRegionCount: Int? = nil,
         coloredOutputMismatchCount: Int? = nil,
         previewCommitViolationCount: Int? = nil,
+        recipeID: String? = nil,
+        material: String? = nil,
+        seed: UInt64? = nil,
+        replayMode: String? = nil,
+        peakRetainedSampleCount: Int? = nil,
+        peakRetainedDabCount: Int? = nil,
+        replayCount: Int? = nil,
+        promotedSettledPrefixCount: Int? = nil,
+        replayDegradationCount: Int? = nil,
+        assetResidentBytes: Int? = nil,
+        materialGPUMilliseconds: [Double]? = nil,
+        fiveHundredDabStressFrameIndex: Int? = nil,
+        fiveHundredDabStressNewDabCount: Int? = nil,
+        processedWashPixelCount: Int? = nil,
+        washWorkingBytes: Int? = nil,
         program: String? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -375,10 +405,25 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         self.changedRegionCount = changedRegionCount
         self.coloredOutputMismatchCount = coloredOutputMismatchCount
         self.previewCommitViolationCount = previewCommitViolationCount
+        self.recipeID = recipeID
+        self.material = material
+        self.seed = seed
+        self.replayMode = replayMode
+        self.peakRetainedSampleCount = peakRetainedSampleCount
+        self.peakRetainedDabCount = peakRetainedDabCount
+        self.replayCount = replayCount
+        self.promotedSettledPrefixCount = promotedSettledPrefixCount
+        self.replayDegradationCount = replayDegradationCount
+        self.assetResidentBytes = assetResidentBytes
+        self.materialGPUMilliseconds = materialGPUMilliseconds
+        self.fiveHundredDabStressFrameIndex = fiveHundredDabStressFrameIndex
+        self.fiveHundredDabStressNewDabCount = fiveHundredDabStressNewDabCount
+        self.processedWashPixelCount = processedWashPixelCount
+        self.washWorkingBytes = washWorkingBytes
     }
 
     public static func encode(_ record: BenchmarkRecord) throws -> Data {
-        try record.validateSchemaFourMetrics()
+        try record.validateVersionedMetrics()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         return try encoder.encode(record)
@@ -386,7 +431,7 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
 
     public static func decode(_ data: Data) throws -> BenchmarkRecord {
         let record = try JSONDecoder().decode(BenchmarkRecord.self, from: data)
-        try record.validateSchemaFourMetrics()
+        try record.validateVersionedMetrics()
         return record
     }
 
@@ -406,8 +451,16 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         return Double(missedFrameCount ?? 0) / Double(frameCount)
     }
 
+    private func validateVersionedMetrics() throws {
+        if schemaVersion == 4 || schemaVersion == 5 {
+            try validateSchemaFourMetrics()
+        }
+        if schemaVersion == 5 {
+            try validateSchemaFiveMetrics()
+        }
+    }
+
     private func validateSchemaFourMetrics() throws {
-        guard schemaVersion == 4 else { return }
 
         guard program != nil else {
             throw BenchmarkRecordError.missingSchemaFourMetric("program")
@@ -507,6 +560,150 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         }
     }
 
+    private func validateSchemaFiveMetrics() throws {
+        guard let recipeID,
+              !recipeID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric("recipeID")
+        }
+        guard let material else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric("material")
+        }
+        guard ["ink", "dry", "glaze", "boundedWash"].contains(material) else {
+            throw BenchmarkRecordError.invalidTextValue(
+                field: "material",
+                value: material
+            )
+        }
+        guard let seed else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric("seed")
+        }
+        guard seed != 0 else {
+            throw BenchmarkRecordError.invalidNumericValue(field: "seed")
+        }
+        guard let replayMode else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric("replayMode")
+        }
+        guard ["appendOnly", "replayTail", "boundedWholeStroke"]
+            .contains(replayMode)
+        else {
+            throw BenchmarkRecordError.invalidTextValue(
+                field: "replayMode",
+                value: replayMode
+            )
+        }
+        guard let peakRetainedSampleCount else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric(
+                "peakRetainedSampleCount"
+            )
+        }
+        guard let peakRetainedDabCount else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric(
+                "peakRetainedDabCount"
+            )
+        }
+        guard let replayCount else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric("replayCount")
+        }
+        guard let promotedSettledPrefixCount else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric(
+                "promotedSettledPrefixCount"
+            )
+        }
+        guard let replayDegradationCount else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric(
+                "replayDegradationCount"
+            )
+        }
+        guard let assetResidentBytes else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric(
+                "assetResidentBytes"
+            )
+        }
+        guard let materialGPUMilliseconds else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric(
+                "materialGPUMilliseconds"
+            )
+        }
+        guard let dabGPUMilliseconds else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric(
+                "dabGPUMilliseconds"
+            )
+        }
+        guard let newInstanceCounts else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric(
+                "newInstanceCounts"
+            )
+        }
+        guard let processedWashPixelCount else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric(
+                "processedWashPixelCount"
+            )
+        }
+        guard let washWorkingBytes else {
+            throw BenchmarkRecordError.missingSchemaFiveMetric(
+                "washWorkingBytes"
+            )
+        }
+
+        try Self.validateNonnegativeFinite(
+            materialGPUMilliseconds,
+            field: "materialGPUMilliseconds"
+        )
+        try Self.validateNonnegativeFinite(
+            dabGPUMilliseconds,
+            field: "dabGPUMilliseconds"
+        )
+        guard !newInstanceCounts.isEmpty,
+              newInstanceCounts.count == dabGPUMilliseconds.count,
+              newInstanceCounts.allSatisfy({ $0 >= 0 })
+        else {
+            throw BenchmarkRecordError.invalidNumericValue(
+                field: "newInstanceCounts"
+            )
+        }
+        let stressScene = "slice4-long-stroke-bounds"
+        if sceneName == stressScene {
+            guard let fiveHundredDabStressFrameIndex else {
+                throw BenchmarkRecordError.missingSchemaFiveMetric(
+                    "fiveHundredDabStressFrameIndex"
+                )
+            }
+            guard let fiveHundredDabStressNewDabCount else {
+                throw BenchmarkRecordError.missingSchemaFiveMetric(
+                    "fiveHundredDabStressNewDabCount"
+                )
+            }
+            guard fiveHundredDabStressFrameIndex
+                    == dabGPUMilliseconds.index(before: dabGPUMilliseconds.endIndex),
+                  fiveHundredDabStressNewDabCount == 500,
+                  newInstanceCounts[fiveHundredDabStressFrameIndex] == 500
+            else {
+                throw BenchmarkRecordError.invalidNumericValue(
+                    field: "fiveHundredDabStressFrameIndex"
+                )
+            }
+        } else if fiveHundredDabStressFrameIndex != nil
+                    || fiveHundredDabStressNewDabCount != nil
+        {
+            throw BenchmarkRecordError.invalidNumericValue(
+                field: "fiveHundredDabStressFrameIndex"
+            )
+        }
+        for (field, value) in [
+            ("peakRetainedSampleCount", peakRetainedSampleCount),
+            ("peakRetainedDabCount", peakRetainedDabCount),
+            ("replayCount", replayCount),
+            ("promotedSettledPrefixCount", promotedSettledPrefixCount),
+            ("replayDegradationCount", replayDegradationCount),
+            ("assetResidentBytes", assetResidentBytes),
+            ("processedWashPixelCount", processedWashPixelCount),
+            ("washWorkingBytes", washWorkingBytes),
+        ] where value < 0 {
+            throw BenchmarkRecordError.invalidNumericValue(field: field)
+        }
+    }
+
     private static func validateNonnegativeFinite(
         _ values: [Double],
         field: String
@@ -519,14 +716,20 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
 
 public enum BenchmarkRecordError: Error, Equatable, LocalizedError {
     case missingSchemaFourMetric(String)
+    case missingSchemaFiveMetric(String)
     case invalidNumericValue(field: String)
+    case invalidTextValue(field: String, value: String)
 
     public var errorDescription: String? {
         switch self {
         case let .missingSchemaFourMetric(field):
             "Schema 4 benchmark record requires '\(field)'."
+        case let .missingSchemaFiveMetric(field):
+            "Schema 5 benchmark record requires '\(field)'."
         case let .invalidNumericValue(field):
-            "Schema 4 benchmark field '\(field)' contains a nonfinite or negative value."
+            "Benchmark field '\(field)' contains an invalid numeric value."
+        case let .invalidTextValue(field, value):
+            "Benchmark field '\(field)' contains invalid value '\(value)'."
         }
     }
 }

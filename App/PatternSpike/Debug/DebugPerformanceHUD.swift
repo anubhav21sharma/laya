@@ -40,6 +40,7 @@ struct DebugPerformanceHUD: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(.primary.opacity(0.16))
         }
+        .accessibilityIdentifier("Debug Performance HUD")
     }
 
     private func metric(_ label: String, _ value: String) -> some View {

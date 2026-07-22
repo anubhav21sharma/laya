@@ -25,7 +25,7 @@ public enum TilingProjection {
         for fragment: CellFragment,
         radius: Float
     ) -> PixelRect {
-        precondition(radius.isFinite && radius >= 1)
+        precondition(radius.isFinite && radius > 0)
         let expansion = 1 + 1 / radius
         let corners = [
             SIMD2(-expansion, -expansion),

@@ -35,6 +35,25 @@ func dirtyPixelRectIncludesShaderExpansionAtCanonicalEdge() {
 }
 
 @Test
+func dirtyPixelRectUsesSubpixelMinimumScaleForAnisotropicCoverage() {
+    let fragment = CellFragment(
+        cell: CellIndex(column: 0, row: 0),
+        imageOrdinal: 0,
+        canonicalFromBrush: Affine2D(
+            xAxis: SIMD2(10, 0),
+            yAxis: SIMD2(0, 0.25),
+            translation: SIMD2(50, 50)
+        ),
+        brushClip: ConvexClip(halfPlanes: [])
+    )
+
+    #expect(
+        TilingProjection.dirtyPixelRect(for: fragment, radius: 0.25)
+            == PixelRect(minX: 0, minY: 48, maxX: 100, maxY: 52)
+    )
+}
+
+@Test
 func gridCornerFootprintEmitsFourExactOwnedFragments() {
     let footprint = squareFootprint(center: SIMD2(3, 3), radius: 10)
     let strategy = TilingStrategy(kind: .grid, tileSize: projectionTileSize)

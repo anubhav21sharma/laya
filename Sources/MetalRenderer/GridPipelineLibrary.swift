@@ -5,14 +5,19 @@ public struct GridPipelineLibrary {
     public let stamp: any MTLRenderPipelineState
     public let display: any MTLRenderPipelineState
     public let commit: any MTLRenderPipelineState
+    public let washDeposit: any MTLRenderPipelineState
+    public let replayClear: any MTLRenderPipelineState
+    public let washClear: any MTLRenderPipelineState
+    public let washSoften: any MTLRenderPipelineState
+    public let washResolve: any MTLRenderPipelineState
 
     public init(device: any MTLDevice, library: any MTLLibrary) throws {
         stamp = try Self.makePipeline(
             device: device,
             library: library,
-            label: "Projected Hard Round Stamp",
+            label: "Projected Brush Stamp",
             vertex: "patternProjectedStampVertex",
-            fragment: "patternHardRoundStampFragment",
+            fragment: "patternBrushStampFragment",
             configure: { attachment in
                 attachment.isBlendingEnabled = true
                 attachment.sourceRGBBlendFactor = .sourceAlpha
@@ -45,6 +50,49 @@ public struct GridPipelineLibrary {
                 attachment.isBlendingEnabled = false
             }
         )
+        washDeposit = try Self.makePipeline(
+            device: device,
+            library: library,
+            label: "Bounded Wash Deposit",
+            vertex: "patternProjectedStampVertex",
+            fragment: "patternBrushStampFragment",
+            pixelFormat: BoundedWashSurface.pixelFormat,
+            configure: Self.configureStraightSourceOver
+        )
+        replayClear = try Self.makePipeline(
+            device: device,
+            library: library,
+            label: "Replay Tail Regional Clear",
+            vertex: "patternFullscreenVertex",
+            fragment: "patternWashClearFragment",
+            configure: { $0.isBlendingEnabled = false }
+        )
+        washClear = try Self.makePipeline(
+            device: device,
+            library: library,
+            label: "Bounded Wash Regional Clear",
+            vertex: "patternFullscreenVertex",
+            fragment: "patternWashClearFragment",
+            pixelFormat: BoundedWashSurface.pixelFormat,
+            configure: { $0.isBlendingEnabled = false }
+        )
+        washSoften = try Self.makePipeline(
+            device: device,
+            library: library,
+            label: "Bounded Wash Local Soften",
+            vertex: "patternFullscreenVertex",
+            fragment: "patternWashSoftenFragment",
+            pixelFormat: BoundedWashSurface.pixelFormat,
+            configure: { $0.isBlendingEnabled = false }
+        )
+        washResolve = try Self.makePipeline(
+            device: device,
+            library: library,
+            label: "Bounded Wash Premultiplied Resolve",
+            vertex: "patternFullscreenVertex",
+            fragment: "patternWashResolveFragment",
+            configure: Self.configurePremultipliedSourceOver
+        )
     }
 
     static func makeHarnessDiagnosticPipeline(
@@ -67,12 +115,27 @@ public struct GridPipelineLibrary {
         )
     }
 
+    static func makeHarnessBrushPipeline(
+        device: any MTLDevice,
+        library: any MTLLibrary
+    ) throws -> any MTLRenderPipelineState {
+        try makePipeline(
+            device: device,
+            library: library,
+            label: "Harness Recipe Brush Footprint",
+            vertex: "patternProjectedStampVertex",
+            fragment: "patternBrushStampFragment",
+            configure: configureStraightSourceOver
+        )
+    }
+
     private static func makePipeline(
         device: any MTLDevice,
         library: any MTLLibrary,
         label: String,
         vertex: String,
         fragment: String,
+        pixelFormat: MTLPixelFormat = .bgra8Unorm,
         configure: (MTLRenderPipelineColorAttachmentDescriptor) -> Void
     ) throws -> any MTLRenderPipelineState {
         guard let vertexFunction = library.makeFunction(name: vertex) else {
@@ -86,7 +149,7 @@ public struct GridPipelineLibrary {
         descriptor.label = label
         descriptor.vertexFunction = vertexFunction
         descriptor.fragmentFunction = fragmentFunction
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        descriptor.colorAttachments[0].pixelFormat = pixelFormat
         configure(descriptor.colorAttachments[0])
 
         do {
@@ -96,5 +159,25 @@ public struct GridPipelineLibrary {
                 error.localizedDescription
             )
         }
+    }
+
+    private static func configureStraightSourceOver(
+        _ attachment: MTLRenderPipelineColorAttachmentDescriptor
+    ) {
+        attachment.isBlendingEnabled = true
+        attachment.sourceRGBBlendFactor = .sourceAlpha
+        attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        attachment.sourceAlphaBlendFactor = .one
+        attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+    }
+
+    private static func configurePremultipliedSourceOver(
+        _ attachment: MTLRenderPipelineColorAttachmentDescriptor
+    ) {
+        attachment.isBlendingEnabled = true
+        attachment.sourceRGBBlendFactor = .one
+        attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        attachment.sourceAlphaBlendFactor = .one
+        attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
     }
 }

@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 5,
+  "name": "slice4-prediction-taper-replay",
+  "width": 192,
+  "height": 128,
+  "tileWidth": 192,
+  "tileHeight": 128,
+  "tiling": 3,
+  "diagnosticMode": "hardRound",
+  "program": "projectedLiveCommit",
+  "recipeID": "anchor.ink-prediction-taper-replay",
+  "seed": 606,
+  "attributedSamples": [
+    {
+      "x": 24,
+      "y": 64,
+      "pressure": 0.35,
+      "timestamp": 0,
+      "phase": "began",
+      "source": "tablet",
+      "kind": "actual",
+      "capabilities": 1
+    },
+    {
+      "x": 56,
+      "y": 60,
+      "pressure": 0.5,
+      "timestamp": 0.01,
+      "phase": "moved",
+      "source": "tablet",
+      "kind": "coalesced",
+      "capabilities": 1
+    },
+    {
+      "x": 92,
+      "y": 58,
+      "pressure": 0.65,
+      "timestamp": 0.018,
+      "phase": "moved",
+      "source": "tablet",
+      "kind": "predicted",
+      "capabilities": 1
+    },
+    {
+      "x": 124,
+      "y": 62,
+      "pressure": 0.75,
+      "timestamp": 0.022,
+      "phase": "moved",
+      "source": "tablet",
+      "kind": "predicted",
+      "capabilities": 1
+    },
+    {
+      "x": 96,
+      "y": 61,
+      "pressure": 0.7,
+      "timestamp": 0.024,
+      "phase": "moved",
+      "source": "tablet",
+      "kind": "actual",
+      "capabilities": 1
+    },
+    {
+      "x": 156,
+      "y": 64,
+      "pressure": 0.9,
+      "timestamp": 0.035,
+      "phase": "ended",
+      "source": "tablet",
+      "kind": "actual",
+      "capabilities": 1
+    }
+  ],
+  "expectedMaterial": "ink",
+  "replayMode": "replayTail",
+  "checks": [
+    {
+      "channel": "canonical",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "tolerance": 0
+    },
+    {
+      "channel": "committedScreen",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        241,
+        244,
+        242,
+        255
+      ],
+      "tolerance": 0
+    }
+  ],
+  "structuralChecks": [
+    {
+      "metric": "replayModeMismatchCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "replayCount",
+      "relation": "lessThanOrEqual",
+      "value": 16
+    },
+    {
+      "metric": "predictedDuplicateSettledDabCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "historyCommandCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "drawEraseChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 1
+    }
+  ]
+}

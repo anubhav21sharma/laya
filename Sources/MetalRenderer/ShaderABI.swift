@@ -30,8 +30,8 @@ public enum ShaderABI {
             && MemoryLayout<PatternClipHalfPlane>.offset(of: \.normal) == 0
             && MemoryLayout<PatternClipHalfPlane>.offset(of: \.offset) == 8
             && MemoryLayout<PatternClipHalfPlane>.offset(of: \.padding) == 12
-            && MemoryLayout<PatternProjectedStampInstance>.size == 112
-            && MemoryLayout<PatternProjectedStampInstance>.stride == 112
+            && MemoryLayout<PatternProjectedStampInstance>.size == 128
+            && MemoryLayout<PatternProjectedStampInstance>.stride == 128
             && MemoryLayout<PatternProjectedStampInstance>.alignment == 16
             && MemoryLayout<PatternProjectedStampInstance>.offset(
                 of: \.canonicalXAxis
@@ -49,6 +49,46 @@ public enum ShaderABI {
             && MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip1) == 64
             && MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip2) == 80
             && MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip3) == 96
+            && MemoryLayout<PatternProjectedStampInstance>.offset(
+                of: \.brushAttributes
+            ) == 112
+            && MemoryLayout<PatternBrushMaterialUniforms>.size == 48
+            && MemoryLayout<PatternBrushMaterialUniforms>.stride == 48
+            && MemoryLayout<PatternBrushMaterialUniforms>.alignment == 4
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.materialFamily
+            ) == 0
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.grainCoordinateMode
+            ) == 4
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.strokeOpacity
+            ) == 8
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.materialStrength
+            ) == 12
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.wetness) == 16
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.bleedRadius
+            ) == 20
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.softenPasses
+            ) == 24
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.accumulationLimit
+            ) == 28
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.shapeKind
+            ) == 32
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.grainKind
+            ) == 36
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.grainRotation
+            ) == 40
+            && MemoryLayout<PatternBrushMaterialUniforms>.offset(
+                of: \.padding1
+            ) == 44
     }
 
     public static func preconditionValid(

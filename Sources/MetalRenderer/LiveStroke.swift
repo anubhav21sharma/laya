@@ -3,6 +3,7 @@ import PatternEngine
 
 public struct IdentifiedDab {
     public let identity: UInt64
+    public let renderEpoch: UInt64
     public let instance: PatternProjectedStampInstance
 }
 
@@ -14,6 +15,7 @@ public struct LiveStroke {
 
     public let capacity: Int
     public private(set) var bakedHighWater: UInt64 = 0
+    public private(set) var renderEpoch: UInt64 = 0
     public private(set) var pending: ContiguousArray<IdentifiedDab> = []
     public var emittedHighWater: UInt64 { nextIdentity }
 
@@ -73,7 +75,13 @@ public struct LiveStroke {
                 capacity
             )
         }
-        pending.append(IdentifiedDab(identity: nextIdentity, instance: instance))
+        pending.append(
+            IdentifiedDab(
+                identity: nextIdentity,
+                renderEpoch: renderEpoch,
+                instance: instance
+            )
+        )
         if let dirtyRect {
             accumulateDirtyRectangle(dirtyRect)
         }
@@ -120,5 +128,16 @@ public struct LiveStroke {
         usesFullTileDirtyRegion = false
         bakedHighWater = 0
         nextIdentity = 0
+        renderEpoch = 0
+    }
+
+    /// Starts a replacement epoch without reusing an active-stroke identity.
+    public mutating func beginReplacementEpoch(_ epoch: UInt64) {
+        precondition(epoch > renderEpoch, "Replacement epochs must advance")
+        pending.removeAll(keepingCapacity: true)
+        dirtyRectangles.removeAll(keepingCapacity: true)
+        usesFullTileDirtyRegion = false
+        bakedHighWater = nextIdentity
+        renderEpoch = epoch
     }
 }

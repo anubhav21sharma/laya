@@ -40,6 +40,7 @@ func reflectedFragmentPacksEveryAffineAndActiveClipScalar() {
     #expect(instance.clip1.normal == SIMD2<Float>(0, -1))
     #expect(instance.clip1.offset == -0.75)
     #expect(instance.clip1.padding == 0)
+    #expect(instance.brushAttributes == SIMD4<Float>(1, 1, 0, 0))
 }
 
 @Test
@@ -58,12 +59,94 @@ func inactiveClipSlotsAreDeterministicallyZeroFilled() {
 }
 
 @Test
+func legacyGridSeamTracePacksExactProjectedInstancesAndDirtyRegions() {
+    let sample = StrokeTraceFixtures.gridSeam.samples[0]
+    let radius: Float = 10
+    let footprint = StampFootprint(
+        brushToWorld: Affine2D(
+            xAxis: SIMD2(radius, 0),
+            yAxis: SIMD2(0, radius),
+            translation: sample.position.simd
+        ),
+        localBounds: AxisAlignedRect(
+            minimum: SIMD2(-1, -1),
+            maximum: SIMD2(1, 1)
+        ),
+        coverageSymmetry: .halfTurnInvariant
+    )
+    let fragments = TilingProjection.fragments(
+        for: footprint,
+        using: TilingStrategy(
+            kind: .grid,
+            tileSize: PatternSize(width: 256, height: 256)
+        )
+    )
+    let color = InkColor(
+        red: 0.2,
+        green: 0.4,
+        blue: 0.6,
+        alpha: 0.8
+    )!
+    let instances = fragments.map {
+        PatternProjectedStampInstance(
+            fragment: $0,
+            radius: radius,
+            color: color
+        )
+    }
+
+    #expect(fragments.map(\.cell) == [
+        CellIndex(column: 0, row: 0),
+        CellIndex(column: 1, row: 0),
+    ])
+    #expect(fragments.map(\.imageOrdinal) == [0, 0])
+    #expect(fragments.map(\.canonicalFromBrush.translation) == [
+        SIMD2<Float>(250, 128),
+        SIMD2<Float>(-6, 128),
+    ])
+    #expect(instances.map(\.canonicalXAxis) == [
+        SIMD2<Float>(10, 0),
+        SIMD2<Float>(10, 0),
+    ])
+    #expect(instances.map(\.canonicalYAxis) == [
+        SIMD2<Float>(0, 10),
+        SIMD2<Float>(0, 10),
+    ])
+    #expect(instances.map(\.radius) == [10, 10])
+    #expect(instances.map(\.color) == [color.simd, color.simd])
+    #expect(instances.map(\.clipCount) == [4, 4])
+    #expect(instances[0].clip0.normal == SIMD2<Float>(1, 0))
+    #expect(instances[0].clip0.offset == -25)
+    #expect(instances[0].clip1.normal == SIMD2<Float>(-1, 0))
+    #expect(abs(instances[0].clip1.offset - -0.6) < 0.0001)
+    #expect(instances[1].clip0.normal == SIMD2<Float>(1, 0))
+    #expect(abs(instances[1].clip0.offset - 0.6) < 0.0001)
+    #expect(instances[1].clip1.normal == SIMD2<Float>(-1, 0))
+    #expect(abs(instances[1].clip1.offset - -26.2) < 0.0001)
+    for instance in instances {
+        #expect(instance.clip2.normal == SIMD2<Float>(0, 1))
+        #expect(abs(instance.clip2.offset - -12.8) < 0.0001)
+        #expect(instance.clip3.normal == SIMD2<Float>(0, -1))
+        #expect(abs(instance.clip3.offset - -12.8) < 0.0001)
+    }
+    #expect(
+        fragments.map {
+            TilingProjection.dirtyPixelRect(for: $0, radius: radius)
+        } == [
+            PixelRect(minX: 239, minY: 117, maxX: 261, maxY: 139)!,
+            PixelRect(minX: -17, minY: 117, maxX: 5, maxY: 139)!,
+        ]
+    )
+    #expect(MemoryLayout<PatternProjectedStampInstance>.stride == 128)
+}
+
+@Test
 func packingAcceptsExactAbsoluteRadiusBounds() {
     let fragment = reflectedTwoPlaneFragment()
 
     #expect(
-        PatternProjectedStampInstance(fragment: fragment, radius: 1).radius
-            == 1
+        PatternProjectedStampInstance(fragment: fragment, radius: 0.25).radius
+            == 0.25
     )
     #expect(
         PatternProjectedStampInstance(fragment: fragment, radius: 1_000)
@@ -83,12 +166,12 @@ func packingRejectsRadiusOutsideTheAbsoluteClamp() throws {
         return
     }
 
-    for radius in [Float(1).nextDown, Float(1_000).nextUp] {
+    for radius in [Float.zero, Float(1_000).nextUp] {
         let result = try runRadiusValidationSubprocess(radius: radius)
         #expect(result.status != 0)
         #expect(
             result.standardError.contains(
-                "Precondition failed: Projected stamp radius must be finite and within 1...1000"
+                "Precondition failed: Projected stamp radius must be finite and within (0, 1000]"
             )
         )
     }

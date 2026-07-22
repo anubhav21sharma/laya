@@ -1,5 +1,7 @@
 #if os(macOS)
 import AppKit
+import EditorCore
+import PatternEngine
 import SwiftUI
 import Testing
 
@@ -69,12 +71,11 @@ func hostedInkColorWellUpdatesTheEditorController() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     var focusRequestCount = 0
-    let host = NSHostingView(
-        rootView: EditorTopBar(
-            controller: controller,
-            requestEditorFocus: { focusRequestCount += 1 }
-        )
+    let topBar = EditorTopBar(
+        controller: controller,
+        requestEditorFocus: { focusRequestCount += 1 }
     )
+    let host = NSHostingView(rootView: topBar)
     host.frame = CGRect(x: 0, y: 0, width: 600, height: 48)
 
     await settle(host)
@@ -94,6 +95,159 @@ func hostedInkColorWellUpdatesTheEditorController() async throws {
     #expect(abs(ink.blue - 0.75) < 0.001)
     #expect(abs(ink.alpha - 0.8) < 0.001)
     #expect(focusRequestCount == 1)
+}
+
+@Test
+@MainActor
+func hostedAnchorPickerUsesOnlyDrawAnchorsAndKeepsNominalDiameter() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    var focusRequestCount = 0
+    let topBar = EditorTopBar(
+        controller: controller,
+        requestEditorFocus: { focusRequestCount += 1 }
+    )
+    do {
+        let host = NSHostingView(rootView: topBar)
+        host.frame = CGRect(x: 0, y: 0, width: 760, height: 48)
+
+        await settle(host)
+        let picker: NSPopUpButton = try #require(findSubview(in: host))
+        let expectedNames = AnchorBrushCatalog.drawAnchors.map(\.displayName)
+        #expect(expectedNames.allSatisfy { picker.itemTitles.contains($0) })
+        #expect(!picker.itemTitles.contains(
+            AnchorBrushCatalog.hardRoundEraser.displayName
+        ))
+    }
+
+    let nominalDiameter = controller.model.brushDiameter
+    for entry in AnchorBrushCatalog.drawAnchors.reversed() {
+        topBar.anchorRecipeBinding.wrappedValue = entry.id
+
+        #expect(controller.model.selectedRecipeID == entry.id)
+        #expect(controller.model.brushDiameter == nominalDiameter)
+    }
+
+    #expect(focusRequestCount == AnchorBrushCatalog.drawAnchors.count)
+}
+
+@Test
+@MainActor
+func repeatedRecipeAndToolChangesRemainCoherent() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let topBar = EditorTopBar(
+        controller: controller,
+        requestEditorFocus: {}
+    )
+    for entry in AnchorBrushCatalog.drawAnchors {
+        controller.handleTool(.erase)
+        topBar.anchorRecipeBinding.wrappedValue = entry.id
+
+        #expect(controller.model.tool == .erase)
+        #expect(controller.model.selectedRecipeID == entry.id)
+
+        controller.handleTool(.draw)
+        #expect(controller.model.tool == .draw)
+        #expect(controller.model.selectedRecipeID == entry.id)
+    }
+}
+
+@Test
+@MainActor
+func brushInputAdapterKeepsMouseNeutralAndOrdersValidSamples() throws {
+    let adapter = BrushInputAdapter()
+    let samples = adapter.orderedSamples([
+        .init(
+            position: ScreenPoint(x: 30, y: 30),
+            pressure: 1,
+            timestamp: 3,
+            phase: .moved,
+            isTablet: false
+        ),
+        .init(
+            position: ScreenPoint(x: .nan, y: 10),
+            pressure: 0,
+            timestamp: 2,
+            phase: .moved,
+            isTablet: false
+        ),
+        .init(
+            position: ScreenPoint(x: 10, y: 10),
+            pressure: 0,
+            timestamp: 1,
+            phase: .began,
+            isTablet: false
+        ),
+        .init(
+            position: ScreenPoint(x: 20, y: 20),
+            pressure: 0,
+            timestamp: 3,
+            phase: .moved,
+            isTablet: false
+        ),
+    ])
+
+    #expect(samples.map(\.timestamp) == [1, 3, 3])
+    #expect(samples.map(\.position.x) == [10, 30, 20])
+    #expect(samples.allSatisfy { $0.pressure == 0.5 })
+    #expect(samples.allSatisfy { $0.source == .mouse })
+    #expect(samples.allSatisfy { $0.kind == .actual })
+    #expect(samples.allSatisfy { $0.capabilities.isEmpty })
+}
+
+@Test
+@MainActor
+func brushInputAdapterNormalizesTabletPressureTiltAndRotation() throws {
+    let adapter = BrushInputAdapter()
+    let sample = try #require(adapter.orderedSamples([
+        .init(
+            position: ScreenPoint(x: 12, y: 34),
+            pressure: 1.4,
+            timestamp: 5,
+            tilt: SIMD2(0.3, 0.4),
+            rotationDegrees: 270,
+            phase: .moved,
+            kind: .coalesced,
+            isTablet: true
+        ),
+    ]).first)
+
+    #expect(sample.source == .tablet)
+    #expect(sample.kind == .coalesced)
+    #expect(sample.pressure == 1)
+    #expect(sample.capabilities == [.pressure, .altitude, .azimuth, .roll])
+    #expect(abs(try #require(sample.altitude) - Float.pi / 3) < 0.0001)
+    #expect(abs(try #require(sample.azimuth) - atan2(0.4, 0.3)) < 0.0001)
+    #expect(abs(try #require(sample.roll) + Float.pi / 2) < 0.0001)
+}
+
+@Test
+@MainActor
+func brushInputAdapterExtractsAnActualNativeMouseEvent() throws {
+    let event = try #require(NSEvent.mouseEvent(
+        with: .leftMouseDragged,
+        location: NSPoint(x: 7, y: 9),
+        modifierFlags: [],
+        timestamp: 12,
+        windowNumber: 0,
+        context: nil,
+        eventNumber: 1,
+        clickCount: 1,
+        pressure: 1
+    ))
+    let sample = try #require(BrushInputAdapter().orderedSamples(
+        for: event,
+        phase: .moved,
+        position: ScreenPoint(x: 70, y: 90)
+    ).first)
+
+    #expect(sample.position == ScreenPoint(x: 70, y: 90))
+    #expect(sample.timestamp == 12)
+    #expect(sample.phase == .moved)
+    #expect(sample.source == .mouse)
+    #expect(sample.kind == .actual)
+    #expect(sample.pressure == 0.5)
 }
 
 @MainActor

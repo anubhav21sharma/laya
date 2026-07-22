@@ -11,12 +11,30 @@ func editorModelDefaultsToGrid() {
     #expect(model.inkColor == .black)
     #expect(model.brushDiameter == 20)
     #expect(model.eraserStrength == 1)
+    #expect(model.selectedRecipeID == AnchorBrushCatalog.defaultDraw.id)
+    #expect(model.selectedRecipe == AnchorBrushCatalog.defaultDraw.recipe)
     #expect(model.showGrid == false)
     #expect(model.tiling == .grid)
     #expect(model.pixelSize == PixelSize(width: 256, height: 256))
     #expect(model.canUndo == false)
     #expect(model.canRedo == false)
     #expect(model.isBusy == false)
+}
+
+@MainActor
+@Test
+func editorModelConfirmsOnlyCatalogDrawRecipes() {
+    let model = EditorModel()
+
+    model.confirmRecipe(AnchorBrushCatalog.dryPencil.id)
+    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryPencil.id)
+    #expect(model.selectedRecipe == AnchorBrushCatalog.dryPencil.recipe)
+
+    model.confirmRecipe(AnchorBrushCatalog.hardRoundEraser.id)
+    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryPencil.id)
+
+    model.confirmRecipe(BrushRecipeID("missing.recipe"))
+    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryPencil.id)
 }
 
 @MainActor

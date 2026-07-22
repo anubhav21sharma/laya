@@ -1890,6 +1890,8 @@ extension HarnessRunner {
                 passed = actual == check.value
             case .lessThanOrEqual:
                 passed = actual <= check.value
+            case .greaterThanOrEqual:
+                passed = actual >= check.value
             }
             guard passed else {
                 if scene.schemaVersion == 3, let tiling = scene.tiling {

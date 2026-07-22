@@ -383,6 +383,198 @@ func fractionallySampledEraserPreviewMatchesCommittedNonuniformRaster() throws {
     )
 }
 
+@Test
+@MainActor
+func glazePreviewMatchesCommitAndNeverExceedsStrokeOpacity() throws {
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("test.glaze.preview-commit"),
+        material: BrushMaterial(
+            family: .glaze,
+            strength: 1,
+            wetness: 0.2,
+            bleedRadius: 0,
+            softenPasses: 0,
+            accumulationLimit: 0.8
+        ),
+        baseSpacingFraction: 0.16,
+        maximumSpacingFraction: 0.3,
+        baseFlow: 0.2,
+        strokeOpacity: 0.65
+    )
+    let style = StrokeRenderStyle(
+        color: InkColor(red: 0.8, green: 0.2, blue: 0.55, alpha: 0.9)!,
+        diameter: 20,
+        compositeMode: .draw,
+        eraserStrength: 1,
+        recipe: recipe,
+        seed: 700
+    )
+    try fractionallySampledPreviewMatchesCommit(
+        style: style,
+        token: RendererOperationToken(rawValue: 42)
+    )
+
+    guard let renderer = try makeRasterOperationRenderer() else { return }
+    try commitCenterStroke(
+        renderer: renderer,
+        token: RendererOperationToken(rawValue: 43),
+        style: style
+    )
+    let committedBytes = try canonicalBytes(renderer)
+    let alphaValues = stride(
+        from: 3,
+        to: committedBytes.count,
+        by: 4
+    ).map { committedBytes[$0] }
+    #expect(alphaValues.max()! <= UInt8((0.65 * 255).rounded(.up)))
+}
+
+@Test
+@MainActor
+func boundedWashPreviewMatchesCommitAndHonorsAccumulationLimit() throws {
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("test.wash.preview-commit"),
+        shape: .softRound,
+        grain: .paper,
+        material: BrushMaterial(
+            family: .boundedWash,
+            strength: 0.85,
+            wetness: 0.9,
+            bleedRadius: 10,
+            softenPasses: 2,
+            accumulationLimit: 0.7
+        ),
+        baseSpacingFraction: 0.15,
+        maximumSpacingFraction: 0.3,
+        baseFlow: 0.45,
+        strokeOpacity: 0.6,
+        replayMode: .boundedWholeStroke,
+        replayLimits: BrushRecipePolicy.wholeStrokeLimits
+    )
+    let style = StrokeRenderStyle(
+        color: InkColor(red: 0.2, green: 0.45, blue: 0.8, alpha: 0.9)!,
+        diameter: 18,
+        compositeMode: .draw,
+        eraserStrength: 1,
+        recipe: recipe,
+        seed: 702
+    )
+    try fractionallySampledPreviewMatchesCommit(
+        style: style,
+        token: RendererOperationToken(rawValue: 45)
+    )
+
+    guard let renderer = try makeRasterOperationRenderer() else { return }
+    try commitCenterStroke(
+        renderer: renderer,
+        token: RendererOperationToken(rawValue: 46),
+        style: style
+    )
+    let committedBytes = try canonicalBytes(renderer)
+    let alphaValues = stride(
+        from: 3,
+        to: committedBytes.count,
+        by: 4
+    ).map { committedBytes[$0] }
+    let expectedCeiling = UInt8((0.7 * 0.6 * 255).rounded(.up))
+    #expect(alphaValues.max()! <= expectedCeiling)
+}
+
+@Test
+@MainActor
+func boundedWashBleedWrapsAcrossCanonicalSeam() throws {
+    let softenedResult = try renderSeamWash(
+        bleedRadius: 8,
+        softenPasses: 2
+    )
+    let depositOnlyResult = try renderSeamWash(
+        bleedRadius: 0,
+        softenPasses: 0
+    )
+    let softened = try #require(softenedResult)
+    let depositOnly = try #require(depositOnlyResult)
+    let acrossSeam = (32 * 64 + 61) * 4
+
+    #expect(softened[acrossSeam] < depositOnly[acrossSeam])
+    #expect(softened[acrossSeam + 1] < depositOnly[acrossSeam + 1])
+    #expect(softened[acrossSeam + 2] < depositOnly[acrossSeam + 2])
+}
+
+@Test
+@MainActor
+func translucentEraserPreviewMatchesCommitAtFractionalEdges() throws {
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("test.erase.translucent-preview"),
+        material: .ink,
+        baseFlow: 1,
+        strokeOpacity: 0.55
+    )
+    try fractionallySampledPreviewMatchesCommit(
+        style: StrokeRenderStyle(
+            color: .black,
+            diameter: 13,
+            compositeMode: .erase,
+            eraserStrength: 0.6,
+            recipe: recipe,
+            seed: 701
+        ),
+        token: RendererOperationToken(rawValue: 44)
+    )
+}
+
+@Test
+@MainActor
+func overlappingEraserDabsApplyStrengthOnceAfterLiveAccumulation() throws {
+    guard let renderer = try makeRasterOperationRenderer() else { return }
+    var receipts: [RasterMutationReceipt] = []
+    renderer.onOperationCompleted = {
+        if case let .rasterSuccess(receipt) = $0 {
+            receipts.append(receipt)
+        }
+    }
+    try commitCenterStroke(
+        renderer: renderer,
+        token: RendererOperationToken(rawValue: 45),
+        style: StrokeRenderStyle(
+            color: .black,
+            diameter: 24,
+            compositeMode: .draw,
+            eraserStrength: 1
+        )
+    )
+    #expect(try centerBGRA(renderer)[3] == 255)
+
+    let eraseToken = RendererOperationToken(rawValue: 46)
+    let eraseStyle = StrokeRenderStyle(
+        color: .black,
+        diameter: 24,
+        compositeMode: .erase,
+        eraserStrength: 0.5
+    )
+    try renderer.beginStroke(
+        token: eraseToken,
+        sample: rasterSample(.began, x: 28),
+        style: eraseStyle
+    )
+    try renderer.appendStroke(
+        token: eraseToken,
+        sample: rasterSample(.moved, x: 34)
+    )
+    try renderer.requestStrokeCommit(
+        token: eraseToken,
+        sample: rasterSample(.ended, x: 40),
+        maximumRetainedBytes: 1_000_000
+    )
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.submitCommitForHarness()
+    try renderer.drainCompletedOperationsForHarness()
+
+    #expect((125...130).contains(Int(try centerBGRA(renderer)[3])))
+    renderer.releaseRasterRevisions(
+        Set(receipts.flatMap { [$0.before.id, $0.after.id] })
+    )
+}
+
 @MainActor
 private func fractionallySampledPreviewMatchesCommit(
     style: StrokeRenderStyle,
@@ -484,5 +676,54 @@ private func textureBytes(_ texture: any MTLTexture) -> [UInt8] {
             mipmapLevel: 0
         )
     }
+    return bytes
+}
+
+@MainActor
+private func renderSeamWash(
+    bleedRadius: Float,
+    softenPasses: Int
+) throws -> [UInt8]? {
+    guard let renderer = try makeRasterOperationRenderer() else { return nil }
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("test.wash.seam.\(softenPasses)"),
+        shape: .hardRound,
+        grain: .opaque,
+        material: BrushMaterial(
+            family: .boundedWash,
+            strength: 1,
+            wetness: 1,
+            bleedRadius: bleedRadius,
+            softenPasses: softenPasses,
+            accumulationLimit: 1
+        ),
+        baseSpacingFraction: 0.2,
+        maximumSpacingFraction: 0.2,
+        baseFlow: 1,
+        strokeOpacity: 1,
+        replayMode: .boundedWholeStroke,
+        replayLimits: BrushRecipePolicy.wholeStrokeLimits
+    )
+    let token = RendererOperationToken(rawValue: UInt64(800 + softenPasses))
+    try renderer.beginStroke(
+        token: token,
+        sample: rasterSample(.began, x: 2, y: 32),
+        style: StrokeRenderStyle(
+            color: .black,
+            diameter: 4,
+            compositeMode: .draw,
+            eraserStrength: 1,
+            recipe: recipe,
+            seed: 800
+        )
+    )
+    _ = try renderer.flushPendingLiveForHarness()
+    let display = try renderer.renderOffscreenDisplayForHarness(
+        width: 64,
+        height: 64,
+        showGridLines: false
+    )
+    let bytes = textureBytes(display.texture)
+    try renderer.cancelStroke(token: token)
     return bytes
 }

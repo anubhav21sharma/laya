@@ -23,6 +23,8 @@ final class EditorSessionController {
     let renderer: GridRenderer
     var onError: ((MetalRendererError) -> Void)?
     private(set) var isSpaceDown = false
+    private let strokeSeedSessionEntropy: UInt64
+    private var nextStrokeSequence: UInt64 = 1
 
     private var transaction = EditorTransaction()
     private var history = DocumentHistory()
@@ -79,10 +81,13 @@ final class EditorSessionController {
         requestResizeRestore: ((
             RendererOperationToken,
             RasterRevisionReference
-        ) throws -> Void)? = nil
+        ) throws -> Void)? = nil,
+        strokeSeedSessionEntropy: UInt64 = EditorSessionController
+            .makeStrokeSeedSessionEntropy()
     ) {
         self.model = model
         self.renderer = renderer
+        self.strokeSeedSessionEntropy = strokeSeedSessionEntropy
         self.releaseRasterRevisions = releaseRasterRevisions ?? {
             renderer.releaseRasterRevisions($0)
         }
@@ -121,6 +126,10 @@ final class EditorSessionController {
         switch sample.phase {
         case .began:
             guard let tool = strokeTool else { return }
+            let recipe = tool == .draw
+                ? model.selectedRecipe
+                : AnchorBrushCatalog.hardRoundEraser.recipe
+            let seed = takeStrokeSeed()
             event = .pointerBegan(
                 sample,
                 tool: tool,
@@ -128,8 +137,11 @@ final class EditorSessionController {
                     color: model.inkColor,
                     diameter: model.brushDiameter,
                     compositeMode: tool == .draw ? .draw : .erase,
-                    eraserStrength: model.eraserStrength
-                )
+                    eraserStrength: model.eraserStrength,
+                    recipe: recipe,
+                    seed: seed
+                ),
+                recipe: recipe
             )
         case .moved:
             event = .pointerMoved(sample)
@@ -139,6 +151,54 @@ final class EditorSessionController {
             event = .pointerCancelled
         }
         apply(event)
+    }
+
+    func handleStrokeSamples(_ samples: [StrokeSample]) {
+        guard samples.count > 1,
+              samples.allSatisfy({ $0.phase == .moved }),
+              case let .drawing(drawing) = transaction.state,
+              drawing.phase == .collecting,
+              transaction.pendingOperation == nil
+        else {
+            for sample in samples {
+                handleStrokeSample(sample)
+            }
+            return
+        }
+
+        let effects = samples.flatMap {
+            transaction.apply(.pointerMoved($0))
+        }
+        guard effects.count == samples.count,
+              effects.allSatisfy({ effect in
+                  if case let .appendStroke(token, _) = effect {
+                      return token == drawing.token
+                  }
+                  return false
+              })
+        else {
+            execute(effects)
+            refreshDerivedModelState()
+            return
+        }
+
+        do {
+            try renderer.appendStrokeBatch(
+                token: rendererToken(drawing.token),
+                samples: samples
+            )
+        } catch let error as MetalRendererError {
+            handleSynchronousFailure(
+                of: effects[0],
+                error: error
+            )
+        } catch {
+            handleSynchronousFailure(
+                of: effects[0],
+                error: .commandFailed(error.localizedDescription)
+            )
+        }
+        refreshDerivedModelState()
     }
 
     func handleTiling(_ tiling: TilingKind) {
@@ -168,6 +228,10 @@ final class EditorSessionController {
 
     func handleInkColor(_ color: InkColor) {
         apply(.colorIntent(color))
+    }
+
+    func handleRecipe(_ recipeID: BrushRecipeID) {
+        apply(.recipeIntent(recipeID))
     }
 
     func stepBrush(larger: Bool) {
@@ -282,7 +346,8 @@ final class EditorSessionController {
 
     private func execute(_ effect: EditorTransactionEffect) throws {
         switch effect {
-        case let .beginStroke(token, sample, _, style):
+        case let .beginStroke(token, sample, _, style, recipe):
+            precondition(style.recipe == recipe)
             try renderer.beginStroke(
                 token: rendererToken(token),
                 sample: sample,
@@ -307,6 +372,8 @@ final class EditorSessionController {
             model.confirmInkColor(color)
         case let .updateBrushDiameter(diameter):
             model.confirmBrushDiameter(diameter)
+        case let .updateRecipe(recipeID):
+            model.confirmRecipe(recipeID)
         case let .updateGridVisibility(visible):
             model.confirmGridVisibility(visible)
             renderer.setInteractiveGridVisibility(visible)
@@ -457,7 +524,7 @@ final class EditorSessionController {
     ) {
         report(error)
         switch effect {
-        case let .beginStroke(token, _, _, _),
+        case let .beginStroke(token, _, _, _, _),
              let .appendStroke(token, _):
             try? renderer.cancelStroke(token: rendererToken(token))
             _ = transaction.apply(.pointerCancelled)
@@ -477,12 +544,56 @@ final class EditorSessionController {
             }
             apply(.operationCompleted(token, succeeded: false))
         case .cancelStroke, .updateTool, .updateColor,
-             .updateBrushDiameter, .updateGridVisibility,
+             .updateBrushDiameter, .updateRecipe, .updateGridVisibility,
              .clearSelectionOverlay, .beginTransform, .cancelTransform,
              .busy, .reportOperationFailure:
             break
         }
         refreshDerivedModelState()
+    }
+
+    nonisolated static func makeStrokeSeedSessionEntropy() -> UInt64 {
+        var generator = SystemRandomNumberGenerator()
+        let entropy = generator.next()
+        return entropy == 0 ? 0xD1B5_4A32_D192_ED03 : entropy
+    }
+
+    nonisolated static func derivedStrokeSeed(
+        sequence: UInt64,
+        sessionEntropy: UInt64
+    ) -> UInt64 {
+        precondition(sequence != 0, "Stroke seed sequence must be nonzero")
+        let multiplierA = (
+            (sessionEntropy ^ 0x9E37_79B9_7F4A_7C15)
+                &* 0xD6E8_FEB8_6659_FD93
+        ) | 1
+        let multiplierB = (
+            (sessionEntropy &+ 0xA076_1D64_78BD_642F)
+                ^ (sessionEntropy >> 29)
+        ) | 1
+        var seed = sequence &* multiplierA
+        let rotation = Int(sessionEntropy & 63)
+        if rotation > 0 {
+            seed = (seed << rotation) | (seed >> (64 - rotation))
+        }
+        seed ^= seed >> 30
+        seed &*= 0xBF58_476D_1CE4_E5B9
+        seed ^= seed >> 27
+        seed &*= multiplierB
+        seed ^= seed >> 31
+        precondition(seed != 0, "Seed mixing must preserve nonzero sequences")
+        return seed
+    }
+
+    private func takeStrokeSeed() -> UInt64 {
+        let sequence = nextStrokeSequence
+        let (nextSequence, overflow) = sequence.addingReportingOverflow(1)
+        precondition(!overflow, "Stroke seed sequence exhausted")
+        nextStrokeSequence = nextSequence
+        return Self.derivedStrokeSeed(
+            sequence: sequence,
+            sessionEntropy: strokeSeedSessionEntropy
+        )
     }
 
     private func handleRendererCompletion(

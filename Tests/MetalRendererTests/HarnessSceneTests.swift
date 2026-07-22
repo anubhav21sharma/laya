@@ -39,7 +39,7 @@ func harnessSceneRejectsAnUnknownSchema() {
     let data = Data(
         """
         {
-          "schemaVersion": 5,
+          "schemaVersion": 6,
           "name": "future-scene",
           "width": 64,
           "height": 64,
@@ -55,9 +55,121 @@ func harnessSceneRejectsAnUnknownSchema() {
         """.utf8
     )
 
-    #expect(throws: HarnessSceneError.unsupportedSchema(5)) {
+    #expect(throws: HarnessSceneError.unsupportedSchema(6)) {
         try HarnessScene.decode(data)
     }
+}
+
+@Test
+func schemaFiveRoundTripsRequiredStrokeProvenanceAndChecks() throws {
+    let scene = try HarnessScene.decode(schemaFiveData())
+
+    #expect(scene.schemaVersion == 5)
+    #expect(scene.recipeID == "anchor.ink")
+    #expect(scene.seed == UInt64.max)
+    #expect(scene.expectedMaterial == .ink)
+    #expect(scene.replayMode == .replayTail)
+    #expect(scene.attributedSamples.count == 2)
+    #expect(scene.attributedSamples[0].phase == .began)
+    #expect(scene.attributedSamples[0].source == .tablet)
+    #expect(scene.attributedSamples[0].kind == .actual)
+    #expect(scene.attributedSamples[0].capabilities == 7)
+    #expect(scene.attributedSamples[0].strokeSample?.pressure == 0.25)
+    #expect(scene.structuralChecks[0].metric == .peakRetainedSampleCount)
+
+    let encoded = try JSONEncoder().encode(scene)
+    let decoded = try HarnessScene.decode(encoded)
+    #expect(decoded == scene)
+}
+
+@Test(arguments: [
+    "recipeID",
+    "seed",
+    "attributedSamples",
+    "expectedMaterial",
+    "replayMode",
+])
+func schemaFiveRequiresEveryStrokeProvenanceField(_ key: String) throws {
+    var object = try #require(
+        JSONSerialization.jsonObject(with: schemaFiveData())
+            as? [String: Any]
+    )
+    object.removeValue(forKey: key)
+
+    #expect(throws: HarnessSceneError.missingSchemaFiveField(key)) {
+        try HarnessScene.decode(JSONSerialization.data(withJSONObject: object))
+    }
+}
+
+@Test
+func schemaFiveRejectsZeroSeedAndEmptyTrace() throws {
+    var object = try #require(
+        JSONSerialization.jsonObject(with: schemaFiveData())
+            as? [String: Any]
+    )
+    object["seed"] = 0
+    #expect(throws: HarnessSceneError.invalidSchemaFiveSeed) {
+        try HarnessScene.decode(JSONSerialization.data(withJSONObject: object))
+    }
+
+    object = try #require(
+        JSONSerialization.jsonObject(with: schemaFiveData())
+            as? [String: Any]
+    )
+    object["attributedSamples"] = []
+    #expect(throws: HarnessSceneError.missingAttributedSamples) {
+        try HarnessScene.decode(JSONSerialization.data(withJSONObject: object))
+    }
+}
+
+@Test
+func schemaFiveRejectsUnknownSampleCapabilities() throws {
+    var object = try #require(
+        JSONSerialization.jsonObject(with: schemaFiveData())
+            as? [String: Any]
+    )
+    var samples = try #require(
+        object["attributedSamples"] as? [[String: Any]]
+    )
+    samples[1]["capabilities"] = 16
+    object["attributedSamples"] = samples
+
+    #expect(throws: HarnessSceneError.invalidAttributedSample(1)) {
+        try HarnessScene.decode(JSONSerialization.data(withJSONObject: object))
+    }
+}
+
+@Test
+func schemaFourRejectsSliceFourOnlyStructuralMetrics() throws {
+    let text = String(decoding: schemaFourData(), as: UTF8.self)
+        .replacingOccurrences(
+            of: "undoCanonicalByteDelta",
+            with: "peakRetainedSampleCount"
+        )
+
+    #expect(
+        throws: HarnessSceneError.structuralMetricUnavailableForSchema(
+            metric: .peakRetainedSampleCount,
+            schemaVersion: 4
+        )
+    ) {
+        try HarnessScene.decode(Data(text.utf8))
+    }
+}
+
+@Test
+func sliceFourTraceCatalogIsReusableAtTheHarnessBoundary() {
+    #expect(StrokeTraceFixtures.all.count == 8)
+    #expect(StrokeTraceFixtures.gridSeam.samples.map(\.phase) == [
+        .began,
+        .moved,
+        .ended,
+    ])
+    #expect(
+        StrokeTraceFixtures.reflectedCell.samples.allSatisfy {
+            $0.source == .tablet
+        }
+    )
 }
 
 @Test(arguments: [
@@ -79,6 +191,11 @@ func schemaFourDecodesOnlySliceThreePrograms(_ program: String) throws {
     #expect(scene.tileHeight == 80)
     #expect(scene.tiling == .grid)
     #expect(scene.diagnosticMode == .hardRound)
+    #expect(scene.recipeID == nil)
+    #expect(scene.seed == nil)
+    #expect(scene.attributedSamples.isEmpty)
+    #expect(scene.expectedMaterial == nil)
+    #expect(scene.replayMode == nil)
 }
 
 @Test(arguments: [
@@ -295,6 +412,12 @@ func sliceThreeGatePinsNegativeFirstOrderAndApprovedProjectedABI() throws {
         ),
         encoding: .utf8
     )
+    let sliceTwoGate = try String(
+        contentsOf: repositoryRoot.appendingPathComponent(
+            "scripts/verify-slice2.sh"
+        ),
+        encoding: .utf8
+    )
     let expectedOrder = [
         "colored-draw|coloredOutputMismatchCount",
         "eraser-live-commit|previewCommitViolationCount",
@@ -308,8 +431,12 @@ func sliceThreeGatePinsNegativeFirstOrderAndApprovedProjectedABI() throws {
         let range = try #require(gate.range(of: row, range: previous..<gate.endIndex))
         previous = range.upperBound
     }
-    #expect(gate.contains("bytes == fragments * 112"))
-    #expect(gate.contains("totalInstanceBytes == 448"))
+    #expect(gate.contains("bytes == fragments * 128"))
+    #expect(gate.contains("totalInstanceBytes == 512"))
+    #expect(gate.contains("four fragments must retain 512 instance bytes"))
+    #expect(sliceTwoGate.contains("bytes == fragments * 128"))
+    #expect(sliceTwoGate.contains("128-byte instance accounting"))
+    #expect(!sliceTwoGate.contains("bytes == fragments * 112"))
     #expect(gate.contains("SLICE3 GATE PASS"))
     #expect(!gate.contains("retry"))
     #expect(!gate.contains("warmup"))
@@ -2959,6 +3086,60 @@ private func schemaFourData(
               "metric": "undoCanonicalByteDelta",
               "relation": "equal",
               "value": 0
+            }
+          ]
+        }
+        """.utf8
+    )
+}
+
+private func schemaFiveData() -> Data {
+    Data(
+        """
+        {
+          "schemaVersion": 5,
+          "name": "slice-four-ink",
+          "width": 96,
+          "height": 80,
+          "tileWidth": 96,
+          "tileHeight": 80,
+          "tiling": 0,
+          "diagnosticMode": "hardRound",
+          "program": "projectedLiveCommit",
+          "recipeID": "anchor.ink",
+          "seed": 18446744073709551615,
+          "attributedSamples": [
+            {
+              "x": 12,
+              "y": 18,
+              "pressure": 0.25,
+              "timestamp": 1,
+              "altitude": 0.8,
+              "azimuth": 0.2,
+              "phase": "began",
+              "source": "tablet",
+              "kind": "actual",
+              "capabilities": 7
+            },
+            {
+              "x": 24,
+              "y": 30,
+              "pressure": 0.75,
+              "timestamp": 1.01,
+              "phase": "ended",
+              "source": "tablet",
+              "kind": "coalesced",
+              "capabilities": 1
+            }
+          ],
+          "expectedMaterial": "ink",
+          "replayMode": "replayTail",
+          "checks": [],
+          "structuralChecks": [
+            {
+              "metric": "peakRetainedSampleCount",
+              "relation": "lessThanOrEqual",
+              "value": 256
             }
           ]
         }

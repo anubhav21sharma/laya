@@ -1395,6 +1395,8 @@ public final class SliceThreeHarnessRunner {
                 passed = actual == check.value
             case .lessThanOrEqual:
                 passed = actual <= check.value
+            case .greaterThanOrEqual:
+                passed = actual >= check.value
             }
             guard passed else {
                 throw SliceThreeHarnessRunError.structuralMismatch(

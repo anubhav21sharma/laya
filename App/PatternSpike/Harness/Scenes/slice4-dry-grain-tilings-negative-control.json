@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 5,
+  "name": "slice4-dry-grain-tilings-negative-control",
+  "width": 192,
+  "height": 192,
+  "tileWidth": 128,
+  "tileHeight": 128,
+  "tiling": 5,
+  "diagnosticMode": "brushLocalCoordinates",
+  "program": "projectedLiveCommit",
+  "recipeID": "anchor.dry-grain",
+  "seed": 303,
+  "attributedSamples": [
+    {
+      "x": 24,
+      "y": 24,
+      "pressure": 0.5,
+      "timestamp": 0,
+      "phase": "began",
+      "source": "tablet",
+      "kind": "actual",
+      "capabilities": 3,
+      "altitude": 0.8,
+      "azimuth": 0.2
+    },
+    {
+      "x": 96,
+      "y": 96,
+      "pressure": 0.7,
+      "timestamp": 0.02,
+      "phase": "moved",
+      "source": "tablet",
+      "kind": "actual",
+      "capabilities": 3,
+      "altitude": 0.7,
+      "azimuth": 0.4
+    },
+    {
+      "x": 168,
+      "y": 168,
+      "pressure": 0.9,
+      "timestamp": 0.04,
+      "phase": "ended",
+      "source": "tablet",
+      "kind": "actual",
+      "capabilities": 3,
+      "altitude": 0.6,
+      "azimuth": 0.6
+    }
+  ],
+  "expectedMaterial": "dry",
+  "replayMode": "appendOnly",
+  "checks": [
+    {
+      "channel": "canonical",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        187,
+        86,
+        36,
+        229
+      ],
+      "tolerance": 0
+    },
+    {
+      "channel": "committedScreen",
+      "x": 0,
+      "y": 0,
+      "expectedBGRA": [
+        214,
+        119,
+        71,
+        255
+      ],
+      "tolerance": 0
+    }
+  ],
+  "structuralChecks": [
+    {
+      "metric": "materialMismatchCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "assetIdentityMismatchCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "assetResidentBytes",
+      "relation": "lessThanOrEqual",
+      "value": 65536
+    },
+    {
+      "metric": "previewCommitViolationCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "drawEraseChangedByteCount",
+      "relation": "greaterThanOrEqual",
+      "value": 1
+    }
+  ],
+  "negativeControls": [
+    {
+      "metric": "assetIdentityMismatchCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "materialMismatchCount",
+      "relation": "equal",
+      "value": 1
+    },
+    {
+      "metric": "previewCommitViolationCount",
+      "relation": "equal",
+      "value": 1
+    }
+  ]
+}

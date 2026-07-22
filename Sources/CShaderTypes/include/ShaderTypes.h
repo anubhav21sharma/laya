@@ -53,14 +53,50 @@ typedef struct PatternProjectedStampInstance {
     PatternClipHalfPlane clip1;
     PatternClipHalfPlane clip2;
     PatternClipHalfPlane clip3;
+    PatternFloat4 brushAttributes;
 } PatternProjectedStampInstance;
+
+typedef struct PatternBrushMaterialUniforms {
+    PatternUInt32 materialFamily;
+    PatternUInt32 grainCoordinateMode;
+    float strokeOpacity;
+    float materialStrength;
+    float wetness;
+    float bleedRadius;
+    PatternUInt32 softenPasses;
+    float accumulationLimit;
+    PatternUInt32 shapeKind;
+    PatternUInt32 grainKind;
+    float grainRotation;
+    PatternUInt32 padding1;
+} PatternBrushMaterialUniforms;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexFrameUniforms = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexGridFrameUniforms = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexDabInstances = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexBrushMaterial = 3;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexCanonical = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexLive = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushShape = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushGrain = 3;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexReplayLive = 4;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireInk = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireDry = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireGlaze = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireBoundedWash = 3;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainCoordinateWireCanonical = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainCoordinateWireBrushLocal = 1;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternShapeWireHardRound = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternShapeWireSoftRound = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternShapeWireChisel = 2;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainWireOpaque = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainWirePaper = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainWireNoise = 2;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireGrid = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireHalfDrop = 1;

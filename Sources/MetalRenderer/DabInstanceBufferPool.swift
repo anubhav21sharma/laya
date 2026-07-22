@@ -76,6 +76,32 @@ public final class DabInstanceBufferPool {
         )
     }
 
+    /// Atomically reserves an exact number of upload buffers.
+    ///
+    /// Replay replacement uses this to ensure that both the settled-prefix
+    /// promotion and the complete replacement tail can be encoded before the
+    /// old replay texture is cleared. A partial reservation is abandoned when
+    /// the full request cannot be satisfied.
+    func acquire(count: Int) -> [Lease]? {
+        precondition(
+            (0...GridCanvasContract.inFlightBufferCount).contains(count)
+        )
+        guard count > 0 else { return [] }
+
+        var leases: [Lease] = []
+        leases.reserveCapacity(count)
+        for _ in 0..<count {
+            guard let lease = acquire() else {
+                for lease in leases {
+                    abandon(lease)
+                }
+                return nil
+            }
+            leases.append(lease)
+        }
+        return leases
+    }
+
     var unavailableSlotCount: Int {
         reservationState.unavailableSlotCount
     }

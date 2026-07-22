@@ -1,5 +1,5 @@
 import Foundation
-import MetalRenderer
+@testable import MetalRenderer
 import Testing
 
 @Test
@@ -141,6 +141,191 @@ func sliceThreeBenchmarkRecordRoundTripsRequiredMetrics() throws {
     #expect(decoded.changedRegionCount == 2)
     #expect(decoded.coloredOutputMismatchCount == 0)
     #expect(decoded.previewCommitViolationCount == 0)
+    #expect(decoded.recipeID == nil)
+    #expect(decoded.material == nil)
+    #expect(decoded.seed == nil)
+    #expect(decoded.replayMode == nil)
+    #expect(decoded.materialGPUMilliseconds == nil)
+}
+
+@Test
+func sliceFourBenchmarkRecordRoundTripsRequiredMetrics() throws {
+    let record = sliceFourBenchmarkFixture()
+
+    let data = try BenchmarkRecord.encode(record)
+    let decoded = try BenchmarkRecord.decode(data)
+
+    #expect(decoded == record)
+    #expect(decoded.recipeID == "anchor.ink")
+    #expect(decoded.material == "ink")
+    #expect(decoded.seed == 42)
+    #expect(decoded.replayMode == "replayTail")
+    #expect(decoded.peakRetainedSampleCount == 128)
+    #expect(decoded.peakRetainedDabCount == 512)
+    #expect(decoded.replayCount == 3)
+    #expect(decoded.promotedSettledPrefixCount == 2)
+    #expect(decoded.replayDegradationCount == 1)
+    #expect(decoded.assetResidentBytes == 8_192)
+    #expect(decoded.materialGPUMilliseconds == [0.2, 0.3])
+    #expect(decoded.fiveHundredDabStressFrameIndex == 1)
+    #expect(decoded.fiveHundredDabStressNewDabCount == 500)
+    #expect(decoded.processedWashPixelCount == 4_096)
+    #expect(decoded.washWorkingBytes == 32_768)
+}
+
+@Test(arguments: [
+    "recipeID",
+    "material",
+    "seed",
+    "replayMode",
+    "peakRetainedSampleCount",
+    "peakRetainedDabCount",
+    "replayCount",
+    "promotedSettledPrefixCount",
+    "replayDegradationCount",
+    "assetResidentBytes",
+    "dabGPUMilliseconds",
+    "newInstanceCounts",
+    "fiveHundredDabStressFrameIndex",
+    "fiveHundredDabStressNewDabCount",
+    "materialGPUMilliseconds",
+    "processedWashPixelCount",
+    "washWorkingBytes",
+])
+func sliceFourBenchmarkParserRequiresEveryNewMetric(_ key: String) throws {
+    let valid = try BenchmarkRecord.encode(sliceFourBenchmarkFixture())
+    var object = try #require(
+        JSONSerialization.jsonObject(with: valid) as? [String: Any]
+    )
+    object.removeValue(forKey: key)
+
+    #expect(throws: BenchmarkRecordError.missingSchemaFiveMetric(key)) {
+        try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+}
+
+@Test(arguments: [
+    "peakRetainedSampleCount",
+    "peakRetainedDabCount",
+    "replayCount",
+    "promotedSettledPrefixCount",
+    "replayDegradationCount",
+    "assetResidentBytes",
+    "processedWashPixelCount",
+    "washWorkingBytes",
+])
+func sliceFourBenchmarkParserRejectsNegativeCounts(_ key: String) throws {
+    let valid = try BenchmarkRecord.encode(sliceFourBenchmarkFixture())
+    var object = try #require(
+        JSONSerialization.jsonObject(with: valid) as? [String: Any]
+    )
+    object[key] = -1
+
+    #expect(throws: BenchmarkRecordError.invalidNumericValue(field: key)) {
+        try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+}
+
+@Test
+func sliceFourBenchmarkRejectsZeroSeedAndNonfiniteMaterialTiming() throws {
+    #expect(
+        throws: BenchmarkRecordError.invalidNumericValue(field: "seed")
+    ) {
+        try BenchmarkRecord.encode(sliceFourBenchmarkFixture(seed: 0))
+    }
+    #expect(
+        throws: BenchmarkRecordError.invalidNumericValue(
+            field: "materialGPUMilliseconds"
+        )
+    ) {
+        try BenchmarkRecord.encode(
+            sliceFourBenchmarkFixture(materialGPU: [.infinity])
+        )
+    }
+}
+
+@Test
+func sliceFourFiveHundredDabBudgetUsesPerFrameInstanceCounts() throws {
+    let record = sliceFourBenchmarkFixture(materialGPU: [0.2, 0.3])
+
+    #expect(
+        try SliceFourEvidenceValidator.fiveHundredDabGPUTimings(record: record)
+            == [0.3]
+    )
+
+    var object = try #require(
+        JSONSerialization.jsonObject(
+            with: BenchmarkRecord.encode(record)
+        ) as? [String: Any]
+    )
+    object["newInstanceCounts"] = [500]
+    #expect(
+        throws: BenchmarkRecordError.invalidNumericValue(
+            field: "newInstanceCounts"
+        )
+    ) {
+        try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+
+    for (field, value) in [
+        ("fiveHundredDabStressFrameIndex", 0),
+        ("fiveHundredDabStressNewDabCount", 501),
+    ] {
+        object = try #require(
+            JSONSerialization.jsonObject(
+                with: BenchmarkRecord.encode(record)
+            ) as? [String: Any]
+        )
+        object[field] = value
+        #expect(throws: BenchmarkRecordError.self) {
+            try BenchmarkRecord.decode(
+                JSONSerialization.data(withJSONObject: object)
+            )
+        }
+    }
+
+    object = try #require(
+        JSONSerialization.jsonObject(
+            with: BenchmarkRecord.encode(record)
+        ) as? [String: Any]
+    )
+    object["newInstanceCounts"] = [12, 501]
+    #expect(throws: BenchmarkRecordError.self) {
+        try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+}
+
+@Test
+func sliceFourBenchmarkRejectsUnknownEnumeratedValues() throws {
+    for (field, value) in [
+        ("material", "watercolor"),
+        ("replayMode", "unbounded"),
+    ] {
+        let valid = try BenchmarkRecord.encode(sliceFourBenchmarkFixture())
+        var object = try #require(
+            JSONSerialization.jsonObject(with: valid) as? [String: Any]
+        )
+        object[field] = value
+
+        #expect(
+            throws: BenchmarkRecordError.invalidTextValue(
+                field: field,
+                value: value
+            )
+        ) {
+            try BenchmarkRecord.decode(
+                JSONSerialization.data(withJSONObject: object)
+            )
+        }
+    }
 }
 
 @Test(arguments: [
@@ -267,6 +452,65 @@ private func sliceThreeBenchmarkFixture(
         coloredOutputMismatchCount: 0,
         previewCommitViolationCount: 0,
         program: "coloredDraw"
+    )
+}
+
+private func sliceFourBenchmarkFixture(
+    seed: UInt64 = 42,
+    materialGPU: [Double] = [0.2, 0.3]
+) -> BenchmarkRecord {
+    BenchmarkRecord(
+        schemaVersion: 5,
+        timestampUTC: "2026-07-22T12:00:00Z",
+        sceneName: "slice4-long-stroke-bounds",
+        hardware: BenchmarkHardware(
+            gpuName: "Test GPU",
+            logicalProcessorCount: 8,
+            physicalMemoryBytes: 16_000_000_000
+        ),
+        operatingSystem: "macOS Test",
+        build: BenchmarkBuild(
+            configuration: "Debug",
+            gitCommit: "0123456789abcdef"
+        ),
+        frameCount: 2,
+        cpuEncodeMilliseconds: [0, 0.1],
+        gpuMilliseconds: [0, 0.2],
+        peakResidentBytes: 42_000_000,
+        dabGPUMilliseconds: materialGPU,
+        newInstanceCounts: [12, 500],
+        tilingRawValue: 0,
+        tileWidth: 96,
+        tileHeight: 80,
+        diagnosticMode: "hardRound",
+        revisionCaptureMilliseconds: [0],
+        revisionRestoreMilliseconds: [0],
+        historyResidentBytes: 0,
+        historyCommandCount: 1,
+        historyCanUndo: true,
+        historyCanRedo: false,
+        historyAppendCount: 1,
+        historyNavigationFinishCount: 0,
+        historyReleasedRevisionCount: 0,
+        changedRegionCount: 1,
+        coloredOutputMismatchCount: 0,
+        previewCommitViolationCount: 0,
+        recipeID: "anchor.ink",
+        material: "ink",
+        seed: seed,
+        replayMode: "replayTail",
+        peakRetainedSampleCount: 128,
+        peakRetainedDabCount: 512,
+        replayCount: 3,
+        promotedSettledPrefixCount: 2,
+        replayDegradationCount: 1,
+        assetResidentBytes: 8_192,
+        materialGPUMilliseconds: materialGPU,
+        fiveHundredDabStressFrameIndex: 1,
+        fiveHundredDabStressNewDabCount: 500,
+        processedWashPixelCount: 4_096,
+        washWorkingBytes: 32_768,
+        program: "pressureDynamics"
     )
 }
 

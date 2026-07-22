@@ -137,6 +137,34 @@ public enum HarnessStructuralMetric: String, Codable, Equatable, Sendable {
     case metadataCanonicalByteDelta
     case restoredWidth
     case restoredHeight
+    case peakRetainedSampleCount
+    case peakRetainedDabCount
+    case replayCount
+    case promotedSettledPrefixCount
+    case replayDegradationCount
+    case assetResidentBytes
+    case materialMismatchCount
+    case replayModeMismatchCount
+    case assetIdentityMismatchCount
+    case predictedDuplicateSettledDabCount
+    case staleReplayEpochViolationCount
+    case processedWashPixelCount
+    case washWorkingBytes
+    case drawEraseChangedByteCount
+    case legacyParityMaximumDelta
+    case anchorTilingMatrixPassCount
+    case anchorTilingNoncentralCount
+    case anchorTilingLiveCommitPassCount
+    case anchorTilingContinuityPassCount
+    case anchorTilingEraserAlphaPassCount
+    case anchorTilingEraserColorPassCount
+    case anchorCatalogEqualityCount
+    case sameSeedMaximumDelta
+    case differentSeedChangedByteCount
+    case pressureResponseChangedByteCount
+    case shapeHardnessChangedByteCount
+    case gpuFailurePreservedCanonicalCount
+    case allocationFailurePreservedCanonicalCount
 
     var isSliceThreeOnly: Bool {
         switch self {
@@ -150,11 +178,171 @@ public enum HarnessStructuralMetric: String, Codable, Equatable, Sendable {
             false
         }
     }
+
+    var isSliceFourOnly: Bool {
+        switch self {
+        case .peakRetainedSampleCount, .peakRetainedDabCount, .replayCount,
+             .promotedSettledPrefixCount, .replayDegradationCount,
+             .assetResidentBytes, .materialMismatchCount,
+             .replayModeMismatchCount, .assetIdentityMismatchCount,
+             .predictedDuplicateSettledDabCount,
+             .staleReplayEpochViolationCount, .processedWashPixelCount,
+             .washWorkingBytes, .drawEraseChangedByteCount,
+             .legacyParityMaximumDelta, .anchorTilingMatrixPassCount,
+             .anchorTilingNoncentralCount,
+             .anchorTilingLiveCommitPassCount,
+             .anchorTilingContinuityPassCount,
+             .anchorTilingEraserAlphaPassCount,
+             .anchorTilingEraserColorPassCount,
+             .anchorCatalogEqualityCount, .sameSeedMaximumDelta,
+             .differentSeedChangedByteCount,
+             .pressureResponseChangedByteCount,
+             .shapeHardnessChangedByteCount,
+             .gpuFailurePreservedCanonicalCount,
+             .allocationFailurePreservedCanonicalCount:
+            true
+        default:
+            false
+        }
+    }
+}
+
+public enum HarnessExpectedMaterial: String, Codable, Equatable, Sendable {
+    case ink
+    case dry
+    case glaze
+    case boundedWash
+
+    public var brushMaterialFamily: BrushMaterialFamily {
+        switch self {
+        case .ink: .ink
+        case .dry: .dry
+        case .glaze: .glaze
+        case .boundedWash: .boundedWash
+        }
+    }
+}
+
+public enum HarnessReplayMode: String, Codable, Equatable, Sendable {
+    case appendOnly
+    case replayTail
+    case boundedWholeStroke
+
+    public var brushReplayMode: BrushReplayMode {
+        switch self {
+        case .appendOnly: .appendOnly
+        case .replayTail: .replayTail
+        case .boundedWholeStroke: .boundedWholeStroke
+        }
+    }
+}
+
+public enum HarnessStrokePhase: String, Codable, Equatable, Sendable {
+    case began
+    case moved
+    case ended
+    case cancelled
+
+    public var strokePhase: StrokePhase {
+        switch self {
+        case .began: .began
+        case .moved: .moved
+        case .ended: .ended
+        case .cancelled: .cancelled
+        }
+    }
+}
+
+public enum HarnessStrokeSource: String, Codable, Equatable, Sendable {
+    case mouse
+    case tablet
+    case pencil
+
+    public var strokeSource: StrokeSource {
+        switch self {
+        case .mouse: .mouse
+        case .tablet: .tablet
+        case .pencil: .pencil
+        }
+    }
+}
+
+public enum HarnessStrokeSampleKind: String, Codable, Equatable, Sendable {
+    case actual
+    case coalesced
+    case predicted
+    case estimatedUpdate
+
+    public var strokeSampleKind: StrokeSampleKind {
+        switch self {
+        case .actual: .actual
+        case .coalesced: .coalesced
+        case .predicted: .predicted
+        case .estimatedUpdate: .estimatedUpdate
+        }
+    }
+}
+
+/// Codable V2 input sample used by schema 5 evidence scenes.
+public struct HarnessAttributedSample: Codable, Equatable, Sendable {
+    public let x: Float
+    public let y: Float
+    public let pressure: Float
+    public let timestamp: TimeInterval
+    public let altitude: Float?
+    public let azimuth: Float?
+    public let roll: Float?
+    public let phase: HarnessStrokePhase
+    public let source: HarnessStrokeSource
+    public let kind: HarnessStrokeSampleKind
+    public let capabilities: UInt8
+
+    public init(
+        x: Float,
+        y: Float,
+        pressure: Float,
+        timestamp: TimeInterval,
+        altitude: Float? = nil,
+        azimuth: Float? = nil,
+        roll: Float? = nil,
+        phase: HarnessStrokePhase,
+        source: HarnessStrokeSource,
+        kind: HarnessStrokeSampleKind = .actual,
+        capabilities: UInt8 = 0
+    ) {
+        self.x = x
+        self.y = y
+        self.pressure = pressure
+        self.timestamp = timestamp
+        self.altitude = altitude
+        self.azimuth = azimuth
+        self.roll = roll
+        self.phase = phase
+        self.source = source
+        self.kind = kind
+        self.capabilities = capabilities
+    }
+
+    public var strokeSample: StrokeSample? {
+        StrokeSample.validated(
+            position: ScreenPoint(x: x, y: y),
+            pressure: pressure,
+            timestamp: timestamp,
+            phase: phase.strokePhase,
+            source: source.strokeSource,
+            kind: kind.strokeSampleKind,
+            capabilities: StrokeInputCapabilities(rawValue: capabilities),
+            altitude: altitude,
+            azimuth: azimuth,
+            roll: roll
+        )
+    }
 }
 
 public enum HarnessRelation: String, Codable, Equatable, Sendable {
     case equal
     case lessThanOrEqual
+    case greaterThanOrEqual
 }
 
 public struct HarnessStructuralCheck: Codable, Equatable, Sendable {
@@ -213,10 +401,16 @@ public struct HarnessScene: Codable, Equatable, Sendable {
     public let checks: [HarnessPixelCheck]
     public let program: TilingHarnessProgram?
     public let structuralChecks: [HarnessStructuralCheck]
+    public let negativeControls: [HarnessStructuralCheck]
     public let tileWidth: Int?
     public let tileHeight: Int?
     public let tiling: TilingKind?
     public let diagnosticMode: HarnessDiagnosticMode?
+    public let recipeID: String?
+    public let seed: UInt64?
+    public let attributedSamples: [HarnessAttributedSample]
+    public let expectedMaterial: HarnessExpectedMaterial?
+    public let replayMode: HarnessReplayMode?
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -226,10 +420,16 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         case checks
         case program
         case structuralChecks
+        case negativeControls
         case tileWidth
         case tileHeight
         case tiling
         case diagnosticMode
+        case recipeID
+        case seed
+        case attributedSamples
+        case expectedMaterial
+        case replayMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -250,7 +450,11 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             [HarnessStructuralCheck].self,
             forKey: .structuralChecks
         ) ?? []
-        if schemaVersion == 3 || schemaVersion == 4 {
+        negativeControls = try values.decodeIfPresent(
+            [HarnessStructuralCheck].self,
+            forKey: .negativeControls
+        ) ?? []
+        if (3...5).contains(schemaVersion) {
             if schemaVersion == 4, program == nil {
                 throw HarnessSceneError.missingSchemaFourField("program")
             }
@@ -288,6 +492,44 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             tiling = nil
             diagnosticMode = nil
         }
+        if schemaVersion == 5 {
+            recipeID = try Self.decodeRequiredSchemaFiveValue(
+                String.self,
+                key: .recipeID,
+                field: "recipeID",
+                from: values
+            )
+            seed = try Self.decodeRequiredSchemaFiveValue(
+                UInt64.self,
+                key: .seed,
+                field: "seed",
+                from: values
+            )
+            attributedSamples = try Self.decodeRequiredSchemaFiveValue(
+                [HarnessAttributedSample].self,
+                key: .attributedSamples,
+                field: "attributedSamples",
+                from: values
+            )
+            expectedMaterial = try Self.decodeRequiredSchemaFiveValue(
+                HarnessExpectedMaterial.self,
+                key: .expectedMaterial,
+                field: "expectedMaterial",
+                from: values
+            )
+            replayMode = try Self.decodeRequiredSchemaFiveValue(
+                HarnessReplayMode.self,
+                key: .replayMode,
+                field: "replayMode",
+                from: values
+            )
+        } else {
+            recipeID = nil
+            seed = nil
+            attributedSamples = []
+            expectedMaterial = nil
+            replayMode = nil
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -301,11 +543,21 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         if !structuralChecks.isEmpty {
             try values.encode(structuralChecks, forKey: .structuralChecks)
         }
-        if schemaVersion == 3 || schemaVersion == 4 {
+        if !negativeControls.isEmpty {
+            try values.encode(negativeControls, forKey: .negativeControls)
+        }
+        if (3...5).contains(schemaVersion) {
             try values.encode(tileWidth, forKey: .tileWidth)
             try values.encode(tileHeight, forKey: .tileHeight)
             try values.encode(tiling, forKey: .tiling)
             try values.encode(diagnosticMode, forKey: .diagnosticMode)
+        }
+        if schemaVersion == 5 {
+            try values.encode(recipeID, forKey: .recipeID)
+            try values.encode(seed, forKey: .seed)
+            try values.encode(attributedSamples, forKey: .attributedSamples)
+            try values.encode(expectedMaterial, forKey: .expectedMaterial)
+            try values.encode(replayMode, forKey: .replayMode)
         }
     }
 
@@ -319,6 +571,16 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         if (1...3).contains(schemaVersion),
            let metric = structuralChecks.first(where: {
                $0.metric.isSliceThreeOnly
+           })?.metric
+        {
+            throw HarnessSceneError.structuralMetricUnavailableForSchema(
+                metric: metric,
+                schemaVersion: schemaVersion
+            )
+        }
+        if (1...4).contains(schemaVersion),
+           let metric = structuralChecks.first(where: {
+               $0.metric.isSliceFourOnly
            })?.metric
         {
             throw HarnessSceneError.structuralMetricUnavailableForSchema(
@@ -413,6 +675,53 @@ public struct HarnessScene: Codable, Equatable, Sendable {
                     "Schema 4 required tiling fields must be decoded before validation"
                 )
             }
+        case 5:
+            guard program != nil else {
+                throw HarnessSceneError.missingSchemaFiveField("program")
+            }
+            guard let tileWidth, let tileHeight else {
+                preconditionFailure(
+                    "Schema 5 required tile fields must be decoded before validation"
+                )
+            }
+            guard (64...4_096).contains(tileWidth),
+                  (64...4_096).contains(tileHeight)
+            else {
+                throw HarnessSceneError.invalidTileDimensions(
+                    width: tileWidth,
+                    height: tileHeight
+                )
+            }
+            guard tiling != nil, diagnosticMode != nil else {
+                preconditionFailure(
+                    "Schema 5 required tiling fields must be decoded before validation"
+                )
+            }
+            guard let recipeID,
+                  !recipeID.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+            else {
+                throw HarnessSceneError.invalidSchemaFiveRecipeID
+            }
+            guard let seed, seed != 0 else {
+                throw HarnessSceneError.invalidSchemaFiveSeed
+            }
+            guard !attributedSamples.isEmpty else {
+                throw HarnessSceneError.missingAttributedSamples
+            }
+            for (index, sample) in attributedSamples.enumerated() {
+                let unknownCapabilities = sample.capabilities & ~UInt8(0x0F)
+                guard unknownCapabilities == 0,
+                      sample.strokeSample != nil
+                else {
+                    throw HarnessSceneError.invalidAttributedSample(index)
+                }
+            }
+            guard expectedMaterial != nil, replayMode != nil else {
+                preconditionFailure(
+                    "Schema 5 material and replay fields must be decoded before validation"
+                )
+            }
         default:
             throw HarnessSceneError.unsupportedSchema(schemaVersion)
         }
@@ -462,6 +771,19 @@ public struct HarnessScene: Codable, Equatable, Sendable {
                 throw HarnessSceneError.invalidStructuralValue(check.value)
             }
         }
+        for check in negativeControls {
+            guard schemaVersion == 5,
+                  name.hasSuffix("-negative-control"),
+                  check.value >= 0
+            else {
+                throw HarnessSceneError.invalidNegativeControl
+            }
+        }
+        guard Set(negativeControls.map { $0.metric.rawValue }).count
+                == negativeControls.count
+        else {
+            throw HarnessSceneError.invalidNegativeControl
+        }
     }
 
     private static func decodeRequiredTilingValue<Value: Decodable>(
@@ -477,7 +799,22 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             if schemaVersion == 3 {
                 throw HarnessSceneError.missingSchemaThreeField(field)
             }
+            if schemaVersion == 5 {
+                throw HarnessSceneError.missingSchemaFiveField(field)
+            }
             throw HarnessSceneError.missingSchemaFourField(field)
+        }
+        return try values.decode(Value.self, forKey: key)
+    }
+
+    private static func decodeRequiredSchemaFiveValue<Value: Decodable>(
+        _ type: Value.Type,
+        key: CodingKeys,
+        field: String,
+        from values: KeyedDecodingContainer<CodingKeys>
+    ) throws -> Value {
+        guard values.contains(key), try !values.decodeNil(forKey: key) else {
+            throw HarnessSceneError.missingSchemaFiveField(field)
         }
         return try values.decode(Value.self, forKey: key)
     }
@@ -494,8 +831,14 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
     case programForbiddenForSchemaOne
     case missingAssertions
     case invalidStructuralValue(Int)
+    case invalidNegativeControl
     case missingSchemaThreeField(String)
     case missingSchemaFourField(String)
+    case missingSchemaFiveField(String)
+    case invalidSchemaFiveRecipeID
+    case invalidSchemaFiveSeed
+    case missingAttributedSamples
+    case invalidAttributedSample(Int)
     case invalidTileDimensions(width: Int, height: Int)
     case programUnavailableForSchema(
         program: TilingHarnessProgram,
@@ -536,10 +879,22 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
             "Schema 2 harness scene has no pixel or structural assertions."
         case let .invalidStructuralValue(value):
             "Harness structural assertion value \(value) is negative."
+        case .invalidNegativeControl:
+            "Harness negative controls must be unique nonnegative schema 5 assertions on a negative-control scene."
         case let .missingSchemaThreeField(field):
             "Schema 3 harness scene requires '\(field)'."
         case let .missingSchemaFourField(field):
             "Schema 4 harness scene requires '\(field)'."
+        case let .missingSchemaFiveField(field):
+            "Schema 5 harness scene requires '\(field)'."
+        case .invalidSchemaFiveRecipeID:
+            "Schema 5 harness scene requires a nonempty recipe ID."
+        case .invalidSchemaFiveSeed:
+            "Schema 5 harness scene requires a nonzero UInt64 seed."
+        case .missingAttributedSamples:
+            "Schema 5 harness scene requires at least one attributed sample."
+        case let .invalidAttributedSample(index):
+            "Schema 5 harness scene attributed sample \(index) is invalid."
         case let .invalidTileDimensions(width, height):
             "Harness tile dimensions \(width)x\(height) are outside 64...4096."
         case let .programUnavailableForSchema(program, schemaVersion):

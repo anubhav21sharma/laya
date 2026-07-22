@@ -11,8 +11,25 @@ final class GridRenderCompletionMailbox: @unchecked Sendable {
         let operationToken: RendererOperationToken?
         let rasterCommit: RasterCommit?
         let uploadSubmissions: [DabBufferSubmissionIdentity]
+        let replayEpoch: UInt64
         let succeeded: Bool
         let errorMessage: String?
+
+        init(
+            operationToken: RendererOperationToken?,
+            rasterCommit: RasterCommit?,
+            uploadSubmissions: [DabBufferSubmissionIdentity],
+            replayEpoch: UInt64 = 0,
+            succeeded: Bool,
+            errorMessage: String?
+        ) {
+            self.operationToken = operationToken
+            self.rasterCommit = rasterCommit
+            self.uploadSubmissions = uploadSubmissions
+            self.replayEpoch = replayEpoch
+            self.succeeded = succeeded
+            self.errorMessage = errorMessage
+        }
     }
 
     private let lock = NSLock()

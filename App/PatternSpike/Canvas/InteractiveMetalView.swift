@@ -46,6 +46,7 @@ final class InteractiveMetalView: MTKView {
     private var dragMode: DragMode?
     private var lastPointerCancellationGeneration: UInt
     private var screenObserver: NSObjectProtocol?
+    private let brushInputAdapter = BrushInputAdapter()
     private let brushCursorView = BrushCursorView(frame: .zero)
     private var brushDiameter: Float = 20
     private var brushCursorLocation: CGPoint?
@@ -74,6 +75,10 @@ final class InteractiveMetalView: MTKView {
         lastPointerCancellationGeneration = pointerCancellationGeneration
         super.init(frame: frame, device: renderer.device)
         brushCursorView.isHidden = true
+        brushCursorView.setAccessibilityElement(true)
+        brushCursorView.setAccessibilityIdentifier("Brush Cursor")
+        brushCursorView.setAccessibilityRole(.image)
+        brushCursorView.setAccessibilityLabel("Brush Cursor")
         addSubview(brushCursorView)
     }
 
@@ -147,13 +152,16 @@ final class InteractiveMetalView: MTKView {
         if controller.isSpaceDown {
             dragMode = .panning(lastLocal: local)
         } else {
-            controller.handleStrokeSample(
-                .mouse(
-                    position: coordinateTransform.map(local),
-                    timestamp: event.timestamp,
-                    phase: .began
-                )
+            let samples = brushInputAdapter.orderedSamples(
+                for: event,
+                phase: .began,
+                position: coordinateTransform.map(local)
             )
+            guard !samples.isEmpty else {
+                dragMode = nil
+                return
+            }
+            deliver(samples)
             dragMode = .drawing
         }
     }
@@ -174,13 +182,16 @@ final class InteractiveMetalView: MTKView {
             )
             dragMode = .panning(lastLocal: local)
         case .drawing:
-            controller.handleStrokeSample(
-                .mouse(
-                    position: coordinateTransform.map(local),
-                    timestamp: event.timestamp,
-                    phase: .moved
-                )
+            let samples = brushInputAdapter.orderedSamples(
+                for: event,
+                phase: .moved,
+                position: coordinateTransform.map(local)
             )
+            guard !samples.isEmpty else {
+                cancelPointerInteraction()
+                return
+            }
+            deliver(samples)
         case nil:
             break
         }
@@ -194,13 +205,16 @@ final class InteractiveMetalView: MTKView {
             cancelPointerInteraction()
             return
         }
-        controller.handleStrokeSample(
-            .mouse(
-                position: coordinateTransform.map(localPoint(event)),
-                timestamp: event.timestamp,
-                phase: .ended
-            )
+        let samples = brushInputAdapter.orderedSamples(
+            for: event,
+            phase: .ended,
+            position: coordinateTransform.map(localPoint(event))
         )
+        guard !samples.isEmpty else {
+            cancelPointerInteraction()
+            return
+        }
+        deliver(samples)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -241,6 +255,9 @@ final class InteractiveMetalView: MTKView {
             return
         }
         brushDiameter = diameter
+        brushCursorView.setAccessibilityValue(
+            "\(Int(diameter.rounded())) px"
+        )
         updateBrushCursorFrame()
     }
 
@@ -331,6 +348,10 @@ final class InteractiveMetalView: MTKView {
             )
         )
         dragMode = nil
+    }
+
+    private func deliver(_ samples: [StrokeSample]) {
+        controller.handleStrokeSamples(samples)
     }
 
     private func updateRefreshRate(for window: NSWindow) {

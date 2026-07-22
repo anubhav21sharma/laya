@@ -24,6 +24,14 @@ struct HarnessDiagnosticRenderedFrame {
     let metrics: GPUFrameMetrics
 }
 
+struct HarnessBrushRenderedFrame {
+    let canonical: any MTLTexture
+    let fragments: [CellFragment]
+    let shapeIdentity: BrushTextureIdentity
+    let grainIdentity: BrushTextureIdentity
+    let assetsWereExact: Bool
+}
+
 public struct HarnessLiveFlushResult {
     public let metrics: GPUFrameMetrics
     public let emittedHighWater: UInt64
@@ -70,10 +78,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var tiling: TilingKind { tilingStrategy.kind }
 
     struct FrameUpload {
+        enum Layer: Equatable {
+            case settled
+            case replay
+        }
+
         let lease: DabInstanceBufferPool.Lease
         let identityRange: Range<UInt64>
         let throughExclusive: UInt64
         let count: Int
+        let layer: Layer
+        let replayEpoch: UInt64
+    }
+
+    struct PendingLiveEncoding {
+        let uploads: [FrameUpload]
+        let encodedReplayClear: Bool
     }
 
     struct ActiveStrokeExecution {
@@ -94,11 +114,29 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let captureTokens: [RasterRevisionOperationToken]
     }
 
+    struct ProjectedDabRecord {
+        let instance: PatternProjectedStampInstance
+        let dirtyRect: PixelRect
+    }
+
+    private struct PreparedGeneratedDab {
+        let attributes: DabAttributes
+        let projected: [ProjectedDabRecord]
+
+        var transient: TransientStrokeDab {
+            TransientStrokeDab(
+                attributes: attributes,
+                projectedInstanceCount: projected.count
+            )
+        }
+    }
+
     struct RasterResources {
         let pixelSize: PixelSize
         let tileSize: PatternSize
         let canonical: CanonicalRaster
         let liveTile: PersistentLiveTile
+        let replayTile: ReplayLiveTile
     }
 
     struct PendingClearOperation {
@@ -183,6 +221,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     let commandQueue: any MTLCommandQueue
     let library: any MTLLibrary
     private let pipelines: GridPipelineLibrary
+    let brushTextureResolver: BrushTextureResolver
+    private(set) var activeShapeResolution: BrushTextureResolution
+    private(set) var activeGrainResolution: BrushTextureResolution
+    private var activeShapeTexture: any MTLTexture {
+        activeShapeResolution.texture
+    }
+    private var activeGrainTexture: any MTLTexture {
+        activeGrainResolution.texture
+    }
+    private var activeMaterialState: BrushMaterialState
+    private(set) var boundedWashSurface: BoundedWashSurface?
+    private(set) var lastBoundedWashWorkPlan: BoundedWashWorkPlan?
+    private(set) var boundedWashEncodedWork = BoundedWashEncodedWork()
+    private var boundedWashHistory = BoundedWashHistoryAccumulator()
     let instancePool: DabInstanceBufferPool
     let revisionStore: RasterRevisionStore
     let completionMailbox = GridRenderCompletionMailbox()
@@ -191,15 +243,34 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     var tileSize: PatternSize { resources.tileSize }
     var canonical: CanonicalRaster { resources.canonical }
     var liveTile: PersistentLiveTile { resources.liveTile }
+    var replayTile: ReplayLiveTile { resources.replayTile }
     var tilingStrategy: TilingStrategy
     var activeStroke: ActiveStrokeExecution?
     var pendingRasterOperation: PendingRasterOperation?
-    var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
+    var strokeGenerator: BrushStrokeGenerator?
+    var predictedStrokeGenerator: BrushStrokeGenerator?
+    var transientStrokeBuffer: TransientStrokeBuffer?
+    var brushInputDeriver = BrushInputDeriver()
+    var predictedInputDeriver: BrushInputDeriver?
     var liveStroke = LiveStroke()
-    private var completedUploadRanges: [(signal: UInt64, throughExclusive: UInt64)] = []
+    var replayStroke = LiveStroke(
+        capacity: TransientStrokeBufferContract
+            .visibleEpochProjectedInstanceCapacity
+    )
+    private var completedUploadRanges: [
+        (
+            signal: UInt64,
+            throughExclusive: UInt64,
+            layer: FrameUpload.Layer,
+            replayEpoch: UInt64
+        )
+    ] = []
     var needsLiveClear = true
+    var needsReplayClear = true
     private var nextHarnessTokenRawValue: UInt64 = 1
     private var nextRasterSubmissionID: UInt64 = 1
+    private var nextReplayEpoch: UInt64 = 1
+    private var knownStrokeTotalDistance: Float?
 
     public convenience init(
         device: any MTLDevice,
@@ -233,10 +304,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             initialRevision: RasterRevision(rawValue: 0),
             forceAllocationFailure: false
         )
+        let brushTextureResolver = BrushTextureResolver(device: device)
+        try brushTextureResolver.preloadValidationPack()
+        let defaultShape = try brushTextureResolver.resolve(shape: .hardRound)
+        let defaultGrain = try brushTextureResolver.resolve(grain: .opaque)
         self.device = device
         self.commandQueue = commandQueue
         self.library = library
         self.resources = resources
+        self.brushTextureResolver = brushTextureResolver
+        activeShapeResolution = defaultShape
+        activeGrainResolution = defaultGrain
+        activeMaterialState = BrushMaterialState(recipe: .legacyEquivalent)
+        boundedWashSurface = nil
+        lastBoundedWashWorkPlan = nil
         tilingStrategy = TilingStrategy(
             kind: configuration.tiling,
             tileSize: resources.tileSize
@@ -286,8 +367,45 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
         counters = GridStructuralCounters()
         resetLiveState()
-        interpolator = CentripetalCatmullRomStrokeInterpolator(
-            radius: style.diameter / 2
+        activeShapeResolution = try brushTextureResolver.resolve(
+            shape: style.recipe.shape
+        )
+        activeGrainResolution = try brushTextureResolver.resolve(
+            grain: style.recipe.grain
+        )
+        activeMaterialState = BrushMaterialState(recipe: style.recipe)
+        if style.recipe.material.family == .boundedWash {
+            do {
+                if boundedWashSurface?.pixelSize != pixelSize {
+                    boundedWashSurface = try BoundedWashSurface(
+                        device: device,
+                        pixelSize: pixelSize
+                    )
+                }
+            } catch {
+                throw MetalRendererError.boundedWashSurfaceAllocationFailed
+            }
+        }
+        let generatorColor: InkColor
+        switch style.compositeMode {
+        case .draw:
+            generatorColor = style.color
+        case .erase:
+            generatorColor = InkColor(
+                red: 0,
+                green: 0,
+                blue: 0,
+                alpha: 1
+            )!
+        }
+        strokeGenerator = BrushStrokeGenerator(
+            recipe: style.recipe,
+            nominalDiameter: style.diameter,
+            color: generatorColor,
+            seed: style.seed
+        )
+        transientStrokeBuffer = TransientStrokeBuffer(
+            replayContract: style.recipe.replayContract
         )
         activeStroke = ActiveStrokeExecution(
             token: token,
@@ -298,8 +416,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         do {
             counters.newDabsThisEvent = 0
-            let world = viewport.screenToWorld(sample.position)
-            try interpolator.begin(at: world, emit: appendWorldDab)
+            let worldSample = brushInputDeriver.derive(
+                sample,
+                viewport: viewport
+            )
+            guard var generator = strokeGenerator else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            let dabs = try prepareGeneratedDabs(generator: &generator) {
+                generator, emit in
+                try generator.begin(worldSample, emit: emit)
+            }
+            strokeGenerator = generator
+            try ingestGeneratedSample(
+                worldSample,
+                dabs: dabs,
+                generatorSnapshot: generator,
+                isFinishing: false
+            )
         } catch {
             activeStroke = nil
             resetLiveState()
@@ -311,13 +445,162 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         sample: StrokeSample
     ) throws {
+        if sample.kind == .predicted {
+            let suffix = [sample]
+            try replacePredictedStrokeSuffix(
+                token: token,
+                samples: suffix[...]
+            )
+        } else {
+            try appendAuthoritativeStroke(token: token, sample: sample)
+        }
+    }
+
+    public func appendStrokeBatch(
+        token: RendererOperationToken,
+        samples: [StrokeSample]
+    ) throws {
+        guard !samples.isEmpty else { return }
+        var index = samples.startIndex
+        while index < samples.endIndex {
+            if samples[index].kind == .predicted {
+                let suffixStart = index
+                while index < samples.endIndex,
+                      samples[index].kind == .predicted
+                {
+                    index += 1
+                }
+                try replacePredictedStrokeSuffix(
+                    token: token,
+                    samples: samples[suffixStart..<index]
+                )
+            } else {
+                try appendAuthoritativeStroke(
+                    token: token,
+                    sample: samples[index]
+                )
+                index += 1
+            }
+        }
+    }
+
+    private func replacePredictedStrokeSuffix(
+        token: RendererOperationToken,
+        samples: ArraySlice<StrokeSample>
+    ) throws {
+        precondition(!samples.isEmpty)
+        precondition(samples.allSatisfy { $0.kind == .predicted })
+        guard samples.allSatisfy({ $0.phase == .moved }) else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        try requireCollectingStroke(token: token)
+        guard let authoritativeGenerator = strokeGenerator,
+              var updatedBuffer = transientStrokeBuffer
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let limits = updatedBuffer.activeReplayLimits
+        guard samples.count <= limits.maximumSamples else {
+            throw MetalRendererError.strokeSampleCapacityExceeded(
+                limits.maximumSamples
+            )
+        }
+
+        var previewDeriver = brushInputDeriver
+        var previewGenerator = authoritativeGenerator
+        var preparedChunks: [TransientStrokeChunk] = []
+        var preparedDabsByChunk: [[PreparedGeneratedDab]] = []
+        var generatedDabCount = 0
+        var projectedInstanceCount = 0
+        preparedChunks.reserveCapacity(samples.count)
+        preparedDabsByChunk.reserveCapacity(samples.count)
+
+        for sample in samples {
+            let worldSample = previewDeriver.deriveAdvancingPrediction(
+                sample,
+                viewport: viewport
+            )
+            let prepared = try prepareGeneratedDabs(
+                generator: &previewGenerator
+            ) { generator, emit in
+                try generator.append(worldSample, emit: emit)
+            }
+            let (nextCount, overflow) = generatedDabCount
+                .addingReportingOverflow(prepared.count)
+            guard !overflow, nextCount <= limits.maximumDabs else {
+                throw MetalRendererError.generatedDabCapacityExceeded(
+                    limits.maximumDabs
+                )
+            }
+            let chunkProjectedCount = prepared.reduce(0) {
+                $0 + $1.projected.count
+            }
+            let (nextProjectedCount, projectedOverflow) = projectedInstanceCount
+                .addingReportingOverflow(chunkProjectedCount)
+            guard !projectedOverflow,
+                  nextProjectedCount <= limits.maximumProjectedInstances
+            else {
+                throw MetalRendererError.projectedInstanceCapacityExceeded(
+                    limits.maximumProjectedInstances
+                )
+            }
+            generatedDabCount = nextCount
+            projectedInstanceCount = nextProjectedCount
+            preparedChunks.append(
+                TransientStrokeChunk(
+                    sample: worldSample,
+                    dabs: prepared.map(\.transient),
+                    generatorSnapshotAfterSample: previewGenerator
+                )
+            )
+            preparedDabsByChunk.append(prepared)
+        }
+
+        let update = try updatedBuffer.replacePredicted(
+            with: preparedChunks
+        )
+        try preflightSettledAppend(update.settledPrefix)
+
+        transientStrokeBuffer = updatedBuffer
+        try appendSettled(update.settledPrefix)
+        try rebuildReplayLayer(
+            preparedPredictedSuffix: preparedDabsByChunk
+        )
+        predictedInputDeriver = previewDeriver
+        predictedStrokeGenerator = previewGenerator
+        counters.newDabsThisEvent = generatedDabCount
+        counters.totalDabsThisStroke += generatedDabCount
+    }
+
+    private func appendAuthoritativeStroke(
+        token: RendererOperationToken,
+        sample: StrokeSample
+    ) throws {
+        precondition(sample.kind != .predicted)
         guard sample.phase == .moved else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         try requireCollectingStroke(token: token)
         counters.newDabsThisEvent = 0
-        let world = viewport.screenToWorld(sample.position)
-        try interpolator.append(world, emit: appendWorldDab)
+        guard let authoritativeGenerator = strokeGenerator else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+
+        predictedInputDeriver = nil
+        predictedStrokeGenerator = nil
+        let worldSample = brushInputDeriver.derive(sample, viewport: viewport)
+        var generator = authoritativeGenerator
+        let dabs = try prepareGeneratedDabs(generator: &generator) {
+            generator, emit in
+            try generator.append(worldSample, emit: emit)
+        }
+        strokeGenerator = generator
+        try ingestGeneratedSample(
+            worldSample,
+            dabs: dabs,
+            generatorSnapshot: generator,
+            isFinishing: false
+        )
     }
 
     public func requestStrokeCommit(
@@ -334,8 +617,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
         do {
             counters.newDabsThisEvent = 0
-            let world = viewport.screenToWorld(sample.position)
-            try interpolator.finish(at: world, emit: appendWorldDab)
+            let worldSample = brushInputDeriver.derive(
+                sample,
+                viewport: viewport
+            )
+            guard var generator = strokeGenerator else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            let dabs = try prepareGeneratedDabs(generator: &generator) {
+                generator, emit in
+                try generator.finish(worldSample, emit: emit)
+            }
+            strokeGenerator = generator
+            try ingestGeneratedSample(
+                worldSample,
+                dabs: dabs,
+                generatorSnapshot: generator,
+                isFinishing: true
+            )
             try prepareCurrentStrokeCommit(
                 maximumRetainedBytes: maximumRetainedBytes
             )
@@ -783,7 +1082,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.rasterRevisionStorageLimitExceeded
         }
 
-        let regions = liveStroke.dirtyRegions(clippedTo: pixelSize)
+        let settledRegions = liveStroke.dirtyRegions(clippedTo: pixelSize)
+        let replayRegions = replayStroke.dirtyRegions(clippedTo: pixelSize)
+        var regions = PixelRegionSet(
+            settledRegions.rectangles + replayRegions.rectangles,
+            clippedTo: pixelSize
+        )
+        if activeMaterialState.family == .boundedWash {
+            let washRegions = boundedWashHistoryRegions
+            regions = PixelRegionSet(
+                regions.rectangles + washRegions.rectangles,
+                clippedTo: pixelSize
+            )
+        }
         let oneRevisionBytes = try revisionStore.retainedBytes(
             pixelSize: pixelSize,
             regions: regions
@@ -832,7 +1143,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             eraserStrength: 1
         )
         resetLiveState()
-        interpolator = CentripetalCatmullRomStrokeInterpolator(radius: radius)
+        strokeGenerator = BrushStrokeGenerator(
+            recipe: style.recipe,
+            nominalDiameter: style.diameter,
+            color: style.color,
+            seed: style.seed
+        )
+        activeShapeResolution = try brushTextureResolver.resolve(
+            shape: style.recipe.shape
+        )
+        activeGrainResolution = try brushTextureResolver.resolve(
+            grain: style.recipe.grain
+        )
+        activeMaterialState = BrushMaterialState(recipe: style.recipe)
         activeStroke = ActiveStrokeExecution(
             token: token,
             style: style,
@@ -877,31 +1200,41 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         var rasterCommit: EncodedRasterCommit?
         do {
             let hasEarlierPendingUploads = !completedUploadRanges.isEmpty
-            let encodedClear = needsLiveClear
-            if encodedClear {
+            let encodedLiveClear = needsLiveClear
+            if encodedLiveClear {
                 try encodeLiveClear(commandBuffer)
             }
-            uploads = try encodePendingLiveDabs(commandBuffer)
-            let plannedThrough = uploads.last?.throughExclusive
-                ?? liveStroke.bakedHighWater
+            let liveEncoding = try encodePendingLiveDabs(commandBuffer)
+            uploads = liveEncoding.uploads
+            let encodedReplayClear = liveEncoding.encodedReplayClear
+            let plannedSettledThrough = uploads.last {
+                $0.layer == .settled
+            }?.throughExclusive ?? liveStroke.bakedHighWater
+            let plannedReplayThrough = uploads.last {
+                $0.layer == .replay
+            }?.throughExclusive ?? replayStroke.bakedHighWater
             let shouldEncodeCommit = activeStroke?.commitRequested == true
-                && plannedThrough == liveStroke.emittedHighWater
+                && plannedSettledThrough == liveStroke.emittedHighWater
+                && plannedReplayThrough == replayStroke.emittedHighWater
                 && !hasEarlierPendingUploads
                 && activeStroke?.pendingTokenBearingFrameCount == 0
             if shouldEncodeCommit {
                 rasterCommit = try encodeCommit(
                     commandBuffer,
-                    liveVisible: liveTile.isVisible || !uploads.isEmpty
+                    liveVisible: liveTile.isVisible
+                        || replayTile.isVisible || !uploads.isEmpty
                 )
             }
             try encodeDisplay(
                 into: drawable.texture,
                 commandBuffer: commandBuffer,
                 showGridLines: interactiveGridVisibility,
-                liveVisible: liveTile.isVisible || !uploads.isEmpty
+                liveVisible: liveTile.isVisible
+                    || replayTile.isVisible || !uploads.isEmpty
             )
             _ = try finalizeFrameEncoding(
-                encodedClear: encodedClear,
+                encodedClear: encodedLiveClear,
+                encodedReplayClear: encodedReplayClear,
                 uploads: uploads,
                 rasterCommit: rasterCommit,
                 commandBuffer: commandBuffer
@@ -969,10 +1302,368 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
 
-    private func appendWorldDab(_ point: WorldPoint) throws {
-        counters.newDabsThisEvent += 1
-        counters.totalDabsThisStroke += 1
-        try appendProjectedFragments(at: point)
+    private func ingestGeneratedSample(
+        _ sample: WorldStrokeSample,
+        dabs: [PreparedGeneratedDab],
+        generatorSnapshot: BrushStrokeGenerator,
+        isFinishing: Bool
+    ) throws {
+        guard var buffer = transientStrokeBuffer else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        counters.newDabsThisEvent += dabs.count
+        counters.totalDabsThisStroke += dabs.count
+        let transientDabs = dabs.map(\.transient)
+        let chunk = TransientStrokeChunk(
+            sample: sample,
+            dabs: transientDabs,
+            generatorSnapshotAfterSample: generatorSnapshot
+        )
+
+        if sample.kind == .predicted {
+            let predicted = buffer.predictedChunks + [chunk]
+            _ = try buffer.replacePredicted(with: predicted)
+            transientStrokeBuffer = buffer
+            try rebuildReplayLayer(
+                preparedPredictedSuffix: [dabs]
+            )
+            return
+        }
+
+        let update = buffer.appendActual(chunk)
+        transientStrokeBuffer = buffer
+        if buffer.mode == .appendOnly,
+           update.settledPrefix.count == 1,
+           update.settledPrefix[0].dabs == transientDabs
+        {
+            var projected: [ProjectedDabRecord] = []
+            projected.reserveCapacity(
+                dabs.reduce(0) { $0 + $1.projected.count }
+            )
+            for dab in dabs {
+                projected.append(contentsOf: dab.projected)
+            }
+            try appendSettledRecords(projected)
+        } else {
+            try appendSettled(update.settledPrefix)
+        }
+
+        if isFinishing {
+            knownStrokeTotalDistance = max(
+                dabs.last?.attributes.sourceDistance ?? 0,
+                buffer.actualChunks.last?.dabs.last?
+                    .attributes.sourceDistance ?? 0
+            )
+        }
+        if buffer.mode != .appendOnly
+            || update.requiresReplayReplacement
+            || !buffer.predictedChunks.isEmpty
+        {
+            try rebuildReplayLayer(
+                preparedActualTail: buffer.mode == .appendOnly || isFinishing
+                    ? nil
+                    : dabs
+            )
+        }
+    }
+
+    private func appendSettled(
+        _ chunks: [TransientStrokeChunk]
+    ) throws {
+        try preflightSettledAppend(chunks)
+        var records: [ProjectedDabRecord] = []
+        for chunk in chunks {
+            for dab in chunk.dabs {
+                records.append(
+                    contentsOf: try projectedRecords(for: dab.attributes)
+                )
+            }
+        }
+        try appendSettledRecords(records)
+    }
+
+    private func preflightSettledAppend(
+        _ chunks: [TransientStrokeChunk]
+    ) throws {
+        var projectedCount = 0
+        for chunk in chunks {
+            let (nextCount, overflow) = projectedCount.addingReportingOverflow(
+                chunk.projectedInstanceCount
+            )
+            guard !overflow else {
+                throw MetalRendererError.projectedInstanceCapacityExceeded(
+                    liveStroke.capacity
+                )
+            }
+            projectedCount = nextCount
+        }
+        guard projectedCount <= liveStroke.capacity - liveStroke.pending.count
+        else {
+            throw MetalRendererError.projectedInstanceCapacityExceeded(
+                liveStroke.capacity
+            )
+        }
+    }
+
+    private func appendSettledRecords(
+        _ records: [ProjectedDabRecord]
+    ) throws {
+        guard records.count <= liveStroke.capacity - liveStroke.pending.count
+        else {
+            throw MetalRendererError.projectedInstanceCapacityExceeded(
+                liveStroke.capacity
+            )
+        }
+        if activeMaterialState.family == .boundedWash,
+           let boundedWashSurface,
+           !records.isEmpty
+        {
+            let plan = try boundedWashSurface.makeWorkPlan(
+                dirtyRegions: records.map(\.dirtyRect),
+                bleedRadius: activeMaterialState.bleedRadius,
+                softenPasses: Int(activeMaterialState.softenPasses)
+            )
+            lastBoundedWashWorkPlan = plan
+            accumulateBoundedWashHistory(plan.processingRegions)
+        }
+        try append(records, to: &liveStroke)
+    }
+
+    private func prepareGeneratedDabs(
+        generator: inout BrushStrokeGenerator,
+        generate: (
+            inout BrushStrokeGenerator,
+            (DabAttributes) throws -> Void
+        ) throws -> Void
+    ) throws -> [PreparedGeneratedDab] {
+        let globalMaximumDabs = TransientStrokeBufferContract
+            .wholeStrokeDabCapacity
+        let globalMaximumProjected = TransientStrokeBufferContract
+            .visibleEpochProjectedInstanceCapacity
+        let activeLimits = transientStrokeBuffer?.activeReplayLimits
+        let isReplayable = transientStrokeBuffer?.mode != .appendOnly
+        let maximumDabs = isReplayable
+            ? min(
+                globalMaximumDabs,
+                activeLimits?.maximumDabs ?? globalMaximumDabs
+            )
+            : globalMaximumDabs
+        let maximumProjected = isReplayable
+            ? min(
+                globalMaximumProjected,
+                activeLimits?.maximumProjectedInstances
+                    ?? globalMaximumProjected
+            )
+            : globalMaximumProjected
+        var prepared: [PreparedGeneratedDab] = []
+        prepared.reserveCapacity(min(64, maximumDabs))
+        var projectedCount = 0
+        try generate(&generator) { dab in
+            guard prepared.count < maximumDabs else {
+                throw MetalRendererError.generatedDabCapacityExceeded(
+                    maximumDabs
+                )
+            }
+            let projected = try projectedRecords(for: dab)
+            let (nextCount, overflow) = projectedCount.addingReportingOverflow(
+                projected.count
+            )
+            guard !overflow, nextCount <= maximumProjected else {
+                throw MetalRendererError.projectedInstanceCapacityExceeded(
+                    maximumProjected
+                )
+            }
+            projectedCount = nextCount
+            prepared.append(
+                PreparedGeneratedDab(
+                    attributes: dab,
+                    projected: projected
+                )
+            )
+        }
+        return prepared
+    }
+
+    private func rebuildReplayLayer(
+        preparedActualTail: [PreparedGeneratedDab]? = nil,
+        preparedPredictedSuffix: [[PreparedGeneratedDab]] = []
+    ) throws {
+        guard let buffer = transientStrokeBuffer,
+              let activeStroke
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let retainedReplayStartDistance = (
+            buffer.actualChunks.first { !$0.dabs.isEmpty }?.dabs.first
+                ?? buffer.predictedChunks.first { !$0.dabs.isEmpty }?
+                    .dabs.first
+        )?.attributes.sourceDistance
+        let priorRegions = replayStroke.dirtyRegions(clippedTo: pixelSize)
+        var replacementRecords: [ProjectedDabRecord] = []
+        replacementRecords.reserveCapacity(
+            min(
+                buffer.visibleProjectedInstanceCount,
+                TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity
+            )
+        )
+        func appendReplayChunks(
+            _ chunks: [TransientStrokeChunk],
+            preparedSuffix: [[PreparedGeneratedDab]] = []
+        ) throws {
+            let preparedStart = chunks.count - preparedSuffix.count
+            precondition(preparedStart >= 0)
+            for (index, chunk) in chunks.enumerated() {
+                if knownStrokeTotalDistance == nil,
+                   index >= preparedStart
+                {
+                    let prepared = preparedSuffix[index - preparedStart]
+                    precondition(
+                        prepared.map(\.transient) == chunk.dabs,
+                        "Prepared replay projection diverged from its chunk."
+                    )
+                    for dab in prepared {
+                        replacementRecords.append(
+                            contentsOf: dab.projected
+                        )
+                    }
+                    continue
+                }
+                for transientDab in chunk.dabs {
+                    let attributes: DabAttributes
+                    if let totalDistance = knownStrokeTotalDistance {
+                        attributes = BrushDynamicsEngine()
+                            .applyingKnownTotalDistance(
+                                transientDab.attributes,
+                                totalDistance: totalDistance,
+                                nominalDiameter: activeStroke.style.diameter,
+                                recipe: activeStroke.style.recipe,
+                                retainedReplayStartDistance:
+                                    retainedReplayStartDistance
+                            )
+                    } else {
+                        attributes = transientDab.attributes
+                    }
+                    replacementRecords.append(
+                        contentsOf: try projectedRecords(for: attributes)
+                    )
+                }
+            }
+        }
+        try appendReplayChunks(
+            buffer.actualChunks,
+            preparedSuffix: preparedActualTail.map { [$0] } ?? []
+        )
+        try appendReplayChunks(
+            buffer.predictedChunks,
+            preparedSuffix: preparedPredictedSuffix
+        )
+        guard replacementRecords.count
+            <= TransientStrokeBufferContract
+                .visibleEpochProjectedInstanceCapacity
+        else {
+            throw MetalRendererError.projectedInstanceCapacityExceeded(
+                TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity
+            )
+        }
+        let replacementRegions = PixelRegionSet(
+            replacementRecords.map(\.dirtyRect),
+            clippedTo: pixelSize
+        )
+        if activeStroke.style.recipe.material.family == .boundedWash,
+           let boundedWashSurface
+        {
+            let plan = try boundedWashSurface.makeWorkPlan(
+                dirtyRegions: replacementRegions.rectangles,
+                bleedRadius: activeStroke.style.recipe.material.bleedRadius,
+                softenPasses: activeStroke.style.recipe.material.softenPasses
+            )
+            lastBoundedWashWorkPlan = plan
+            accumulateBoundedWashHistory(plan.processingRegions)
+        } else {
+            lastBoundedWashWorkPlan = nil
+        }
+        let epoch = takeReplayEpoch()
+        _ = replayTile.planReplacement(
+            epoch: epoch,
+            prior: priorRegions,
+            replacement: replacementRegions
+        )
+        replayStroke.beginReplacementEpoch(epoch)
+        try append(replacementRecords, to: &replayStroke)
+        needsReplayClear = true
+    }
+
+    private func append(
+        _ records: [ProjectedDabRecord],
+        to stroke: inout LiveStroke
+    ) throws {
+        for record in records {
+            try stroke.append(record.instance, dirtyRect: record.dirtyRect)
+            counters.totalInstancesThisStroke += 1
+        }
+    }
+
+    private func projectedRecords(
+        for dab: DabAttributes
+    ) throws -> [ProjectedDabRecord] {
+        guard let activeStroke else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let minimumAffineScale = min(
+            simd_length(dab.brushToWorld.xAxis),
+            simd_length(dab.brushToWorld.yAxis)
+        )
+        guard minimumAffineScale.isFinite, minimumAffineScale > 0 else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let footprint = StampFootprint(
+            brushToWorld: dab.brushToWorld,
+            localBounds: AxisAlignedRect(
+                minimum: SIMD2(-1, -1),
+                maximum: SIMD2(1, 1)
+            ),
+            coverageSymmetry: coverageSymmetry(
+                for: activeStroke.style.recipe.shape
+            )
+        )
+        let color = InkColor(
+            red: dab.color.red,
+            green: dab.color.green,
+            blue: dab.color.blue,
+            alpha: dab.color.alpha * dab.flow * dab.materialContribution
+        )!
+        let brushAttributes = SIMD4(
+            dab.hardness,
+            dab.grainScale,
+            dab.grainOffset.x,
+            dab.grainOffset.y
+        )
+        return TilingProjection.fragments(
+            for: footprint,
+            using: tilingStrategy
+        ).map { fragment in
+            ProjectedDabRecord(
+                instance: PatternProjectedStampInstance(
+                    fragment: fragment,
+                    radius: minimumAffineScale,
+                    color: color,
+                    brushAttributes: brushAttributes
+                ),
+                dirtyRect: TilingProjection.dirtyPixelRect(
+                    for: fragment,
+                    radius: minimumAffineScale
+                )
+            )
+        }
+    }
+
+    private func takeReplayEpoch() -> UInt64 {
+        let epoch = nextReplayEpoch
+        nextReplayEpoch &+= 1
+        precondition(nextReplayEpoch != 0, "Replay epoch exhausted")
+        return epoch
     }
 
     @discardableResult
@@ -999,27 +1690,30 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             ),
             coverageSymmetry: .halfTurnInvariant
         )
+        return try appendProjectedFragments(
+            footprint: footprint,
+            radius: radius,
+            color: color(for: activeStroke.style),
+            brushAttributes: SIMD4(1, 1, 0, 0)
+        )
+    }
+
+    private func appendProjectedFragments(
+        footprint: StampFootprint,
+        radius: Float,
+        color: InkColor,
+        brushAttributes: SIMD4<Float>
+    ) throws -> [CellFragment] {
         let fragments = TilingProjection.fragments(
             for: footprint,
             using: tilingStrategy
         )
-        let color: InkColor
-        switch activeStroke.style.compositeMode {
-        case .draw:
-            color = activeStroke.style.color
-        case .erase:
-            color = InkColor(
-                red: 0,
-                green: 0,
-                blue: 0,
-                alpha: activeStroke.style.eraserStrength
-            )!
-        }
         for fragment in fragments {
             let instance = PatternProjectedStampInstance(
                 fragment: fragment,
                 radius: radius,
-                color: color
+                color: color,
+                brushAttributes: brushAttributes
             )
             try liveStroke.append(
                 instance,
@@ -1031,6 +1725,35 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             counters.totalInstancesThisStroke += 1
         }
         return fragments
+    }
+
+    private func color(for style: StrokeRenderStyle) -> InkColor {
+        switch style.compositeMode {
+        case .draw:
+            style.color
+        case .erase:
+            InkColor(
+                red: 0,
+                green: 0,
+                blue: 0,
+                alpha: 1
+            )!
+        }
+    }
+
+    private func coverageSymmetry(
+        for shape: BrushShapeDescriptor
+    ) -> FootprintCoverageSymmetry {
+        switch shape {
+        case .hardRound, .softRound:
+            .halfTurnInvariant
+        case .chisel:
+            .oriented
+        case let .asset(identity):
+            identity == BrushTextureIdentity.chiselShape.rawValue
+                ? .oriented
+                : .halfTurnInvariant
+        }
     }
 
     func frameUniforms(
@@ -1054,6 +1777,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             compositeMode: compositeMode,
             padding: 0
         )
+    }
+
+    private var compositeMaterialUniforms: PatternBrushMaterialUniforms {
+        var uniforms = activeMaterialState.uniforms
+        if activeStroke?.style.compositeMode == .erase {
+            uniforms.materialStrength = activeStroke?.style.eraserStrength ?? 1
+        }
+        return uniforms
     }
 
     func makeHarnessTexture(
@@ -1131,6 +1862,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             device: device,
             pixelSize: pixelSize
         )
+        let replayTile = try ReplayLiveTile(
+            device: device,
+            pixelSize: pixelSize
+        )
         return RasterResources(
             pixelSize: pixelSize,
             tileSize: PatternSize(
@@ -1138,7 +1873,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 height: Float(pixelSize.height)
             ),
             canonical: canonical,
-            liveTile: liveTile
+            liveTile: liveTile,
+            replayTile: replayTile
         )
     }
 
@@ -1204,7 +1940,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             throw MetalRendererError.commandBufferUnavailable
         }
-        for texture in [canonical.front, canonical.scratch, liveTile.texture] {
+        for texture in [
+            canonical.front,
+            canonical.scratch,
+            liveTile.texture,
+            replayTile.texture,
+        ] {
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = texture
             pass.colorAttachments[0].loadAction = .clear
@@ -1226,7 +1967,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         liveTile.markCleared()
+        replayTile.markCleared(epoch: 0)
         needsLiveClear = false
+        needsReplayClear = false
     }
 
     private func encodeTransparentClear(
@@ -1293,6 +2036,57 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         encoder.endEncoding()
     }
 
+    func encodeReplayClear(
+        _ commandBuffer: any MTLCommandBuffer
+    ) throws {
+        let plan = replayTile.lastClearPlan
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = replayTile.texture
+        pass.colorAttachments[0].storeAction = .store
+        switch plan {
+        case .regional:
+            pass.colorAttachments[0].loadAction = .load
+        case .fullTile, nil:
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        }
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(
+            descriptor: pass
+        ) else {
+            throw MetalRendererError.renderEncoderUnavailable
+        }
+        encoder.label = "Clear Replay Live Stroke"
+        if case let .regional(regions) = plan {
+            encoder.setRenderPipelineState(pipelines.replayClear)
+            var uniforms = frameUniforms(
+                drawableSize: tileSize,
+                showGridLines: false,
+                liveVisible: true
+            )
+            encoder.setVertexBytes(
+                &uniforms,
+                length: MemoryLayout<PatternGridFrameUniforms>.stride,
+                index: Int(PatternBufferIndexGridFrameUniforms)
+            )
+            for rectangle in regions.rectangles {
+                encoder.setScissorRect(
+                    MTLScissorRect(
+                        x: rectangle.minX,
+                        y: rectangle.minY,
+                        width: rectangle.width,
+                        height: rectangle.height
+                    )
+                )
+                encoder.drawPrimitives(
+                    type: .triangle,
+                    vertexStart: 0,
+                    vertexCount: 3
+                )
+            }
+        }
+        encoder.endEncoding()
+    }
+
     func clearLiveForHarnessIfNeeded() throws {
         guard needsLiveClear else {
             return
@@ -1317,67 +2111,228 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     func encodePendingLiveDabs(
         _ commandBuffer: any MTLCommandBuffer
-    ) throws -> [FrameUpload] {
-        guard let firstPending = liveStroke.pending.firstIndex(
-            where: { $0.identity >= liveStroke.bakedHighWater }
-        ) else {
-            return []
+    ) throws -> PendingLiveEncoding {
+        let requiresAtomicReplayReplacement = needsReplayClear
+            && replayStroke.renderEpoch > replayTile.visibleEpoch
+        if requiresAtomicReplayReplacement {
+            return try encodeAtomicReplayReplacement(commandBuffer)
         }
 
         var uploads: [FrameUpload] = []
         uploads.reserveCapacity(GridCanvasContract.inFlightBufferCount)
-        var cursor = firstPending
-
+        let encodedReplayClear = needsReplayClear
         do {
-            while cursor < liveStroke.pending.endIndex,
-                  uploads.count < GridCanvasContract.inFlightBufferCount {
-                guard let lease = instancePool.acquire() else {
-                    break
-                }
-                let end = min(
-                    cursor + lease.capacity,
-                    liveStroke.pending.endIndex
-                )
-                let chunk = liveStroke.pending[cursor..<end]
-                instancePool.write(chunk, into: lease)
-                do {
-                    try encodeStamp(
-                        commandBuffer,
-                        lease: lease,
-                        count: chunk.count
-                    )
-                } catch {
-                    instancePool.abandon(lease)
-                    throw error
-                }
-                let throughExclusive = chunk.last.map { $0.identity + 1 }
-                    ?? liveStroke.bakedHighWater
-                let fromIdentity = chunk.first.map(\.identity)
-                    ?? throughExclusive
-                uploads.append(
-                    FrameUpload(
-                        lease: lease,
-                        identityRange: fromIdentity..<throughExclusive,
-                        throughExclusive: throughExclusive,
-                        count: chunk.count
-                    )
-                )
-                cursor = end
+            if encodedReplayClear {
+                try encodeReplayClear(commandBuffer)
             }
-            return uploads
+            try encodePending(
+                liveStroke,
+                layer: .settled,
+                texture: liveTile.texture,
+                commandBuffer: commandBuffer,
+                uploads: &uploads
+            )
+            try encodePending(
+                replayStroke,
+                layer: .replay,
+                texture: replayTile.texture,
+                commandBuffer: commandBuffer,
+                uploads: &uploads
+            )
+            return PendingLiveEncoding(
+                uploads: uploads,
+                encodedReplayClear: encodedReplayClear
+            )
         } catch {
             abandon(uploads)
             throw error
         }
     }
 
+    /// Encodes a replay epoch only after reserving enough buffers for both
+    /// chronological prefix promotion and the complete replacement tail.
+    /// Returning an empty, uncleared encoding is an intentional retry signal:
+    /// the previous replay texture remains visible until a later frame can
+    /// reserve the whole atomic group.
+    private func encodeAtomicReplayReplacement(
+        _ commandBuffer: any MTLCommandBuffer
+    ) throws -> PendingLiveEncoding {
+        let settledCount = pendingInstanceCount(in: liveStroke)
+        let replayCount = pendingInstanceCount(in: replayStroke)
+        let capacity = GridCanvasContract.instanceCapacity
+        guard settledCount <= capacity else {
+            throw MetalRendererError.projectedInstanceCapacityExceeded(
+                capacity
+            )
+        }
+        guard replayCount <= capacity else {
+            throw MetalRendererError.projectedInstanceCapacityExceeded(
+                capacity
+            )
+        }
+
+        let requiredLeaseCount = (settledCount > 0 ? 1 : 0)
+            + (replayCount > 0 ? 1 : 0)
+        guard let leases = instancePool.acquire(count: requiredLeaseCount)
+        else {
+            return PendingLiveEncoding(
+                uploads: [],
+                encodedReplayClear: false
+            )
+        }
+
+        var uploads: [FrameUpload] = []
+        uploads.reserveCapacity(requiredLeaseCount)
+        var leaseIndex = 0
+        do {
+            if settledCount > 0 {
+                try encodeCompletePending(
+                    liveStroke,
+                    layer: .settled,
+                    texture: liveTile.texture,
+                    lease: leases[leaseIndex],
+                    commandBuffer: commandBuffer,
+                    uploads: &uploads
+                )
+                leaseIndex += 1
+            }
+
+            try encodeReplayClear(commandBuffer)
+
+            if replayCount > 0 {
+                try encodeCompletePending(
+                    replayStroke,
+                    layer: .replay,
+                    texture: replayTile.texture,
+                    lease: leases[leaseIndex],
+                    commandBuffer: commandBuffer,
+                    uploads: &uploads
+                )
+            }
+            return PendingLiveEncoding(
+                uploads: uploads,
+                encodedReplayClear: true
+            )
+        } catch {
+            for lease in leases {
+                instancePool.abandon(lease)
+            }
+            throw error
+        }
+    }
+
+    private func pendingInstanceCount(in stroke: LiveStroke) -> Int {
+        stroke.pending.count {
+            $0.identity >= stroke.bakedHighWater
+        }
+    }
+
+    private func encodeCompletePending(
+        _ stroke: LiveStroke,
+        layer: FrameUpload.Layer,
+        texture: any MTLTexture,
+        lease: DabInstanceBufferPool.Lease,
+        commandBuffer: any MTLCommandBuffer,
+        uploads: inout [FrameUpload]
+    ) throws {
+        guard let firstPending = stroke.pending.firstIndex(
+            where: { $0.identity >= stroke.bakedHighWater }
+        ) else {
+            preconditionFailure("Atomic upload was preflighted without dabs")
+        }
+        let chunk = stroke.pending[firstPending...]
+        precondition(chunk.count <= lease.capacity)
+        instancePool.write(chunk, into: lease)
+        try encodeStamp(
+            commandBuffer,
+            lease: lease,
+            count: chunk.count,
+            instances: chunk,
+            texture: texture,
+            layer: layer
+        )
+        let throughExclusive = chunk.last!.identity + 1
+        uploads.append(
+            FrameUpload(
+                lease: lease,
+                identityRange: chunk.first!.identity..<throughExclusive,
+                throughExclusive: throughExclusive,
+                count: chunk.count,
+                layer: layer,
+                replayEpoch: stroke.renderEpoch
+            )
+        )
+    }
+
+    private func encodePending(
+        _ stroke: LiveStroke,
+        layer: FrameUpload.Layer,
+        texture: any MTLTexture,
+        commandBuffer: any MTLCommandBuffer,
+        uploads: inout [FrameUpload]
+    ) throws {
+        guard let firstPending = stroke.pending.firstIndex(
+            where: { $0.identity >= stroke.bakedHighWater }
+        ) else { return }
+        var cursor = firstPending
+        while cursor < stroke.pending.endIndex,
+              uploads.count < GridCanvasContract.inFlightBufferCount
+        {
+            guard let lease = instancePool.acquire() else { break }
+            let end = min(cursor + lease.capacity, stroke.pending.endIndex)
+            let chunk = stroke.pending[cursor..<end]
+            instancePool.write(chunk, into: lease)
+            do {
+                try encodeStamp(
+                    commandBuffer,
+                    lease: lease,
+                    count: chunk.count,
+                    instances: chunk,
+                    texture: texture,
+                    layer: layer
+                )
+            } catch {
+                instancePool.abandon(lease)
+                throw error
+            }
+            let throughExclusive = chunk.last.map { $0.identity + 1 }
+                ?? stroke.bakedHighWater
+            let fromIdentity = chunk.first.map(\.identity) ?? throughExclusive
+            uploads.append(
+                FrameUpload(
+                    lease: lease,
+                    identityRange: fromIdentity..<throughExclusive,
+                    throughExclusive: throughExclusive,
+                    count: chunk.count,
+                    layer: layer,
+                    replayEpoch: stroke.renderEpoch
+                )
+            )
+            cursor = end
+        }
+    }
+
     private func encodeStamp(
         _ commandBuffer: any MTLCommandBuffer,
         lease: DabInstanceBufferPool.Lease,
-        count: Int
+        count: Int,
+        instances: ArraySlice<IdentifiedDab>,
+        texture: any MTLTexture,
+        layer: FrameUpload.Layer
     ) throws {
+        if activeMaterialState.family == .boundedWash {
+            try encodeBoundedWash(
+                commandBuffer,
+                lease: lease,
+                count: count,
+                instances: instances,
+                destination: texture,
+                layer: layer
+            )
+            return
+        }
         let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = liveTile.texture
+        pass.colorAttachments[0].texture = texture
         pass.colorAttachments[0].loadAction = .load
         pass.colorAttachments[0].storeAction = .store
         guard let encoder = commandBuffer.makeRenderCommandEncoder(
@@ -1385,7 +2340,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         ) else {
             throw MetalRendererError.renderEncoderUnavailable
         }
-        encoder.label = "Stamp Persistent Live Dabs"
+        encoder.label = layer == .settled
+            ? "Stamp Persistent Live Dabs"
+            : "Stamp Replay Live Dabs"
         encoder.setRenderPipelineState(pipelines.stamp)
         var uniforms = frameUniforms(
             drawableSize: tileSize,
@@ -1402,12 +2359,254 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             offset: 0,
             index: Int(PatternBufferIndexDabInstances)
         )
+        encoder.setFragmentTexture(
+            activeShapeTexture,
+            index: Int(PatternTextureIndexBrushShape)
+        )
+        encoder.setFragmentTexture(
+            activeGrainTexture,
+            index: Int(PatternTextureIndexBrushGrain)
+        )
+        var materialUniforms = activeMaterialState.uniforms
+        encoder.setFragmentBytes(
+            &materialUniforms,
+            length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
+            index: Int(PatternBufferIndexBrushMaterial)
+        )
         encoder.drawPrimitives(
             type: .triangle,
             vertexStart: 0,
             vertexCount: 6,
             instanceCount: count
         )
+        encoder.endEncoding()
+    }
+
+    private func encodeBoundedWash(
+        _ commandBuffer: any MTLCommandBuffer,
+        lease: DabInstanceBufferPool.Lease,
+        count: Int,
+        instances: ArraySlice<IdentifiedDab>,
+        destination: any MTLTexture,
+        layer: FrameUpload.Layer
+    ) throws {
+        guard let surface = boundedWashSurface else {
+            throw MetalRendererError.boundedWashSurfaceAllocationFailed
+        }
+        let dirty = instances.compactMap {
+            boundedWashDirtyRect(for: $0.instance)
+        }
+        let plan = try surface.makeWorkPlan(
+            dirtyRegions: dirty,
+            bleedRadius: activeMaterialState.bleedRadius,
+            softenPasses: Int(activeMaterialState.softenPasses)
+        )
+        guard !plan.processingRegions.rectangles.isEmpty else { return }
+        let regionMetadata = try surface.prepareProcessingRegions(
+            plan.processingRegions,
+            slot: lease.slot
+        )
+        lastBoundedWashWorkPlan = plan
+
+        try encodeWashRegionalPass(
+            commandBuffer,
+            pipeline: pipelines.washClear,
+            destination: surface.depositTexture,
+            source: nil,
+            regions: plan.processingRegions,
+            regionMetadata: nil,
+            label: "Clear Bounded Wash Deposit"
+        )
+        try encodeWashDeposit(
+            commandBuffer,
+            lease: lease,
+            count: count,
+            destination: surface.depositTexture,
+            layer: layer
+        )
+
+        var source = surface.depositTexture
+        if plan.softenPasses > 0 {
+            for passIndex in 0..<plan.softenPasses {
+                let target = passIndex.isMultiple(of: 2)
+                    ? surface.scratchTexture
+                    : surface.depositTexture
+                try encodeWashRegionalPass(
+                    commandBuffer,
+                    pipeline: pipelines.washSoften,
+                    destination: target,
+                    source: source,
+                    regions: plan.processingRegions,
+                    regionMetadata: regionMetadata,
+                    label: "Bounded Wash Soften \(passIndex + 1)"
+                )
+                source = target
+            }
+        }
+        try encodeWashRegionalPass(
+            commandBuffer,
+            pipeline: pipelines.washResolve,
+            destination: destination,
+            source: source,
+            regions: plan.processingRegions,
+            regionMetadata: nil,
+            label: layer == .settled
+                ? "Resolve Bounded Wash To Settled Live"
+                : "Resolve Bounded Wash To Replay Live"
+        )
+        boundedWashEncodedWork.record(plan)
+    }
+
+    private var boundedWashHistoryRegions: PixelRegionSet {
+        boundedWashHistory.regions(pixelSize: pixelSize)
+    }
+
+    private func accumulateBoundedWashHistory(
+        _ regions: PixelRegionSet
+    ) {
+        boundedWashHistory.record(regions, pixelSize: pixelSize)
+    }
+
+    private func boundedWashDirtyRect(
+        for instance: PatternProjectedStampInstance
+    ) -> PixelRect? {
+        let radius = instance.radius
+        guard radius.isFinite, radius > 0 else { return nil }
+        let expansion = 1 + 1 / radius
+        let extent = (
+            abs(instance.canonicalXAxis) + abs(instance.canonicalYAxis)
+        ) * expansion
+        return PixelRect(
+            minX: Int(floor(instance.canonicalTranslation.x - extent.x)),
+            minY: Int(floor(instance.canonicalTranslation.y - extent.y)),
+            maxX: Int(ceil(instance.canonicalTranslation.x + extent.x)),
+            maxY: Int(ceil(instance.canonicalTranslation.y + extent.y))
+        )
+    }
+
+    private func encodeWashDeposit(
+        _ commandBuffer: any MTLCommandBuffer,
+        lease: DabInstanceBufferPool.Lease,
+        count: Int,
+        destination: any MTLTexture,
+        layer: FrameUpload.Layer
+    ) throws {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = destination
+        pass.colorAttachments[0].loadAction = .load
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(
+            descriptor: pass
+        ) else {
+            throw MetalRendererError.renderEncoderUnavailable
+        }
+        encoder.label = layer == .settled
+            ? "Deposit Bounded Wash Settled Dabs"
+            : "Deposit Bounded Wash Replay Dabs"
+        encoder.setRenderPipelineState(pipelines.washDeposit)
+        var uniforms = frameUniforms(
+            drawableSize: tileSize,
+            showGridLines: false,
+            liveVisible: true
+        )
+        encoder.setVertexBytes(
+            &uniforms,
+            length: MemoryLayout<PatternGridFrameUniforms>.stride,
+            index: Int(PatternBufferIndexGridFrameUniforms)
+        )
+        encoder.setVertexBuffer(
+            lease.buffer,
+            offset: 0,
+            index: Int(PatternBufferIndexDabInstances)
+        )
+        encoder.setFragmentTexture(
+            activeShapeTexture,
+            index: Int(PatternTextureIndexBrushShape)
+        )
+        encoder.setFragmentTexture(
+            activeGrainTexture,
+            index: Int(PatternTextureIndexBrushGrain)
+        )
+        var material = activeMaterialState.uniforms
+        encoder.setFragmentBytes(
+            &material,
+            length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
+            index: Int(PatternBufferIndexBrushMaterial)
+        )
+        encoder.drawPrimitives(
+            type: .triangle,
+            vertexStart: 0,
+            vertexCount: 6,
+            instanceCount: count
+        )
+        encoder.endEncoding()
+    }
+
+    private func encodeWashRegionalPass(
+        _ commandBuffer: any MTLCommandBuffer,
+        pipeline: any MTLRenderPipelineState,
+        destination: any MTLTexture,
+        source: (any MTLTexture)?,
+        regions: PixelRegionSet,
+        regionMetadata: (buffer: any MTLBuffer, count: Int)?,
+        label: String
+    ) throws {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = destination
+        pass.colorAttachments[0].loadAction = .load
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(
+            descriptor: pass
+        ) else {
+            throw MetalRendererError.renderEncoderUnavailable
+        }
+        encoder.label = label
+        encoder.setRenderPipelineState(pipeline)
+        var uniforms = frameUniforms(
+            drawableSize: tileSize,
+            showGridLines: false,
+            liveVisible: true
+        )
+        encoder.setVertexBytes(
+            &uniforms,
+            length: MemoryLayout<PatternGridFrameUniforms>.stride,
+            index: Int(PatternBufferIndexGridFrameUniforms)
+        )
+        if let source {
+            encoder.setFragmentTexture(
+                source,
+                index: Int(PatternTextureIndexCanonical)
+            )
+        }
+        if let regionMetadata {
+            encoder.setFragmentBuffer(
+                regionMetadata.buffer,
+                offset: 0,
+                index: Int(PatternBufferIndexDabInstances)
+            )
+        }
+        var material = activeMaterialState.uniforms
+        material.padding1 = UInt32(regionMetadata?.count ?? 0)
+        encoder.setFragmentBytes(
+            &material,
+            length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
+            index: Int(PatternBufferIndexBrushMaterial)
+        )
+        for rectangle in regions.rectangles {
+            encoder.setScissorRect(
+                MTLScissorRect(
+                    x: rectangle.minX,
+                    y: rectangle.minY,
+                    width: rectangle.width,
+                    height: rectangle.height
+                )
+            )
+            encoder.drawPrimitives(
+                type: .triangle,
+                vertexStart: 0,
+                vertexCount: 3
+            )
+        }
         encoder.endEncoding()
     }
 
@@ -1459,6 +2658,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 length: MemoryLayout<PatternGridFrameUniforms>.stride,
                 index: Int(PatternBufferIndexGridFrameUniforms)
             )
+            var materialUniforms = compositeMaterialUniforms
+            encoder.setFragmentBytes(
+                &materialUniforms,
+                length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
+                index: Int(PatternBufferIndexBrushMaterial)
+            )
             encoder.setFragmentTexture(
                 canonical.front,
                 index: Int(PatternTextureIndexCanonical)
@@ -1466,6 +2671,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             encoder.setFragmentTexture(
                 liveTile.texture,
                 index: Int(PatternTextureIndexLive)
+            )
+            encoder.setFragmentTexture(
+                replayTile.texture,
+                index: Int(PatternTextureIndexReplayLive)
             )
             encoder.drawPrimitives(
                 type: .triangle,
@@ -1537,6 +2746,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             length: MemoryLayout<PatternGridFrameUniforms>.stride,
             index: Int(PatternBufferIndexGridFrameUniforms)
         )
+        var materialUniforms = compositeMaterialUniforms
+        encoder.setFragmentBytes(
+            &materialUniforms,
+            length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
+            index: Int(PatternBufferIndexBrushMaterial)
+        )
         encoder.setFragmentTexture(
             canonicalTexture ?? canonical.front,
             index: Int(PatternTextureIndexCanonical)
@@ -1544,6 +2759,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         encoder.setFragmentTexture(
             liveTile.texture,
             index: Int(PatternTextureIndexLive)
+        )
+        encoder.setFragmentTexture(
+            replayTile.texture,
+            index: Int(PatternTextureIndexReplayLive)
         )
         encoder.drawPrimitives(
             type: .triangle,
@@ -1555,6 +2774,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     func finalizeFrameEncoding(
         encodedClear: Bool,
+        encodedReplayClear: Bool = false,
         uploads: [FrameUpload],
         rasterCommit: EncodedRasterCommit?,
         commandBuffer: any MTLCommandBuffer,
@@ -1577,6 +2797,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             liveTile.markCleared()
             needsLiveClear = false
         }
+        if encodedReplayClear {
+            replayTile.markCleared(epoch: replayStroke.renderEpoch)
+            needsReplayClear = false
+        }
         var uploadSubmissions: [DabBufferSubmissionIdentity] = []
         uploadSubmissions.reserveCapacity(uploads.count)
         for upload in uploads {
@@ -1589,18 +2813,36 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             completedUploadRanges.append(
                 (
                     signal: upload.lease.signalValue,
-                    throughExclusive: upload.throughExclusive
+                    throughExclusive: upload.throughExclusive,
+                    layer: upload.layer,
+                    replayEpoch: upload.replayEpoch
                 )
             )
-            liveStroke.markEncoded(
-                throughExclusive: upload.throughExclusive
-            )
+            switch upload.layer {
+            case .settled:
+                liveStroke.markEncoded(
+                    throughExclusive: upload.throughExclusive
+                )
+            case .replay:
+                if upload.replayEpoch == replayStroke.renderEpoch {
+                    replayStroke.markEncoded(
+                        throughExclusive: upload.throughExclusive
+                    )
+                }
+            }
         }
         counters.newInstancesThisFrame = uploads.reduce(0) {
             $0 + $1.count
         }
-        if !uploads.isEmpty {
+        if uploads.contains(where: { $0.layer == .settled }) {
             liveTile.markStamped()
+        }
+        if let epoch = uploads
+            .filter({ $0.layer == .replay })
+            .map(\.replayEpoch)
+            .max()
+        {
+            replayTile.markVisible(epoch: epoch)
         }
 
         let submittedOperationToken: RendererOperationToken?
@@ -1608,7 +2850,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             submittedOperationToken = rasterCommit.token
         } else if let execution = activeStroke,
                   !execution.isCommitSubmitted,
-                  encodedClear || !uploads.isEmpty
+                  encodedClear || encodedReplayClear || !uploads.isEmpty
         {
             submittedOperationToken = execution.token
         } else {
@@ -1626,6 +2868,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             activeStroke = execution
         }
         let submittedUploads = uploadSubmissions
+        let submittedReplayEpoch = uploads
+            .filter { $0.layer == .replay }
+            .map(\.replayEpoch)
+            .max() ?? 0
         let submittedCommit = rasterCommit.map {
             GridRenderCompletionMailbox.RasterCommit(
                 token: $0.token,
@@ -1639,6 +2885,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 submittedCommit,
                 submittedOperationToken,
                 submittedUploads,
+                submittedReplayEpoch,
             ] buffer in
             let completed = buffer.status == .completed && !forceFailure
             completionMailbox.push(
@@ -1646,6 +2893,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     operationToken: submittedOperationToken,
                     rasterCommit: submittedCommit,
                     uploadSubmissions: submittedUploads,
+                    replayEpoch: submittedReplayEpoch,
                     succeeded: completed,
                     errorMessage: forceFailure
                         ? "injected harness command-buffer failure"
@@ -1661,8 +2909,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let completed = completedUploadRanges.filter {
             $0.signal <= completedSignal
         }
-        if let greatest = completed.map(\.throughExclusive).max() {
+        if let greatest = (completed
+            .filter { $0.layer == .settled }
+            .map(\.throughExclusive)
+            .max())
+        {
             liveStroke.releaseEncodedPrefix(throughExclusive: greatest)
+        }
+        if let greatestReplay = (completed
+            .filter {
+                $0.layer == .replay
+                    && $0.replayEpoch == replayStroke.renderEpoch
+            }
+            .map(\.throughExclusive)
+            .max())
+        {
+            replayStroke.releaseEncodedPrefix(
+                throughExclusive: greatestReplay
+            )
         }
         completedUploadRanges.removeAll {
             $0.signal <= completedSignal
@@ -1836,12 +3100,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func install(_ replacement: RasterResources) {
         let tiling = tilingStrategy.kind
         replacement.liveTile.markCleared()
+        replacement.replayTile.markCleared(epoch: 0)
         resources = replacement
         tilingStrategy = TilingStrategy(
             kind: tiling,
             tileSize: replacement.tileSize
         )
         needsLiveClear = false
+        needsReplayClear = false
     }
 
     private func finalizeRestoreToken(
@@ -1914,6 +3180,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             instancePool.reclaimTerminalFailure(
                 outcome.uploadSubmissions
             )
+        }
+        let isStaleReplayOutcome = outcome.replayEpoch != 0
+            && outcome.replayEpoch < replayStroke.renderEpoch
+        if isStaleReplayOutcome,
+           outcome.rasterCommit == nil,
+           outcome.succeeded
+        {
+            if let token = outcome.operationToken {
+                finishTokenBearingFrame(token: token)
+            }
+            return nil
         }
         guard let commit = outcome.rasterCommit else {
             if let token = outcome.operationToken {
@@ -2057,11 +3334,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func resetLiveState() {
-        interpolator.cancel()
+        strokeGenerator?.cancel()
+        strokeGenerator = nil
+        predictedStrokeGenerator?.cancel()
+        predictedStrokeGenerator = nil
+        transientStrokeBuffer?.cancel()
+        transientStrokeBuffer = nil
+        brushInputDeriver.reset()
+        predictedInputDeriver = nil
         liveTile.hide()
+        replayTile.reset()
         completedUploadRanges.removeAll(keepingCapacity: true)
         liveStroke.reset()
+        replayStroke.reset()
         needsLiveClear = true
+        needsReplayClear = true
+        nextReplayEpoch = 1
+        knownStrokeTotalDistance = nil
+        lastBoundedWashWorkPlan = nil
+        boundedWashEncodedWork = BoundedWashEncodedWork()
+        boundedWashHistory = BoundedWashHistoryAccumulator()
     }
 
     func report(_ error: MetalRendererError) {
