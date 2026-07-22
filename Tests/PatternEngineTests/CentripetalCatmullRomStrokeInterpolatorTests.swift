@@ -7,22 +7,22 @@ private func distance(_ lhs: WorldPoint, _ rhs: WorldPoint) -> Float {
 }
 
 @Test
-func clickEmitsExactlyOneDab() throws {
+func clickEmitsExactlyOneDab() {
     var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
     var emitted: [WorldPoint] = []
-    try interpolator.begin(at: WorldPoint(x: 4, y: 9)) { emitted.append($0) }
-    try interpolator.finish(at: WorldPoint(x: 4, y: 9)) { emitted.append($0) }
+    interpolator.begin(at: WorldPoint(x: 4, y: 9)) { emitted.append($0) }
+    interpolator.finish(at: WorldPoint(x: 4, y: 9)) { emitted.append($0) }
 
     #expect(emitted == [WorldPoint(x: 4, y: 9)])
 }
 
 @Test
-func straightMotionUsesRecoveredSpacingAndExactFinalEndpoint() throws {
+func straightMotionUsesRecoveredSpacingAndExactFinalEndpoint() {
     var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
     var emitted: [WorldPoint] = []
-    try interpolator.begin(at: WorldPoint(x: 0, y: 0)) { emitted.append($0) }
-    try interpolator.append(WorldPoint(x: 5, y: 0)) { emitted.append($0) }
-    try interpolator.finish(at: WorldPoint(x: 6, y: 0)) { emitted.append($0) }
+    interpolator.begin(at: WorldPoint(x: 0, y: 0)) { emitted.append($0) }
+    interpolator.append(WorldPoint(x: 5, y: 0)) { emitted.append($0) }
+    interpolator.finish(at: WorldPoint(x: 6, y: 0)) { emitted.append($0) }
 
     #expect(emitted == [
         WorldPoint(x: 0, y: 0),
@@ -33,24 +33,24 @@ func straightMotionUsesRecoveredSpacingAndExactFinalEndpoint() throws {
 }
 
 @Test
-func spacingCarryCrossesInputSegments() throws {
+func spacingCarryCrossesInputSegments() {
     var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
     var emitted: [WorldPoint] = []
-    try interpolator.begin(at: WorldPoint(x: 0, y: 0)) { emitted.append($0) }
-    try interpolator.append(WorldPoint(x: 1, y: 0)) { emitted.append($0) }
-    try interpolator.append(WorldPoint(x: 3, y: 0)) { emitted.append($0) }
+    interpolator.begin(at: WorldPoint(x: 0, y: 0)) { emitted.append($0) }
+    interpolator.append(WorldPoint(x: 1, y: 0)) { emitted.append($0) }
+    interpolator.append(WorldPoint(x: 3, y: 0)) { emitted.append($0) }
 
     #expect(emitted.count == 2)
     #expect(abs(emitted[1].x - 2.5) < 0.01)
 }
 
 @Test
-func curvedMotionStaysAtFixedArcLengthWithinTolerance() throws {
+func curvedMotionStaysAtFixedArcLengthWithinTolerance() {
     var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
     var emitted: [WorldPoint] = []
-    try interpolator.begin(at: WorldPoint(x: 0, y: 0)) { emitted.append($0) }
-    try interpolator.append(WorldPoint(x: 7.5, y: 0)) { emitted.append($0) }
-    try interpolator.append(WorldPoint(x: 7.5, y: 7.5)) { emitted.append($0) }
+    interpolator.begin(at: WorldPoint(x: 0, y: 0)) { emitted.append($0) }
+    interpolator.append(WorldPoint(x: 7.5, y: 0)) { emitted.append($0) }
+    interpolator.append(WorldPoint(x: 7.5, y: 7.5)) { emitted.append($0) }
 
     for pair in zip(emitted, emitted.dropFirst()) {
         #expect(abs(distance(pair.0, pair.1) - 2.5) < 0.08)
@@ -59,13 +59,13 @@ func curvedMotionStaysAtFixedArcLengthWithinTolerance() throws {
 }
 
 @Test
-func cancelResetsIdentityAndCarry() throws {
+func cancelResetsIdentityAndCarry() {
     var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
     var emitted: [WorldPoint] = []
-    try interpolator.begin(at: WorldPoint(x: -8, y: 0)) { emitted.append($0) }
-    try interpolator.append(WorldPoint(x: -6, y: 0)) { emitted.append($0) }
+    interpolator.begin(at: WorldPoint(x: -8, y: 0)) { emitted.append($0) }
+    interpolator.append(WorldPoint(x: -6, y: 0)) { emitted.append($0) }
     interpolator.cancel()
-    try interpolator.append(WorldPoint(x: 40, y: 20)) { emitted.append($0) }
+    interpolator.append(WorldPoint(x: 40, y: 20)) { emitted.append($0) }
 
     #expect(emitted == [
         WorldPoint(x: -8, y: 0),
@@ -74,11 +74,11 @@ func cancelResetsIdentityAndCarry() throws {
 }
 
 @Test
-func negativeWorldMotionDoesNotChangeSpacing() throws {
+func negativeWorldMotionDoesNotChangeSpacing() {
     var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
     var emitted: [WorldPoint] = []
-    try interpolator.begin(at: WorldPoint(x: -8, y: -4)) { emitted.append($0) }
-    try interpolator.finish(at: WorldPoint(x: -3, y: -4)) { emitted.append($0) }
+    interpolator.begin(at: WorldPoint(x: -8, y: -4)) { emitted.append($0) }
+    interpolator.finish(at: WorldPoint(x: -3, y: -4)) { emitted.append($0) }
 
     #expect(emitted == [
         WorldPoint(x: -8, y: -4),

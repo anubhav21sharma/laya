@@ -69,6 +69,19 @@ targets:
         CURRENT_PROJECT_VERSION: 1
         MARKETING_VERSION: 0.1.0
 
+  PatternSpikeMacUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: UITests
+    dependencies:
+      - target: PatternSpikeMac
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+        PRODUCT_BUNDLE_IDENTIFIER: com.anubhav.patternspike.uitests
+
 schemes:
   PatternSpikeMac:
     build:
@@ -76,6 +89,10 @@ schemes:
         PatternSpikeMac: all
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - PatternSpikeMacUITests
 
   PatternSpikePad:
     build:

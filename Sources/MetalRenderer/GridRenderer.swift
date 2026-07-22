@@ -908,9 +908,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
             #if DEBUG && os(macOS)
             let targetFramesPerSecond = max(1, view.preferredFramesPerSecond)
+            let fallbackPresentationTimestamp =
+                ProcessInfo.processInfo.systemUptime
             drawable.addPresentedHandler { [weak self] presentedDrawable in
-                let timestamp = presentedDrawable.presentedTime
-                guard timestamp > 0 else { return }
+                let timestamp = Self.interactivePresentationTimestamp(
+                    presentedTime: presentedDrawable.presentedTime,
+                    fallback: fallbackPresentationTimestamp
+                )
                 Task { @MainActor [weak self] in
                     self?.onInteractiveFramePresented?(
                         timestamp,
@@ -936,6 +940,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
     }
+
+    #if DEBUG && os(macOS)
+    nonisolated static func interactivePresentationTimestamp(
+        presentedTime: TimeInterval,
+        fallback: TimeInterval
+    ) -> TimeInterval {
+        guard presentedTime.isFinite, presentedTime > 0 else {
+            return fallback
+        }
+        return presentedTime
+    }
+    #endif
 
     public func mtkView(
         _ view: MTKView,

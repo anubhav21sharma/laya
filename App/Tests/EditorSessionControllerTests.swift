@@ -9,7 +9,7 @@ import AppKit
 #endif
 
 @MainActor
-private func makeControllerRenderer() throws -> GridRenderer? {
+func makeControllerRenderer() throws -> GridRenderer? {
     guard let device = MTLCreateSystemDefaultDevice() else { return nil }
     let root = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -358,6 +358,66 @@ func semanticShortcutsUpdateToolBrushAndGridThroughControllerIntents() throws {
     #expect(controller.model.brushDiameter == 25)
     #expect(controller.model.showGrid)
     #expect(renderer.interactiveGridVisibility)
+}
+
+@Test
+@MainActor
+func brushChangeKeepsSubsequentEditorActionsCoherent() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    controller.stepBrush(larger: true)
+    #expect(controller.model.brushDiameter == 25)
+    #expect(!controller.model.isBusy)
+
+    var retainedRevisionIDs: Set<StoredRasterRevisionID> = []
+    try commitControllerStroke(controller, renderer: renderer)
+    let draw = try #require(controller.lastRecordedRasterCommandForTesting)
+    retainedRevisionIDs.formUnion([draw.before.id, draw.after.id])
+    #expect(draw.kind == .draw)
+    let drawnBytes = try canonicalBytes(renderer)
+    #expect(!drawnBytes.allSatisfy { $0 == 0 })
+
+    controller.handleTool(.erase)
+    #expect(controller.model.tool == .erase)
+    try commitControllerStroke(controller, renderer: renderer)
+    let erase = try #require(controller.lastRecordedRasterCommandForTesting)
+    retainedRevisionIDs.formUnion([erase.before.id, erase.after.id])
+    #expect(erase.kind == .erase)
+    let erasedBytes = try canonicalBytes(renderer)
+    let drawnAlpha = stride(from: 3, to: drawnBytes.count, by: 4)
+        .reduce(0) { $0 + Int(drawnBytes[$1]) }
+    let erasedAlpha = stride(from: 3, to: erasedBytes.count, by: 4)
+        .reduce(0) { $0 + Int(erasedBytes[$1]) }
+    #expect(erasedAlpha < drawnAlpha)
+
+    controller.handleTool(.draw)
+    try commitControllerStroke(
+        controller,
+        renderer: renderer,
+        x: 20,
+        y: 20
+    )
+    let redraw = try #require(controller.lastRecordedRasterCommandForTesting)
+    retainedRevisionIDs.formUnion([redraw.before.id, redraw.after.id])
+    let redrawnBytes = try canonicalBytes(renderer)
+    #expect(!redrawnBytes.allSatisfy { $0 == 0 })
+
+    controller.handleGridVisibility(true)
+    controller.handleTiling(.halfDrop)
+    #expect(controller.model.showGrid)
+    #expect(renderer.interactiveGridVisibility)
+    #expect(controller.model.tiling == .halfDrop)
+    #expect(renderer.tiling == .halfDrop)
+
+    controller.clear()
+    try renderer.finishRasterOperationForHarness()
+    #expect(try canonicalBytes(renderer).allSatisfy { $0 == 0 })
+    #expect(!controller.model.isBusy)
+
+    let clear = try #require(controller.lastRecordedRasterCommandForTesting)
+    retainedRevisionIDs.formUnion([clear.before.id, clear.after.id])
+    renderer.releaseRasterRevisions(retainedRevisionIDs)
 }
 
 @Test

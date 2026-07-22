@@ -262,6 +262,10 @@ final class InteractiveMetalView: MTKView {
         !brushCursorView.isHidden
     }
 
+    var brushDiameterForTesting: Float {
+        brushDiameter
+    }
+
     private func localPoint(_ event: NSEvent) -> ScreenPoint {
         let local = convert(event.locationInWindow, from: nil)
         return ScreenPoint(x: Float(local.x), y: Float(local.y))

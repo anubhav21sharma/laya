@@ -46,6 +46,16 @@ struct MetalCanvas: NSViewRepresentable {
     }
 
     func updateNSView(_ view: InteractiveMetalView, context: Context) {
+        #if DEBUG
+        precondition(
+            view.controller === controller,
+            "MetalCanvas reused a view with a different editor controller."
+        )
+        precondition(
+            view.gridRenderer === renderer,
+            "MetalCanvas reused a view with a different renderer."
+        )
+        #endif
         view.updateBrushCursor(diameter: brushDiameter)
         view.applyPointerCancellation(
             generation: pointerCancellationGeneration

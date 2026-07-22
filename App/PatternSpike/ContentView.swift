@@ -18,7 +18,7 @@ struct ContentView: View {
     @Environment(\.controlActiveState) private var controlActiveState
     #endif
 
-    private let state: CanvasState
+    @State private var state: CanvasState
     @State private var runtimeError: MetalRendererError?
     @State private var pointerCancellationGeneration: UInt = 0
     @FocusState private var editorFocused: Bool
@@ -27,9 +27,17 @@ struct ContentView: View {
     @State private var debugPerformanceMonitor = DebugPerformanceMonitor()
     #endif
 
+    init(controller: EditorSessionController) {
+        _state = State(initialValue: .ready(controller))
+    }
+
     init() {
         guard let device = MTLCreateSystemDefaultDevice() else {
-            state = .unavailable("Pattern requires a Metal-capable Apple device.")
+            _state = State(
+                initialValue: .unavailable(
+                    "Pattern requires a Metal-capable Apple device."
+                )
+            )
             return
         }
 
@@ -43,11 +51,15 @@ struct ContentView: View {
                 drawableSize: PatternSize(width: 1, height: 1),
                 configuration: configuration
             )
-            state = .ready(
-                EditorSessionController(renderer: renderer)
+            _state = State(
+                initialValue: .ready(
+                    EditorSessionController(renderer: renderer)
+                )
             )
         } catch {
-            state = .unavailable(error.localizedDescription)
+            _state = State(
+                initialValue: .unavailable(error.localizedDescription)
+            )
         }
     }
 
@@ -91,6 +103,7 @@ struct ContentView: View {
                         pointerCancellationGeneration:
                             pointerCancellationGeneration
                     )
+                    .accessibilityIdentifier("Pattern Canvas")
                     #if DEBUG && os(macOS)
                     if debugHUDVisible {
                         DebugPerformanceHUD(
