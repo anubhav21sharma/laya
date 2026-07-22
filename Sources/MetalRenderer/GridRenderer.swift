@@ -2473,7 +2473,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         forceFailure: Bool
     ) {
-        commandBuffer.addCompletedHandler { [rasterCompletionMailbox] buffer in
+        commandBuffer.addCompletedHandler {
+            [weak self, rasterCompletionMailbox] buffer in
             let succeeded = buffer.status == .completed && !forceFailure
             rasterCompletionMailbox.push(
                 RendererRasterSubmissionOutcome(
@@ -2485,6 +2486,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                         : buffer.error?.localizedDescription
                 )
             )
+            Task { @MainActor [weak self] in
+                _ = self?.drainRasterOperationOutcomes()
+            }
         }
     }
 

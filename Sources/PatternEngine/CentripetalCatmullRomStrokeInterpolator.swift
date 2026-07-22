@@ -120,12 +120,19 @@ public struct CentripetalCatmullRomStrokeInterpolator: Sendable {
         let dt0 = max(epsilon, sqrt(simd_distance(p0.simd, p1.simd)))
         let dt1 = max(epsilon, sqrt(simd_distance(p1.simd, p2.simd)))
         let dt2 = max(epsilon, sqrt(simd_distance(p2.simd, p3.simd)))
-        var m1 = (p1.simd - p0.simd) / dt0
-            - (p2.simd - p0.simd) / (dt0 + dt1)
-            + (p2.simd - p1.simd) / dt1
-        var m2 = (p2.simd - p1.simd) / dt1
-            - (p3.simd - p1.simd) / (dt1 + dt2)
-            + (p3.simd - p2.simd) / dt2
+        // Keep SIMD operations discrete and explicitly typed so different Swift
+        // compiler versions can resolve the overloaded operators reliably.
+        let d20: SIMD2<Float> = p2.simd - p0.simd
+        let d31: SIMD2<Float> = p3.simd - p1.simd
+        let d32: SIMD2<Float> = p3.simd - p2.simd
+        let m1a: SIMD2<Float> = incoming / dt0
+        let m1b: SIMD2<Float> = d20 / (dt0 + dt1)
+        let m1c: SIMD2<Float> = outgoing / dt1
+        let m2a: SIMD2<Float> = outgoing / dt1
+        let m2b: SIMD2<Float> = d31 / (dt1 + dt2)
+        let m2c: SIMD2<Float> = d32 / dt2
+        var m1 = m1a - m1b + m1c
+        var m2 = m2a - m2b + m2c
         m1 *= dt1
         m2 *= dt1
         let u2 = u * u

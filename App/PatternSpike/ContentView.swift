@@ -163,7 +163,8 @@ struct ContentView: View {
         _ press: KeyPress,
         controller: EditorSessionController
     ) -> KeyPress.Result {
-        guard let phase = editorPhase(from: press.phase),
+        guard editorFocused,
+              let phase = editorPhase(from: press.phase),
               let shortcut = EditorKeymap.resolve(
                 editorKey(from: press),
                 modifiers: editorModifiers(from: press.modifiers),

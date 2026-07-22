@@ -34,6 +34,7 @@ struct EditorShellStructuralTests {
         #expect(content.contains("case .return:"))
         #expect(content.contains("handleEditorShortcut("))
         #expect(content.contains(".onChange(of: editorFocused)"))
+        #expect(content.contains("guard editorFocused,"))
         #expect(content.contains("return .ignored"))
         #expect(keyPressOwnerCount(in: [content, native, canvas]) == 1)
         #expect(!commands.contains(".keyboardShortcut("))

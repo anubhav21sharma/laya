@@ -450,6 +450,34 @@ func commandShortcutsShareClearUndoAndRedoHistoryFlow() throws {
 
 @Test
 @MainActor
+func clearCompletesWithoutAViewFrameAndControlsAcceptTheNextIntent() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    controller.clear()
+    #expect(controller.model.isBusy)
+
+    for _ in 0..<200 where controller.model.isBusy {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+
+    #expect(!controller.model.isBusy)
+    #expect(renderer.isIdle)
+
+    controller.handleGridVisibility(true)
+    controller.handleTiling(.halfDrop)
+
+    #expect(controller.model.showGrid)
+    #expect(renderer.interactiveGridVisibility)
+    #expect(controller.model.tiling == .halfDrop)
+    #expect(renderer.tiling == .halfDrop)
+
+    let clear = try #require(controller.lastRecordedRasterCommandForTesting)
+    renderer.releaseRasterRevisions([clear.before.id, clear.after.id])
+}
+
+@Test
+@MainActor
 func cancelShortcutCancelsStrokeWithoutCreatingHistory() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
