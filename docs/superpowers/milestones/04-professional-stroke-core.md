@@ -4,8 +4,8 @@
 - **Date:** 2026-07-22
 - **Authorized base:** `9ae8c68dba36531b2eca165da23e5360663fc26d`
 - **Branch:** `main`
-- **Implementation evidence commit:** Pending until the verified source is
-  committed below.
+- **Implementation evidence commit:**
+  `bf3a6cba109fe612cc2bcde0b941475441287583`
 - **Gate:** `./scripts/verify-slice4.sh` (requires committed, clean source)
 - **Governing design:**
   `docs/superpowers/specs/2026-07-22-professional-stroke-core-design.md`
@@ -14,9 +14,8 @@
 
 ## Status Ruling
 
-Tasks 1–13 are implemented and all available automated correctness work is
-green. Slice 4 is not accepted: the committed-source gate is still pending
-until the evidence commit below exists, while macOS UI automation permission,
+Tasks 1–13 are implemented and every available automated correctness gate is
+green. Slice 4 is not accepted: macOS UI automation permission,
 subjective/manual interaction, stable physical-GPU timing, pressure-tablet,
 and iPad hardware checks are unavailable in this environment.
 
@@ -70,9 +69,8 @@ selection-transform surface is claimed.
 
 ## Verification Results Run On 2026-07-22
 
-These pre-commit results were obtained from the reviewed Slice 4 worktree. The
-clean committed-source gate result is recorded separately after the evidence
-commit is created:
+These results were obtained from the reviewed Slice 4 worktree and confirmed
+by the clean committed-source gate where applicable:
 
 - `swift test --no-parallel`: `480 tests in 9 suites` passed.
 - The real eight-scene Slice 4 runner, every independent negative family,
@@ -95,8 +93,30 @@ commit is created:
   stress-frame identity, wash metadata, and ABI-gate gaps. The final focused
   re-review reported no actionable findings.
 
-The full `./scripts/verify-slice4.sh` result is deliberately absent here until
-the gate can run from the required clean committed source.
+## Clean Committed-Source Gate
+
+`./scripts/verify-slice4.sh` ran from evidence commit
+`bf3a6cba109fe612cc2bcde0b941475441287583` and returned status `2` with:
+
+```text
+SLICE4 PERFORMANCE PENDING: unstable real-Metal timing environment 'Apple Paravirtual device'.
+SLICE4 CORRECTNESS PASS; PERFORMANCE PENDING artifacts=/Users/anubhav/git/laya/.build/slice4-artifacts commit=bf3a6cba109fe612cc2bcde0b941475441287583
+```
+
+The status is the gate's documented correctness-pass/performance-pending
+outcome, not a correctness failure. It proves source provenance, inherited
+Slice 0–3 correctness, pure and full Swift tests, bootstrap, both app builds,
+both analyzers, all eight positive scenes, all eight negative controls,
+artifact structure/digests/content, and the fail-closed evidence validator.
+
+Artifact provenance is retained at `.build/slice4-artifacts/provenance.json`:
+
+- commit: `bf3a6cba109fe612cc2bcde0b941475441287583`;
+- configuration: `Debug`;
+- operating system: macOS `26.5.2` (`25F84`);
+- machine: `arm64`, `VirtualMac2,1`;
+- scene matrix: all eight governing Slice 4 scenes; and
+- logs: `.build/slice4-artifacts/gate-logs/`.
 
 ## UI Verification
 
@@ -129,16 +149,16 @@ not changed.
 ## Performance Status
 
 The available GPU identifies as `Apple Paravirtual device`. Correctness,
-bounds, provenance, and malformed evidence must still fail closed. Stable
+bounds, provenance, and malformed evidence still fail closed. Stable
 material/GPU timing is explicitly pending and must not be promoted to a pass.
-After a committed-source run, the validator is expected to return status `2`
-(`PERFORMANCE PENDING`) on this GPU if all correctness stages pass.
+The committed-source validator returned status `2` (`PERFORMANCE PENDING`)
+only after every correctness stage passed.
 
 ## Task 13 Handoff — Not Accepted
 
-- [ ] Create the Slice 4 implementation evidence commit, run
+- [x] Create the Slice 4 implementation evidence commit, run
       `./scripts/verify-slice4.sh` from clean committed source, and record the
-      exact result and artifact provenance below.
+      exact result and artifact provenance.
 - [x] Run every configured formatting/lint equivalent and record that no Swift
       formatter/linter is configured.
 - [x] Run approved ASan and TSan non-crash suites and record the expected-trap
@@ -159,7 +179,7 @@ After a committed-source run, the validator is expected to return status `2`
       acceptance evidence.
 - [ ] Run tablet-specific input and iPad hardware/Pencil checks. The simulator
       build launched, but no iPad or Pencil hardware was available.
-- [ ] Record the final evidence commit and artifact provenance before any
+- [x] Record the final evidence commit and artifact provenance before any
       acceptance decision.
 
 Every available Task 13 correctness and integration check is complete. The
