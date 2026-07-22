@@ -22,6 +22,10 @@ struct ContentView: View {
     @State private var runtimeError: MetalRendererError?
     @State private var pointerCancellationGeneration: UInt = 0
     @FocusState private var editorFocused: Bool
+    #if DEBUG && os(macOS)
+    @State private var debugHUDVisible = false
+    @State private var debugPerformanceMonitor = DebugPerformanceMonitor()
+    #endif
 
     init() {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -78,14 +82,25 @@ struct ContentView: View {
                     requestEditorFocus: requestEditorFocus
                 )
                 Divider()
-                MetalCanvas(
-                    controller: controller,
-                    renderer: controller.renderer,
-                    brushDiameter: controller.model.brushDiameter,
-                    requestEditorFocus: requestEditorFocus,
-                    pointerCancellationGeneration:
-                        pointerCancellationGeneration
-                )
+                ZStack(alignment: .topLeading) {
+                    MetalCanvas(
+                        controller: controller,
+                        renderer: controller.renderer,
+                        brushDiameter: controller.model.brushDiameter,
+                        requestEditorFocus: requestEditorFocus,
+                        pointerCancellationGeneration:
+                            pointerCancellationGeneration
+                    )
+                    #if DEBUG && os(macOS)
+                    if debugHUDVisible {
+                        DebugPerformanceHUD(
+                            snapshot: debugPerformanceMonitor.snapshot
+                        )
+                        .padding(12)
+                        .allowsHitTesting(false)
+                    }
+                    #endif
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
                 TilingInspector(
@@ -122,11 +137,23 @@ struct ContentView: View {
             controller.renderer.onError = {
                 runtimeError = $0
             }
+            #if DEBUG && os(macOS)
+            let monitor = debugPerformanceMonitor
+            controller.renderer.onInteractiveFramePresented = { timestamp, targetFramesPerSecond in
+                monitor.recordPresentedFrame(
+                    at: timestamp,
+                    targetFramesPerSecond: targetFramesPerSecond
+                )
+            }
+            #endif
         }
         .onDisappear {
             cancelCurrentInteraction(controller)
             controller.onError = nil
             controller.renderer.onError = nil
+            #if DEBUG && os(macOS)
+            controller.renderer.onInteractiveFramePresented = nil
+            #endif
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
@@ -164,8 +191,21 @@ struct ContentView: View {
         _ press: KeyPress,
         controller: EditorSessionController
     ) -> KeyPress.Result {
-        guard editorFocused,
-              let phase = editorPhase(from: press.phase),
+        guard editorFocused else {
+            return .ignored
+        }
+
+        #if DEBUG && os(macOS)
+        if press.phase == .down, press.characters == "~" {
+            debugHUDVisible.toggle()
+            if debugHUDVisible {
+                debugPerformanceMonitor.reset()
+            }
+            return .handled
+        }
+        #endif
+
+        guard let phase = editorPhase(from: press.phase),
               let shortcut = EditorKeymap.resolve(
                 editorKey(from: press),
                 modifiers: editorModifiers(from: press.modifiers),

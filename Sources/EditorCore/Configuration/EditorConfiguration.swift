@@ -11,6 +11,15 @@ public enum EditorConfiguration {
         min(maximumBrushDiameter, 8 * Float(min(size.width, size.height)))
     }
 
+    public static func isValidBrushDiameter(
+        _ diameter: Float,
+        pixelSize: PixelSize
+    ) -> Bool {
+        diameter.isFinite
+            && (minimumBrushDiameter...brushMaximum(for: pixelSize))
+                .contains(diameter)
+    }
+
     public static func stepBrush(
         _ value: Float,
         larger: Bool,

@@ -54,8 +54,8 @@ struct ReflectedRotationalShaderTests {
 
     @Test
     func diagnosticSelectionIsInternalAndAbsentFromProductViews() throws {
-        let renderer = try normalizedSource(
-            "Sources/MetalRenderer/GridRenderer.swift"
+        let harnessExtension = try normalizedSource(
+            "Sources/MetalRenderer/GridRenderer+Harness.swift"
         )
         let productPaths = [
             "App/PatternSpike/ContentView.swift",
@@ -63,8 +63,10 @@ struct ReflectedRotationalShaderTests {
             "App/PatternSpike/Canvas/InteractiveMetalView.swift",
         ]
 
-        #expect(renderer.contains("renderDiagnosticFootprintForHarness"))
-        #expect(!renderer.contains(
+        #expect(harnessExtension.contains(
+            "renderDiagnosticFootprintForHarness"
+        ))
+        #expect(!harnessExtension.contains(
             "public func renderDiagnosticFootprintForHarness"
         ))
         for path in productPaths {
@@ -93,9 +95,13 @@ struct ReflectedRotationalShaderTests {
 
     @Test
     func harnessComputesDiagnosticMetricsFromCapturesAndTransforms() throws {
-        let runner = try normalizedSource(
+        let runnerCore = try normalizedSource(
             "Sources/MetalRenderer/Capture/HarnessRunner.swift"
         )
+        let runnerGrid = try normalizedSource(
+            "Sources/MetalRenderer/Capture/HarnessRunner+Grid.swift"
+        )
+        let runner = runnerCore + " " + runnerGrid
 
         #expect(runner.contains("coordinateContinuityMismatchCount("))
         #expect(runner.contains("independentTransformMismatchCount("))

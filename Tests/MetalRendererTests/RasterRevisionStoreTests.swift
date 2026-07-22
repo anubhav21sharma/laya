@@ -340,6 +340,49 @@ struct RasterRevisionStoreTests {
     }
 
     @Test
+    func foreignIDDoesNotBlockValidLocalReleasesInTheSameSet() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let firstStore = RasterRevisionStore(device: device)
+        let secondStore = RasterRevisionStore(device: device)
+        let size = PixelSize(width: 64, height: 64)
+        let regions = regionSet(size: size)
+        let firstPair = try firstStore.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let secondPair = try secondStore.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let texture = try makeTexture(device: device, size: size)
+        let queue = try #require(device.makeCommandQueue())
+        try captureAndPublish(
+            firstPair,
+            in: firstStore,
+            from: texture,
+            on: queue
+        )
+        try captureAndPublish(
+            secondPair,
+            in: secondStore,
+            from: texture,
+            on: queue
+        )
+
+        secondStore.release([secondPair.before.id, firstPair.before.id])
+
+        #expect(secondStore.residentBytes == secondPair.after.retainedBytes)
+        firstStore.release(firstPair.revisionIDs)
+        secondStore.release([secondPair.after.id])
+        #expect(firstStore.residentBytes == 0)
+        #expect(secondStore.residentBytes == 0)
+    }
+
+    @Test
     func prematureSuccessFailsTypedAndUnwindsCapture() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let store = RasterRevisionStore(device: device)

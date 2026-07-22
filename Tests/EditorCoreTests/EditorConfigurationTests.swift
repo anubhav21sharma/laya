@@ -17,6 +17,14 @@ func brushConfigurationUsesExactDefaultsAndTileDependentMaximum() {
             for: PixelSize(width: 512, height: 512)
         ) == 2_000
     )
+
+    let smallTile = PixelSize(width: 64, height: 512)
+    #expect(EditorConfiguration.isValidBrushDiameter(2, pixelSize: smallTile))
+    #expect(EditorConfiguration.isValidBrushDiameter(512, pixelSize: smallTile))
+    #expect(!EditorConfiguration.isValidBrushDiameter(1, pixelSize: smallTile))
+    #expect(!EditorConfiguration.isValidBrushDiameter(513, pixelSize: smallTile))
+    #expect(!EditorConfiguration.isValidBrushDiameter(.nan, pixelSize: smallTile))
+    #expect(!EditorConfiguration.isValidBrushDiameter(.infinity, pixelSize: smallTile))
 }
 
 @Test

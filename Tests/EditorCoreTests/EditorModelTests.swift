@@ -81,3 +81,26 @@ func editorModelRejectsPixelSizesOutsideCentralBounds() {
     model.confirmPixelSize(PixelSize(width: 4_097, height: 4_096))
     #expect(model.pixelSize == PixelSize(width: 4_096, height: 4_096))
 }
+
+@MainActor
+@Test
+func editorModelPreservesBrushInvariantsAcrossConfirmationsAndResize() {
+    let model = EditorModel()
+
+    for invalid in [Float.nan, -.infinity, 0, 1, 2_001, .infinity] {
+        model.confirmBrushDiameter(invalid)
+        #expect(model.brushDiameter == EditorConfiguration.defaultBrushDiameter)
+    }
+
+    model.confirmBrushDiameter(1_000)
+    #expect(model.brushDiameter == 1_000)
+
+    model.confirmPixelSize(PixelSize(width: 64, height: 128))
+    #expect(model.brushDiameter == 512)
+
+    model.confirmBrushDiameter(513)
+    #expect(model.brushDiameter == 512)
+
+    model.confirmBrushDiameter(512)
+    #expect(model.brushDiameter == 512)
+}

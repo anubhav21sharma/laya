@@ -52,8 +52,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var onError: ((MetalRendererError) -> Void)?
     public var onIdleStateChange: ((Bool) -> Void)?
     public var onOperationCompleted: ((RendererOperationCompletion) -> Void)?
+    #if DEBUG && os(macOS)
+    public var onInteractiveFramePresented: ((TimeInterval, Int) -> Void)?
+    #endif
     public private(set) var viewport: ViewportTransform
-    public private(set) var counters = GridStructuralCounters()
+    public internal(set) var counters = GridStructuralCounters()
     public private(set) var interactiveGridVisibility = false
     public var isIdle: Bool {
         activeStroke == nil && pendingRasterOperation == nil
@@ -66,14 +69,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
     public var tiling: TilingKind { tilingStrategy.kind }
 
-    private struct FrameUpload {
+    struct FrameUpload {
         let lease: DabInstanceBufferPool.Lease
         let identityRange: Range<UInt64>
         let throughExclusive: UInt64
         let count: Int
     }
 
-    private struct ActiveStrokeExecution {
+    struct ActiveStrokeExecution {
         let token: RendererOperationToken
         let style: StrokeRenderStyle
         var commitRequested: Bool
@@ -85,20 +88,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private struct EncodedRasterCommit {
+    struct EncodedRasterCommit {
         let token: RendererOperationToken
         let revisions: PendingRasterRevisionPair
         let captureTokens: [RasterRevisionOperationToken]
     }
 
-    private struct RasterResources {
+    struct RasterResources {
         let pixelSize: PixelSize
         let tileSize: PatternSize
         let canonical: CanonicalRaster
         let liveTile: PersistentLiveTile
     }
 
-    private struct PendingClearOperation {
+    struct PendingClearOperation {
         let submissionID: UInt64
         let token: RendererOperationToken
         let revisions: PendingRasterRevisionPair
@@ -106,7 +109,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let commandBuffer: any MTLCommandBuffer
     }
 
-    private struct PendingRestoreOperation {
+    struct PendingRestoreOperation {
         let submissionID: UInt64
         let token: RendererOperationToken
         let revision: RasterRevisionReference
@@ -114,7 +117,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let commandBuffer: any MTLCommandBuffer
     }
 
-    private struct PendingResizeOperation {
+    struct PendingResizeOperation {
         let submissionID: UInt64
         let token: RendererOperationToken
         let replacement: RasterResources
@@ -123,7 +126,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let commandBuffer: any MTLCommandBuffer
     }
 
-    private struct PendingResizeRestoreOperation {
+    struct PendingResizeRestoreOperation {
         let submissionID: UInt64
         let token: RendererOperationToken
         let replacement: RasterResources
@@ -131,7 +134,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let commandBuffer: any MTLCommandBuffer
     }
 
-    private enum PendingRasterOperation {
+    enum PendingRasterOperation {
         case clear(PendingClearOperation)
         case restore(PendingRestoreOperation)
         case resize(PendingResizeOperation)
@@ -177,24 +180,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private let commandQueue: any MTLCommandQueue
-    private let library: any MTLLibrary
+    let commandQueue: any MTLCommandQueue
+    let library: any MTLLibrary
     private let pipelines: GridPipelineLibrary
-    private let instancePool: DabInstanceBufferPool
-    private let revisionStore: RasterRevisionStore
-    private let completionMailbox = GridRenderCompletionMailbox()
+    let instancePool: DabInstanceBufferPool
+    let revisionStore: RasterRevisionStore
+    let completionMailbox = GridRenderCompletionMailbox()
     private let rasterCompletionMailbox = RendererRasterCompletionMailbox()
-    private var resources: RasterResources
-    private var tileSize: PatternSize { resources.tileSize }
-    private var canonical: CanonicalRaster { resources.canonical }
-    private var liveTile: PersistentLiveTile { resources.liveTile }
-    private var tilingStrategy: TilingStrategy
-    private var activeStroke: ActiveStrokeExecution?
-    private var pendingRasterOperation: PendingRasterOperation?
-    private var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
-    private var liveStroke = LiveStroke()
+    var resources: RasterResources
+    var tileSize: PatternSize { resources.tileSize }
+    var canonical: CanonicalRaster { resources.canonical }
+    var liveTile: PersistentLiveTile { resources.liveTile }
+    var tilingStrategy: TilingStrategy
+    var activeStroke: ActiveStrokeExecution?
+    var pendingRasterOperation: PendingRasterOperation?
+    var interpolator = CentripetalCatmullRomStrokeInterpolator(radius: 10)
+    var liveStroke = LiveStroke()
     private var completedUploadRanges: [(signal: UInt64, throughExclusive: UInt64)] = []
-    private var needsLiveClear = true
+    var needsLiveClear = true
     private var nextHarnessTokenRawValue: UInt64 = 1
     private var nextRasterSubmissionID: UInt64 = 1
 
@@ -406,7 +409,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    private func requestResizeRestore(
+    func requestResizeRestore(
         token: RendererOperationToken,
         revision: RasterRevisionReference,
         forceCommandFailure: Bool
@@ -478,7 +481,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         commandBuffer.commit()
     }
 
-    private func requestResize(
+    func requestResize(
         token: RendererOperationToken,
         to newPixelSize: PixelSize,
         maximumRetainedBytes: Int,
@@ -597,7 +600,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         commandBuffer.commit()
     }
 
-    private func requestClear(
+    func requestClear(
         token: RendererOperationToken,
         maximumRetainedBytes: Int,
         forceFailure: Bool
@@ -694,7 +697,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         commandBuffer.commit()
     }
 
-    private func requestRasterRestore(
+    func requestRasterRestore(
         token: RendererOperationToken,
         revision: RasterRevisionReference,
         forceFailure: Bool
@@ -764,7 +767,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func prepareCurrentStrokeCommit(
+    func prepareCurrentStrokeCommit(
         maximumRetainedBytes: Int
     ) throws {
         guard var execution = activeStroke else {
@@ -813,7 +816,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeStroke?.pendingRevisions = nil
     }
 
-    private func beginHarnessExecution(radius: Float) throws {
+    func beginHarnessExecution(radius: Float) throws {
         guard activeStroke == nil else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -903,6 +906,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 rasterCommit: rasterCommit,
                 commandBuffer: commandBuffer
             )
+            #if DEBUG && os(macOS)
+            let targetFramesPerSecond = max(1, view.preferredFramesPerSecond)
+            drawable.addPresentedHandler { [weak self] presentedDrawable in
+                let timestamp = presentedDrawable.presentedTime
+                guard timestamp > 0 else { return }
+                Task { @MainActor [weak self] in
+                    self?.onInteractiveFramePresented?(
+                        timestamp,
+                        targetFramesPerSecond
+                    )
+                }
+            }
+            #endif
             commandBuffer.present(drawable)
             if activeStroke != nil {
                 counters.renderedFramesThisStroke += 1
@@ -936,635 +952,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    public func flushPendingLiveForHarness(
-        forceFailure: Bool = false
-    ) throws -> HarnessLiveFlushResult {
-        drainFrameOutcomes()
-        drainCompletedUploadRanges()
-        try clearLiveForHarnessIfNeeded()
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
-        }
-
-        var uploads: [FrameUpload] = []
-        var submissions: [DabBufferSubmissionIdentity] = []
-        var didFinalize = false
-        let start = CFAbsoluteTimeGetCurrent()
-        do {
-            uploads = try encodePendingLiveDabs(commandBuffer)
-            submissions = try finalizeFrameEncoding(
-                encodedClear: false,
-                uploads: uploads,
-                rasterCommit: nil,
-                commandBuffer: commandBuffer,
-                forceFailure: forceFailure
-            )
-            didFinalize = true
-            if activeStroke != nil {
-                counters.renderedFramesThisStroke += 1
-            }
-            let cpuMilliseconds = HarnessSubmissionTiming
-                .measureThroughSubmission(
-                    since: start,
-                    submit: commandBuffer.commit
-                )
-            commandBuffer.waitUntilCompleted()
-            let submittedError = drainFrameOutcomes()
-            drainCompletedUploadRanges()
-            if let submittedError {
-                throw submittedError
-            }
-            do {
-                try validateHarnessCommand(commandBuffer)
-            } catch let error as MetalRendererError {
-                instancePool.reclaimTerminalFailure(submissions)
-                report(error)
-                throw error
-            }
-            return HarnessLiveFlushResult(
-                metrics: metrics(
-                    commandBuffer: commandBuffer,
-                    cpuMilliseconds: cpuMilliseconds
-                ),
-                emittedHighWater: liveStroke.emittedHighWater,
-                encodedIdentityRanges: uploads.map(\.identityRange)
-            )
-        } catch {
-            if !didFinalize {
-                abandon(uploads)
-                failActiveOperationIfNeeded(
-                    (error as? MetalRendererError)
-                        ?? .commandFailed(error.localizedDescription)
-                )
-            }
-            throw error
-        }
-    }
-
-    public func renderOffscreenDisplayForHarness(
-        width: Int,
-        height: Int,
-        showGridLines: Bool
-    ) throws -> RenderedFrame {
-        guard (1...4096).contains(width), (1...4096).contains(height) else {
-            throw MetalRendererError.invalidDrawableSize
-        }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: width,
-            height: height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.renderTarget, .shaderRead]
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
-        }
-
-        let start = CFAbsoluteTimeGetCurrent()
-        try encodeDisplay(
-            into: texture,
-            commandBuffer: commandBuffer,
-            showGridLines: showGridLines,
-            liveVisible: liveTile.isVisible
-        )
-        let cpuMilliseconds = elapsedMilliseconds(since: start)
-        commandBuffer.commit()
-        do {
-            try waitForHarnessCommand(commandBuffer)
-        } catch let error as MetalRendererError {
-            report(error)
-            throw error
-        }
-        return RenderedFrame(
-            texture: texture,
-            metrics: metrics(
-                commandBuffer: commandBuffer,
-                cpuMilliseconds: cpuMilliseconds
-            )
-        )
-    }
-
-    func renderDiagnosticFootprintForHarness(
-        footprint: StampFootprint,
-        radius: Float,
-        diagnosticMode: UInt32,
-        width: Int,
-        height: Int
-    ) throws -> HarnessDiagnosticRenderedFrame {
-        guard (1...4096).contains(width), (1...4096).contains(height) else {
-            throw MetalRendererError.invalidDrawableSize
-        }
-        precondition(
-            diagnosticMode == PatternDiagnosticWireAsymmetricCoverage
-                || diagnosticMode == PatternDiagnosticWireCanonicalCoordinates
-                || diagnosticMode == PatternDiagnosticWireBrushLocalCoordinates,
-            "Harness diagnostic mode must use a shared nonzero wire value"
-        )
-
-        let fragments = TilingProjection.fragments(
-            for: footprint,
-            using: tilingStrategy
-        )
-        let instances = fragments.map {
-            PatternProjectedStampInstance(fragment: $0, radius: radius)
-        }
-        guard
-            !instances.isEmpty,
-            instances.count <= GridCanvasContract.pendingCapacity
-        else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                GridCanvasContract.pendingCapacity
-            )
-        }
-        let instanceByteCount =
-            instances.count * MemoryLayout<PatternProjectedStampInstance>.stride
-        guard let instanceBuffer = device.makeBuffer(
-            length: instanceByteCount,
-            options: .storageModeShared
-        ) else {
-            throw MetalRendererError.instanceBufferAllocationFailed
-        }
-        instances.withUnsafeBytes { bytes in
-            instanceBuffer.contents().copyMemory(
-                from: bytes.baseAddress!,
-                byteCount: bytes.count
-            )
-        }
-
-        let canonicalTexture = try makeHarnessTexture(
-            width: pixelSize.width,
-            height: pixelSize.height
-        )
-        let screenTexture = try makeHarnessTexture(
-            width: width,
-            height: height
-        )
-        let displayValidationCanonical =
-            try makeHarnessDisplayValidationTexture()
-        let displayValidationScreen = try makeHarnessTexture(
-            width: width,
-            height: height
-        )
-        let gridLinesScreen = try makeHarnessTexture(
-            width: width,
-            height: height
-        )
-        let diagnosticPipeline =
-            try GridPipelineLibrary.makeHarnessDiagnosticPipeline(
-                device: device,
-                library: library
-            )
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
-        }
-
-        let start = CFAbsoluteTimeGetCurrent()
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = canonicalTexture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        encoder.label = "Harness Diagnostic Projected Footprint"
-        encoder.setRenderPipelineState(diagnosticPipeline)
-        var uniforms = frameUniforms(
-            drawableSize: tileSize,
-            showGridLines: false,
-            liveVisible: false,
-            diagnosticMode: diagnosticMode
-        )
-        encoder.setVertexBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setFragmentBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setVertexBuffer(
-            instanceBuffer,
-            offset: 0,
-            index: Int(PatternBufferIndexDabInstances)
-        )
-        encoder.drawPrimitives(
-            type: .triangle,
-            vertexStart: 0,
-            vertexCount: 6,
-            instanceCount: instances.count
-        )
-        encoder.endEncoding()
-
-        try encodeDisplay(
-            into: screenTexture,
-            commandBuffer: commandBuffer,
-            showGridLines: false,
-            liveVisible: false,
-            canonicalTexture: canonicalTexture
-        )
-        try encodeDisplay(
-            into: displayValidationScreen,
-            commandBuffer: commandBuffer,
-            showGridLines: false,
-            liveVisible: false,
-            canonicalTexture: displayValidationCanonical
-        )
-        try encodeDisplay(
-            into: gridLinesScreen,
-            commandBuffer: commandBuffer,
-            showGridLines: true,
-            liveVisible: false,
-            canonicalTexture: displayValidationCanonical
-        )
-        let cpuMilliseconds = elapsedMilliseconds(since: start)
-        commandBuffer.commit()
-        do {
-            try waitForHarnessCommand(commandBuffer)
-        } catch let error as MetalRendererError {
-            report(error)
-            throw error
-        }
-        return HarnessDiagnosticRenderedFrame(
-            canonical: canonicalTexture,
-            screen: screenTexture,
-            displayValidationCanonical: displayValidationCanonical,
-            displayValidationScreen: displayValidationScreen,
-            gridLinesScreen: gridLinesScreen,
-            fragments: fragments,
-            metrics: metrics(
-                commandBuffer: commandBuffer,
-                cpuMilliseconds: cpuMilliseconds
-            )
-        )
-    }
-
-    public func finishCommitForHarness() throws -> GPUFrameMetrics {
-        let metrics = try submitCommitForHarness()
-        try drainCompletedOperationsForHarness()
-        return metrics
-    }
-
-    func requestRasterRestoreForHarness(
-        token: RendererOperationToken,
-        revision: RasterRevisionReference,
-        forceFailure: Bool
-    ) throws {
-        try requestRasterRestore(
-            token: token,
-            revision: revision,
-            forceFailure: forceFailure
-        )
-    }
-
-    func requestClearForHarness(
-        token: RendererOperationToken,
-        maximumRetainedBytes: Int,
-        forceFailure: Bool
-    ) throws {
-        try requestClear(
-            token: token,
-            maximumRetainedBytes: maximumRetainedBytes,
-            forceFailure: forceFailure
-        )
-    }
-
-    func requestResizeForHarness(
-        token: RendererOperationToken,
-        to pixelSize: PixelSize,
-        maximumRetainedBytes: Int,
-        forceResourceAllocationFailure: Bool,
-        forceCommandFailure: Bool = false
-    ) throws {
-        try requestResize(
-            token: token,
-            to: pixelSize,
-            maximumRetainedBytes: maximumRetainedBytes,
-            forceResourceAllocationFailure: forceResourceAllocationFailure,
-            forceCommandFailure: forceCommandFailure
-        )
-    }
-
-    func requestResizeRestoreForHarness(
-        token: RendererOperationToken,
-        revision: RasterRevisionReference,
-        forceCommandFailure: Bool
-    ) throws {
-        try requestResizeRestore(
-            token: token,
-            revision: revision,
-            forceCommandFailure: forceCommandFailure
-        )
-    }
-
-    public func finishRasterOperationForHarness() throws {
-        guard let operation = pendingRasterOperation else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        operation.commandBuffer.waitUntilCompleted()
-        if let error = drainRasterOperationOutcomes() {
-            throw error
-        }
-    }
-
-    func submitCommitForHarness(
-        forceFailure: Bool = false
-    ) throws -> GPUFrameMetrics {
-        drainFrameOutcomes()
-        drainCompletedUploadRanges()
-        guard activeStroke?.commitRequested == true,
-              activeStroke?.pendingTokenBearingFrameCount == 0,
-              liveStroke.bakedHighWater == liveStroke.emittedHighWater
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
-        }
-
-        let start = CFAbsoluteTimeGetCurrent()
-        let rasterCommit = try encodeCommit(
-            commandBuffer,
-            liveVisible: liveTile.isVisible
-        )
-        _ = try finalizeFrameEncoding(
-            encodedClear: false,
-            uploads: [],
-            rasterCommit: rasterCommit,
-            commandBuffer: commandBuffer,
-            forceFailure: forceFailure
-        )
-        counters.renderedFramesThisStroke += 1
-        let cpuMilliseconds = elapsedMilliseconds(since: start)
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        try validateHarnessCommand(commandBuffer)
-        return metrics(
-            commandBuffer: commandBuffer,
-            cpuMilliseconds: cpuMilliseconds
-        )
-    }
-
-    func drainCompletedOperationsForHarness() throws {
-        let submittedError = drainFrameOutcomes()
-        drainCompletedUploadRanges()
-        if let submittedError {
-            throw submittedError
-        }
-    }
-
-    func submitDisplayOnlyForHarness(
-        forceFailure: Bool
-    ) throws {
-        let texture = try makeHarnessTexture(width: 64, height: 64)
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        try encodeDisplay(
-            into: texture,
-            commandBuffer: commandBuffer,
-            showGridLines: false,
-            liveVisible: false
-        )
-        _ = try finalizeFrameEncoding(
-            encodedClear: false,
-            uploads: [],
-            rasterCommit: nil,
-            commandBuffer: commandBuffer,
-            forceFailure: forceFailure
-        )
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        try validateHarnessCommand(commandBuffer)
-    }
-
-    func prioritizeLatestFrameOutcomeForHarness() {
-        completionMailbox.prioritizeLastForHarness()
-    }
-
-    func deferNextFrameOutcomeForHarness() {
-        completionMailbox.deferNextForHarness()
-    }
-
-    func releaseDeferredFrameOutcomesForHarness() {
-        completionMailbox.releaseDeferredForHarness()
-    }
-
-    func drainNextCompletedOperationForHarness() throws {
-        guard let outcome = completionMailbox.drainFirstForHarness() else {
-            return
-        }
-        let submittedError = processFrameOutcome(outcome)
-        drainCompletedUploadRanges()
-        if let submittedError {
-            throw submittedError
-        }
-    }
-
-    public func copyCanonicalForHarness() throws -> any MTLTexture {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: canonical.pixelSize.width,
-            height: canonical.pixelSize.height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.shaderRead]
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
-            throw MetalRendererError.commandFailed(
-                "Metal blit encoder creation failed."
-            )
-        }
-        encoder.copy(
-            from: canonical.front,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: MTLSize(
-                width: canonical.pixelSize.width,
-                height: canonical.pixelSize.height,
-                depth: 1
-            ),
-            to: texture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-        )
-        encoder.endEncoding()
-        commandBuffer.commit()
-        do {
-            try waitForHarnessCommand(commandBuffer)
-        } catch let error as MetalRendererError {
-            report(error)
-            throw error
-        }
-        return texture
-    }
-
-    public func replaceCanonicalPixelsForHarness(_ bytes: [UInt8]) throws {
-        let bytesPerRow = pixelSize.width * 4
-        guard bytes.count == bytesPerRow * pixelSize.height else {
-            throw MetalRendererError.commandFailed(
-                "Harness canonical byte count does not match pixel size."
-            )
-        }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: pixelSize.width,
-            height: pixelSize.height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.shaderRead]
-        guard let staging = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        bytes.withUnsafeBytes { storage in
-            staging.replace(
-                region: MTLRegionMake2D(
-                    0,
-                    0,
-                    pixelSize.width,
-                    pixelSize.height
-                ),
-                mipmapLevel: 0,
-                withBytes: storage.baseAddress!,
-                bytesPerRow: bytesPerRow
-            )
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        try encodeResizeIntersectionCopy(
-            from: staging,
-            oldPixelSize: pixelSize,
-            to: canonical.front,
-            newPixelSize: pixelSize,
-            on: commandBuffer
-        )
-        commandBuffer.commit()
-        try waitForHarnessCommand(commandBuffer)
-    }
-
-    public var harnessCounters: GridStructuralCounters { counters }
-    var harnessRevision: RasterRevision { canonical.revision }
-    var harnessTiling: TilingKind { tilingStrategy.kind }
-    var harnessRasterRevisionResidentBytes: Int {
-        revisionStore.residentBytes
-    }
-    var harnessReservedInstanceBufferCount: Int {
-        instancePool.unavailableSlotCount
-    }
-    var harnessInterpolatorSpacing: Float { interpolator.spacing }
-    var harnessCompositeMode: StrokeCompositeMode? {
-        activeStroke?.style.compositeMode
-    }
-    var harnessPendingInstanceColors: [SIMD4<Float>] {
-        liveStroke.pending.map(\.instance.color)
-    }
-    var harnessTilingMutationSnapshot: HarnessTilingMutationSnapshot {
-        HarnessTilingMutationSnapshot(
-            canonicalFront: ObjectIdentifier(canonical.front as AnyObject),
-            canonicalScratch: ObjectIdentifier(canonical.scratch as AnyObject),
-            liveTexture: ObjectIdentifier(liveTile.texture as AnyObject),
-            revision: canonical.revision,
-            liveVisible: liveTile.isVisible,
-            liveDirty: liveTile.isDirty,
-            needsLiveClear: needsLiveClear,
-            counters: counters,
-            pendingInstanceCount: liveStroke.pending.count,
-            bakedHighWater: liveStroke.bakedHighWater,
-            emittedHighWater: liveStroke.emittedHighWater
-        )
-    }
-
-    func injectFiveHundredInteriorDabsIntoOneFrame() throws {
-        try beginHarnessExecution(radius: GridCanvasContract.brushRadius)
-        counters = GridStructuralCounters()
-        counters.newDabsThisEvent = 500
-        counters.totalDabsThisStroke = 500
-
-        for row in 0..<25 {
-            for column in 0..<20 {
-                try appendProjectedFragments(
-                    at: WorldPoint(
-                        x: 32 + Float(column) * 8,
-                        y: 32 + Float(row) * 7
-                    )
-                )
-            }
-        }
-    }
-
-    @discardableResult
-    func injectHarnessDab(
-        at world: WorldPoint,
-        radius requestedRadius: Float = GridCanvasContract.brushRadius
-    ) throws -> [CellFragment] {
-        try beginHarnessExecution(radius: requestedRadius)
-        counters = GridStructuralCounters()
-        counters.newDabsThisEvent = 1
-        counters.totalDabsThisStroke = 1
-        let fragments = try appendProjectedFragments(
-            at: world,
-            requestedRadius: requestedRadius
-        )
-        try prepareCurrentStrokeCommit(maximumRetainedBytes: Int.max)
-        return fragments
-    }
-
-    @discardableResult
-    func beginFixedProjectedStrokeForHarness(
-        at world: WorldPoint
-    ) throws -> [CellFragment] {
-        try beginHarnessExecution(radius: GridCanvasContract.brushRadius)
-        counters = GridStructuralCounters()
-        counters.newDabsThisEvent = 1
-        counters.totalDabsThisStroke = 1
-        return try appendProjectedFragments(at: world)
-    }
-
-    @discardableResult
-    func appendFixedProjectedSegmentForHarness(
-        to world: WorldPoint
-    ) throws -> [CellFragment] {
-        guard hasActiveStroke else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        counters.newDabsThisEvent = 1
-        counters.totalDabsThisStroke += 1
-        return try appendProjectedFragments(at: world)
-    }
-
-    func endFixedProjectedStrokeForHarness() throws {
-        guard hasActiveStroke else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        counters.newDabsThisEvent = 0
-        try prepareCurrentStrokeCommit(maximumRetainedBytes: Int.max)
-    }
 
     private func appendWorldDab(_ point: WorldPoint) throws {
         counters.newDabsThisEvent += 1
@@ -1573,7 +960,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     @discardableResult
-    private func appendProjectedFragments(
+    func appendProjectedFragments(
         at point: WorldPoint,
         requestedRadius: Float? = nil
     ) throws -> [CellFragment] {
@@ -1630,7 +1017,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return fragments
     }
 
-    private func frameUniforms(
+    func frameUniforms(
         drawableSize: PatternSize,
         showGridLines: Bool,
         liveVisible: Bool,
@@ -1653,7 +1040,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    private func makeHarnessTexture(
+    func makeHarnessTexture(
         width: Int,
         height: Int
     ) throws -> any MTLTexture {
@@ -1671,7 +1058,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return texture
     }
 
-    private func makeHarnessDisplayValidationTexture()
+    func makeHarnessDisplayValidationTexture()
         throws -> any MTLTexture
     {
         let texture = try makeHarnessTexture(
@@ -1766,7 +1153,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    private func encodeResizeIntersectionCopy(
+    func encodeResizeIntersectionCopy(
         from source: any MTLTexture,
         oldPixelSize: PixelSize,
         to destination: any MTLTexture,
@@ -1890,7 +1277,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         encoder.endEncoding()
     }
 
-    private func clearLiveForHarnessIfNeeded() throws {
+    func clearLiveForHarnessIfNeeded() throws {
         guard needsLiveClear else {
             return
         }
@@ -1912,7 +1299,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         needsLiveClear = false
     }
 
-    private func encodePendingLiveDabs(
+    func encodePendingLiveDabs(
         _ commandBuffer: any MTLCommandBuffer
     ) throws -> [FrameUpload] {
         guard let firstPending = liveStroke.pending.firstIndex(
@@ -2008,7 +1395,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         encoder.endEncoding()
     }
 
-    private func encodeCommit(
+    func encodeCommit(
         _ commandBuffer: any MTLCommandBuffer,
         liveVisible: Bool
     ) throws -> EncodedRasterCommit {
@@ -2089,7 +1476,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func encodeDisplay(
+    func encodeDisplay(
         into texture: any MTLTexture,
         commandBuffer: any MTLCommandBuffer,
         showGridLines: Bool,
@@ -2150,7 +1537,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         encoder.endEncoding()
     }
 
-    private func finalizeFrameEncoding(
+    func finalizeFrameEncoding(
         encodedClear: Bool,
         uploads: [FrameUpload],
         rasterCommit: EncodedRasterCommit?,
@@ -2253,7 +1640,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return submittedUploads
     }
 
-    private func drainCompletedUploadRanges() {
+    func drainCompletedUploadRanges() {
         let completedSignal = instancePool.event.signaledValue
         let completed = completedUploadRanges.filter {
             $0.signal <= completedSignal
@@ -2267,7 +1654,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     @discardableResult
-    private func drainRasterOperationOutcomes() -> MetalRendererError? {
+    func drainRasterOperationOutcomes() -> MetalRendererError? {
         var latestError: MetalRendererError?
         for outcome in rasterCompletionMailbox.drain() {
             if let error = processRasterOperationOutcome(outcome) {
@@ -2493,7 +1880,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     @discardableResult
-    private func drainFrameOutcomes() -> MetalRendererError? {
+    func drainFrameOutcomes() -> MetalRendererError? {
         var latestError: MetalRendererError?
         for outcome in completionMailbox.drain() {
             let error = processFrameOutcome(outcome)
@@ -2504,7 +1891,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return latestError
     }
 
-    private func processFrameOutcome(
+    func processFrameOutcome(
         _ outcome: GridRenderCompletionMailbox.Outcome
     ) -> MetalRendererError? {
         if !outcome.succeeded {
@@ -2661,7 +2048,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         needsLiveClear = true
     }
 
-    private func report(_ error: MetalRendererError) {
+    func report(_ error: MetalRendererError) {
         lastError = error
         onError?(error)
     }
@@ -2671,13 +2058,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         onIdleStateChange?(isIdle)
     }
 
-    private func abandon(_ uploads: [FrameUpload]) {
+    func abandon(_ uploads: [FrameUpload]) {
         for upload in uploads {
             instancePool.abandon(upload.lease)
         }
     }
 
-    private func abandon(_ commit: EncodedRasterCommit?) {
+    func abandon(_ commit: EncodedRasterCommit?) {
         guard let commit else { return }
         finalizeCaptureTokens(commit.captureTokens, as: .cancelled)
     }
@@ -2701,7 +2088,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return true
     }
 
-    private func failActiveOperationIfNeeded(_ error: MetalRendererError) {
+    func failActiveOperationIfNeeded(_ error: MetalRendererError) {
         guard let execution = activeStroke else {
             report(error)
             return
@@ -2713,14 +2100,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         terminateActiveOperation(token: execution.token, error: error)
     }
 
-    private func waitForHarnessCommand(
+    func waitForHarnessCommand(
         _ commandBuffer: any MTLCommandBuffer
     ) throws {
         commandBuffer.waitUntilCompleted()
         try validateHarnessCommand(commandBuffer)
     }
 
-    private func validateHarnessCommand(
+    func validateHarnessCommand(
         _ commandBuffer: any MTLCommandBuffer
     ) throws {
         guard commandBuffer.status == .completed else {
@@ -2731,11 +2118,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func elapsedMilliseconds(since start: CFAbsoluteTime) -> Double {
+    func elapsedMilliseconds(since start: CFAbsoluteTime) -> Double {
         (CFAbsoluteTimeGetCurrent() - start) * 1_000
     }
 
-    private func metrics(
+    func metrics(
         commandBuffer: any MTLCommandBuffer,
         cpuMilliseconds: Double
     ) -> GPUFrameMetrics {

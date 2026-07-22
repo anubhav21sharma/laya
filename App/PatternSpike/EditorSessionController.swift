@@ -616,12 +616,6 @@ final class EditorSessionController {
 
     private func confirmPixelSizeAndClampDiameter(_ pixelSize: PixelSize) {
         model.confirmPixelSize(pixelSize)
-        model.confirmBrushDiameter(
-            min(
-                model.brushDiameter,
-                EditorConfiguration.brushMaximum(for: pixelSize)
-            )
-        )
     }
 
     private func report(_ error: MetalRendererError) {

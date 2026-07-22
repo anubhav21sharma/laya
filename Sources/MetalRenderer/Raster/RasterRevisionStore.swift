@@ -439,10 +439,8 @@ public final class RasterRevisionStore: @unchecked Sendable {
 
     public func release(_ ids: Set<StoredRasterRevisionID>) {
         withLock {
-            guard ids.allSatisfy({ $0.belongs(to: storeIdentity) }) else {
-                return
-            }
-            for id in ids {
+            let localIDs = ids.filter { $0.belongs(to: storeIdentity) }
+            for id in localIDs {
                 guard let entry = entries[id] else {
                     preconditionFailure(
                         "Cannot release a missing raster revision."
@@ -458,7 +456,7 @@ public final class RasterRevisionStore: @unchecked Sendable {
                 )
             }
 
-            for id in ids {
+            for id in localIDs {
                 if entries[id]!.inFlightCount == 0 {
                     remove(id)
                 } else {

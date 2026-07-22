@@ -28,6 +28,12 @@ public final class EditorModel {
     }
 
     public func confirmBrushDiameter(_ brushDiameter: Float) {
+        guard EditorConfiguration.isValidBrushDiameter(
+            brushDiameter,
+            pixelSize: pixelSize
+        ) else {
+            return
+        }
         self.brushDiameter = brushDiameter
     }
 
@@ -44,6 +50,10 @@ public final class EditorModel {
             return
         }
         self.pixelSize = pixelSize
+        brushDiameter = min(
+            brushDiameter,
+            EditorConfiguration.brushMaximum(for: pixelSize)
+        )
     }
 
     public func confirmHistoryAvailability(
