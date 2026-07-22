@@ -81,6 +81,7 @@ struct ContentView: View {
                 MetalCanvas(
                     controller: controller,
                     renderer: controller.renderer,
+                    brushDiameter: controller.model.brushDiameter,
                     requestEditorFocus: requestEditorFocus,
                     pointerCancellationGeneration:
                         pointerCancellationGeneration

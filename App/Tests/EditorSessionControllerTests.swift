@@ -557,6 +557,42 @@ func escapeDuringActivePanCancelsNativeAndReducerState() throws {
     #expect(renderer.isIdle)
 }
 
+@Test
+@MainActor
+func brushCursorTracksPointerDiameterAndZoom() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let view = InteractiveMetalView(
+        frame: CGRect(x: 0, y: 0, width: 100, height: 100),
+        controller: controller,
+        renderer: renderer,
+        requestEditorFocus: {},
+        pointerCancellationGeneration: 0
+    )
+    view.drawableSize = CGSize(width: 200, height: 200)
+    view.updateBrushCursor(diameter: 40)
+
+    let move = try #require(
+        pointerEvent(type: .mouseMoved, location: CGPoint(x: 30, y: 60))
+    )
+    view.mouseMoved(with: move)
+
+    #expect(view.isBrushCursorVisibleForTesting)
+    #expect(view.brushCursorFrameForTesting.midX == 30)
+    #expect(view.brushCursorFrameForTesting.midY == 40)
+    #expect(view.brushCursorFrameForTesting.width == 20)
+    #expect(view.brushCursorFrameForTesting.height == 20)
+
+    controller.zoom(by: 2, anchor: ScreenPoint(x: 30, y: 40))
+    view.updateBrushCursor(diameter: 40)
+
+    #expect(view.brushCursorFrameForTesting.width == 40)
+    #expect(view.brushCursorFrameForTesting.height == 40)
+
+    view.mouseExited(with: move)
+    #expect(!view.isBrushCursorVisibleForTesting)
+}
+
 private func pointerEvent(
     type: NSEvent.EventType,
     location: CGPoint

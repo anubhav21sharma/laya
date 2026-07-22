@@ -28,6 +28,7 @@ import AppKit
 struct MetalCanvas: NSViewRepresentable {
     let controller: EditorSessionController
     let renderer: GridRenderer
+    let brushDiameter: Float
     let requestEditorFocus: @MainActor () -> Void
     let pointerCancellationGeneration: UInt
 
@@ -40,10 +41,12 @@ struct MetalCanvas: NSViewRepresentable {
             pointerCancellationGeneration: pointerCancellationGeneration
         )
         configure(view, renderer: renderer)
+        view.updateBrushCursor(diameter: brushDiameter)
         return view
     }
 
     func updateNSView(_ view: InteractiveMetalView, context: Context) {
+        view.updateBrushCursor(diameter: brushDiameter)
         view.applyPointerCancellation(
             generation: pointerCancellationGeneration
         )
@@ -55,6 +58,7 @@ import UIKit
 struct MetalCanvas: UIViewRepresentable {
     let controller: EditorSessionController
     let renderer: GridRenderer
+    let brushDiameter: Float
     let requestEditorFocus: @MainActor () -> Void
     let pointerCancellationGeneration: UInt
 
