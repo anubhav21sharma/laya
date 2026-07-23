@@ -10,8 +10,8 @@ struct TilingInspector: View {
     let requestEditorFocus: @MainActor () -> Void
     @State private var widthDraft: String
     @State private var heightDraft: String
-    @State private var squareRepeatSizeDraft: String
-    @State private var squareOrientationDraft: String
+    @State private var latticeRepeatSizeDraft: String
+    @State private var latticeOrientationDraft: String
 
     init(
         controller: EditorSessionController,
@@ -25,12 +25,12 @@ struct TilingInspector: View {
         self.requestEditorFocus = requestEditorFocus
         _widthDraft = State(initialValue: String(controller.model.pixelSize.width))
         _heightDraft = State(initialValue: String(controller.model.pixelSize.height))
-        _squareRepeatSizeDraft = State(
+        _latticeRepeatSizeDraft = State(
             initialValue: Self.repeatSizeDraft(
                 controller.model.periodicConfiguration
             )
         )
-        _squareOrientationDraft = State(
+        _latticeOrientationDraft = State(
             initialValue: Self.orientationDraft(
                 controller.model.periodicConfiguration
             )
@@ -82,10 +82,10 @@ struct TilingInspector: View {
             .frame(minHeight: editorControlExtent)
             .frame(maxWidth: .infinity, alignment: .trailing)
 
-            if controller.model.tiling.isSquare {
+            if controller.model.tiling.supportsSpacingAndOrientation {
                 Divider()
 
-                Text("Square Repeat")
+                Text("Lattice Repeat")
                     .font(.headline)
 
                 Grid(
@@ -97,37 +97,37 @@ struct TilingInspector: View {
                         Text("Spacing")
                         TextField(
                             "Spacing",
-                            text: $squareRepeatSizeDraft
+                            text: $latticeRepeatSizeDraft
                         )
                         .multilineTextAlignment(.trailing)
                         .frame(minHeight: editorControlExtent)
                         .focused(
                             focusTarget,
-                            equals: .squareRepeatSize
+                            equals: .latticeRepeatSize
                         )
-                        .accessibilityIdentifier("Square Repeat Size")
-                        .onSubmit { applyDraftSquareConfiguration() }
+                        .accessibilityIdentifier("Lattice Repeat Size")
+                        .onSubmit { applyDraftLatticeConfiguration() }
                     }
                     GridRow {
                         Text("Angle °")
                         TextField(
                             "Angle",
-                            text: $squareOrientationDraft
+                            text: $latticeOrientationDraft
                         )
                         .multilineTextAlignment(.trailing)
                         .frame(minHeight: editorControlExtent)
                         .focused(
                             focusTarget,
-                            equals: .squareOrientation
+                            equals: .latticeOrientation
                         )
-                        .accessibilityIdentifier("Square Orientation")
-                        .onSubmit { applyDraftSquareConfiguration() }
+                        .accessibilityIdentifier("Lattice Orientation")
+                        .onSubmit { applyDraftLatticeConfiguration() }
                     }
                 }
                 .textFieldStyle(.roundedBorder)
 
                 Button("Apply Repeat") {
-                    applyDraftSquareConfiguration()
+                    applyDraftLatticeConfiguration()
                 }
                 .buttonStyle(.borderedProminent)
                 .frame(minHeight: editorControlExtent)
@@ -207,11 +207,11 @@ struct TilingInspector: View {
         heightDraft = String(controller.model.pixelSize.height)
     }
 
-    private func applyDraftSquareConfiguration() {
+    private func applyDraftLatticeConfiguration() {
         defer { requestEditorFocus() }
         guard let configuration = Self.periodicConfiguration(
-            repeatDraft: squareRepeatSizeDraft,
-            orientationDraft: squareOrientationDraft,
+            repeatDraft: latticeRepeatSizeDraft,
+            orientationDraft: latticeOrientationDraft,
             committed: controller.model.periodicConfiguration,
             presetID: controller.model.tiling
         ) else {
@@ -227,10 +227,10 @@ struct TilingInspector: View {
     }
 
     private func resetDraftsToCommittedConfiguration() {
-        squareRepeatSizeDraft = Self.repeatSizeDraft(
+        latticeRepeatSizeDraft = Self.repeatSizeDraft(
             controller.model.periodicConfiguration
         )
-        squareOrientationDraft = Self.orientationDraft(
+        latticeOrientationDraft = Self.orientationDraft(
             controller.model.periodicConfiguration
         )
     }
@@ -313,6 +313,16 @@ struct TilingInspector: View {
             "Square Rotation"
         case .squareKaleidoscope:
             "Square Kaleidoscope"
+        case .hexagons:
+            "Hexagons"
+        case .rotation3:
+            "Rotation 3"
+        case .rotation6:
+            "Rotation 6"
+        case .kaleidoscope60:
+            "Kaleidoscope 60°"
+        case .kaleidoscope30:
+            "Kaleidoscope 30°"
         }
     }
 }

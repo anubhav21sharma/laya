@@ -4,6 +4,7 @@ import Metal
 public struct GridPipelineLibrary {
     public let stamp: any MTLRenderPipelineState
     public let display: any MTLRenderPipelineState
+    public let triangularDisplay: any MTLRenderPipelineState
     public let commit: any MTLRenderPipelineState
     public let washDeposit: any MTLRenderPipelineState
     public let replayClear: any MTLRenderPipelineState
@@ -32,6 +33,20 @@ public struct GridPipelineLibrary {
             label: "Grid Display",
             vertex: "patternFullscreenVertex",
             fragment: "patternGridFragment",
+            configure: { attachment in
+                attachment.isBlendingEnabled = true
+                attachment.sourceRGBBlendFactor = .one
+                attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                attachment.sourceAlphaBlendFactor = .one
+                attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            }
+        )
+        triangularDisplay = try Self.makePipeline(
+            device: device,
+            library: library,
+            label: "Triangular Grid Display",
+            vertex: "patternFullscreenVertex",
+            fragment: "patternTriangularGridFragment",
             configure: { attachment in
                 attachment.isBlendingEnabled = true
                 attachment.sourceRGBBlendFactor = .one

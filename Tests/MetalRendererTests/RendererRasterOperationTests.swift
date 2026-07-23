@@ -31,7 +31,9 @@ private func rasterSample(
 }
 
 @MainActor
-private func makeRasterOperationRenderer() throws -> GridRenderer? {
+private func makeRasterOperationRenderer(
+    pixelSize: PixelSize = PixelSize(width: 64, height: 64)
+) throws -> GridRenderer? {
     guard let device = MTLCreateSystemDefaultDevice() else { return nil }
     let root = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -59,9 +61,12 @@ private func makeRasterOperationRenderer() throws -> GridRenderer? {
     return try GridRenderer(
         device: device,
         library: library,
-        drawableSize: PatternSize(width: 64, height: 64),
+        drawableSize: PatternSize(
+            width: Float(pixelSize.width),
+            height: Float(pixelSize.height)
+        ),
         configuration: TilingCanvasConfiguration(
-            pixelSize: PixelSize(width: 64, height: 64),
+            pixelSize: pixelSize,
             tiling: .grid
         )
     )
@@ -86,6 +91,82 @@ private func commitCenterStroke(
     _ = try renderer.flushPendingLiveForHarness()
     _ = try renderer.submitCommitForHarness()
     try renderer.drainCompletedOperationsForHarness()
+}
+
+@Test(arguments: [
+    SymmetryPresetID.hexagons,
+    .rotation3,
+    .rotation6,
+    .kaleidoscope60,
+    .kaleidoscope30,
+])
+@MainActor
+func triangularPresetGuideOverlayChangesBlankDisplay(
+    preset: SymmetryPresetID
+) throws {
+    guard let renderer = try makeRasterOperationRenderer() else { return }
+    try renderer.applyTiling(preset)
+
+    let plain = try renderer.renderOffscreenDisplayForHarness(
+        width: 64,
+        height: 64,
+        showGridLines: false
+    )
+    let guided = try renderer.renderOffscreenDisplayForHarness(
+        width: 64,
+        height: 64,
+        showGridLines: true
+    )
+    let plainBytes = textureBytes(plain.texture)
+    let guidedBytes = textureBytes(guided.texture)
+    let hasChangedByte = zip(plainBytes, guidedBytes).contains {
+        $0.0 != $0.1
+    }
+
+    #expect(hasChangedByte)
+}
+
+@Test
+@MainActor
+func triangularPresetSelectionUsesUniformDefaultAndPreservesLatticeDraft()
+    throws
+{
+    guard let renderer = try makeRasterOperationRenderer(
+        pixelSize: PixelSize(width: 64, height: 96)
+    ) else {
+        return
+    }
+
+    try renderer.applyTiling(.hexagons)
+    #expect(
+        renderer.periodicConfiguration.repeatSize
+            == PatternSize(width: 64, height: 64)
+    )
+
+    let configured = PeriodicSymmetryConfiguration(
+        presetID: .hexagons,
+        repeatSize: PatternSize(width: 83.25, height: 83.25),
+        orientationRadians: -.pi / 9
+    )
+    try renderer.applyPeriodicConfiguration(configured)
+    try renderer.applyTiling(.squareRotation)
+    #expect(
+        renderer.periodicConfiguration
+            == PeriodicSymmetryConfiguration(
+                presetID: .squareRotation,
+                repeatSize: configured.repeatSize,
+                orientationRadians: configured.orientationRadians
+            )
+    )
+    try renderer.applyTiling(.kaleidoscope30)
+    #expect(
+        renderer.periodicConfiguration
+            == PeriodicSymmetryConfiguration(
+                presetID: .kaleidoscope30,
+                repeatSize: configured.repeatSize,
+                orientationRadians: configured.orientationRadians
+            )
+    )
 }
 
 @Test
@@ -300,6 +381,11 @@ func restoreRejectsMismatchedCanonicalSizeBeforeSubmission() throws {
     SymmetryPresetID.grid,
     .squareRotation,
     .squareKaleidoscope,
+    .hexagons,
+    .rotation3,
+    .rotation6,
+    .kaleidoscope60,
+    .kaleidoscope30,
 ])
 @MainActor
 func liveAndCommittedFixedStrengthEraserMatchAndClearCenter(

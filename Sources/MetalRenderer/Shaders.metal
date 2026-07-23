@@ -503,6 +503,44 @@ static PatternDisplayMapping patternDisplayMapping(
     }
 }
 
+static PatternDisplayMapping patternTriangularDisplayMapping(
+    float2 world,
+    float2 tileSize,
+    float2 repeatSize,
+    float2 latticeXAxis,
+    float2 latticeYAxis,
+    float2 latticeTranslation,
+    uint symmetryFamily,
+    uint tilingKind
+) {
+    if (symmetryFamily != PatternSymmetryFamilyWireTriangular) {
+        return {float2(0.0), float2(0.0), false};
+    }
+    switch (tilingKind) {
+    case PatternTilingWireHexagons:
+    case PatternTilingWireRotation3:
+    case PatternTilingWireRotation6:
+    case PatternTilingWireKaleidoscope60:
+    case PatternTilingWireKaleidoscope30: {
+        const float2 lattice =
+            latticeXAxis * world.x
+            + latticeYAxis * world.y
+            + latticeTranslation;
+        const float2 foldedUnit = patternPositiveFold(
+            lattice,
+            float2(1.0)
+        );
+        return {
+            foldedUnit * tileSize,
+            foldedUnit * repeatSize,
+            true
+        };
+    }
+    default:
+        return {float2(0.0), float2(0.0), false};
+    }
+}
+
 static float4 patternSourceOver(float4 source, float4 destination) {
     return source + destination * (1.0 - source.a);
 }
@@ -819,6 +857,146 @@ fragment float4 patternPeriodicRepeatExportFragment(
     );
 }
 
+static float patternDistanceToNearestInteger(float value) {
+    const float folded = fract(value);
+    return min(folded, 1.0 - folded);
+}
+
+static float2 patternTriangularAxial(
+    float2 local,
+    float spacing
+) {
+    const float inverseSqrtThree = 0.57735026919;
+    const float row = 2.0 * local.y * inverseSqrtThree / spacing;
+    return float2(local.x / spacing - row * 0.5, row);
+}
+
+static float patternTriangularEdgeDistance(
+    float2 local,
+    float spacing
+) {
+    const float2 axial = patternTriangularAxial(local, spacing);
+    const float altitude = 0.86602540378 * spacing;
+    return min(
+        min(
+            patternDistanceToNearestInteger(axial.x),
+            patternDistanceToNearestInteger(axial.y)
+        ),
+        patternDistanceToNearestInteger(axial.x + axial.y)
+    ) * altitude;
+}
+
+static float2 patternNearestTriangularLatticePoint(
+    float2 local,
+    float spacing
+) {
+    const float2 axial = patternTriangularAxial(local, spacing);
+    float cubeX = round(axial.x);
+    float cubeZ = round(axial.y);
+    float cubeY = round(-axial.x - axial.y);
+    const float differenceX = abs(cubeX - axial.x);
+    const float differenceZ = abs(cubeZ - axial.y);
+    const float differenceY = abs(cubeY + axial.x + axial.y);
+    if (differenceX > differenceY && differenceX > differenceZ) {
+        cubeX = -cubeY - cubeZ;
+    } else if (differenceY > differenceZ) {
+        cubeY = -cubeX - cubeZ;
+    } else {
+        cubeZ = -cubeX - cubeY;
+    }
+    return float2(
+        (cubeX + cubeZ * 0.5) * spacing,
+        cubeZ * 0.86602540378 * spacing
+    );
+}
+
+static float patternHexagonEdgeDistance(
+    float2 local,
+    float spacing
+) {
+    const float2 relative = local
+        - patternNearestTriangularLatticePoint(local, spacing);
+    const float apothem = spacing * 0.5;
+    const float first = apothem - abs(relative.x);
+    const float second = apothem - abs(
+        dot(relative, float2(0.5, 0.86602540378))
+    );
+    const float third = apothem - abs(
+        dot(relative, float2(-0.5, 0.86602540378))
+    );
+    return max(min(first, min(second, third)), 0.0);
+}
+
+static float patternGuideRingDistance(
+    float2 local,
+    float2 repeatSize,
+    float2 normalizedCenter,
+    float zoom,
+    float radius
+) {
+    return abs(
+        length(local - normalizedCenter * repeatSize) * zoom - radius
+    );
+}
+
+static float patternTriangularCenterDistance(
+    float2 local,
+    float2 repeatSize,
+    uint guideKind,
+    float zoom
+) {
+    float distance = INFINITY;
+    if (
+        guideKind == PatternGuideWireTriangularRotation3
+        || guideKind == PatternGuideWireTriangularKaleidoscope60
+        || guideKind == PatternGuideWireTriangularRotation6
+        || guideKind == PatternGuideWireTriangularKaleidoscope30
+    ) {
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.0, 0.0), zoom, 4.0
+        ));
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.5, 1.0 / 6.0), zoom, 3.0
+        ));
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.0, 1.0 / 3.0), zoom, 3.0
+        ));
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.5, 0.5), zoom, 4.0
+        ));
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.0, 2.0 / 3.0), zoom, 3.0
+        ));
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.5, 5.0 / 6.0), zoom, 3.0
+        ));
+    }
+    if (
+        guideKind == PatternGuideWireTriangularRotation6
+        || guideKind == PatternGuideWireTriangularKaleidoscope30
+    ) {
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.5, 0.0), zoom, 2.5
+        ));
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.25, 0.25), zoom, 2.5
+        ));
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.75, 0.25), zoom, 2.5
+        ));
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.0, 0.5), zoom, 2.5
+        ));
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.25, 0.75), zoom, 2.5
+        ));
+        distance = min(distance, patternGuideRingDistance(
+            local, repeatSize, float2(0.75, 0.75), zoom, 2.5
+        ));
+    }
+    return distance;
+}
+
 static float4 patternGridOverlay(
     float4 color,
     PatternDisplayMapping mapping,
@@ -887,6 +1065,63 @@ static float4 patternGridOverlay(
     return color;
 }
 
+static float4 patternTriangularGridOverlay(
+    float4 color,
+    PatternDisplayMapping mapping,
+    constant PatternGridFrameUniforms& frame
+) {
+    if (frame.showGridLines != 0) {
+        const float2 edgeDistance = min(
+            mapping.phasedCellLocal,
+            frame.repeatSize - mapping.phasedCellLocal
+        );
+        float guideDistance = min(edgeDistance.x, edgeDistance.y)
+            * frame.zoom;
+        const float spacing = frame.repeatSize.x;
+        const float triangularDistance = patternTriangularEdgeDistance(
+            mapping.phasedCellLocal,
+            spacing
+        ) * frame.zoom;
+        const float hexagonDistance = patternHexagonEdgeDistance(
+            mapping.phasedCellLocal,
+            spacing
+        ) * frame.zoom;
+        if (frame.guideKind == PatternGuideWireHexagons) {
+            guideDistance = min(guideDistance, hexagonDistance);
+        } else if (
+            frame.guideKind == PatternGuideWireTriangularKaleidoscope30
+        ) {
+            guideDistance = min(
+                guideDistance,
+                min(triangularDistance, hexagonDistance)
+            );
+        } else {
+            guideDistance = min(guideDistance, triangularDistance);
+        }
+        guideDistance = min(
+            guideDistance,
+            patternTriangularCenterDistance(
+                mapping.phasedCellLocal,
+                frame.repeatSize,
+                frame.guideKind,
+                frame.zoom
+            )
+        );
+        const float coverage = 1.0 - smoothstep(
+            frame.gridLineWidth,
+            frame.gridLineWidth + 1.0,
+            guideDistance
+        );
+        const float alpha = 0.22 * coverage;
+        const float4 grid = float4(
+            float3(0.18, 0.20, 0.19) * alpha,
+            alpha
+        );
+        return patternSourceOver(grid, color);
+    }
+    return color;
+}
+
 fragment float4 patternGridFragment(
     PatternFullscreenOut input [[stage_in]],
     constant PatternGridFrameUniforms& frame
@@ -926,6 +1161,47 @@ fragment float4 patternGridFragment(
     );
 
     return patternGridOverlay(result, mapping, frame);
+}
+
+fragment float4 patternTriangularGridFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternBrushMaterialUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]],
+    texture2d<float> live [[texture(PatternTextureIndexLive)]],
+    texture2d<float> replayLive [[texture(PatternTextureIndexReplayLive)]]
+) {
+    const float2 screenCenter = frame.drawableSize * 0.5;
+    const float2 world = (input.screenPixel - screenCenter) / frame.zoom
+        + frame.worldCenter;
+    const PatternDisplayMapping mapping = patternTriangularDisplayMapping(
+        world,
+        frame.tileSize,
+        frame.repeatSize,
+        frame.latticeXAxis,
+        frame.latticeYAxis,
+        frame.latticeTranslation,
+        frame.symmetryFamily,
+        frame.tilingKind
+    );
+    if (!mapping.valid) {
+        return float4(1.0, 0.0, 1.0, 1.0);
+    }
+    float4 result = patternCompositeThenBilinearSample(
+        canonical,
+        live,
+        replayLive,
+        mapping.canonicalPixel,
+        frame.compositeMode,
+        frame.liveVisible,
+        material.strokeOpacity,
+        material.accumulationLimit,
+        material.materialStrength
+    );
+
+    return patternTriangularGridOverlay(result, mapping, frame);
 }
 
 fragment float4 patternCommitFragment(

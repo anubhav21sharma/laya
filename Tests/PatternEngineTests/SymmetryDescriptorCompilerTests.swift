@@ -28,9 +28,14 @@ struct SymmetryDescriptorCompilerTests {
         )
         #expect(SymmetryPresetID.squareRotation.rawValue == 7)
         #expect(SymmetryPresetID.squareKaleidoscope.rawValue == 8)
+        #expect(SymmetryPresetID.hexagons.rawValue == 9)
+        #expect(SymmetryPresetID.rotation3.rawValue == 10)
+        #expect(SymmetryPresetID.rotation6.rawValue == 11)
+        #expect(SymmetryPresetID.kaleidoscope60.rawValue == 12)
+        #expect(SymmetryPresetID.kaleidoscope30.rawValue == 13)
         #expect(
             SymmetryPresetID.allCases.map(\.rawValue)
-                == Array(0...8).map(UInt32.init)
+                == Array(0...13).map(UInt32.init)
         )
         #expect(TilingKind.rotational.rawValue == 6)
 
@@ -446,6 +451,170 @@ struct SymmetryDescriptorCompilerTests {
             ) < 0.01
         )
     }
+
+    @Test
+    func triangularPresetsCompileExactSupercellPrograms() throws {
+        let expectations: [(
+            preset: SymmetryPresetID,
+            images: Int,
+            guide: CompiledGuideKind,
+            stabilizers: Int
+        )] = [
+            (.hexagons, 2, .hexagons, 0),
+            (.rotation3, 6, .triangularRotation3, 6),
+            (.rotation6, 12, .triangularRotation6, 12),
+            (.kaleidoscope60, 12, .triangularKaleidoscope60, 6),
+            (.kaleidoscope30, 24, .triangularKaleidoscope30, 12),
+        ]
+
+        for expected in expectations {
+            let compiled = try SymmetryDescriptorCompiler.compile(
+                configuration: PeriodicSymmetryConfiguration(
+                    presetID: expected.preset,
+                    repeatSize: PatternSize(width: 256, height: 256),
+                    orientationRadians: .pi / 7
+                ),
+                canonicalRasterSize: PixelSize(width: 192, height: 128)
+            )
+            #expect(compiled.family == .triangular)
+            #expect(compiled.displayProgram.family == .triangular)
+            #expect(compiled.displayProgram.guideKind == expected.guide)
+            #expect(compiled.images.count == expected.images)
+            #expect(compiled.images.map(\.ordinal)
+                == Array(0..<expected.images).map(UInt8.init))
+            #expect(compiled.cost.maximumImagesPerCell == expected.images)
+            guard case let .triangularDomains(
+                triangles,
+                stabilizers
+            ) = compiled.ownership else {
+                Issue.record(
+                    "\(expected.preset) must compile triangular ownership"
+                )
+                continue
+            }
+            #expect(triangles.count == 24)
+            #expect(stabilizers.count == expected.stabilizers)
+            #expect(triangles.allSatisfy {
+                Int($0.ownerOrdinal) < expected.images
+                    && $0.canonicalVertices.count == 3
+            })
+            let coveredArea = triangles.reduce(Float.zero) {
+                $0 + abs(signedArea($1.canonicalVertices))
+            }
+            #expect(abs(coveredArea - 192 * 128) < 0.1)
+
+            let basis = compiled.domain.periodic!.translationBasis
+            #expect(abs(simd_length(basis.u) - 256) < 0.001)
+            #expect(
+                abs(simd_length(basis.v) - sqrt(3) * 256) < 0.001
+            )
+            #expect(abs(simd_dot(basis.u, basis.v)) < 0.02)
+            #expect(
+                simd_distance(
+                    compiled.rasterMetric.worldToRaster.applying(
+                        to: basis.u
+                    ),
+                    SIMD2<Float>(192, 0)
+                ) < 0.001
+            )
+            #expect(
+                simd_distance(
+                    compiled.rasterMetric.worldToRaster.applying(
+                        to: basis.v
+                    ),
+                    SIMD2<Float>(0, 128)
+                ) < 0.001
+            )
+        }
+    }
+
+    @Test
+    func triangularImageTablesAreClosedModuloRectangularSupercell() throws {
+        for preset in [
+            SymmetryPresetID.hexagons,
+            .rotation3,
+            .rotation6,
+            .kaleidoscope60,
+            .kaleidoscope30,
+        ] {
+            let compiled = try SymmetryDescriptorCompiler.compile(
+                configuration: PeriodicSymmetryConfiguration(
+                    presetID: preset,
+                    repeatSize: PatternSize(width: 256, height: 256),
+                    orientationRadians: -.pi / 9
+                ),
+                canonicalRasterSize: PixelSize(width: 192, height: 128)
+            )
+            for image in compiled.images {
+                let determinant =
+                    image.localToCanonical.xAxis.x
+                        * image.localToCanonical.yAxis.y
+                    - image.localToCanonical.xAxis.y
+                        * image.localToCanonical.yAxis.x
+                #expect(
+                    abs(
+                        determinant
+                            - (image.operation.reflected ? -1 : 1)
+                    ) < 0.000_01
+                )
+                #expect(compiled.images.contains {
+                    affinesAgreeModuloSupercell(
+                        image.localToCanonical.concatenating(
+                            $0.localToCanonical
+                        ),
+                        .identity,
+                        size: PatternSize(width: 192, height: 128)
+                    )
+                })
+            }
+            for lhs in compiled.images {
+                for rhs in compiled.images {
+                    let product = lhs.localToCanonical.concatenating(
+                        rhs.localToCanonical
+                    )
+                    #expect(compiled.images.contains {
+                        affinesAgreeModuloSupercell(
+                            product,
+                            $0.localToCanonical,
+                            size: PatternSize(width: 192, height: 128)
+                        )
+                    })
+                }
+            }
+        }
+    }
+
+    @Test
+    func compilerValidatesTriangularSpacingAndCost() {
+        let unequal = PeriodicSymmetryConfiguration(
+            presetID: .rotation6,
+            repeatSize: PatternSize(width: 128, height: 96),
+            orientationRadians: .pi / 6
+        )
+        #expect(
+            throws: SymmetryDescriptorError.nonUniformTriangularSpacing(
+                width: 128,
+                height: 96
+            )
+        ) {
+            try SymmetryDescriptorCompiler.compile(
+                configuration: unequal,
+                canonicalRasterSize: PixelSize(width: 128, height: 96)
+            )
+        }
+
+        let overBudget = PeriodicSymmetryConfiguration(
+            presetID: .kaleidoscope30,
+            repeatSize: PatternSize(width: 0.001, height: 0.001),
+            orientationRadians: .pi / 11
+        )
+        #expect(throws: SymmetryDescriptorError.self) {
+            try SymmetryDescriptorCompiler.compile(
+                configuration: overBudget,
+                canonicalRasterSize: PixelSize(width: 128, height: 96)
+            )
+        }
+    }
 }
 
 private func affinesAgree(
@@ -457,6 +626,24 @@ private func affinesAgree(
         simd_distance(lhs.applying(to: $0), rhs.applying(to: $0))
             < 0.000_1
     }
+}
+
+private func affinesAgreeModuloSupercell(
+    _ lhs: Affine2D,
+    _ rhs: Affine2D,
+    size: PatternSize
+) -> Bool {
+    guard
+        simd_distance(lhs.xAxis, rhs.xAxis) < 0.000_1,
+        simd_distance(lhs.yAxis, rhs.yAxis) < 0.000_1
+    else {
+        return false
+    }
+    let delta = lhs.translation - rhs.translation
+    let column = (delta.x / size.width).rounded()
+    let row = (delta.y / size.height).rounded()
+    return abs(delta.x - column * size.width) < 0.001
+        && abs(delta.y - row * size.height) < 0.001
 }
 
 private func squareRotationImages(side: Float) -> [CompiledIsometry] {

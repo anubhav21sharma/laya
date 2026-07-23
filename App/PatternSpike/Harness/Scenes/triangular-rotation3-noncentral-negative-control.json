@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 3,
+  "name": "triangular-rotation3-noncentral-negative-control",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 192,
+  "tileHeight": 128,
+  "tiling": 10,
+  "diagnosticMode": "hardRound",
+  "periodicConfiguration": {
+    "version": 1,
+    "repeatWidth": 160,
+    "repeatHeight": 160,
+    "orientationRadians": 0.17453292
+  },
+  "program": "noncentralVisibleCell",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "visibleCellCanonicalByteDelta", "relation": "equal", "value": 1}
+  ]
+}

@@ -346,8 +346,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public func applyTiling(_ tiling: TilingKind) throws {
         let current = tilingStrategy.periodicConfiguration
         let proposed: PeriodicSymmetryConfiguration
-        if tiling.isSquare {
-            if current.presetID.isSquare {
+        if tiling.supportsSpacingAndOrientation {
+            if current.presetID.supportsSpacingAndOrientation {
                 proposed = PeriodicSymmetryConfiguration(
                     presetID: tiling,
                     repeatSize: current.repeatSize,
@@ -1796,6 +1796,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             ?? PatternCompositeWireDraw
         let periodic = tilingStrategy.compiledSymmetry.domain.periodic!
         let worldToLattice = periodic.worldToLattice
+        let displayRepeatSize =
+            tilingStrategy.compiledSymmetry.family == .triangular
+            ? SIMD2(
+                simd_length(periodic.translationBasis.u),
+                simd_length(periodic.translationBasis.v)
+            )
+            : periodic.configuration.repeatSize.simd
         return PatternGridFrameUniforms(
             drawableSize: drawableSize.simd,
             worldCenter: viewport.worldCenter.simd,
@@ -1810,7 +1817,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             compositeMode: compositeMode,
             symmetryFamily:
                 tilingStrategy.compiledSymmetry.displayProgram.family.rawValue,
-            repeatSize: periodic.configuration.repeatSize.simd,
+            repeatSize: displayRepeatSize,
             latticeXAxis: worldToLattice.xAxis,
             latticeYAxis: worldToLattice.yAxis,
             latticeTranslation: worldToLattice.translation,
@@ -2768,8 +2775,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         ) else {
             throw MetalRendererError.renderEncoderUnavailable
         }
-        encoder.label = "Grid Display"
-        encoder.setRenderPipelineState(pipelines.display)
+        let usesTriangularDisplay =
+            tilingStrategy.compiledSymmetry.family == .triangular
+        encoder.label = usesTriangularDisplay
+            ? "Triangular Grid Display"
+            : "Grid Display"
+        encoder.setRenderPipelineState(
+            usesTriangularDisplay
+                ? pipelines.triangularDisplay
+                : pipelines.display
+        )
         var uniforms = frameUniforms(
             drawableSize: PatternSize(
                 width: Float(texture.width),

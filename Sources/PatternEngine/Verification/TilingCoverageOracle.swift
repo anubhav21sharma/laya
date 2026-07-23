@@ -100,6 +100,19 @@ public enum TilingCoverageOracle {
                     for: footprint
                 )
             )
+        case .hexagons, .rotation3, .rotation6, .kaleidoscope60,
+             .kaleidoscope30:
+            return renderTriangularCanonical(
+                footprint: footprint,
+                brushToWorld: brushToWorld,
+                configuration: .defaultConfiguration(
+                    presetID: tiling,
+                    canonicalRasterSize: tileSize
+                ),
+                canonicalRasterSize: tileSize,
+                supersampling: supersampling,
+                coverageSymmetry: naturalCoverageSymmetry(for: footprint)
+            )
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
              .rotational:
             break
@@ -253,6 +266,17 @@ public enum TilingCoverageOracle {
                 coverageSymmetry: coverageSymmetry
                     ?? naturalCoverageSymmetry(for: footprint)
             )
+        case .hexagons, .rotation3, .rotation6, .kaleidoscope60,
+             .kaleidoscope30:
+            return renderTriangularCanonical(
+                footprint: footprint,
+                brushToWorld: brushToWorld,
+                configuration: configuration,
+                canonicalRasterSize: canonicalRasterSize,
+                supersampling: supersampling,
+                coverageSymmetry: coverageSymmetry
+                    ?? naturalCoverageSymmetry(for: footprint)
+            )
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
              .rotational:
             let rasterRepeat = PatternSize(
@@ -264,7 +288,7 @@ public enum TilingCoverageOracle {
                 "TilingCoverageOracle legacy configuration repeat must match the canonical raster"
             )
             precondition(
-                normalizedSquareAngle(configuration.orientationRadians) == 0,
+                normalizedPeriodicAngle(configuration.orientationRadians) == 0,
                 "TilingCoverageOracle legacy configuration orientation must be zero"
             )
             return renderCanonical(
@@ -316,6 +340,143 @@ public enum TilingCoverageOracle {
 }
 
 private extension TilingCoverageOracle {
+    static func renderTriangularCanonical(
+        footprint: OracleFootprint,
+        brushToWorld: Affine2D,
+        configuration: PeriodicSymmetryConfiguration,
+        canonicalRasterSize: PixelSize,
+        supersampling: Int,
+        coverageSymmetry: FootprintCoverageSymmetry
+    ) -> OracleRasterResult {
+        validateRenderInputs(
+            footprint: footprint,
+            brushToWorld: brushToWorld,
+            tileSize: canonicalRasterSize,
+            supersampling: supersampling
+        )
+        let geometry = directTriangularGeometry(
+            configuration: configuration,
+            canonicalRasterSize: canonicalRasterSize
+        )
+        let worldBounds = transformedFootprintBounds(
+            footprint,
+            by: brushToWorld
+        )
+        validateSampleWork(
+            integerPixelBounds(worldBounds),
+            tileSize: canonicalRasterSize,
+            supersampling: supersampling
+        )
+        let candidates = directTriangularCandidates(
+            worldBounds: worldBounds,
+            footprint: footprint,
+            brushToWorld: brushToWorld,
+            geometry: geometry
+        )
+        _ = coverageSymmetry
+        // Coverage is a set union. Complete-stamp-equivalent images may
+        // remain in this independent list because each sample is recorded
+        // once, so fixed points cannot multiply opacity or eraser strength.
+        let area = checkedPixelArea(
+            canonicalRasterSize,
+            message: "TilingCoverageOracle pixel area must be Int-representable"
+        )
+        let samplesPerPixel = supersampling * supersampling
+        var coverageBytes = [UInt8](repeating: 0, count: area)
+        var canonicalBGRA = [UInt8](repeating: 0, count: area * 4)
+        var brushBGRA = [UInt8](repeating: 0, count: area * 4)
+
+        for pixelY in 0..<canonicalRasterSize.height {
+            for pixelX in 0..<canonicalRasterSize.width {
+                var coveredSamples = 0
+                var canonicalRedSum = 0
+                var canonicalGreenSum = 0
+                var brushRedSum = 0
+                var brushGreenSum = 0
+
+                for subY in 0..<supersampling {
+                    for subX in 0..<supersampling {
+                        let canonical = SIMD2<Float>(
+                            Float(pixelX) + sampleOffset(
+                                subpixel: subX,
+                                supersampling: supersampling
+                            ),
+                            Float(pixelY) + sampleOffset(
+                                subpixel: subY,
+                                supersampling: supersampling
+                            )
+                        )
+                        var owningBrushLocal: SIMD2<Float>?
+                        for candidate in candidates {
+                            let brushLocal = candidate.brushFromCanonical
+                                .applying(to: canonical)
+                            if directTriangularContains(
+                                brushLocal,
+                                footprint: footprint
+                            ) {
+                                owningBrushLocal = brushLocal
+                            }
+                        }
+                        guard let brushLocal = owningBrushLocal else {
+                            continue
+                        }
+
+                        coveredSamples += 1
+                        canonicalRedSum += Int(
+                            encodeUnit(
+                                canonical.x
+                                    / Float(canonicalRasterSize.width)
+                            )
+                        )
+                        canonicalGreenSum += Int(
+                            encodeUnit(
+                                canonical.y
+                                    / Float(canonicalRasterSize.height)
+                            )
+                        )
+                        brushRedSum += Int(encodeSigned(brushLocal.x))
+                        brushGreenSum += Int(encodeSigned(brushLocal.y))
+                    }
+                }
+
+                let pixelIndex = pixelY * canonicalRasterSize.width + pixelX
+                let byteOffset = pixelIndex * 4
+                let alpha = averagedByte(
+                    sum: coveredSamples * 255,
+                    divisor: samplesPerPixel
+                )
+                coverageBytes[pixelIndex] = alpha
+                canonicalBGRA[byteOffset + 1] = averagedByte(
+                    sum: canonicalGreenSum,
+                    divisor: samplesPerPixel
+                )
+                canonicalBGRA[byteOffset + 2] = averagedByte(
+                    sum: canonicalRedSum,
+                    divisor: samplesPerPixel
+                )
+                canonicalBGRA[byteOffset + 3] = alpha
+                brushBGRA[byteOffset + 1] = averagedByte(
+                    sum: brushGreenSum,
+                    divisor: samplesPerPixel
+                )
+                brushBGRA[byteOffset + 2] = averagedByte(
+                    sum: brushRedSum,
+                    divisor: samplesPerPixel
+                )
+                brushBGRA[byteOffset + 3] = alpha
+            }
+        }
+
+        return OracleRasterResult(
+            coverage: OracleCoverage(
+                pixelSize: canonicalRasterSize,
+                bytes: coverageBytes
+            ),
+            canonicalCoordinatesBGRA: canonicalBGRA,
+            brushLocalCoordinatesBGRA: brushBGRA
+        )
+    }
+
     static func renderSquareCanonical(
         footprint: OracleFootprint,
         brushToWorld: Affine2D,
@@ -508,6 +669,24 @@ private struct DirectSquareCandidate {
     let operation: DirectSquareOperation
     let brushFromCanonical: Affine2D
     let coverageKey: DirectCoverageDomainKey
+}
+
+private struct DirectTriangularGeometry {
+    let presetID: SymmetryPresetID
+    let worldToRaster: Affine2D
+    let canonicalRasterSize: PixelSize
+}
+
+private struct DirectTriangularOperation: Equatable {
+    let sixthTurn: UInt8
+    let reflected: Bool
+    let reflectionAtThirtyDegrees: Bool
+}
+
+private struct DirectTriangularCandidate {
+    let cell: DirectCell
+    let imageOrdinal: UInt8
+    let brushFromCanonical: Affine2D
 }
 
 private struct DirectCanonicalVertex: Equatable {
@@ -896,7 +1075,8 @@ private func phaseAlignedWorldSample(
             phase: phase
         )
     case .grid, .mirrorX, .mirrorY, .mirrorXY, .rotational,
-         .squareRotation, .squareKaleidoscope:
+         .squareRotation, .squareKaleidoscope, .hexagons, .rotation3,
+         .rotation6, .kaleidoscope60, .kaleidoscope30:
         break
     }
     return SIMD2(worldX, worldY)
@@ -980,7 +1160,7 @@ private func legacySquareCoverageSymmetry(
     }
 }
 
-private func normalizedSquareAngle(_ value: Float) -> Float {
+private func normalizedPeriodicAngle(_ value: Float) -> Float {
     precondition(
         value.isFinite,
         "TilingCoverageOracle orientation must be finite"
@@ -993,6 +1173,325 @@ private func normalizedSquareAngle(_ value: Float) -> Float {
         result += fullTurn
     }
     return result == 0 ? 0 : result
+}
+
+private func directTriangularGeometry(
+    configuration: PeriodicSymmetryConfiguration,
+    canonicalRasterSize: PixelSize
+) -> DirectTriangularGeometry {
+    switch configuration.presetID {
+    case .hexagons, .rotation3, .rotation6, .kaleidoscope60,
+         .kaleidoscope30:
+        break
+    case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
+         .rotational, .squareRotation, .squareKaleidoscope:
+        preconditionFailure(
+            "TilingCoverageOracle triangular geometry requires a triangular preset"
+        )
+    }
+    let width = configuration.repeatSize.width
+    let height = configuration.repeatSize.height
+    precondition(
+        width.isFinite && height.isFinite,
+        "TilingCoverageOracle triangular repeat must be finite"
+    )
+    precondition(
+        width == height,
+        "TilingCoverageOracle triangular spacing values must be equal"
+    )
+    precondition(
+        width > 0,
+        "TilingCoverageOracle triangular spacing must be positive"
+    )
+    let angle = normalizedPeriodicAngle(configuration.orientationRadians)
+    let cosine = cos(angle)
+    let sine = sin(angle)
+    let rasterWidth = Float(canonicalRasterSize.width)
+    let rasterHeight = Float(canonicalRasterSize.height)
+    let verticalSpacing = sqrt(Float(3)) * width
+    let rectangularSupercellToWorld = Affine2D(
+        xAxis: SIMD2(width * cosine, width * sine),
+        yAxis: SIMD2(
+            -verticalSpacing * sine,
+            verticalSpacing * cosine
+        ),
+        translation: .zero
+    )
+    let latticeToRaster = Affine2D(
+        xAxis: SIMD2(rasterWidth, 0),
+        yAxis: SIMD2(0, rasterHeight),
+        translation: .zero
+    )
+    let worldToRaster = rectangularSupercellToWorld.inverted()
+        .concatenating(latticeToRaster)
+    return DirectTriangularGeometry(
+        presetID: configuration.presetID,
+        worldToRaster: worldToRaster,
+        canonicalRasterSize: canonicalRasterSize
+    )
+}
+
+private func directTriangularCandidates(
+    worldBounds: FloatBounds,
+    footprint: OracleFootprint,
+    brushToWorld: Affine2D,
+    geometry: DirectTriangularGeometry
+) -> [DirectTriangularCandidate] {
+    let operations = directTriangularOperations(for: geometry.presetID)
+    let rasterWidth = Float(geometry.canonicalRasterSize.width)
+    let rasterHeight = Float(geometry.canonicalRasterSize.height)
+    let cosets = [
+        SIMD2<Float>.zero,
+        SIMD2(rasterWidth * 0.5, rasterHeight * 0.5),
+    ]
+    let corners = [
+        worldBounds.minimum,
+        SIMD2(worldBounds.maximum.x, worldBounds.minimum.y),
+        worldBounds.maximum,
+        SIMD2(worldBounds.minimum.x, worldBounds.maximum.y),
+    ]
+    let effectiveBrush = directSquareEffectiveBrush(
+        footprint: footprint,
+        brushToWorld: brushToWorld
+    )
+    var candidates: [DirectTriangularCandidate] = []
+
+    for (cosetIndex, coset) in cosets.enumerated() {
+        for (operationIndex, operation) in operations.enumerated() {
+            let imageOrdinal = UInt8(
+                cosetIndex * operations.count + operationIndex
+            )
+            let rasterOperation = directTriangularRasterOperation(
+                operation,
+                canonicalRasterSize: geometry.canonicalRasterSize,
+                translation: coset
+            )
+            let worldToTransformedRaster = geometry.worldToRaster
+                .concatenating(rasterOperation)
+            let transformed = corners.map(
+                worldToTransformedRaster.applying
+            )
+            let minimumX = transformed.map(\.x).min()!
+            let maximumX = transformed.map(\.x).max()!
+            let minimumY = transformed.map(\.y).min()!
+            let maximumY = transformed.map(\.y).max()!
+            guard
+                let columns = directTriangularIntersectingCells(
+                    minimum: minimumX,
+                    maximum: maximumX,
+                    extent: rasterWidth
+                ),
+                let rows = directTriangularIntersectingCells(
+                    minimum: minimumY,
+                    maximum: maximumY,
+                    extent: rasterHeight
+                )
+            else {
+                continue
+            }
+
+            for row in rows {
+                for column in columns {
+                    let targetOrigin = SIMD2(
+                        Float(column) * rasterWidth,
+                        Float(row) * rasterHeight
+                    )
+                    let subtractTarget = Affine2D(
+                        xAxis: SIMD2(1, 0),
+                        yAxis: SIMD2(0, 1),
+                        translation: -targetOrigin
+                    )
+                    let canonicalFromBrush = effectiveBrush
+                        .concatenating(worldToTransformedRaster)
+                        .concatenating(subtractTarget)
+                    candidates.append(
+                        DirectTriangularCandidate(
+                            cell: DirectCell(
+                                column: column,
+                                row: row
+                            ),
+                            imageOrdinal: imageOrdinal,
+                            brushFromCanonical: canonicalFromBrush.inverted()
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    candidates.sort {
+        if $0.cell.row != $1.cell.row {
+            return $0.cell.row < $1.cell.row
+        }
+        if $0.cell.column != $1.cell.column {
+            return $0.cell.column < $1.cell.column
+        }
+        return $0.imageOrdinal < $1.imageOrdinal
+    }
+    return candidates
+}
+
+private func directTriangularContains(
+    _ point: SIMD2<Float>,
+    footprint: OracleFootprint
+) -> Bool {
+    switch footprint {
+    case .hardRound:
+        return simd_dot(point, point) <= 1
+    case .asymmetricTriangle:
+        return contains(point, footprint: .asymmetricTriangle)
+    }
+}
+
+private func directTriangularOperations(
+    for presetID: SymmetryPresetID
+) -> [DirectTriangularOperation] {
+    let order: UInt8
+    let includesReflections: Bool
+    switch presetID {
+    case .hexagons:
+        order = 1
+        includesReflections = false
+    case .rotation3:
+        order = 3
+        includesReflections = false
+    case .rotation6:
+        order = 6
+        includesReflections = false
+    case .kaleidoscope60:
+        order = 3
+        includesReflections = true
+    case .kaleidoscope30:
+        order = 6
+        includesReflections = true
+    case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
+         .rotational, .squareRotation, .squareKaleidoscope:
+        preconditionFailure(
+            "TilingCoverageOracle triangular operations require a triangular preset"
+        )
+    }
+    let turnMultiplier: UInt8 = order == 3 ? 2 : order == 1 ? 0 : 1
+    var result = (0..<order).map {
+        DirectTriangularOperation(
+            sixthTurn: $0 * turnMultiplier,
+            reflected: false,
+            reflectionAtThirtyDegrees: false
+        )
+    }
+    if includesReflections {
+        result.append(contentsOf: (0..<order).map {
+            DirectTriangularOperation(
+                sixthTurn: $0 * turnMultiplier,
+                reflected: true,
+                reflectionAtThirtyDegrees: presetID == .kaleidoscope60
+            )
+        })
+    }
+    return result
+}
+
+private func directTriangularRasterOperation(
+    _ operation: DirectTriangularOperation,
+    canonicalRasterSize: PixelSize,
+    translation: SIMD2<Float>
+) -> Affine2D {
+    let rotation = directTriangularNormalizedRotation(operation.sixthTurn)
+    let normalized: Affine2D
+    if operation.reflected {
+        let reflection = operation.reflectionAtThirtyDegrees
+            ? Affine2D(
+                xAxis: SIMD2(0.5, 0.5),
+                yAxis: SIMD2(1.5, -0.5),
+                translation: .zero
+            )
+            : Affine2D(
+                xAxis: SIMD2(1, 0),
+                yAxis: SIMD2(0, -1),
+                translation: .zero
+            )
+        normalized = reflection.concatenating(rotation)
+    } else {
+        normalized = rotation
+    }
+    let width = Float(canonicalRasterSize.width)
+    let height = Float(canonicalRasterSize.height)
+    return Affine2D(
+        xAxis: SIMD2(
+            normalized.xAxis.x,
+            normalized.xAxis.y * height / width
+        ),
+        yAxis: SIMD2(
+            normalized.yAxis.x * width / height,
+            normalized.yAxis.y
+        ),
+        translation: translation
+    )
+}
+
+private func directTriangularNormalizedRotation(
+    _ sixthTurn: UInt8
+) -> Affine2D {
+    switch sixthTurn % 6 {
+    case 0:
+        return .identity
+    case 1:
+        return Affine2D(
+            xAxis: SIMD2(0.5, 0.5),
+            yAxis: SIMD2(-1.5, 0.5),
+            translation: .zero
+        )
+    case 2:
+        return Affine2D(
+            xAxis: SIMD2(-0.5, 0.5),
+            yAxis: SIMD2(-1.5, -0.5),
+            translation: .zero
+        )
+    case 3:
+        return Affine2D(
+            xAxis: SIMD2(-1, 0),
+            yAxis: SIMD2(0, -1),
+            translation: .zero
+        )
+    case 4:
+        return Affine2D(
+            xAxis: SIMD2(-0.5, -0.5),
+            yAxis: SIMD2(1.5, -0.5),
+            translation: .zero
+        )
+    case 5:
+        return Affine2D(
+            xAxis: SIMD2(0.5, -0.5),
+            yAxis: SIMD2(1.5, 0.5),
+            translation: .zero
+        )
+    default:
+        preconditionFailure(
+            "TilingCoverageOracle sixth-turn modulo must be in 0...5"
+        )
+    }
+}
+
+private func directTriangularIntersectingCells(
+    minimum: Float,
+    maximum: Float,
+    extent: Float
+) -> ClosedRange<Int>? {
+    precondition(
+        minimum.isFinite && maximum.isFinite
+            && extent.isFinite && extent > 0,
+        "TilingCoverageOracle triangular cell bounds must be finite"
+    )
+    guard maximum > minimum else { return nil }
+    let lower = floor(Double(minimum / extent))
+    let upper = floor(Double(maximum.nextDown / extent))
+    precondition(
+        lower >= Double(Int.min) && lower <= Double(Int.max)
+            && upper >= Double(Int.min) && upper <= Double(Int.max),
+        "TilingCoverageOracle triangular cell range must be Int-representable"
+    )
+    let first = Int(lower)
+    let last = Int(upper)
+    return last >= first ? first...last : nil
 }
 
 private func directSquareGeometry(
@@ -1018,7 +1517,7 @@ private func directSquareGeometry(
         width > 0,
         "TilingCoverageOracle square repeat side must be positive"
     )
-    let angle = normalizedSquareAngle(configuration.orientationRadians)
+    let angle = normalizedPeriodicAngle(configuration.orientationRadians)
     let cosine = cos(angle)
     let sine = sin(angle)
     let u = SIMD2(width * cosine, width * sine)
@@ -1546,6 +2045,11 @@ private func directFoldDestinations(
             let image = directSquareForwardImage(local, ordinal: $0)
             return SIMD2(image.x * width, image.y * height)
         }
+    case .hexagons, .rotation3, .rotation6, .kaleidoscope60,
+         .kaleidoscope30:
+        preconditionFailure(
+            "Triangular folds must use the direct triangular oracle"
+        )
     }
 }
 
@@ -1581,6 +2085,11 @@ private func directCell(
         return DirectCell(
             column: cellIndex(world.x, extent: side),
             row: cellIndex(world.y, extent: side)
+        )
+    case .hexagons, .rotation3, .rotation6, .kaleidoscope60,
+         .kaleidoscope30:
+        preconditionFailure(
+            "Triangular cells must use the direct triangular oracle"
         )
     }
 }
@@ -2018,6 +2527,11 @@ private func directCellOrigin(
         return SIMD2(
             Float(cell.column) * side,
             Float(cell.row) * side
+        )
+    case .hexagons, .rotation3, .rotation6, .kaleidoscope60,
+         .kaleidoscope30:
+        preconditionFailure(
+            "Triangular origins must use the direct triangular oracle"
         )
     }
 }

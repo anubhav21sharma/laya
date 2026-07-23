@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 3,
+  "name": "triangular-kaleidoscope30-fixed-point",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 192,
+  "tileHeight": 128,
+  "tiling": 13,
+  "diagnosticMode": "hardRound",
+  "program": "triangularFixedPoint",
+  "periodicConfiguration": {
+    "version": 1,
+    "repeatWidth": 160,
+    "repeatHeight": 160,
+    "orientationRadians": -0.31415927
+  },
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "duplicateFixedPointWriteCount", "relation": "equal", "value": 0},
+    {"metric": "oracleHoleCount", "relation": "equal", "value": 0},
+    {"metric": "oraclePhantomCount", "relation": "equal", "value": 0},
+    {"metric": "oracleMaximumDelta", "relation": "lessThanOrEqual", "value": 1},
+    {"metric": "previewCommitMaximumDelta", "relation": "lessThanOrEqual", "value": 1}
+  ]
+}

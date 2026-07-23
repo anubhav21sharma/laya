@@ -304,6 +304,49 @@ func periodicConfigurationChangeUndoRedoIsExactMetadataOnly() throws {
 
 @Test
 @MainActor
+func everyTriangularPresetLeavesEditorControlsResponsive() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let presets: [SymmetryPresetID] = [
+        .hexagons,
+        .rotation3,
+        .rotation6,
+        .kaleidoscope60,
+        .kaleidoscope30,
+    ]
+
+    for preset in presets {
+        controller.handleTiling(preset)
+        #expect(controller.model.tiling == preset)
+        #expect(renderer.tiling == preset)
+        #expect(!controller.model.isBusy)
+        #expect(renderer.isIdle)
+
+        controller.handleGridVisibility(true)
+        controller.handleTool(.erase)
+        #expect(controller.model.showGrid)
+        #expect(renderer.interactiveGridVisibility)
+        #expect(controller.model.tool == .erase)
+
+        controller.handleTool(.draw)
+        controller.handleGridVisibility(false)
+        #expect(controller.model.tool == .draw)
+        #expect(!controller.model.showGrid)
+        #expect(!renderer.interactiveGridVisibility)
+    }
+
+    controller.clear()
+    try renderer.finishRasterOperationForHarness()
+    #expect(try canonicalBytes(renderer).allSatisfy { $0 == 0 })
+    #expect(!controller.model.isBusy)
+    #expect(renderer.isIdle)
+
+    let clear = try #require(controller.lastRecordedRasterCommandForTesting)
+    renderer.releaseRasterRevisions([clear.before.id, clear.after.id])
+}
+
+@Test
+@MainActor
 func invalidPeriodicConfigurationFailsAtomicallyWithoutHistory() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)

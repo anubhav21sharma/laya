@@ -477,6 +477,153 @@ struct TilingCoverageOracleTests {
     }
 
     @Test
+    func triangularOracleMatchesAtLargeRotatedCoordinates() {
+        let testCase = OraclePropertyCase(
+            name: "triangular translation large rotated",
+            footprint: .hardRound(radius: 5),
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(0, 1),
+                yAxis: SIMD2(-1, 0),
+                translation: SIMD2(640_020, -864_066)
+            ),
+            tileSize: PixelSize(width: 64, height: 96),
+            tiling: .hexagons,
+            supersampling: 2
+        )
+        let expected = TilingCoverageOracle.renderCanonical(
+            footprint: testCase.footprint,
+            brushToWorld: testCase.brushToWorld,
+            tileSize: testCase.tileSize,
+            tiling: testCase.tiling,
+            supersampling: testCase.supersampling
+        )
+        let actual = rasterizeProductionFragments(testCase)
+
+        let mismatches = expected.coverage.bytes.indices.filter {
+            expected.coverage.bytes[$0] != actual.coverage.bytes[$0]
+        }
+        let summary = mismatches.prefix(16).map { index in
+            let x = index % testCase.tileSize.width
+            let y = index / testCase.tileSize.width
+            let expectedByte = expected.coverage.bytes[index]
+            let actualByte = actual.coverage.bytes[index]
+            return "(\(x),\(y)) \(expectedByte)/\(actualByte)"
+        }.joined(separator: ", ")
+        #expect(
+            mismatches.isEmpty,
+            "mismatches=\(summary)"
+        )
+    }
+
+    @Test(arguments: [
+        SymmetryPresetID.hexagons,
+        .rotation3,
+        .rotation6,
+        .kaleidoscope60,
+        .kaleidoscope30,
+    ])
+    func orientedTriangularConfigurationsMatchIndependentOracle(
+        _ preset: SymmetryPresetID
+    ) throws {
+        let rasterSize = PixelSize(width: 64, height: 96)
+        let spacing: Float = 80
+        let angle: Float = 0.37
+        let configuration = PeriodicSymmetryConfiguration(
+            presetID: preset,
+            repeatSize: PatternSize(width: spacing, height: spacing),
+            orientationRadians: angle
+        )
+        let horizontal = SIMD2(
+            spacing * cos(angle),
+            spacing * sin(angle)
+        )
+        let vertical = SIMD2(
+            -sqrt(Float(3)) * spacing * sin(angle),
+            sqrt(Float(3)) * spacing * cos(angle)
+        )
+        let brushToWorld = Affine2D(
+            xAxis: SIMD2(6.3, 1.4),
+            yAxis: SIMD2(-2.1, 5.7),
+            translation: horizontal * 1.31 + vertical * -0.73
+        )
+        let expected = TilingCoverageOracle.renderCanonical(
+            footprint: .asymmetricTriangle,
+            brushToWorld: brushToWorld,
+            configuration: configuration,
+            canonicalRasterSize: rasterSize,
+            supersampling: 2,
+            coverageSymmetry: .oriented
+        )
+        let strategy = try TilingStrategy(
+            configuration: configuration,
+            canonicalRasterSize: rasterSize
+        )
+        let fragments = TilingProjection.fragments(
+            for: StampFootprint(
+                brushToWorld: brushToWorld,
+                localBounds: AxisAlignedRect(
+                    minimum: SIMD2(-0.75, -0.60),
+                    maximum: SIMD2(0.85, 0.90)
+                ),
+                coverageSymmetry: .oriented
+            ),
+            using: strategy
+        )
+        let actual = rasterizeProductionFragments(
+            OraclePropertyCase(
+                name: "\(preset)",
+                footprint: .asymmetricTriangle,
+                brushToWorld: brushToWorld,
+                tileSize: rasterSize,
+                tiling: preset,
+                supersampling: 2
+            ),
+            fragments: fragments
+        )
+        let translatedBrush = Affine2D(
+            xAxis: brushToWorld.xAxis,
+            yAxis: brushToWorld.yAxis,
+            translation: brushToWorld.translation
+                + horizontal * 3 - vertical * 2
+        )
+        let repeatedExpected = TilingCoverageOracle.renderCanonical(
+            footprint: .asymmetricTriangle,
+            brushToWorld: translatedBrush,
+            configuration: configuration,
+            canonicalRasterSize: rasterSize,
+            supersampling: 2,
+            coverageSymmetry: .oriented
+        )
+        let repeatedFragments = TilingProjection.fragments(
+            for: StampFootprint(
+                brushToWorld: translatedBrush,
+                localBounds: AxisAlignedRect(
+                    minimum: SIMD2(-0.75, -0.60),
+                    maximum: SIMD2(0.85, 0.90)
+                ),
+                coverageSymmetry: .oriented
+            ),
+            using: strategy
+        )
+        let repeatedActual = rasterizeProductionFragments(
+            OraclePropertyCase(
+                name: "\(preset) repeated",
+                footprint: .asymmetricTriangle,
+                brushToWorld: translatedBrush,
+                tileSize: rasterSize,
+                tiling: preset,
+                supersampling: 2
+            ),
+            fragments: repeatedFragments
+        )
+
+        #expect(expected == actual)
+        #expect(repeatedExpected == repeatedActual)
+        #expect(expected == repeatedExpected)
+        #expect(actual == repeatedActual)
+    }
+
+    @Test
     func orientedSquareConfigurationsMatchIndependentOracleAndRepeatExactly()
         throws
     {
@@ -1216,7 +1363,10 @@ private let compiledDescriptorParityMatrix: [CompiledDescriptorParityCase] = {
     var cases: [CompiledDescriptorParityCase] = []
     var centreIndex = 0
 
-    for preset in SymmetryPresetID.allCases {
+    let legacyAndSquarePresets = SymmetryPresetID.allCases.filter {
+        $0.rawValue <= SymmetryPresetID.squareKaleidoscope.rawValue
+    }
+    for preset in legacyAndSquarePresets {
         for (sizeName, size) in sizes {
             for transform in transforms {
                 for footprint in footprints {

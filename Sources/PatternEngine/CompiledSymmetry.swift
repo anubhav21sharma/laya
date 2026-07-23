@@ -67,6 +67,8 @@ public enum CoincidentImagePolicy: Equatable, Sendable {
     case halfTurnInvariantCoverage
     case quarterTurnInvariantCoverage
     case squareDihedralInvariantCoverage
+    case triangularCyclicInvariantCoverage
+    case triangularDihedralInvariantCoverage
 }
 
 public struct PeriodicTranslationBasis: Equatable, Sendable {
@@ -101,16 +103,40 @@ public enum CompiledSymmetryDomain: Equatable, Sendable {
 }
 
 public struct CompiledGroupOperation: Equatable, Sendable {
-    public let quarterTurns: UInt8
+    public let rotationStep: UInt8
+    public let rotationOrder: UInt8
     public let reflected: Bool
 
-    public init(quarterTurns: UInt8, reflected: Bool) {
-        precondition(quarterTurns < 4)
-        self.quarterTurns = quarterTurns
+    public init(
+        rotationStep: UInt8,
+        rotationOrder: UInt8,
+        reflected: Bool
+    ) {
+        precondition(rotationOrder > 0)
+        precondition(rotationStep < rotationOrder)
+        self.rotationStep = rotationStep
+        self.rotationOrder = rotationOrder
         self.reflected = reflected
     }
 
+    public init(quarterTurns: UInt8, reflected: Bool) {
+        precondition(quarterTurns < 4)
+        self.init(
+            rotationStep: quarterTurns,
+            rotationOrder: 4,
+            reflected: reflected
+        )
+    }
+
     public static let identity = Self(quarterTurns: 0, reflected: false)
+
+    public var quarterTurns: UInt8 {
+        precondition(
+            rotationOrder == 4,
+            "Only quarter-turn operations expose a quarterTurns value"
+        )
+        return rotationStep
+    }
 }
 
 public struct CompiledIsometry: Equatable, Sendable {
@@ -181,12 +207,21 @@ public enum CompiledOwnership: Equatable, Sendable {
         triangles: [CompiledOwnershipFragment],
         stabilizers: [CompiledStabilizer]
     )
+    case triangularDomains(
+        triangles: [CompiledOwnershipFragment],
+        stabilizers: [CompiledStabilizer]
+    )
 }
 
 public enum CompiledGuideKind: UInt32, Equatable, Sendable {
     case rectangular = 0
     case squareRotation = 1
     case squareKaleidoscope = 2
+    case hexagons = 3
+    case triangularRotation3 = 4
+    case triangularRotation6 = 5
+    case triangularKaleidoscope60 = 6
+    case triangularKaleidoscope30 = 7
 }
 
 public struct CompiledDisplayProgram: Equatable, Sendable {

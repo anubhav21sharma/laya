@@ -37,14 +37,17 @@ public enum PeriodicRepeatExportError:
 {
     case unsupportedPreset(SymmetryPresetID)
     case invalidDensity(Int)
+    case derivedDimensionOutOfRange(width: Int, height: Int)
     case byteCountOverflow
 
     public var errorDescription: String? {
         switch self {
         case let .unsupportedPreset(preset):
-            "Preset \(preset.rawValue) does not expose a square repeat export."
+            "Preset \(preset.rawValue) does not expose a metric repeat export."
         case let .invalidDensity(density):
             "Repeat-export density \(density) is outside 64...4096."
+        case let .derivedDimensionOutOfRange(width, height):
+            "Repeat-export dimensions \(width)x\(height) are outside 64...4096."
         case .byteCountOverflow:
             "Repeat-export storage size overflowed."
         }
@@ -60,7 +63,7 @@ enum PeriodicRepeatExportInjectedFailure: Equatable {
 
 @MainActor
 public extension GridRenderer {
-    /// Resolves one half-open square repeat from the committed canonical
+    /// Resolves one half-open metric repeat from the committed canonical
     /// raster. Live/replay pixels are deliberately excluded.
     func exportPeriodicRepeat(
         density: Int
@@ -78,18 +81,22 @@ extension GridRenderer {
         density: Int,
         injecting failure: PeriodicRepeatExportInjectedFailure
     ) throws -> PeriodicRepeatExport {
-        guard periodicConfiguration.presetID.isSquare else {
+        guard periodicConfiguration.presetID.supportsMetricRepeatExport else {
             throw PeriodicRepeatExportError.unsupportedPreset(tiling)
         }
         guard (64...4_096).contains(density) else {
             throw PeriodicRepeatExportError.invalidDensity(density)
         }
 
-        let (bytesPerRow, rowOverflow) = density.multipliedReportingOverflow(
-            by: 4
+        let exportPixelSize = try periodicRepeatExportPixelSize(
+            horizontalDensity: density
         )
+        let (bytesPerRow, rowOverflow) = exportPixelSize.width
+            .multipliedReportingOverflow(
+                by: 4
+            )
         let (byteCount, imageOverflow) = bytesPerRow
-            .multipliedReportingOverflow(by: density)
+            .multipliedReportingOverflow(by: exportPixelSize.height)
         guard !rowOverflow, !imageOverflow else {
             throw PeriodicRepeatExportError.byteCountOverflow
         }
@@ -97,8 +104,8 @@ extension GridRenderer {
         let pipeline = try makePeriodicRepeatExportPipeline()
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
-            width: density,
-            height: density,
+            width: exportPixelSize.width,
+            height: exportPixelSize.height,
             mipmapped: false
         )
         descriptor.storageMode = .shared
@@ -128,12 +135,12 @@ extension GridRenderer {
         ) else {
             throw MetalRendererError.renderEncoderUnavailable
         }
-        encoder.label = "Periodic Square Repeat Export"
+        encoder.label = "Periodic Metric Repeat Export"
         encoder.setRenderPipelineState(pipeline)
         var uniforms = frameUniforms(
             drawableSize: PatternSize(
-                width: Float(density),
-                height: Float(density)
+                width: Float(exportPixelSize.width),
+                height: Float(exportPixelSize.height)
             ),
             showGridLines: false,
             liveVisible: false
@@ -167,15 +174,52 @@ extension GridRenderer {
             target.getBytes(
                 storage.baseAddress!,
                 bytesPerRow: bytesPerRow,
-                from: MTLRegionMake2D(0, 0, density, density),
+                from: MTLRegionMake2D(
+                    0,
+                    0,
+                    exportPixelSize.width,
+                    exportPixelSize.height
+                ),
                 mipmapLevel: 0
             )
         }
         return PeriodicRepeatExport(
-            pixelSize: PixelSize(width: density, height: density),
+            pixelSize: exportPixelSize,
             bytesPerRow: bytesPerRow,
             bgra8Bytes: bytes
         )
+    }
+
+    private func periodicRepeatExportPixelSize(
+        horizontalDensity: Int
+    ) throws -> PixelSize {
+        let height: Int
+        if tilingStrategy.compiledSymmetry.family == .triangular {
+            let periodic = tilingStrategy.compiledSymmetry.domain.periodic!
+            let horizontal = Double(simd_length(
+                periodic.translationBasis.u
+            ))
+            let vertical = Double(simd_length(
+                periodic.translationBasis.v
+            ))
+            let derived = Double(horizontalDensity) * vertical / horizontal
+            guard derived.isFinite, derived <= Double(Int.max) else {
+                throw PeriodicRepeatExportError.byteCountOverflow
+            }
+            height = Int(derived.rounded())
+        } else {
+            height = horizontalDensity
+        }
+        guard
+            (64...4_096).contains(horizontalDensity),
+            (64...4_096).contains(height)
+        else {
+            throw PeriodicRepeatExportError.derivedDimensionOutOfRange(
+                width: horizontalDensity,
+                height: height
+            )
+        }
+        return PixelSize(width: horizontalDensity, height: height)
     }
 
     private func makePeriodicRepeatExportPipeline()
@@ -190,7 +234,7 @@ extension GridRenderer {
             throw MetalRendererError.shaderFunctionUnavailable(fragmentName)
         }
         let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.label = "Periodic Square Repeat Export"
+        descriptor.label = "Periodic Metric Repeat Export"
         descriptor.vertexFunction = vertex
         descriptor.fragmentFunction = fragment
         descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm

@@ -102,7 +102,7 @@ func periodicConfigurationUndoRedoPreservesExactCommandIdentity() throws {
         orientationRadians: .pi / 8
     )
     let after = PeriodicSymmetryConfiguration(
-        presetID: .squareRotation,
+        presetID: .kaleidoscope30,
         repeatSize: PatternSize(width: 384, height: 384),
         orientationRadians: .pi / 4
     )

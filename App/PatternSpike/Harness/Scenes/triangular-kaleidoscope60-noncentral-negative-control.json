@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 3,
+  "name": "triangular-kaleidoscope60-noncentral-negative-control",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 192,
+  "tileHeight": 128,
+  "tiling": 12,
+  "diagnosticMode": "hardRound",
+  "periodicConfiguration": {
+    "version": 1,
+    "repeatWidth": 128,
+    "repeatHeight": 128,
+    "orientationRadians": 0
+  },
+  "program": "noncentralVisibleCell",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "visibleCellCanonicalByteDelta", "relation": "equal", "value": 1}
+  ]
+}

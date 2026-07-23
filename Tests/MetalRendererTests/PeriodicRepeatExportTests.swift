@@ -107,6 +107,63 @@ struct PeriodicRepeatExportTests {
     }
 
     @Test(arguments: [
+        SymmetryPresetID.hexagons,
+        .rotation3,
+        .rotation6,
+        .kaleidoscope60,
+        .kaleidoscope30,
+    ])
+    @MainActor
+    func rendersMetricTriangularSupercellAtRequestedHorizontalDensity(
+        preset: SymmetryPresetID
+    ) throws {
+        guard let renderer = try makeExportRenderer(preset: preset) else {
+            return
+        }
+        let source = makeCanonicalFixture(side: 64)
+        try renderer.replaceCanonicalPixelsForHarness(source)
+
+        let exported = try renderer.exportPeriodicRepeat(density: 64)
+        let expectedSize = PixelSize(width: 64, height: 111)
+        let expected = wrappedBilinearReference(
+            source,
+            sourceSize: PixelSize(width: 64, height: 64),
+            outputSize: expectedSize
+        )
+
+        #expect(exported.pixelSize == expectedSize)
+        #expect(exported.bytesPerRow == expectedSize.width * 4)
+        #expect(
+            exported.bgra8Bytes.count
+                == expectedSize.width * expectedSize.height * 4
+        )
+        #expect(maximumChannelDelta(exported.bgra8Bytes, expected) <= 1)
+    }
+
+    @Test
+    @MainActor
+    func rejectsTriangularDensityWhoseDerivedHeightExceedsLimit()
+        throws
+    {
+        guard let renderer = try makeExportRenderer(
+            preset: .kaleidoscope30
+        ) else {
+            return
+        }
+        let snapshot = renderer.harnessTilingMutationSnapshot
+        let configuration = renderer.periodicConfiguration
+
+        #expect(
+            throws: PeriodicRepeatExportError
+                .derivedDimensionOutOfRange(width: 4_096, height: 7_094)
+        ) {
+            try renderer.exportPeriodicRepeat(density: 4_096)
+        }
+        #expect(renderer.harnessTilingMutationSnapshot == snapshot)
+        #expect(renderer.periodicConfiguration == configuration)
+    }
+
+    @Test(arguments: [
         SymmetryPresetID.squareRotation,
         .squareKaleidoscope,
     ])
@@ -171,6 +228,36 @@ struct PeriodicRepeatExportTests {
             repeatRows: 3
         )
 
+        #expect(maximumChannelDelta(repeated, expected) <= 1)
+    }
+
+    @Test
+    @MainActor
+    func triangularThreeByThreeRepeatMatchesIndependentTranslatedSampling()
+        throws
+    {
+        guard let renderer = try makeExportRenderer(
+            preset: .kaleidoscope30,
+            repeatSide: 173.5,
+            orientationRadians: .pi / 7
+        ) else {
+            return
+        }
+        let source = makeCanonicalFixture(side: 64)
+        try renderer.replaceCanonicalPixelsForHarness(source)
+        let exported = try renderer.exportPeriodicRepeat(density: 96)
+        let repeated = tileThreeByThree(exported)
+        let expected = wrappedBilinearReference(
+            source,
+            sourceSize: PixelSize(width: 64, height: 64),
+            outputSize: PixelSize(
+                width: exported.pixelSize.width * 3,
+                height: exported.pixelSize.height * 3
+            ),
+            repeatSize: exported.pixelSize
+        )
+
+        #expect(exported.pixelSize == PixelSize(width: 96, height: 166))
         #expect(maximumChannelDelta(repeated, expected) <= 1)
     }
 
@@ -291,9 +378,26 @@ private func wrappedBilinearReference(
     repeatColumns: Int = 1,
     repeatRows: Int = 1
 ) -> [UInt8] {
-    precondition(repeatColumns > 0 && repeatRows > 0)
-    let outputWidth = density * repeatColumns
-    let outputHeight = density * repeatRows
+    wrappedBilinearReference(
+        source,
+        sourceSize: sourceSize,
+        outputSize: PixelSize(
+            width: density * repeatColumns,
+            height: density * repeatRows
+        ),
+        repeatSize: PixelSize(width: density, height: density)
+    )
+}
+
+private func wrappedBilinearReference(
+    _ source: [UInt8],
+    sourceSize: PixelSize,
+    outputSize: PixelSize,
+    repeatSize: PixelSize? = nil
+) -> [UInt8] {
+    let period = repeatSize ?? outputSize
+    let outputWidth = outputSize.width
+    let outputHeight = outputSize.height
     var result = [UInt8](
         repeating: 0,
         count: outputWidth * outputHeight * 4
@@ -301,10 +405,10 @@ private func wrappedBilinearReference(
     for y in 0..<outputHeight {
         for x in 0..<outputWidth {
             let canonicalX =
-                (Double(x) + 0.5) / Double(density)
+                (Double(x) + 0.5) / Double(period.width)
                 * Double(sourceSize.width)
             let canonicalY =
-                (Double(y) + 0.5) / Double(density)
+                (Double(y) + 0.5) / Double(period.height)
                 * Double(sourceSize.height)
             let sampleX = canonicalX - 0.5
             let sampleY = canonicalY - 0.5
@@ -396,18 +500,23 @@ private func canonicalBytes(_ renderer: GridRenderer) throws -> [UInt8] {
 private func tileThreeByThree(
     _ export: PeriodicRepeatExport
 ) -> [UInt8] {
-    let side = export.pixelSize.width
-    let repeatedSide = side * 3
+    let width = export.pixelSize.width
+    let height = export.pixelSize.height
+    let repeatedWidth = width * 3
+    let repeatedHeight = height * 3
     var result = [UInt8](
         repeating: 0,
-        count: repeatedSide * repeatedSide * 4
+        count: repeatedWidth * repeatedHeight * 4
     )
     for tileY in 0..<3 {
         for tileX in 0..<3 {
-            for row in 0..<side {
+            for row in 0..<height {
                 let sourceStart = row * export.bytesPerRow
                 let destinationStart =
-                    ((tileY * side + row) * repeatedSide + tileX * side) * 4
+                    (
+                        (tileY * height + row) * repeatedWidth
+                            + tileX * width
+                    ) * 4
                 result.replaceSubrange(
                     destinationStart..<(destinationStart + export.bytesPerRow),
                     with: export.bgra8Bytes[

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 3,
+  "name": "triangular-kaleidoscope30-large-footprint",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 64,
+  "tileHeight": 96,
+  "tiling": 13,
+  "diagnosticMode": "hardRound",
+  "program": "triangularLargeFootprint",
+  "periodicConfiguration": {
+    "version": 1,
+    "repeatWidth": 64,
+    "repeatHeight": 64,
+    "orientationRadians": 0
+  },
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "oracleHoleCount", "relation": "equal", "value": 0},
+    {"metric": "oraclePhantomCount", "relation": "equal", "value": 0},
+    {"metric": "oracleMaximumDelta", "relation": "lessThanOrEqual", "value": 1}
+  ]
+}

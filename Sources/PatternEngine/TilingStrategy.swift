@@ -145,9 +145,20 @@ public struct TilingStrategy: Equatable, Sendable {
     }
 
     public func cell(containing point: WorldPoint) -> CellIndex {
-        RectangularSymmetryKernel(
-            compiled: compiledSymmetry
-        ).cell(containing: point)
+        switch compiledSymmetry.family {
+        case .rectangular:
+            RectangularSymmetryKernel(
+                compiled: compiledSymmetry
+            ).cell(containing: point)
+        case .triangular:
+            TriangularSymmetryKernel(
+                compiled: compiledSymmetry
+            ).cell(containing: point)
+        case .radial:
+            preconditionFailure(
+                "Periodic TilingStrategy cannot dispatch a radial kernel"
+            )
+        }
     }
 
     public func images(
@@ -175,14 +186,36 @@ public struct TilingStrategy: Equatable, Sendable {
         else {
             return []
         }
-        return RectangularSymmetryKernel(
-            compiled: compiledSymmetry
-        ).images(intersecting: worldBounds)
+        switch compiledSymmetry.family {
+        case .rectangular:
+            return RectangularSymmetryKernel(
+                compiled: compiledSymmetry
+            ).images(intersecting: worldBounds)
+        case .triangular:
+            return TriangularSymmetryKernel(
+                compiled: compiledSymmetry
+            ).images(intersecting: worldBounds)
+        case .radial:
+            preconditionFailure(
+                "Periodic TilingStrategy cannot dispatch a radial kernel"
+            )
+        }
     }
 
     public func displayFold(_ point: WorldPoint) -> CanonicalPoint {
-        RectangularSymmetryKernel(
-            compiled: compiledSymmetry
-        ).displayFold(point)
+        switch compiledSymmetry.family {
+        case .rectangular:
+            RectangularSymmetryKernel(
+                compiled: compiledSymmetry
+            ).displayFold(point)
+        case .triangular:
+            TriangularSymmetryKernel(
+                compiled: compiledSymmetry
+            ).displayFold(point)
+        case .radial:
+            preconditionFailure(
+                "Periodic TilingStrategy cannot dispatch a radial kernel"
+            )
+        }
     }
 }

@@ -12,3 +12,4 @@ does not upgrade an earlier pending or unaccepted status.
 | 4 | [Professional Stroke Core](04-professional-stroke-core.md) | Implementation Complete — Acceptance Pending Environment-Only Gates |
 | Compiled symmetry Phase 1 | [Compiled Symmetry Foundation](05-compiled-symmetry-foundation.md) | Phase 1 Complete |
 | Compiled symmetry Phase 2 | [Square Symmetry Families](06-square-symmetry-families.md) | Implementation Complete — Acceptance Pending Environment-Only Gates |
+| Compiled symmetry Phase 3 | [Triangular Symmetry Families](07-triangular-symmetry-families.md) | Implementation Complete — Acceptance Pending Environment-Only Gates |

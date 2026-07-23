@@ -366,6 +366,17 @@ public final class HarnessRunner {
                 radius: 256,
                 requiresDistantCells: true
             )
+        case .triangularLargeFootprint:
+            return hardRoundTaskSevenInput(
+                center: SIMD2(0, 0),
+                radius: 256,
+                requiresDistantCells: true
+            )
+        case .triangularMirror:
+            return asymmetricTaskSevenInput(
+                center: SIMD2(32, 0),
+                diagnosticMode: .asymmetricCoverage
+            )
         case .asymmetricFootprint:
             let angle: Float = 0.37
             let scale: Float = 40
@@ -463,6 +474,18 @@ public final class HarnessRunner {
                     x: visible.x,
                     y: visible.y
                 ),
+                visibleCell: CellIndex(column: 1, row: 0)
+            )
+        case .hexagons, .rotation3, .rotation6, .kaleidoscope60,
+             .kaleidoscope30:
+            let basis = configuration.makeStrategy()
+                .compiledSymmetry.domain.periodic!.translationBasis
+            let central = basis.u * 0.25 + basis.v * 0.1875
+            let visible = central + basis.u
+            return TaskEightNoncentralInput(
+                tileSize: configuration.pixelSize,
+                central: WorldPoint(x: central.x, y: central.y),
+                visible: WorldPoint(x: visible.x, y: visible.y),
                 visibleCell: CellIndex(column: 1, row: 0)
             )
         }
@@ -1098,21 +1121,24 @@ public final class HarnessRunner {
     nonisolated static func independentTransformMismatchCount(
         fragments: [CellFragment],
         brushToWorld: Affine2D,
-        tileSize: PixelSize,
-        tiling: TilingKind
+        canonicalRasterSize: PixelSize,
+        configuration: PeriodicSymmetryConfiguration
     ) -> Int {
+        let tiling = configuration.presetID
         var mismatchCount = 0
         var ordinalsByCell: [CellIndex: Set<UInt8>] = [:]
+        var allOrdinals: Set<UInt8> = []
         for fragment in fragments {
             ordinalsByCell[fragment.cell, default: []].insert(
                 fragment.imageOrdinal
             )
+            allOrdinals.insert(fragment.imageOrdinal)
             guard let expectedWorldToCanonical =
                     independentWorldToCanonical(
                         cell: fragment.cell,
                         ordinal: fragment.imageOrdinal,
-                        tileSize: tileSize,
-                        tiling: tiling
+                        canonicalRasterSize: canonicalRasterSize,
+                        configuration: configuration
                     )
             else {
                 mismatchCount += 1
@@ -1130,15 +1156,49 @@ public final class HarnessRunner {
             }
         }
 
-        let expectedOrdinals: Set<UInt8> = tiling == .rotational
-            ? [0, 1]
-            : [0]
-        for ordinals in ordinalsByCell.values {
-            mismatchCount += ordinals.symmetricDifference(
-                expectedOrdinals
+        if tiling.isTriangular {
+            let expectedCount: Int = switch tiling {
+            case .hexagons: 2
+            case .rotation3: 6
+            case .rotation6, .kaleidoscope60: 12
+            case .kaleidoscope30: 24
+            case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
+                 .rotational, .squareRotation, .squareKaleidoscope:
+                preconditionFailure(
+                    "Triangular ordinal audit requires a triangular preset"
+                )
+            }
+            mismatchCount += allOrdinals.symmetricDifference(
+                Set((0..<expectedCount).map(UInt8.init))
             ).count
+        } else {
+            let expectedOrdinals: Set<UInt8> = tiling == .rotational
+                ? [0, 1]
+                : [0]
+            for ordinals in ordinalsByCell.values {
+                mismatchCount += ordinals.symmetricDifference(
+                    expectedOrdinals
+                ).count
+            }
         }
         return mismatchCount
+    }
+
+    nonisolated static func independentTransformMismatchCount(
+        fragments: [CellFragment],
+        brushToWorld: Affine2D,
+        tileSize: PixelSize,
+        tiling: TilingKind
+    ) -> Int {
+        independentTransformMismatchCount(
+            fragments: fragments,
+            brushToWorld: brushToWorld,
+            canonicalRasterSize: tileSize,
+            configuration: .defaultConfiguration(
+                presetID: tiling,
+                canonicalRasterSize: tileSize
+            )
+        )
     }
 
     nonisolated static func duplicateFixedPointWriteCount(
@@ -1484,11 +1544,20 @@ private func channelDistance(
 private func independentWorldToCanonical(
     cell: CellIndex,
     ordinal: UInt8,
-    tileSize: PixelSize,
-    tiling: TilingKind
+    canonicalRasterSize: PixelSize,
+    configuration: PeriodicSymmetryConfiguration
 ) -> Affine2D? {
-    let width = Float(tileSize.width)
-    let height = Float(tileSize.height)
+    let tiling = configuration.presetID
+    let width = Float(canonicalRasterSize.width)
+    let height = Float(canonicalRasterSize.height)
+    if tiling.isTriangular {
+        return independentTriangularWorldToCanonical(
+            cell: cell,
+            ordinal: ordinal,
+            canonicalRasterSize: canonicalRasterSize,
+            configuration: configuration
+        )
+    }
     let phaseX = tiling == .brick && (cell.row & 1) != 0
         ? width * 0.5
         : 0
@@ -1533,6 +1602,163 @@ private func independentWorldToCanonical(
             reflectsY ? origin.y + height : -origin.y
         )
     )
+}
+
+private func independentTriangularWorldToCanonical(
+    cell: CellIndex,
+    ordinal: UInt8,
+    canonicalRasterSize: PixelSize,
+    configuration: PeriodicSymmetryConfiguration
+) -> Affine2D? {
+    let operationCount: UInt8
+    let rotationOrder: UInt8
+    let includesReflections: Bool
+    switch configuration.presetID {
+    case .hexagons:
+        operationCount = 1
+        rotationOrder = 1
+        includesReflections = false
+    case .rotation3:
+        operationCount = 3
+        rotationOrder = 3
+        includesReflections = false
+    case .rotation6:
+        operationCount = 6
+        rotationOrder = 6
+        includesReflections = false
+    case .kaleidoscope60:
+        operationCount = 6
+        rotationOrder = 3
+        includesReflections = true
+    case .kaleidoscope30:
+        operationCount = 12
+        rotationOrder = 6
+        includesReflections = true
+    case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
+         .rotational, .squareRotation, .squareKaleidoscope:
+        return nil
+    }
+    guard ordinal < operationCount * 2 else { return nil }
+    let operationOrdinal = ordinal % operationCount
+    let reflected = includesReflections
+        && operationOrdinal >= rotationOrder
+    let rotationStep = operationOrdinal % rotationOrder
+    let sixthTurn: UInt8 = switch rotationOrder {
+    case 1: 0
+    case 3: rotationStep * 2
+    case 6: rotationStep
+    default: preconditionFailure(
+        "Triangular harness rotation order must be 1, 3, or 6"
+    )
+    }
+    let rotation = independentTriangularNormalizedRotation(sixthTurn)
+    let normalized: Affine2D
+    if reflected {
+        let reflection = configuration.presetID == .kaleidoscope60
+            ? Affine2D(
+                xAxis: SIMD2(0.5, 0.5),
+                yAxis: SIMD2(1.5, -0.5),
+                translation: .zero
+            )
+            : Affine2D(
+                xAxis: SIMD2(1, 0),
+                yAxis: SIMD2(0, -1),
+                translation: .zero
+            )
+        normalized = reflection.concatenating(rotation)
+    } else {
+        normalized = rotation
+    }
+
+    let spacing = configuration.repeatSize.width
+    guard spacing == configuration.repeatSize.height else { return nil }
+    let angle = configuration.orientationRadians
+    let verticalSpacing = sqrt(Float(3)) * spacing
+    let supercellToWorld = Affine2D(
+        xAxis: SIMD2(spacing * cos(angle), spacing * sin(angle)),
+        yAxis: SIMD2(
+            -verticalSpacing * sin(angle),
+            verticalSpacing * cos(angle)
+        ),
+        translation: .zero
+    )
+    let rasterWidth = Float(canonicalRasterSize.width)
+    let rasterHeight = Float(canonicalRasterSize.height)
+    let worldToRaster = supercellToWorld.inverted().concatenating(
+        Affine2D(
+            xAxis: SIMD2(rasterWidth, 0),
+            yAxis: SIMD2(0, rasterHeight),
+            translation: .zero
+        )
+    )
+    let cosetTranslation = ordinal >= operationCount
+        ? SIMD2(rasterWidth * 0.5, rasterHeight * 0.5)
+        : .zero
+    let rasterOperation = Affine2D(
+        xAxis: SIMD2(
+            normalized.xAxis.x,
+            normalized.xAxis.y * rasterHeight / rasterWidth
+        ),
+        yAxis: SIMD2(
+            normalized.yAxis.x * rasterWidth / rasterHeight,
+            normalized.yAxis.y
+        ),
+        translation: cosetTranslation
+    )
+    let targetOrigin = SIMD2(
+        Float(cell.column) * rasterWidth,
+        Float(cell.row) * rasterHeight
+    )
+    return worldToRaster.concatenating(rasterOperation).concatenating(
+        Affine2D(
+            xAxis: SIMD2(1, 0),
+            yAxis: SIMD2(0, 1),
+            translation: -targetOrigin
+        )
+    )
+}
+
+private func independentTriangularNormalizedRotation(
+    _ sixthTurn: UInt8
+) -> Affine2D {
+    switch sixthTurn % 6 {
+    case 0:
+        .identity
+    case 1:
+        Affine2D(
+            xAxis: SIMD2(0.5, 0.5),
+            yAxis: SIMD2(-1.5, 0.5),
+            translation: .zero
+        )
+    case 2:
+        Affine2D(
+            xAxis: SIMD2(-0.5, 0.5),
+            yAxis: SIMD2(-1.5, -0.5),
+            translation: .zero
+        )
+    case 3:
+        Affine2D(
+            xAxis: SIMD2(-1, 0),
+            yAxis: SIMD2(0, -1),
+            translation: .zero
+        )
+    case 4:
+        Affine2D(
+            xAxis: SIMD2(-0.5, -0.5),
+            yAxis: SIMD2(1.5, -0.5),
+            translation: .zero
+        )
+    case 5:
+        Affine2D(
+            xAxis: SIMD2(0.5, -0.5),
+            yAxis: SIMD2(1.5, 0.5),
+            translation: .zero
+        )
+    default:
+        preconditionFailure(
+            "Sixth-turn modulo must be in 0...5"
+        )
+    }
 }
 
 private func affinesMatch(

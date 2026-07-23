@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 3,
+  "name": "triangular-kaleidoscope30-mirror",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 128,
+  "tileHeight": 128,
+  "tiling": 13,
+  "diagnosticMode": "asymmetricCoverage",
+  "program": "triangularMirror",
+  "periodicConfiguration": {
+    "version": 1,
+    "repeatWidth": 128,
+    "repeatHeight": 128,
+    "orientationRadians": 0
+  },
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "oracleHoleCount", "relation": "equal", "value": 0},
+    {"metric": "oraclePhantomCount", "relation": "equal", "value": 0},
+    {"metric": "oracleMaximumDelta", "relation": "lessThanOrEqual", "value": 1},
+    {"metric": "transformMismatchCount", "relation": "equal", "value": 0}
+  ]
+}

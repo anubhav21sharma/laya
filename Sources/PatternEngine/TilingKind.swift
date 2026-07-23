@@ -13,6 +13,11 @@ public enum SymmetryPresetID: UInt32, CaseIterable, Codable, Sendable {
     case rotational = 6
     case squareRotation = 7
     case squareKaleidoscope = 8
+    case hexagons = 9
+    case rotation3 = 10
+    case rotation6 = 11
+    case kaleidoscope60 = 12
+    case kaleidoscope30 = 13
 }
 
 public typealias TilingKind = SymmetryPresetID

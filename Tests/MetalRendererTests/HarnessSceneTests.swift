@@ -1251,7 +1251,7 @@ func schemaThreeRejectsEachMissingRequiredKey(key: String) throws {
 @Test
 func schemaThreeRejectsUnknownNumericTilingWireValue() {
     #expect(throws: DecodingError.self) {
-        try HarnessScene.decode(schemaThreeData(tiling: 9))
+        try HarnessScene.decode(schemaThreeData(tiling: 14))
     }
 }
 
@@ -2216,6 +2216,9 @@ func displayMetricsUseIndependentMirrorRotationalAndGridLineFormulas() {
             preconditionFailure("Task 7 display fixture only")
         case .squareRotation: .squareKaleidoscope
         case .squareKaleidoscope: .squareRotation
+        case .hexagons, .rotation3, .rotation6, .kaleidoscope60,
+             .kaleidoscope30:
+            preconditionFailure("Phase 3 display fixture only")
         }
         let wrongParityOrAxis = independentTaskSevenDisplay(
             canonicalBGRA: canonical,
@@ -2545,6 +2548,83 @@ func phaseTwoSquareNoncentralInputStaysGenericInLatticeSpace() throws {
         #expect(simd_distance(visibleLattice, SIMD2(1.31, 0.17)) < 0.000_01)
         #expect(input.visibleCell == CellIndex(column: 1, row: 0))
     }
+}
+
+@Test
+func phaseThreeTriangularNoncentralInputStaysGenericInSupercellSpace()
+    throws
+{
+    let presets: [SymmetryPresetID] = [
+        .hexagons,
+        .rotation3,
+        .rotation6,
+        .kaleidoscope60,
+        .kaleidoscope30,
+    ]
+    for preset in presets {
+        let configuration = HarnessRenderConfiguration(
+            pixelSize: PixelSize(width: 192, height: 128),
+            periodicConfiguration: PeriodicSymmetryConfiguration(
+                presetID: preset,
+                repeatSize: PatternSize(width: 160, height: 160),
+                orientationRadians: -.pi / 10
+            ),
+            diagnosticMode: .hardRound
+        )
+        let periodic = try #require(
+            configuration.makeStrategy()
+                .compiledSymmetry.domain.periodic
+        )
+        let input = HarnessRunner.taskEightNoncentralInput(
+            for: configuration
+        )
+
+        #expect(
+            simd_distance(
+                periodic.worldToLattice.applying(to: input.central.simd),
+                SIMD2(0.25, 0.1875)
+            ) < 0.000_01
+        )
+        #expect(
+            simd_distance(
+                periodic.worldToLattice.applying(to: input.visible.simd),
+                SIMD2(1.25, 0.1875)
+            ) < 0.000_01
+        )
+        #expect(input.visibleCell == CellIndex(column: 1, row: 0))
+    }
+}
+
+@Test
+func triangularFixedPointHarnessProjectionUsesCompleteRoundSymmetry()
+    throws
+{
+    let pixelSize = PixelSize(width: 192, height: 128)
+    let configuration = HarnessRenderConfiguration(
+        pixelSize: pixelSize,
+        periodicConfiguration: PeriodicSymmetryConfiguration(
+            presetID: .kaleidoscope30,
+            repeatSize: PatternSize(width: 160, height: 160),
+            orientationRadians: -.pi / 10
+        ),
+        diagnosticMode: .hardRound
+    )
+    let strategy = configuration.makeStrategy()
+    let center = strategy.compiledSymmetry.rasterMetric.rasterToWorld
+        .applying(to: SIMD2(96, 128 / 6))
+    let fragments = HarnessRunner.hardRoundFragments(
+        at: WorldPoint(center),
+        radius: GridCanvasContract.brushRadius,
+        configuration: configuration,
+        coverageSymmetry: .rotationAndReflectionInvariant
+    )
+
+    #expect(!fragments.isEmpty)
+    #expect(
+        HarnessRunner.duplicateFixedPointWriteCount(
+            fragments: fragments
+        ) == 0
+    )
 }
 
 @Test
@@ -2985,6 +3065,92 @@ func phaseTwoSquareFixedPointPairsPinOracleLiveCommitAndDeduplication()
             value: 1
         )
         #expect(negative.structuralChecks == negativeChecks)
+    }
+}
+
+@Test
+func phaseThreeTriangularScenePairsAreCompleteAndSingleCause() throws {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let scenesDirectory = repositoryRoot
+        .appendingPathComponent("App/PatternSpike/Harness/Scenes")
+    let cases: [(
+        name: String,
+        preset: SymmetryPresetID,
+        program: TilingHarnessProgram
+    )] = [
+        ("triangular-hexagons-noncentral", .hexagons, .noncentralVisibleCell),
+        ("triangular-rotation3-noncentral", .rotation3, .noncentralVisibleCell),
+        ("triangular-rotation6-noncentral", .rotation6, .noncentralVisibleCell),
+        (
+            "triangular-kaleidoscope60-noncentral",
+            .kaleidoscope60,
+            .noncentralVisibleCell
+        ),
+        (
+            "triangular-kaleidoscope30-noncentral",
+            .kaleidoscope30,
+            .noncentralVisibleCell
+        ),
+        (
+            "triangular-kaleidoscope30-fixed-point",
+            .kaleidoscope30,
+            .triangularFixedPoint
+        ),
+        (
+            "triangular-kaleidoscope30-large-footprint",
+            .kaleidoscope30,
+            .triangularLargeFootprint
+        ),
+        (
+            "triangular-kaleidoscope30-mirror",
+            .kaleidoscope30,
+            .triangularMirror
+        ),
+        (
+            "triangular-kaleidoscope30-eraser",
+            .kaleidoscope30,
+            .eraserLiveCommit
+        ),
+    ]
+
+    for item in cases {
+        let positive = try HarnessScene.decode(Data(contentsOf:
+            scenesDirectory.appendingPathComponent("\(item.name).json")
+        ))
+        let negative = try HarnessScene.decode(Data(contentsOf:
+            scenesDirectory.appendingPathComponent(
+                "\(item.name)-negative-control.json"
+            )
+        ))
+
+        #expect(positive.tiling == item.preset)
+        #expect(positive.program == item.program)
+        #expect(negative.tiling == item.preset)
+        #expect(negative.program == item.program)
+        #expect(
+            positive.structuralChecks.count
+                == negative.structuralChecks.count
+        )
+        #expect(!positive.structuralChecks.isEmpty)
+        #expect(
+            positive.structuralChecks.dropFirst()
+                == negative.structuralChecks.dropFirst()
+        )
+        #expect(
+            positive.structuralChecks[0].metric
+                == negative.structuralChecks[0].metric
+        )
+        #expect(
+            positive.structuralChecks[0].relation
+                == negative.structuralChecks[0].relation
+        )
+        #expect(
+            positive.structuralChecks[0].value
+                != negative.structuralChecks[0].value
+        )
     }
 }
 

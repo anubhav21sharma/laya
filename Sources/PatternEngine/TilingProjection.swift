@@ -145,7 +145,8 @@ public enum TilingProjection {
                 candidates,
                 policy: policy,
                 symmetry: footprint.coverageSymmetry,
-                ownership: strategy.compiledSymmetry.ownership
+                ownership: strategy.compiledSymmetry.ownership,
+                canonicalSize: strategy.tileSize
             )
         }
         candidates.sort {
@@ -263,17 +264,20 @@ private struct CoverageDomainKey: Hashable {
 
     init(
         _ candidate: FragmentCandidate,
-        ownership: CompiledOwnership
+        ownership: CompiledOwnership,
+        canonicalSize: PatternSize
     ) {
         let affine = candidate.fragment.canonicalFromBrush
         switch ownership {
         case .rectangularHalfOpen:
             centerX = Int64(normalizedZero(affine.translation.x).bitPattern)
             centerY = Int64(normalizedZero(affine.translation.y).bitPattern)
-        case .squareRotation, .squareMirrorTriangles:
+        case .squareRotation, .squareMirrorTriangles,
+             .triangularDomains:
             let center = canonicalizedCoverageCenter(
                 affine.translation,
-                ownership: ownership
+                ownership: ownership,
+                canonicalSize: canonicalSize
             )
             centerX = Int64(normalizedZero(center.x).bitPattern)
             centerY = Int64(normalizedZero(center.y).bitPattern)
@@ -299,35 +303,64 @@ private struct CoverageDomainKey: Hashable {
             polygon = TilingProjection.canonicalPolygonKey(
                 candidate.localPolygon
             )
+        case .triangularDomains:
+            polygon = TilingProjection.canonicalPolygonKey(
+                candidate.localPolygon
+            )
         }
     }
-
 }
 
 private func canonicalizedCoverageCenter(
     _ point: SIMD2<Float>,
-    ownership: CompiledOwnership
+    ownership: CompiledOwnership,
+    canonicalSize: PatternSize
 ) -> SIMD2<Float> {
     let stabilizers: [CompiledStabilizer]
+    let candidate: SIMD2<Float>
     switch ownership {
     case .rectangularHalfOpen:
         return point
     case let .squareRotation(_, values),
          let .squareMirrorTriangles(_, values):
         stabilizers = values
+        candidate = point
+    case let .triangularDomains(_, values):
+        stabilizers = values
+        candidate = SIMD2(
+            triangularCanonicalBoundaryCoordinate(
+                point.x,
+                extent: canonicalSize.width
+            ),
+            triangularCanonicalBoundaryCoordinate(
+                point.y,
+                extent: canonicalSize.height
+            )
+        )
     }
     return stabilizers.first(where: {
         coverageCoordinatesAgree(
-            point.x,
+            candidate.x,
             $0.canonicalPoint.x,
             maximumULPDistance: 2
         )
             && coverageCoordinatesAgree(
-                point.y,
+                candidate.y,
                 $0.canonicalPoint.y,
                 maximumULPDistance: 2
             )
-    })?.canonicalPoint ?? point
+    })?.canonicalPoint ?? candidate
+}
+
+private func triangularCanonicalBoundaryCoordinate(
+    _ value: Float,
+    extent: Float
+) -> Float {
+    let tolerance = 2 * extent.ulp
+    if abs(value) <= tolerance || abs(value - extent) <= tolerance {
+        return 0
+    }
+    return value
 }
 
 private func coverageCoordinatesAgree(
@@ -525,10 +558,20 @@ private func removingCoverageEqualCandidates(
     _ candidates: [FragmentCandidate],
     policy: CoincidentImagePolicy,
     symmetry: FootprintCoverageSymmetry,
-    ownership: CompiledOwnership
+    ownership: CompiledOwnership,
+    canonicalSize: PatternSize
 ) -> [FragmentCandidate] {
     guard policy != .byteEqualOnly, symmetry != .oriented else {
         return candidates
+    }
+    if case .triangularDomains = ownership {
+        return removingTriangularCoverageEqualCandidates(
+            candidates,
+            policy: policy,
+            symmetry: symmetry,
+            ownership: ownership,
+            canonicalSize: canonicalSize
+        )
     }
     let ordered = candidates.enumerated().sorted { lhs, rhs in
         let lhsRank = ownershipRank(lhs.element, ownership: ownership)
@@ -537,7 +580,11 @@ private func removingCoverageEqualCandidates(
     }.map(\.element)
     var seen: [CoverageDomainKey: [CompiledGroupOperation]] = [:]
     return ordered.filter { candidate in
-        let key = CoverageDomainKey(candidate, ownership: ownership)
+        let key = CoverageDomainKey(
+            candidate,
+            ownership: ownership,
+            canonicalSize: canonicalSize
+        )
         let operation = candidate.fragment.operation
         if seen[key, default: []].contains(where: {
             operationsAreEquivalent(
@@ -550,6 +597,58 @@ private func removingCoverageEqualCandidates(
             return false
         }
         seen[key, default: []].append(operation)
+        return true
+    }
+}
+
+private struct TriangularCoverageCenterKey: Hashable {
+    let x: UInt32
+    let y: UInt32
+}
+
+private func removingTriangularCoverageEqualCandidates(
+    _ candidates: [FragmentCandidate],
+    policy: CoincidentImagePolicy,
+    symmetry: FootprintCoverageSymmetry,
+    ownership: CompiledOwnership,
+    canonicalSize: PatternSize
+) -> [FragmentCandidate] {
+    let ordered = candidates.enumerated().sorted { lhs, rhs in
+        let lhsRank = ownershipRank(lhs.element, ownership: ownership)
+        let rhsRank = ownershipRank(rhs.element, ownership: ownership)
+        return lhsRank == rhsRank ? lhs.offset < rhs.offset : lhsRank < rhsRank
+    }.map(\.element)
+    var selectedOperations:
+        [TriangularCoverageCenterKey: [CompiledGroupOperation]] = [:]
+
+    return ordered.filter { candidate in
+        let center = canonicalizedCoverageCenter(
+            candidate.fragment.canonicalFromBrush.translation,
+            ownership: ownership,
+            canonicalSize: canonicalSize
+        )
+        let key = TriangularCoverageCenterKey(
+            x: normalizedZero(center.x).bitPattern,
+            y: normalizedZero(center.y).bitPattern
+        )
+        let operation = candidate.fragment.operation
+        let selected = selectedOperations[key, default: []]
+        if selected.contains(operation) {
+            // A chosen operation may be split into complementary fragments at
+            // a rectangular-supercell seam. Retain every one of its pieces.
+            return true
+        }
+        if selected.contains(where: {
+            operationsAreEquivalent(
+                $0,
+                operation,
+                policy: policy,
+                symmetry: symmetry
+            )
+        }) {
+            return false
+        }
+        selectedOperations[key, default: []].append(operation)
         return true
     }
 }
@@ -579,9 +678,12 @@ func preferredOwnershipOwner(
         fragments = sectors
     case let .squareMirrorTriangles(triangles, _):
         fragments = triangles
+    case let .triangularDomains(triangles, _):
+        fragments = triangles
     }
 
-    // Every square ownership fragment is a triangle. Inclusive containment
+    // Every nonrectangular ownership fragment is a triangle. Inclusive
+    // containment
     // deliberately gives an exact edge or stabilizer point to the smallest
     // declared owner, making half-open boundary ties independent of discovery
     // order.
@@ -629,19 +731,31 @@ private func operationsAreEquivalent(
     symmetry: FootprintCoverageSymmetry
 ) -> Bool {
     let changesReflection = lhs.reflected != rhs.reflected
-    let turnDifference = Int(rhs.quarterTurns)
-        - Int(lhs.quarterTurns)
-    let normalizedTurns = (turnDifference % 4 + 4) % 4
+    let commonOrder = leastCommonMultiple(
+        Int(lhs.rotationOrder),
+        Int(rhs.rotationOrder)
+    )
+    let lhsStep = Int(lhs.rotationStep)
+        * commonOrder / Int(lhs.rotationOrder)
+    let rhsStep = Int(rhs.rotationStep)
+        * commonOrder / Int(rhs.rotationOrder)
+    let turnDifference = rhsStep - lhsStep
+    let normalizedTurns =
+        (turnDifference % commonOrder + commonOrder) % commonOrder
+    let changesByHalfTurn = commonOrder.isMultiple(of: 2)
+        && normalizedTurns == commonOrder / 2
 
     let policyAllows: Bool
     switch policy {
     case .byteEqualOnly:
         policyAllows = false
     case .halfTurnInvariantCoverage:
-        policyAllows = !changesReflection && normalizedTurns == 2
-    case .quarterTurnInvariantCoverage:
+        policyAllows = !changesReflection && changesByHalfTurn
+    case .quarterTurnInvariantCoverage,
+         .triangularCyclicInvariantCoverage:
         policyAllows = !changesReflection
-    case .squareDihedralInvariantCoverage:
+    case .squareDihedralInvariantCoverage,
+         .triangularDihedralInvariantCoverage:
         policyAllows = true
     }
     guard policyAllows else { return false }
@@ -650,7 +764,7 @@ private func operationsAreEquivalent(
     case .oriented:
         return false
     case .halfTurnInvariant:
-        return !changesReflection && normalizedTurns == 2
+        return !changesReflection && changesByHalfTurn
     case .rotationInvariant:
         return !changesReflection
     case .reflectionInvariant:
@@ -658,6 +772,21 @@ private func operationsAreEquivalent(
     case .rotationAndReflectionInvariant:
         return true
     }
+}
+
+private func leastCommonMultiple(_ lhs: Int, _ rhs: Int) -> Int {
+    lhs / greatestCommonDivisor(lhs, rhs) * rhs
+}
+
+private func greatestCommonDivisor(_ lhs: Int, _ rhs: Int) -> Int {
+    var first = lhs
+    var second = rhs
+    while second != 0 {
+        let remainder = first % second
+        first = second
+        second = remainder
+    }
+    return first
 }
 
 private func removingConsecutiveDuplicates(

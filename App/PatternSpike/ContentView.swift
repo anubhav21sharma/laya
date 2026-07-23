@@ -16,8 +16,8 @@ enum EditorFocusTarget: Hashable {
     case editor
     case tileWidth
     case tileHeight
-    case squareRepeatSize
-    case squareOrientation
+    case latticeRepeatSize
+    case latticeOrientation
 }
 
 struct ContentView: View {

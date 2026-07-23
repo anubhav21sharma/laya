@@ -391,6 +391,7 @@ extension HarnessRunner {
         case .mirrorX, .mirrorY, .mirrorXY,
              .rotationalGenerator, .rotationalFixedPoint,
              .rotationalOrientation, .largeFootprint,
+             .triangularLargeFootprint, .triangularMirror,
              .asymmetricFootprint, .canonicalCoordinateContinuity,
              .brushLocalCoordinateContinuity:
             guard let input = Self.taskSevenInput(for: program),
@@ -496,13 +497,26 @@ extension HarnessRunner {
                     message: "large footprint did not cross beyond immediate neighbors"
                 )
             }
-            state.artifacts.oracle = TilingCoverageOracle.renderCanonical(
-                footprint: input.oracleFootprint,
-                brushToWorld: input.brushToWorld,
-                tileSize: configuration.pixelSize,
-                tiling: configuration.tiling,
-                supersampling: 1
-            )
+            if configuration.tiling.isTriangular {
+                state.artifacts.oracle =
+                    TilingCoverageOracle.renderCanonical(
+                        footprint: input.oracleFootprint,
+                        brushToWorld: input.brushToWorld,
+                        configuration:
+                            configuration.periodicConfiguration,
+                        canonicalRasterSize: configuration.pixelSize,
+                        supersampling: 1
+                    )
+            } else {
+                state.artifacts.oracle =
+                    TilingCoverageOracle.renderCanonical(
+                        footprint: input.oracleFootprint,
+                        brushToWorld: input.brushToWorld,
+                        tileSize: configuration.pixelSize,
+                        tiling: configuration.tiling,
+                        supersampling: 1
+                    )
+            }
         case .rectangularTile:
             let center = Self.taskEightRectangularCenter
             let fragments = try gridRenderer.injectHarnessDab(at: center)
@@ -586,7 +600,9 @@ extension HarnessRunner {
             let centralCanonical =
                 try gridRenderer.copyCanonicalForHarness()
             state.artifacts.canonical = centralCanonical
-            if configuration.tiling.isSquare {
+            if configuration.tiling.isSquare
+                || configuration.tiling.isTriangular
+            {
                 state.artifacts.oracle =
                     TilingCoverageOracle.renderCanonical(
                         footprint: .hardRound(
@@ -659,32 +675,62 @@ extension HarnessRunner {
                     expectedCell: input.visibleCell
                 )
             } else if configuration.tiling.isSquare {
-                let expectedImageCount =
-                    configuration.tiling == .squareRotation ? 4 : 8
-                try validateSquareVisibleCellOrbit(
+                let expectedImageCount = expectedGenericImageCount(
+                    for: configuration.tiling
+                )
+                try validateVisibleCellOrbit(
                     scene: scene,
                     fragments: centralFragments,
                     expectedCell: CellIndex(column: 0, row: 0),
                     expectedImageCount: expectedImageCount
                 )
-                try validateSquareVisibleCellOrbit(
+                try validateVisibleCellOrbit(
                     scene: scene,
                     fragments: visibleFragments,
                     expectedCell: input.visibleCell,
                     expectedImageCount: expectedImageCount
                 )
+            } else if configuration.tiling.isTriangular {
+                let expectedImageCount = expectedGenericImageCount(
+                    for: configuration.tiling
+                )
+                try validateTriangularOrbit(
+                    scene: scene,
+                    fragments: centralFragments,
+                    expectedImageCount: expectedImageCount
+                )
+                try validateTriangularOrbit(
+                    scene: scene,
+                    fragments: visibleFragments,
+                    expectedImageCount: expectedImageCount
+                )
             }
-        case .squareFixedPoint:
-            guard configuration.tiling.isSquare else {
+        case .squareFixedPoint, .triangularFixedPoint:
+            let requiresSquare = program == .squareFixedPoint
+            guard requiresSquare
+                    ? configuration.tiling.isSquare
+                    : configuration.tiling.isTriangular
+            else {
                 throw HarnessRunError.counterInvariant(
                     sceneName: scene.name,
-                    message: "square fixed-point program requires a square preset"
+                    message: "\(requiresSquare ? "square" : "triangular") fixed-point program requires a matching preset"
                 )
             }
             let strategy = configuration.makeStrategy()
-            let basis = strategy.compiledSymmetry.domain.periodic!
-                .translationBasis
-            let center = basis.origin + (basis.u + basis.v) * 0.5
+            let center: SIMD2<Float>
+            if requiresSquare {
+                let basis = strategy.compiledSymmetry.domain.periodic!
+                    .translationBasis
+                center = basis.origin + (basis.u + basis.v) * 0.5
+            } else {
+                center = strategy.compiledSymmetry.rasterMetric
+                    .rasterToWorld.applying(
+                        to: SIMD2(
+                            Float(configuration.pixelSize.width) * 0.5,
+                            Float(configuration.pixelSize.height) / 6
+                        )
+                    )
+            }
             state.taskSevenFragments = try gridRenderer.injectHarnessDab(
                 at: WorldPoint(center),
                 radius: GridCanvasContract.brushRadius,
@@ -1132,8 +1178,9 @@ extension HarnessRunner {
                     Self.independentTransformMismatchCount(
                         fragments: taskSevenFragments,
                         brushToWorld: input.brushToWorld,
-                        tileSize: oracle.coverage.pixelSize,
-                        tiling: configuration.tiling
+                        canonicalRasterSize: oracle.coverage.pixelSize,
+                        configuration:
+                            configuration.periodicConfiguration
                     ) + mismatchCount + displaySemanticMismatchCount
             } else {
                 transformMismatchCount =
@@ -1141,6 +1188,7 @@ extension HarnessRunner {
             }
             if program == .rotationalFixedPoint
                 || program == .squareFixedPoint
+                || program == .triangularFixedPoint
             {
                 duplicateFixedPointWrites =
                     Self.duplicateFixedPointWriteCount(
@@ -1513,7 +1561,7 @@ extension HarnessRunner {
         }
     }
 
-    private func validateSquareVisibleCellOrbit(
+    private func validateVisibleCellOrbit(
         scene: HarnessScene,
         fragments: [CellFragment],
         expectedCell: CellIndex,
@@ -1530,7 +1578,48 @@ extension HarnessRunner {
         guard ordinals == expectedOrdinals else {
             throw HarnessRunError.counterInvariant(
                 sceneName: scene.name,
-                message: "square visible cell \(expectedCell.column),\(expectedCell.row) did not contain the complete \(expectedImageCount)-image orbit"
+                message: "visible cell \(expectedCell.column),\(expectedCell.row) did not contain the complete \(expectedImageCount)-image orbit"
+            )
+        }
+    }
+
+    private func expectedGenericImageCount(
+        for preset: SymmetryPresetID
+    ) -> Int {
+        switch preset {
+        case .squareRotation:
+            4
+        case .squareKaleidoscope:
+            8
+        case .hexagons:
+            2
+        case .rotation3:
+            6
+        case .rotation6, .kaleidoscope60:
+            12
+        case .kaleidoscope30:
+            24
+        case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
+             .rotational:
+            preconditionFailure(
+                "Generic orbit count requires a square or triangular preset"
+            )
+        }
+    }
+
+    private func validateTriangularOrbit(
+        scene: HarnessScene,
+        fragments: [CellFragment],
+        expectedImageCount: Int
+    ) throws {
+        let ordinals = Set(fragments.map(\.imageOrdinal))
+        let expectedOrdinals = Set(
+            (0..<expectedImageCount).map(UInt8.init)
+        )
+        guard ordinals == expectedOrdinals else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: scene.name,
+                message: "triangular projection did not contain the complete \(expectedImageCount)-image orbit"
             )
         }
     }
@@ -1918,10 +2007,11 @@ extension HarnessRunner {
              .rotationalOrientation, .largeFootprint,
              .asymmetricFootprint, .canonicalCoordinateContinuity,
              .brushLocalCoordinateContinuity, .rectangularTile,
-             .squareFixedPoint:
+             .squareFixedPoint, .triangularFixedPoint,
+             .triangularLargeFootprint, .triangularMirror:
             requiresOracle = true
         case .noncentralVisibleCell:
-            requiresOracle = tiling.isSquare
+            requiresOracle = tiling.isSquare || tiling.isTriangular
         default:
             requiresOracle = false
         }

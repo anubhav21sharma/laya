@@ -66,6 +66,31 @@ func editorModelConfirmsFullPeriodicConfigurationAndComputesTiling() {
 }
 
 @MainActor
+@Test(arguments: [
+    SymmetryPresetID.hexagons,
+    .rotation3,
+    .rotation6,
+    .kaleidoscope60,
+    .kaleidoscope30,
+])
+func editorModelRetainsEveryTriangularPresetConfigurationExactly(
+    _ preset: SymmetryPresetID
+) {
+    let model = EditorModel()
+    let configuration = PeriodicSymmetryConfiguration(
+        presetID: preset,
+        repeatSize: PatternSize(width: 173.25, height: 173.25),
+        orientationRadians: -.pi / 7
+    )
+
+    model.confirmPeriodicConfiguration(configuration)
+    model.confirmPixelSize(PixelSize(width: 320, height: 192))
+
+    #expect(model.periodicConfiguration == configuration)
+    #expect(model.tiling == preset)
+}
+
+@MainActor
 @Test
 func editorModelCanonicalResizePreservesPeriodicConfiguration() {
     let model = EditorModel()

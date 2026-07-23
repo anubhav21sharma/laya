@@ -23,6 +23,11 @@ func tilingWireValuesAreAppendOnly() {
     #expect(PatternTilingWireRotational == 6)
     #expect(PatternTilingWireSquareRotation == 7)
     #expect(PatternTilingWireSquareKaleidoscope == 8)
+    #expect(PatternTilingWireHexagons == 9)
+    #expect(PatternTilingWireRotation3 == 10)
+    #expect(PatternTilingWireRotation6 == 11)
+    #expect(PatternTilingWireKaleidoscope60 == 12)
+    #expect(PatternTilingWireKaleidoscope30 == 13)
 }
 
 @Test
@@ -30,6 +35,11 @@ func guideWireValuesAreAppendOnly() {
     #expect(PatternGuideWireRectangular == 0)
     #expect(PatternGuideWireSquareRotation == 1)
     #expect(PatternGuideWireSquareKaleidoscope == 2)
+    #expect(PatternGuideWireHexagons == 3)
+    #expect(PatternGuideWireTriangularRotation3 == 4)
+    #expect(PatternGuideWireTriangularRotation6 == 5)
+    #expect(PatternGuideWireTriangularKaleidoscope60 == 6)
+    #expect(PatternGuideWireTriangularKaleidoscope30 == 7)
 }
 
 @Test

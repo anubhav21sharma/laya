@@ -76,11 +76,16 @@ func hostedDebugHUDSamplesOnlyWhileVisible() async throws {
 }
 #endif
 
-@Test
+@Test(arguments: [
+    SymmetryPresetID.squareRotation,
+    .kaleidoscope30,
+])
 @MainActor
-func squareInspectorPreservesUntouchedContinuousConfigurationFields() {
+func latticeInspectorPreservesUntouchedContinuousConfigurationFields(
+    _ preset: SymmetryPresetID
+) {
     let committed = PeriodicSymmetryConfiguration(
-        presetID: .squareRotation,
+        presetID: preset,
         repeatSize: PatternSize(width: 96.5004, height: 96.5004),
         orientationRadians: .pi / 7
     )
@@ -91,7 +96,7 @@ func squareInspectorPreservesUntouchedContinuousConfigurationFields() {
         repeatDraft: repeatDraft,
         orientationDraft: angleDraft,
         committed: committed,
-        presetID: .squareRotation
+        presetID: preset
     )
     #expect(unchanged == committed)
 
@@ -99,7 +104,7 @@ func squareInspectorPreservesUntouchedContinuousConfigurationFields() {
         repeatDraft: "120.25",
         orientationDraft: angleDraft,
         committed: committed,
-        presetID: .squareRotation
+        presetID: preset
     )
     #expect(spacingOnly?.repeatSize == PatternSize(
         width: 120.25,
@@ -111,7 +116,7 @@ func squareInspectorPreservesUntouchedContinuousConfigurationFields() {
         repeatDraft: repeatDraft,
         orientationDraft: "30.125",
         committed: committed,
-        presetID: .squareRotation
+        presetID: preset
     )
     #expect(angleOnly?.repeatSize == committed.repeatSize)
     #expect(angleOnly?.orientationRadians == Float(30.125) * .pi / 180)

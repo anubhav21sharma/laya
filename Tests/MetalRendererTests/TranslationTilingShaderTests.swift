@@ -87,6 +87,34 @@ struct TranslationTilingShaderTests {
     }
 
     @Test
+    func triangularDisplayUsesCompiledLatticeAndFamilyGuides() throws {
+        let source = try normalizedShaderSource()
+
+        #expect(source.contains("patternTriangularDisplayMapping("))
+        #expect(source.contains(
+            "symmetryFamily != PatternSymmetryFamilyWireTriangular"
+        ))
+        #expect(source.contains(
+            "fragment float4 patternTriangularGridFragment("
+        ))
+        #expect(source.contains(
+            "return patternTriangularGridOverlay(result, mapping, frame)"
+        ))
+        #expect(source.contains("case PatternTilingWireHexagons:"))
+        #expect(source.contains("case PatternTilingWireRotation3:"))
+        #expect(source.contains("case PatternTilingWireRotation6:"))
+        #expect(source.contains("case PatternTilingWireKaleidoscope60:"))
+        #expect(source.contains("case PatternTilingWireKaleidoscope30:"))
+        #expect(source.contains("patternTriangularAxial("))
+        #expect(source.contains("patternTriangularEdgeDistance("))
+        #expect(source.contains("patternHexagonEdgeDistance("))
+        #expect(source.contains("patternTriangularCenterDistance("))
+        #expect(source.contains(
+            "PatternGuideWireTriangularKaleidoscope30"
+        ))
+    }
+
+    @Test
     func displayCompositesNeighborsBeforeBilinearFiltering() throws {
         let source = try normalizedShaderSource()
 

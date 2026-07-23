@@ -120,10 +120,20 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireMirrorXY = 5;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireRotational = 6;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireSquareRotation = 7;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireSquareKaleidoscope = 8;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireHexagons = 9;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireRotation3 = 10;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireRotation6 = 11;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireKaleidoscope60 = 12;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireKaleidoscope30 = 13;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireRectangular = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireSquareRotation = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireSquareKaleidoscope = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireHexagons = 3;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireTriangularRotation3 = 4;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireTriangularRotation6 = 5;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireTriangularKaleidoscope60 = 6;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireTriangularKaleidoscope30 = 7;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireNone = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireAsymmetricCoverage = 1;

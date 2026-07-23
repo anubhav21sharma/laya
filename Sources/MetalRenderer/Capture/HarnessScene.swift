@@ -77,6 +77,9 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
     case rectangularTile
     case noncentralVisibleCell
     case squareFixedPoint
+    case triangularFixedPoint
+    case triangularLargeFootprint
+    case triangularMirror
     case metadataTilingSwitch
     case projectedLiveCommit
     case projectedLongStroke
@@ -112,6 +115,10 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
             .rotational
         case .noncentralVisibleCell, .squareFixedPoint:
             nil
+        case .triangularFixedPoint:
+            nil
+        case .triangularLargeFootprint, .triangularMirror:
+            .kaleidoscope30
         case .coloredDraw, .eraserLiveCommit, .regionUndoSeam,
              .clearUndo, .tilingUndo, .resizeCropFill:
             nil
@@ -125,7 +132,8 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
              .generalizedGrid, .halfDropInterior, .halfDropEdge,
              .halfDropCorner, .brickTranspose, .rotationalFixedPoint,
              .largeFootprint, .rectangularTile, .noncentralVisibleCell,
-             .squareFixedPoint,
+             .squareFixedPoint, .triangularFixedPoint,
+             .triangularLargeFootprint,
              .metadataTilingSwitch,
              .projectedLiveCommit, .projectedLongStroke:
             true
@@ -686,6 +694,12 @@ public struct HarnessScene: Codable, Equatable, Sendable {
                 )
             }
             if program == .squareFixedPoint, !tiling.isSquare {
+                throw HarnessSceneError.programTilingMismatch(
+                    program: program,
+                    tiling: tiling
+                )
+            }
+            if program == .triangularFixedPoint, !tiling.isTriangular {
                 throw HarnessSceneError.programTilingMismatch(
                     program: program,
                     tiling: tiling
