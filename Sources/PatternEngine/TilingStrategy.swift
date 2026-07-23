@@ -15,24 +15,65 @@ public struct TilingImage: Equatable, Sendable {
     public let cell: CellIndex
     public let ordinal: UInt8
     public let worldBounds: AxisAlignedRect
+    public let worldClip: ConvexClip
     public let worldToCanonical: Affine2D
+    public let operation: CompiledGroupOperation
 
     public init(
         cell: CellIndex,
         ordinal: UInt8,
         worldBounds: AxisAlignedRect,
+        worldClip: ConvexClip? = nil,
         worldToCanonical: Affine2D
+    ) {
+        self.init(
+            cell: cell,
+            ordinal: ordinal,
+            worldBounds: worldBounds,
+            worldClip: worldClip,
+            worldToCanonical: worldToCanonical,
+            operation: .identity
+        )
+    }
+
+    public init(
+        cell: CellIndex,
+        ordinal: UInt8,
+        worldBounds: AxisAlignedRect,
+        worldClip: ConvexClip? = nil,
+        worldToCanonical: Affine2D,
+        operation: CompiledGroupOperation
     ) {
         self.cell = cell
         self.ordinal = ordinal
         self.worldBounds = worldBounds
+        self.worldClip = worldClip ?? ConvexClip(halfPlanes: [
+            HalfPlane2D(
+                normal: SIMD2(1, 0),
+                offset: worldBounds.minimum.x
+            ),
+            HalfPlane2D(
+                normal: SIMD2(-1, 0),
+                offset: -worldBounds.maximum.x
+            ),
+            HalfPlane2D(
+                normal: SIMD2(0, 1),
+                offset: worldBounds.minimum.y
+            ),
+            HalfPlane2D(
+                normal: SIMD2(0, -1),
+                offset: -worldBounds.maximum.y
+            ),
+        ])
         self.worldToCanonical = worldToCanonical
+        self.operation = operation
     }
 }
 
 public struct TilingStrategy: Equatable, Sendable {
     public let presetID: SymmetryPresetID
     public let tileSize: PatternSize
+    public let periodicConfiguration: PeriodicSymmetryConfiguration
     public let compiledSymmetry: CompiledSymmetry
 
     public var kind: TilingKind { presetID }
@@ -62,18 +103,45 @@ public struct TilingStrategy: Equatable, Sendable {
             tileSize.height >= 64 && tileSize.height <= 4096,
             "TilingStrategy tile height must be in 64...4096"
         )
-        presetID = kind
-        self.tileSize = tileSize
+        let canonicalRasterSize = PixelSize(
+            width: Int(tileSize.width),
+            height: Int(tileSize.height)
+        )
+        let configuration = PeriodicSymmetryConfiguration
+            .defaultConfiguration(
+                presetID: kind,
+                canonicalRasterSize: canonicalRasterSize
+            )
         do {
             compiledSymmetry = try SymmetryDescriptorCompiler.compile(
-                presetID: kind,
-                tileSize: tileSize
+                configuration: configuration,
+                canonicalRasterSize: canonicalRasterSize
             )
         } catch {
             preconditionFailure(
                 "TilingStrategy validated dimensions must compile"
             )
         }
+        presetID = kind
+        self.tileSize = tileSize
+        periodicConfiguration = compiledSymmetry.domain.periodic!.configuration
+    }
+
+    public init(
+        configuration: PeriodicSymmetryConfiguration,
+        canonicalRasterSize: PixelSize
+    ) throws {
+        let compiled = try SymmetryDescriptorCompiler.compile(
+            configuration: configuration,
+            canonicalRasterSize: canonicalRasterSize
+        )
+        presetID = configuration.presetID
+        tileSize = PatternSize(
+            width: Float(canonicalRasterSize.width),
+            height: Float(canonicalRasterSize.height)
+        )
+        periodicConfiguration = compiled.domain.periodic!.configuration
+        compiledSymmetry = compiled
     }
 
     public func cell(containing point: WorldPoint) -> CellIndex {

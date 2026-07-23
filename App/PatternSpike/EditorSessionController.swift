@@ -45,6 +45,9 @@ final class EditorSessionController {
         RendererOperationToken,
         RasterRevisionReference
     ) throws -> Void
+    private let requestStrokeCancellation: (
+        RendererOperationToken
+    ) throws -> Void
     private(set) var lastRecordedRasterCommandForTesting: RasterHistoryCommand?
     private(set) var lastRecordedResizeCommandForTesting: TileResizeHistoryCommand?
 
@@ -82,6 +85,9 @@ final class EditorSessionController {
             RendererOperationToken,
             RasterRevisionReference
         ) throws -> Void)? = nil,
+        requestStrokeCancellation: ((
+            RendererOperationToken
+        ) throws -> Void)? = nil,
         strokeSeedSessionEntropy: UInt64 = EditorSessionController
             .makeStrokeSeedSessionEntropy()
     ) {
@@ -104,8 +110,11 @@ final class EditorSessionController {
         self.requestResizeRestore = requestResizeRestore ?? {
             try renderer.requestResizeRestore(token: $0, revision: $1)
         }
+        self.requestStrokeCancellation = requestStrokeCancellation ?? {
+            try renderer.cancelStroke(token: $0)
+        }
         model.confirmPixelSize(renderer.pixelSize)
-        model.confirmTiling(renderer.tiling)
+        model.confirmPeriodicConfiguration(renderer.periodicConfiguration)
         renderer.setInteractiveGridVisibility(model.showGrid)
         renderer.onOperationCompleted = { [weak self] completion in
             self?.handleRendererCompletion(completion)
@@ -203,6 +212,12 @@ final class EditorSessionController {
 
     func handleTiling(_ tiling: TilingKind) {
         apply(.tilingIntent(tiling))
+    }
+
+    func handlePeriodicConfiguration(
+        _ configuration: PeriodicSymmetryConfiguration
+    ) {
+        apply(.periodicConfigurationIntent(configuration))
     }
 
     func handleTileSize(_ pixelSize: PixelSize) {
@@ -328,16 +343,24 @@ final class EditorSessionController {
     }
 
     private func execute(_ effects: [EditorTransactionEffect]) {
-        for effect in effects {
+        for (index, effect) in effects.enumerated() {
             do {
                 try execute(effect)
             } catch let error as MetalRendererError {
                 handleSynchronousFailure(of: effect, error: error)
+                failUnexecutedEffects(
+                    effects.dropFirst(index + 1),
+                    because: error
+                )
                 break
             } catch {
-                handleSynchronousFailure(
-                    of: effect,
-                    error: .commandFailed(error.localizedDescription)
+                let rendererError = MetalRendererError.commandFailed(
+                    error.localizedDescription
+                )
+                handleSynchronousFailure(of: effect, error: rendererError)
+                failUnexecutedEffects(
+                    effects.dropFirst(index + 1),
+                    because: rendererError
                 )
                 break
             }
@@ -365,7 +388,7 @@ final class EditorSessionController {
                 maximumRetainedBytes: history.maximumBytes
             )
         case let .cancelStroke(token):
-            try renderer.cancelStroke(token: rendererToken(token))
+            try requestStrokeCancellation(rendererToken(token))
         case let .updateTool(tool):
             model.confirmTool(tool)
         case let .updateColor(color):
@@ -378,16 +401,42 @@ final class EditorSessionController {
             model.confirmGridVisibility(visible)
             renderer.setInteractiveGridVisibility(visible)
         case let .applyTiling(token, tiling):
-            let before = model.tiling
-            if before == tiling {
+            let before = model.periodicConfiguration
+            if before.presetID == tiling {
                 apply(.operationCompleted(token, succeeded: true))
                 return
             }
             try history.validateNewCommand(retainedBytes: 0)
             try renderer.applyTiling(tiling)
-            model.confirmTiling(tiling)
+            let after = renderer.periodicConfiguration
+            model.confirmPeriodicConfiguration(after)
             let released = history.appendSuccessful(
-                .tiling(MetadataChange(before: before, after: tiling))
+                .periodicConfiguration(
+                    MetadataChange(before: before, after: after)
+                )
+            )
+            if !released.isEmpty {
+                releaseRasterRevisions(released)
+            }
+            apply(.operationCompleted(token, succeeded: true))
+        case let .applyPeriodicConfiguration(token, configuration):
+            let before = model.periodicConfiguration
+            if before == configuration {
+                apply(.operationCompleted(token, succeeded: true))
+                return
+            }
+            try history.validateNewCommand(retainedBytes: 0)
+            try renderer.applyPeriodicConfiguration(configuration)
+            let after = renderer.periodicConfiguration
+            model.confirmPeriodicConfiguration(after)
+            if after == before {
+                apply(.operationCompleted(token, succeeded: true))
+                return
+            }
+            let released = history.appendSuccessful(
+                .periodicConfiguration(
+                    MetadataChange(before: before, after: after)
+                )
             )
             if !released.isEmpty {
                 releaseRasterRevisions(released)
@@ -492,7 +541,23 @@ final class EditorSessionController {
                     ? change.before
                     : change.after
                 try renderer.applyTiling(target)
-                model.confirmTiling(target)
+                model.confirmPeriodicConfiguration(
+                    renderer.periodicConfiguration
+                )
+                try history.finishNavigation(
+                    token: navigation.token,
+                    succeeded: true
+                )
+                pendingHistoryNavigation = nil
+                apply(.operationCompleted(operationToken, succeeded: true))
+            case let .periodicConfiguration(change):
+                let target = navigation.direction == .undo
+                    ? change.before
+                    : change.after
+                try renderer.applyPeriodicConfiguration(target)
+                model.confirmPeriodicConfiguration(
+                    renderer.periodicConfiguration
+                )
                 try history.finishNavigation(
                     token: navigation.token,
                     succeeded: true
@@ -520,9 +585,12 @@ final class EditorSessionController {
 
     private func handleSynchronousFailure(
         of effect: EditorTransactionEffect,
-        error: MetalRendererError
+        error: MetalRendererError,
+        shouldReport: Bool = true
     ) {
-        report(error)
+        if shouldReport {
+            report(error)
+        }
         switch effect {
         case let .beginStroke(token, _, _, _, _),
              let .appendStroke(token, _):
@@ -531,6 +599,7 @@ final class EditorSessionController {
         case let .requestStrokeCommit(token, _),
              let .performCommand(token, _),
              let .applyTiling(token, _),
+             let .applyPeriodicConfiguration(token, _),
              let .applyTileSize(token, _):
             finishHistoryNavigationIfNeeded(
                 operationToken: token,
@@ -550,6 +619,19 @@ final class EditorSessionController {
             break
         }
         refreshDerivedModelState()
+    }
+
+    private func failUnexecutedEffects(
+        _ effects: ArraySlice<EditorTransactionEffect>,
+        because error: MetalRendererError
+    ) {
+        for effect in effects {
+            handleSynchronousFailure(
+                of: effect,
+                error: error,
+                shouldReport: false
+            )
+        }
     }
 
     nonisolated static func makeStrokeSeedSessionEntropy() -> UInt64 {

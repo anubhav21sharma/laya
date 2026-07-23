@@ -35,15 +35,25 @@ func footprintSymmetryAccountsForShapeAndGrainFrame() throws {
             expected: FootprintCoverageSymmetry
         )
     ] = [
-        (.hardRound, .opaque, .brushLocal, .halfTurnInvariant),
-        (.softRound, .paper, .canonical, .halfTurnInvariant),
+        (
+            .hardRound,
+            .opaque,
+            .brushLocal,
+            .rotationAndReflectionInvariant
+        ),
+        (
+            .softRound,
+            .paper,
+            .canonical,
+            .rotationAndReflectionInvariant
+        ),
         (.hardRound, .paper, .brushLocal, .oriented),
         (.hardRound, .noise, .brushLocal, .oriented),
         (
             .hardRound,
             .asset("builtin.grain.opaque"),
             .brushLocal,
-            .halfTurnInvariant
+            .rotationAndReflectionInvariant
         ),
         (
             .hardRound,

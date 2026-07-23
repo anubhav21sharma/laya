@@ -10,8 +10,12 @@ public final class EditorModel {
     public private(set) var eraserStrength: Float = 1
     public private(set) var selectedRecipeID = AnchorBrushCatalog.defaultDraw.id
     public private(set) var showGrid = false
-    public private(set) var tiling: TilingKind = .grid
     public private(set) var pixelSize = PixelSize(width: 256, height: 256)
+    public private(set) var periodicConfiguration =
+        PeriodicSymmetryConfiguration.defaultConfiguration(
+            presetID: .grid,
+            canonicalRasterSize: PixelSize(width: 256, height: 256)
+        )
     public private(set) var canUndo = false
     public private(set) var canRedo = false
     public private(set) var isBusy = false
@@ -21,8 +25,15 @@ public final class EditorModel {
             ?? AnchorBrushCatalog.defaultDraw.recipe
     }
 
+    public var tiling: TilingKind {
+        periodicConfiguration.presetID
+    }
+
     public init(tiling: TilingKind = .grid) {
-        self.tiling = tiling
+        periodicConfiguration = .defaultConfiguration(
+            presetID: tiling,
+            canonicalRasterSize: pixelSize
+        )
     }
 
     public func confirmTool(_ tool: EditorTool) {
@@ -55,7 +66,16 @@ public final class EditorModel {
     }
 
     public func confirmTiling(_ tiling: TilingKind) {
-        self.tiling = tiling
+        periodicConfiguration = .defaultConfiguration(
+            presetID: tiling,
+            canonicalRasterSize: pixelSize
+        )
+    }
+
+    public func confirmPeriodicConfiguration(
+        _ configuration: PeriodicSymmetryConfiguration
+    ) {
+        periodicConfiguration = configuration
     }
 
     public func confirmPixelSize(_ pixelSize: PixelSize) {

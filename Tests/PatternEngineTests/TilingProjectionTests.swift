@@ -4,6 +4,15 @@ import simd
 import Testing
 
 private let projectionTileSize = PatternSize(width: 256, height: 256)
+private let legacyProjectionTilings: [TilingKind] = [
+    .grid,
+    .halfDrop,
+    .brick,
+    .mirrorX,
+    .mirrorY,
+    .mirrorXY,
+    .rotational,
+]
 private let normalizedBrushBounds = AxisAlignedRect(
     minimum: SIMD2<Float>(-1, -1),
     maximum: SIMD2<Float>(1, 1)
@@ -371,15 +380,12 @@ func coincidentRemovalFollowsCompiledPolicyNotPresetBranch() throws {
         encoding: .utf8
     )
     #expect(!source.contains("strategy.kind == .rotational"))
-    #expect(
-        source.contains(
-            ".coincidentImagePolicy == .halfTurnInvariantCoverage"
-        )
-    )
+    #expect(source.contains("policy: policy"))
+    #expect(source.contains("operationsAreEquivalent("))
     #expect(source.contains("candidates = removingByteEqualCandidates(candidates)"))
 
     let tileSize = PatternSize(width: 288, height: 288)
-    let strategies = TilingKind.allCases.map {
+    let strategies = legacyProjectionTilings.map {
         TilingStrategy(kind: $0, tileSize: tileSize)
     }
 
@@ -442,6 +448,166 @@ func coincidentRemovalFollowsCompiledPolicyNotPresetBranch() throws {
             ])
             #expect(isInRequiredFragmentOrder(invariantFragments))
         }
+    }
+}
+
+@Test
+func squareFixedPointDeduplicationFollowsCompleteStampInvariance() {
+    let tileSize = PatternSize(width: 288, height: 288)
+    let center = SIMD2<Float>(144, 144)
+    let cases: [
+        (
+            TilingKind,
+            FootprintCoverageSymmetry,
+            expectedCount: Int
+        )
+    ] = [
+        (.squareRotation, .oriented, 4),
+        (.squareRotation, .halfTurnInvariant, 2),
+        (.squareRotation, .rotationInvariant, 1),
+        (.squareRotation, .reflectionInvariant, 4),
+        (.squareRotation, .rotationAndReflectionInvariant, 1),
+        (.squareKaleidoscope, .oriented, 8),
+        (.squareKaleidoscope, .halfTurnInvariant, 4),
+        (.squareKaleidoscope, .rotationInvariant, 2),
+        (.squareKaleidoscope, .reflectionInvariant, 4),
+        (.squareKaleidoscope, .rotationAndReflectionInvariant, 1),
+    ]
+
+    for (tiling, symmetry, expectedCount) in cases {
+        let fragments = TilingProjection.fragments(
+            for: squareFootprint(
+                center: center,
+                radius: 10,
+                symmetry: symmetry
+            ),
+            using: TilingStrategy(kind: tiling, tileSize: tileSize)
+        )
+        #expect(
+            fragments.count == expectedCount,
+            "\(tiling) \(symmetry)"
+        )
+        #expect(isInRequiredFragmentOrder(fragments))
+    }
+}
+
+@Test
+func squareNearFixedPointsRemainDistinctCoverageOrbits() {
+    let tileSize = PatternSize(width: 4_096, height: 4_096)
+    let center = SIMD2<Float>(
+        2_048 + 0.0015,
+        2_048 + 0.001
+    )
+
+    for tiling in [TilingKind.squareRotation, .squareKaleidoscope] {
+        let fragments = TilingProjection.fragments(
+            for: squareFootprint(
+                center: center,
+                radius: 10,
+                symmetry: .rotationAndReflectionInvariant
+            ),
+            using: TilingStrategy(kind: tiling, tileSize: tileSize)
+        )
+        #expect(
+            fragments.count == (tiling == .squareRotation ? 4 : 8),
+            "\(tiling): \(fragments.map(\.imageOrdinal))"
+        )
+    }
+}
+
+@Test
+func orientedSquareFixedPointDeduplicationIsRasterAspectIndependent() throws {
+    let raster = PixelSize(width: 288, height: 192)
+    let configuration = PeriodicSymmetryConfiguration(
+        presetID: .squareKaleidoscope,
+        repeatSize: PatternSize(width: 173.5, height: 173.5),
+        orientationRadians: .pi / 7
+    )
+    let strategy = try TilingStrategy(
+        configuration: configuration,
+        canonicalRasterSize: raster
+    )
+    let basis = strategy.compiledSymmetry.domain.periodic!.translationBasis
+    let center = (basis.u + basis.v) * 0.5
+    let cases: [(FootprintCoverageSymmetry, Int)] = [
+        (.oriented, 8),
+        (.halfTurnInvariant, 4),
+        (.rotationInvariant, 2),
+        (.reflectionInvariant, 4),
+        (.rotationAndReflectionInvariant, 1),
+    ]
+
+    for (symmetry, expectedCount) in cases {
+        let fragments = TilingProjection.fragments(
+            for: squareFootprint(
+                center: center,
+                radius: 7.25,
+                symmetry: symmetry
+            ),
+            using: strategy
+        )
+        #expect(
+            fragments.count == expectedCount,
+            "\(symmetry): \(fragments.map(\.imageOrdinal))"
+        )
+        #expect(isInRequiredFragmentOrder(fragments))
+    }
+}
+
+@Test
+func compiledSquareOwnershipAssignsInteriorAndBoundaryTiesExactly() throws {
+    let raster = PixelSize(width: 128, height: 128)
+    let rotation = try SymmetryDescriptorCompiler.compile(
+        configuration: PeriodicSymmetryConfiguration(
+            presetID: .squareRotation,
+            repeatSize: PatternSize(width: 91.5, height: 91.5)
+        ),
+        canonicalRasterSize: raster
+    )
+    let kaleidoscope = try SymmetryDescriptorCompiler.compile(
+        configuration: PeriodicSymmetryConfiguration(
+            presetID: .squareKaleidoscope,
+            repeatSize: PatternSize(width: 91.5, height: 91.5)
+        ),
+        canonicalRasterSize: raster
+    )
+
+    let rotationCases: [(SIMD2<Float>, UInt8)] = [
+        (SIMD2(64, 16), 0),
+        (SIMD2(112, 64), 1),
+        (SIMD2(64, 112), 2),
+        (SIMD2(16, 64), 3),
+        (SIMD2(64, 64), 0),
+        (SIMD2(0, 0), 0),
+    ]
+    for (point, owner) in rotationCases {
+        #expect(
+            preferredOwnershipOwner(
+                at: point,
+                ownership: rotation.ownership
+            ) == owner
+        )
+    }
+
+    let mirrorCases: [(SIMD2<Float>, UInt8)] = [
+        (SIMD2(32, 16), 0),
+        (SIMD2(96, 16), 1),
+        (SIMD2(112, 32), 2),
+        (SIMD2(112, 96), 3),
+        (SIMD2(96, 112), 4),
+        (SIMD2(32, 112), 5),
+        (SIMD2(16, 96), 6),
+        (SIMD2(16, 32), 7),
+        (SIMD2(64, 64), 0),
+        (SIMD2(64, 16), 0),
+    ]
+    for (point, owner) in mirrorCases {
+        #expect(
+            preferredOwnershipOwner(
+                at: point,
+                ownership: kaleidoscope.ownership
+            ) == owner
+        )
     }
 }
 

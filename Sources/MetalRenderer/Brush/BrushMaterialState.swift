@@ -94,31 +94,33 @@ public struct BrushMaterialState: Equatable, Sendable {
 
 extension BrushRecipe {
     var footprintCoverageSymmetry: FootprintCoverageSymmetry {
-        let shapeIsInvariant: Bool
+        let shapeIsRotationAndReflectionInvariant: Bool
         switch shape {
         case .hardRound, .softRound:
-            shapeIsInvariant = true
+            shapeIsRotationAndReflectionInvariant = true
         case .chisel:
-            shapeIsInvariant = false
+            shapeIsRotationAndReflectionInvariant = false
         case let .asset(identity):
-            shapeIsInvariant =
-                identity != BrushTextureIdentity.chiselShape.rawValue
+            shapeIsRotationAndReflectionInvariant = [
+                BrushTextureIdentity.hardRoundShape.rawValue,
+                BrushTextureIdentity.softRoundShape.rawValue,
+            ].contains(identity)
         }
-        guard shapeIsInvariant else {
+        guard shapeIsRotationAndReflectionInvariant else {
             return .oriented
         }
 
         guard grainCoordinateMode == .brushLocal else {
-            return .halfTurnInvariant
+            return .rotationAndReflectionInvariant
         }
         switch grain {
         case .opaque:
-            return .halfTurnInvariant
+            return .rotationAndReflectionInvariant
         case .paper, .noise:
             return .oriented
         case let .asset(identity):
             return identity == BrushTextureIdentity.opaqueGrain.rawValue
-                ? .halfTurnInvariant
+                ? .rotationAndReflectionInvariant
                 : .oriented
         }
     }

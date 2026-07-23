@@ -26,8 +26,50 @@ public struct HarnessRunResult: Equatable, Sendable {
 
 struct HarnessRenderConfiguration: Equatable, Sendable {
     let pixelSize: PixelSize
-    let tiling: TilingKind
+    let periodicConfiguration: PeriodicSymmetryConfiguration
     let diagnosticMode: HarnessDiagnosticMode
+
+    var tiling: TilingKind {
+        periodicConfiguration.presetID
+    }
+
+    init(
+        pixelSize: PixelSize,
+        tiling: TilingKind,
+        diagnosticMode: HarnessDiagnosticMode
+    ) {
+        self.init(
+            pixelSize: pixelSize,
+            periodicConfiguration: .defaultConfiguration(
+                presetID: tiling,
+                canonicalRasterSize: pixelSize
+            ),
+            diagnosticMode: diagnosticMode
+        )
+    }
+
+    init(
+        pixelSize: PixelSize,
+        periodicConfiguration: PeriodicSymmetryConfiguration,
+        diagnosticMode: HarnessDiagnosticMode
+    ) {
+        self.pixelSize = pixelSize
+        self.periodicConfiguration = periodicConfiguration
+        self.diagnosticMode = diagnosticMode
+    }
+
+    func makeStrategy() -> TilingStrategy {
+        do {
+            return try TilingStrategy(
+                configuration: periodicConfiguration,
+                canonicalRasterSize: pixelSize
+            )
+        } catch {
+            preconditionFailure(
+                "Decoded harness periodic configuration must compile: \(error.localizedDescription)"
+            )
+        }
+    }
 }
 
 struct TranslationHarnessInput: Equatable, Sendable {
@@ -85,8 +127,8 @@ struct HarnessFragmentMeasurements {
 }
 
 private struct FixedPointCoverageKey: Hashable {
-    let centerX: UInt32
-    let centerY: UInt32
+    let centerX: Int64
+    let centerY: Int64
     let xAxisLength: UInt32
     let yAxisLength: UInt32
 }
@@ -351,59 +393,93 @@ public final class HarnessRunner {
     }
 
     nonisolated static func taskEightNoncentralInput(
-        for tiling: TilingKind
+        for configuration: HarnessRenderConfiguration
     ) -> TaskEightNoncentralInput {
-        switch tiling {
+        switch configuration.tiling {
         case .grid:
-            TaskEightNoncentralInput(
+            return TaskEightNoncentralInput(
                 tileSize: PixelSize(width: 256, height: 256),
                 central: WorldPoint(x: 64, y: 64),
                 visible: WorldPoint(x: 320, y: 64),
                 visibleCell: CellIndex(column: 1, row: 0)
             )
         case .halfDrop:
-            TaskEightNoncentralInput(
+            return TaskEightNoncentralInput(
                 tileSize: PixelSize(width: 288, height: 192),
                 central: WorldPoint(x: 64, y: 64),
                 visible: WorldPoint(x: 352, y: 160),
                 visibleCell: CellIndex(column: 1, row: 0)
             )
         case .brick:
-            TaskEightNoncentralInput(
+            return TaskEightNoncentralInput(
                 tileSize: PixelSize(width: 288, height: 192),
                 central: WorldPoint(x: 64, y: 64),
                 visible: WorldPoint(x: 208, y: 256),
                 visibleCell: CellIndex(column: 0, row: 1)
             )
         case .mirrorX:
-            TaskEightNoncentralInput(
+            return TaskEightNoncentralInput(
                 tileSize: PixelSize(width: 256, height: 256),
                 central: WorldPoint(x: 64, y: 64),
                 visible: WorldPoint(x: 448, y: 64),
                 visibleCell: CellIndex(column: 1, row: 0)
             )
         case .mirrorY:
-            TaskEightNoncentralInput(
+            return TaskEightNoncentralInput(
                 tileSize: PixelSize(width: 256, height: 256),
                 central: WorldPoint(x: 64, y: 64),
                 visible: WorldPoint(x: 64, y: 448),
                 visibleCell: CellIndex(column: 0, row: 1)
             )
         case .mirrorXY:
-            TaskEightNoncentralInput(
+            return TaskEightNoncentralInput(
                 tileSize: PixelSize(width: 256, height: 256),
                 central: WorldPoint(x: 64, y: 64),
                 visible: WorldPoint(x: 448, y: 448),
                 visibleCell: CellIndex(column: 1, row: 1)
             )
         case .rotational:
-            TaskEightNoncentralInput(
+            return TaskEightNoncentralInput(
                 tileSize: PixelSize(width: 256, height: 256),
                 central: WorldPoint(x: 64, y: 80),
                 visible: WorldPoint(x: 320, y: 80),
                 visibleCell: CellIndex(column: 1, row: 0)
             )
+        case .squareRotation, .squareKaleidoscope:
+            let basis = configuration.makeStrategy()
+                .compiledSymmetry.domain.periodic!.translationBasis
+            // Keep the generic D4 orbit well away from rotation centres and
+            // mirror axes. Otherwise two valid anti-aliased copies can
+            // overlap and cross the binary oracle threshold together.
+            let central = basis.u * 0.31 + basis.v * 0.17
+            let visible = central + basis.u
+            return TaskEightNoncentralInput(
+                tileSize: configuration.pixelSize,
+                central: WorldPoint(
+                    x: central.x,
+                    y: central.y
+                ),
+                visible: WorldPoint(
+                    x: visible.x,
+                    y: visible.y
+                ),
+                visibleCell: CellIndex(column: 1, row: 0)
+            )
         }
+    }
+
+    nonisolated static func taskEightNoncentralInput(
+        for tiling: TilingKind
+    ) -> TaskEightNoncentralInput {
+        taskEightNoncentralInput(
+            for: HarnessRenderConfiguration(
+                pixelSize: tiling == .halfDrop || tiling == .brick
+                    ? PixelSize(width: 288, height: 192)
+                    : GridCanvasContract.defaultPixelSize,
+                tiling: tiling,
+                diagnosticMode: .hardRound
+            )
+        )
     }
 
     nonisolated static var taskEightRectangularCenter: WorldPoint {
@@ -575,12 +651,20 @@ public final class HarnessRunner {
     nonisolated static func configuration(
         for scene: HarnessScene
     ) -> HarnessRenderConfiguration {
-        HarnessRenderConfiguration(
-            pixelSize: PixelSize(
-                width: scene.tileWidth ?? Int(GridCanvasContract.tileSize),
-                height: scene.tileHeight ?? Int(GridCanvasContract.tileSize)
-            ),
-            tiling: scene.tiling ?? .grid,
+        let pixelSize = PixelSize(
+            width: scene.tileWidth ?? Int(GridCanvasContract.tileSize),
+            height: scene.tileHeight ?? Int(GridCanvasContract.tileSize)
+        )
+        let tiling = scene.tiling ?? .grid
+        let periodicConfiguration = scene.periodicConfiguration?
+            .productionConfiguration(presetID: tiling)
+            ?? .defaultConfiguration(
+                presetID: tiling,
+                canonicalRasterSize: pixelSize
+            )
+        return HarnessRenderConfiguration(
+            pixelSize: pixelSize,
+            periodicConfiguration: periodicConfiguration,
             diagnosticMode: scene.diagnosticMode ?? .hardRound
         )
     }
@@ -658,7 +742,8 @@ public final class HarnessRunner {
     nonisolated static func hardRoundFragments(
         at world: WorldPoint,
         radius requestedRadius: Float,
-        configuration: HarnessRenderConfiguration
+        configuration: HarnessRenderConfiguration,
+        coverageSymmetry: FootprintCoverageSymmetry = .halfTurnInvariant
     ) -> [CellFragment] {
         let tileSize = PatternSize(
             width: Float(configuration.pixelSize.width),
@@ -678,14 +763,11 @@ public final class HarnessRunner {
                 minimum: SIMD2(-1, -1),
                 maximum: SIMD2(1, 1)
             ),
-            coverageSymmetry: .halfTurnInvariant
+            coverageSymmetry: coverageSymmetry
         )
         return TilingProjection.fragments(
             for: footprint,
-            using: TilingStrategy(
-                kind: configuration.tiling,
-                tileSize: tileSize
-            )
+            using: configuration.makeStrategy()
         )
     }
 
@@ -695,13 +777,7 @@ public final class HarnessRunner {
     ) -> [CellFragment] {
         TilingProjection.fragments(
             for: footprint,
-            using: TilingStrategy(
-                kind: configuration.tiling,
-                tileSize: PatternSize(
-                    width: Float(configuration.pixelSize.width),
-                    height: Float(configuration.pixelSize.height)
-                )
-            )
+            using: configuration.makeStrategy()
         )
     }
 
@@ -1072,15 +1148,21 @@ public final class HarnessRunner {
         var duplicates = 0
         for fragment in fragments {
             let affine = fragment.canonicalFromBrush
+            let axisLengths = [
+                normalizedZero(simd_length(affine.xAxis)),
+                normalizedZero(simd_length(affine.yAxis)),
+            ].sorted()
             let key = FixedPointCoverageKey(
-                centerX: normalizedZero(affine.translation.x).bitPattern,
-                centerY: normalizedZero(affine.translation.y).bitPattern,
-                xAxisLength: normalizedZero(
-                    simd_length(affine.xAxis)
-                ).bitPattern,
-                yAxisLength: normalizedZero(
-                    simd_length(affine.yAxis)
-                ).bitPattern
+                centerX: Int64(
+                    (Double(normalizedZero(affine.translation.x)) * 4_096)
+                        .rounded()
+                ),
+                centerY: Int64(
+                    (Double(normalizedZero(affine.translation.y)) * 4_096)
+                        .rounded()
+                ),
+                xAxisLength: axisLengths[0].bitPattern,
+                yAxisLength: axisLengths[1].bitPattern
             )
             if !seen.insert(key).inserted {
                 duplicates += 1

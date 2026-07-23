@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 3,
+  "name": "square-rotation-noncentral-negative-control",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 256,
+  "tileHeight": 256,
+  "tiling": 7,
+  "diagnosticMode": "hardRound",
+  "periodicConfiguration": {
+    "version": 1,
+    "repeatWidth": 192,
+    "repeatHeight": 192,
+    "orientationRadians": 0.2617994
+  },
+  "program": "noncentralVisibleCell",
+  "checks": [],
+  "structuralChecks": [
+    {"metric": "visibleCellCanonicalByteDelta", "relation": "equal", "value": 1}
+  ]
+}

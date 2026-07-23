@@ -10,6 +10,8 @@ struct TilingInspector: View {
     let requestEditorFocus: @MainActor () -> Void
     @State private var widthDraft: String
     @State private var heightDraft: String
+    @State private var squareRepeatSizeDraft: String
+    @State private var squareOrientationDraft: String
 
     init(
         controller: EditorSessionController,
@@ -23,6 +25,16 @@ struct TilingInspector: View {
         self.requestEditorFocus = requestEditorFocus
         _widthDraft = State(initialValue: String(controller.model.pixelSize.width))
         _heightDraft = State(initialValue: String(controller.model.pixelSize.height))
+        _squareRepeatSizeDraft = State(
+            initialValue: Self.repeatSizeDraft(
+                controller.model.periodicConfiguration
+            )
+        )
+        _squareOrientationDraft = State(
+            initialValue: Self.orientationDraft(
+                controller.model.periodicConfiguration
+            )
+        )
     }
 
     var body: some View {
@@ -69,6 +81,58 @@ struct TilingInspector: View {
             .buttonStyle(.borderedProminent)
             .frame(minHeight: editorControlExtent)
             .frame(maxWidth: .infinity, alignment: .trailing)
+
+            if controller.model.tiling.isSquare {
+                Divider()
+
+                Text("Square Repeat")
+                    .font(.headline)
+
+                Grid(
+                    alignment: .leading,
+                    horizontalSpacing: 8,
+                    verticalSpacing: 8
+                ) {
+                    GridRow {
+                        Text("Spacing")
+                        TextField(
+                            "Spacing",
+                            text: $squareRepeatSizeDraft
+                        )
+                        .multilineTextAlignment(.trailing)
+                        .frame(minHeight: editorControlExtent)
+                        .focused(
+                            focusTarget,
+                            equals: .squareRepeatSize
+                        )
+                        .accessibilityIdentifier("Square Repeat Size")
+                        .onSubmit { applyDraftSquareConfiguration() }
+                    }
+                    GridRow {
+                        Text("Angle °")
+                        TextField(
+                            "Angle",
+                            text: $squareOrientationDraft
+                        )
+                        .multilineTextAlignment(.trailing)
+                        .frame(minHeight: editorControlExtent)
+                        .focused(
+                            focusTarget,
+                            equals: .squareOrientation
+                        )
+                        .accessibilityIdentifier("Square Orientation")
+                        .onSubmit { applyDraftSquareConfiguration() }
+                    }
+                }
+                .textFieldStyle(.roundedBorder)
+
+                Button("Apply Repeat") {
+                    applyDraftSquareConfiguration()
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(minHeight: editorControlExtent)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
         }
         #if os(macOS)
         .controlSize(.small)
@@ -82,6 +146,9 @@ struct TilingInspector: View {
         .disabled(controller.model.isBusy)
         .onChange(of: controller.model.pixelSize) {
             resetDraftsToCommittedSize()
+        }
+        .onChange(of: controller.model.periodicConfiguration) {
+            resetDraftsToCommittedConfiguration()
         }
         .onChange(of: runtimeError) {
             if runtimeError != nil {
@@ -140,6 +207,92 @@ struct TilingInspector: View {
         heightDraft = String(controller.model.pixelSize.height)
     }
 
+    private func applyDraftSquareConfiguration() {
+        defer { requestEditorFocus() }
+        guard let configuration = Self.periodicConfiguration(
+            repeatDraft: squareRepeatSizeDraft,
+            orientationDraft: squareOrientationDraft,
+            committed: controller.model.periodicConfiguration,
+            presetID: controller.model.tiling
+        ) else {
+            runtimeError = .invalidPeriodicConfiguration(
+                "Repeat spacing must be positive and finite; angle must be finite."
+            )
+            resetDraftsToCommittedConfiguration()
+            return
+        }
+
+        runtimeError = nil
+        controller.handlePeriodicConfiguration(configuration)
+    }
+
+    private func resetDraftsToCommittedConfiguration() {
+        squareRepeatSizeDraft = Self.repeatSizeDraft(
+            controller.model.periodicConfiguration
+        )
+        squareOrientationDraft = Self.orientationDraft(
+            controller.model.periodicConfiguration
+        )
+    }
+
+    static func repeatSizeDraft(
+        _ configuration: PeriodicSymmetryConfiguration
+    ) -> String {
+        let value = configuration.repeatSize.width
+        let rounded = value.rounded()
+        return rounded == value
+            ? String(format: "%.0f", Double(rounded))
+            : String(value)
+    }
+
+    static func orientationDraft(
+        _ configuration: PeriodicSymmetryConfiguration
+    ) -> String {
+        let degrees = configuration.orientationRadians * 180 / .pi
+        let rounded = degrees.rounded()
+        return rounded == degrees
+            ? String(format: "%.0f", Double(rounded))
+            : String(degrees)
+    }
+
+    static func periodicConfiguration(
+        repeatDraft repeatDraftText: String,
+        orientationDraft orientationDraftText: String,
+        committed: PeriodicSymmetryConfiguration,
+        presetID: SymmetryPresetID
+    ) -> PeriodicSymmetryConfiguration? {
+        let repeatText = repeatDraftText.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let angleText = orientationDraftText.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard
+            let parsedRepeat = Float(repeatText),
+            parsedRepeat.isFinite,
+            parsedRepeat > 0,
+            let parsedAngleDegrees = Float(angleText),
+            parsedAngleDegrees.isFinite
+        else {
+            return nil
+        }
+        let repeatSize = repeatText == repeatSizeDraft(committed)
+            ? committed.repeatSize.width
+            : parsedRepeat
+        let orientationRadians =
+            angleText == orientationDraft(committed)
+            ? committed.orientationRadians
+            : parsedAngleDegrees * .pi / 180
+        return PeriodicSymmetryConfiguration(
+            presetID: presetID,
+            repeatSize: PatternSize(
+                width: repeatSize,
+                height: repeatSize
+            ),
+            orientationRadians: orientationRadians
+        )
+    }
+
     private func label(for tiling: TilingKind) -> String {
         switch tiling {
         case .grid:
@@ -156,6 +309,10 @@ struct TilingInspector: View {
             "Mirror XY"
         case .rotational:
             "Rotational"
+        case .squareRotation:
+            "Square Rotation"
+        case .squareKaleidoscope:
+            "Square Kaleidoscope"
         }
     }
 }

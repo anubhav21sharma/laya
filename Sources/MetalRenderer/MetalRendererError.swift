@@ -16,6 +16,7 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case generatedDabCapacityExceeded(Int)
     case projectedInstanceCapacityExceeded(Int)
     case invalidTileDimensions(width: Int, height: Int)
+    case invalidPeriodicConfiguration(String)
     case tilingChangeRequiresIdle
     case invalidStrokeLifecycle
     case invalidRendererOperationToken
@@ -69,6 +70,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
             "Projected-instance capacity \(capacity) was exceeded."
         case let .invalidTileDimensions(width, height):
             "Tile dimensions \(width)x\(height) are outside 64...4096."
+        case let .invalidPeriodicConfiguration(message):
+            "Invalid periodic symmetry: \(message)"
         case .tilingChangeRequiresIdle:
             "Tiling can only change while the renderer is idle."
         case .invalidStrokeLifecycle:

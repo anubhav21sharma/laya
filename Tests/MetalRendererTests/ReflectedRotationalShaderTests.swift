@@ -13,10 +13,10 @@ struct ReflectedRotationalShaderTests {
         #expect(source.contains("case PatternTilingWireMirrorY:"))
         #expect(source.contains("case PatternTilingWireMirrorXY:"))
         #expect(source.contains("case PatternTilingWireRotational:"))
-        #expect(source.contains("const int column = int(floor(world.x / tileSize.x));"))
-        #expect(source.contains("const int row = int(floor(world.y / tileSize.y));"))
-        #expect(source.contains("patternPositiveFold(tileSize.x - local.x, tileSize.x)"))
-        #expect(source.contains("patternPositiveFold(tileSize.y - local.y, tileSize.y)"))
+        #expect(source.contains("const int column = int(floor(lattice.x));"))
+        #expect(source.contains("const int row = int(floor(lattice.y));"))
+        #expect(source.contains("patternPositiveFold(1.0 - localUnit.x, 1.0)"))
+        #expect(source.contains("patternPositiveFold(1.0 - localUnit.y, 1.0)"))
     }
 
     @Test

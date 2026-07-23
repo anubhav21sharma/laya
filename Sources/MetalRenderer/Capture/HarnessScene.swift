@@ -18,6 +18,40 @@ public enum HarnessDiagnosticMode: String, Codable, Equatable, Sendable {
     case brushLocalCoordinates
 }
 
+public struct HarnessPeriodicConfiguration: Codable, Equatable, Sendable {
+    public static let currentVersion = 1
+
+    public let version: Int
+    public let repeatWidth: Float
+    public let repeatHeight: Float
+    public let orientationRadians: Float
+
+    public init(
+        version: Int = currentVersion,
+        repeatWidth: Float,
+        repeatHeight: Float,
+        orientationRadians: Float
+    ) {
+        self.version = version
+        self.repeatWidth = repeatWidth
+        self.repeatHeight = repeatHeight
+        self.orientationRadians = orientationRadians
+    }
+
+    func productionConfiguration(
+        presetID: SymmetryPresetID
+    ) -> PeriodicSymmetryConfiguration {
+        PeriodicSymmetryConfiguration(
+            presetID: presetID,
+            repeatSize: PatternSize(
+                width: repeatWidth,
+                height: repeatHeight
+            ),
+            orientationRadians: orientationRadians
+        )
+    }
+}
+
 public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
     case gridInterior
     case gridBoundary
@@ -42,6 +76,7 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
     case brushLocalCoordinateContinuity
     case rectangularTile
     case noncentralVisibleCell
+    case squareFixedPoint
     case metadataTilingSwitch
     case projectedLiveCommit
     case projectedLongStroke
@@ -75,7 +110,7 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
         case .rotationalGenerator, .rotationalFixedPoint,
              .rotationalOrientation, .asymmetricFootprint:
             .rotational
-        case .noncentralVisibleCell:
+        case .noncentralVisibleCell, .squareFixedPoint:
             nil
         case .coloredDraw, .eraserLiveCommit, .regionUndoSeam,
              .clearUndo, .tilingUndo, .resizeCropFill:
@@ -90,6 +125,7 @@ public enum TilingHarnessProgram: String, Codable, Equatable, Sendable {
              .generalizedGrid, .halfDropInterior, .halfDropEdge,
              .halfDropCorner, .brickTranspose, .rotationalFixedPoint,
              .largeFootprint, .rectangularTile, .noncentralVisibleCell,
+             .squareFixedPoint,
              .metadataTilingSwitch,
              .projectedLiveCommit, .projectedLongStroke:
             true
@@ -406,6 +442,7 @@ public struct HarnessScene: Codable, Equatable, Sendable {
     public let tileHeight: Int?
     public let tiling: TilingKind?
     public let diagnosticMode: HarnessDiagnosticMode?
+    public let periodicConfiguration: HarnessPeriodicConfiguration?
     public let recipeID: String?
     public let seed: UInt64?
     public let attributedSamples: [HarnessAttributedSample]
@@ -425,6 +462,7 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         case tileHeight
         case tiling
         case diagnosticMode
+        case periodicConfiguration
         case recipeID
         case seed
         case attributedSamples
@@ -492,6 +530,10 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             tiling = nil
             diagnosticMode = nil
         }
+        periodicConfiguration = try values.decodeIfPresent(
+            HarnessPeriodicConfiguration.self,
+            forKey: .periodicConfiguration
+        )
         if schemaVersion == 5 {
             recipeID = try Self.decodeRequiredSchemaFiveValue(
                 String.self,
@@ -552,6 +594,10 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             try values.encode(tiling, forKey: .tiling)
             try values.encode(diagnosticMode, forKey: .diagnosticMode)
         }
+        try values.encodeIfPresent(
+            periodicConfiguration,
+            forKey: .periodicConfiguration
+        )
         if schemaVersion == 5 {
             try values.encode(recipeID, forKey: .recipeID)
             try values.encode(seed, forKey: .seed)
@@ -634,6 +680,12 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             if let requiredTiling = program.requiredTiling,
                requiredTiling != tiling
             {
+                throw HarnessSceneError.programTilingMismatch(
+                    program: program,
+                    tiling: tiling
+                )
+            }
+            if program == .squareFixedPoint, !tiling.isSquare {
                 throw HarnessSceneError.programTilingMismatch(
                     program: program,
                     tiling: tiling
@@ -724,6 +776,49 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             }
         default:
             throw HarnessSceneError.unsupportedSchema(schemaVersion)
+        }
+        if let periodicConfiguration {
+            guard schemaVersion == 3 else {
+                throw HarnessSceneError.periodicConfigurationUnavailableForSchema(
+                    schemaVersion
+                )
+            }
+            guard periodicConfiguration.version
+                    == HarnessPeriodicConfiguration.currentVersion
+            else {
+                throw HarnessSceneError.unsupportedPeriodicConfigurationVersion(
+                    periodicConfiguration.version
+                )
+            }
+            guard let tiling, let tileWidth, let tileHeight else {
+                preconditionFailure(
+                    "Periodic harness configuration requires decoded schema 3 tiling state"
+                )
+            }
+            guard periodicConfiguration.repeatWidth.isFinite,
+                  periodicConfiguration.repeatHeight.isFinite,
+                  periodicConfiguration.repeatWidth > 0,
+                  periodicConfiguration.repeatHeight > 0
+            else {
+                throw HarnessSceneError.invalidPeriodicRepeatDimensions(
+                    width: periodicConfiguration.repeatWidth,
+                    height: periodicConfiguration.repeatHeight
+                )
+            }
+            do {
+                _ = try SymmetryDescriptorCompiler.compile(
+                    configuration: periodicConfiguration
+                        .productionConfiguration(presetID: tiling),
+                    canonicalRasterSize: PixelSize(
+                        width: tileWidth,
+                        height: tileHeight
+                    )
+                )
+            } catch let error as SymmetryDescriptorError {
+                throw HarnessSceneError.invalidPeriodicConfiguration(
+                    error
+                )
+            }
         }
         guard !name.isEmpty else {
             throw HarnessSceneError.emptyName
@@ -840,6 +935,10 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
     case missingAttributedSamples
     case invalidAttributedSample(Int)
     case invalidTileDimensions(width: Int, height: Int)
+    case periodicConfigurationUnavailableForSchema(Int)
+    case unsupportedPeriodicConfigurationVersion(Int)
+    case invalidPeriodicRepeatDimensions(width: Float, height: Float)
+    case invalidPeriodicConfiguration(SymmetryDescriptorError)
     case programUnavailableForSchema(
         program: TilingHarnessProgram,
         schemaVersion: Int
@@ -897,6 +996,14 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
             "Schema 5 harness scene attributed sample \(index) is invalid."
         case let .invalidTileDimensions(width, height):
             "Harness tile dimensions \(width)x\(height) are outside 64...4096."
+        case let .periodicConfigurationUnavailableForSchema(schemaVersion):
+            "Harness periodic configuration is unavailable in schema \(schemaVersion)."
+        case let .unsupportedPeriodicConfigurationVersion(version):
+            "Unsupported harness periodic configuration version \(version)."
+        case let .invalidPeriodicRepeatDimensions(width, height):
+            "Harness repeat dimensions \(width)x\(height) must be positive and finite."
+        case let .invalidPeriodicConfiguration(error):
+            "Invalid harness periodic configuration: \(error.localizedDescription)"
         case let .programUnavailableForSchema(program, schemaVersion):
             "Harness program \(program.rawValue) is unavailable in schema \(schemaVersion)."
         case let .structuralMetricUnavailableForSchema(metric, schemaVersion):

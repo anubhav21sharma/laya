@@ -77,6 +77,47 @@ func hostedDebugHUDSamplesOnlyWhileVisible() async throws {
 #endif
 
 @Test
+@MainActor
+func squareInspectorPreservesUntouchedContinuousConfigurationFields() {
+    let committed = PeriodicSymmetryConfiguration(
+        presetID: .squareRotation,
+        repeatSize: PatternSize(width: 96.5004, height: 96.5004),
+        orientationRadians: .pi / 7
+    )
+    let repeatDraft = TilingInspector.repeatSizeDraft(committed)
+    let angleDraft = TilingInspector.orientationDraft(committed)
+
+    let unchanged = TilingInspector.periodicConfiguration(
+        repeatDraft: repeatDraft,
+        orientationDraft: angleDraft,
+        committed: committed,
+        presetID: .squareRotation
+    )
+    #expect(unchanged == committed)
+
+    let spacingOnly = TilingInspector.periodicConfiguration(
+        repeatDraft: "120.25",
+        orientationDraft: angleDraft,
+        committed: committed,
+        presetID: .squareRotation
+    )
+    #expect(spacingOnly?.repeatSize == PatternSize(
+        width: 120.25,
+        height: 120.25
+    ))
+    #expect(spacingOnly?.orientationRadians == committed.orientationRadians)
+
+    let angleOnly = TilingInspector.periodicConfiguration(
+        repeatDraft: repeatDraft,
+        orientationDraft: "30.125",
+        committed: committed,
+        presetID: .squareRotation
+    )
+    #expect(angleOnly?.repeatSize == committed.repeatSize)
+    #expect(angleOnly?.orientationRadians == Float(30.125) * .pi / 180)
+}
+
+@Test
 func defaultContentViewInitializerDoesNotAllocateRenderer() throws {
     let source = try contentViewInitializerSource()
 
@@ -160,6 +201,77 @@ func hostedTileFieldReceivesNumberKeyEventsWithoutEditorShortcuts() async throws
 
     #expect(widthField.stringValue == "320")
     #expect(controller.model.tiling == .grid)
+}
+
+@Test
+@MainActor
+func hostedSquareFieldsAreConditionalAndKeepDigitsOutOfShortcuts() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let host = NSHostingView(rootView: ContentView(controller: controller))
+    let window = NSWindow(
+        contentRect: CGRect(x: 0, y: 0, width: 1_024, height: 768),
+        styleMask: [.titled],
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    defer { window.close() }
+
+    await settle(host)
+    #expect(
+        findSubviews(of: NSTextField.self, in: host).allSatisfy {
+            $0.placeholderString != "Spacing"
+                && $0.placeholderString != "Angle"
+        }
+    )
+
+    controller.handleTiling(.squareRotation)
+    await settle(host)
+    let repeatField = try #require(
+        findSubviews(of: NSTextField.self, in: host).first {
+            $0.isEditable && $0.placeholderString == "Spacing"
+        }
+    )
+    repeatField.selectText(nil)
+    await Task.yield()
+    sendKey("3", keyCode: 20, to: window)
+    sendKey("2", keyCode: 19, to: window)
+    sendKey("0", keyCode: 29, to: window)
+    await settle(host)
+
+    #expect(repeatField.stringValue == "320")
+    #expect(controller.model.tiling == .squareRotation)
+
+    let angleField = try #require(
+        findSubviews(of: NSTextField.self, in: host).first {
+            $0.isEditable && $0.placeholderString == "Angle"
+        }
+    )
+    angleField.selectText(nil)
+    await Task.yield()
+    sendKey("4", keyCode: 21, to: window)
+    sendKey("5", keyCode: 23, to: window)
+    await settle(host)
+
+    #expect(angleField.stringValue == "45")
+    #expect(controller.model.tiling == .squareRotation)
+
+    sendKey("\r", keyCode: 36, to: window)
+    await settle(host)
+
+    #expect(
+        controller.model.periodicConfiguration.repeatSize
+            == PatternSize(width: 320, height: 320)
+    )
+    #expect(
+        abs(
+            controller.model.periodicConfiguration.orientationRadians
+                - Float.pi / 4
+        ) < 0.0001
+    )
 }
 
 @Test

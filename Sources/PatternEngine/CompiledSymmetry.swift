@@ -7,6 +7,33 @@ public enum SymmetryKernelFamily: UInt32, Codable, Sendable {
     case radial = 2
 }
 
+public struct PeriodicSymmetryConfiguration: Equatable, Sendable {
+    public let presetID: SymmetryPresetID
+    public let repeatSize: PatternSize
+    public let orientationRadians: Float
+
+    public init(
+        presetID: SymmetryPresetID,
+        repeatSize: PatternSize,
+        orientationRadians: Float = 0
+    ) {
+        self.presetID = presetID
+        self.repeatSize = repeatSize
+        self.orientationRadians = orientationRadians
+    }
+
+    public static func legacy(
+        presetID: SymmetryPresetID,
+        tileSize: PatternSize
+    ) -> Self {
+        Self(
+            presetID: presetID,
+            repeatSize: tileSize,
+            orientationRadians: 0
+        )
+    }
+}
+
 public enum SymmetryAxis: Equatable, Sendable {
     case x
     case y
@@ -38,6 +65,8 @@ public struct PeriodicPhaseProgram: Equatable, Sendable {
 public enum CoincidentImagePolicy: Equatable, Sendable {
     case byteEqualOnly
     case halfTurnInvariantCoverage
+    case quarterTurnInvariantCoverage
+    case squareDihedralInvariantCoverage
 }
 
 public struct PeriodicTranslationBasis: Equatable, Sendable {
@@ -53,8 +82,10 @@ public struct PeriodicTranslationBasis: Equatable, Sendable {
 }
 
 public struct CompiledPeriodicDomain: Equatable, Sendable {
+    public let configuration: PeriodicSymmetryConfiguration
     public let tileSize: PatternSize
     public let translationBasis: PeriodicTranslationBasis
+    public let worldToLattice: Affine2D
     public let phase: PeriodicPhaseProgram?
     public let alternatingReflections: SymmetryReflectionAxes
     public let coincidentImagePolicy: CoincidentImagePolicy
@@ -69,16 +100,99 @@ public enum CompiledSymmetryDomain: Equatable, Sendable {
     }
 }
 
+public struct CompiledGroupOperation: Equatable, Sendable {
+    public let quarterTurns: UInt8
+    public let reflected: Bool
+
+    public init(quarterTurns: UInt8, reflected: Bool) {
+        precondition(quarterTurns < 4)
+        self.quarterTurns = quarterTurns
+        self.reflected = reflected
+    }
+
+    public static let identity = Self(quarterTurns: 0, reflected: false)
+}
+
 public struct CompiledIsometry: Equatable, Sendable {
     public let ordinal: UInt8
     public let localToCanonical: Affine2D
+    public let operation: CompiledGroupOperation
+
+    public init(
+        ordinal: UInt8,
+        localToCanonical: Affine2D
+    ) {
+        self.init(
+            ordinal: ordinal,
+            localToCanonical: localToCanonical,
+            operation: .identity
+        )
+    }
+
+    public init(
+        ordinal: UInt8,
+        localToCanonical: Affine2D,
+        operation: CompiledGroupOperation
+    ) {
+        self.ordinal = ordinal
+        self.localToCanonical = localToCanonical
+        self.operation = operation
+    }
 }
 
-public enum CompiledOwnership: Equatable, Sendable { case rectangularHalfOpen }
+public struct CompiledOwnershipFragment: Equatable, Sendable {
+    public let ownerOrdinal: UInt8
+    public let canonicalVertices: [SIMD2<Float>]
+
+    public init(
+        ownerOrdinal: UInt8,
+        canonicalVertices: [SIMD2<Float>]
+    ) {
+        self.ownerOrdinal = ownerOrdinal
+        self.canonicalVertices = canonicalVertices
+    }
+}
+
+public enum CompiledStabilizerKind: Equatable, Sendable {
+    case rotation(order: UInt8)
+    case dihedral(rotationOrder: UInt8)
+}
+
+public struct CompiledStabilizer: Equatable, Sendable {
+    public let canonicalPoint: SIMD2<Float>
+    public let kind: CompiledStabilizerKind
+
+    public init(
+        canonicalPoint: SIMD2<Float>,
+        kind: CompiledStabilizerKind
+    ) {
+        self.canonicalPoint = canonicalPoint
+        self.kind = kind
+    }
+}
+
+public enum CompiledOwnership: Equatable, Sendable {
+    case rectangularHalfOpen
+    case squareRotation(
+        sectors: [CompiledOwnershipFragment],
+        stabilizers: [CompiledStabilizer]
+    )
+    case squareMirrorTriangles(
+        triangles: [CompiledOwnershipFragment],
+        stabilizers: [CompiledStabilizer]
+    )
+}
+
+public enum CompiledGuideKind: UInt32, Equatable, Sendable {
+    case rectangular = 0
+    case squareRotation = 1
+    case squareKaleidoscope = 2
+}
 
 public struct CompiledDisplayProgram: Equatable, Sendable {
     public let family: SymmetryKernelFamily
     public let presetWireID: UInt32
+    public let guideKind: CompiledGuideKind
 }
 
 public struct RasterMetric2D: Equatable, Sendable {
@@ -92,6 +206,7 @@ public enum SymmetryExportCapability: Equatable, Sendable { case rectangularRepe
 
 public struct SymmetryCostBound: Equatable, Sendable {
     public let maximumImagesPerCell: Int
+    public let maximumProjectedInstancesPerDab: Int
 }
 
 public struct CompiledSymmetry: Equatable, Sendable {

@@ -10,8 +10,8 @@ public enum ShaderABI {
             && MemoryLayout<PatternFrameUniforms>.alignment == 8
             && MemoryLayout<PatternFrameUniforms>.offset(of: \.drawableSize) == 0
             && MemoryLayout<PatternFrameUniforms>.offset(of: \.inverseDrawableSize) == 8
-            && MemoryLayout<PatternGridFrameUniforms>.size == 56
-            && MemoryLayout<PatternGridFrameUniforms>.stride == 56
+            && MemoryLayout<PatternGridFrameUniforms>.size == 96
+            && MemoryLayout<PatternGridFrameUniforms>.stride == 96
             && MemoryLayout<PatternGridFrameUniforms>.alignment == 8
             && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.drawableSize) == 0
             && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.worldCenter) == 8
@@ -25,6 +25,19 @@ public enum ShaderABI {
             && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.compositeMode) == 48
             && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.symmetryFamily)
                 == 52
+            && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.repeatSize)
+                == 56
+            && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.latticeXAxis)
+                == 64
+            && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.latticeYAxis)
+                == 72
+            && MemoryLayout<PatternGridFrameUniforms>.offset(
+                of: \.latticeTranslation
+            ) == 80
+            && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.guideKind)
+                == 88
+            && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.padding2)
+                == 92
             && MemoryLayout<PatternClipHalfPlane>.size == 16
             && MemoryLayout<PatternClipHalfPlane>.stride == 16
             && MemoryLayout<PatternClipHalfPlane>.alignment == 8

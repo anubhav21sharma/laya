@@ -4,6 +4,16 @@ import Foundation
 import ImageIO
 import Metal
 import PatternEngine
+
+private let sliceFourLegacyTilings: [TilingKind] = [
+    .grid,
+    .halfDrop,
+    .brick,
+    .mirrorX,
+    .mirrorY,
+    .mirrorXY,
+    .rotational,
+]
 import UniformTypeIdentifiers
 
 public struct SliceFourArtifactDigest: Codable, Equatable, Sendable {
@@ -817,7 +827,7 @@ private extension SliceFourHarnessRunner {
         let catalogEqualityCount = anchorRecipes.filter {
             catalogRecipeVerifier?($0) == true
         }.count
-        for tiling in TilingKind.allCases {
+        for tiling in sliceFourLegacyTilings {
             for recipe in anchorRecipes {
                 let renderer = try GridRenderer(
                     device: device,
@@ -2327,7 +2337,7 @@ public enum SliceFourEvidenceValidator {
                 "Slice 4 matrix lacks coverage: \(requiredCoverage.subtracting(aggregateCoverage).sorted())"
             )
         }
-        guard tilings == Set(TilingKind.allCases.map(\.rawValue)) else {
+        guard tilings == Set(sliceFourLegacyTilings.map(\.rawValue)) else {
             throw invalid("Slice 4 matrix does not cover all seven tilings")
         }
         guard materials == Set(["ink", "dry", "glaze", "boundedWash"]) else {

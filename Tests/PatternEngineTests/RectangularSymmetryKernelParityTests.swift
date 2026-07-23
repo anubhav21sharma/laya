@@ -146,8 +146,85 @@ func legacyRectangularImageTransformsAndOrdinalsRemainExact() {
                 xAxis: SIMD2(-1, 0),
                 yAxis: SIMD2(0, -1),
                 translation: SIMD2(128, 0)
+            ),
+            operation: CompiledGroupOperation(
+                quarterTurns: 2,
+                reflected: false
             )
         ),
+    ])
+}
+
+@Test
+func rotatedSquareLatticeUsesExactCellClipMetricAndImageOrder() throws {
+    let rasterSize = PixelSize(width: 192, height: 128)
+    let repeatSize = PatternSize(width: 128, height: 128)
+    let configuration = PeriodicSymmetryConfiguration(
+        presetID: .squareRotation,
+        repeatSize: repeatSize,
+        orientationRadians: .pi / 4
+    )
+    let strategy = try TilingStrategy(
+        configuration: configuration,
+        canonicalRasterSize: rasterSize
+    )
+    let periodic = try #require(
+        strategy.compiledSymmetry.domain.periodic
+    )
+    let world = periodic.translationBasis.u * 1.25
+        + periodic.translationBasis.v * -0.75
+    let point = WorldPoint(world)
+
+    #expect(
+        strategy.cell(containing: point)
+            == CellIndex(column: 1, row: -1)
+    )
+    let folded = strategy.displayFold(point)
+    #expect(abs(folded.x - 48) < 0.0001)
+    #expect(abs(folded.y - 32) < 0.0001)
+
+    let images = strategy.images(intersecting: rect(
+        minimum: world - SIMD2(repeating: 0.25),
+        maximum: world + SIMD2(repeating: 0.25)
+    ))
+    #expect(images.count == 4)
+    #expect(images.map(\.cell) == Array(
+        repeating: CellIndex(column: 1, row: -1),
+        count: 4
+    ))
+    #expect(images.map(\.ordinal) == [0, 1, 2, 3])
+    #expect(images.allSatisfy { $0.worldClip.halfPlanes.count == 4 })
+    #expect(images.allSatisfy {
+        $0.worldClip.contains(world, tolerance: 0.0001)
+    })
+    #expect(images == images.sorted(by: imagePrecedes))
+}
+
+@Test
+func squareKaleidoscopeEnumeratesEightImagesPerGenericCell() throws {
+    let strategy = try TilingStrategy(
+        configuration: PeriodicSymmetryConfiguration(
+            presetID: .squareKaleidoscope,
+            repeatSize: PatternSize(width: 128, height: 128),
+            orientationRadians: .pi / 6
+        ),
+        canonicalRasterSize: PixelSize(width: 192, height: 128)
+    )
+    let periodic = try #require(
+        strategy.compiledSymmetry.domain.periodic
+    )
+    let world = periodic.translationBasis.u * 0.25
+        + periodic.translationBasis.v * 0.375
+    let images = strategy.images(intersecting: rect(
+        minimum: world - SIMD2(repeating: 0.1),
+        maximum: world + SIMD2(repeating: 0.1)
+    ))
+
+    #expect(images.count == 8)
+    #expect(images.map(\.ordinal) == Array(0..<8).map(UInt8.init))
+    #expect(images.map(\.operation.reflected) == [
+        false, false, false, false,
+        true, true, true, true,
     ])
 }
 

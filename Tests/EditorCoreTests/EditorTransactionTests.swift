@@ -19,6 +19,12 @@ private let style = StrokeRenderStyle(
 
 private let capturedRecipe = AnchorBrushCatalog.dryPencil.recipe
 
+private let squareConfiguration = PeriodicSymmetryConfiguration(
+    presetID: .squareKaleidoscope,
+    repeatSize: PatternSize(width: 192, height: 192),
+    orientationRadians: .pi / 6
+)
+
 private let alternateColor = InkColor(
     red: 0.25,
     green: 0.5,
@@ -332,6 +338,27 @@ func collectingStrokeCancelsBeforeSynchronousAndConfigurationIntents() {
     }
     #expect(tilingTransaction.pendingOperation == tilingToken)
 
+    var periodicTransaction = collectingDrawTransaction()
+    guard case let .drawing(periodicDrawing) = periodicTransaction.state else {
+        Issue.record("Expected drawing state")
+        return
+    }
+    let periodicEffects = periodicTransaction.apply(
+        .periodicConfigurationIntent(squareConfiguration)
+    )
+    #expect(periodicEffects.count == 2)
+    #expect(periodicEffects[0] == .cancelStroke(periodicDrawing.token))
+    guard case let .applyPeriodicConfiguration(
+        periodicToken,
+        appliedConfiguration
+    ) = periodicEffects[1] else {
+        Issue.record("Expected applyPeriodicConfiguration")
+        return
+    }
+    #expect(appliedConfiguration == squareConfiguration)
+    #expect(periodicTransaction.state == .idle)
+    #expect(periodicTransaction.pendingOperation == periodicToken)
+
     var sizeTransaction = collectingDrawTransaction()
     guard case let .drawing(sizeDrawing) = sizeTransaction.state else {
         Issue.record("Expected drawing state")
@@ -347,6 +374,28 @@ func collectingStrokeCancelsBeforeSynchronousAndConfigurationIntents() {
     }
     #expect(appliedSize == size)
     #expect(sizeTransaction.pendingOperation == sizeToken)
+}
+
+@Test
+func periodicConfigurationIntentAppliesExactlyWhileIdle() {
+    var transaction = EditorTransaction()
+
+    let effects = transaction.apply(
+        .periodicConfigurationIntent(squareConfiguration)
+    )
+
+    guard case let .applyPeriodicConfiguration(token, configuration) =
+        effects.first
+    else {
+        Issue.record("Expected applyPeriodicConfiguration")
+        return
+    }
+    #expect(effects.count == 1)
+    #expect(configuration == squareConfiguration)
+    #expect(token.rawValue == 1)
+    #expect(transaction.state == .idle)
+    #expect(transaction.pendingOperation == token)
+    #expect(transaction.isBusy)
 }
 
 @Test
@@ -463,12 +512,21 @@ func submittedWorkRejectsConflictsAndGridChanges() {
     #expect(stroke.state == strokeState)
     #expect(stroke.apply(.gridVisibilityIntent(true)) == [.busy])
     #expect(stroke.state == strokeState)
+    #expect(
+        stroke.apply(.periodicConfigurationIntent(squareConfiguration))
+            == [.busy]
+    )
+    #expect(stroke.state == strokeState)
 
     var command = pendingCommandTransaction()
     let commandState = command.state
     let pending = command.pendingOperation
     #expect(command.apply(.toolIntent(.erase)) == [.busy])
     #expect(command.apply(.gridVisibilityIntent(true)) == [.busy])
+    #expect(
+        command.apply(.periodicConfigurationIntent(squareConfiguration))
+            == [.busy]
+    )
     #expect(command.state == commandState)
     #expect(command.pendingOperation == pending)
 }
@@ -561,6 +619,7 @@ func everyStateAndEventPairIsTotal() {
         .gridVisibilityIntent(true),
         .command(.undo),
         .tilingIntent(.halfDrop),
+        .periodicConfigurationIntent(squareConfiguration),
         .tileSizeIntent(PixelSize(width: 288, height: 320)),
         .selectionChanged(region),
         .selectionEnded,

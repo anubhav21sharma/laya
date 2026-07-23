@@ -263,6 +263,147 @@ func tilingChangeUndoRedoIsMetadataOnly() throws {
 
 @Test
 @MainActor
+func periodicConfigurationChangeUndoRedoIsExactMetadataOnly() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let before = controller.model.periodicConfiguration
+    let beforeBytes = try canonicalBytes(renderer)
+    let beforeResources = renderer.harnessTilingMutationSnapshot
+    let configuration = PeriodicSymmetryConfiguration(
+        presetID: .squareKaleidoscope,
+        repeatSize: PatternSize(width: 192, height: 192),
+        orientationRadians: .pi / 6
+    )
+
+    controller.handlePeriodicConfiguration(configuration)
+
+    #expect(controller.model.periodicConfiguration == configuration)
+    #expect(renderer.periodicConfiguration == configuration)
+    #expect(controller.historyAvailabilityForTesting.canUndo)
+    #expect(!controller.historyAvailabilityForTesting.canRedo)
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+
+    controller.undo()
+    #expect(controller.model.periodicConfiguration == before)
+    #expect(renderer.periodicConfiguration == before)
+    #expect(controller.historyAvailabilityForTesting.canRedo)
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+
+    controller.redo()
+    #expect(controller.model.periodicConfiguration == configuration)
+    #expect(renderer.periodicConfiguration == configuration)
+    #expect(!controller.historyAvailabilityForTesting.canRedo)
+    #expect(try canonicalBytes(renderer) == beforeBytes)
+    #expect(
+        renderer.harnessTilingMutationSnapshot.canonicalFront
+            == beforeResources.canonicalFront
+    )
+    #expect(renderer.harnessRevision == beforeResources.revision)
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+}
+
+@Test
+@MainActor
+func invalidPeriodicConfigurationFailsAtomicallyWithoutHistory() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    var errors: [MetalRendererError] = []
+    controller.onError = { errors.append($0) }
+    let beforeConfiguration = controller.model.periodicConfiguration
+    let beforeBytes = try canonicalBytes(renderer)
+    let beforeResources = renderer.harnessTilingMutationSnapshot
+    let invalid = PeriodicSymmetryConfiguration(
+        presetID: .squareRotation,
+        repeatSize: PatternSize(width: 192, height: 160),
+        orientationRadians: .pi / 4
+    )
+
+    controller.handlePeriodicConfiguration(invalid)
+
+    #expect(controller.model.periodicConfiguration == beforeConfiguration)
+    #expect(renderer.periodicConfiguration == beforeConfiguration)
+    #expect(!controller.historyAvailabilityForTesting.canUndo)
+    #expect(!controller.historyAvailabilityForTesting.canRedo)
+    #expect(!controller.model.isBusy)
+    #expect(renderer.isIdle)
+    #expect(try canonicalBytes(renderer) == beforeBytes)
+    #expect(renderer.harnessTilingMutationSnapshot == beforeResources)
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    #expect(errors.count == 1)
+    guard let error = errors.first,
+          case .invalidPeriodicConfiguration = error
+    else {
+        Issue.record("Expected invalidPeriodicConfiguration")
+        return
+    }
+}
+
+@Test
+@MainActor
+func cancellationFailureCannotStrandQueuedPeriodicIntentBusy() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let injectedError = MetalRendererError.commandFailed(
+        "injected cancellation failure"
+    )
+    var errors: [MetalRendererError] = []
+    let controller = EditorSessionController(
+        renderer: renderer,
+        requestStrokeCancellation: { token in
+            try renderer.cancelStroke(token: token)
+            throw injectedError
+        }
+    )
+    controller.onError = { errors.append($0) }
+    let before = controller.model.periodicConfiguration
+
+    controller.handleStrokeSample(controllerSample(.began))
+    controller.handlePeriodicConfiguration(
+        PeriodicSymmetryConfiguration(
+            presetID: .squareRotation,
+            repeatSize: PatternSize(width: 96.5, height: 96.5),
+            orientationRadians: .pi / 7
+        )
+    )
+
+    #expect(errors == [injectedError])
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(!controller.model.isBusy)
+    #expect(renderer.isIdle)
+    #expect(controller.model.periodicConfiguration == before)
+    #expect(!controller.historyAvailabilityForTesting.canUndo)
+
+    controller.handleTiling(.mirrorX)
+    #expect(controller.model.tiling == .mirrorX)
+    #expect(!controller.model.isBusy)
+}
+
+@Test
+@MainActor
+func normalizedEquivalentPeriodicConfigurationDoesNotCreateHistory() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleTiling(.squareRotation)
+    controller.undo()
+    #expect(!controller.historyAvailabilityForTesting.canUndo)
+    #expect(controller.historyAvailabilityForTesting.canRedo)
+    let before = controller.model.periodicConfiguration
+
+    controller.handlePeriodicConfiguration(
+        PeriodicSymmetryConfiguration(
+            presetID: before.presetID,
+            repeatSize: before.repeatSize,
+            orientationRadians: 2 * .pi
+        )
+    )
+
+    #expect(controller.model.periodicConfiguration == before)
+    #expect(renderer.periodicConfiguration == before)
+    #expect(!controller.historyAvailabilityForTesting.canUndo)
+    #expect(controller.historyAvailabilityForTesting.canRedo)
+}
+
+@Test
+@MainActor
 func tilingAfterUndoReleasesRasterRedoWithoutAllocatingMetadataPayload() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     var releaseCalls: [Set<StoredRasterRevisionID>] = []

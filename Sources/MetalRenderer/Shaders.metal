@@ -342,6 +342,10 @@ struct PatternDisplayMapping {
 static PatternDisplayMapping patternDisplayMapping(
     float2 world,
     float2 tileSize,
+    float2 repeatSize,
+    float2 latticeXAxis,
+    float2 latticeYAxis,
+    float2 latticeTranslation,
     uint symmetryFamily,
     uint tilingKind
 ) {
@@ -349,31 +353,97 @@ static PatternDisplayMapping patternDisplayMapping(
         return {float2(0.0), float2(0.0), false};
     }
 
+    const float2 lattice =
+        latticeXAxis * world.x
+        + latticeYAxis * world.y
+        + latticeTranslation;
+
     switch (tilingKind) {
     case PatternTilingWireHalfDrop: {
-        const int column = int(floor(world.x / tileSize.x));
-        const float phaseY = (column & 1) * tileSize.y * 0.5;
-        const float2 folded = patternPositiveFold(
-            float2(world.x, world.y - phaseY),
-            tileSize
+        if (all(repeatSize == tileSize)) {
+            const int column = int(floor(world.x / tileSize.x));
+            const float phaseY = (column & 1) * tileSize.y * 0.5;
+            const float2 folded = patternPositiveFold(
+                float2(world.x, world.y - phaseY),
+                tileSize
+            );
+            return {folded, folded, true};
+        }
+        const int column = int(floor(lattice.x));
+        const float phaseY = (column & 1) * 0.5;
+        const float2 foldedUnit = patternPositiveFold(
+            float2(lattice.x, lattice.y - phaseY),
+            float2(1.0)
         );
-        return {folded, folded, true};
+        return {
+            foldedUnit * tileSize,
+            foldedUnit * repeatSize,
+            true
+        };
     }
     case PatternTilingWireBrick: {
-        const int row = int(floor(world.y / tileSize.y));
-        const float phaseX = (row & 1) * tileSize.x * 0.5;
-        const float2 folded = patternPositiveFold(
-            float2(world.x - phaseX, world.y),
-            tileSize
+        if (all(repeatSize == tileSize)) {
+            const int row = int(floor(world.y / tileSize.y));
+            const float phaseX = (row & 1) * tileSize.x * 0.5;
+            const float2 folded = patternPositiveFold(
+                float2(world.x - phaseX, world.y),
+                tileSize
+            );
+            return {folded, folded, true};
+        }
+        const int row = int(floor(lattice.y));
+        const float phaseX = (row & 1) * 0.5;
+        const float2 foldedUnit = patternPositiveFold(
+            float2(lattice.x - phaseX, lattice.y),
+            float2(1.0)
         );
-        return {folded, folded, true};
+        return {
+            foldedUnit * tileSize,
+            foldedUnit * repeatSize,
+            true
+        };
     }
     case PatternTilingWireMirrorX:
     case PatternTilingWireMirrorY:
     case PatternTilingWireMirrorXY: {
-        const int column = int(floor(world.x / tileSize.x));
-        const int row = int(floor(world.y / tileSize.y));
-        const float2 local = patternPositiveFold(world, tileSize);
+        if (all(repeatSize == tileSize)) {
+            const int column = int(floor(world.x / tileSize.x));
+            const int row = int(floor(world.y / tileSize.y));
+            const float2 local = patternPositiveFold(world, tileSize);
+            const bool reflectsX =
+                (
+                    tilingKind == PatternTilingWireMirrorX
+                    || tilingKind == PatternTilingWireMirrorXY
+                )
+                && (column & 1) != 0;
+            const bool reflectsY =
+                (
+                    tilingKind == PatternTilingWireMirrorY
+                    || tilingKind == PatternTilingWireMirrorXY
+                )
+                && (row & 1) != 0;
+            const float2 canonical = float2(
+                reflectsX
+                    ? patternPositiveFold(
+                        tileSize.x - local.x,
+                        tileSize.x
+                    )
+                    : local.x,
+                reflectsY
+                    ? patternPositiveFold(
+                        tileSize.y - local.y,
+                        tileSize.y
+                    )
+                    : local.y
+            );
+            return {canonical, local, true};
+        }
+        const int column = int(floor(lattice.x));
+        const int row = int(floor(lattice.y));
+        const float2 localUnit = patternPositiveFold(
+            lattice,
+            float2(1.0)
+        );
         const bool reflectsX =
             (
                 tilingKind == PatternTilingWireMirrorX
@@ -386,23 +456,47 @@ static PatternDisplayMapping patternDisplayMapping(
                 || tilingKind == PatternTilingWireMirrorXY
             )
             && (row & 1) != 0;
-        const float2 canonical = float2(
+        const float2 canonicalUnit = float2(
             reflectsX
-                ? patternPositiveFold(tileSize.x - local.x, tileSize.x)
-                : local.x,
+                ? patternPositiveFold(1.0 - localUnit.x, 1.0)
+                : localUnit.x,
             reflectsY
-                ? patternPositiveFold(tileSize.y - local.y, tileSize.y)
-                : local.y
+                ? patternPositiveFold(1.0 - localUnit.y, 1.0)
+                : localUnit.y
         );
-        return {canonical, local, true};
+        return {
+            canonicalUnit * tileSize,
+            localUnit * repeatSize,
+            true
+        };
     }
-    case PatternTilingWireRotational: {
-        const float2 folded = patternPositiveFold(world, tileSize);
-        return {folded, folded, true};
-    }
+    case PatternTilingWireRotational:
     case PatternTilingWireGrid: {
-        const float2 folded = patternPositiveFold(world, tileSize);
-        return {folded, folded, true};
+        if (all(repeatSize == tileSize)) {
+            const float2 folded = patternPositiveFold(world, tileSize);
+            return {folded, folded, true};
+        }
+        const float2 foldedUnit = patternPositiveFold(
+            lattice,
+            float2(1.0)
+        );
+        return {
+            foldedUnit * tileSize,
+            foldedUnit * repeatSize,
+            true
+        };
+    }
+    case PatternTilingWireSquareRotation:
+    case PatternTilingWireSquareKaleidoscope: {
+        const float2 foldedUnit = patternPositiveFold(
+            lattice,
+            float2(1.0)
+        );
+        return {
+            foldedUnit * tileSize,
+            foldedUnit * repeatSize,
+            true
+        };
     }
     default:
         return {float2(0.0), float2(0.0), false};
@@ -681,6 +775,50 @@ static float4 patternCompositeThenBilinearSample(
     );
 }
 
+static float4 patternWrappedBilinearCanonicalSample(
+    texture2d<float> canonical,
+    float2 canonicalPixel
+) {
+    const float2 samplePosition = canonicalPixel - 0.5;
+    const int2 lower = int2(floor(samplePosition));
+    const float2 blend = fract(samplePosition);
+    const uint2 textureSize = uint2(
+        canonical.get_width(),
+        canonical.get_height()
+    );
+    const float4 value00 = canonical.read(
+        patternWrappedTexel(lower, textureSize)
+    );
+    const float4 value10 = canonical.read(
+        patternWrappedTexel(lower + int2(1, 0), textureSize)
+    );
+    const float4 value01 = canonical.read(
+        patternWrappedTexel(lower + int2(0, 1), textureSize)
+    );
+    const float4 value11 = canonical.read(
+        patternWrappedTexel(lower + int2(1, 1), textureSize)
+    );
+    return mix(
+        mix(value00, value10, blend.x),
+        mix(value01, value11, blend.x),
+        blend.y
+    );
+}
+
+fragment float4 patternPeriodicRepeatExportFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]]
+) {
+    const float2 canonicalPixel =
+        input.screenPixel / frame.drawableSize * frame.tileSize;
+    return patternWrappedBilinearCanonicalSample(
+        canonical,
+        canonicalPixel
+    );
+}
+
 static float4 patternGridOverlay(
     float4 color,
     PatternDisplayMapping mapping,
@@ -689,12 +827,55 @@ static float4 patternGridOverlay(
     if (frame.showGridLines != 0) {
         const float2 edgeDistance = min(
             mapping.phasedCellLocal,
-            frame.tileSize - mapping.phasedCellLocal
-        ) * frame.zoom;
+            frame.repeatSize - mapping.phasedCellLocal
+        );
+        float guideDistance = min(edgeDistance.x, edgeDistance.y)
+            * frame.zoom;
+        const float2 centerRelative =
+            mapping.phasedCellLocal - frame.repeatSize * 0.5;
+        if (
+            frame.guideKind == PatternGuideWireSquareRotation
+            || frame.guideKind == PatternGuideWireSquareKaleidoscope
+        ) {
+            const float cornerRingDistance = abs(
+                length(edgeDistance) * frame.zoom - 4.0
+            );
+            const float centerRingDistance = abs(
+                length(centerRelative) * frame.zoom - 4.0
+            );
+            const float edgeCenterRingDistance = abs(
+                min(
+                    length(float2(abs(centerRelative.x), edgeDistance.y)),
+                    length(float2(edgeDistance.x, abs(centerRelative.y)))
+                ) * frame.zoom - 3.0
+            );
+            guideDistance = min(
+                guideDistance,
+                min(
+                    cornerRingDistance,
+                    min(centerRingDistance, edgeCenterRingDistance)
+                )
+            );
+        }
+        if (
+            frame.guideKind == PatternGuideWireSquareKaleidoscope
+        ) {
+            const float inverseSquareRootTwo = 0.70710678118;
+            const float mirrorDistance = min(
+                min(abs(centerRelative.x), abs(centerRelative.y)),
+                min(
+                    abs(centerRelative.x - centerRelative.y)
+                        * inverseSquareRootTwo,
+                    abs(centerRelative.x + centerRelative.y)
+                        * inverseSquareRootTwo
+                )
+            ) * frame.zoom;
+            guideDistance = min(guideDistance, mirrorDistance);
+        }
         const float coverage = 1.0 - smoothstep(
             frame.gridLineWidth,
             frame.gridLineWidth + 1.0,
-            min(edgeDistance.x, edgeDistance.y)
+            guideDistance
         );
         const float alpha = 0.22 * coverage;
         const float4 grid = float4(
@@ -722,6 +903,10 @@ fragment float4 patternGridFragment(
     const PatternDisplayMapping mapping = patternDisplayMapping(
         world,
         frame.tileSize,
+        frame.repeatSize,
+        frame.latticeXAxis,
+        frame.latticeYAxis,
+        frame.latticeTranslation,
         frame.symmetryFamily,
         frame.tilingKind
     );

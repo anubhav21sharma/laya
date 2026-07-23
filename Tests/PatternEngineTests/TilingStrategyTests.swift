@@ -3,6 +3,16 @@ import PatternEngine
 import simd
 import Testing
 
+private let legacyTilingKinds: [TilingKind] = [
+    .grid,
+    .halfDrop,
+    .brick,
+    .mirrorX,
+    .mirrorY,
+    .mirrorXY,
+    .rotational,
+]
+
 private let standardTileSize = PatternSize(width: 288, height: 192)
 
 @Test
@@ -62,7 +72,14 @@ func migratedGridFoldKeepsTinyNegativeRemainderHalfOpen() {
 
 @Test
 func tilingKindRawValuesAndDisplayFoldMatchTheGoverningTable() {
-    #expect(TilingKind.allCases.map(\.rawValue) == Array(0...6).map(UInt32.init))
+    #expect(
+        legacyTilingKinds.map(\.rawValue)
+            == Array(0...6).map(UInt32.init)
+    )
+    #expect(
+        TilingKind.allCases.map(\.rawValue)
+            == Array(0...8).map(UInt32.init)
+    )
 
     let probes: [(TilingKind, WorldPoint, CanonicalPoint)] = [
         (.grid,       .init(x: -1,  y: 193), .init(x: 287, y: 1)),
@@ -144,7 +161,7 @@ func everyTilingFamilyKeepsIndicesNearPositiveAndNegativeOneMillion() {
     let tileSize = PatternSize(width: 256, height: 128)
     let indices = [1_000_000, -1_000_000, 999_999, -999_999]
 
-    for kind in TilingKind.allCases {
+    for kind in legacyTilingKinds {
         let strategy = TilingStrategy(kind: kind, tileSize: tileSize)
         for index in indices {
             let odd = !index.isMultiple(of: 2)
@@ -499,6 +516,10 @@ func rotationalImagesAreIdentityThenTileCenterRotation() {
                 xAxis: SIMD2(-1, 0),
                 yAxis: SIMD2(0, -1),
                 translation: SIMD2(576, 576)
+            ),
+            operation: CompiledGroupOperation(
+                quarterTurns: 2,
+                reflected: false
             )
         ),
     ])
@@ -525,7 +546,7 @@ func imagesStrictlyIntersectBoundsAndUseStableRowColumnOrdinalOrder() {
         .rotational: 8,
     ]
 
-    for kind in TilingKind.allCases {
+    for kind in legacyTilingKinds {
         let strategy = TilingStrategy(kind: kind, tileSize: standardTileSize)
         let first = strategy.images(intersecting: query)
         let second = strategy.images(intersecting: query)
@@ -549,11 +570,63 @@ func emptyBoundsProduceNoImagesForEveryTilingFamily() {
         maximum: SIMD2<Float>(20, 10)
     )
 
-    for kind in TilingKind.allCases {
+    for kind in legacyTilingKinds {
         let strategy = TilingStrategy(kind: kind, tileSize: standardTileSize)
         #expect(strategy.images(intersecting: zeroWidth).isEmpty)
         #expect(strategy.images(intersecting: zeroHeight).isEmpty)
     }
+}
+
+@Test
+func legacyConstructionCreatesEquivalentZeroAnglePeriodicConfiguration() throws {
+    for kind in legacyTilingKinds {
+        let strategy = TilingStrategy(kind: kind, tileSize: standardTileSize)
+        let expected = PeriodicSymmetryConfiguration(
+            presetID: kind,
+            repeatSize: standardTileSize,
+            orientationRadians: 0
+        )
+
+        #expect(strategy.periodicConfiguration == expected)
+        #expect(strategy.kind == kind)
+        #expect(strategy.tileSize == standardTileSize)
+    }
+}
+
+@Test
+func configuredSquareStrategyKeepsWorldRepeatSeparateFromRasterSize() throws {
+    let configuration = PeriodicSymmetryConfiguration(
+        presetID: .squareRotation,
+        repeatSize: PatternSize(width: 128, height: 128),
+        orientationRadians: .pi / 4
+    )
+    let strategy = try TilingStrategy(
+        configuration: configuration,
+        canonicalRasterSize: PixelSize(width: 192, height: 128)
+    )
+
+    #expect(strategy.periodicConfiguration == configuration)
+    #expect(strategy.kind == .squareRotation)
+    #expect(strategy.tileSize == PatternSize(width: 192, height: 128))
+    #expect(strategy.compiledSymmetry.images.map(\.ordinal) == [0, 1, 2, 3])
+    #expect(
+        simd_distance(
+            strategy.compiledSymmetry.domain.periodic!.translationBasis.u,
+            SIMD2<Float>(
+                Float(128).squareRoot() * 8,
+                Float(128).squareRoot() * 8
+            )
+        ) < 0.000_1
+    )
+    #expect(
+        simd_distance(
+            strategy.compiledSymmetry.domain.periodic!.translationBasis.v,
+            SIMD2<Float>(
+                -Float(128).squareRoot() * 8,
+                Float(128).squareRoot() * 8
+            )
+        ) < 0.000_1
+    )
 }
 
 @Test
@@ -738,6 +811,8 @@ private func independentMSLDisplayMapping(
         canonical = local
     case .grid, .halfDrop, .brick:
         preconditionFailure("Fixture accepts only Task 7 tilings")
+    case .squareRotation, .squareKaleidoscope:
+        preconditionFailure("Square display fixtures use the Phase 2 mapping")
     }
     return IndependentMSLDisplayMapping(
         canonical: CanonicalPoint(x: canonical.x, y: canonical.y),

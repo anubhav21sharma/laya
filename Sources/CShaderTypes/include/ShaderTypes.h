@@ -34,6 +34,12 @@ typedef struct PatternGridFrameUniforms {
     PatternUInt32 diagnosticMode;
     PatternUInt32 compositeMode;
     PatternUInt32 symmetryFamily;
+    PatternFloat2 repeatSize;
+    PatternFloat2 latticeXAxis;
+    PatternFloat2 latticeYAxis;
+    PatternFloat2 latticeTranslation;
+    PatternUInt32 guideKind;
+    PatternUInt32 padding2;
 } PatternGridFrameUniforms;
 
 typedef struct PatternClipHalfPlane {
@@ -112,6 +118,12 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireMirrorX = 3;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireMirrorY = 4;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireMirrorXY = 5;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireRotational = 6;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireSquareRotation = 7;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireSquareKaleidoscope = 8;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireRectangular = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireSquareRotation = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireSquareKaleidoscope = 2;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireNone = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireAsymmetricCoverage = 1;

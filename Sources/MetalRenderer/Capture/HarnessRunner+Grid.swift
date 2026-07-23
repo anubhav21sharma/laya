@@ -52,7 +52,8 @@ extension HarnessRunner {
                 ),
                 configuration: try TilingCanvasConfiguration(
                     pixelSize: configuration.pixelSize,
-                    tiling: configuration.tiling
+                    periodicConfiguration:
+                        configuration.periodicConfiguration
                 )
             )
         }
@@ -546,7 +547,7 @@ extension HarnessRunner {
             )
         case .noncentralVisibleCell:
             let input = Self.taskEightNoncentralInput(
-                for: configuration.tiling
+                for: configuration
             )
             guard input.tileSize == configuration.pixelSize else {
                 throw HarnessRunError.counterInvariant(
@@ -585,6 +586,24 @@ extension HarnessRunner {
             let centralCanonical =
                 try gridRenderer.copyCanonicalForHarness()
             state.artifacts.canonical = centralCanonical
+            if configuration.tiling.isSquare {
+                state.artifacts.oracle =
+                    TilingCoverageOracle.renderCanonical(
+                        footprint: .hardRound(
+                            radius: GridCanvasContract.brushRadius
+                        ),
+                        brushToWorld: Affine2D(
+                            xAxis: SIMD2(1, 0),
+                            yAxis: SIMD2(0, 1),
+                            translation: input.central.simd
+                        ),
+                        configuration:
+                            configuration.periodicConfiguration,
+                        canonicalRasterSize: configuration.pixelSize,
+                        supersampling: 1,
+                        coverageSymmetry: .halfTurnInvariant
+                    )
+            }
 
             let visibleRenderer = try makeGridRenderer(
                 scene: scene,
@@ -639,7 +658,79 @@ extension HarnessRunner {
                     fragments: visibleFragments,
                     expectedCell: input.visibleCell
                 )
+            } else if configuration.tiling.isSquare {
+                let expectedImageCount =
+                    configuration.tiling == .squareRotation ? 4 : 8
+                try validateSquareVisibleCellOrbit(
+                    scene: scene,
+                    fragments: centralFragments,
+                    expectedCell: CellIndex(column: 0, row: 0),
+                    expectedImageCount: expectedImageCount
+                )
+                try validateSquareVisibleCellOrbit(
+                    scene: scene,
+                    fragments: visibleFragments,
+                    expectedCell: input.visibleCell,
+                    expectedImageCount: expectedImageCount
+                )
             }
+        case .squareFixedPoint:
+            guard configuration.tiling.isSquare else {
+                throw HarnessRunError.counterInvariant(
+                    sceneName: scene.name,
+                    message: "square fixed-point program requires a square preset"
+                )
+            }
+            let strategy = configuration.makeStrategy()
+            let basis = strategy.compiledSymmetry.domain.periodic!
+                .translationBasis
+            let center = basis.origin + (basis.u + basis.v) * 0.5
+            state.taskSevenFragments = try gridRenderer.injectHarnessDab(
+                at: WorldPoint(center),
+                radius: GridCanvasContract.brushRadius,
+                coverageSymmetry: .rotationAndReflectionInvariant
+            )
+            try Self.appendFragmentAudit(
+                sceneName: scene.name,
+                fragments: state.taskSevenFragments,
+                repeatedFragments: Self.hardRoundFragments(
+                    at: WorldPoint(center),
+                    radius: GridCanvasContract.brushRadius,
+                    configuration: configuration,
+                    coverageSymmetry: .rotationAndReflectionInvariant
+                ),
+                into: &state.fragmentMeasurements
+            )
+            try flushPending(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &state.measurements
+            )
+            state.artifacts.liveScreen = try captureDisplay(
+                scene: scene,
+                renderer: gridRenderer,
+                measurements: &state.measurements
+            )
+            try captureCommittedAndCanonical(
+                scene: scene,
+                renderer: gridRenderer,
+                artifacts: &state.artifacts,
+                measurements: &state.measurements
+            )
+            state.artifacts.oracle = TilingCoverageOracle.renderCanonical(
+                footprint: .hardRound(
+                    radius: GridCanvasContract.brushRadius
+                ),
+                brushToWorld: Affine2D(
+                    xAxis: SIMD2(1, 0),
+                    yAxis: SIMD2(0, 1),
+                    translation: center
+                ),
+                configuration: configuration.periodicConfiguration,
+                canonicalRasterSize: configuration.pixelSize,
+                supersampling: 1,
+                coverageSymmetry: .rotationAndReflectionInvariant
+            )
         case .metadataTilingSwitch:
             let fragments = try gridRenderer.injectHarnessDab(
                 at: Self.taskEightMetadataCenter
@@ -1048,7 +1139,9 @@ extension HarnessRunner {
                 transformMismatchCount =
                     mismatchCount + displaySemanticMismatchCount
             }
-            if program == .rotationalFixedPoint {
+            if program == .rotationalFixedPoint
+                || program == .squareFixedPoint
+            {
                 duplicateFixedPointWrites =
                     Self.duplicateFixedPointWriteCount(
                         fragments: taskSevenFragments
@@ -1277,7 +1370,8 @@ extension HarnessRunner {
             restoredDisplayMaximumDelta: restoredDisplayMaximumDelta,
             previewCommitViolationCount: previewCommitViolationCount,
             longStrokeMetrics: longStrokeMetrics,
-            structuralValues: structuralValues
+            structuralValues: structuralValues,
+            tiling: configuration.tiling
         )
         try evaluatePixelChecks(
             scene: scene,
@@ -1396,7 +1490,7 @@ extension HarnessRunner {
             ),
             configuration: TilingCanvasConfiguration(
                 pixelSize: configuration.pixelSize,
-                tiling: configuration.tiling
+                periodicConfiguration: configuration.periodicConfiguration
             )
         )
     }
@@ -1415,6 +1509,28 @@ extension HarnessRunner {
             throw HarnessRunError.counterInvariant(
                 sceneName: scene.name,
                 message: "rotational visible cell \(expectedCell.column),\(expectedCell.row) did not contain the p2 image pair"
+            )
+        }
+    }
+
+    private func validateSquareVisibleCellOrbit(
+        scene: HarnessScene,
+        fragments: [CellFragment],
+        expectedCell: CellIndex,
+        expectedImageCount: Int
+    ) throws {
+        let ordinals = Set(
+            fragments.lazy
+                .filter { $0.cell == expectedCell }
+                .map(\.imageOrdinal)
+        )
+        let expectedOrdinals = Set(
+            (0..<expectedImageCount).map(UInt8.init)
+        )
+        guard ordinals == expectedOrdinals else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: scene.name,
+                message: "square visible cell \(expectedCell.column),\(expectedCell.row) did not contain the complete \(expectedImageCount)-image orbit"
             )
         }
     }
@@ -1761,7 +1877,8 @@ extension HarnessRunner {
         restoredDisplayMaximumDelta: Int?,
         previewCommitViolationCount: Int?,
         longStrokeMetrics: BenchmarkLongStrokeMetrics?,
-        structuralValues: [HarnessStructuralMetric: Int]
+        structuralValues: [HarnessStructuralMetric: Int],
+        tiling: TilingKind
     ) throws {
         guard scene.schemaVersion == 3 else {
             return
@@ -1800,8 +1917,11 @@ extension HarnessRunner {
              .mirrorXY, .rotationalGenerator, .rotationalFixedPoint,
              .rotationalOrientation, .largeFootprint,
              .asymmetricFootprint, .canonicalCoordinateContinuity,
-             .brushLocalCoordinateContinuity, .rectangularTile:
+             .brushLocalCoordinateContinuity, .rectangularTile,
+             .squareFixedPoint:
             requiresOracle = true
+        case .noncentralVisibleCell:
+            requiresOracle = tiling.isSquare
         default:
             requiresOracle = false
         }

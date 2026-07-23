@@ -51,6 +51,40 @@ func editorModelChangesOnlyAfterTilingConfirmation() {
 
 @MainActor
 @Test
+func editorModelConfirmsFullPeriodicConfigurationAndComputesTiling() {
+    let model = EditorModel()
+    let configuration = PeriodicSymmetryConfiguration(
+        presetID: .squareKaleidoscope,
+        repeatSize: PatternSize(width: 320, height: 320),
+        orientationRadians: .pi / 6
+    )
+
+    model.confirmPeriodicConfiguration(configuration)
+
+    #expect(model.periodicConfiguration == configuration)
+    #expect(model.tiling == .squareKaleidoscope)
+}
+
+@MainActor
+@Test
+func editorModelCanonicalResizePreservesPeriodicConfiguration() {
+    let model = EditorModel()
+    let configuration = PeriodicSymmetryConfiguration(
+        presetID: .squareRotation,
+        repeatSize: PatternSize(width: 192, height: 192),
+        orientationRadians: .pi / 4
+    )
+    model.confirmPeriodicConfiguration(configuration)
+
+    model.confirmPixelSize(PixelSize(width: 512, height: 384))
+
+    #expect(model.pixelSize == PixelSize(width: 512, height: 384))
+    #expect(model.periodicConfiguration == configuration)
+    #expect(model.tiling == .squareRotation)
+}
+
+@MainActor
+@Test
 func editorModelChangesCommittedReadStateOnlyThroughConfirmations() {
     let model = EditorModel()
     let color = InkColor(

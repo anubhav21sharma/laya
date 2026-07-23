@@ -11,6 +11,8 @@ public enum SymmetryPresetID: UInt32, CaseIterable, Codable, Sendable {
     case mirrorY = 4
     case mirrorXY = 5
     case rotational = 6
+    case squareRotation = 7
+    case squareKaleidoscope = 8
 }
 
 public typealias TilingKind = SymmetryPresetID

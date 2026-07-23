@@ -68,6 +68,66 @@ func metadataCommandsHaveNoRetainedRasterCost() throws {
 }
 
 @Test
+func periodicConfigurationMetadataHasNoRetainedRasterCost() throws {
+    let history = DocumentHistory(maximumCommands: 2, maximumBytes: 0)
+    let before = PeriodicSymmetryConfiguration(
+        presetID: .grid,
+        repeatSize: PatternSize(width: 256, height: 256)
+    )
+    let after = PeriodicSymmetryConfiguration(
+        presetID: .squareKaleidoscope,
+        repeatSize: PatternSize(width: 320, height: 320),
+        orientationRadians: .pi / 6
+    )
+    let command = DocumentHistoryCommand.periodicConfiguration(
+        MetadataChange(before: before, after: after)
+    )
+
+    try history.validateNewCommand(retainedBytes: command.retainedBytes)
+    let released = history.appendSuccessful(command)
+
+    #expect(command.retainedBytes == 0)
+    #expect(command.revisionIDs.isEmpty)
+    #expect(history.commandCount == 1)
+    #expect(history.retainedRasterBytes == 0)
+    #expect(released.isEmpty)
+}
+
+@Test
+func periodicConfigurationUndoRedoPreservesExactCommandIdentity() throws {
+    let history = DocumentHistory()
+    let before = PeriodicSymmetryConfiguration(
+        presetID: .halfDrop,
+        repeatSize: PatternSize(width: 192, height: 128),
+        orientationRadians: .pi / 8
+    )
+    let after = PeriodicSymmetryConfiguration(
+        presetID: .squareRotation,
+        repeatSize: PatternSize(width: 384, height: 384),
+        orientationRadians: .pi / 4
+    )
+    let command = DocumentHistoryCommand.periodicConfiguration(
+        MetadataChange(before: before, after: after)
+    )
+    try history.validateNewCommand(retainedBytes: command.retainedBytes)
+    _ = history.appendSuccessful(command)
+
+    let undo = try #require(try history.beginUndo())
+    #expect(undo.command == command)
+    try history.finishNavigation(token: undo.token, succeeded: true)
+
+    let redo = try #require(try history.beginRedo())
+    #expect(redo.command == command)
+    guard case let .periodicConfiguration(change) = redo.command else {
+        Issue.record("Expected periodic-configuration metadata command")
+        return
+    }
+    #expect(change.before == before)
+    #expect(change.after == after)
+    try history.finishNavigation(token: redo.token, succeeded: true)
+}
+
+@Test
 func tileResizeRetainsBothDifferentlySizedFullRasterRevisions() throws {
     let beforeSize = PixelSize(width: 96, height: 80)
     let afterSize = PixelSize(width: 64, height: 72)

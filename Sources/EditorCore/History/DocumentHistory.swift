@@ -58,13 +58,16 @@ public struct TileResizeHistoryCommand: Equatable, Sendable {
 public enum DocumentHistoryCommand: Equatable, Sendable {
     case raster(RasterHistoryCommand)
     case tiling(MetadataChange<TilingKind>)
+    case periodicConfiguration(
+        MetadataChange<PeriodicSymmetryConfiguration>
+    )
     case tileResize(TileResizeHistoryCommand)
 
     public var retainedBytes: Int {
         switch self {
         case let .raster(command):
             command.retainedBytes
-        case .tiling:
+        case .tiling, .periodicConfiguration:
             0
         case let .tileResize(command):
             command.retainedBytes
@@ -75,7 +78,7 @@ public enum DocumentHistoryCommand: Equatable, Sendable {
         switch self {
         case let .raster(command):
             [command.before.id, command.after.id]
-        case .tiling:
+        case .tiling, .periodicConfiguration:
             []
         case let .tileResize(command):
             [command.before.id, command.after.id]

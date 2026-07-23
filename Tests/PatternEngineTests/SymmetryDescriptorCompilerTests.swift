@@ -3,6 +3,16 @@ import Foundation
 import simd
 import Testing
 
+private let legacySymmetryPresetIDs: [SymmetryPresetID] = [
+    .grid,
+    .halfDrop,
+    .brick,
+    .mirrorX,
+    .mirrorY,
+    .mirrorXY,
+    .rotational,
+]
+
 @Suite("Symmetry descriptor compiler")
 struct SymmetryDescriptorCompilerTests {
     @Test
@@ -12,7 +22,16 @@ struct SymmetryDescriptorCompilerTests {
         #expect(SymmetryKernelFamily.rectangular.rawValue == 0)
         #expect(SymmetryKernelFamily.triangular.rawValue == 1)
         #expect(SymmetryKernelFamily.radial.rawValue == 2)
-        #expect(SymmetryPresetID.allCases.map(\.rawValue) == Array(0...6))
+        #expect(
+            legacySymmetryPresetIDs.map(\.rawValue)
+                == Array(0...6).map(UInt32.init)
+        )
+        #expect(SymmetryPresetID.squareRotation.rawValue == 7)
+        #expect(SymmetryPresetID.squareKaleidoscope.rawValue == 8)
+        #expect(
+            SymmetryPresetID.allCases.map(\.rawValue)
+                == Array(0...8).map(UInt32.init)
+        )
         #expect(TilingKind.rotational.rawValue == 6)
 
         let encoded = try JSONEncoder().encode(SymmetryPresetID.mirrorXY)
@@ -25,7 +44,7 @@ struct SymmetryDescriptorCompilerTests {
         )
     }
 
-    @Test(arguments: SymmetryPresetID.allCases)
+    @Test(arguments: legacySymmetryPresetIDs)
     func everyLegacyPresetCompilesClosedRectangularData(
         _ presetID: SymmetryPresetID
     ) throws {
@@ -43,6 +62,11 @@ struct SymmetryDescriptorCompilerTests {
         #expect(compiled.displayProgram.family == .rectangular)
         #expect(compiled.displayProgram.presetWireID == presetID.rawValue)
         #expect(compiled.cost.maximumImagesPerCell == compiled.images.count)
+        #expect(
+            compiled.cost.maximumProjectedInstancesPerDab
+                <= TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity
+        )
         #expect(!compiled.images.isEmpty)
         #expect(
             compiled.domain.periodic?.translationBasis
@@ -93,4 +117,449 @@ struct SymmetryDescriptorCompilerTests {
             }
         }
     }
+
+    @Test
+    func compilerValidatesSquareConfigurationGeometryAndOrientation() throws {
+        let legacy = PeriodicSymmetryConfiguration(
+            presetID: .grid,
+            repeatSize: PatternSize(width: 128, height: 96),
+            orientationRadians: 0
+        )
+        #expect(legacy.presetID == .grid)
+        #expect(legacy.repeatSize == PatternSize(width: 128, height: 96))
+        #expect(legacy.orientationRadians == 0)
+        let compiledLegacy = try SymmetryDescriptorCompiler.compile(
+            configuration: legacy,
+            canonicalRasterSize: PixelSize(width: 128, height: 96)
+        )
+        #expect(compiledLegacy.ownership == .rectangularHalfOpen)
+
+        let nonSquare = PeriodicSymmetryConfiguration(
+            presetID: .squareRotation,
+            repeatSize: PatternSize(width: 128, height: 96),
+            orientationRadians: 0
+        )
+        #expect(throws: SymmetryDescriptorError.nonSquareRepeat(
+            width: 128,
+            height: 96
+        )) {
+            try SymmetryDescriptorCompiler.compile(
+                configuration: nonSquare,
+                canonicalRasterSize: PixelSize(width: 128, height: 96)
+            )
+        }
+        let nonFiniteAngle = PeriodicSymmetryConfiguration(
+            presetID: .squareKaleidoscope,
+            repeatSize: PatternSize(width: 128, height: 128),
+            orientationRadians: .infinity
+        )
+        #expect(throws: SymmetryDescriptorError.nonFiniteOrientation) {
+            try SymmetryDescriptorCompiler.compile(
+                configuration: nonFiniteAngle,
+                canonicalRasterSize: PixelSize(width: 128, height: 128)
+            )
+        }
+    }
+
+    @Test
+    func repeatGeometryAcceptsContinuousWorldDimensionsIndependentOfRaster() throws {
+        for side: Float in [96.5, 173.25, 8_192.25] {
+            let configuration = PeriodicSymmetryConfiguration(
+                presetID: .squareRotation,
+                repeatSize: PatternSize(width: side, height: side),
+                orientationRadians: .pi / 7
+            )
+            let compiled = try SymmetryDescriptorCompiler.compile(
+                configuration: configuration,
+                canonicalRasterSize: PixelSize(width: 128, height: 96)
+            )
+            #expect(
+                compiled.domain.periodic?.configuration.repeatSize
+                    == configuration.repeatSize
+            )
+            #expect(
+                compiled.domain.periodic?.configuration.orientationRadians
+                    == configuration.orientationRadians
+            )
+        }
+
+        let nonFinite = PeriodicSymmetryConfiguration(
+            presetID: .squareRotation,
+            repeatSize: PatternSize(width: .infinity, height: .infinity),
+            orientationRadians: 0
+        )
+        #expect(
+            throws: SymmetryDescriptorError.nonFiniteDimension(.width)
+        ) {
+            try SymmetryDescriptorCompiler.compile(
+                configuration: nonFinite,
+                canonicalRasterSize: PixelSize(width: 128, height: 96)
+            )
+        }
+    }
+
+    @Test
+    func compilerRejectsRepeatGeometryThatExceedsProjectionCapacity() {
+        let configuration = PeriodicSymmetryConfiguration(
+            presetID: .squareKaleidoscope,
+            repeatSize: PatternSize(width: 0.001, height: 0.001),
+            orientationRadians: .pi / 7
+        )
+
+        do {
+            _ = try SymmetryDescriptorCompiler.compile(
+                configuration: configuration,
+                canonicalRasterSize: PixelSize(width: 128, height: 96)
+            )
+            Issue.record("Expected unsafe repeat geometry to be rejected")
+        } catch let error as SymmetryDescriptorError {
+            guard case let .projectionCostExceedsLimit(actual, maximum) =
+                error
+            else {
+                Issue.record("Unexpected compiler error: \(error)")
+                return
+            }
+            #expect(
+                actual
+                    > TransientStrokeBufferContract
+                        .visibleEpochProjectedInstanceCapacity
+            )
+            #expect(
+                maximum
+                    == TransientStrokeBufferContract
+                        .visibleEpochProjectedInstanceCapacity
+            )
+        } catch {
+            Issue.record("Unexpected compiler error: \(error)")
+        }
+    }
+
+    @Test
+    func compilerCostBoundIncludesWorstCaseRotatedBrushBounds() {
+        let configuration = PeriodicSymmetryConfiguration(
+            presetID: .squareKaleidoscope,
+            repeatSize: PatternSize(width: 37, height: 37),
+            orientationRadians: 0
+        )
+
+        do {
+            _ = try SymmetryDescriptorCompiler.compile(
+                configuration: configuration,
+                canonicalRasterSize: PixelSize(width: 128, height: 96)
+            )
+            Issue.record("Expected rotated maximum dab cost rejection")
+        } catch let error as SymmetryDescriptorError {
+            guard case let .projectionCostExceedsLimit(actual, maximum) =
+                error
+            else {
+                Issue.record("Unexpected compiler error: \(error)")
+                return
+            }
+            #expect(actual == 7_688)
+            #expect(
+                maximum
+                    == TransientStrokeBufferContract
+                        .visibleEpochProjectedInstanceCapacity
+            )
+        } catch {
+            Issue.record("Unexpected compiler error: \(error)")
+        }
+    }
+
+    @Test
+    func squarePresetsCompileExactImageTablesOwnershipAndCost() throws {
+        let repeatSize = PatternSize(width: 128, height: 128)
+        let rasterSize = PixelSize(width: 128, height: 128)
+        let squareRotation = try SymmetryDescriptorCompiler.compile(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: .squareRotation,
+                repeatSize: repeatSize,
+                orientationRadians: 0
+            ),
+            canonicalRasterSize: rasterSize
+        )
+        let squareKaleidoscope = try SymmetryDescriptorCompiler.compile(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: .squareKaleidoscope,
+                repeatSize: repeatSize,
+                orientationRadians: 0
+            ),
+            canonicalRasterSize: rasterSize
+        )
+
+        let rotations = squareRotationImages(side: 128)
+        let reflected = squareReflectedImages(side: 128)
+        #expect(squareRotation.family == .rectangular)
+        #expect(squareRotation.images == rotations)
+        #expect(squareRotation.cost.maximumImagesPerCell == 4)
+        guard case let .squareRotation(sectors, rotationStabilizers) =
+            squareRotation.ownership
+        else {
+            Issue.record("Square Rotation must compile square-sector ownership")
+            return
+        }
+        #expect(sectors.count == 4)
+        #expect(sectors.map(\.ownerOrdinal) == Array(0..<4).map(UInt8.init))
+        #expect(sectors.allSatisfy {
+            $0.canonicalVertices.count == 3
+                && abs(signedArea($0.canonicalVertices) - 4_096) < 0.001
+        })
+        #expect(rotationStabilizers.contains {
+            $0.canonicalPoint == SIMD2<Float>(64, 64)
+                && $0.kind == .rotation(order: 4)
+        })
+
+        #expect(squareKaleidoscope.family == .rectangular)
+        #expect(squareKaleidoscope.images == rotations + reflected)
+        #expect(squareKaleidoscope.cost.maximumImagesPerCell == 8)
+        guard case let .squareMirrorTriangles(
+            triangles,
+            reflectionStabilizers
+        ) = squareKaleidoscope.ownership else {
+            Issue.record(
+                "Square Kaleidoscope must compile mirror-triangle ownership"
+            )
+            return
+        }
+        #expect(triangles.count == 8)
+        #expect(
+            triangles.map(\.ownerOrdinal)
+                == Array(0..<8).map(UInt8.init)
+        )
+        #expect(
+            triangles.allSatisfy {
+                $0.canonicalVertices.count == 3
+                    && abs(signedArea($0.canonicalVertices) - 2_048) < 0.001
+            }
+        )
+        #expect(reflectionStabilizers.contains {
+            $0.canonicalPoint == SIMD2<Float>(64, 64)
+                && $0.kind == .dihedral(rotationOrder: 4)
+        })
+
+        let center = SIMD2<Float>(64, 64)
+        #expect(
+            squareRotation.images.filter {
+                $0.localToCanonical.applying(to: center) == center
+            }.count == 4
+        )
+        #expect(
+            squareKaleidoscope.images.filter {
+                $0.localToCanonical.applying(to: center) == center
+            }.count == 8
+        )
+    }
+
+    @Test
+    func squareRasterMetricMapsSquareWorldRepeatIntoRectangularStorage() throws {
+        let compiled = try SymmetryDescriptorCompiler.compile(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: .squareRotation,
+                repeatSize: PatternSize(width: 128, height: 128),
+                orientationRadians: 0
+            ),
+            canonicalRasterSize: PixelSize(width: 192, height: 128)
+        )
+
+        #expect(compiled.rasterMetric.worldToRaster == Affine2D(
+            xAxis: SIMD2(1.5, 0),
+            yAxis: SIMD2(0, 1),
+            translation: .zero
+        ))
+        #expect(
+            simd_distance(
+                compiled.rasterMetric.rasterToWorld.xAxis,
+                SIMD2<Float>(2 / 3, 0)
+            ) < 0.000_001
+        )
+        #expect(compiled.rasterMetric.rasterToWorld.yAxis == SIMD2(0, 1))
+    }
+
+    @Test
+    func squareDihedralImagesAreClosedInvertibleAndPreserveTheSquareLattice()
+        throws
+    {
+        let compiled = try SymmetryDescriptorCompiler.compile(
+            configuration: PeriodicSymmetryConfiguration(
+                presetID: .squareKaleidoscope,
+                repeatSize: PatternSize(width: 173.5, height: 173.5),
+                orientationRadians: .pi / 7
+            ),
+            canonicalRasterSize: PixelSize(width: 192, height: 128)
+        )
+        let probes = [
+            SIMD2<Float>(0, 0),
+            SIMD2<Float>(37, 19),
+            SIMD2<Float>(192, 128),
+        ]
+
+        for image in compiled.images {
+            let transform = image.localToCanonical
+            let determinant = transform.xAxis.x * transform.yAxis.y
+                - transform.xAxis.y * transform.yAxis.x
+            #expect(
+                abs(determinant - (image.operation.reflected ? -1 : 1))
+                    < 0.000_001
+            )
+            let inverse = transform.inverted()
+            #expect(compiled.images.contains {
+                affinesAgree(
+                    transform.concatenating(
+                        $0.localToCanonical
+                    ),
+                    .identity,
+                    probes: probes
+                )
+            })
+            #expect(
+                affinesAgree(
+                    transform.concatenating(inverse),
+                    .identity,
+                    probes: probes
+                )
+            )
+        }
+
+        for lhs in compiled.images {
+            for rhs in compiled.images {
+                let product = lhs.localToCanonical.concatenating(
+                    rhs.localToCanonical
+                )
+                #expect(compiled.images.contains {
+                    affinesAgree(
+                        product,
+                        $0.localToCanonical,
+                        probes: probes
+                    )
+                })
+            }
+        }
+
+        let basis = compiled.domain.periodic!.translationBasis
+        #expect(abs(simd_length(basis.u) - 173.5) < 0.000_1)
+        #expect(abs(simd_length(basis.v) - 173.5) < 0.000_1)
+        #expect(abs(simd_dot(basis.u, basis.v)) < 0.002)
+        #expect(
+            abs(
+                basis.u.x * basis.v.y - basis.u.y * basis.v.x
+                    - 173.5 * 173.5
+            ) < 0.01
+        )
+    }
+}
+
+private func affinesAgree(
+    _ lhs: Affine2D,
+    _ rhs: Affine2D,
+    probes: [SIMD2<Float>]
+) -> Bool {
+    probes.allSatisfy {
+        simd_distance(lhs.applying(to: $0), rhs.applying(to: $0))
+            < 0.000_1
+    }
+}
+
+private func squareRotationImages(side: Float) -> [CompiledIsometry] {
+    [
+        CompiledIsometry(ordinal: 0, localToCanonical: .identity),
+        CompiledIsometry(
+            ordinal: 1,
+            localToCanonical: Affine2D(
+                xAxis: SIMD2(0, 1),
+                yAxis: SIMD2(-1, 0),
+                translation: SIMD2(side, 0)
+            ),
+            operation: CompiledGroupOperation(
+                quarterTurns: 1,
+                reflected: false
+            )
+        ),
+        CompiledIsometry(
+            ordinal: 2,
+            localToCanonical: Affine2D(
+                xAxis: SIMD2(-1, 0),
+                yAxis: SIMD2(0, -1),
+                translation: SIMD2(side, side)
+            ),
+            operation: CompiledGroupOperation(
+                quarterTurns: 2,
+                reflected: false
+            )
+        ),
+        CompiledIsometry(
+            ordinal: 3,
+            localToCanonical: Affine2D(
+                xAxis: SIMD2(0, -1),
+                yAxis: SIMD2(1, 0),
+                translation: SIMD2(0, side)
+            ),
+            operation: CompiledGroupOperation(
+                quarterTurns: 3,
+                reflected: false
+            )
+        ),
+    ]
+}
+
+private func squareReflectedImages(side: Float) -> [CompiledIsometry] {
+    [
+        CompiledIsometry(
+            ordinal: 4,
+            localToCanonical: Affine2D(
+                xAxis: SIMD2(1, 0),
+                yAxis: SIMD2(0, -1),
+                translation: SIMD2(0, side)
+            ),
+            operation: CompiledGroupOperation(
+                quarterTurns: 0,
+                reflected: true
+            )
+        ),
+        CompiledIsometry(
+            ordinal: 5,
+            localToCanonical: Affine2D(
+                xAxis: SIMD2(0, 1),
+                yAxis: SIMD2(1, 0),
+                translation: .zero
+            ),
+            operation: CompiledGroupOperation(
+                quarterTurns: 1,
+                reflected: true
+            )
+        ),
+        CompiledIsometry(
+            ordinal: 6,
+            localToCanonical: Affine2D(
+                xAxis: SIMD2(-1, 0),
+                yAxis: SIMD2(0, 1),
+                translation: SIMD2(side, 0)
+            ),
+            operation: CompiledGroupOperation(
+                quarterTurns: 2,
+                reflected: true
+            )
+        ),
+        CompiledIsometry(
+            ordinal: 7,
+            localToCanonical: Affine2D(
+                xAxis: SIMD2(0, -1),
+                yAxis: SIMD2(-1, 0),
+                translation: SIMD2(side, side)
+            ),
+            operation: CompiledGroupOperation(
+                quarterTurns: 3,
+                reflected: true
+            )
+        ),
+    ]
+}
+
+private func signedArea(_ vertices: [SIMD2<Float>]) -> Float {
+    guard vertices.count >= 3 else { return 0 }
+    var twiceArea: Float = 0
+    for index in vertices.indices {
+        let next = vertices[(index + 1) % vertices.count]
+        twiceArea += vertices[index].x * next.y - vertices[index].y * next.x
+    }
+    return abs(twiceArea) * 0.5
 }

@@ -448,20 +448,133 @@ struct TilingCoverageOracleTests {
             )
             let actual = rasterizeProductionFragments(testCase.oracleCase)
 
-            #expect(
-                expected.coverage.bytes == actual.coverage.bytes,
-                "\(testCase.failureContext): coverage bytes"
+            let coverageMatches = expected.coverage.bytes.elementsEqual(
+                actual.coverage.bytes
             )
-            #expect(
-                expected.canonicalCoordinatesBGRA
-                    == actual.canonicalCoordinatesBGRA,
-                "\(testCase.failureContext): canonical-coordinate bytes"
+            let canonicalMatches = expected.canonicalCoordinatesBGRA
+                .elementsEqual(actual.canonicalCoordinatesBGRA)
+            let brushLocalMatches = expected.brushLocalCoordinatesBGRA
+                .elementsEqual(actual.brushLocalCoordinatesBGRA)
+            guard coverageMatches else {
+                Issue.record(
+                    "\(testCase.failureContext): coverage bytes"
+                )
+                return
+            }
+            guard canonicalMatches else {
+                Issue.record(
+                    "\(testCase.failureContext): canonical-coordinate bytes"
+                )
+                return
+            }
+            guard brushLocalMatches else {
+                Issue.record(
+                    "\(testCase.failureContext): brush-local bytes"
+                )
+                return
+            }
+        }
+    }
+
+    @Test
+    func orientedSquareConfigurationsMatchIndependentOracleAndRepeatExactly()
+        throws
+    {
+        let cases: [
+            (
+                configuration: PeriodicSymmetryConfiguration,
+                rasterSize: PixelSize
             )
-            #expect(
-                expected.brushLocalCoordinatesBGRA
-                    == actual.brushLocalCoordinatesBGRA,
-                "\(testCase.failureContext): brush-local bytes"
+        ] = [
+            (
+                PeriodicSymmetryConfiguration(
+                    presetID: .squareRotation,
+                    repeatSize: PatternSize(width: 80, height: 80),
+                    orientationRadians: 0.37
+                ),
+                PixelSize(width: 96, height: 64)
+            ),
+            (
+                PeriodicSymmetryConfiguration(
+                    presetID: .squareKaleidoscope,
+                    repeatSize: PatternSize(width: 96, height: 96),
+                    orientationRadians: -0.41
+                ),
+                PixelSize(width: 64, height: 96)
+            ),
+        ]
+
+        for testCase in cases {
+            let side = testCase.configuration.repeatSize.width
+            let angle = testCase.configuration.orientationRadians
+            let u = SIMD2(side * cos(angle), side * sin(angle))
+            let v = SIMD2(-side * sin(angle), side * cos(angle))
+            let baseTransform = Affine2D(
+                xAxis: SIMD2(6.3, 1.4),
+                yAxis: SIMD2(-2.1, 5.7),
+                translation: u * 1.31 + v * -0.73
             )
+            var baseline: OracleRasterResult?
+
+            for translation in [
+                baseTransform.translation,
+                baseTransform.translation + u * 3 + v * -2,
+            ] {
+                let brushToWorld = Affine2D(
+                    xAxis: baseTransform.xAxis,
+                    yAxis: baseTransform.yAxis,
+                    translation: translation
+                )
+                let expected = TilingCoverageOracle.renderCanonical(
+                    footprint: .asymmetricTriangle,
+                    brushToWorld: brushToWorld,
+                    configuration: testCase.configuration,
+                    canonicalRasterSize: testCase.rasterSize,
+                    supersampling: 2,
+                    coverageSymmetry: .oriented
+                )
+                let strategy = try TilingStrategy(
+                    configuration: testCase.configuration,
+                    canonicalRasterSize: testCase.rasterSize
+                )
+                let fragments = TilingProjection.fragments(
+                    for: StampFootprint(
+                        brushToWorld: brushToWorld,
+                        localBounds: AxisAlignedRect(
+                            minimum: SIMD2(-0.75, -0.60),
+                            maximum: SIMD2(0.85, 0.90)
+                        ),
+                        coverageSymmetry: .oriented
+                    ),
+                    using: strategy
+                )
+                let actual = rasterizeProductionFragments(
+                    OraclePropertyCase(
+                        name: "\(testCase.configuration.presetID)",
+                        footprint: .asymmetricTriangle,
+                        brushToWorld: brushToWorld,
+                        tileSize: testCase.rasterSize,
+                        tiling: testCase.configuration.presetID,
+                        supersampling: 2
+                    ),
+                    fragments: fragments
+                )
+
+                #expect(expected.coverage.bytes == actual.coverage.bytes)
+                #expect(
+                    expected.canonicalCoordinatesBGRA
+                        == actual.canonicalCoordinatesBGRA
+                )
+                #expect(
+                    expected.brushLocalCoordinatesBGRA
+                        == actual.brushLocalCoordinatesBGRA
+                )
+                if let baseline {
+                    #expect(expected == baseline)
+                } else {
+                    baseline = expected
+                }
+            }
         }
     }
 
@@ -1355,10 +1468,11 @@ private func fullyCoveredPixels(
 }
 
 private func rasterizeProductionFragments(
-    _ testCase: OraclePropertyCase
+    _ testCase: OraclePropertyCase,
+    fragments: [CellFragment]? = nil
 ) -> OracleRasterResult {
-    let fragments = productionFragments(for: testCase)
-    let inverseFragments = fragments.map {
+    let resolvedFragments = fragments ?? productionFragments(for: testCase)
+    let inverseFragments = resolvedFragments.map {
         ProductionFragmentSample(
             canonicalToBrush: $0.canonicalFromBrush.inverted(),
             brushClip: $0.brushClip

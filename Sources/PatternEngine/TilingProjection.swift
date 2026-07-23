@@ -6,6 +6,7 @@ public struct CellFragment: Equatable, Sendable {
     public let imageOrdinal: UInt8
     public let canonicalFromBrush: Affine2D
     public let brushClip: ConvexClip
+    public let operation: CompiledGroupOperation
 
     public init(
         cell: CellIndex,
@@ -13,10 +14,27 @@ public struct CellFragment: Equatable, Sendable {
         canonicalFromBrush: Affine2D,
         brushClip: ConvexClip
     ) {
+        self.init(
+            cell: cell,
+            imageOrdinal: imageOrdinal,
+            canonicalFromBrush: canonicalFromBrush,
+            brushClip: brushClip,
+            operation: .identity
+        )
+    }
+
+    public init(
+        cell: CellIndex,
+        imageOrdinal: UInt8,
+        canonicalFromBrush: Affine2D,
+        brushClip: ConvexClip,
+        operation: CompiledGroupOperation
+    ) {
         self.cell = cell
         self.imageOrdinal = imageOrdinal
         self.canonicalFromBrush = canonicalFromBrush
         self.brushClip = brushClip
+        self.operation = operation
     }
 }
 
@@ -83,7 +101,7 @@ public enum TilingProjection {
         for image in images
         where image.worldBounds.intersects(worldBounds) {
             let planes = brushLocalPlanes(
-                for: image.worldBounds,
+                for: image.worldClip,
                 brushToWorld: footprint.brushToWorld
             )
             let localPolygon = planes.reduce(
@@ -111,7 +129,8 @@ public enum TilingProjection {
                         cell: image.cell,
                         imageOrdinal: image.ordinal,
                         canonicalFromBrush: canonicalFromBrush,
-                        brushClip: ConvexClip(halfPlanes: planes)
+                        brushClip: ConvexClip(halfPlanes: planes),
+                        operation: image.operation
                     ),
                     localPolygon: localPolygon
                 )
@@ -119,12 +138,15 @@ public enum TilingProjection {
         }
 
         candidates = removingByteEqualCandidates(candidates)
-        if
-            strategy.compiledSymmetry.domain.periodic?
-                .coincidentImagePolicy == .halfTurnInvariantCoverage,
-            footprint.coverageSymmetry == .halfTurnInvariant
+        if let policy = strategy.compiledSymmetry.domain.periodic?
+            .coincidentImagePolicy
         {
-            candidates = removingCoverageEqualCandidates(candidates)
+            candidates = removingCoverageEqualCandidates(
+                candidates,
+                policy: policy,
+                symmetry: footprint.coverageSymmetry,
+                ownership: strategy.compiledSymmetry.ownership
+            )
         }
         candidates.sort {
             fragmentPrecedes($0.fragment, $1.fragment)
@@ -219,24 +241,112 @@ private struct FragmentByteKey: Hashable {
 }
 
 private struct CoverageDomainKey: Hashable {
-    let centerX: UInt32
-    let centerY: UInt32
+    let centerX: Int64
+    let centerY: Int64
     let xAxisLength: UInt32
     let yAxisLength: UInt32
     let polygon: [UInt32]
 
-    init(_ candidate: FragmentCandidate) {
-        let affine = candidate.fragment.canonicalFromBrush
-        centerX = normalizedZero(affine.translation.x).bitPattern
-        centerY = normalizedZero(affine.translation.y).bitPattern
-        xAxisLength = normalizedZero(simd_length(affine.xAxis)).bitPattern
-        yAxisLength = normalizedZero(simd_length(affine.yAxis)).bitPattern
-        polygon = TilingProjection.canonicalPolygonKey(
-            candidate.localPolygon.map {
-                affine.applying(to: $0)
-            }
-        )
+    private init(
+        centerX: Int64,
+        centerY: Int64,
+        xAxisLength: UInt32,
+        yAxisLength: UInt32,
+        polygon: [UInt32]
+    ) {
+        self.centerX = centerX
+        self.centerY = centerY
+        self.xAxisLength = xAxisLength
+        self.yAxisLength = yAxisLength
+        self.polygon = polygon
     }
+
+    init(
+        _ candidate: FragmentCandidate,
+        ownership: CompiledOwnership
+    ) {
+        let affine = candidate.fragment.canonicalFromBrush
+        switch ownership {
+        case .rectangularHalfOpen:
+            centerX = Int64(normalizedZero(affine.translation.x).bitPattern)
+            centerY = Int64(normalizedZero(affine.translation.y).bitPattern)
+        case .squareRotation, .squareMirrorTriangles:
+            let center = canonicalizedCoverageCenter(
+                affine.translation,
+                ownership: ownership
+            )
+            centerX = Int64(normalizedZero(center.x).bitPattern)
+            centerY = Int64(normalizedZero(center.y).bitPattern)
+        }
+        let lengths = [
+            normalizedZero(simd_length(affine.xAxis)),
+            normalizedZero(simd_length(affine.yAxis)),
+        ].sorted()
+        xAxisLength = lengths[0].bitPattern
+        yAxisLength = lengths[1].bitPattern
+        switch ownership {
+        case .rectangularHalfOpen:
+            polygon = TilingProjection.canonicalPolygonKey(
+                candidate.localPolygon.map {
+                    affine.applying(to: $0)
+                }
+            )
+        case .squareRotation, .squareMirrorTriangles:
+            // Square group images can have different canonical quad
+            // orientations while an invariant brush covers the same clipped
+            // local domain. Cell clipping itself is expressed in brush-local
+            // coordinates, so this preserves complementary seam fragments.
+            polygon = TilingProjection.canonicalPolygonKey(
+                candidate.localPolygon
+            )
+        }
+    }
+
+}
+
+private func canonicalizedCoverageCenter(
+    _ point: SIMD2<Float>,
+    ownership: CompiledOwnership
+) -> SIMD2<Float> {
+    let stabilizers: [CompiledStabilizer]
+    switch ownership {
+    case .rectangularHalfOpen:
+        return point
+    case let .squareRotation(_, values),
+         let .squareMirrorTriangles(_, values):
+        stabilizers = values
+    }
+    return stabilizers.first(where: {
+        coverageCoordinatesAgree(
+            point.x,
+            $0.canonicalPoint.x,
+            maximumULPDistance: 2
+        )
+            && coverageCoordinatesAgree(
+                point.y,
+                $0.canonicalPoint.y,
+                maximumULPDistance: 2
+            )
+    })?.canonicalPoint ?? point
+}
+
+private func coverageCoordinatesAgree(
+    _ lhs: Float,
+    _ rhs: Float,
+    maximumULPDistance: UInt32
+) -> Bool {
+    guard lhs.isFinite, rhs.isFinite else { return false }
+    let lhsBits = orderedCoverageBits(normalizedZero(lhs))
+    let rhsBits = orderedCoverageBits(normalizedZero(rhs))
+    return max(lhsBits, rhsBits) - min(lhsBits, rhsBits)
+        <= maximumULPDistance
+}
+
+private func orderedCoverageBits(_ value: Float) -> UInt32 {
+    let bits = value.bitPattern
+    return bits & 0x8000_0000 == 0
+        ? bits | 0x8000_0000
+        : ~bits
 }
 
 private struct CanonicalVertex: Equatable {
@@ -265,31 +375,16 @@ private func bounds(
 }
 
 private func brushLocalPlanes(
-    for worldBounds: AxisAlignedRect,
+    for worldClip: ConvexClip,
     brushToWorld: Affine2D
 ) -> [HalfPlane2D] {
-    [
+    worldClip.halfPlanes.map {
         brushLocalPlane(
-            worldNormal: SIMD2(1, 0),
-            worldOffset: worldBounds.minimum.x,
+            worldNormal: $0.normal,
+            worldOffset: $0.offset,
             brushToWorld: brushToWorld
-        ),
-        brushLocalPlane(
-            worldNormal: SIMD2(-1, 0),
-            worldOffset: -worldBounds.maximum.x,
-            brushToWorld: brushToWorld
-        ),
-        brushLocalPlane(
-            worldNormal: SIMD2(0, 1),
-            worldOffset: worldBounds.minimum.y,
-            brushToWorld: brushToWorld
-        ),
-        brushLocalPlane(
-            worldNormal: SIMD2(0, -1),
-            worldOffset: -worldBounds.maximum.y,
-            brushToWorld: brushToWorld
-        ),
-    ]
+        )
+    }
 }
 
 private func brushLocalPlane(
@@ -427,11 +522,141 @@ private func removingByteEqualCandidates(
 }
 
 private func removingCoverageEqualCandidates(
-    _ candidates: [FragmentCandidate]
+    _ candidates: [FragmentCandidate],
+    policy: CoincidentImagePolicy,
+    symmetry: FootprintCoverageSymmetry,
+    ownership: CompiledOwnership
 ) -> [FragmentCandidate] {
-    var seen: Set<CoverageDomainKey> = []
-    return candidates.filter {
-        seen.insert(CoverageDomainKey($0)).inserted
+    guard policy != .byteEqualOnly, symmetry != .oriented else {
+        return candidates
+    }
+    let ordered = candidates.enumerated().sorted { lhs, rhs in
+        let lhsRank = ownershipRank(lhs.element, ownership: ownership)
+        let rhsRank = ownershipRank(rhs.element, ownership: ownership)
+        return lhsRank == rhsRank ? lhs.offset < rhs.offset : lhsRank < rhsRank
+    }.map(\.element)
+    var seen: [CoverageDomainKey: [CompiledGroupOperation]] = [:]
+    return ordered.filter { candidate in
+        let key = CoverageDomainKey(candidate, ownership: ownership)
+        let operation = candidate.fragment.operation
+        if seen[key, default: []].contains(where: {
+            operationsAreEquivalent(
+                $0,
+                operation,
+                policy: policy,
+                symmetry: symmetry
+            )
+        }) {
+            return false
+        }
+        seen[key, default: []].append(operation)
+        return true
+    }
+}
+
+private func ownershipRank(
+    _ candidate: FragmentCandidate,
+    ownership: CompiledOwnership
+) -> Int {
+    guard let owner = preferredOwnershipOwner(
+        at: candidate.fragment.canonicalFromBrush.translation,
+        ownership: ownership
+    ) else {
+        return 1
+    }
+    return candidate.fragment.imageOrdinal == owner ? 0 : 1
+}
+
+func preferredOwnershipOwner(
+    at canonicalPoint: SIMD2<Float>,
+    ownership: CompiledOwnership
+) -> UInt8? {
+    let fragments: [CompiledOwnershipFragment]
+    switch ownership {
+    case .rectangularHalfOpen:
+        return nil
+    case let .squareRotation(sectors, _):
+        fragments = sectors
+    case let .squareMirrorTriangles(triangles, _):
+        fragments = triangles
+    }
+
+    // Every square ownership fragment is a triangle. Inclusive containment
+    // deliberately gives an exact edge or stabilizer point to the smallest
+    // declared owner, making half-open boundary ties independent of discovery
+    // order.
+    return fragments.compactMap { fragment -> UInt8? in
+        guard triangleContains(
+            canonicalPoint,
+            vertices: fragment.canonicalVertices
+        ) else {
+            return nil
+        }
+        return fragment.ownerOrdinal
+    }.min()
+}
+
+private func triangleContains(
+    _ point: SIMD2<Float>,
+    vertices: [SIMD2<Float>]
+) -> Bool {
+    guard vertices.count == 3 else {
+        return false
+    }
+    let edges = [
+        (vertices[0], vertices[1]),
+        (vertices[1], vertices[2]),
+        (vertices[2], vertices[0]),
+    ]
+    let crosses = edges.map { edgeVertices in
+        let edge = edgeVertices.1 - edgeVertices.0
+        let relative = point - edgeVertices.0
+        return edge.x * relative.y - edge.y * relative.x
+    }
+    let scale = max(
+        vertices.flatMap { [abs($0.x), abs($0.y)] }.max() ?? 1,
+        1
+    )
+    let tolerance = scale * scale * 8 * Float.ulpOfOne
+    return crosses.allSatisfy { $0 >= -tolerance }
+        || crosses.allSatisfy { $0 <= tolerance }
+}
+
+private func operationsAreEquivalent(
+    _ lhs: CompiledGroupOperation,
+    _ rhs: CompiledGroupOperation,
+    policy: CoincidentImagePolicy,
+    symmetry: FootprintCoverageSymmetry
+) -> Bool {
+    let changesReflection = lhs.reflected != rhs.reflected
+    let turnDifference = Int(rhs.quarterTurns)
+        - Int(lhs.quarterTurns)
+    let normalizedTurns = (turnDifference % 4 + 4) % 4
+
+    let policyAllows: Bool
+    switch policy {
+    case .byteEqualOnly:
+        policyAllows = false
+    case .halfTurnInvariantCoverage:
+        policyAllows = !changesReflection && normalizedTurns == 2
+    case .quarterTurnInvariantCoverage:
+        policyAllows = !changesReflection
+    case .squareDihedralInvariantCoverage:
+        policyAllows = true
+    }
+    guard policyAllows else { return false }
+
+    switch symmetry {
+    case .oriented:
+        return false
+    case .halfTurnInvariant:
+        return !changesReflection && normalizedTurns == 2
+    case .rotationInvariant:
+        return !changesReflection
+    case .reflectionInvariant:
+        return changesReflection
+    case .rotationAndReflectionInvariant:
+        return true
     }
 }
 

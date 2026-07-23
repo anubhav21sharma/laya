@@ -296,10 +296,19 @@ func restoreRejectsMismatchedCanonicalSizeBeforeSubmission() throws {
     #expect(renderer.isIdle)
 }
 
-@Test
+@Test(arguments: [
+    SymmetryPresetID.grid,
+    .squareRotation,
+    .squareKaleidoscope,
+])
 @MainActor
-func liveAndCommittedFixedStrengthEraserMatchAndClearCenter() throws {
+func liveAndCommittedFixedStrengthEraserMatchAndClearCenter(
+    preset: SymmetryPresetID
+) throws {
     guard let renderer = try makeRasterOperationRenderer() else { return }
+    if preset != .grid {
+        try renderer.applyTiling(preset)
+    }
     var receipts: [RasterMutationReceipt] = []
     renderer.onOperationCompleted = {
         if case let .rasterSuccess(receipt) = $0 {

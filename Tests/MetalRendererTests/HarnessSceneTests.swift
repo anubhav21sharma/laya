@@ -944,6 +944,109 @@ func schemaThreeRoundTripKeepsNumericTilingWithoutDescriptors() throws {
     }
 }
 
+@Test
+func schemaThreeRoundTripsVersionedPeriodicConfiguration() throws {
+    var object = try #require(
+        JSONSerialization.jsonObject(with: schemaThreeData(
+            tileWidth: 256,
+            tileHeight: 256,
+            tiling: 7,
+            program: TilingHarnessProgram.noncentralVisibleCell.rawValue
+        )) as? [String: Any]
+    )
+    object["periodicConfiguration"] = [
+        "version": 1,
+        "repeatWidth": 192,
+        "repeatHeight": 192,
+        "orientationRadians": 0.25,
+    ]
+
+    let scene = try HarnessScene.decode(
+        JSONSerialization.data(withJSONObject: object)
+    )
+
+    #expect(scene.tiling == .squareRotation)
+    #expect(scene.periodicConfiguration == HarnessPeriodicConfiguration(
+        repeatWidth: 192,
+        repeatHeight: 192,
+        orientationRadians: 0.25
+    ))
+    let decoded = try HarnessScene.decode(JSONEncoder().encode(scene))
+    #expect(decoded == scene)
+}
+
+@Test
+func periodicConfigurationRejectsUnsupportedVersionAndNonSquareRepeat() throws {
+    var object = try #require(
+        JSONSerialization.jsonObject(with: schemaThreeData(
+            tileWidth: 256,
+            tileHeight: 256,
+            tiling: 8,
+            program: TilingHarnessProgram.noncentralVisibleCell.rawValue
+        )) as? [String: Any]
+    )
+    object["periodicConfiguration"] = [
+        "version": 2,
+        "repeatWidth": 192,
+        "repeatHeight": 192,
+        "orientationRadians": 0,
+    ]
+    #expect(
+        throws: HarnessSceneError.unsupportedPeriodicConfigurationVersion(2)
+    ) {
+        try HarnessScene.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+
+    object["periodicConfiguration"] = [
+        "version": 1,
+        "repeatWidth": 192,
+        "repeatHeight": 160,
+        "orientationRadians": 0,
+    ]
+    #expect(
+        throws: HarnessSceneError.invalidPeriodicConfiguration(
+            .nonSquareRepeat(width: 192, height: 160)
+        )
+    ) {
+        try HarnessScene.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+}
+
+@Test
+func periodicConfigurationRejectsNonpositiveRepeatBeforeProductionConversion()
+    throws
+{
+    var object = try #require(
+        JSONSerialization.jsonObject(with: schemaThreeData(
+            tileWidth: 256,
+            tileHeight: 192,
+            tiling: 7,
+            program: TilingHarnessProgram.noncentralVisibleCell.rawValue
+        )) as? [String: Any]
+    )
+    object["periodicConfiguration"] = [
+        "version": 1,
+        "repeatWidth": 0,
+        "repeatHeight": 0,
+        "orientationRadians": 0,
+    ]
+
+    #expect(
+        throws: HarnessSceneError.invalidPeriodicRepeatDimensions(
+            width: 0,
+            height: 0
+        )
+    ) {
+        try HarnessScene.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+}
+
 @Test(
     arguments: [
         ("tileWidth", 63, 96),
@@ -1053,6 +1156,7 @@ func schemaThreeRejectsInteractiveDiagnosticMode() {
         (.largeFootprint, .grid),
         (.rectangularTile, .grid),
         (.noncentralVisibleCell, .grid),
+        (.squareFixedPoint, .squareRotation),
         (.metadataTilingSwitch, .grid),
         (.projectedLiveCommit, .halfDrop),
         (.projectedLongStroke, .halfDrop),
@@ -1147,7 +1251,7 @@ func schemaThreeRejectsEachMissingRequiredKey(key: String) throws {
 @Test
 func schemaThreeRejectsUnknownNumericTilingWireValue() {
     #expect(throws: DecodingError.self) {
-        try HarnessScene.decode(schemaThreeData(tiling: 7))
+        try HarnessScene.decode(schemaThreeData(tiling: 9))
     }
 }
 
@@ -1372,6 +1476,40 @@ func runnerBoundaryResolvesLegacyDefaultsAndSchemaThreeValues() throws {
             == HarnessRenderConfiguration(
                 pixelSize: PixelSize(width: 64, height: 96),
                 tiling: .halfDrop,
+                diagnosticMode: .hardRound
+            )
+    )
+}
+
+@Test
+func runnerBoundaryPreservesExplicitPeriodicConfiguration() throws {
+    var object = try #require(
+        JSONSerialization.jsonObject(with: schemaThreeData(
+            tileWidth: 256,
+            tileHeight: 256,
+            tiling: 8,
+            program: TilingHarnessProgram.noncentralVisibleCell.rawValue
+        )) as? [String: Any]
+    )
+    object["periodicConfiguration"] = [
+        "version": 1,
+        "repeatWidth": 176,
+        "repeatHeight": 176,
+        "orientationRadians": 0.125,
+    ]
+    let scene = try HarnessScene.decode(
+        JSONSerialization.data(withJSONObject: object)
+    )
+
+    #expect(
+        HarnessRunner.configuration(for: scene)
+            == HarnessRenderConfiguration(
+                pixelSize: PixelSize(width: 256, height: 256),
+                periodicConfiguration: PeriodicSymmetryConfiguration(
+                    presetID: .squareKaleidoscope,
+                    repeatSize: PatternSize(width: 176, height: 176),
+                    orientationRadians: 0.125
+                ),
                 diagnosticMode: .hardRound
             )
     )
@@ -2076,6 +2214,8 @@ func displayMetricsUseIndependentMirrorRotationalAndGridLineFormulas() {
         case .rotational: .mirrorXY
         case .grid, .halfDrop, .brick:
             preconditionFailure("Task 7 display fixture only")
+        case .squareRotation: .squareKaleidoscope
+        case .squareKaleidoscope: .squareRotation
         }
         let wrongParityOrAxis = independentTaskSevenDisplay(
             canonicalBGRA: canonical,
@@ -2257,6 +2397,56 @@ func fixedPointMetricCountsDuplicateCoverageDomainsFromTransforms() {
             fragments: [identity, rotated]
         ) == 1
     )
+
+    let ulpShifted = CellFragment(
+        cell: rotated.cell,
+        imageOrdinal: rotated.imageOrdinal,
+        canonicalFromBrush: Affine2D(
+            xAxis: rotated.canonicalFromBrush.xAxis,
+            yAxis: rotated.canonicalFromBrush.yAxis,
+            translation: SIMD2(
+                Float(128).nextUp,
+                Float(128).nextDown
+            )
+        ),
+        brushClip: clip
+    )
+    #expect(
+        HarnessRunner.duplicateFixedPointWriteCount(
+            fragments: [identity, ulpShifted]
+        ) == 1
+    )
+}
+
+@Test
+func squareFixedPointHarnessProjectionUsesCompleteRoundSymmetry() {
+    let pixelSize = PixelSize(width: 256, height: 256)
+    for preset in [
+        SymmetryPresetID.squareRotation,
+        .squareKaleidoscope,
+    ] {
+        let configuration = HarnessRenderConfiguration(
+            pixelSize: pixelSize,
+            periodicConfiguration: PeriodicSymmetryConfiguration(
+                presetID: preset,
+                repeatSize: PatternSize(width: 192, height: 192),
+                orientationRadians: .pi / 12
+            ),
+            diagnosticMode: .hardRound
+        )
+        let basis = configuration.makeStrategy()
+            .compiledSymmetry.domain.periodic!.translationBasis
+        let center = WorldPoint(basis.origin + (basis.u + basis.v) * 0.5)
+
+        let fragments = HarnessRunner.hardRoundFragments(
+            at: center,
+            radius: GridCanvasContract.brushRadius,
+            configuration: configuration,
+            coverageSymmetry: .rotationAndReflectionInvariant
+        )
+
+        #expect(fragments.count == 1)
+    }
 }
 
 @Test
@@ -2322,6 +2512,38 @@ func taskEightNoncentralInputsUseApprovedParityDistinctVisibleCells() {
         #expect(input.central == central, "\(tiling)")
         #expect(input.visible == visible, "\(tiling)")
         #expect(input.visibleCell == visibleCell, "\(tiling)")
+    }
+}
+
+@Test
+func phaseTwoSquareNoncentralInputStaysGenericInLatticeSpace() throws {
+    for tiling in [TilingKind.squareRotation, .squareKaleidoscope] {
+        let configuration = HarnessRenderConfiguration(
+            pixelSize: PixelSize(width: 256, height: 256),
+            periodicConfiguration: PeriodicSymmetryConfiguration(
+                presetID: tiling,
+                repeatSize: PatternSize(width: 192, height: 192),
+                orientationRadians: .pi / 12
+            ),
+            diagnosticMode: .hardRound
+        )
+        let strategy = configuration.makeStrategy()
+        let periodic = try #require(
+            strategy.compiledSymmetry.domain.periodic
+        )
+        let input = HarnessRunner.taskEightNoncentralInput(
+            for: configuration
+        )
+        let centralLattice = periodic.worldToLattice.applying(
+            to: input.central.simd
+        )
+        let visibleLattice = periodic.worldToLattice.applying(
+            to: input.visible.simd
+        )
+
+        #expect(simd_distance(centralLattice, SIMD2(0.31, 0.17)) < 0.000_01)
+        #expect(simd_distance(visibleLattice, SIMD2(1.31, 0.17)) < 0.000_01)
+        #expect(input.visibleCell == CellIndex(column: 1, row: 0))
     }
 }
 
@@ -2622,6 +2844,147 @@ func taskNineScenePairsMatchTheCompleteFixedMatrixExactly() throws {
             negative.structuralChecks == expectedNegativeChecks,
             "\(item.name)"
         )
+    }
+}
+
+@Test
+func phaseTwoSquareScenePairsUseExplicitGeometryAndOneNegativeCause() throws {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let scenesDirectory = repositoryRoot
+        .appendingPathComponent("App/PatternSpike/Harness/Scenes")
+    let expected: [(
+        name: String,
+        preset: SymmetryPresetID,
+        repeatSide: Float,
+        orientation: Float
+    )] = [
+        (
+            "square-rotation-noncentral",
+            .squareRotation,
+            192,
+            0.2617994
+        ),
+        (
+            "square-kaleidoscope-noncentral",
+            .squareKaleidoscope,
+            160,
+            -0.17453292
+        ),
+    ]
+
+    for item in expected {
+        let positive = try HarnessScene.decode(Data(contentsOf:
+            scenesDirectory.appendingPathComponent("\(item.name).json")
+        ))
+        let negative = try HarnessScene.decode(Data(contentsOf:
+            scenesDirectory.appendingPathComponent(
+                "\(item.name)-negative-control.json"
+            )
+        ))
+
+        #expect(positive.schemaVersion == 3)
+        #expect(positive.program == .noncentralVisibleCell)
+        #expect(positive.tiling == item.preset)
+        #expect(positive.periodicConfiguration?.version == 1)
+        #expect(positive.periodicConfiguration?.repeatWidth == item.repeatSide)
+        #expect(positive.periodicConfiguration?.repeatHeight == item.repeatSide)
+        #expect(
+            positive.periodicConfiguration?.orientationRadians
+                == item.orientation
+        )
+        #expect(positive.structuralChecks == [
+            HarnessStructuralCheck(
+                metric: .visibleCellCanonicalByteDelta,
+                relation: .equal,
+                value: 0
+            ),
+        ])
+        #expect(negative.structuralChecks == [
+            HarnessStructuralCheck(
+                metric: .visibleCellCanonicalByteDelta,
+                relation: .equal,
+                value: 1
+            ),
+        ])
+
+        var positiveObject = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(positive)
+            ) as? [String: Any]
+        )
+        var negativeObject = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(negative)
+            ) as? [String: Any]
+        )
+        positiveObject["name"] = "<name>"
+        negativeObject["name"] = "<name>"
+        negativeObject["structuralChecks"] =
+            positiveObject["structuralChecks"]
+        #expect(
+            NSDictionary(dictionary: positiveObject)
+                .isEqual(to: negativeObject)
+        )
+    }
+}
+
+@Test
+func phaseTwoSquareFixedPointPairsPinOracleLiveCommitAndDeduplication()
+    throws
+{
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let scenesDirectory = repositoryRoot
+        .appendingPathComponent("App/PatternSpike/Harness/Scenes")
+    let cases: [(String, SymmetryPresetID)] = [
+        ("square-rotation-fixed-point", .squareRotation),
+        ("square-kaleidoscope-fixed-point", .squareKaleidoscope),
+    ]
+    let expectedChecks: [HarnessStructuralCheck] = [
+        .init(
+            metric: .duplicateFixedPointWriteCount,
+            relation: .equal,
+            value: 0
+        ),
+        .init(metric: .oracleHoleCount, relation: .equal, value: 0),
+        .init(metric: .oraclePhantomCount, relation: .equal, value: 0),
+        .init(
+            metric: .oracleMaximumDelta,
+            relation: .lessThanOrEqual,
+            value: 1
+        ),
+        .init(
+            metric: .previewCommitMaximumDelta,
+            relation: .lessThanOrEqual,
+            value: 1
+        ),
+    ]
+
+    for (name, preset) in cases {
+        let positive = try HarnessScene.decode(Data(contentsOf:
+            scenesDirectory.appendingPathComponent("\(name).json")
+        ))
+        let negative = try HarnessScene.decode(Data(contentsOf:
+            scenesDirectory.appendingPathComponent(
+                "\(name)-negative-control.json"
+            )
+        ))
+
+        #expect(positive.program == .squareFixedPoint)
+        #expect(positive.tiling == preset)
+        #expect(positive.structuralChecks == expectedChecks)
+        var negativeChecks = expectedChecks
+        negativeChecks[0] = .init(
+            metric: .duplicateFixedPointWriteCount,
+            relation: .equal,
+            value: 1
+        )
+        #expect(negative.structuralChecks == negativeChecks)
     }
 }
 

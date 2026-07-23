@@ -21,6 +21,15 @@ func tilingWireValuesAreAppendOnly() {
     #expect(PatternTilingWireMirrorY == 4)
     #expect(PatternTilingWireMirrorXY == 5)
     #expect(PatternTilingWireRotational == 6)
+    #expect(PatternTilingWireSquareRotation == 7)
+    #expect(PatternTilingWireSquareKaleidoscope == 8)
+}
+
+@Test
+func guideWireValuesAreAppendOnly() {
+    #expect(PatternGuideWireRectangular == 0)
+    #expect(PatternGuideWireSquareRotation == 1)
+    #expect(PatternGuideWireSquareKaleidoscope == 2)
 }
 
 @Test
@@ -46,8 +55,8 @@ func compositeWireValuesAreAppendOnly() {
 
 @Test
 func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
-    #expect(MemoryLayout<PatternGridFrameUniforms>.size == 56)
-    #expect(MemoryLayout<PatternGridFrameUniforms>.stride == 56)
+    #expect(MemoryLayout<PatternGridFrameUniforms>.size == 96)
+    #expect(MemoryLayout<PatternGridFrameUniforms>.stride == 96)
     #expect(MemoryLayout<PatternGridFrameUniforms>.alignment == 8)
     #expect(MemoryLayout<PatternGridFrameUniforms>.offset(of: \.drawableSize) == 0)
     #expect(MemoryLayout<PatternGridFrameUniforms>.offset(of: \.worldCenter) == 8)
@@ -65,6 +74,31 @@ func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
     #expect(
         MemoryLayout<PatternGridFrameUniforms>.offset(of: \.symmetryFamily)
             == 52
+    )
+    #expect(
+        MemoryLayout<PatternGridFrameUniforms>.offset(of: \.repeatSize)
+            == 56
+    )
+    #expect(
+        MemoryLayout<PatternGridFrameUniforms>.offset(of: \.latticeXAxis)
+            == 64
+    )
+    #expect(
+        MemoryLayout<PatternGridFrameUniforms>.offset(of: \.latticeYAxis)
+            == 72
+    )
+    #expect(
+        MemoryLayout<PatternGridFrameUniforms>.offset(
+            of: \.latticeTranslation
+        ) == 80
+    )
+    #expect(
+        MemoryLayout<PatternGridFrameUniforms>.offset(of: \.guideKind)
+            == 88
+    )
+    #expect(
+        MemoryLayout<PatternGridFrameUniforms>.offset(of: \.padding2)
+            == 92
     )
 
     #expect(MemoryLayout<PatternClipHalfPlane>.size == 16)

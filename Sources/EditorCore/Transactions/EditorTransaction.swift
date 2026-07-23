@@ -72,6 +72,7 @@ public enum EditorTransactionEvent: Equatable, Sendable {
     case gridVisibilityIntent(Bool)
     case command(EditorCommand)
     case tilingIntent(TilingKind)
+    case periodicConfigurationIntent(PeriodicSymmetryConfiguration)
     case tileSizeIntent(PixelSize)
     case selectionChanged(SelectionRegion?)
     case selectionEnded
@@ -96,6 +97,10 @@ public enum EditorTransactionEffect: Equatable, Sendable {
     case updateGridVisibility(Bool)
     case performCommand(EditorTransactionToken, EditorCommand)
     case applyTiling(EditorTransactionToken, TilingKind)
+    case applyPeriodicConfiguration(
+        EditorTransactionToken,
+        PeriodicSymmetryConfiguration
+    )
     case applyTileSize(EditorTransactionToken, PixelSize)
     case clearSelectionOverlay
     case beginTransform(SelectionRegion)
@@ -212,6 +217,8 @@ public struct EditorTransaction: Equatable, Sendable {
             return [beginCommand(command)]
         case let .tilingIntent(tiling):
             return [beginTiling(tiling)]
+        case let .periodicConfigurationIntent(configuration):
+            return [beginPeriodicConfiguration(configuration)]
         case let .tileSizeIntent(size):
             return [beginTileSize(size)]
         case let .selectionChanged(region):
@@ -270,6 +277,12 @@ public struct EditorTransaction: Equatable, Sendable {
         case let .tilingIntent(tiling):
             state = .idle
             return [.cancelStroke(drawing.token), beginTiling(tiling)]
+        case let .periodicConfigurationIntent(configuration):
+            state = .idle
+            return [
+                .cancelStroke(drawing.token),
+                beginPeriodicConfiguration(configuration),
+            ]
         case let .tileSizeIntent(size):
             state = .idle
             return [.cancelStroke(drawing.token), beginTileSize(size)]
@@ -312,6 +325,10 @@ public struct EditorTransaction: Equatable, Sendable {
         case let .tilingIntent(tiling):
             state = .idle
             return clearSelectionEffects(for: region) + [beginTiling(tiling)]
+        case let .periodicConfigurationIntent(configuration):
+            state = .idle
+            return clearSelectionEffects(for: region)
+                + [beginPeriodicConfiguration(configuration)]
         case let .tileSizeIntent(size):
             state = .idle
             return clearSelectionEffects(for: region) + [beginTileSize(size)]
@@ -369,6 +386,12 @@ public struct EditorTransaction: Equatable, Sendable {
         case let .tilingIntent(tiling):
             state = .idle
             return [.clearSelectionOverlay, beginTiling(tiling)]
+        case let .periodicConfigurationIntent(configuration):
+            state = .idle
+            return [
+                .clearSelectionOverlay,
+                beginPeriodicConfiguration(configuration),
+            ]
         case let .tileSizeIntent(size):
             state = .idle
             return [.clearSelectionOverlay, beginTileSize(size)]
@@ -440,6 +463,13 @@ public struct EditorTransaction: Equatable, Sendable {
                 .clearSelectionOverlay,
                 beginTiling(tiling),
             ]
+        case let .periodicConfigurationIntent(configuration):
+            state = .idle
+            return [
+                .cancelTransform,
+                .clearSelectionOverlay,
+                beginPeriodicConfiguration(configuration),
+            ]
         case let .tileSizeIntent(size):
             state = .idle
             return [
@@ -471,7 +501,8 @@ public struct EditorTransaction: Equatable, Sendable {
         case .pointerCancelled, .toolIntent, .colorIntent,
              .brushDiameterIntent, .recipeIntent, .gridVisibilityIntent,
              .command,
-             .tilingIntent, .tileSizeIntent, .selectionChanged,
+             .tilingIntent, .periodicConfigurationIntent, .tileSizeIntent,
+             .selectionChanged,
              .selectionEnded, .operationCompleted:
             return true
         }
@@ -491,6 +522,14 @@ public struct EditorTransaction: Equatable, Sendable {
         let token = takeToken()
         pendingOperation = token
         return .applyTiling(token, tiling)
+    }
+
+    private mutating func beginPeriodicConfiguration(
+        _ configuration: PeriodicSymmetryConfiguration
+    ) -> EditorTransactionEffect {
+        let token = takeToken()
+        pendingOperation = token
+        return .applyPeriodicConfiguration(token, configuration)
     }
 
     private mutating func beginTileSize(

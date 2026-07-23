@@ -8,10 +8,36 @@ struct TranslationTilingShaderTests {
         let source = try normalizedShaderSource()
 
         #expect(source.contains(
-            "case PatternTilingWireHalfDrop: { const int column = int(floor(world.x / tileSize.x)); const float phaseY = (column & 1) * tileSize.y * 0.5; const float2 folded = patternPositiveFold( float2(world.x, world.y - phaseY), tileSize );"
+            "if (all(repeatSize == tileSize)) { const int column = int(floor(world.x / tileSize.x)); const float phaseY = (column & 1) * tileSize.y * 0.5; const float2 folded = patternPositiveFold( float2(world.x, world.y - phaseY), tileSize );"
         ))
         #expect(source.contains(
-            "case PatternTilingWireBrick: { const int row = int(floor(world.y / tileSize.y)); const float phaseX = (row & 1) * tileSize.x * 0.5; const float2 folded = patternPositiveFold( float2(world.x - phaseX, world.y), tileSize );"
+            "if (all(repeatSize == tileSize)) { const int row = int(floor(world.y / tileSize.y)); const float phaseX = (row & 1) * tileSize.x * 0.5; const float2 folded = patternPositiveFold( float2(world.x - phaseX, world.y), tileSize );"
+        ))
+        #expect(source.contains(
+            "const int column = int(floor(lattice.x)); const float phaseY = (column & 1) * 0.5; const float2 foldedUnit = patternPositiveFold( float2(lattice.x, lattice.y - phaseY), float2(1.0) );"
+        ))
+        #expect(source.contains(
+            "const int row = int(floor(lattice.y)); const float phaseX = (row & 1) * 0.5; const float2 foldedUnit = patternPositiveFold( float2(lattice.x - phaseX, lattice.y), float2(1.0) );"
+        ))
+    }
+
+    @Test
+    func legacyRasterSizedRepeatsRetainTheOriginalDisplayArithmetic() throws {
+        let source = try normalizedShaderSource()
+
+        #expect(
+            source.components(
+                separatedBy: "if (all(repeatSize == tileSize))"
+            ).count == 5
+        )
+        #expect(source.contains(
+            "const float2 folded = patternPositiveFold(world, tileSize); return {folded, folded, true};"
+        ))
+        #expect(source.contains(
+            "patternPositiveFold( tileSize.x - local.x, tileSize.x )"
+        ))
+        #expect(source.contains(
+            "patternPositiveFold( tileSize.y - local.y, tileSize.y )"
         ))
     }
 
@@ -21,7 +47,7 @@ struct TranslationTilingShaderTests {
 
         #expect(source.contains("mapping.phasedCellLocal"))
         #expect(source.contains(
-            "const float2 edgeDistance = min( mapping.phasedCellLocal, frame.tileSize - mapping.phasedCellLocal ) * frame.zoom;"
+            "const float2 edgeDistance = min( mapping.phasedCellLocal, frame.repeatSize - mapping.phasedCellLocal );"
         ))
     }
 
@@ -30,7 +56,33 @@ struct TranslationTilingShaderTests {
         let source = try normalizedShaderSource()
 
         #expect(source.contains(
-            "const PatternDisplayMapping mapping = patternDisplayMapping( world, frame.tileSize, frame.symmetryFamily, frame.tilingKind );"
+            "const PatternDisplayMapping mapping = patternDisplayMapping( world, frame.tileSize, frame.repeatSize, frame.latticeXAxis, frame.latticeYAxis, frame.latticeTranslation, frame.symmetryFamily, frame.tilingKind );"
+        ))
+    }
+
+    @Test
+    func squareDisplayUsesCompiledLatticeAndDedicatedGuides() throws {
+        let source = try normalizedShaderSource()
+
+        #expect(source.contains(
+            "const float2 lattice = latticeXAxis * world.x + latticeYAxis * world.y + latticeTranslation;"
+        ))
+        #expect(source.contains("case PatternTilingWireSquareRotation:"))
+        #expect(source.contains("case PatternTilingWireSquareKaleidoscope:"))
+        #expect(source.contains(
+            "frame.guideKind == PatternGuideWireSquareRotation"
+        ))
+        #expect(source.contains(
+            "frame.guideKind == PatternGuideWireSquareKaleidoscope"
+        ))
+        #expect(source.contains("const float cornerRingDistance"))
+        #expect(source.contains("const float centerRingDistance"))
+        #expect(source.contains("const float edgeCenterRingDistance"))
+        #expect(source.contains(
+            "abs(centerRelative.x - centerRelative.y)"
+        ))
+        #expect(source.contains(
+            "abs(centerRelative.x + centerRelative.y)"
         ))
     }
 

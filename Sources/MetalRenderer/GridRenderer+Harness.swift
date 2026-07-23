@@ -804,7 +804,8 @@ extension GridRenderer {
     @discardableResult
     func injectHarnessDab(
         at world: WorldPoint,
-        radius requestedRadius: Float = GridCanvasContract.brushRadius
+        radius requestedRadius: Float = GridCanvasContract.brushRadius,
+        coverageSymmetry: FootprintCoverageSymmetry = .halfTurnInvariant
     ) throws -> [CellFragment] {
         try beginHarnessExecution(radius: requestedRadius)
         counters = GridStructuralCounters()
@@ -812,7 +813,8 @@ extension GridRenderer {
         counters.totalDabsThisStroke = 1
         let fragments = try appendProjectedFragments(
             at: world,
-            requestedRadius: requestedRadius
+            requestedRadius: requestedRadius,
+            coverageSymmetry: coverageSymmetry
         )
         try prepareCurrentStrokeCommit(maximumRetainedBytes: Int.max)
         return fragments

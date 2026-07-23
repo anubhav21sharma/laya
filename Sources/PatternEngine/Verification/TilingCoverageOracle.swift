@@ -85,6 +85,25 @@ public enum TilingCoverageOracle {
         tiling: TilingKind,
         supersampling: Int
     ) -> OracleRasterResult {
+        switch tiling {
+        case .squareRotation, .squareKaleidoscope:
+            return renderSquareCanonical(
+                footprint: footprint,
+                brushToWorld: brushToWorld,
+                configuration: .defaultConfiguration(
+                    presetID: tiling,
+                    canonicalRasterSize: tileSize
+                ),
+                canonicalRasterSize: tileSize,
+                supersampling: supersampling,
+                coverageSymmetry: legacySquareCoverageSymmetry(
+                    for: footprint
+                )
+            )
+        case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
+             .rotational:
+            break
+        }
         validateRenderInputs(
             footprint: footprint,
             brushToWorld: brushToWorld,
@@ -215,6 +234,49 @@ public enum TilingCoverageOracle {
         )
     }
 
+    public static func renderCanonical(
+        footprint: OracleFootprint,
+        brushToWorld: Affine2D,
+        configuration: PeriodicSymmetryConfiguration,
+        canonicalRasterSize: PixelSize,
+        supersampling: Int,
+        coverageSymmetry: FootprintCoverageSymmetry? = nil
+    ) -> OracleRasterResult {
+        switch configuration.presetID {
+        case .squareRotation, .squareKaleidoscope:
+            return renderSquareCanonical(
+                footprint: footprint,
+                brushToWorld: brushToWorld,
+                configuration: configuration,
+                canonicalRasterSize: canonicalRasterSize,
+                supersampling: supersampling,
+                coverageSymmetry: coverageSymmetry
+                    ?? naturalCoverageSymmetry(for: footprint)
+            )
+        case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
+             .rotational:
+            let rasterRepeat = PatternSize(
+                width: Float(canonicalRasterSize.width),
+                height: Float(canonicalRasterSize.height)
+            )
+            precondition(
+                configuration.repeatSize == rasterRepeat,
+                "TilingCoverageOracle legacy configuration repeat must match the canonical raster"
+            )
+            precondition(
+                normalizedSquareAngle(configuration.orientationRadians) == 0,
+                "TilingCoverageOracle legacy configuration orientation must be zero"
+            )
+            return renderCanonical(
+                footprint: footprint,
+                brushToWorld: brushToWorld,
+                tileSize: canonicalRasterSize,
+                tiling: configuration.presetID,
+                supersampling: supersampling
+            )
+        }
+    }
+
     public static func compare(
         expected: OracleCoverage,
         actual: OracleCoverage,
@@ -253,6 +315,143 @@ public enum TilingCoverageOracle {
     }
 }
 
+private extension TilingCoverageOracle {
+    static func renderSquareCanonical(
+        footprint: OracleFootprint,
+        brushToWorld: Affine2D,
+        configuration: PeriodicSymmetryConfiguration,
+        canonicalRasterSize: PixelSize,
+        supersampling: Int,
+        coverageSymmetry: FootprintCoverageSymmetry
+    ) -> OracleRasterResult {
+        validateRenderInputs(
+            footprint: footprint,
+            brushToWorld: brushToWorld,
+            tileSize: canonicalRasterSize,
+            supersampling: supersampling
+        )
+        let geometry = directSquareGeometry(
+            configuration: configuration,
+            canonicalRasterSize: canonicalRasterSize
+        )
+        let worldBounds = transformedFootprintBounds(
+            footprint,
+            by: brushToWorld
+        )
+        validateSampleWork(
+            integerPixelBounds(worldBounds),
+            tileSize: canonicalRasterSize,
+            supersampling: supersampling
+        )
+        let candidates = directSquareCandidates(
+            worldBounds: worldBounds,
+            footprint: footprint,
+            brushToWorld: brushToWorld,
+            geometry: geometry,
+            coverageSymmetry: coverageSymmetry
+        )
+        let area = checkedPixelArea(
+            canonicalRasterSize,
+            message: "TilingCoverageOracle pixel area must be Int-representable"
+        )
+        let samplesPerPixel = supersampling * supersampling
+        var coverageBytes = [UInt8](repeating: 0, count: area)
+        var canonicalBGRA = [UInt8](repeating: 0, count: area * 4)
+        var brushBGRA = [UInt8](repeating: 0, count: area * 4)
+
+        for pixelY in 0..<canonicalRasterSize.height {
+            for pixelX in 0..<canonicalRasterSize.width {
+                var coveredSamples = 0
+                var canonicalRedSum = 0
+                var canonicalGreenSum = 0
+                var brushRedSum = 0
+                var brushGreenSum = 0
+
+                for subY in 0..<supersampling {
+                    for subX in 0..<supersampling {
+                        let canonical = SIMD2<Float>(
+                            Float(pixelX) + sampleOffset(
+                                subpixel: subX,
+                                supersampling: supersampling
+                            ),
+                            Float(pixelY) + sampleOffset(
+                                subpixel: subY,
+                                supersampling: supersampling
+                            )
+                        )
+                        var owningBrushLocal: SIMD2<Float>?
+                        for candidate in candidates {
+                            let brushLocal = candidate.brushFromCanonical.applying(
+                                to: canonical
+                            )
+                            if directSquareContains(
+                                brushLocal,
+                                footprint: footprint
+                            ) {
+                                owningBrushLocal = brushLocal
+                            }
+                        }
+                        guard let brushLocal = owningBrushLocal else {
+                            continue
+                        }
+
+                        coveredSamples += 1
+                        canonicalRedSum += Int(
+                            encodeUnit(
+                                canonical.x
+                                    / Float(canonicalRasterSize.width)
+                            )
+                        )
+                        canonicalGreenSum += Int(
+                            encodeUnit(
+                                canonical.y
+                                    / Float(canonicalRasterSize.height)
+                            )
+                        )
+                        brushRedSum += Int(encodeSigned(brushLocal.x))
+                        brushGreenSum += Int(encodeSigned(brushLocal.y))
+                    }
+                }
+
+                let pixelIndex = pixelY * canonicalRasterSize.width + pixelX
+                let byteOffset = pixelIndex * 4
+                let alpha = averagedByte(
+                    sum: coveredSamples * 255,
+                    divisor: samplesPerPixel
+                )
+                coverageBytes[pixelIndex] = alpha
+                canonicalBGRA[byteOffset + 1] = averagedByte(
+                    sum: canonicalGreenSum,
+                    divisor: samplesPerPixel
+                )
+                canonicalBGRA[byteOffset + 2] = averagedByte(
+                    sum: canonicalRedSum,
+                    divisor: samplesPerPixel
+                )
+                canonicalBGRA[byteOffset + 3] = alpha
+                brushBGRA[byteOffset + 1] = averagedByte(
+                    sum: brushGreenSum,
+                    divisor: samplesPerPixel
+                )
+                brushBGRA[byteOffset + 2] = averagedByte(
+                    sum: brushRedSum,
+                    divisor: samplesPerPixel
+                )
+                brushBGRA[byteOffset + 3] = alpha
+            }
+        }
+
+        return OracleRasterResult(
+            coverage: OracleCoverage(
+                pixelSize: canonicalRasterSize,
+                bytes: coverageBytes
+            ),
+            canonicalCoordinatesBGRA: canonicalBGRA,
+            brushLocalCoordinatesBGRA: brushBGRA
+        )
+    }
+}
+
 private struct FloatBounds {
     let minimum: SIMD2<Float>
     let maximum: SIMD2<Float>
@@ -286,6 +485,29 @@ private struct DirectCoverageDomainKey: Hashable {
     let xAxisLength: UInt32
     let yAxisLength: UInt32
     let polygon: [UInt32]
+}
+
+private struct DirectSquareGeometry {
+    let presetID: SymmetryPresetID
+    let side: Float
+    let cosine: Float
+    let sine: Float
+    let u: SIMD2<Float>
+    let v: SIMD2<Float>
+    let canonicalRasterSize: PixelSize
+}
+
+private struct DirectSquareOperation: Equatable {
+    let quarterTurns: UInt8
+    let reflected: Bool
+}
+
+private struct DirectSquareCandidate {
+    let cell: DirectCell
+    let imageOrdinal: UInt8
+    let operation: DirectSquareOperation
+    let brushFromCanonical: Affine2D
+    let coverageKey: DirectCoverageDomainKey
 }
 
 private struct DirectCanonicalVertex: Equatable {
@@ -673,7 +895,8 @@ private func phaseAlignedWorldSample(
             supersampling: supersampling,
             phase: phase
         )
-    case .grid, .mirrorX, .mirrorY, .mirrorXY, .rotational:
+    case .grid, .mirrorX, .mirrorY, .mirrorXY, .rotational,
+         .squareRotation, .squareKaleidoscope:
         break
     }
     return SIMD2(worldX, worldY)
@@ -733,6 +956,520 @@ private func normalizedBrushCoordinate(
     case .asymmetricTriangle:
         return point
     }
+}
+
+private func naturalCoverageSymmetry(
+    for footprint: OracleFootprint
+) -> FootprintCoverageSymmetry {
+    switch footprint {
+    case .hardRound:
+        return .rotationAndReflectionInvariant
+    case .asymmetricTriangle:
+        return .oriented
+    }
+}
+
+private func legacySquareCoverageSymmetry(
+    for footprint: OracleFootprint
+) -> FootprintCoverageSymmetry {
+    switch footprint {
+    case .hardRound:
+        return .halfTurnInvariant
+    case .asymmetricTriangle:
+        return .oriented
+    }
+}
+
+private func normalizedSquareAngle(_ value: Float) -> Float {
+    precondition(
+        value.isFinite,
+        "TilingCoverageOracle orientation must be finite"
+    )
+    let fullTurn = 2 * Float.pi
+    var result = value.truncatingRemainder(dividingBy: fullTurn)
+    if result >= Float.pi {
+        result -= fullTurn
+    } else if result < -Float.pi {
+        result += fullTurn
+    }
+    return result == 0 ? 0 : result
+}
+
+private func directSquareGeometry(
+    configuration: PeriodicSymmetryConfiguration,
+    canonicalRasterSize: PixelSize
+) -> DirectSquareGeometry {
+    precondition(
+        configuration.presetID == .squareRotation
+            || configuration.presetID == .squareKaleidoscope,
+        "TilingCoverageOracle square geometry requires a square preset"
+    )
+    let width = configuration.repeatSize.width
+    let height = configuration.repeatSize.height
+    precondition(
+        width.isFinite && height.isFinite,
+        "TilingCoverageOracle square repeat must be finite"
+    )
+    precondition(
+        width == height,
+        "TilingCoverageOracle square repeat extents must be equal"
+    )
+    precondition(
+        width > 0,
+        "TilingCoverageOracle square repeat side must be positive"
+    )
+    let angle = normalizedSquareAngle(configuration.orientationRadians)
+    let cosine = cos(angle)
+    let sine = sin(angle)
+    let u = SIMD2(width * cosine, width * sine)
+    let v = SIMD2(-width * sine, width * cosine)
+    let determinant = u.x * v.y - u.y * v.x
+    precondition(
+        determinant.isFinite && abs(determinant) >= Float.ulpOfOne,
+        "TilingCoverageOracle square basis must be nonsingular"
+    )
+    return DirectSquareGeometry(
+        presetID: configuration.presetID,
+        side: width,
+        cosine: cosine,
+        sine: sine,
+        u: u,
+        v: v,
+        canonicalRasterSize: canonicalRasterSize
+    )
+}
+
+private func directSquareCandidates(
+    worldBounds: FloatBounds,
+    footprint: OracleFootprint,
+    brushToWorld: Affine2D,
+    geometry: DirectSquareGeometry,
+    coverageSymmetry: FootprintCoverageSymmetry
+) -> [DirectSquareCandidate] {
+    let latticeCorners = [
+        worldBounds.minimum,
+        SIMD2(worldBounds.maximum.x, worldBounds.minimum.y),
+        worldBounds.maximum,
+        SIMD2(worldBounds.minimum.x, worldBounds.maximum.y),
+    ].map { directSquareLatticeCoordinate($0, geometry: geometry) }
+    let columns = directSquareCandidateRange(
+        minimum: latticeCorners.map(\.x).min()!,
+        maximum: latticeCorners.map(\.x).max()!
+    )
+    let rows = directSquareCandidateRange(
+        minimum: latticeCorners.map(\.y).min()!,
+        maximum: latticeCorners.map(\.y).max()!
+    )
+    let effectiveBrush = directSquareEffectiveBrush(
+        footprint: footprint,
+        brushToWorld: brushToWorld
+    )
+    let localBounds = directSquareLocalBounds(for: footprint)
+    let ordinals: Range<UInt8> = geometry.presetID == .squareRotation
+        ? 0..<4
+        : 0..<8
+    var candidates: [DirectSquareCandidate] = []
+
+    for row in rows {
+        for column in columns {
+            let cell = DirectCell(column: column, row: row)
+            let origin = directSquareCellOrigin(cell, geometry: geometry)
+            let planes = directSquareCellPlanes(
+                origin: origin,
+                geometry: geometry,
+                brushToWorld: effectiveBrush
+            )
+            let polygon = planes.reduce(localBounds) {
+                clipDirectLocalPolygon($0, to: $1)
+            }
+            guard polygon.count >= 3 else { continue }
+            let worldPolygon = polygon.map(effectiveBrush.applying)
+            guard abs(directSquareSignedArea(worldPolygon)) > 0.0001 else {
+                continue
+            }
+
+            for ordinal in ordinals {
+                let operation = DirectSquareOperation(
+                    quarterTurns: ordinal % 4,
+                    reflected: ordinal >= 4
+                )
+                let canonicalFromBrush = directSquareCanonicalFromBrush(
+                    cell: cell,
+                    imageOrdinal: ordinal,
+                    brushToWorld: effectiveBrush,
+                    geometry: geometry
+                )
+                let center = directSquareCanonicalizedCenter(
+                    canonicalFromBrush.translation,
+                    rasterSize: geometry.canonicalRasterSize
+                )
+                let axisLengths = [
+                    directCoverageMagnitude(canonicalFromBrush.xAxis),
+                    directCoverageMagnitude(canonicalFromBrush.yAxis),
+                ].sorted()
+                let key = DirectCoverageDomainKey(
+                    centerX: normalizedZeroBitPattern(
+                        center.x
+                    ),
+                    centerY: normalizedZeroBitPattern(
+                        center.y
+                    ),
+                    xAxisLength: normalizedZeroBitPattern(
+                        axisLengths[0]
+                    ),
+                    yAxisLength: normalizedZeroBitPattern(
+                        axisLengths[1]
+                    ),
+                    polygon: directCanonicalPolygonKey(polygon)
+                )
+                candidates.append(
+                    DirectSquareCandidate(
+                        cell: cell,
+                        imageOrdinal: ordinal,
+                        operation: operation,
+                        brushFromCanonical: canonicalFromBrush.inverted(),
+                        coverageKey: key
+                    )
+                )
+            }
+        }
+    }
+
+    guard coverageSymmetry != .oriented else {
+        return candidates
+    }
+    var seen: [DirectCoverageDomainKey: [DirectSquareOperation]] = [:]
+    return candidates.filter { candidate in
+        if seen[candidate.coverageKey, default: []].contains(where: {
+            directSquareOperationsAreEquivalent(
+                $0,
+                candidate.operation,
+                presetID: geometry.presetID,
+                coverageSymmetry: coverageSymmetry
+            )
+        }) {
+            return false
+        }
+        seen[candidate.coverageKey, default: []].append(candidate.operation)
+        return true
+    }
+}
+
+private func directSquareCanonicalizedCenter(
+    _ point: SIMD2<Float>,
+    rasterSize: PixelSize
+) -> SIMD2<Float> {
+    let width = Float(rasterSize.width)
+    let height = Float(rasterSize.height)
+    let fixedPoints = [
+        SIMD2<Float>(0, 0),
+        SIMD2(width * 0.5, height * 0.5),
+        SIMD2(width * 0.5, 0),
+        SIMD2(0, height * 0.5),
+    ]
+    return fixedPoints.first(where: {
+        directCoordinatesAreWithinULPs(point.x, $0.x, maximum: 2)
+            && directCoordinatesAreWithinULPs(
+                point.y,
+                $0.y,
+                maximum: 2
+            )
+    }) ?? point
+}
+
+private func directCoordinatesAreWithinULPs(
+    _ lhs: Float,
+    _ rhs: Float,
+    maximum: UInt32
+) -> Bool {
+    guard lhs.isFinite, rhs.isFinite else { return false }
+    let lhsBits = directOrderedFloatBits(lhs == 0 ? 0 : lhs)
+    let rhsBits = directOrderedFloatBits(rhs == 0 ? 0 : rhs)
+    return max(lhsBits, rhsBits) - min(lhsBits, rhsBits) <= maximum
+}
+
+private func directOrderedFloatBits(_ value: Float) -> UInt32 {
+    let bits = value.bitPattern
+    return bits & 0x8000_0000 == 0
+        ? bits | 0x8000_0000
+        : ~bits
+}
+
+private func directSquareCandidateRange(
+    minimum: Float,
+    maximum: Float
+) -> ClosedRange<Int> {
+    let lower = floor(minimum)
+    let upper = floor(maximum)
+    precondition(
+        lower.isFinite && upper.isFinite
+            && lower >= Float(Int.min) && upper < Float(Int.max),
+        "TilingCoverageOracle square cell range must be Int-representable"
+    )
+    return Int(lower)...Int(upper)
+}
+
+private func directSquareLatticeCoordinate(
+    _ world: SIMD2<Float>,
+    geometry: DirectSquareGeometry
+) -> SIMD2<Float> {
+    SIMD2(
+        (geometry.cosine * world.x + geometry.sine * world.y)
+            / geometry.side,
+        (-geometry.sine * world.x + geometry.cosine * world.y)
+            / geometry.side
+    )
+}
+
+private func directSquareCellOrigin(
+    _ cell: DirectCell,
+    geometry: DirectSquareGeometry
+) -> SIMD2<Float> {
+    geometry.u * Float(cell.column) + geometry.v * Float(cell.row)
+}
+
+private func directSquareEffectiveBrush(
+    footprint: OracleFootprint,
+    brushToWorld: Affine2D
+) -> Affine2D {
+    switch footprint {
+    case let .hardRound(radius):
+        return Affine2D(
+            xAxis: brushToWorld.xAxis * radius,
+            yAxis: brushToWorld.yAxis * radius,
+            translation: brushToWorld.translation
+        )
+    case .asymmetricTriangle:
+        return brushToWorld
+    }
+}
+
+private func directSquareLocalBounds(
+    for footprint: OracleFootprint
+) -> [SIMD2<Float>] {
+    switch footprint {
+    case .hardRound:
+        return [
+            SIMD2(-1, -1),
+            SIMD2(1, -1),
+            SIMD2(1, 1),
+            SIMD2(-1, 1),
+        ]
+    case .asymmetricTriangle:
+        return [
+            SIMD2(-0.75, -0.60),
+            SIMD2(0.85, -0.60),
+            SIMD2(0.85, 0.90),
+            SIMD2(-0.75, 0.90),
+        ]
+    }
+}
+
+private func directSquareCellPlanes(
+    origin: SIMD2<Float>,
+    geometry: DirectSquareGeometry,
+    brushToWorld: Affine2D
+) -> [DirectLocalPlane] {
+    let vertices = [
+        origin,
+        origin + geometry.u,
+        origin + geometry.u + geometry.v,
+        origin + geometry.v,
+    ]
+    return vertices.indices.map { index in
+        let start = vertices[index]
+        let end = vertices[(index + 1) % vertices.count]
+        let edge = end - start
+        let inward = SIMD2(-edge.y, edge.x) / directCoverageMagnitude(edge)
+        return directBrushLocalPlane(
+            worldNormal: inward,
+            worldOffset: simd_dot(inward, start),
+            xAxis: brushToWorld.xAxis,
+            yAxis: brushToWorld.yAxis,
+            translation: brushToWorld.translation
+        )
+    }
+}
+
+private func directSquareCanonicalFromBrush(
+    cell: DirectCell,
+    imageOrdinal: UInt8,
+    brushToWorld: Affine2D,
+    geometry: DirectSquareGeometry
+) -> Affine2D {
+    let worldToLattice = Affine2D(
+        xAxis: SIMD2(
+            geometry.cosine / geometry.side,
+            -geometry.sine / geometry.side
+        ),
+        yAxis: SIMD2(
+            geometry.sine / geometry.side,
+            geometry.cosine / geometry.side
+        ),
+        translation: .zero
+    )
+    let subtractCell = Affine2D(
+        xAxis: SIMD2(1, 0),
+        yAxis: SIMD2(0, 1),
+        translation: SIMD2(
+            -Float(cell.column),
+            -Float(cell.row)
+        )
+    )
+    let scaleToRaster = Affine2D(
+        xAxis: SIMD2(Float(geometry.canonicalRasterSize.width), 0),
+        yAxis: SIMD2(0, Float(geometry.canonicalRasterSize.height)),
+        translation: .zero
+    )
+    return brushToWorld
+        .concatenating(worldToLattice)
+        .concatenating(subtractCell)
+        .concatenating(scaleToRaster)
+        .concatenating(
+            directSquareRasterImage(
+                ordinal: imageOrdinal,
+                canonicalRasterSize: geometry.canonicalRasterSize
+            )
+        )
+}
+
+private func directSquareForwardImage(
+    _ local: SIMD2<Float>,
+    ordinal: UInt8
+) -> SIMD2<Float> {
+    switch ordinal {
+    case 0:
+        return local
+    case 1:
+        return SIMD2(1 - local.y, local.x)
+    case 2:
+        return SIMD2(1 - local.x, 1 - local.y)
+    case 3:
+        return SIMD2(local.y, 1 - local.x)
+    case 4:
+        return SIMD2(local.x, 1 - local.y)
+    case 5:
+        return SIMD2(local.y, local.x)
+    case 6:
+        return SIMD2(1 - local.x, local.y)
+    case 7:
+        return SIMD2(1 - local.y, 1 - local.x)
+    default:
+        preconditionFailure(
+            "TilingCoverageOracle square image ordinal must be in 0...7"
+        )
+    }
+}
+
+private func directSquareRasterImage(
+    ordinal: UInt8,
+    canonicalRasterSize: PixelSize
+) -> Affine2D {
+    let width = Float(canonicalRasterSize.width)
+    let height = Float(canonicalRasterSize.height)
+    let widthPerHeight = width / height
+    let heightPerWidth = height / width
+    switch ordinal {
+    case 0:
+        return .identity
+    case 1:
+        return Affine2D(
+            xAxis: SIMD2(0, heightPerWidth),
+            yAxis: SIMD2(-widthPerHeight, 0),
+            translation: SIMD2(width, 0)
+        )
+    case 2:
+        return Affine2D(
+            xAxis: SIMD2(-1, 0),
+            yAxis: SIMD2(0, -1),
+            translation: SIMD2(width, height)
+        )
+    case 3:
+        return Affine2D(
+            xAxis: SIMD2(0, -heightPerWidth),
+            yAxis: SIMD2(widthPerHeight, 0),
+            translation: SIMD2(0, height)
+        )
+    case 4:
+        return Affine2D(
+            xAxis: SIMD2(1, 0),
+            yAxis: SIMD2(0, -1),
+            translation: SIMD2(0, height)
+        )
+    case 5:
+        return Affine2D(
+            xAxis: SIMD2(0, heightPerWidth),
+            yAxis: SIMD2(widthPerHeight, 0),
+            translation: .zero
+        )
+    case 6:
+        return Affine2D(
+            xAxis: SIMD2(-1, 0),
+            yAxis: SIMD2(0, 1),
+            translation: SIMD2(width, 0)
+        )
+    case 7:
+        return Affine2D(
+            xAxis: SIMD2(0, -heightPerWidth),
+            yAxis: SIMD2(-widthPerHeight, 0),
+            translation: SIMD2(width, height)
+        )
+    default:
+        preconditionFailure(
+            "TilingCoverageOracle square image ordinal must be in 0...7"
+        )
+    }
+}
+
+private func directSquareContains(
+    _ point: SIMD2<Float>,
+    footprint: OracleFootprint
+) -> Bool {
+    switch footprint {
+    case .hardRound:
+        return simd_dot(point, point) <= 1
+    case .asymmetricTriangle:
+        return contains(point, footprint: .asymmetricTriangle)
+    }
+}
+
+private func directSquareOperationsAreEquivalent(
+    _ lhs: DirectSquareOperation,
+    _ rhs: DirectSquareOperation,
+    presetID: SymmetryPresetID,
+    coverageSymmetry: FootprintCoverageSymmetry
+) -> Bool {
+    let changesReflection = lhs.reflected != rhs.reflected
+    let difference = Int(rhs.quarterTurns) - Int(lhs.quarterTurns)
+    let turns = (difference % 4 + 4) % 4
+    let policyAllows = presetID == .squareKaleidoscope
+        || !changesReflection
+    guard policyAllows else { return false }
+
+    switch coverageSymmetry {
+    case .oriented:
+        return false
+    case .halfTurnInvariant:
+        return !changesReflection && turns == 2
+    case .rotationInvariant:
+        return !changesReflection
+    case .reflectionInvariant:
+        return changesReflection
+    case .rotationAndReflectionInvariant:
+        return true
+    }
+}
+
+private func directSquareSignedArea(_ polygon: [SIMD2<Float>]) -> Float {
+    guard polygon.count >= 3 else { return 0 }
+    let origin = polygon[0]
+    var twiceArea: Float = 0
+    for index in 1..<(polygon.count - 1) {
+        let first = polygon[index] - origin
+        let second = polygon[index + 1] - origin
+        twiceArea += first.x * second.y - first.y * second.x
+    }
+    return twiceArea * 0.5
 }
 
 private func directFoldDestinations(
@@ -798,6 +1535,17 @@ private func directFoldDestinations(
             positiveFold(height - identity.y, extent: height)
         )
         return rotated == identity ? [identity] : [identity, rotated]
+    case .squareRotation, .squareKaleidoscope:
+        let side = Float(min(tileSize.width, tileSize.height))
+        let local = SIMD2(
+            positiveFold(world.x, extent: side) / side,
+            positiveFold(world.y, extent: side) / side
+        )
+        let imageCount: UInt8 = tiling == .squareRotation ? 4 : 8
+        return (0..<imageCount).map {
+            let image = directSquareForwardImage(local, ordinal: $0)
+            return SIMD2(image.x * width, image.y * height)
+        }
     }
 }
 
@@ -827,6 +1575,12 @@ private func directCell(
         return DirectCell(
             column: cellIndex(world.x, extent: width),
             row: cellIndex(world.y, extent: height)
+        )
+    case .squareRotation, .squareKaleidoscope:
+        let side = Float(min(tileSize.width, tileSize.height))
+        return DirectCell(
+            column: cellIndex(world.x, extent: side),
+            row: cellIndex(world.y, extent: side)
         )
     }
 }
@@ -1258,6 +2012,12 @@ private func directCellOrigin(
         return SIMD2(
             Float(cell.column) * width,
             Float(cell.row) * height
+        )
+    case .squareRotation, .squareKaleidoscope:
+        let side = Float(min(tileSize.width, tileSize.height))
+        return SIMD2(
+            Float(cell.column) * side,
+            Float(cell.row) * side
         )
     }
 }

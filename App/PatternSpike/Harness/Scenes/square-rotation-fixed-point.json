@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 3,
+  "name": "square-rotation-fixed-point",
+  "width": 512,
+  "height": 512,
+  "tileWidth": 256,
+  "tileHeight": 256,
+  "tiling": 7,
+  "diagnosticMode": "hardRound",
+  "program": "squareFixedPoint",
+  "periodicConfiguration": {
+    "version": 1,
+    "repeatWidth": 192,
+    "repeatHeight": 192,
+    "orientationRadians": 0.2617994
+  },
+  "checks": [],
+  "structuralChecks": [
+    {
+      "metric": "duplicateFixedPointWriteCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "oracleHoleCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "oraclePhantomCount",
+      "relation": "equal",
+      "value": 0
+    },
+    {
+      "metric": "oracleMaximumDelta",
+      "relation": "lessThanOrEqual",
+      "value": 1
+    },
+    {
+      "metric": "previewCommitMaximumDelta",
+      "relation": "lessThanOrEqual",
+      "value": 1
+    }
+  ]
+}

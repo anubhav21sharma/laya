@@ -76,6 +76,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             && activeStroke.pendingRevisions == nil
     }
     public var tiling: TilingKind { tilingStrategy.kind }
+    public var periodicConfiguration: PeriodicSymmetryConfiguration {
+        tilingStrategy.periodicConfiguration
+    }
 
     struct FrameUpload {
         enum Layer: Equatable {
@@ -318,9 +321,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeMaterialState = BrushMaterialState(recipe: .legacyEquivalent)
         boundedWashSurface = nil
         lastBoundedWashWorkPlan = nil
-        tilingStrategy = TilingStrategy(
-            kind: configuration.tiling,
-            tileSize: resources.tileSize
+        tilingStrategy = try TilingStrategy(
+            configuration: configuration.periodicConfiguration,
+            canonicalRasterSize: resources.pixelSize
         )
         pipelines = try GridPipelineLibrary(device: device, library: library)
         instancePool = try DabInstanceBufferPool(device: device)
@@ -341,17 +344,59 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     public func applyTiling(_ tiling: TilingKind) throws {
+        let current = tilingStrategy.periodicConfiguration
+        let proposed: PeriodicSymmetryConfiguration
+        if tiling.isSquare {
+            if current.presetID.isSquare {
+                proposed = PeriodicSymmetryConfiguration(
+                    presetID: tiling,
+                    repeatSize: current.repeatSize,
+                    orientationRadians: current.orientationRadians
+                )
+            } else {
+                proposed = .defaultConfiguration(
+                    presetID: tiling,
+                    canonicalRasterSize: pixelSize
+                )
+            }
+        } else {
+            proposed = PeriodicSymmetryConfiguration(
+                presetID: tiling,
+                repeatSize: current.repeatSize,
+                orientationRadians: 0
+            )
+        }
+        try applyPeriodicConfiguration(proposed)
+    }
+
+    public func applyPeriodicConfiguration(
+        _ configuration: PeriodicSymmetryConfiguration
+    ) throws {
         guard isIdle else {
             throw MetalRendererError.tilingChangeRequiresIdle
         }
-        tilingStrategy = TilingStrategy(
-            kind: tiling,
-            tileSize: tileSize
-        )
+        let proposed: TilingStrategy
+        do {
+            proposed = try TilingStrategy(
+                configuration: configuration,
+                canonicalRasterSize: pixelSize
+            )
+        } catch {
+            throw MetalRendererError.invalidPeriodicConfiguration(
+                error.localizedDescription
+            )
+        }
+        tilingStrategy = proposed
     }
 
     public func setTiling(_ tiling: TilingKind) throws {
         try applyTiling(tiling)
+    }
+
+    public func setPeriodicConfiguration(
+        _ configuration: PeriodicSymmetryConfiguration
+    ) throws {
+        try applyPeriodicConfiguration(configuration)
     }
 
     public func beginStroke(
@@ -1668,7 +1713,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     @discardableResult
     func appendProjectedFragments(
         at point: WorldPoint,
-        requestedRadius: Float? = nil
+        requestedRadius: Float? = nil,
+        coverageSymmetry: FootprintCoverageSymmetry = .halfTurnInvariant
     ) throws -> [CellFragment] {
         guard let activeStroke else {
             throw MetalRendererError.invalidStrokeLifecycle
@@ -1687,7 +1733,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 minimum: SIMD2(-1, -1),
                 maximum: SIMD2(1, 1)
             ),
-            coverageSymmetry: .halfTurnInvariant
+            coverageSymmetry: coverageSymmetry
         )
         return try appendProjectedFragments(
             footprint: footprint,
@@ -1748,6 +1794,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) -> PatternGridFrameUniforms {
         let compositeMode = activeStroke?.style.compositeMode.rawValue
             ?? PatternCompositeWireDraw
+        let periodic = tilingStrategy.compiledSymmetry.domain.periodic!
+        let worldToLattice = periodic.worldToLattice
         return PatternGridFrameUniforms(
             drawableSize: drawableSize.simd,
             worldCenter: viewport.worldCenter.simd,
@@ -1761,7 +1809,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             diagnosticMode: diagnosticMode,
             compositeMode: compositeMode,
             symmetryFamily:
-                tilingStrategy.compiledSymmetry.displayProgram.family.rawValue
+                tilingStrategy.compiledSymmetry.displayProgram.family.rawValue,
+            repeatSize: periodic.configuration.repeatSize.simd,
+            latticeXAxis: worldToLattice.xAxis,
+            latticeYAxis: worldToLattice.yAxis,
+            latticeTranslation: worldToLattice.translation,
+            guideKind:
+                tilingStrategy.compiledSymmetry.displayProgram.guideKind
+                    .rawValue,
+            padding2: 0
         )
     }
 
@@ -3084,14 +3140,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func install(_ replacement: RasterResources) {
-        let tiling = tilingStrategy.kind
+        let configuration = tilingStrategy.periodicConfiguration
+        let replacementStrategy: TilingStrategy
+        do {
+            replacementStrategy = try TilingStrategy(
+                configuration: configuration,
+                canonicalRasterSize: replacement.pixelSize
+            )
+        } catch {
+            preconditionFailure(
+                "Validated periodic configuration must survive raster resize"
+            )
+        }
         replacement.liveTile.markCleared()
         replacement.replayTile.markCleared(epoch: 0)
         resources = replacement
-        tilingStrategy = TilingStrategy(
-            kind: tiling,
-            tileSize: replacement.tileSize
-        )
+        tilingStrategy = replacementStrategy
         needsLiveClear = false
         needsReplayClear = false
     }

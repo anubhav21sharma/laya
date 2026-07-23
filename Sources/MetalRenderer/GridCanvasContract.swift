@@ -3,8 +3,22 @@ import PatternEngine
 public struct TilingCanvasConfiguration: Equatable, Sendable {
     public let pixelSize: PixelSize
     public let tiling: TilingKind
+    public let periodicConfiguration: PeriodicSymmetryConfiguration
 
     public init(pixelSize: PixelSize, tiling: TilingKind) throws {
+        try self.init(
+            pixelSize: pixelSize,
+            periodicConfiguration: .defaultConfiguration(
+                presetID: tiling,
+                canonicalRasterSize: pixelSize
+            )
+        )
+    }
+
+    public init(
+        pixelSize: PixelSize,
+        periodicConfiguration: PeriodicSymmetryConfiguration
+    ) throws {
         guard
             (64...4_096).contains(pixelSize.width),
             (64...4_096).contains(pixelSize.height)
@@ -14,8 +28,19 @@ public struct TilingCanvasConfiguration: Equatable, Sendable {
                 height: pixelSize.height
             )
         }
+        do {
+            _ = try SymmetryDescriptorCompiler.compile(
+                configuration: periodicConfiguration,
+                canonicalRasterSize: pixelSize
+            )
+        } catch {
+            throw MetalRendererError.invalidPeriodicConfiguration(
+                error.localizedDescription
+            )
+        }
         self.pixelSize = pixelSize
-        self.tiling = tiling
+        tiling = periodicConfiguration.presetID
+        self.periodicConfiguration = periodicConfiguration
     }
 }
 
