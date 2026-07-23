@@ -437,6 +437,53 @@ struct TilingCoverageOracleTests {
     }
 
     @Test
+    func compiledDescriptorsMatchIndependentOracleAcrossLegacyMatrix() {
+        for testCase in compiledDescriptorParityMatrix {
+            let expected = TilingCoverageOracle.renderCanonical(
+                footprint: testCase.oracleCase.footprint,
+                brushToWorld: testCase.oracleCase.brushToWorld,
+                tileSize: testCase.oracleCase.tileSize,
+                tiling: testCase.oracleCase.tiling,
+                supersampling: testCase.oracleCase.supersampling
+            )
+            let actual = rasterizeProductionFragments(testCase.oracleCase)
+
+            #expect(
+                expected.coverage.bytes == actual.coverage.bytes,
+                "\(testCase.failureContext): coverage bytes"
+            )
+            #expect(
+                expected.canonicalCoordinatesBGRA
+                    == actual.canonicalCoordinatesBGRA,
+                "\(testCase.failureContext): canonical-coordinate bytes"
+            )
+            #expect(
+                expected.brushLocalCoordinatesBGRA
+                    == actual.brushLocalCoordinatesBGRA,
+                "\(testCase.failureContext): brush-local bytes"
+            )
+        }
+    }
+
+    @Test
+    func oracleDoesNotConsumeProductionDescriptors() throws {
+        let source = try String(
+            contentsOf: packageRoot()
+                .appending(
+                    path:
+                        "Sources/PatternEngine/Verification/TilingCoverageOracle.swift"
+                ),
+            encoding: .utf8
+        )
+
+        #expect(source.contains("tiling: TilingKind"))
+        #expect(!source.contains("CompiledSymmetry"))
+        #expect(!source.contains("CompiledIsometry"))
+        #expect(!source.contains("CompiledOwnership"))
+        #expect(!source.contains("CompiledDisplayProgram"))
+    }
+
+    @Test
     func coordinateDiagnosticsMatchAnIndependentFragmentRasterizer() {
         let diagnosticCases = oraclePropertyMatrix.filter {
             [
@@ -966,6 +1013,140 @@ private struct OraclePropertyCase {
     let supersampling: Int
 }
 
+private struct CompiledDescriptorParityCase {
+    let oracleCase: OraclePropertyCase
+    let failureContext: String
+}
+
+private struct ParityTransform {
+    let name: String
+    let make: (SIMD2<Float>) -> Affine2D
+}
+
+private struct ParityCenter {
+    let name: String
+    let resolve: (PixelSize) -> SIMD2<Float>
+}
+
+private let compiledDescriptorParityMatrix: [CompiledDescriptorParityCase] = {
+    let sizes = [
+        ("square", PixelSize(width: 64, height: 64)),
+        ("rectangular", PixelSize(width: 64, height: 96)),
+    ]
+    let transforms = [
+        ParityTransform(name: "identity") { _ in
+            Affine2D(
+                xAxis: SIMD2(1, 0),
+                yAxis: SIMD2(0, 1),
+                translation: .zero
+            )
+        },
+        ParityTransform(name: "translated") {
+            Affine2D(
+                xAxis: SIMD2(1, 0),
+                yAxis: SIMD2(0, 1),
+                translation: $0
+            )
+        },
+        ParityTransform(name: "rotated-90") {
+            Affine2D(
+                xAxis: SIMD2(0, 1),
+                yAxis: SIMD2(-1, 0),
+                translation: $0
+            )
+        },
+        ParityTransform(name: "reflected-x") {
+            Affine2D(
+                xAxis: SIMD2(-1, 0),
+                yAxis: SIMD2(0, 1),
+                translation: $0
+            )
+        },
+        ParityTransform(name: "sheared-x") {
+            Affine2D(
+                xAxis: SIMD2(1, 0),
+                yAxis: SIMD2(0.5, 1),
+                translation: $0
+            )
+        },
+    ]
+    let centres = [
+        ParityCenter(name: "base-cell") { _ in SIMD2(20, 30) },
+        ParityCenter(name: "positive-odd-cell") {
+            SIMD2(Float($0.width + 20), Float($0.height + 30))
+        },
+        ParityCenter(name: "negative-odd-cell") {
+            SIMD2(Float(-$0.width + 20), Float(-$0.height + 30))
+        },
+        ParityCenter(name: "exact-right-boundary") {
+            SIMD2(Float($0.width), 30)
+        },
+        ParityCenter(name: "exact-bottom-boundary") {
+            SIMD2(20, Float($0.height))
+        },
+        ParityCenter(name: "seam") { _ in SIMD2(0, 30) },
+        ParityCenter(name: "corner") {
+            SIMD2(Float($0.width), Float($0.height))
+        },
+        ParityCenter(name: "large-representable-cell") {
+            SIMD2(
+                Float($0.width * 10_000 + 20),
+                Float(-$0.height * 9_001 + 30)
+            )
+        },
+    ]
+    let footprints: [(name: String, footprint: OracleFootprint)] = [
+        ("hard-round", .hardRound(radius: 5)),
+        ("asymmetric-triangle", .asymmetricTriangle),
+    ]
+    let supersamplingValues = [1, 2, 4]
+    var cases: [CompiledDescriptorParityCase] = []
+    var centreIndex = 0
+
+    for preset in SymmetryPresetID.allCases {
+        for (sizeName, size) in sizes {
+            for transform in transforms {
+                for footprint in footprints {
+                    for supersampling in supersamplingValues {
+                        let centre: ParityCenter
+                        if transform.name == "identity" {
+                            centre = centres[6]
+                        } else {
+                            centre = centres[centreIndex % centres.count]
+                            centreIndex += 1
+                        }
+                        let brushToWorld = transform.make(
+                            centre.resolve(size)
+                        )
+                        let context = [
+                            "preset=\(preset)",
+                            "size=\(sizeName)-\(size.width)x\(size.height)",
+                            "transform=\(transform.name)",
+                            "footprint=\(footprint.name)",
+                            "supersampling=\(supersampling)",
+                            "centre=\(centre.name)",
+                        ].joined(separator: " ")
+                        cases.append(
+                            CompiledDescriptorParityCase(
+                                oracleCase: OraclePropertyCase(
+                                    name: context,
+                                    footprint: footprint.footprint,
+                                    brushToWorld: brushToWorld,
+                                    tileSize: size,
+                                    tiling: preset,
+                                    supersampling: supersampling
+                                ),
+                                failureContext: context
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+    return cases
+}()
+
 private let oraclePropertyMatrix: [OraclePropertyCase] = [
     OraclePropertyCase(
         name: "grid interior",
@@ -1391,6 +1572,13 @@ private func encodeSignedCoordinate(_ value: Float) -> UInt8 {
 
 private func averagedByte(sum: Int, divisor: Int) -> UInt8 {
     UInt8((sum + divisor / 2) / divisor)
+}
+
+private func packageRoot() -> URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
 }
 
 private func maximumByteDelta(

@@ -877,6 +877,73 @@ func schemaThreeDecodesNumericHalfDropAndRequiredState() throws {
     #expect(scene.diagnosticMode == .hardRound)
 }
 
+@Test
+func schemaThreeDecodesEveryLegacyNumericTilingValue() throws {
+    let expectedPresets: [SymmetryPresetID] = [
+        .grid,
+        .halfDrop,
+        .brick,
+        .mirrorX,
+        .mirrorY,
+        .mirrorXY,
+        .rotational,
+    ]
+
+    for (rawValue, expectedPreset) in expectedPresets.enumerated() {
+        let scene = try HarnessScene.decode(
+            schemaThreeData(
+                tiling: rawValue,
+                program: TilingHarnessProgram.noncentralVisibleCell.rawValue
+            )
+        )
+
+        #expect(
+            scene.tiling == expectedPreset,
+            "raw tiling \(rawValue)"
+        )
+    }
+}
+
+@Test
+func schemaThreeRoundTripKeepsNumericTilingWithoutDescriptors() throws {
+    for rawValue in 0...6 {
+        let scene = try HarnessScene.decode(
+            schemaThreeData(
+                tiling: rawValue,
+                program: TilingHarnessProgram.noncentralVisibleCell.rawValue
+            )
+        )
+        let encoded = try JSONEncoder().encode(scene)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+
+        #expect(object["tiling"] as? Int == rawValue)
+        #expect(Set(object.keys) == [
+            "schemaVersion",
+            "name",
+            "width",
+            "height",
+            "checks",
+            "program",
+            "structuralChecks",
+            "tileWidth",
+            "tileHeight",
+            "tiling",
+            "diagnosticMode",
+        ])
+        #expect(object["presetID"] == nil)
+        #expect(object["symmetryFamily"] == nil)
+        #expect(object["compiledSymmetry"] == nil)
+        #expect(object["isometries"] == nil)
+        #expect(object["ownership"] == nil)
+        #expect(object["displayProgram"] == nil)
+
+        let decoded = try HarnessScene.decode(encoded)
+        #expect(decoded == scene)
+    }
+}
+
 @Test(
     arguments: [
         ("tileWidth", 63, 96),
