@@ -1624,9 +1624,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 minimum: SIMD2(-1, -1),
                 maximum: SIMD2(1, 1)
             ),
-            coverageSymmetry: coverageSymmetry(
-                for: activeStroke.style.recipe.shape
-            )
+            coverageSymmetry:
+                activeStroke.style.recipe.footprintCoverageSymmetry
         )
         let color = InkColor(
             red: dab.color.red,
@@ -1738,21 +1737,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 blue: 0,
                 alpha: 1
             )!
-        }
-    }
-
-    private func coverageSymmetry(
-        for shape: BrushShapeDescriptor
-    ) -> FootprintCoverageSymmetry {
-        switch shape {
-        case .hardRound, .softRound:
-            .halfTurnInvariant
-        case .chisel:
-            .oriented
-        case let .asset(identity):
-            identity == BrushTextureIdentity.chiselShape.rawValue
-                ? .oriented
-                : .halfTurnInvariant
         }
     }
 

@@ -6,17 +6,11 @@ struct DebugPerformanceHUD: View {
     let snapshot: DebugPerformanceSnapshot
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Text("RENDER")
-                    .fontWeight(.semibold)
-                Text("~ close")
-                    .foregroundStyle(.secondary)
-            }
+        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
             metric(
                 "FPS",
                 snapshot.sampleCount == 0
-                    ? "measuring"
+                    ? "--"
                     : String(
                         format: "%.1f / %d",
                         snapshot.framesPerSecond,
@@ -24,33 +18,32 @@ struct DebugPerformanceHUD: View {
                     )
             )
             metric(
-                "p95 frame",
+                "p95",
                 String(format: "%.2f ms", snapshot.p95FrameMilliseconds)
             )
             metric(
-                "missed",
+                "miss",
                 String(format: "%.2f%%", snapshot.missedFramePercentage)
             )
         }
-        .font(.system(.caption, design: .monospaced))
-        .padding(10)
+        .font(.system(size: 10, weight: .medium, design: .monospaced))
+        .padding(6)
         .foregroundStyle(.primary)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
         .overlay {
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: 6)
                 .stroke(.primary.opacity(0.16))
         }
         .accessibilityIdentifier("Debug Performance HUD")
     }
 
     private func metric(_ label: String, _ value: String) -> some View {
-        HStack(spacing: 8) {
+        GridRow {
             Text(label)
                 .foregroundStyle(.secondary)
-            Spacer(minLength: 8)
             Text(value)
+                .gridColumnAlignment(.trailing)
         }
-        .frame(minWidth: 168)
     }
 }
 #endif

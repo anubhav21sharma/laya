@@ -311,7 +311,11 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
 }
 
 private func positiveModulo(_ value: Float, _ extent: Float) -> Float {
-    let remainder = value.truncatingRemainder(dividingBy: extent)
+    let normalizedValue = abs(value) < Float.leastNormalMagnitude ? 0 : value
+    let remainder = normalizedValue.truncatingRemainder(dividingBy: extent)
+    if abs(remainder) < Float.leastNormalMagnitude {
+        return 0
+    }
     if remainder == 0 {
         return 0
     }

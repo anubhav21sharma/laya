@@ -92,6 +92,38 @@ public struct BrushMaterialState: Equatable, Sendable {
     }
 }
 
+extension BrushRecipe {
+    var footprintCoverageSymmetry: FootprintCoverageSymmetry {
+        let shapeIsInvariant: Bool
+        switch shape {
+        case .hardRound, .softRound:
+            shapeIsInvariant = true
+        case .chisel:
+            shapeIsInvariant = false
+        case let .asset(identity):
+            shapeIsInvariant =
+                identity != BrushTextureIdentity.chiselShape.rawValue
+        }
+        guard shapeIsInvariant else {
+            return .oriented
+        }
+
+        guard grainCoordinateMode == .brushLocal else {
+            return .halfTurnInvariant
+        }
+        switch grain {
+        case .opaque:
+            return .halfTurnInvariant
+        case .paper, .noise:
+            return .oriented
+        case let .asset(identity):
+            return identity == BrushTextureIdentity.opaqueGrain.rawValue
+                ? .halfTurnInvariant
+                : .oriented
+        }
+    }
+}
+
 /// CPU reference used by projection/material tests and harness negative controls.
 public enum BrushCoverageOracle {
     public static func shapeCoverage(

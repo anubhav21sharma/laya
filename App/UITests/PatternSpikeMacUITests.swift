@@ -120,10 +120,14 @@ final class PatternSpikeMacUITests: XCTestCase {
         XCTAssertEqual(cursor.value as? String, "25 px")
         XCTAssertEqual(cursor.frame.width, 25, accuracy: 2)
 
-        app.typeKey("~", modifierFlags: [])
+        app.typeKey("`", modifierFlags: [])
         let hud = app.descendants(matching: .any)["Debug Performance HUD"]
         XCTAssertTrue(hud.waitForExistence(timeout: 2))
-        app.typeKey("~", modifierFlags: [])
+        XCTAssertLessThan(hud.frame.width, 130)
+        XCTAssertLessThan(hud.frame.height, 70)
+        XCTAssertEqual(hud.frame.maxX, canvas.frame.maxX - 8, accuracy: 3)
+        XCTAssertEqual(hud.frame.maxY, canvas.frame.maxY - 8, accuracy: 3)
+        app.typeKey("`", modifierFlags: [])
         XCTAssertTrue(hud.waitForNonExistence(timeout: 2))
 
         app.typeKey("g", modifierFlags: [])
@@ -146,6 +150,32 @@ final class PatternSpikeMacUITests: XCTestCase {
         XCTAssertTrue(waitUntilEnabled(undo))
     }
 
+    func testTileSizeFieldsAcceptDigitsWithoutChangingTiling() {
+        let app = XCUIApplication()
+        app.launch()
+
+        let tiling = app.popUpButtons["Tiling"]
+        let width = app.textFields["Tile Width"]
+        let height = app.textFields["Tile Height"]
+        XCTAssertTrue(tiling.waitForExistence(timeout: 5))
+        XCTAssertTrue(width.waitForExistence(timeout: 2))
+        XCTAssertTrue(height.waitForExistence(timeout: 2))
+        XCTAssertEqual(tiling.value as? String, "Grid")
+
+        replaceText(in: width, with: "320")
+        XCTAssertEqual(width.value as? String, "320")
+        XCTAssertEqual(tiling.value as? String, "Grid")
+
+        replaceText(in: height, with: "192")
+        XCTAssertEqual(height.value as? String, "192")
+        XCTAssertEqual(tiling.value as? String, "Grid")
+
+        app.buttons["Apply Size"].click()
+        XCTAssertEqual(width.value as? String, "320")
+        XCTAssertEqual(height.value as? String, "192")
+        XCTAssertEqual(tiling.value as? String, "Grid")
+    }
+
     private func select(
         _ name: String,
         in picker: XCUIElement,
@@ -166,6 +196,12 @@ final class PatternSpikeMacUITests: XCTestCase {
             forDuration: 0.05,
             thenDragTo: canvas.coordinate(withNormalizedOffset: end)
         )
+    }
+
+    private func replaceText(in field: XCUIElement, with value: String) {
+        field.click()
+        field.typeKey("a", modifierFlags: .command)
+        field.typeText(value)
     }
 
     private func waitUntilEnabled(_ element: XCUIElement) -> Bool {

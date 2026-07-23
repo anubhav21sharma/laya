@@ -44,6 +44,12 @@ import Testing
     #expect(glaze.material.family == .glaze)
     #expect(glaze.baseFlow < 1)
     #expect(glaze.strokeOpacity < 1)
+    #expect(glaze.aspectRatio >= 0.65)
+    #expect(
+        glaze.baseFlow
+            * glaze.material.strength
+            * glaze.strokeOpacity >= 0.2
+    )
 
     #expect(wash.shape == .softRound)
     #expect(wash.material.family == .boundedWash)
@@ -51,6 +57,11 @@ import Testing
     #expect(wash.material.softenPasses <= 2)
     #expect(wash.replayMode == .boundedWholeStroke)
     #expect(wash.replayLimits != nil)
+    #expect(
+        wash.baseFlow
+            * wash.material.strength
+            * wash.strokeOpacity >= 0.65
+    )
 
     #expect(eraser.shape == .hardRound)
     #expect(eraser.grain == .opaque)

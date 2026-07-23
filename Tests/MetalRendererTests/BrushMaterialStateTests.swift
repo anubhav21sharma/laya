@@ -26,6 +26,52 @@ private func materialRecipe(
 }
 
 @Test
+func footprintSymmetryAccountsForShapeAndGrainFrame() throws {
+    let fixtures: [
+        (
+            shape: BrushShapeDescriptor,
+            grain: BrushGrainDescriptor,
+            mode: BrushGrainCoordinateMode,
+            expected: FootprintCoverageSymmetry
+        )
+    ] = [
+        (.hardRound, .opaque, .brushLocal, .halfTurnInvariant),
+        (.softRound, .paper, .canonical, .halfTurnInvariant),
+        (.hardRound, .paper, .brushLocal, .oriented),
+        (.hardRound, .noise, .brushLocal, .oriented),
+        (
+            .hardRound,
+            .asset("builtin.grain.opaque"),
+            .brushLocal,
+            .halfTurnInvariant
+        ),
+        (
+            .hardRound,
+            .asset("builtin.grain.paper"),
+            .brushLocal,
+            .oriented
+        ),
+        (.chisel, .opaque, .canonical, .oriented),
+        (
+            .asset("builtin.shape.chisel"),
+            .opaque,
+            .canonical,
+            .oriented
+        ),
+    ]
+
+    for (index, fixture) in fixtures.enumerated() {
+        let recipe = try materialRecipe(
+            id: "test.symmetry.\(index)",
+            shape: fixture.shape,
+            grain: fixture.grain,
+            coordinateMode: fixture.mode
+        )
+        #expect(recipe.footprintCoverageSymmetry == fixture.expected)
+    }
+}
+
+@Test
 func materialUniformsPackEverySelectorAndBoundedValue() throws {
     let wash = BrushMaterial(
         family: .boundedWash,

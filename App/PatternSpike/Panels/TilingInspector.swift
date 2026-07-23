@@ -6,6 +6,7 @@ import SwiftUI
 struct TilingInspector: View {
     let controller: EditorSessionController
     @Binding var runtimeError: MetalRendererError?
+    let focusTarget: FocusState<EditorFocusTarget?>.Binding
     let requestEditorFocus: @MainActor () -> Void
     @State private var widthDraft: String
     @State private var heightDraft: String
@@ -13,10 +14,12 @@ struct TilingInspector: View {
     init(
         controller: EditorSessionController,
         runtimeError: Binding<MetalRendererError?>,
+        focusTarget: FocusState<EditorFocusTarget?>.Binding,
         requestEditorFocus: @escaping @MainActor () -> Void
     ) {
         self.controller = controller
         _runtimeError = runtimeError
+        self.focusTarget = focusTarget
         self.requestEditorFocus = requestEditorFocus
         _widthDraft = State(initialValue: String(controller.model.pixelSize.width))
         _heightDraft = State(initialValue: String(controller.model.pixelSize.height))
@@ -44,6 +47,8 @@ struct TilingInspector: View {
                     TextField("Width", text: $widthDraft)
                         .multilineTextAlignment(.trailing)
                         .frame(minHeight: editorControlExtent)
+                        .focused(focusTarget, equals: .tileWidth)
+                        .accessibilityIdentifier("Tile Width")
                         .onSubmit { requestEditorFocus() }
                 }
                 GridRow {
@@ -51,6 +56,8 @@ struct TilingInspector: View {
                     TextField("Height", text: $heightDraft)
                         .multilineTextAlignment(.trailing)
                         .frame(minHeight: editorControlExtent)
+                        .focused(focusTarget, equals: .tileHeight)
+                        .accessibilityIdentifier("Tile Height")
                         .onSubmit { requestEditorFocus() }
                 }
             }

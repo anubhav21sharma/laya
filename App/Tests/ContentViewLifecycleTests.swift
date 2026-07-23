@@ -22,6 +22,68 @@ private struct HostedContentView: View {
     }
 }
 
+#if DEBUG
+@Test func debugHUDToggleAcceptsPhysicalGraveAndShiftedTilde() {
+    #expect(isDebugHUDToggleCharacter("`"))
+    #expect(isDebugHUDToggleCharacter("~"))
+    #expect(!isDebugHUDToggleCharacter("1"))
+    #expect(!isDebugHUDToggleCharacter(""))
+}
+
+@Test
+@MainActor
+func debugHUDHasACompactIntrinsicSize() {
+    let host = NSHostingView(
+        rootView: DebugPerformanceHUD(snapshot: DebugPerformanceSnapshot())
+    )
+    host.layoutSubtreeIfNeeded()
+
+    #expect(host.fittingSize.width < 130)
+    #expect(host.fittingSize.height < 70)
+}
+
+@Test
+@MainActor
+func hostedDebugHUDSamplesOnlyWhileVisible() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let host = NSHostingView(rootView: ContentView(controller: controller))
+    let window = NSWindow(
+        contentRect: CGRect(x: 0, y: 0, width: 1_024, height: 768),
+        styleMask: [.titled],
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    defer { window.close() }
+
+    await settle(host)
+    #expect(renderer.onInteractiveFramePresented == nil)
+
+    sendKey("`", keyCode: 50, to: window)
+    await settle(host)
+    #expect(renderer.onInteractiveFramePresented != nil)
+
+    sendKey("`", keyCode: 50, to: window)
+    await settle(host)
+    #expect(renderer.onInteractiveFramePresented == nil)
+
+    sendKey("`", keyCode: 50, modifiers: .command, to: window)
+    await settle(host)
+    #expect(renderer.onInteractiveFramePresented == nil)
+}
+#endif
+
+@Test
+func defaultContentViewInitializerDoesNotAllocateRenderer() throws {
+    let source = try contentViewInitializerSource()
+
+    #expect(!source.contains("MTLCreateSystemDefaultDevice"))
+    #expect(!source.contains("GridRenderer("))
+}
+
 @Test
 @MainActor
 func hostedContentViewRetainsOneEditorSessionAcrossUpdates() async throws {
@@ -63,6 +125,41 @@ func hostedContentViewRetainsOneEditorSessionAcrossUpdates() async throws {
     #expect(updatedCanvas.gridRenderer === initialRenderer)
     #expect(updatedCanvas.brushDiameterForTesting == 25)
     #expect(replacementController.model.brushDiameter == 20)
+}
+
+@Test
+@MainActor
+func hostedTileFieldReceivesNumberKeyEventsWithoutEditorShortcuts() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let host = NSHostingView(rootView: ContentView(controller: controller))
+    let window = NSWindow(
+        contentRect: CGRect(x: 0, y: 0, width: 1_024, height: 768),
+        styleMask: [.titled],
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    defer { window.close() }
+
+    await settle(host)
+    let widthField = try #require(
+        findSubviews(of: NSTextField.self, in: host).first {
+            $0.isEditable && $0.placeholderString == "Width"
+        }
+    )
+    widthField.selectText(nil)
+    await Task.yield()
+
+    sendKey("3", keyCode: 20, to: window)
+    sendKey("2", keyCode: 19, to: window)
+    sendKey("0", keyCode: 29, to: window)
+    await settle(host)
+
+    #expect(widthField.stringValue == "320")
+    #expect(controller.model.tiling == .grid)
 }
 
 @Test
@@ -282,5 +379,65 @@ private func findSubview<Subview: NSView>(in view: NSView) -> Subview? {
         }
     }
     return nil
+}
+
+@MainActor
+private func findSubviews<Subview: NSView>(
+    of type: Subview.Type,
+    in view: NSView
+) -> [Subview] {
+    var matches: [Subview] = []
+    if let match = view as? Subview {
+        matches.append(match)
+    }
+    for child in view.subviews {
+        matches.append(contentsOf: findSubviews(of: type, in: child))
+    }
+    return matches
+}
+
+@MainActor
+private func sendKey(
+    _ character: String,
+    keyCode: UInt16,
+    modifiers: NSEvent.ModifierFlags = [],
+    to window: NSWindow
+) {
+    for type: NSEvent.EventType in [.keyDown, .keyUp] {
+        guard let event = NSEvent.keyEvent(
+            with: type,
+            location: .zero,
+            modifierFlags: modifiers,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: character,
+            charactersIgnoringModifiers: character,
+            isARepeat: false,
+            keyCode: keyCode
+        ) else { continue }
+        window.sendEvent(event)
+    }
+}
+
+private func contentViewInitializerSource() throws -> String {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let source = try String(
+        contentsOf: repositoryRoot.appendingPathComponent(
+            "App/PatternSpike/ContentView.swift"
+        ),
+        encoding: .utf8
+    )
+    let initializerStart = try #require(source.range(of: "    init() {"))
+    let bodyStart = try #require(
+        source.range(
+            of: "\n    var body:",
+            range: initializerStart.upperBound..<source.endIndex
+        )
+    )
+    return String(source[initializerStart.lowerBound..<bodyStart.lowerBound])
 }
 #endif

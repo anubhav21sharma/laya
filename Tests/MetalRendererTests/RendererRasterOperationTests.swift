@@ -1,5 +1,6 @@
 import Metal
 @testable import MetalRenderer
+import EditorCore
 import PatternEngine
 import Testing
 
@@ -478,6 +479,87 @@ func boundedWashPreviewMatchesCommitAndHonorsAccumulationLimit() throws {
     ).map { committedBytes[$0] }
     let expectedCeiling = UInt8((0.7 * 0.6 * 255).rounded(.up))
     #expect(alphaValues.max()! <= expectedCeiling)
+}
+
+@Test
+@MainActor
+func calibratedAnchorsProduceVisibleNominalMouseDabs() throws {
+    let fixtures: [(AnchorBrushEntry, UInt64, UInt8)] = [
+        (AnchorBrushCatalog.glazeMarker, 47, 40),
+        (AnchorBrushCatalog.boundedWash, 48, 24),
+    ]
+
+    for (entry, tokenValue, minimumPeakAlpha) in fixtures {
+        guard let renderer = try makeRasterOperationRenderer() else { return }
+        try commitCenterStroke(
+            renderer: renderer,
+            token: RendererOperationToken(rawValue: tokenValue),
+            style: StrokeRenderStyle(
+                color: .black,
+                diameter: 40,
+                compositeMode: .draw,
+                eraserStrength: 1,
+                recipe: entry.recipe,
+                seed: tokenValue
+            )
+        )
+
+        let bytes = try canonicalBytes(renderer)
+        let alphaValues = stride(from: 3, to: bytes.count, by: 4).map {
+            bytes[$0]
+        }
+        #expect(
+            alphaValues.max()! >= minimumPeakAlpha,
+            "\(entry.displayName) must remain clearly visible"
+        )
+
+        if entry.id == AnchorBrushCatalog.glazeMarker.id {
+            let visibleOffsets = alphaValues.indices.filter {
+                alphaValues[$0] >= 8
+            }
+            let xs = visibleOffsets.map { $0 % 64 }
+            let ys = visibleOffsets.map { $0 / 64 }
+            let visibleWidth = xs.max()! - xs.min()! + 1
+            let visibleHeight = ys.max()! - ys.min()! + 1
+            #expect(
+                min(visibleWidth, visibleHeight) >= 22,
+                "Glaze Marker must occupy most of its nominal cursor envelope"
+            )
+        }
+    }
+}
+
+@Test
+@MainActor
+func rotationalFixedPointKeepsBrushLocalGrainOrientations() throws {
+    guard let renderer = try makeRasterOperationRenderer() else { return }
+    try renderer.applyTiling(.rotational)
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("test.brush-local-paper"),
+        shape: .hardRound,
+        grain: .paper,
+        grainCoordinateMode: .brushLocal,
+        material: .ink,
+        baseSpacingFraction: 0.125,
+        maximumSpacingFraction: 0.125
+    )
+    let token = RendererOperationToken(rawValue: 49)
+
+    try renderer.beginStroke(
+        token: token,
+        sample: rasterSample(.began),
+        style: StrokeRenderStyle(
+            color: .black,
+            diameter: 20,
+            compositeMode: .draw,
+            eraserStrength: 1,
+            recipe: recipe,
+            seed: 49
+        )
+    )
+    defer { try? renderer.cancelStroke(token: token) }
+
+    #expect(renderer.harnessCounters.totalInstancesThisStroke == 2)
 }
 
 @Test

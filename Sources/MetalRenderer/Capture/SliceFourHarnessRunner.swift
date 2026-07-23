@@ -918,9 +918,8 @@ private extension SliceFourHarnessRunner {
                         minimum: SIMD2(-1, -1),
                         maximum: SIMD2(1, 1)
                     ),
-                    coverageSymmetry: Self.coverageSymmetry(
-                        for: recipe.shape
-                    )
+                    coverageSymmetry:
+                        recipe.footprintCoverageSymmetry
                 )
                 let brushAttributes = SIMD4<Float>(
                     recipe.baseHardness,
@@ -1143,20 +1142,6 @@ private extension SliceFourHarnessRunner {
             phantomCount: phantoms,
             maximumDelta: holes == 0 && phantoms == 0 ? 0 : 255
         )
-    }
-
-    nonisolated static func coverageSymmetry(
-        for shape: BrushShapeDescriptor
-    ) -> FootprintCoverageSymmetry {
-        switch shape {
-        case .hardRound, .softRound:
-            .halfTurnInvariant
-        case .chisel:
-            .oriented
-        case let .asset(identity):
-            identity == BrushTextureIdentity.chiselShape.rawValue
-                ? .oriented : .halfTurnInvariant
-        }
     }
 
     func drawEraseAudit(

@@ -312,12 +312,25 @@ fragment float4 patternDiagnosticFootprintFragment(
     }
 }
 
-static float2 patternPositiveFold(float2 world, float2 tileSize) {
-    return world - floor(world / tileSize) * tileSize;
+static float patternPositiveFold(float coordinate, float extent) {
+    const float remainder = fmod(coordinate, extent);
+    if (remainder == 0.0) {
+        return 0.0;
+    }
+    if (remainder < 0.0) {
+        return min(
+            remainder + extent,
+            nextafter(extent, 0.0)
+        );
+    }
+    return remainder;
 }
 
-static float patternPositiveFold(float coordinate, float extent) {
-    return coordinate - floor(coordinate / extent) * extent;
+static float2 patternPositiveFold(float2 world, float2 tileSize) {
+    return float2(
+        patternPositiveFold(world.x, tileSize.x),
+        patternPositiveFold(world.y, tileSize.y)
+    );
 }
 
 struct PatternDisplayMapping {

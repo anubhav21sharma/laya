@@ -12,16 +12,22 @@ let editorControlExtent: CGFloat = 44
 let editorInspectorWidth: CGFloat = 252
 #endif
 
+enum EditorFocusTarget: Hashable {
+    case editor
+    case tileWidth
+    case tileHeight
+}
+
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     #if os(macOS)
     @Environment(\.controlActiveState) private var controlActiveState
     #endif
 
-    @State private var state: CanvasState
+    @State private var state: CanvasState = .loading
     @State private var runtimeError: MetalRendererError?
     @State private var pointerCancellationGeneration: UInt = 0
-    @FocusState private var editorFocused: Bool
+    @FocusState private var focusTarget: EditorFocusTarget?
     #if DEBUG && os(macOS)
     @State private var debugHUDVisible = false
     @State private var debugPerformanceMonitor = DebugPerformanceMonitor()
@@ -31,12 +37,34 @@ struct ContentView: View {
         _state = State(initialValue: .ready(controller))
     }
 
-    init() {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            _state = State(
-                initialValue: .unavailable(
-                    "Pattern requires a Metal-capable Apple device."
+    init() {}
+
+    var body: some View {
+        Group {
+            switch state {
+            case .loading:
+                ProgressView("Preparing renderer…")
+            case let .ready(controller):
+                editorShell(controller)
+            case let .unavailable(message):
+                ContentUnavailableView(
+                    "Renderer Unavailable",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(message)
                 )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task {
+            initializeRendererIfNeeded()
+        }
+    }
+
+    private func initializeRendererIfNeeded() {
+        guard case .loading = state else { return }
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            state = .unavailable(
+                "Pattern requires a Metal-capable Apple device."
             )
             return
         }
@@ -51,32 +79,12 @@ struct ContentView: View {
                 drawableSize: PatternSize(width: 1, height: 1),
                 configuration: configuration
             )
-            _state = State(
-                initialValue: .ready(
-                    EditorSessionController(renderer: renderer)
-                )
+            state = .ready(
+                EditorSessionController(renderer: renderer)
             )
         } catch {
-            _state = State(
-                initialValue: .unavailable(error.localizedDescription)
-            )
+            state = .unavailable(error.localizedDescription)
         }
-    }
-
-    var body: some View {
-        Group {
-            switch state {
-            case let .ready(controller):
-                editorShell(controller)
-            case let .unavailable(message):
-                ContentUnavailableView(
-                    "Renderer Unavailable",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text(message)
-                )
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func editorShell(
@@ -94,7 +102,7 @@ struct ContentView: View {
                     requestEditorFocus: requestEditorFocus
                 )
                 Divider()
-                ZStack(alignment: .topLeading) {
+                ZStack(alignment: .bottomTrailing) {
                     MetalCanvas(
                         controller: controller,
                         renderer: controller.renderer,
@@ -109,7 +117,7 @@ struct ContentView: View {
                         DebugPerformanceHUD(
                             snapshot: debugPerformanceMonitor.snapshot
                         )
-                        .padding(12)
+                        .padding(8)
                         .allowsHitTesting(false)
                     }
                     #endif
@@ -119,6 +127,7 @@ struct ContentView: View {
                 TilingInspector(
                     controller: controller,
                     runtimeError: $runtimeError,
+                    focusTarget: $focusTarget,
                     requestEditorFocus: requestEditorFocus
                 )
             }
@@ -133,9 +142,9 @@ struct ContentView: View {
             }
         }
         .focusable()
-        .focused($editorFocused)
-        .onChange(of: editorFocused) { _, isFocused in
-            if !isFocused {
+        .focused($focusTarget, equals: .editor)
+        .onChange(of: focusTarget) { _, target in
+            if target != .editor {
                 cancelCurrentInteraction(controller)
             }
         }
@@ -151,13 +160,10 @@ struct ContentView: View {
                 runtimeError = $0
             }
             #if DEBUG && os(macOS)
-            let monitor = debugPerformanceMonitor
-            controller.renderer.onInteractiveFramePresented = { timestamp, targetFramesPerSecond in
-                monitor.recordPresentedFrame(
-                    at: timestamp,
-                    targetFramesPerSecond: targetFramesPerSecond
-                )
-            }
+            updateDebugPerformanceSampling(
+                controller,
+                visible: debugHUDVisible
+            )
             #endif
         }
         .onDisappear {
@@ -168,6 +174,11 @@ struct ContentView: View {
             controller.renderer.onInteractiveFramePresented = nil
             #endif
         }
+        #if DEBUG && os(macOS)
+        .onChange(of: debugHUDVisible) { _, visible in
+            updateDebugPerformanceSampling(controller, visible: visible)
+        }
+        #endif
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
                 cancelCurrentInteraction(controller)
@@ -187,7 +198,7 @@ struct ContentView: View {
     }
 
     private func requestEditorFocus() {
-        editorFocused = true
+        focusTarget = .editor
     }
 
     private func cancelCurrentInteraction(
@@ -204,12 +215,15 @@ struct ContentView: View {
         _ press: KeyPress,
         controller: EditorSessionController
     ) -> KeyPress.Result {
-        guard editorFocused else {
+        guard focusTarget == .editor else {
             return .ignored
         }
 
         #if DEBUG && os(macOS)
-        if press.phase == .down, press.characters == "~" {
+        if press.phase == .down,
+           press.modifiers.isEmpty || press.modifiers == .shift,
+           isDebugHUDToggleCharacter(press.characters)
+        {
             debugHUDVisible.toggle()
             if debugHUDVisible {
                 debugPerformanceMonitor.reset()
@@ -235,6 +249,27 @@ struct ContentView: View {
         )
         return .handled
     }
+
+    #if DEBUG && os(macOS)
+    private func updateDebugPerformanceSampling(
+        _ controller: EditorSessionController,
+        visible: Bool
+    ) {
+        guard visible else {
+            controller.renderer.onInteractiveFramePresented = nil
+            return
+        }
+        let monitor = debugPerformanceMonitor
+        controller.renderer.onInteractiveFramePresented = {
+            timestamp,
+            targetFramesPerSecond in
+            monitor.recordPresentedFrame(
+                at: timestamp,
+                targetFramesPerSecond: targetFramesPerSecond
+            )
+        }
+    }
+    #endif
 
     private func editorKey(from press: KeyPress) -> EditorKey {
         switch press.key {
@@ -314,10 +349,17 @@ struct ContentView: View {
     #endif
 
     private enum CanvasState {
+        case loading
         case ready(EditorSessionController)
         case unavailable(String)
     }
 }
+
+#if DEBUG && os(macOS)
+func isDebugHUDToggleCharacter(_ characters: String) -> Bool {
+    characters == "`" || characters == "~"
+}
+#endif
 
 private struct ErrorBanner: View {
     let error: MetalRendererError

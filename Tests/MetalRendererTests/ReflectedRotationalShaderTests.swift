@@ -1,4 +1,6 @@
 import Foundation
+import Metal
+import PatternEngine
 import Testing
 
 @Suite("Reflected, rotational, and diagnostic Metal paths")
@@ -15,6 +17,67 @@ struct ReflectedRotationalShaderTests {
         #expect(source.contains("const int row = int(floor(world.y / tileSize.y));"))
         #expect(source.contains("patternPositiveFold(tileSize.x - local.x, tileSize.x)"))
         #expect(source.contains("patternPositiveFold(tileSize.y - local.y, tileSize.y)"))
+    }
+
+    @Test
+    @MainActor
+    func metalPositiveFoldMatchesCPUAtNegativeSeamEpsilons() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let inputs: [Float] = [
+            -1e-8,
+            -Float.leastNonzeroMagnitude,
+            -64,
+            0,
+            64,
+        ]
+        let library = try makeProbeLibrary(device: device)
+        let function = try #require(
+            library.makeFunction(name: "patternPositiveFoldProbe")
+        )
+        let pipeline = try device.makeComputePipelineState(function: function)
+        let inputBuffer = try #require(
+            device.makeBuffer(
+                bytes: inputs,
+                length: inputs.count * MemoryLayout<Float>.stride
+            )
+        )
+        let outputBuffer = try #require(
+            device.makeBuffer(
+                length: inputs.count * MemoryLayout<Float>.stride
+            )
+        )
+        let commandBuffer = try #require(
+            device.makeCommandQueue()?.makeCommandBuffer()
+        )
+        let encoder = try #require(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.dispatchThreads(
+            MTLSize(width: inputs.count, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: inputs.count, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.status == .completed)
+
+        let actual = Array(
+            UnsafeBufferPointer(
+                start: outputBuffer.contents()
+                    .assumingMemoryBound(to: Float.self),
+                count: inputs.count
+            )
+        )
+        let strategy = TilingStrategy(
+            kind: .grid,
+            tileSize: PatternSize(width: 64, height: 64)
+        )
+        let expected = inputs.map {
+            strategy.displayFold(WorldPoint(x: $0, y: 0)).x
+        }
+
+        #expect(actual.map(\.bitPattern) == expected.map(\.bitPattern))
     }
 
     @Test
@@ -137,6 +200,44 @@ struct ReflectedRotationalShaderTests {
             of: #"\s+"#,
             with: " ",
             options: .regularExpression
+        )
+    }
+
+    private func makeProbeLibrary(
+        device: any MTLDevice
+    ) throws -> any MTLLibrary {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shader = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/MetalRenderer/Shaders.metal"
+            ),
+            encoding: .utf8
+        )
+        let header = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/CShaderTypes/include/ShaderTypes.h"
+            ),
+            encoding: .utf8
+        )
+        let probe = """
+
+        kernel void patternPositiveFoldProbe(
+            const device float* inputs [[buffer(0)]],
+            device float* outputs [[buffer(1)]],
+            uint index [[thread_position_in_grid]]
+        ) {
+            outputs[index] = patternPositiveFold(inputs[index], 64.0);
+        }
+        """
+        return try device.makeLibrary(
+            source: shader.replacingOccurrences(
+                of: "#include \"ShaderTypes.h\"",
+                with: header
+            ) + probe,
+            options: nil
         )
     }
 }

@@ -112,18 +112,18 @@ public enum AnchorBrushCatalog {
                 grain: .opaque,
                 material: BrushMaterial(
                     family: .glaze,
-                    strength: 0.75,
+                    strength: 0.8,
                     wetness: 0.2,
                     bleedRadius: 0,
                     softenPasses: 0,
-                    accumulationLimit: 0.8
+                    accumulationLimit: 0.85
                 ),
                 baseSpacingFraction: 0.16,
                 maximumSpacingFraction: 0.3,
-                baseFlow: 0.2,
-                strokeOpacity: 0.65,
+                baseFlow: 0.35,
+                strokeOpacity: 0.75,
                 baseHardness: 0.7,
-                aspectRatio: 0.35,
+                aspectRatio: 0.7,
                 sizeMapping: .linear(
                     input: .pressure,
                     output: 0.6...1
@@ -156,16 +156,16 @@ public enum AnchorBrushCatalog {
                 ),
                 material: BrushMaterial(
                     family: .boundedWash,
-                    strength: 0.65,
+                    strength: 1,
                     wetness: 0.8,
                     bleedRadius: 12,
                     softenPasses: 2,
-                    accumulationLimit: 0.7
+                    accumulationLimit: 0.75
                 ),
                 baseSpacingFraction: 0.15,
                 maximumSpacingFraction: 0.3,
-                baseFlow: 0.25,
-                strokeOpacity: 0.6,
+                baseFlow: 0.85,
+                strokeOpacity: 0.85,
                 baseHardness: 0.2,
                 sizeMapping: .linear(
                     input: .pressure,
