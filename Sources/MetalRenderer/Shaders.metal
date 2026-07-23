@@ -329,8 +329,13 @@ struct PatternDisplayMapping {
 static PatternDisplayMapping patternDisplayMapping(
     float2 world,
     float2 tileSize,
+    uint symmetryFamily,
     uint tilingKind
 ) {
+    if (symmetryFamily != PatternSymmetryFamilyWireRectangular) {
+        return {float2(0.0), float2(0.0), false};
+    }
+
     switch (tilingKind) {
     case PatternTilingWireHalfDrop: {
         const int column = int(floor(world.x / tileSize.x));
@@ -704,6 +709,7 @@ fragment float4 patternGridFragment(
     const PatternDisplayMapping mapping = patternDisplayMapping(
         world,
         frame.tileSize,
+        frame.symmetryFamily,
         frame.tilingKind
     );
     if (!mapping.valid) {

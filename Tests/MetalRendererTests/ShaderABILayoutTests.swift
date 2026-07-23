@@ -24,6 +24,13 @@ func tilingWireValuesAreAppendOnly() {
 }
 
 @Test
+func symmetryFamilyWireValuesAreAppendOnly() {
+    #expect(PatternSymmetryFamilyWireRectangular == 0)
+    #expect(PatternSymmetryFamilyWireTriangular == 1)
+    #expect(PatternSymmetryFamilyWireRadial == 2)
+}
+
+@Test
 func diagnosticWireValuesAreAppendOnly() {
     #expect(PatternDiagnosticWireNone == 0)
     #expect(PatternDiagnosticWireAsymmetricCoverage == 1)
@@ -55,7 +62,10 @@ func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
             == 44
     )
     #expect(MemoryLayout<PatternGridFrameUniforms>.offset(of: \.compositeMode) == 48)
-    #expect(MemoryLayout<PatternGridFrameUniforms>.offset(of: \.padding) == 52)
+    #expect(
+        MemoryLayout<PatternGridFrameUniforms>.offset(of: \.symmetryFamily)
+            == 52
+    )
 
     #expect(MemoryLayout<PatternClipHalfPlane>.size == 16)
     #expect(MemoryLayout<PatternClipHalfPlane>.stride == 16)

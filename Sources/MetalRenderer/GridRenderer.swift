@@ -1772,10 +1772,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             gridLineWidth: 1,
             showGridLines: showGridLines ? 1 : 0,
             liveVisible: liveVisible ? 1 : 0,
-            tilingKind: tilingStrategy.kind.rawValue,
+            tilingKind:
+                tilingStrategy.compiledSymmetry.displayProgram.presetWireID,
             diagnosticMode: diagnosticMode,
             compositeMode: compositeMode,
-            padding: 0
+            symmetryFamily:
+                tilingStrategy.compiledSymmetry.displayProgram.family.rawValue
         )
     }
 

@@ -26,6 +26,15 @@ struct TranslationTilingShaderTests {
     }
 
     @Test
+    func fragmentPassesSymmetryFamilyIntoDisplayMapping() throws {
+        let source = try normalizedShaderSource()
+
+        #expect(source.contains(
+            "const PatternDisplayMapping mapping = patternDisplayMapping( world, frame.tileSize, frame.symmetryFamily, frame.tilingKind );"
+        ))
+    }
+
+    @Test
     func displayCompositesNeighborsBeforeBilinearFiltering() throws {
         let source = try normalizedShaderSource()
 

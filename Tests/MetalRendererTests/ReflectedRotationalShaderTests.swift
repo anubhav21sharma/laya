@@ -26,7 +26,16 @@ struct ReflectedRotationalShaderTests {
 
         #expect(shader.contains("float4(1.0, 0.0, 1.0, 1.0)"))
         #expect(shader.contains("if (!mapping.valid)"))
-        #expect(renderer.contains("tilingKind: tilingStrategy.kind.rawValue"))
+        #expect(renderer.contains(
+            "tilingKind: tilingStrategy.compiledSymmetry.displayProgram.presetWireID"
+        ))
+        #expect(renderer.contains(
+            "symmetryFamily: tilingStrategy.compiledSymmetry.displayProgram.family.rawValue"
+        ))
+        #expect(shader.contains("uint symmetryFamily"))
+        #expect(shader.contains(
+            "symmetryFamily != PatternSymmetryFamilyWireRectangular"
+        ))
         #expect(!renderer.contains("public func setTilingWire"))
         #expect(!renderer.contains("public var tilingWire"))
     }

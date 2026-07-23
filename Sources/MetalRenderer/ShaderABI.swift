@@ -23,7 +23,8 @@ public enum ShaderABI {
             && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.tilingKind) == 40
             && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.diagnosticMode) == 44
             && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.compositeMode) == 48
-            && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.padding) == 52
+            && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.symmetryFamily)
+                == 52
             && MemoryLayout<PatternClipHalfPlane>.size == 16
             && MemoryLayout<PatternClipHalfPlane>.stride == 16
             && MemoryLayout<PatternClipHalfPlane>.alignment == 8
