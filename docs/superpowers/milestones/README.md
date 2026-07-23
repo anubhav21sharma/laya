@@ -10,3 +10,4 @@ does not upgrade an earlier pending or unaccepted status.
 | 2 | [Generalized Seam-Correct Tiling](02-generalized-seam-correct-tiling.md) | Pending Performance And Manual Acceptance |
 | 3 | [Transactions, Region Undo, Color, And Eraser](03-transactions-region-undo-color-eraser.md) | Pending Performance And Manual Acceptance |
 | 4 | [Professional Stroke Core](04-professional-stroke-core.md) | Implementation Complete — Acceptance Pending Environment-Only Gates |
+| Compiled symmetry Phase 1 | [Compiled Symmetry Foundation](05-compiled-symmetry-foundation.md) | Phase 1 Complete |
