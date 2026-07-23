@@ -6,7 +6,9 @@
 - **Governing specification:**
   `docs/superpowers/specs/2026-07-23-compiled-periodic-radial-symmetry-design.md`
 - **Implementation plan:**
-  `docs/superpowers/plans/2026-07-23-compiled-symmetry-foundation.md`
+  `docs/superpowers/plans/2026-07-23-compiled-symmetry-foundation.md` (was
+  untracked during the recorded verification; included in the final Phase 1
+  documentation set)
 - **Phase implementation range:** `c27bc2d^..354deb4`
 
 ## Status Ruling
@@ -298,9 +300,11 @@ pair separately proves that changing the preset remains metadata-only.
 ## Dirty-Checkout Provenance
 
 The checkout retained unrelated user modifications in app, app-test,
-EditorCore, and MetalRenderer-test files, the untracked `.vscode/` directory,
-and the untracked implementation plan. Ignored build and evidence artifacts
-and SDD records were also preserved.
+EditorCore, and MetalRenderer-test files and the untracked `.vscode/`
+directory. The implementation plan was untracked during the recorded
+verification and is included in the final Phase 1 documentation set; unrelated
+user modifications and `.vscode/` remain uncommitted. Ignored build and
+evidence artifacts and SDD records were also preserved.
 
 Strict clean-source slice wrappers were not run because their deliberate
 provenance gate would reject that preserved dirty checkout. Task 5 instead
