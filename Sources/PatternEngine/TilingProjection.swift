@@ -120,7 +120,8 @@ public enum TilingProjection {
 
         candidates = removingByteEqualCandidates(candidates)
         if
-            strategy.kind == .rotational,
+            strategy.compiledSymmetry.domain.periodic?
+                .coincidentImagePolicy == .halfTurnInvariantCoverage,
             footprint.coverageSymmetry == .halfTurnInvariant
         {
             candidates = removingCoverageEqualCandidates(candidates)

@@ -9,6 +9,13 @@ private let normalizedBrushBounds = AxisAlignedRect(
     maximum: SIMD2<Float>(1, 1)
 )
 
+private func packageRoot() -> URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+}
+
 @Test
 func dirtyPixelRectIncludesShaderExpansionAtCanonicalEdge() {
     let fragment = CellFragment(
@@ -354,6 +361,88 @@ func endpointDistanceWitnessClipsToFinitePositivePolygon() {
         plane.contains($0, tolerance: 0.000001)
     })
     #expect(abs(testSignedArea(clipped)) > 0.0001)
+}
+
+@Test
+func coincidentRemovalFollowsCompiledPolicyNotPresetBranch() throws {
+    let source = try String(
+        contentsOf: packageRoot()
+            .appending(path: "Sources/PatternEngine/TilingProjection.swift"),
+        encoding: .utf8
+    )
+    #expect(!source.contains("strategy.kind == .rotational"))
+    #expect(
+        source.contains(
+            ".coincidentImagePolicy == .halfTurnInvariantCoverage"
+        )
+    )
+    #expect(source.contains("candidates = removingByteEqualCandidates(candidates)"))
+
+    let tileSize = PatternSize(width: 288, height: 288)
+    let strategies = TilingKind.allCases.map {
+        TilingStrategy(kind: $0, tileSize: tileSize)
+    }
+
+    #expect(strategies.count == 7)
+    for strategy in strategies {
+        let policy = try #require(
+            strategy.compiledSymmetry.domain.periodic?.coincidentImagePolicy
+        )
+        #expect(
+            policy == (
+                strategy.kind == .rotational
+                    ? .halfTurnInvariantCoverage
+                    : .byteEqualOnly
+            )
+        )
+    }
+
+    let invariant = squareFootprint(
+        center: SIMD2(144, 144),
+        radius: 10,
+        symmetry: .halfTurnInvariant
+    )
+    let oriented = squareFootprint(
+        center: SIMD2(144, 144),
+        radius: 10,
+        symmetry: .oriented
+    )
+    for strategy in strategies {
+        let invariantFragments = TilingProjection.fragments(
+            for: invariant,
+            using: strategy
+        )
+        let orientedFragments = TilingProjection.fragments(
+            for: oriented,
+            using: strategy
+        )
+        let hasCoverageDeduplication = try #require(
+            strategy.compiledSymmetry.domain.periodic?.coincidentImagePolicy
+        ) == .halfTurnInvariantCoverage
+
+        if hasCoverageDeduplication {
+            #expect(invariantFragments.count == 1)
+            #expect(invariantFragments.map(\.imageOrdinal) == [0])
+            #expect(orientedFragments.count == 2)
+            #expect(orientedFragments.map(\.imageOrdinal) == [0, 1])
+        } else {
+            #expect(invariantFragments.count == 1)
+            #expect(orientedFragments.count == 1)
+            #expect(invariantFragments == orientedFragments)
+            #expect(invariantFragments.map(\.cell) == [
+                CellIndex(column: 0, row: 0),
+            ])
+            #expect(invariantFragments.map(\.imageOrdinal) == [0])
+            #expect(invariantFragments.map(\.canonicalFromBrush) == [
+                Affine2D(
+                    xAxis: SIMD2(10, 0),
+                    yAxis: SIMD2(0, 10),
+                    translation: SIMD2(144, 144)
+                ),
+            ])
+            #expect(isInRequiredFragmentOrder(invariantFragments))
+        }
+    }
 }
 
 @Test
