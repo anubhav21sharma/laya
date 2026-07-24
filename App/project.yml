@@ -23,6 +23,9 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: PatternSpike
+        excludes:
+          - PatternSpikeMac-Info.plist
+          - PatternSpikePad-Info.plist
       - path: ../Sources/MetalRenderer/Shaders.metal
         buildPhase: sources
     dependencies:
@@ -32,15 +35,34 @@ targets:
         product: EditorCore
       - package: PatternModules
         product: MetalRenderer
+      - package: PatternModules
+        product: PatternFile
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         PRODUCT_NAME: PatternSpike
         PRODUCT_BUNDLE_IDENTIFIER: com.anubhav.patternspike
-        GENERATE_INFOPLIST_FILE: true
         INFOPLIST_KEY_CFBundleDisplayName: Pattern
         CURRENT_PROJECT_VERSION: 1
         MARKETING_VERSION: 0.1.0
+    info:
+      path: PatternSpike/PatternSpikeMac-Info.plist
+      properties:
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.anubhav.pattern-project
+            UTTypeDescription: Pattern Project
+            UTTypeConformsTo:
+              - public.zip-archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - patternproj
+              public.mime-type:
+                - application/x-pattern-project
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Pattern Project
+            LSItemContentTypes:
+              - com.anubhav.pattern-project
+            CFBundleTypeRole: Editor
 
   PatternSpikePad:
     type: application
@@ -48,6 +70,9 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: PatternSpike
+        excludes:
+          - PatternSpikeMac-Info.plist
+          - PatternSpikePad-Info.plist
       - path: ../Sources/MetalRenderer/Shaders.metal
         buildPhase: sources
     dependencies:
@@ -57,17 +82,42 @@ targets:
         product: EditorCore
       - package: PatternModules
         product: MetalRenderer
+      - package: PatternModules
+        product: PatternFile
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         PRODUCT_NAME: PatternSpikePad
         PRODUCT_BUNDLE_IDENTIFIER: com.anubhav.patternspike.pad
-        GENERATE_INFOPLIST_FILE: true
         INFOPLIST_KEY_CFBundleDisplayName: Pattern
         INFOPLIST_KEY_UILaunchScreen_Generation: true
         TARGETED_DEVICE_FAMILY: 2
         CURRENT_PROJECT_VERSION: 1
         MARKETING_VERSION: 0.1.0
+    info:
+      path: PatternSpike/PatternSpikePad-Info.plist
+      properties:
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.anubhav.pattern-project
+            UTTypeDescription: Pattern Project
+            UTTypeConformsTo:
+              - public.zip-archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - patternproj
+              public.mime-type:
+                - application/x-pattern-project
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Pattern Project
+            LSItemContentTypes:
+              - com.anubhav.pattern-project
+            CFBundleTypeRole: Editor
 
   PatternSpikeMacUITests:
     type: bundle.ui-testing

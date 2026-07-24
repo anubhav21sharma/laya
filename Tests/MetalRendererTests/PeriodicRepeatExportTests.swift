@@ -142,7 +142,7 @@ struct PeriodicRepeatExportTests {
 
     @Test
     @MainActor
-    func rejectsTriangularDensityWhoseDerivedHeightExceedsLimit()
+    func maximumTriangularDensityFitsTheRectangularExportLimit()
         throws
     {
         guard let renderer = try makeExportRenderer(
@@ -153,12 +153,9 @@ struct PeriodicRepeatExportTests {
         let snapshot = renderer.harnessTilingMutationSnapshot
         let configuration = renderer.periodicConfiguration
 
-        #expect(
-            throws: PeriodicRepeatExportError
-                .derivedDimensionOutOfRange(width: 4_096, height: 7_094)
-        ) {
-            try renderer.exportPeriodicRepeat(density: 4_096)
-        }
+        let exported = try renderer.exportPeriodicRepeat(density: 4_096)
+        #expect(exported.pixelSize == PixelSize(width: 4_096, height: 7_094))
+        #expect(exported.bgra8Bytes.count == 4_096 * 7_094 * 4)
         #expect(renderer.harnessTilingMutationSnapshot == snapshot)
         #expect(renderer.periodicConfiguration == configuration)
     }
@@ -289,6 +286,141 @@ struct PeriodicRepeatExportTests {
         #expect(renderer.viewport == viewportBefore)
         #expect(renderer.periodicConfiguration == configurationBefore)
     }
+
+    @Test(arguments: SymmetryPresetID.periodicCases)
+    @MainActor
+    func bakedRepeatCompletesEveryPeriodicPreset(
+        preset: SymmetryPresetID
+    ) throws {
+        guard let renderer = try makeExportRenderer(preset: preset) else {
+            return
+        }
+        let source = makeCanonicalFixture(side: 64)
+        try renderer.replaceCanonicalPixelsForHarness(source)
+        let snapshot = renderer.harnessTilingMutationSnapshot
+        let viewport = renderer.viewport
+
+        let exported = try renderer.exportBakedPeriodicRepeat()
+
+        let expectedSize: PixelSize
+        switch preset {
+        case .halfDrop, .mirrorX:
+            expectedSize = PixelSize(width: 128, height: 64)
+        case .brick, .mirrorY:
+            expectedSize = PixelSize(width: 64, height: 128)
+        case .mirrorXY:
+            expectedSize = PixelSize(width: 128, height: 128)
+        case .hexagons, .rotation3, .rotation6, .kaleidoscope60,
+             .kaleidoscope30:
+            expectedSize = PixelSize(width: 64, height: 111)
+        case .grid, .rotational, .squareRotation,
+             .squareKaleidoscope:
+            expectedSize = PixelSize(width: 64, height: 64)
+        case .plainCanvas, .radialMirror, .radialRotation,
+             .radialMandala:
+            Issue.record("Finite preset entered periodic matrix")
+            return
+        }
+        #expect(exported.pixelSize == expectedSize, "\(preset)")
+        #expect(
+            exported.bgra8Bytes.count
+                == expectedSize.width * expectedSize.height * 4,
+            "\(preset)"
+        )
+        #expect(renderer.harnessTilingMutationSnapshot == snapshot)
+        #expect(renderer.viewport == viewport)
+        #expect(try canonicalBytes(renderer) == source)
+        if preset == .grid || preset == .rotational
+            || preset.isSquare
+        {
+            #expect(exported.bgra8Bytes == source, "\(preset)")
+        }
+    }
+
+    @Test
+    @MainActor
+    func legacyBakedRepeatEncodesPhaseAndReflectionPeriods()
+        throws
+    {
+        let source = makeCanonicalFixture(side: 64)
+
+        guard let halfDrop = try makeExportRenderer(
+            preset: .halfDrop
+        ) else {
+            return
+        }
+        try halfDrop.replaceCanonicalPixelsForHarness(source)
+        let halfDropExport = try halfDrop.exportBakedPeriodicRepeat()
+        #expect(
+            exportPixel(halfDropExport, x: 64, y: 0)
+                == sourcePixel(source, width: 64, x: 0, y: 32)
+        )
+
+        guard let mirrorX = try makeExportRenderer(
+            preset: .mirrorX
+        ) else {
+            return
+        }
+        try mirrorX.replaceCanonicalPixelsForHarness(source)
+        let mirrorExport = try mirrorX.exportBakedPeriodicRepeat()
+        #expect(
+            exportPixel(mirrorExport, x: 64, y: 0)
+                == sourcePixel(source, width: 64, x: 63, y: 0)
+        )
+    }
+
+    @Test
+    @MainActor
+    func flattenedSceneExcludesDraftAndPreservesViewportAndPixels()
+        throws
+    {
+        guard let renderer = try makeExportRenderer(preset: .grid) else {
+            return
+        }
+        let source = makeCanonicalFixture(side: 64)
+        try renderer.replaceCanonicalPixelsForHarness(source)
+        renderer.pan(byScreenDelta: SIMD2(7, -5))
+        renderer.zoom(
+            by: 1.5,
+            anchor: ScreenPoint(x: 19, y: 23)
+        )
+        let viewport = renderer.viewport
+        _ = try renderer.beginFixedProjectedStrokeForHarness(
+            at: WorldPoint(x: 11, y: 13)
+        )
+        let snapshot = renderer.harnessTilingMutationSnapshot
+
+        let scene = try renderer.exportFlattenedScene(
+            pixelSize: PixelSize(width: 96, height: 80),
+            transparentBackground: true
+        )
+
+        #expect(scene.pixelSize == PixelSize(width: 96, height: 80))
+        #expect(scene.hasTransparentBackground)
+        #expect(renderer.viewport == viewport)
+        #expect(renderer.harnessTilingMutationSnapshot == snapshot)
+        #expect(try canonicalBytes(renderer) == source)
+        #expect(renderer.hasActiveStroke)
+    }
+}
+
+private func exportPixel(
+    _ export: PeriodicRepeatExport,
+    x: Int,
+    y: Int
+) -> [UInt8] {
+    let offset = y * export.bytesPerRow + x * 4
+    return Array(export.bgra8Bytes[offset..<(offset + 4)])
+}
+
+private func sourcePixel(
+    _ bytes: [UInt8],
+    width: Int,
+    x: Int,
+    y: Int
+) -> [UInt8] {
+    let offset = (y * width + x) * 4
+    return Array(bytes[offset..<(offset + 4)])
 }
 
 @MainActor

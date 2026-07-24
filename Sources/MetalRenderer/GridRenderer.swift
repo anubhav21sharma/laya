@@ -86,8 +86,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var finiteConfiguration: FiniteSymmetryConfiguration? {
         tilingStrategy.finiteConfiguration
     }
-    public private(set) var radialGeometryLocked = false
-    public private(set) var documentDomainLocked = false
+    public internal(set) var radialGeometryLocked = false
+    public internal(set) var documentDomainLocked = false
 
     struct FrameUpload {
         enum Layer: Equatable {
@@ -1396,6 +1396,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public func zoom(by factor: Float, anchor: ScreenPoint) {
         guard isIdle else { return }
         viewport = viewport.zoomed(by: factor, anchorScreen: anchor)
+    }
+
+    public func restoreSavedViewport(
+        worldCenter: WorldPoint,
+        zoom: Float
+    ) {
+        guard worldCenter.x.isFinite,
+              worldCenter.y.isFinite,
+              zoom.isFinite,
+              GridCanvasContract.zoomRange.contains(zoom)
+        else {
+            return
+        }
+        viewport = ViewportTransform(
+            drawableSize: viewport.drawableSize,
+            worldCenter: worldCenter,
+            zoom: zoom
+        )
     }
 
     public func resize(to size: PatternSize) {
@@ -3306,7 +3324,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         liveVisible: Bool,
         canonicalTexture: (any MTLTexture)? = nil,
         documentPixelMapping: Bool = false,
-        transparentBackground: Bool = false
+        transparentBackground: Bool = false,
+        worldCenterOverride: SIMD2<Float>? = nil,
+        zoomOverride: Float? = nil
     ) throws {
         guard texture.width > 0, texture.height > 0 else {
             throw MetalRendererError.invalidDrawableSize
@@ -3354,6 +3374,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 Float(pixelSize.height) * 0.5
             )
             uniforms.zoom = 1
+        }
+        if let worldCenterOverride {
+            uniforms.worldCenter = worldCenterOverride
+        }
+        if let zoomOverride {
+            uniforms.zoom = zoomOverride
         }
         encoder.setVertexBytes(
             &uniforms,

@@ -2,7 +2,9 @@ import EditorCore
 import Metal
 import MetalRenderer
 import PatternEngine
+import PatternFile
 import SwiftUI
+import UniformTypeIdentifiers
 
 #if os(macOS)
 let editorControlExtent: CGFloat = 32
@@ -24,6 +26,25 @@ enum EditorFocusTarget: Hashable {
     case radialReferenceAngle
 }
 
+struct EditorCanvasHost: View {
+    let controller: EditorSessionController
+    let brushDiameter: Float
+    let requestEditorFocus: @MainActor () -> Void
+    let pointerCancellationGeneration: UInt
+
+    var body: some View {
+        MetalCanvas(
+            controller: controller,
+            renderer: controller.renderer,
+            brushDiameter: brushDiameter,
+            requestEditorFocus: requestEditorFocus,
+            pointerCancellationGeneration:
+                pointerCancellationGeneration
+        )
+        .id(ObjectIdentifier(controller))
+    }
+}
+
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     #if os(macOS)
@@ -32,6 +53,12 @@ struct ContentView: View {
 
     @State private var state: CanvasState = .loading
     @State private var runtimeError: MetalRendererError?
+    @State private var fileErrorMessage: String?
+    @State private var projectIdentity = PatternProjectIdentity.new()
+    @State private var fileOperationBusy = false
+    @State private var importPresented = false
+    @State private var exportPresented = false
+    @State private var exportDocument: PatternProjectFileDocument?
     @State private var pointerCancellationGeneration: UInt = 0
     @FocusState private var focusTarget: EditorFocusTarget?
     #if DEBUG && os(macOS)
@@ -63,6 +90,24 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
             initializeRendererIfNeeded()
+        }
+        .fileImporter(
+            isPresented: $importPresented,
+            allowedContentTypes: [.patternProject],
+            allowsMultipleSelection: false
+        ) {
+            handleImportResult($0)
+        }
+        .fileExporter(
+            isPresented: $exportPresented,
+            document: exportDocument,
+            contentType: .patternProject,
+            defaultFilename: defaultProjectFilename
+        ) { result in
+            exportDocument = nil
+            if case let .failure(error) = result {
+                fileErrorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -99,7 +144,12 @@ struct ContentView: View {
         VStack(spacing: 0) {
             EditorTopBar(
                 controller: controller,
-                requestEditorFocus: requestEditorFocus
+                requestEditorFocus: requestEditorFocus,
+                openProject: beginOpen,
+                saveProject: {
+                    beginSave(controller)
+                },
+                fileOperationsEnabled: !fileOperationBusy
             )
             Divider()
             HStack(spacing: 0) {
@@ -109,9 +159,8 @@ struct ContentView: View {
                 )
                 Divider()
                 ZStack(alignment: .bottomTrailing) {
-                    MetalCanvas(
+                    EditorCanvasHost(
                         controller: controller,
-                        renderer: controller.renderer,
                         brushDiameter: controller.model.brushDiameter,
                         requestEditorFocus: requestEditorFocus,
                         pointerCancellationGeneration:
@@ -139,13 +188,21 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .top) {
-            if let runtimeError {
-                ErrorBanner(error: runtimeError) {
-                    self.runtimeError = nil
-                    requestEditorFocus()
+            VStack(spacing: 6) {
+                if let runtimeError {
+                    ErrorBanner(error: runtimeError) {
+                        self.runtimeError = nil
+                        requestEditorFocus()
+                    }
                 }
-                .padding(.top, editorControlExtent + 16)
+                if let fileErrorMessage {
+                    FileErrorBanner(message: fileErrorMessage) {
+                        self.fileErrorMessage = nil
+                        requestEditorFocus()
+                    }
+                }
             }
+            .padding(.top, editorControlExtent + 16)
         }
         .focusable()
         .focused($focusTarget, equals: .editor)
@@ -205,6 +262,108 @@ struct ContentView: View {
 
     private func requestEditorFocus() {
         focusTarget = .editor
+    }
+
+    private var defaultProjectFilename: String {
+        let base = projectIdentity.title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = base.isEmpty ? "Untitled Pattern" : base
+        return title.lowercased().hasSuffix(".patternproj")
+            ? title
+            : "\(title).patternproj"
+    }
+
+    private func beginOpen() {
+        guard !fileOperationBusy else { return }
+        importPresented = true
+    }
+
+    private func beginSave(
+        _ controller: EditorSessionController
+    ) {
+        guard !fileOperationBusy else { return }
+        fileErrorMessage = nil
+        do {
+            let captured = try PatternProjectBridge.capture(
+                renderer: controller.renderer,
+                identity: projectIdentity,
+                appVersion: Bundle.main.object(
+                    forInfoDictionaryKey: "CFBundleShortVersionString"
+                ) as? String ?? "0.1.0"
+            )
+            fileOperationBusy = true
+            Task {
+                do {
+                    let data = try await Task.detached(
+                        priority: .utility
+                    ) {
+                        try PatternProjectPackageCodec.encode(
+                            metadata: captured.metadata,
+                            rastersByPath: captured.rastersByPath
+                        )
+                    }.value
+                    exportDocument = PatternProjectFileDocument(
+                        archiveData: data
+                    )
+                    exportPresented = true
+                } catch {
+                    fileErrorMessage = error.localizedDescription
+                }
+                fileOperationBusy = false
+            }
+        } catch {
+            fileErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func handleImportResult(
+        _ result: Result<[URL], Error>
+    ) {
+        guard !fileOperationBusy else { return }
+        switch result {
+        case let .failure(error):
+            fileErrorMessage = error.localizedDescription
+        case let .success(urls):
+            guard let url = urls.first else { return }
+            fileOperationBusy = true
+            fileErrorMessage = nil
+            Task {
+                do {
+                    let decoded = try await Task.detached(
+                        priority: .utility
+                    ) {
+                        let accessed =
+                            url.startAccessingSecurityScopedResource()
+                        defer {
+                            if accessed {
+                                url.stopAccessingSecurityScopedResource()
+                            }
+                        }
+                        return try PatternProjectPackageCodec.open(at: url)
+                    }.value
+                    guard case let .ready(current) = state else {
+                        throw PatternProjectBridgeError
+                            .incompatibleSurface
+                    }
+                    let identity = try PatternProjectBridge.identity(
+                        from: decoded
+                    )
+                    let renderer = try PatternProjectBridge.makeRenderer(
+                        from: decoded,
+                        device: current.renderer.device,
+                        drawableSize:
+                            current.renderer.viewport.drawableSize
+                    )
+                    projectIdentity = identity
+                    state = .ready(
+                        EditorSessionController(renderer: renderer)
+                    )
+                } catch {
+                    fileErrorMessage = error.localizedDescription
+                }
+                fileOperationBusy = false
+            }
+        }
     }
 
     private func cancelCurrentInteraction(
@@ -347,9 +506,14 @@ struct ContentView: View {
                 controller.handleTool(.erase)
                 requestEditorFocus()
             },
+            openProject: beginOpen,
+            saveProject: {
+                beginSave(controller)
+            },
             canUndo: controller.model.canUndo,
             canRedo: controller.model.canRedo,
-            canEdit: !controller.model.isBusy
+            canEdit: !controller.model.isBusy,
+            canUseFileCommands: !fileOperationBusy
         )
     }
     #endif
@@ -382,6 +546,29 @@ private struct ErrorBanner: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Dismiss Error")
+        }
+        .padding(.horizontal, 10)
+        .frame(minHeight: editorControlExtent)
+        .foregroundStyle(.white)
+        .background(Color.red.opacity(0.92))
+    }
+}
+
+private struct FileErrorBanner: View {
+    let message: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "doc.badge.exclamationmark")
+            Text(message)
+                .font(.caption)
+                .lineLimit(2)
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss File Error")
         }
         .padding(.horizontal, 10)
         .frame(minHeight: editorControlExtent)

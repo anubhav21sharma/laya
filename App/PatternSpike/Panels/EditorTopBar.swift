@@ -12,9 +12,43 @@ import UIKit
 struct EditorTopBar: View {
     let controller: EditorSessionController
     let requestEditorFocus: @MainActor () -> Void
+    let openProject: @MainActor () -> Void
+    let saveProject: @MainActor () -> Void
+    let fileOperationsEnabled: Bool
+
+    init(
+        controller: EditorSessionController,
+        requestEditorFocus: @escaping @MainActor () -> Void,
+        openProject: @escaping @MainActor () -> Void = {},
+        saveProject: @escaping @MainActor () -> Void = {},
+        fileOperationsEnabled: Bool = false
+    ) {
+        self.controller = controller
+        self.requestEditorFocus = requestEditorFocus
+        self.openProject = openProject
+        self.saveProject = saveProject
+        self.fileOperationsEnabled = fileOperationsEnabled
+    }
 
     var body: some View {
         HStack(spacing: 8) {
+            Button(action: openProject) {
+                Image(systemName: "folder")
+            }
+            .frame(width: editorControlExtent, height: editorControlExtent)
+            .accessibilityLabel("Open Project")
+            .disabled(!fileOperationsEnabled)
+
+            Button(action: saveProject) {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .frame(width: editorControlExtent, height: editorControlExtent)
+            .accessibilityLabel("Save Project")
+            .disabled(!fileOperationsEnabled)
+
+            Divider()
+                .frame(height: 20)
+
             Picker("Brush", selection: anchorRecipeBinding) {
                 ForEach(AnchorBrushCatalog.drawAnchors, id: \.id) { entry in
                     Text(entry.displayName)

@@ -22,6 +22,19 @@ private struct HostedContentView: View {
     }
 }
 
+private struct HostedEditorCanvas: View {
+    @ObservedObject var driver: HostedSessionDriver
+
+    var body: some View {
+        EditorCanvasHost(
+            controller: driver.controller,
+            brushDiameter: driver.controller.model.brushDiameter,
+            requestEditorFocus: {},
+            pointerCancellationGeneration: 0
+        )
+    }
+}
+
 #if DEBUG
 @Test func debugHUDToggleAcceptsPhysicalGraveAndShiftedTilde() {
     #expect(isDebugHUDToggleCharacter("`"))
@@ -245,6 +258,35 @@ func hostedContentViewRetainsOneEditorSessionAcrossUpdates() async throws {
     #expect(updatedCanvas.gridRenderer === initialRenderer)
     #expect(updatedCanvas.brushDiameterForTesting == 25)
     #expect(replacementController.model.brushDiameter == 20)
+}
+
+@Test
+@MainActor
+func editorCanvasReplacesItsNativeViewForAnImportedSession() async throws {
+    guard let initialRenderer = try makeControllerRenderer(),
+          let replacementRenderer = try makeControllerRenderer()
+    else { return }
+
+    let initialController = EditorSessionController(renderer: initialRenderer)
+    let replacementController = EditorSessionController(
+        renderer: replacementRenderer
+    )
+    let driver = HostedSessionDriver(controller: initialController)
+    let host = NSHostingView(rootView: HostedEditorCanvas(driver: driver))
+    host.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+
+    await settle(host)
+    let initialCanvas = try #require(findCanvas(in: host))
+    #expect(initialCanvas.controller === initialController)
+    #expect(initialCanvas.gridRenderer === initialRenderer)
+
+    driver.controller = replacementController
+    await settle(host)
+
+    let replacementCanvas = try #require(findCanvas(in: host))
+    #expect(replacementCanvas !== initialCanvas)
+    #expect(replacementCanvas.controller === replacementController)
+    #expect(replacementCanvas.gridRenderer === replacementRenderer)
 }
 
 @Test

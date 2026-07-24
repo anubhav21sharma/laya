@@ -212,7 +212,7 @@ extension GridRenderer {
         }
         guard
             (64...4_096).contains(horizontalDensity),
-            (64...4_096).contains(height)
+            (64...8_192).contains(height)
         else {
             throw PeriodicRepeatExportError.derivedDimensionOutOfRange(
                 width: horizontalDensity,

@@ -24,6 +24,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case invalidStrokeLifecycle
     case invalidRendererOperationToken
     case commitPendingInput
+    case committedSnapshotUnavailable
+    case committedSnapshotIncompatible
     case invalidDrawableSize
     case rasterRevisionBufferAllocationFailed
     case rasterRevisionStorageOverflow
@@ -89,6 +91,10 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
             "The renderer operation token does not match the active operation."
         case .commitPendingInput:
             "A canonical commit is still pending."
+        case .committedSnapshotUnavailable:
+            "Committed pixels are changing and cannot be captured yet."
+        case .committedSnapshotIncompatible:
+            "Committed project pixels do not match the validated document geometry."
         case .invalidDrawableSize:
             "The drawable size is invalid."
         case .rasterRevisionBufferAllocationFailed:
