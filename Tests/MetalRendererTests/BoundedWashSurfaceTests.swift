@@ -121,6 +121,122 @@ struct BoundedWashSurfaceTests {
 
     @Test
     @MainActor
+    func finiteCanvasClipsWashInsteadOfWrappingOppositeEdges() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 100, height: 80)
+        let surface = try BoundedWashSurface(device: device, pixelSize: size)
+        let crossing = PixelRect(
+            minX: -5,
+            minY: 70,
+            maxX: 10,
+            maxY: 90
+        )!
+
+        let plan = try surface.makeWorkPlan(
+            dirtyRegions: [
+                BoundedWashDirtyRegion(rectangle: crossing),
+            ],
+            topology: .finite,
+            bleedRadius: 4,
+            softenPasses: 1
+        )
+
+        #expect(plan.depositionRegions.rectangles == [
+            PixelRect(minX: 0, minY: 70, maxX: 10, maxY: 80)!,
+        ])
+        #expect(plan.processingRegions.rectangles == [
+            PixelRect(minX: 0, minY: 66, maxX: 14, maxY: 80)!,
+        ])
+    }
+
+    @Test
+    @MainActor
+    func radialHaloCrossesLogicalPagesNotAdjacentAtlasSlots() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layout = try RadialSectorLayout(
+            maximumRadius: 700,
+            sectorAngleRadians: .pi / 4
+        )
+        let sourceCoordinate = RadialPageCoordinate(x: 1, y: 0)
+        let targetCoordinate = RadialPageCoordinate(x: 1, y: 1)
+        let source = try #require(
+            layout.residentPage(at: sourceCoordinate)
+        )
+        let target = try #require(
+            layout.residentPage(at: targetCoordinate)
+        )
+        let side = RadialSectorLayout.pageSide
+        let sourceAtlasX = source.atlasSlot % layout.atlasColumns * side
+        let sourceAtlasY = source.atlasSlot / layout.atlasColumns * side
+        let targetAtlasX = target.atlasSlot % layout.atlasColumns * side
+        let targetAtlasY = target.atlasSlot / layout.atlasColumns * side
+        #expect(targetAtlasX != sourceAtlasX)
+
+        let surface = try BoundedWashSurface(
+            device: device,
+            pixelSize: layout.atlasPixelSize
+        )
+        let plan = try surface.makeWorkPlan(
+            dirtyRegions: [
+                BoundedWashDirtyRegion(
+                    rectangle: PixelRect(
+                        minX: sourceAtlasX + 100,
+                        minY: sourceAtlasY + 252,
+                        maxX: sourceAtlasX + 104,
+                        maxY: sourceAtlasY + 256
+                    )!,
+                    radialPage: sourceCoordinate
+                ),
+            ],
+            topology: .radial(layout),
+            bleedRadius: 8,
+            softenPasses: 1
+        )
+
+        func contains(_ x: Int, _ y: Int) -> Bool {
+            plan.processingRegions.rectangles.contains {
+                x >= $0.minX && x < $0.maxX
+                    && y >= $0.minY && y < $0.maxY
+            }
+        }
+        #expect(contains(targetAtlasX + 101, targetAtlasY + 2))
+        #expect(!contains(sourceAtlasX + 101, sourceAtlasY + side + 2))
+    }
+
+    @Test
+    @MainActor
+    func radialPlanningRejectsMissingPageIdentity() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layout = try RadialSectorLayout(
+            maximumRadius: 512,
+            sectorAngleRadians: .pi / 2
+        )
+        let surface = try BoundedWashSurface(
+            device: device,
+            pixelSize: layout.atlasPixelSize
+        )
+
+        #expect(throws: BoundedWashSurfaceError.radialPageMetadataMissing) {
+            try surface.makeWorkPlan(
+                dirtyRegions: [
+                    BoundedWashDirtyRegion(
+                        rectangle: PixelRect(
+                            minX: 10,
+                            minY: 10,
+                            maxX: 20,
+                            maxY: 20
+                        )!
+                    ),
+                ],
+                topology: .radial(layout),
+                bleedRadius: 4,
+                softenPasses: 1
+            )
+        }
+    }
+
+    @Test
+    @MainActor
     func workPlanningReusesTheSameResources() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let surface = try BoundedWashSurface(

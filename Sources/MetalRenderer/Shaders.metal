@@ -589,6 +589,18 @@ static uint2 patternWrappedTexel(
     );
 }
 
+static bool patternRadialAtlasTexel(
+    int2 logicalTexel,
+    constant PatternRadialFrameUniforms& radial,
+    texture2d<int, access::read> pageTable,
+    thread uint2& atlasTexel
+);
+
+static bool patternRadialOrbitIntersectsCanvas(
+    float2 logicalPoint,
+    constant PatternRadialFrameUniforms& radial
+);
+
 fragment float4 patternWashClearFragment(
     PatternFullscreenOut input [[stage_in]]
 ) {
@@ -617,8 +629,93 @@ static float4 patternWashRead(
     texture2d<float> source,
     int2 texel,
     const device int4* regions,
-    uint regionCount
+    uint regionCount,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternRadialFrameUniforms& radial,
+    constant PatternRadialResizePageUniforms& page,
+    texture2d<int, access::read> pageTable
 ) {
+    if (frame.tilingKind == PatternTilingWirePlainCanvas) {
+        if (
+            any(texel < int2(0))
+            || texel.x >= int(source.get_width())
+            || texel.y >= int(source.get_height())
+        ) {
+            return float4(0.0);
+        }
+        const uint2 direct = uint2(texel);
+        return patternWashRegionContains(direct, regions, regionCount)
+            ? source.read(direct)
+            : float4(0.0);
+    }
+    if (frame.symmetryFamily == PatternSymmetryFamilyWireRadial) {
+        const int side = int(radial.pageSide);
+        const int2 atlasPage = int2(
+            int(page.destinationSlot) % int(radial.atlasColumns),
+            int(page.destinationSlot) / int(radial.atlasColumns)
+        );
+        const float2 logicalPixel = float2(
+            int2(page.logicalPageX, page.logicalPageY) * side
+                + texel - atlasPage * side
+        ) + 0.5;
+        const float radius = length(logicalPixel);
+        float2 folded = logicalPixel;
+        if (radius > 0.0) {
+            const float fullTurn = 2.0 * M_PI_F;
+            float angle = atan2(logicalPixel.y, logicalPixel.x);
+            angle = fmod(angle, fullTurn);
+            if (angle < 0.0) {
+                angle += fullTurn;
+            }
+            const uint sector = min(
+                uint(floor(angle / radial.sectorAngle)),
+                radial.displayedSectorCount - 1
+            );
+            float localAngle =
+                angle - float(sector) * radial.sectorAngle;
+            if (radial.dihedral != 0 && (sector & 1u) != 0) {
+                localAngle = radial.sectorAngle - localAngle;
+            }
+            folded = radius * float2(
+                cos(localAngle),
+                sin(localAngle)
+            );
+        }
+        if (!patternRadialOrbitIntersectsCanvas(folded, radial)) {
+            return float4(0.0);
+        }
+        const float2 samplePosition = folded - 0.5;
+        const int2 lower = int2(floor(samplePosition));
+        const float2 blend = fract(samplePosition);
+        float4 samples[4];
+        const int2 offsets[4] = {
+            int2(0, 0),
+            int2(1, 0),
+            int2(0, 1),
+            int2(1, 1),
+        };
+        for (uint index = 0; index < 4; ++index) {
+            uint2 atlasTexel;
+            samples[index] = (
+                patternRadialAtlasTexel(
+                    lower + offsets[index],
+                    radial,
+                    pageTable,
+                    atlasTexel
+                )
+                && patternWashRegionContains(
+                    atlasTexel,
+                    regions,
+                    regionCount
+                )
+            ) ? source.read(atlasTexel) : float4(0.0);
+        }
+        return mix(
+            mix(samples[0], samples[1], blend.x),
+            mix(samples[2], samples[3], blend.x),
+            blend.y
+        );
+    }
     const uint2 wrapped = patternWrappedTexel(
         texel,
         uint2(source.get_width(), source.get_height())
@@ -648,11 +745,19 @@ static float4 patternLimitWashAccumulation(
 
 fragment float4 patternWashSoftenFragment(
     PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
     constant PatternBrushMaterialUniforms& material
         [[buffer(PatternBufferIndexBrushMaterial)]],
     const device int4* processingRegions
         [[buffer(PatternBufferIndexDabInstances)]],
-    texture2d<float> source [[texture(PatternTextureIndexCanonical)]]
+    constant PatternRadialFrameUniforms& radial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    constant PatternRadialResizePageUniforms& page
+        [[buffer(PatternBufferIndexRadialResizePage)]],
+    texture2d<float> source [[texture(PatternTextureIndexCanonical)]],
+    texture2d<int, access::read> pageTable
+        [[texture(PatternTextureIndexRadialPageTable)]]
 ) {
     const int2 centerTexel = int2(input.screenPixel);
     const uint passCount = max(material.softenPasses, 1u);
@@ -666,32 +771,44 @@ fragment float4 patternWashSoftenFragment(
         source,
         centerTexel,
         processingRegions,
-        material.padding1
+        material.padding1,
+        frame,
+        radial,
+        page,
+        pageTable
     );
     float4 softened = center * 4.0;
     softened += patternWashRead(
-        source, centerTexel - dx, processingRegions, material.padding1
+        source, centerTexel - dx, processingRegions, material.padding1,
+        frame, radial, page, pageTable
     ) * 2.0;
     softened += patternWashRead(
-        source, centerTexel + dx, processingRegions, material.padding1
+        source, centerTexel + dx, processingRegions, material.padding1,
+        frame, radial, page, pageTable
     ) * 2.0;
     softened += patternWashRead(
-        source, centerTexel - dy, processingRegions, material.padding1
+        source, centerTexel - dy, processingRegions, material.padding1,
+        frame, radial, page, pageTable
     ) * 2.0;
     softened += patternWashRead(
-        source, centerTexel + dy, processingRegions, material.padding1
+        source, centerTexel + dy, processingRegions, material.padding1,
+        frame, radial, page, pageTable
     ) * 2.0;
     softened += patternWashRead(
-        source, centerTexel - dx - dy, processingRegions, material.padding1
+        source, centerTexel - dx - dy, processingRegions, material.padding1,
+        frame, radial, page, pageTable
     );
     softened += patternWashRead(
-        source, centerTexel + dx - dy, processingRegions, material.padding1
+        source, centerTexel + dx - dy, processingRegions, material.padding1,
+        frame, radial, page, pageTable
     );
     softened += patternWashRead(
-        source, centerTexel - dx + dy, processingRegions, material.padding1
+        source, centerTexel - dx + dy, processingRegions, material.padding1,
+        frame, radial, page, pageTable
     );
     softened += patternWashRead(
-        source, centerTexel + dx + dy, processingRegions, material.padding1
+        source, centerTexel + dx + dy, processingRegions, material.padding1,
+        frame, radial, page, pageTable
     );
     softened /= 16.0;
 
@@ -704,11 +821,40 @@ fragment float4 patternWashSoftenFragment(
 
 fragment float4 patternWashResolveFragment(
     PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
     constant PatternBrushMaterialUniforms& material
         [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternRadialFrameUniforms& radial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    constant PatternRadialResizePageUniforms& page
+        [[buffer(PatternBufferIndexRadialResizePage)]],
     texture2d<float> source [[texture(PatternTextureIndexCanonical)]]
 ) {
     const uint2 texel = uint2(input.screenPixel);
+    if (
+        frame.symmetryFamily == PatternSymmetryFamilyWireRadial
+        && frame.tilingKind != PatternTilingWirePlainCanvas
+    ) {
+        const int side = int(radial.pageSide);
+        const int2 atlasPage = int2(
+            int(page.destinationSlot) % int(radial.atlasColumns),
+            int(page.destinationSlot) / int(radial.atlasColumns)
+        );
+        const float2 logicalPixel = float2(
+            int2(page.logicalPageX, page.logicalPageY) * side
+                + int2(texel) - atlasPage * side
+        ) + 0.5;
+        const float angle = atan2(logicalPixel.y, logicalPixel.x);
+        const float tolerance = 0.0001;
+        if (
+            angle < -tolerance
+            || angle > radial.sectorAngle + tolerance
+            || !patternRadialOrbitIntersectsCanvas(logicalPixel, radial)
+        ) {
+            return float4(0.0);
+        }
+    }
     return patternLimitWashAccumulation(
         source.read(texel),
         material.accumulationLimit
@@ -1202,6 +1348,377 @@ fragment float4 patternTriangularGridFragment(
     );
 
     return patternTriangularGridOverlay(result, mapping, frame);
+}
+
+struct PatternRadialMapping {
+    float2 logicalPixel;
+    float radius;
+    float relativeAngle;
+    bool valid;
+};
+
+static PatternRadialMapping patternRadialMapping(
+    float2 world,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternRadialFrameUniforms& radial
+) {
+    if (
+        world.x < 0.0
+        || world.y < 0.0
+        || world.x >= radial.canvasSize.x
+        || world.y >= radial.canvasSize.y
+    ) {
+        return {float2(0.0), 0.0, 0.0, false};
+    }
+    if (frame.tilingKind == PatternTilingWirePlainCanvas) {
+        return {world, 0.0, 0.0, true};
+    }
+
+    const float2 relative = world - radial.center;
+    const float radius = length(relative);
+    if (radius == 0.0) {
+        return {float2(0.0), 0.0, 0.0, true};
+    }
+    const float fullTurn = 2.0 * M_PI_F;
+    float angle = atan2(relative.y, relative.x)
+        - radial.referenceAngle;
+    angle = fmod(angle, fullTurn);
+    if (angle < 0.0) {
+        angle += fullTurn;
+    }
+    uint sector = min(
+        uint(floor(angle / radial.sectorAngle)),
+        radial.displayedSectorCount - 1
+    );
+    float localAngle = angle - float(sector) * radial.sectorAngle;
+    if (radial.dihedral != 0 && (sector & 1u) != 0) {
+        localAngle = radial.sectorAngle - localAngle;
+    }
+    return {
+        radius * float2(cos(localAngle), sin(localAngle)),
+        radius,
+        angle,
+        true
+    };
+}
+
+static bool patternRadialAtlasTexel(
+    int2 logicalTexel,
+    constant PatternRadialFrameUniforms& radial,
+    texture2d<int, access::read> pageTable,
+    thread uint2& atlasTexel
+) {
+    const int side = int(radial.pageSide);
+    const int2 page = int2(floor(float2(logicalTexel) / float(side)));
+    const int2 table = page - int2(radial.pageOrigin);
+    if (
+        any(table < int2(0))
+        || any(table >= int2(radial.pageTableSize))
+    ) {
+        return false;
+    }
+    const int slot = pageTable.read(uint2(table)).x;
+    if (slot < 0) {
+        return false;
+    }
+    const int2 local = logicalTexel - page * side;
+    const int2 atlasPage = int2(
+        slot % int(radial.atlasColumns),
+        slot / int(radial.atlasColumns)
+    );
+    atlasTexel = uint2(atlasPage * side + local);
+    return true;
+}
+
+static bool patternRadialOrbitIntersectsCanvas(
+    float2 logicalPoint,
+    constant PatternRadialFrameUniforms& radial
+) {
+    if (radial.displayedSectorCount == 1) {
+        return (
+            logicalPoint.x >= 0.0
+            && logicalPoint.y >= 0.0
+            && logicalPoint.x < radial.canvasSize.x
+            && logicalPoint.y < radial.canvasSize.y
+        );
+    }
+    const uint rays = radial.dihedral != 0
+        ? radial.displayedSectorCount / 2
+        : radial.displayedSectorCount;
+    const float step = 2.0 * M_PI_F / float(rays);
+    const float radius = length(logicalPoint);
+    const float localAngle = atan2(logicalPoint.y, logicalPoint.x);
+    for (uint index = 0; index < rays; ++index) {
+        const float angle = radial.referenceAngle
+            + localAngle + float(index) * step;
+        const float2 world = radial.center
+            + radius * float2(cos(angle), sin(angle));
+        if (
+            world.x >= 0.0 && world.y >= 0.0
+            && world.x < radial.canvasSize.x
+            && world.y < radial.canvasSize.y
+        ) {
+            return true;
+        }
+        if (radial.dihedral != 0) {
+            const float reflectedAngle = radial.referenceAngle
+                - localAngle + float(index) * step;
+            const float2 reflectedWorld = radial.center
+                + radius * float2(
+                    cos(reflectedAngle),
+                    sin(reflectedAngle)
+                );
+            if (
+                reflectedWorld.x >= 0.0 && reflectedWorld.y >= 0.0
+                && reflectedWorld.x < radial.canvasSize.x
+                && reflectedWorld.y < radial.canvasSize.y
+            ) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+kernel void patternRadialResizeCopy(
+    texture2d<float, access::read> source
+        [[texture(PatternTextureIndexCanonical)]],
+    texture2d<float, access::write> destination
+        [[texture(PatternTextureIndexLive)]],
+    texture2d<int, access::read> sourcePageTable
+        [[texture(PatternTextureIndexRadialPageTable)]],
+    constant PatternRadialFrameUniforms& sourceRadial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    constant PatternRadialFrameUniforms& destinationRadial
+        [[buffer(PatternBufferIndexRadialResizeDestinationUniforms)]],
+    constant PatternRadialResizePageUniforms& page
+        [[buffer(PatternBufferIndexRadialResizePage)]],
+    uint2 localTexel [[thread_position_in_grid]]
+) {
+    const uint side = destinationRadial.pageSide;
+    if (localTexel.x >= side || localTexel.y >= side) {
+        return;
+    }
+    const int2 logicalTexel = int2(
+        page.logicalPageX * int(side) + int(localTexel.x),
+        page.logicalPageY * int(side) + int(localTexel.y)
+    );
+    const float2 logicalPoint = float2(logicalTexel) + 0.5;
+    const uint2 destinationPage = uint2(
+        page.destinationSlot % destinationRadial.atlasColumns,
+        page.destinationSlot / destinationRadial.atlasColumns
+    );
+    const uint2 destinationTexel = destinationPage * side + localTexel;
+    uint2 sourceTexel;
+    if (
+        patternRadialOrbitIntersectsCanvas(
+            logicalPoint,
+            destinationRadial
+        )
+        && patternRadialAtlasTexel(
+            logicalTexel,
+            sourceRadial,
+            sourcePageTable,
+            sourceTexel
+        )
+    ) {
+        destination.write(source.read(sourceTexel), destinationTexel);
+    } else {
+        destination.write(float4(0.0), destinationTexel);
+    }
+}
+
+static float4 patternRadialCompositeTexel(
+    texture2d<float> canonical,
+    texture2d<float> settledLive,
+    texture2d<float> replayLive,
+    texture2d<int, access::read> pageTable,
+    int2 logicalTexel,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternRadialFrameUniforms& radial,
+    constant PatternBrushMaterialUniforms& material
+) {
+    uint2 atlasTexel;
+    if (!patternRadialAtlasTexel(
+        logicalTexel,
+        radial,
+        pageTable,
+        atlasTexel
+    )) {
+        return float4(0.0);
+    }
+    const float4 settled = frame.liveVisible == 0
+        ? float4(0.0)
+        : settledLive.read(atlasTexel);
+    const float4 replay = frame.liveVisible == 0
+        ? float4(0.0)
+        : replayLive.read(atlasTexel);
+    return patternCompositeLive(
+        settled,
+        replay,
+        canonical.read(atlasTexel),
+        frame.compositeMode,
+        material.strokeOpacity,
+        material.accumulationLimit,
+        material.materialStrength
+    );
+}
+
+static float4 patternRadialBilinearComposite(
+    texture2d<float> canonical,
+    texture2d<float> settledLive,
+    texture2d<float> replayLive,
+    texture2d<int, access::read> pageTable,
+    float2 logicalPixel,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternRadialFrameUniforms& radial,
+    constant PatternBrushMaterialUniforms& material
+) {
+    const float2 samplePosition = logicalPixel - 0.5;
+    const int2 lower = int2(floor(samplePosition));
+    const float2 blend = fract(samplePosition);
+    const float4 value00 = patternRadialCompositeTexel(
+        canonical, settledLive, replayLive, pageTable, lower,
+        frame, radial, material
+    );
+    const float4 value10 = patternRadialCompositeTexel(
+        canonical, settledLive, replayLive, pageTable,
+        lower + int2(1, 0), frame, radial, material
+    );
+    const float4 value01 = patternRadialCompositeTexel(
+        canonical, settledLive, replayLive, pageTable,
+        lower + int2(0, 1), frame, radial, material
+    );
+    const float4 value11 = patternRadialCompositeTexel(
+        canonical, settledLive, replayLive, pageTable,
+        lower + int2(1, 1), frame, radial, material
+    );
+    return mix(
+        mix(value00, value10, blend.x),
+        mix(value01, value11, blend.x),
+        blend.y
+    );
+}
+
+static float4 patternRadialGuideOverlay(
+    float4 color,
+    PatternRadialMapping mapping,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternRadialFrameUniforms& radial
+) {
+    if (
+        frame.showGridLines == 0
+        || frame.tilingKind == PatternTilingWirePlainCanvas
+    ) {
+        return color;
+    }
+    const float sectorPhase = fmod(
+        mapping.relativeAngle,
+        radial.sectorAngle
+    );
+    const float axisAngle = min(
+        sectorPhase,
+        radial.sectorAngle - sectorPhase
+    );
+    const float axisDistance =
+        mapping.radius * abs(sin(axisAngle)) * frame.zoom;
+    const float centerDistance = abs(mapping.radius * frame.zoom - 4.0);
+    const float guideDistance = min(axisDistance, centerDistance);
+    const float coverage = 1.0 - smoothstep(
+        frame.gridLineWidth,
+        frame.gridLineWidth + 1.0,
+        guideDistance
+    );
+    const float alpha = 0.24 * coverage;
+    return patternSourceOver(
+        float4(float3(0.18, 0.20, 0.19) * alpha, alpha),
+        color
+    );
+}
+
+static float4 patternFiniteBilinearComposite(
+    texture2d<float> canonical,
+    texture2d<float> settledLive,
+    texture2d<float> replayLive,
+    float2 canonicalPixel,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternBrushMaterialUniforms& material
+) {
+    constexpr sampler finiteSampler(
+        coord::normalized,
+        address::clamp_to_zero,
+        filter::linear
+    );
+    const float2 size = float2(
+        canonical.get_width(),
+        canonical.get_height()
+    );
+    const float2 uv = canonicalPixel / size;
+    const float4 settled = frame.liveVisible == 0
+        ? float4(0.0)
+        : settledLive.sample(finiteSampler, uv);
+    const float4 replay = frame.liveVisible == 0
+        ? float4(0.0)
+        : replayLive.sample(finiteSampler, uv);
+    return patternCompositeLive(
+        settled,
+        replay,
+        canonical.sample(finiteSampler, uv),
+        frame.compositeMode,
+        material.strokeOpacity,
+        material.accumulationLimit,
+        material.materialStrength
+    );
+}
+
+fragment float4 patternRadialGridFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternBrushMaterialUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternRadialFrameUniforms& radial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]],
+    texture2d<float> live [[texture(PatternTextureIndexLive)]],
+    texture2d<float> replayLive [[texture(PatternTextureIndexReplayLive)]],
+    texture2d<int, access::read> pageTable
+        [[texture(PatternTextureIndexRadialPageTable)]]
+) {
+    const float2 screenCenter = frame.drawableSize * 0.5;
+    const float2 world = (input.screenPixel - screenCenter) / frame.zoom
+        + frame.worldCenter;
+    const PatternRadialMapping mapping = patternRadialMapping(
+        world,
+        frame,
+        radial
+    );
+    if (!mapping.valid) {
+        return float4(0.0);
+    }
+    float4 result;
+    if (frame.tilingKind == PatternTilingWirePlainCanvas) {
+        result = patternFiniteBilinearComposite(
+            canonical,
+            live,
+            replayLive,
+            mapping.logicalPixel,
+            frame,
+            material
+        );
+    } else {
+        result = patternRadialBilinearComposite(
+            canonical,
+            live,
+            replayLive,
+            pageTable,
+            mapping.logicalPixel,
+            frame,
+            radial,
+            material
+        );
+    }
+    return patternRadialGuideOverlay(result, mapping, frame, radial);
 }
 
 fragment float4 patternCommitFragment(

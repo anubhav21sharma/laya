@@ -47,6 +47,9 @@ func editorModelChangesOnlyAfterTilingConfirmation() {
     model.confirmTiling(.mirrorXY)
 
     #expect(model.tiling == .mirrorXY)
+
+    model.confirmTiling(.radialMandala)
+    #expect(model.tiling == .mirrorXY)
 }
 
 @MainActor
@@ -106,6 +109,57 @@ func editorModelCanonicalResizePreservesPeriodicConfiguration() {
     #expect(model.pixelSize == PixelSize(width: 512, height: 384))
     #expect(model.periodicConfiguration == configuration)
     #expect(model.tiling == .squareRotation)
+}
+
+@MainActor
+@Test
+func editorModelConfirmsFiniteDomainAndGeometryLocksExactly() {
+    let model = EditorModel()
+    let radial = RadialSymmetryConfiguration(
+        kind: .mandala,
+        rayCount: 12,
+        center: WorldPoint(x: 91.5, y: 73.25),
+        referenceAngleRadians: -.pi / 7
+    )
+
+    model.confirmFiniteConfiguration(.radial(radial))
+    model.confirmGeometryLocks(
+        documentDomainLocked: true,
+        radialGeometryLocked: true
+    )
+
+    #expect(model.documentConfiguration == .finite(.radial(radial)))
+    #expect(model.finiteConfiguration == .radial(radial))
+    #expect(model.radialConfiguration == radial)
+    #expect(model.tiling == .radialMandala)
+    #expect(model.documentDomainLocked)
+    #expect(model.radialGeometryLocked)
+
+    model.confirmFiniteConfiguration(.plain)
+    #expect(model.documentConfiguration == .finite(.plain))
+    #expect(model.tiling == .plainCanvas)
+    #expect(model.radialConfiguration == nil)
+}
+
+@MainActor
+@Test
+func editorModelReturnsToLastPeriodicConfigurationFromFiniteDomain() {
+    let model = EditorModel()
+    let periodic = PeriodicSymmetryConfiguration(
+        presetID: .kaleidoscope30,
+        repeatSize: PatternSize(width: 183, height: 183),
+        orientationRadians: .pi / 9
+    )
+    model.confirmPeriodicConfiguration(periodic)
+    model.confirmFiniteConfiguration(.plain)
+    #expect(model.tiling == .plainCanvas)
+
+    model.confirmPeriodicConfiguration(periodic)
+
+    #expect(model.documentConfiguration == .periodic(periodic))
+    #expect(model.periodicConfiguration == periodic)
+    #expect(model.finiteConfiguration == nil)
+    #expect(model.tiling == .kaleidoscope30)
 }
 
 @MainActor

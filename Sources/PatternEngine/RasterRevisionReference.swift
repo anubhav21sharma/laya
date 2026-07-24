@@ -39,7 +39,11 @@ public struct StoredRasterRevisionID: RawRepresentable, Hashable, Sendable {
 
 public struct RasterRevisionReference: Equatable, Sendable {
     public let id: StoredRasterRevisionID
+    /// Physical texture dimensions retained by this revision.
     public let pixelSize: PixelSize
+    /// User-visible finite canvas dimensions. This differs from `pixelSize`
+    /// only when a sparse radial sector atlas backs the document.
+    public let documentPixelSize: PixelSize
     public let regions: PixelRegionSet
     public let retainedBytes: Int
 
@@ -49,10 +53,43 @@ public struct RasterRevisionReference: Equatable, Sendable {
         regions: PixelRegionSet,
         retainedBytes: Int
     ) {
+        self.init(
+            id: id,
+            pixelSize: pixelSize,
+            documentPixelSize: pixelSize,
+            regions: regions,
+            retainedBytes: retainedBytes
+        )
+    }
+
+    public init(
+        id: StoredRasterRevisionID,
+        pixelSize: PixelSize,
+        documentPixelSize: PixelSize,
+        regions: PixelRegionSet,
+        retainedBytes: Int
+    ) {
         precondition(retainedBytes >= 0)
         self.id = id
         self.pixelSize = pixelSize
+        self.documentPixelSize = documentPixelSize
         self.regions = regions
         self.retainedBytes = retainedBytes
+    }
+
+    public init(
+        id: StoredRasterRevisionID,
+        pixelSize: PixelSize,
+        documentPixelSize: PixelSize?,
+        regions: PixelRegionSet,
+        retainedBytes: Int
+    ) {
+        self.init(
+            id: id,
+            pixelSize: pixelSize,
+            documentPixelSize: documentPixelSize ?? pixelSize,
+            regions: regions,
+            retainedBytes: retainedBytes
+        )
     }
 }

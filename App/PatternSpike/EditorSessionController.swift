@@ -114,7 +114,11 @@ final class EditorSessionController {
             try renderer.cancelStroke(token: $0)
         }
         model.confirmPixelSize(renderer.pixelSize)
-        model.confirmPeriodicConfiguration(renderer.periodicConfiguration)
+        model.confirmDocumentConfiguration(renderer.documentConfiguration)
+        model.confirmGeometryLocks(
+            documentDomainLocked: renderer.documentDomainLocked,
+            radialGeometryLocked: renderer.radialGeometryLocked
+        )
         renderer.setInteractiveGridVisibility(model.showGrid)
         renderer.onOperationCompleted = { [weak self] completion in
             self?.handleRendererCompletion(completion)
@@ -211,13 +215,34 @@ final class EditorSessionController {
     }
 
     func handleTiling(_ tiling: TilingKind) {
+        guard tiling.isPeriodic else { return }
+        if case .finite = model.documentConfiguration {
+            let configuration = PeriodicSymmetryConfiguration
+                .defaultConfiguration(
+                    presetID: tiling,
+                    canonicalRasterSize: model.pixelSize
+                )
+            replaceEmptyDocumentConfiguration(.periodic(configuration))
+            return
+        }
         apply(.tilingIntent(tiling))
     }
 
     func handlePeriodicConfiguration(
         _ configuration: PeriodicSymmetryConfiguration
     ) {
+        guard configuration.presetID.isPeriodic else { return }
+        if case .finite = model.documentConfiguration {
+            replaceEmptyDocumentConfiguration(.periodic(configuration))
+            return
+        }
         apply(.periodicConfigurationIntent(configuration))
+    }
+
+    func handleFiniteConfiguration(
+        _ configuration: FiniteSymmetryConfiguration
+    ) {
+        replaceEmptyDocumentConfiguration(.finite(configuration))
     }
 
     func handleTileSize(_ pixelSize: PixelSize) {
@@ -281,7 +306,8 @@ final class EditorSessionController {
             handleGridVisibility(!model.showGrid)
         case let .selectTiling(index1):
             guard index1 > 0,
-                  let tiling = TilingKind(rawValue: UInt32(index1 - 1))
+                  let tiling = TilingKind(rawValue: UInt32(index1 - 1)),
+                  tiling.isPeriodic
             else { return }
             handleTiling(tiling)
         case .cancel:
@@ -521,8 +547,8 @@ final class EditorSessionController {
                     return nil
                 }
                 return navigation.direction == .undo
-                    ? command.before.pixelSize
-                    : command.after.pixelSize
+                    ? command.before.documentPixelSize
+                    : command.after.documentPixelSize
             }()
         )
 
@@ -699,8 +725,10 @@ final class EditorSessionController {
                       pendingTileResize.token == completedToken
             {
                 precondition(
-                    receipt.before.pixelSize == pendingTileResize.before
-                        && receipt.after.pixelSize == pendingTileResize.after,
+                    receipt.before.documentPixelSize
+                        == pendingTileResize.before
+                        && receipt.after.documentPixelSize
+                            == pendingTileResize.after,
                     "Renderer resize receipt must match the pending resize."
                 )
                 self.pendingTileResize = nil
@@ -711,7 +739,9 @@ final class EditorSessionController {
                 let released = history.appendSuccessful(.tileResize(command))
                 lastRecordedResizeCommandForTesting = command
                 releaseRasterRevisions(released)
-                confirmPixelSizeAndClampDiameter(receipt.after.pixelSize)
+                confirmPixelSizeAndClampDiameter(
+                    receipt.after.documentPixelSize
+                )
                 apply(
                     .operationCompleted(
                         completedToken,
@@ -800,11 +830,43 @@ final class EditorSessionController {
     }
 
     private func refreshDerivedModelState() {
+        model.confirmDocumentConfiguration(renderer.documentConfiguration)
+        model.confirmGeometryLocks(
+            documentDomainLocked: renderer.documentDomainLocked,
+            radialGeometryLocked: renderer.radialGeometryLocked
+        )
         model.confirmBusy(transaction.isBusy)
         model.confirmHistoryAvailability(
             canUndo: history.canUndo && !transaction.isBusy,
             canRedo: history.canRedo && !transaction.isBusy
         )
+    }
+
+    private func replaceEmptyDocumentConfiguration(
+        _ configuration: SymmetryDocumentConfiguration
+    ) {
+        guard transaction.state == .idle,
+              transaction.pendingOperation == nil,
+              renderer.isIdle
+        else {
+            report(.tilingChangeRequiresIdle)
+            return
+        }
+        do {
+            switch configuration {
+            case let .periodic(periodic):
+                try renderer.applyPeriodicConfiguration(periodic)
+            case let .finite(finite):
+                try renderer.applyFiniteConfiguration(finite)
+            }
+            releaseRasterRevisions(history.removeAll())
+            model.confirmDocumentConfiguration(renderer.documentConfiguration)
+            refreshDerivedModelState()
+        } catch let error as MetalRendererError {
+            report(error)
+        } catch {
+            report(.commandFailed(error.localizedDescription))
+        }
     }
 
     private func confirmPixelSizeAndClampDiameter(_ pixelSize: PixelSize) {

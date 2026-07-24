@@ -1600,7 +1600,8 @@ extension HarnessRunner {
         case .kaleidoscope30:
             24
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
-             .rotational:
+             .rotational, .plainCanvas, .radialMirror, .radialRotation,
+             .radialMandala:
             preconditionFailure(
                 "Generic orbit count requires a square or triangular preset"
             )

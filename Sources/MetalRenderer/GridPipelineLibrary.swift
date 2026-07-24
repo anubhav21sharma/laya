@@ -5,6 +5,8 @@ public struct GridPipelineLibrary {
     public let stamp: any MTLRenderPipelineState
     public let display: any MTLRenderPipelineState
     public let triangularDisplay: any MTLRenderPipelineState
+    public let radialDisplay: any MTLRenderPipelineState
+    public let radialResizeCopy: any MTLComputePipelineState
     public let commit: any MTLRenderPipelineState
     public let washDeposit: any MTLRenderPipelineState
     public let replayClear: any MTLRenderPipelineState
@@ -55,6 +57,36 @@ public struct GridPipelineLibrary {
                 attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
             }
         )
+        radialDisplay = try Self.makePipeline(
+            device: device,
+            library: library,
+            label: "Radial Finite Display",
+            vertex: "patternFullscreenVertex",
+            fragment: "patternRadialGridFragment",
+            configure: { attachment in
+                attachment.isBlendingEnabled = true
+                attachment.sourceRGBBlendFactor = .one
+                attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                attachment.sourceAlphaBlendFactor = .one
+                attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            }
+        )
+        guard let radialResizeFunction = library.makeFunction(
+            name: "patternRadialResizeCopy"
+        ) else {
+            throw MetalRendererError.shaderFunctionUnavailable(
+                "patternRadialResizeCopy"
+            )
+        }
+        do {
+            radialResizeCopy = try device.makeComputePipelineState(
+                function: radialResizeFunction
+            )
+        } catch {
+            throw MetalRendererError.pipelineCreationFailed(
+                error.localizedDescription
+            )
+        }
         commit = try Self.makePipeline(
             device: device,
             library: library,

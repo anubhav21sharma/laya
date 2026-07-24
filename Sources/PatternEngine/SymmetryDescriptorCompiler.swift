@@ -16,12 +16,19 @@ public enum SymmetryDescriptorError:
     case nonIntegerDimension(SymmetryDimension)
     case dimensionOutOfRange(SymmetryDimension, value: Float)
     case nonFiniteOrientation
+    case finitePresetRequiresFiniteConfiguration(SymmetryPresetID)
     case unsupportedOrientation(SymmetryPresetID)
     case nonSquareRepeat(width: Float, height: Float)
     case nonUniformTriangularSpacing(width: Float, height: Float)
     case singularTranslationBasis
     case imageCostExceedsLimit(actual: Int, maximum: Int)
     case projectionCostExceedsLimit(actual: Int, maximum: Int)
+    case nonFiniteRadialGeometry
+    case radialCenterOutsideCanvas
+    case unsupportedRadialRayCount(actual: Int, maximum: Int)
+    case radialPageLayoutEmpty
+    case radialAtlasDimensionExceeded(width: Int, height: Int, maximum: Int)
+    case radialResidentBytesExceeded(actual: Int, maximum: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -33,6 +40,8 @@ public enum SymmetryDescriptorError:
             "Symmetry \(dimension.label) \(value) is outside 64...4096."
         case .nonFiniteOrientation:
             "Symmetry orientation must be finite."
+        case let .finitePresetRequiresFiniteConfiguration(preset):
+            "Finite preset \(preset.rawValue) requires finite document configuration."
         case let .unsupportedOrientation(preset):
             "Preset \(preset.rawValue) does not support orientation."
         case let .nonSquareRepeat(width, height):
@@ -45,6 +54,18 @@ public enum SymmetryDescriptorError:
             "Symmetry image count \(actual) exceeds the limit \(maximum)."
         case let .projectionCostExceedsLimit(actual, maximum):
             "Symmetry worst-case projected instance count \(actual) exceeds the limit \(maximum)."
+        case .nonFiniteRadialGeometry:
+            "Radial geometry must be finite."
+        case .radialCenterOutsideCanvas:
+            "Radial centre must lie inside the finite canvas."
+        case let .unsupportedRadialRayCount(actual, maximum):
+            "Radial ray count \(actual) is outside the supported range through \(maximum)."
+        case .radialPageLayoutEmpty:
+            "Radial sector does not contain any resident page."
+        case let .radialAtlasDimensionExceeded(width, height, maximum):
+            "Radial sector atlas \(width)x\(height) exceeds \(maximum) pixels per dimension."
+        case let .radialResidentBytesExceeded(actual, maximum):
+            "Radial sector storage \(actual) bytes exceeds the per-surface limit \(maximum)."
         }
     }
 }
@@ -60,6 +81,7 @@ private extension SymmetryDimension {
 
 public enum SymmetryDescriptorCompiler {
     public static let maximumImagesPerCell = 24
+    public static let maximumRadialRayCount = 32
 
     public static func compile(
         presetID: SymmetryPresetID,
@@ -79,6 +101,12 @@ public enum SymmetryDescriptorCompiler {
         configuration: PeriodicSymmetryConfiguration,
         canonicalRasterSize: PixelSize
     ) throws -> CompiledSymmetry {
+        guard configuration.presetID.isPeriodic else {
+            throw SymmetryDescriptorError
+                .finitePresetRequiresFiniteConfiguration(
+                    configuration.presetID
+                )
+        }
         let canonicalSize = PatternSize(
             width: Float(canonicalRasterSize.width),
             height: Float(canonicalRasterSize.height)
@@ -203,6 +231,307 @@ public enum SymmetryDescriptorCompiler {
         )
     }
 
+    public static func compile(
+        finiteConfiguration: FiniteSymmetryConfiguration,
+        canvasSize: PixelSize
+    ) throws -> CompiledSymmetry {
+        try validate(Float(canvasSize.width), dimension: .width)
+        try validate(Float(canvasSize.height), dimension: .height)
+        let canvasPatternSize = PatternSize(
+            width: Float(canvasSize.width),
+            height: Float(canvasSize.height)
+        )
+
+        switch finiteConfiguration {
+        case .plain:
+            let identity = CompiledIsometry(
+                ordinal: 0,
+                localToCanonical: .identity
+            )
+            let radial = CompiledRadialDomain(
+                configuration: nil,
+                canvasSize: canvasSize,
+                sectorAngleRadians: 2 * .pi,
+                displayedSectorCount: 1,
+                maximumRadius: hypot(
+                    canvasPatternSize.width,
+                    canvasPatternSize.height
+                ),
+                layout: nil,
+                coincidentImagePolicy: .byteEqualOnly
+            )
+            return CompiledSymmetry(
+                presetID: .plainCanvas,
+                domain: .finite(CompiledFiniteDomain(
+                    configuration: .plain,
+                    radial: radial
+                )),
+                family: .radial,
+                images: [identity],
+                ownership: .radialSector(stabilizers: []),
+                displayProgram: CompiledDisplayProgram(
+                    family: .radial,
+                    presetWireID: SymmetryPresetID.plainCanvas.rawValue,
+                    guideKind: .finitePlain
+                ),
+                rasterMetric: .identity,
+                exportCapability: .finiteCanvas,
+                cost: SymmetryCostBound(
+                    maximumImagesPerCell: 1,
+                    maximumProjectedInstancesPerDab: 1
+                )
+            )
+        case let .radial(configuration):
+            return try compileRadial(
+                configuration: configuration,
+                canvasSize: canvasSize
+            )
+        }
+    }
+
+    public static func compile(
+        documentConfiguration: SymmetryDocumentConfiguration,
+        canvasSize: PixelSize
+    ) throws -> CompiledSymmetry {
+        switch documentConfiguration {
+        case let .periodic(configuration):
+            try compile(
+                configuration: configuration,
+                canonicalRasterSize: canvasSize
+            )
+        case let .finite(configuration):
+            try compile(
+                finiteConfiguration: configuration,
+                canvasSize: canvasSize
+            )
+        }
+    }
+
+    private static func compileRadial(
+        configuration: RadialSymmetryConfiguration,
+        canvasSize: PixelSize
+    ) throws -> CompiledSymmetry {
+        let center = configuration.center.simd
+        guard center.x.isFinite,
+              center.y.isFinite,
+              configuration.referenceAngleRadians.isFinite
+        else {
+            throw SymmetryDescriptorError.nonFiniteRadialGeometry
+        }
+        guard center.x >= 0, center.y >= 0,
+              center.x < Float(canvasSize.width),
+              center.y < Float(canvasSize.height)
+        else {
+            throw SymmetryDescriptorError.radialCenterOutsideCanvas
+        }
+
+        let rays: Int
+        let presetID: SymmetryPresetID
+        let isDihedral: Bool
+        switch configuration.kind {
+        case .mirror:
+            guard configuration.rayCount == 1 else {
+                throw SymmetryDescriptorError.unsupportedRadialRayCount(
+                    actual: configuration.rayCount,
+                    maximum: 1
+                )
+            }
+            rays = 1
+            presetID = .radialMirror
+            isDihedral = true
+        case .rotation:
+            guard (2...maximumRadialRayCount).contains(
+                configuration.rayCount
+            ) else {
+                throw SymmetryDescriptorError.unsupportedRadialRayCount(
+                    actual: configuration.rayCount,
+                    maximum: maximumRadialRayCount
+                )
+            }
+            rays = configuration.rayCount
+            presetID = .radialRotation
+            isDihedral = false
+        case .mandala:
+            guard (2...maximumRadialRayCount).contains(
+                configuration.rayCount
+            ) else {
+                throw SymmetryDescriptorError.unsupportedRadialRayCount(
+                    actual: configuration.rayCount,
+                    maximum: maximumRadialRayCount
+                )
+            }
+            rays = configuration.rayCount
+            presetID = .radialMandala
+            isDihedral = true
+        }
+
+        let normalizedReference = normalizedAngle(
+            configuration.referenceAngleRadians
+        )
+        let normalizedConfiguration = RadialSymmetryConfiguration(
+            kind: configuration.kind,
+            rayCount: rays,
+            center: configuration.center,
+            referenceAngleRadians: normalizedReference
+        )
+        let canvasCorners = [
+            SIMD2<Float>(0, 0),
+            SIMD2(Float(canvasSize.width), 0),
+            SIMD2(Float(canvasSize.width), Float(canvasSize.height)),
+            SIMD2(0, Float(canvasSize.height)),
+        ]
+        let maximumRadius = canvasCorners.map {
+            simd_distance($0, center)
+        }.max()!
+        let sectorAngle = isDihedral
+            ? Float.pi / Float(rays)
+            : 2 * Float.pi / Float(rays)
+        let displayedSectorCount = isDihedral ? 2 * rays : rays
+        let layout = try RadialSectorLayout(
+            maximumRadius: maximumRadius,
+            sectorAngleRadians: sectorAngle
+        )
+        let images = radialImages(
+            configuration: normalizedConfiguration,
+            displayedSectorCount: displayedSectorCount,
+            sectorAngle: sectorAngle
+        )
+        guard images.count <= 2 * maximumRadialRayCount else {
+            throw SymmetryDescriptorError.imageCostExceedsLimit(
+                actual: images.count,
+                maximum: 2 * maximumRadialRayCount
+            )
+        }
+        let pageMultiplier = max(1, layout.residentPages.count)
+        let (projectedCost, overflow) = images.count
+            .multipliedReportingOverflow(by: pageMultiplier * 2)
+        guard !overflow,
+              projectedCost <= TransientStrokeBufferContract
+                .visibleEpochProjectedInstanceCapacity
+        else {
+            throw SymmetryDescriptorError.projectionCostExceedsLimit(
+                actual: overflow ? Int.max : projectedCost,
+                maximum: TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity
+            )
+        }
+        let logicalToRaster = Affine2D(
+            xAxis: SIMD2(1, 0),
+            yAxis: SIMD2(0, 1),
+            translation: -layout.logicalBounds.minimum
+        )
+        let radial = CompiledRadialDomain(
+            configuration: normalizedConfiguration,
+            canvasSize: canvasSize,
+            sectorAngleRadians: sectorAngle,
+            displayedSectorCount: displayedSectorCount,
+            maximumRadius: maximumRadius,
+            layout: layout,
+            coincidentImagePolicy: isDihedral
+                ? .radialDihedralInvariantCoverage
+                : .radialCyclicInvariantCoverage
+        )
+        let guideKind: CompiledGuideKind
+        switch configuration.kind {
+        case .mirror:
+            guideKind = .radialMirror
+        case .rotation:
+            guideKind = .radialRotation
+        case .mandala:
+            guideKind = .radialMandala
+        }
+        return CompiledSymmetry(
+            presetID: presetID,
+            domain: .finite(CompiledFiniteDomain(
+                configuration: .radial(normalizedConfiguration),
+                radial: radial
+            )),
+            family: .radial,
+            images: images,
+            ownership: .radialSector(stabilizers: [
+                CompiledStabilizer(
+                    canonicalPoint: layout.atlasPoint(forLogical: .zero)
+                        ?? .zero,
+                    kind: isDihedral
+                        ? .dihedral(rotationOrder: UInt8(rays))
+                        : .rotation(order: UInt8(rays))
+                ),
+            ]),
+            displayProgram: CompiledDisplayProgram(
+                family: .radial,
+                presetWireID: presetID.rawValue,
+                guideKind: guideKind
+            ),
+            rasterMetric: RasterMetric2D(
+                worldToRaster: logicalToRaster,
+                rasterToWorld: logicalToRaster.inverted()
+            ),
+            exportCapability: .finiteCanvas,
+            cost: SymmetryCostBound(
+                maximumImagesPerCell: images.count,
+                maximumProjectedInstancesPerDab: projectedCost
+            )
+        )
+    }
+
+    private static func radialImages(
+        configuration: RadialSymmetryConfiguration,
+        displayedSectorCount: Int,
+        sectorAngle: Float
+    ) -> [CompiledIsometry] {
+        let center = configuration.center.simd
+        let reference = configuration.referenceAngleRadians
+        return (0..<displayedSectorCount).map { sector in
+            let reflected = configuration.kind != .rotation
+                && !sector.isMultiple(of: 2)
+            let matrix: (SIMD2<Float>, SIMD2<Float>)
+            if reflected {
+                let axis = Float(sector + 1) * sectorAngle * 0.5
+                let cosine = cos(2 * axis)
+                let sine = sin(2 * axis)
+                let localReflection = Affine2D(
+                    xAxis: SIMD2(cosine, sine),
+                    yAxis: SIMD2(sine, -cosine),
+                    translation: .zero
+                )
+                let removeReference = rotationAffine(-reference)
+                let combined = removeReference.concatenating(localReflection)
+                matrix = (combined.xAxis, combined.yAxis)
+            } else {
+                let angle = -reference - Float(sector) * sectorAngle
+                let rotation = rotationAffine(angle)
+                matrix = (rotation.xAxis, rotation.yAxis)
+            }
+            let transform = Affine2D(
+                xAxis: matrix.0,
+                yAxis: matrix.1,
+                translation: -(matrix.0 * center.x + matrix.1 * center.y)
+            )
+            let rotationStep = configuration.kind == .rotation
+                ? sector
+                : sector / 2
+            return CompiledIsometry(
+                ordinal: UInt8(sector),
+                localToCanonical: transform,
+                operation: CompiledGroupOperation(
+                    rotationStep: UInt8(rotationStep),
+                    rotationOrder: UInt8(configuration.rayCount),
+                    reflected: reflected
+                )
+            )
+        }
+    }
+
+    private static func rotationAffine(_ angle: Float) -> Affine2D {
+        let cosine = cos(angle)
+        let sine = sin(angle)
+        return Affine2D(
+            xAxis: SIMD2(cosine, sine),
+            yAxis: SIMD2(-sine, cosine),
+            translation: .zero
+        )
+    }
+
     private static func compiledProgram(
         for presetID: SymmetryPresetID,
         canonicalSize: PatternSize
@@ -321,6 +650,11 @@ public enum SymmetryDescriptorCompiler {
                     stabilizers: stabilizers
                 ),
                 guideKind: triangularGuideKind(for: presetID)
+            )
+        case .plainCanvas, .radialMirror, .radialRotation,
+             .radialMandala:
+            preconditionFailure(
+                "Finite presets require finite descriptor compilation"
             )
         }
     }
@@ -609,6 +943,11 @@ public enum SymmetryDescriptorCompiler {
         case .kaleidoscope30:
             order = 6
             includesReflections = true
+        case .plainCanvas, .radialMirror, .radialRotation,
+             .radialMandala:
+            preconditionFailure(
+                "Triangular images require a triangular preset"
+            )
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
              .rotational, .squareRotation, .squareKaleidoscope:
             preconditionFailure(
@@ -832,7 +1171,8 @@ public enum SymmetryDescriptorCompiler {
         case .kaleidoscope30:
             return UInt8(index)
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
-             .rotational, .squareRotation, .squareKaleidoscope:
+             .rotational, .squareRotation, .squareKaleidoscope,
+             .plainCanvas, .radialMirror, .radialRotation, .radialMandala:
             preconditionFailure(
                 "Triangular ownership requires a triangular preset"
             )
@@ -872,7 +1212,8 @@ public enum SymmetryDescriptorCompiler {
                 (0.5, 5 / 6, 3),
             ]
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
-             .rotational, .squareRotation, .squareKaleidoscope:
+             .rotational, .squareRotation, .squareKaleidoscope,
+             .plainCanvas, .radialMirror, .radialRotation, .radialMandala:
             preconditionFailure(
                 "Triangular stabilizers require a triangular preset"
             )
@@ -906,7 +1247,8 @@ public enum SymmetryDescriptorCompiler {
         case .kaleidoscope30:
             .triangularKaleidoscope30
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
-             .rotational, .squareRotation, .squareKaleidoscope:
+             .rotational, .squareRotation, .squareKaleidoscope,
+             .plainCanvas, .radialMirror, .radialRotation, .radialMandala:
             preconditionFailure(
                 "Triangular guide kind requires a triangular preset"
             )
@@ -916,10 +1258,16 @@ public enum SymmetryDescriptorCompiler {
     private static func normalizedAngle(_ value: Float) -> Float {
         let fullTurn = 2 * Float.pi
         var result = value.truncatingRemainder(dividingBy: fullTurn)
-        if result >= Float.pi {
+        let boundaryTolerance = fullTurn * 8 * Float.ulpOfOne
+        if result >= Float.pi - boundaryTolerance {
             result -= fullTurn
         } else if result < -Float.pi {
             result += fullTurn
+        }
+        if result < -Float.pi
+            && result >= -Float.pi - boundaryTolerance
+        {
+            result = -Float.pi
         }
         return result == 0 ? 0 : result
     }
@@ -1081,7 +1429,8 @@ public extension SymmetryPresetID {
             true
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
              .rotational, .hexagons, .rotation3, .rotation6,
-             .kaleidoscope60, .kaleidoscope30:
+             .kaleidoscope60, .kaleidoscope30, .plainCanvas,
+             .radialMirror, .radialRotation, .radialMandala:
             false
         }
     }
@@ -1092,7 +1441,8 @@ public extension SymmetryPresetID {
              .kaleidoscope30:
             true
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
-             .rotational, .squareRotation, .squareKaleidoscope:
+             .rotational, .squareRotation, .squareKaleidoscope,
+             .plainCanvas, .radialMirror, .radialRotation, .radialMandala:
             false
         }
     }
@@ -1103,7 +1453,8 @@ public extension SymmetryPresetID {
             true
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
              .rotational, .squareRotation, .squareKaleidoscope, .hexagons,
-             .rotation3, .rotation6:
+             .rotation3, .rotation6, .plainCanvas, .radialMirror,
+             .radialRotation, .radialMandala:
             false
         }
     }

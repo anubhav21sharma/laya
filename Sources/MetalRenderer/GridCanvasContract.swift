@@ -3,7 +3,23 @@ import PatternEngine
 public struct TilingCanvasConfiguration: Equatable, Sendable {
     public let pixelSize: PixelSize
     public let tiling: TilingKind
-    public let periodicConfiguration: PeriodicSymmetryConfiguration
+    public let documentConfiguration: SymmetryDocumentConfiguration
+
+    public var periodicConfiguration: PeriodicSymmetryConfiguration {
+        guard case let .periodic(configuration) = documentConfiguration else {
+            preconditionFailure(
+                "Finite canvas configuration has no periodic configuration"
+            )
+        }
+        return configuration
+    }
+
+    public var finiteConfiguration: FiniteSymmetryConfiguration? {
+        guard case let .finite(configuration) = documentConfiguration else {
+            return nil
+        }
+        return configuration
+    }
 
     public init(pixelSize: PixelSize, tiling: TilingKind) throws {
         try self.init(
@@ -28,19 +44,81 @@ public struct TilingCanvasConfiguration: Equatable, Sendable {
                 height: pixelSize.height
             )
         }
+        try Self.validate(
+            pixelSize: pixelSize,
+            documentConfiguration: .periodic(periodicConfiguration)
+        )
+        self.pixelSize = pixelSize
+        tiling = periodicConfiguration.presetID
+        documentConfiguration = .periodic(periodicConfiguration)
+    }
+
+    public init(
+        pixelSize: PixelSize,
+        finiteConfiguration: FiniteSymmetryConfiguration
+    ) throws {
+        guard
+            (64...4_096).contains(pixelSize.width),
+            (64...4_096).contains(pixelSize.height)
+        else {
+            throw MetalRendererError.invalidTileDimensions(
+                width: pixelSize.width,
+                height: pixelSize.height
+            )
+        }
+        try Self.validate(
+            pixelSize: pixelSize,
+            documentConfiguration: .finite(finiteConfiguration)
+        )
+        self.pixelSize = pixelSize
+        documentConfiguration = .finite(finiteConfiguration)
+        switch finiteConfiguration {
+        case .plain:
+            tiling = .plainCanvas
+        case let .radial(radial):
+            switch radial.kind {
+            case .mirror:
+                tiling = .radialMirror
+            case .rotation:
+                tiling = .radialRotation
+            case .mandala:
+                tiling = .radialMandala
+            }
+        }
+    }
+
+    public init(
+        pixelSize: PixelSize,
+        documentConfiguration: SymmetryDocumentConfiguration
+    ) throws {
+        switch documentConfiguration {
+        case let .periodic(configuration):
+            try self.init(
+                pixelSize: pixelSize,
+                periodicConfiguration: configuration
+            )
+        case let .finite(configuration):
+            try self.init(
+                pixelSize: pixelSize,
+                finiteConfiguration: configuration
+            )
+        }
+    }
+
+    private static func validate(
+        pixelSize: PixelSize,
+        documentConfiguration: SymmetryDocumentConfiguration
+    ) throws {
         do {
             _ = try SymmetryDescriptorCompiler.compile(
-                configuration: periodicConfiguration,
-                canonicalRasterSize: pixelSize
+                documentConfiguration: documentConfiguration,
+                canvasSize: pixelSize
             )
         } catch {
-            throw MetalRendererError.invalidPeriodicConfiguration(
+            throw MetalRendererError.invalidSymmetryConfiguration(
                 error.localizedDescription
             )
         }
-        self.pixelSize = pixelSize
-        tiling = periodicConfiguration.presetID
-        self.periodicConfiguration = periodicConfiguration
     }
 }
 

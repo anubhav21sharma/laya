@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "radial-axis",
+  "scenario": "axis",
+  "kind": 2,
+  "rayCount": 8,
+  "canvasWidth": 128,
+  "canvasHeight": 128,
+  "centerX": 64,
+  "centerY": 64,
+  "referenceAngleRadians": 0,
+  "probeX": 92,
+  "probeY": 64,
+  "diameter": 12,
+  "expectedMismatchCount": 0
+}

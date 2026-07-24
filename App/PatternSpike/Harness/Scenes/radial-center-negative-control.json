@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "radial-center-negative-control",
+  "scenario": "center",
+  "kind": 2,
+  "rayCount": 7,
+  "canvasWidth": 128,
+  "canvasHeight": 128,
+  "centerX": 61,
+  "centerY": 67,
+  "referenceAngleRadians": -0.31,
+  "probeX": 61,
+  "probeY": 67,
+  "diameter": 16,
+  "expectedMismatchCount": 1
+}

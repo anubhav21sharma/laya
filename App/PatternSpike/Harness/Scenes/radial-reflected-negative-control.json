@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "radial-reflected-negative-control",
+  "scenario": "reflected",
+  "kind": 0,
+  "rayCount": 1,
+  "canvasWidth": 128,
+  "canvasHeight": 128,
+  "centerX": 64,
+  "centerY": 64,
+  "referenceAngleRadians": 0.41,
+  "probeX": 88,
+  "probeY": 75,
+  "diameter": 12,
+  "expectedMismatchCount": 1
+}

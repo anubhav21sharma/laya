@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "radial-large-footprint-negative-control",
+  "scenario": "largeFootprint",
+  "kind": 2,
+  "rayCount": 32,
+  "canvasWidth": 128,
+  "canvasHeight": 128,
+  "centerX": 64,
+  "centerY": 64,
+  "referenceAngleRadians": 0.09,
+  "probeX": 70,
+  "probeY": 66,
+  "diameter": 96,
+  "expectedMismatchCount": 1
+}

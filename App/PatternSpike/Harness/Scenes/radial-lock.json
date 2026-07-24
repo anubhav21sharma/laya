@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "radial-lock",
+  "scenario": "lock",
+  "kind": 1,
+  "rayCount": 4,
+  "canvasWidth": 128,
+  "canvasHeight": 128,
+  "centerX": 58,
+  "centerY": 62,
+  "referenceAngleRadians": 0.22,
+  "probeX": 87,
+  "probeY": 68,
+  "diameter": 12,
+  "expectedMismatchCount": 0
+}

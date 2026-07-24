@@ -138,17 +138,20 @@ public enum TilingProjection {
         }
 
         candidates = removingByteEqualCandidates(candidates)
-        if let policy = strategy.compiledSymmetry.domain.periodic?
-            .coincidentImagePolicy
-        {
-            candidates = removingCoverageEqualCandidates(
-                candidates,
-                policy: policy,
-                symmetry: footprint.coverageSymmetry,
-                ownership: strategy.compiledSymmetry.ownership,
-                canonicalSize: strategy.tileSize
-            )
+        let policy: CoincidentImagePolicy
+        switch strategy.compiledSymmetry.domain {
+        case let .periodic(periodic):
+            policy = periodic.coincidentImagePolicy
+        case let .finite(finite):
+            policy = finite.radial.coincidentImagePolicy
         }
+        candidates = removingCoverageEqualCandidates(
+            candidates,
+            policy: policy,
+            symmetry: footprint.coverageSymmetry,
+            ownership: strategy.compiledSymmetry.ownership,
+            canonicalSize: strategy.tileSize
+        )
         candidates.sort {
             fragmentPrecedes($0.fragment, $1.fragment)
         }
@@ -273,7 +276,7 @@ private struct CoverageDomainKey: Hashable {
             centerX = Int64(normalizedZero(affine.translation.x).bitPattern)
             centerY = Int64(normalizedZero(affine.translation.y).bitPattern)
         case .squareRotation, .squareMirrorTriangles,
-             .triangularDomains:
+             .triangularDomains, .radialSector:
             let center = canonicalizedCoverageCenter(
                 affine.translation,
                 ownership: ownership,
@@ -303,7 +306,7 @@ private struct CoverageDomainKey: Hashable {
             polygon = TilingProjection.canonicalPolygonKey(
                 candidate.localPolygon
             )
-        case .triangularDomains:
+        case .triangularDomains, .radialSector:
             polygon = TilingProjection.canonicalPolygonKey(
                 candidate.localPolygon
             )
@@ -337,6 +340,9 @@ private func canonicalizedCoverageCenter(
                 extent: canonicalSize.height
             )
         )
+    case let .radialSector(values):
+        stabilizers = values
+        candidate = point
     }
     return stabilizers.first(where: {
         coverageCoordinatesAgree(
@@ -573,6 +579,15 @@ private func removingCoverageEqualCandidates(
             canonicalSize: canonicalSize
         )
     }
+    if case .radialSector = ownership {
+        return removingTriangularCoverageEqualCandidates(
+            candidates,
+            policy: policy,
+            symmetry: symmetry,
+            ownership: ownership,
+            canonicalSize: canonicalSize
+        )
+    }
     let ordered = candidates.enumerated().sorted { lhs, rhs in
         let lhsRank = ownershipRank(lhs.element, ownership: ownership)
         let rhsRank = ownershipRank(rhs.element, ownership: ownership)
@@ -680,6 +695,8 @@ func preferredOwnershipOwner(
         fragments = triangles
     case let .triangularDomains(triangles, _):
         fragments = triangles
+    case .radialSector:
+        return nil
     }
 
     // Every nonrectangular ownership fragment is a triangle. Inclusive
@@ -752,10 +769,12 @@ private func operationsAreEquivalent(
     case .halfTurnInvariantCoverage:
         policyAllows = !changesReflection && changesByHalfTurn
     case .quarterTurnInvariantCoverage,
-         .triangularCyclicInvariantCoverage:
+         .triangularCyclicInvariantCoverage,
+         .radialCyclicInvariantCoverage:
         policyAllows = !changesReflection
     case .squareDihedralInvariantCoverage,
-         .triangularDihedralInvariantCoverage:
+         .triangularDihedralInvariantCoverage,
+         .radialDihedralInvariantCoverage:
         policyAllows = true
     }
     guard policyAllows else { return false }

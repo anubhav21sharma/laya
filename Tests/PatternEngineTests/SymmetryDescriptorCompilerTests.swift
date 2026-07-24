@@ -33,9 +33,13 @@ struct SymmetryDescriptorCompilerTests {
         #expect(SymmetryPresetID.rotation6.rawValue == 11)
         #expect(SymmetryPresetID.kaleidoscope60.rawValue == 12)
         #expect(SymmetryPresetID.kaleidoscope30.rawValue == 13)
+        #expect(SymmetryPresetID.plainCanvas.rawValue == 14)
+        #expect(SymmetryPresetID.radialMirror.rawValue == 15)
+        #expect(SymmetryPresetID.radialRotation.rawValue == 16)
+        #expect(SymmetryPresetID.radialMandala.rawValue == 17)
         #expect(
             SymmetryPresetID.allCases.map(\.rawValue)
-                == Array(0...13).map(UInt32.init)
+                == Array(0...17).map(UInt32.init)
         )
         #expect(TilingKind.rotational.rawValue == 6)
 
@@ -47,6 +51,215 @@ struct SymmetryDescriptorCompilerTests {
                 from: Data("5".utf8)
             ) == .mirrorXY
         )
+    }
+
+    @Test
+    func finiteDescriptorsCompilePlainCyclicDihedralAndMirrorExactly()
+        throws
+    {
+        let canvas = PixelSize(width: 256, height: 192)
+        let center = WorldPoint(x: 91, y: 73)
+        let plain = try SymmetryDescriptorCompiler.compile(
+            finiteConfiguration: .plain,
+            canvasSize: canvas
+        )
+        #expect(plain.presetID == .plainCanvas)
+        #expect(plain.family == .radial)
+        #expect(plain.images.count == 1)
+        #expect(plain.domain.finite?.radial.layout == nil)
+        #expect(plain.exportCapability == .finiteCanvas)
+
+        let cases: [
+            (
+                kind: RadialSymmetryKind,
+                rays: Int,
+                preset: SymmetryPresetID,
+                images: Int,
+                sectors: Int,
+                angle: Float
+            )
+        ] = [
+            (.mirror, 1, .radialMirror, 2, 2, .pi),
+            (.rotation, 5, .radialRotation, 5, 5, 2 * .pi / 5),
+            (.mandala, 7, .radialMandala, 14, 14, .pi / 7),
+        ]
+        for item in cases {
+            let compiled = try SymmetryDescriptorCompiler.compile(
+                finiteConfiguration: .radial(
+                    RadialSymmetryConfiguration(
+                        kind: item.kind,
+                        rayCount: item.rays,
+                        center: center,
+                        referenceAngleRadians: 5 * .pi
+                    )
+                ),
+                canvasSize: canvas
+            )
+            let radial = try #require(compiled.domain.finite?.radial)
+            #expect(compiled.presetID == item.preset)
+            #expect(compiled.family == .radial)
+            #expect(compiled.images.count == item.images)
+            #expect(radial.displayedSectorCount == item.sectors)
+            #expect(abs(radial.sectorAngleRadians - item.angle) < 0.000_001)
+            #expect(radial.configuration?.referenceAngleRadians == -.pi)
+            #expect(radial.layout != nil)
+            #expect(compiled.exportCapability == .finiteCanvas)
+            #expect(compiled.cost.maximumImagesPerCell == item.images)
+
+            for image in compiled.images {
+                let determinant =
+                    image.localToCanonical.xAxis.x
+                        * image.localToCanonical.yAxis.y
+                    - image.localToCanonical.xAxis.y
+                        * image.localToCanonical.yAxis.x
+                #expect(abs(abs(determinant) - 1) < 0.000_001)
+                #expect(simd_length(
+                    image.localToCanonical.applying(to: center.simd)
+                ) < 0.000_1)
+            }
+        }
+    }
+
+    @Test
+    func radialDescriptorRejectsInvalidCentreRaysAndNonfiniteGeometry() {
+        let canvas = PixelSize(width: 256, height: 256)
+
+        #expect(throws: SymmetryDescriptorError.radialCenterOutsideCanvas) {
+            try SymmetryDescriptorCompiler.compile(
+                finiteConfiguration: .radial(
+                    RadialSymmetryConfiguration(
+                        kind: .rotation,
+                        rayCount: 4,
+                        center: WorldPoint(x: 256, y: 128)
+                    )
+                ),
+                canvasSize: canvas
+            )
+        }
+        #expect(throws: SymmetryDescriptorError
+            .unsupportedRadialRayCount(actual: 1, maximum: 32))
+        {
+            try SymmetryDescriptorCompiler.compile(
+                finiteConfiguration: .radial(
+                    RadialSymmetryConfiguration(
+                        kind: .rotation,
+                        rayCount: 1,
+                        center: WorldPoint(x: 128, y: 128)
+                    )
+                ),
+                canvasSize: canvas
+            )
+        }
+        #expect(throws: SymmetryDescriptorError
+            .unsupportedRadialRayCount(actual: 33, maximum: 32))
+        {
+            try SymmetryDescriptorCompiler.compile(
+                finiteConfiguration: .radial(
+                    RadialSymmetryConfiguration(
+                        kind: .mandala,
+                        rayCount: 33,
+                        center: WorldPoint(x: 128, y: 128)
+                    )
+                ),
+                canvasSize: canvas
+            )
+        }
+        #expect(throws: SymmetryDescriptorError.nonFiniteRadialGeometry) {
+            try SymmetryDescriptorCompiler.compile(
+                finiteConfiguration: .radial(
+                    RadialSymmetryConfiguration(
+                        kind: .mirror,
+                        rayCount: 1,
+                        center: WorldPoint(x: 128, y: 128),
+                        referenceAngleRadians: .infinity
+                    )
+                ),
+                canvasSize: canvas
+            )
+        }
+    }
+
+    @Test
+    func periodicCompilationRejectsEveryFinitePresetWithoutCrashing() {
+        let size = PixelSize(width: 256, height: 256)
+        for preset in SymmetryPresetID.allCases where !preset.isPeriodic {
+            let configuration = PeriodicSymmetryConfiguration
+                .defaultConfiguration(
+                    presetID: preset,
+                    canonicalRasterSize: size
+                )
+            #expect(throws: SymmetryDescriptorError
+                .finitePresetRequiresFiniteConfiguration(preset))
+            {
+                try SymmetryDescriptorCompiler.compile(
+                    configuration: configuration,
+                    canonicalRasterSize: size
+                )
+            }
+        }
+    }
+
+    @Test
+    func maximumCanvasAndRayConfigurationsCompileWithinDeclaredBudgets()
+        throws
+    {
+        let canvas = PixelSize(width: 4_096, height: 4_096)
+        let center = WorldPoint(x: 2_048, y: 2_048)
+        for kind in [
+            RadialSymmetryKind.rotation,
+            .mandala,
+        ] {
+            let compiled = try SymmetryDescriptorCompiler.compile(
+                finiteConfiguration: .radial(
+                    RadialSymmetryConfiguration(
+                        kind: kind,
+                        rayCount:
+                            SymmetryDescriptorCompiler.maximumRadialRayCount,
+                        center: center,
+                        referenceAngleRadians: -.pi / 17
+                    )
+                ),
+                canvasSize: canvas
+            )
+            let layout = try #require(
+                compiled.domain.finite?.radial.layout
+            )
+            #expect(
+                compiled.cost.maximumProjectedInstancesPerDab
+                    <= TransientStrokeBufferContract
+                        .visibleEpochProjectedInstanceCapacity
+            )
+            #expect(
+                layout.residentBytesPerSurface
+                    <= RadialSectorLayout.maximumResidentBytesPerSurface
+            )
+            #expect(
+                layout.atlasPixelSize.width
+                    <= RadialSectorLayout.maximumAtlasDimension
+            )
+            #expect(
+                layout.atlasPixelSize.height
+                    <= RadialSectorLayout.maximumAtlasDimension
+            )
+        }
+    }
+
+    @Test
+    func overBudgetExtremeRadialGeometryFailsExplicitly() {
+        #expect(throws: SymmetryDescriptorError
+            .projectionCostExceedsLimit(actual: 4_160, maximum: 4_096))
+        {
+            try SymmetryDescriptorCompiler.compile(
+                finiteConfiguration: .radial(
+                    RadialSymmetryConfiguration(
+                        kind: .rotation,
+                        rayCount: 32,
+                        center: WorldPoint(x: 1, y: 1)
+                    )
+                ),
+                canvasSize: PixelSize(width: 4_096, height: 4_096)
+            )
+        }
     }
 
     @Test(arguments: legacySymmetryPresetIDs)

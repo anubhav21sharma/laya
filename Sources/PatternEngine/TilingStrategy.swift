@@ -72,13 +72,33 @@ public struct TilingImage: Equatable, Sendable {
 
 public struct TilingStrategy: Equatable, Sendable {
     public let presetID: SymmetryPresetID
+    public let canvasSize: PixelSize
     public let tileSize: PatternSize
-    public let periodicConfiguration: PeriodicSymmetryConfiguration
+    public let documentConfiguration: SymmetryDocumentConfiguration
     public let compiledSymmetry: CompiledSymmetry
 
     public var kind: TilingKind { presetID }
+    public var periodicConfiguration: PeriodicSymmetryConfiguration {
+        guard case let .periodic(configuration) = documentConfiguration else {
+            preconditionFailure(
+                "Finite symmetry strategy has no periodic configuration"
+            )
+        }
+        return configuration
+    }
+
+    public var finiteConfiguration: FiniteSymmetryConfiguration? {
+        guard case let .finite(configuration) = documentConfiguration else {
+            return nil
+        }
+        return configuration
+    }
 
     public init(kind: TilingKind, tileSize: PatternSize) {
+        precondition(
+            kind.isPeriodic,
+            "Legacy TilingStrategy initializer requires a periodic preset"
+        )
         precondition(
             tileSize.width.isFinite,
             "TilingStrategy tile width must be finite"
@@ -123,8 +143,11 @@ public struct TilingStrategy: Equatable, Sendable {
             )
         }
         presetID = kind
+        canvasSize = canonicalRasterSize
         self.tileSize = tileSize
-        periodicConfiguration = compiledSymmetry.domain.periodic!.configuration
+        documentConfiguration = .periodic(
+            compiledSymmetry.domain.periodic!.configuration
+        )
     }
 
     public init(
@@ -136,12 +159,53 @@ public struct TilingStrategy: Equatable, Sendable {
             canonicalRasterSize: canonicalRasterSize
         )
         presetID = configuration.presetID
+        canvasSize = canonicalRasterSize
         tileSize = PatternSize(
             width: Float(canonicalRasterSize.width),
             height: Float(canonicalRasterSize.height)
         )
-        periodicConfiguration = compiled.domain.periodic!.configuration
+        documentConfiguration = .periodic(
+            compiled.domain.periodic!.configuration
+        )
         compiledSymmetry = compiled
+    }
+
+    public init(
+        finiteConfiguration: FiniteSymmetryConfiguration,
+        canvasSize: PixelSize
+    ) throws {
+        let compiled = try SymmetryDescriptorCompiler.compile(
+            finiteConfiguration: finiteConfiguration,
+            canvasSize: canvasSize
+        )
+        presetID = compiled.presetID
+        self.canvasSize = canvasSize
+        let storageSize = compiled.domain.finite?.radial.layout?
+            .atlasPixelSize ?? canvasSize
+        tileSize = PatternSize(
+            width: Float(storageSize.width),
+            height: Float(storageSize.height)
+        )
+        documentConfiguration = .finite(finiteConfiguration)
+        compiledSymmetry = compiled
+    }
+
+    public init(
+        documentConfiguration: SymmetryDocumentConfiguration,
+        canvasSize: PixelSize
+    ) throws {
+        switch documentConfiguration {
+        case let .periodic(configuration):
+            try self.init(
+                configuration: configuration,
+                canonicalRasterSize: canvasSize
+            )
+        case let .finite(configuration):
+            try self.init(
+                finiteConfiguration: configuration,
+                canvasSize: canvasSize
+            )
+        }
     }
 
     public func cell(containing point: WorldPoint) -> CellIndex {
@@ -155,9 +219,9 @@ public struct TilingStrategy: Equatable, Sendable {
                 compiled: compiledSymmetry
             ).cell(containing: point)
         case .radial:
-            preconditionFailure(
-                "Periodic TilingStrategy cannot dispatch a radial kernel"
-            )
+            RadialSymmetryKernel(
+                compiled: compiledSymmetry
+            ).cell(containing: point)
         }
     }
 
@@ -196,9 +260,9 @@ public struct TilingStrategy: Equatable, Sendable {
                 compiled: compiledSymmetry
             ).images(intersecting: worldBounds)
         case .radial:
-            preconditionFailure(
-                "Periodic TilingStrategy cannot dispatch a radial kernel"
-            )
+            return RadialSymmetryKernel(
+                compiled: compiledSymmetry
+            ).images(intersecting: worldBounds)
         }
     }
 
@@ -213,9 +277,9 @@ public struct TilingStrategy: Equatable, Sendable {
                 compiled: compiledSymmetry
             ).displayFold(point)
         case .radial:
-            preconditionFailure(
-                "Periodic TilingStrategy cannot dispatch a radial kernel"
-            )
+            RadialSymmetryKernel(
+                compiled: compiledSymmetry
+            ).displayFold(point)
         }
     }
 }

@@ -196,8 +196,8 @@ extension GridRenderer {
         }
 
         let canonicalTexture = try makeHarnessTexture(
-            width: pixelSize.width,
-            height: pixelSize.height
+            width: storagePixelSize.width,
+            height: storagePixelSize.height
         )
         let screenTexture = try makeHarnessTexture(
             width: width,
@@ -352,8 +352,8 @@ extension GridRenderer {
         let shape = try brushTextureResolver.resolve(shape: recipe.shape)
         let grain = try brushTextureResolver.resolve(grain: recipe.grain)
         let canonicalTexture = try makeHarnessTexture(
-            width: pixelSize.width,
-            height: pixelSize.height
+            width: storagePixelSize.width,
+            height: storagePixelSize.height
         )
         let pipeline = try GridPipelineLibrary.makeHarnessBrushPipeline(
             device: device,
@@ -633,16 +633,16 @@ extension GridRenderer {
     }
 
     public func replaceCanonicalPixelsForHarness(_ bytes: [UInt8]) throws {
-        let bytesPerRow = pixelSize.width * 4
-        guard bytes.count == bytesPerRow * pixelSize.height else {
+        let bytesPerRow = storagePixelSize.width * 4
+        guard bytes.count == bytesPerRow * storagePixelSize.height else {
             throw MetalRendererError.commandFailed(
-                "Harness canonical byte count does not match pixel size."
+                "Harness canonical byte count does not match storage size."
             )
         }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
-            width: pixelSize.width,
-            height: pixelSize.height,
+            width: storagePixelSize.width,
+            height: storagePixelSize.height,
             mipmapped: false
         )
         descriptor.storageMode = .shared
@@ -655,8 +655,8 @@ extension GridRenderer {
                 region: MTLRegionMake2D(
                     0,
                     0,
-                    pixelSize.width,
-                    pixelSize.height
+                    storagePixelSize.width,
+                    storagePixelSize.height
                 ),
                 mipmapLevel: 0,
                 withBytes: storage.baseAddress!,
@@ -668,9 +668,9 @@ extension GridRenderer {
         }
         try encodeResizeIntersectionCopy(
             from: staging,
-            oldPixelSize: pixelSize,
+            oldPixelSize: storagePixelSize,
             to: canonical.front,
-            newPixelSize: pixelSize,
+            newPixelSize: storagePixelSize,
             on: commandBuffer
         )
         commandBuffer.commit()
@@ -743,14 +743,14 @@ extension GridRenderer {
         let newerEpoch = base &+ 2
         _ = replayTile.planReplacement(
             epoch: staleEpoch,
-            prior: PixelRegionSet([], clippedTo: pixelSize),
-            replacement: PixelRegionSet([], clippedTo: pixelSize)
+            prior: PixelRegionSet([], clippedTo: storagePixelSize),
+            replacement: PixelRegionSet([], clippedTo: storagePixelSize)
         )
         replayTile.markVisible(epoch: staleEpoch)
         _ = replayTile.planReplacement(
             epoch: newerEpoch,
-            prior: PixelRegionSet([], clippedTo: pixelSize),
-            replacement: PixelRegionSet([], clippedTo: pixelSize)
+            prior: PixelRegionSet([], clippedTo: storagePixelSize),
+            replacement: PixelRegionSet([], clippedTo: storagePixelSize)
         )
         replayTile.markVisible(epoch: newerEpoch)
         let before = replayTile.visibleEpoch

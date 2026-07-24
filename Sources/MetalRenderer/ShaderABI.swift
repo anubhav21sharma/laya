@@ -38,6 +38,56 @@ public enum ShaderABI {
                 == 88
             && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.padding2)
                 == 92
+            && MemoryLayout<PatternRadialFrameUniforms>.size == 64
+            && MemoryLayout<PatternRadialFrameUniforms>.stride == 64
+            && MemoryLayout<PatternRadialFrameUniforms>.alignment == 8
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(
+                of: \.canvasSize
+            ) == 0
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(of: \.center)
+                == 8
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(
+                of: \.referenceAngle
+            ) == 16
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(
+                of: \.sectorAngle
+            ) == 20
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(
+                of: \.displayedSectorCount
+            ) == 24
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(
+                of: \.dihedral
+            ) == 28
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(
+                of: \.pageOrigin
+            ) == 32
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(
+                of: \.pageTableSize
+            ) == 40
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(
+                of: \.atlasColumns
+            ) == 48
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(
+                of: \.pageSide
+            ) == 52
+            && MemoryLayout<PatternRadialFrameUniforms>.offset(
+                of: \.atlasSize
+            ) == 56
+            && MemoryLayout<PatternRadialResizePageUniforms>.size == 16
+            && MemoryLayout<PatternRadialResizePageUniforms>.stride == 16
+            && MemoryLayout<PatternRadialResizePageUniforms>.alignment == 4
+            && MemoryLayout<PatternRadialResizePageUniforms>.offset(
+                of: \.logicalPageX
+            ) == 0
+            && MemoryLayout<PatternRadialResizePageUniforms>.offset(
+                of: \.logicalPageY
+            ) == 4
+            && MemoryLayout<PatternRadialResizePageUniforms>.offset(
+                of: \.destinationSlot
+            ) == 8
+            && MemoryLayout<PatternRadialResizePageUniforms>.offset(
+                of: \.padding
+            ) == 12
             && MemoryLayout<PatternClipHalfPlane>.size == 16
             && MemoryLayout<PatternClipHalfPlane>.stride == 16
             && MemoryLayout<PatternClipHalfPlane>.alignment == 8

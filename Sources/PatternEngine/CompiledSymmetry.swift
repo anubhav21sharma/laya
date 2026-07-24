@@ -34,6 +34,50 @@ public struct PeriodicSymmetryConfiguration: Equatable, Sendable {
     }
 }
 
+public enum RadialSymmetryKind: UInt32, Codable, Equatable, Sendable {
+    case mirror = 0
+    case rotation = 1
+    case mandala = 2
+}
+
+public struct RadialSymmetryConfiguration: Equatable, Sendable {
+    public let kind: RadialSymmetryKind
+    public let rayCount: Int
+    public let center: WorldPoint
+    public let referenceAngleRadians: Float
+
+    public init(
+        kind: RadialSymmetryKind,
+        rayCount: Int,
+        center: WorldPoint,
+        referenceAngleRadians: Float = 0
+    ) {
+        self.kind = kind
+        self.rayCount = rayCount
+        self.center = center
+        self.referenceAngleRadians = referenceAngleRadians
+    }
+}
+
+public enum FiniteSymmetryConfiguration: Equatable, Sendable {
+    case plain
+    case radial(RadialSymmetryConfiguration)
+}
+
+public enum SymmetryDocumentConfiguration: Equatable, Sendable {
+    case periodic(PeriodicSymmetryConfiguration)
+    case finite(FiniteSymmetryConfiguration)
+
+    public var domainID: SymmetryDocumentDomainID {
+        switch self {
+        case .periodic:
+            .periodic
+        case .finite:
+            .finite
+        }
+    }
+}
+
 public enum SymmetryAxis: Equatable, Sendable {
     case x
     case y
@@ -69,6 +113,8 @@ public enum CoincidentImagePolicy: Equatable, Sendable {
     case squareDihedralInvariantCoverage
     case triangularCyclicInvariantCoverage
     case triangularDihedralInvariantCoverage
+    case radialCyclicInvariantCoverage
+    case radialDihedralInvariantCoverage
 }
 
 public struct PeriodicTranslationBasis: Equatable, Sendable {
@@ -93,11 +139,34 @@ public struct CompiledPeriodicDomain: Equatable, Sendable {
     public let coincidentImagePolicy: CoincidentImagePolicy
 }
 
+public struct CompiledRadialDomain: Equatable, Sendable {
+    public let configuration: RadialSymmetryConfiguration?
+    public let canvasSize: PixelSize
+    public let sectorAngleRadians: Float
+    public let displayedSectorCount: Int
+    public let maximumRadius: Float
+    public let layout: RadialSectorLayout?
+    public let coincidentImagePolicy: CoincidentImagePolicy
+
+    public var isPlain: Bool { configuration == nil }
+}
+
+public struct CompiledFiniteDomain: Equatable, Sendable {
+    public let configuration: FiniteSymmetryConfiguration
+    public let radial: CompiledRadialDomain
+}
+
 public enum CompiledSymmetryDomain: Equatable, Sendable {
     case periodic(CompiledPeriodicDomain)
+    case finite(CompiledFiniteDomain)
 
     public var periodic: CompiledPeriodicDomain? {
         guard case let .periodic(value) = self else { return nil }
+        return value
+    }
+
+    public var finite: CompiledFiniteDomain? {
+        guard case let .finite(value) = self else { return nil }
         return value
     }
 }
@@ -211,6 +280,7 @@ public enum CompiledOwnership: Equatable, Sendable {
         triangles: [CompiledOwnershipFragment],
         stabilizers: [CompiledStabilizer]
     )
+    case radialSector(stabilizers: [CompiledStabilizer])
 }
 
 public enum CompiledGuideKind: UInt32, Equatable, Sendable {
@@ -222,6 +292,10 @@ public enum CompiledGuideKind: UInt32, Equatable, Sendable {
     case triangularRotation6 = 5
     case triangularKaleidoscope60 = 6
     case triangularKaleidoscope30 = 7
+    case finitePlain = 8
+    case radialRotation = 9
+    case radialMirror = 10
+    case radialMandala = 11
 }
 
 public struct CompiledDisplayProgram: Equatable, Sendable {
@@ -237,7 +311,10 @@ public struct RasterMetric2D: Equatable, Sendable {
     public static let identity = RasterMetric2D(worldToRaster: .identity, rasterToWorld: .identity)
 }
 
-public enum SymmetryExportCapability: Equatable, Sendable { case rectangularRepeat }
+public enum SymmetryExportCapability: Equatable, Sendable {
+    case rectangularRepeat
+    case finiteCanvas
+}
 
 public struct SymmetryCostBound: Equatable, Sendable {
     public let maximumImagesPerCell: Int

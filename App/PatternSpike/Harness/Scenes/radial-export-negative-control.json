@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "radial-export-negative-control",
+  "scenario": "export",
+  "kind": 2,
+  "rayCount": 12,
+  "canvasWidth": 128,
+  "canvasHeight": 128,
+  "centerX": 57,
+  "centerY": 71,
+  "referenceAngleRadians": 0.19,
+  "probeX": 86,
+  "probeY": 77,
+  "diameter": 12,
+  "expectedMismatchCount": 1
+}

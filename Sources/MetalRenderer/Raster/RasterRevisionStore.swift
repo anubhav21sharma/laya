@@ -113,8 +113,10 @@ public final class RasterRevisionStore: @unchecked Sendable {
 
     public func allocatePair(
         beforePixelSize: PixelSize,
+        beforeDocumentPixelSize: PixelSize? = nil,
         beforeRegions: PixelRegionSet,
         afterPixelSize: PixelSize,
+        afterDocumentPixelSize: PixelSize? = nil,
         afterRegions: PixelRegionSet
     ) throws -> PendingRasterRevisionPair {
         let beforeLayout = try makeLayout(
@@ -170,12 +172,16 @@ public final class RasterRevisionStore: @unchecked Sendable {
             let beforeReference = RasterRevisionReference(
                 id: beforeID,
                 pixelSize: beforePixelSize,
+                documentPixelSize:
+                    beforeDocumentPixelSize ?? beforePixelSize,
                 regions: beforeRegions,
                 retainedBytes: beforeLayout.retainedBytes
             )
             let afterReference = RasterRevisionReference(
                 id: afterID,
                 pixelSize: afterPixelSize,
+                documentPixelSize:
+                    afterDocumentPixelSize ?? afterPixelSize,
                 regions: afterRegions,
                 retainedBytes: afterLayout.retainedBytes
             )

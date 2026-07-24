@@ -28,6 +28,10 @@ func tilingWireValuesAreAppendOnly() {
     #expect(PatternTilingWireRotation6 == 11)
     #expect(PatternTilingWireKaleidoscope60 == 12)
     #expect(PatternTilingWireKaleidoscope30 == 13)
+    #expect(PatternTilingWirePlainCanvas == 14)
+    #expect(PatternTilingWireRadialMirror == 15)
+    #expect(PatternTilingWireRadialRotation == 16)
+    #expect(PatternTilingWireRadialMandala == 17)
 }
 
 @Test
@@ -40,6 +44,10 @@ func guideWireValuesAreAppendOnly() {
     #expect(PatternGuideWireTriangularRotation6 == 5)
     #expect(PatternGuideWireTriangularKaleidoscope60 == 6)
     #expect(PatternGuideWireTriangularKaleidoscope30 == 7)
+    #expect(PatternGuideWireFinitePlain == 8)
+    #expect(PatternGuideWireRadialRotation == 9)
+    #expect(PatternGuideWireRadialMirror == 10)
+    #expect(PatternGuideWireRadialMandala == 11)
 }
 
 @Test
@@ -224,11 +232,74 @@ func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
 }
 
 @Test
+func radialUniformLayoutMatchesTheMetalContract() {
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.size == 64)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.stride == 64)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.alignment == 8)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.canvasSize
+    ) == 0)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.center
+    ) == 8)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.referenceAngle
+    ) == 16)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.sectorAngle
+    ) == 20)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.displayedSectorCount
+    ) == 24)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.dihedral
+    ) == 28)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.pageOrigin
+    ) == 32)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.pageTableSize
+    ) == 40)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.atlasColumns
+    ) == 48)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.pageSide
+    ) == 52)
+    #expect(MemoryLayout<PatternRadialFrameUniforms>.offset(
+        of: \.atlasSize
+    ) == 56)
+}
+
+@Test
+func radialResizePageUniformLayoutMatchesTheMetalContract() {
+    #expect(MemoryLayout<PatternRadialResizePageUniforms>.size == 16)
+    #expect(MemoryLayout<PatternRadialResizePageUniforms>.stride == 16)
+    #expect(MemoryLayout<PatternRadialResizePageUniforms>.alignment == 4)
+    #expect(MemoryLayout<PatternRadialResizePageUniforms>.offset(
+        of: \.logicalPageX
+    ) == 0)
+    #expect(MemoryLayout<PatternRadialResizePageUniforms>.offset(
+        of: \.logicalPageY
+    ) == 4)
+    #expect(MemoryLayout<PatternRadialResizePageUniforms>.offset(
+        of: \.destinationSlot
+    ) == 8)
+    #expect(MemoryLayout<PatternRadialResizePageUniforms>.offset(
+        of: \.padding
+    ) == 12)
+    #expect(ShaderABI.isValid)
+}
+
+@Test
 func gridWireIndicesAppendWithoutRenumberingSliceZero() {
     #expect(PatternBufferIndexFrameUniforms == 0)
     #expect(PatternBufferIndexGridFrameUniforms == 1)
     #expect(PatternBufferIndexDabInstances == 2)
     #expect(PatternBufferIndexBrushMaterial == 3)
+    #expect(PatternBufferIndexRadialFrameUniforms == 4)
+    #expect(PatternBufferIndexRadialResizeDestinationUniforms == 5)
+    #expect(PatternBufferIndexRadialResizePage == 6)
     #expect(PatternTextureIndexCanonical == 0)
     #expect(PatternTextureIndexLive == 1)
     #expect(PatternTextureIndexBrushShape == 2)

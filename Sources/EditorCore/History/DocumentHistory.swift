@@ -187,6 +187,19 @@ public final class DocumentHistory {
         }
     }
 
+    /// Removes setup history when an empty document changes storage domain.
+    /// The caller releases the returned raster revisions.
+    @discardableResult
+    public func removeAll() -> Set<StoredRasterRevisionID> {
+        precondition(pendingNavigation == nil)
+        let released = referencedRevisionIDs
+        commands.removeAll(keepingCapacity: true)
+        cursor = 0
+        commandCount = 0
+        retainedRasterBytes = 0
+        return released
+    }
+
     @discardableResult
     public func appendSuccessful(
         _ command: DocumentHistoryCommand

@@ -9,7 +9,9 @@ import AppKit
 #endif
 
 @MainActor
-func makeControllerRenderer() throws -> GridRenderer? {
+func makeControllerRenderer(
+    finiteConfiguration: FiniteSymmetryConfiguration? = nil
+) throws -> GridRenderer? {
     guard let device = MTLCreateSystemDefaultDevice() else { return nil }
     let root = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -34,14 +36,21 @@ func makeControllerRenderer() throws -> GridRenderer? {
         ),
         options: nil
     )
+    let pixelSize = PixelSize(width: 64, height: 64)
+    let canvasConfiguration = try finiteConfiguration.map {
+        try TilingCanvasConfiguration(
+            pixelSize: pixelSize,
+            finiteConfiguration: $0
+        )
+    } ?? TilingCanvasConfiguration(
+        pixelSize: pixelSize,
+        tiling: .grid
+    )
     return try GridRenderer(
         device: device,
         library: library,
         drawableSize: PatternSize(width: 64, height: 64),
-        configuration: TilingCanvasConfiguration(
-            pixelSize: PixelSize(width: 64, height: 64),
-            tiling: .grid
-        )
+        configuration: canvasConfiguration
     )
 }
 
@@ -72,6 +81,13 @@ private func controllerMovedSample(
     )
 }
 
+private let controllerRadialConfiguration = RadialSymmetryConfiguration(
+    kind: .mandala,
+    rayCount: 8,
+    center: WorldPoint(x: 32, y: 32),
+    referenceAngleRadians: .pi / 12
+)
+
 @MainActor
 private func commitControllerStroke(
     _ controller: EditorSessionController,
@@ -84,6 +100,124 @@ private func commitControllerStroke(
     _ = try renderer.flushPendingLiveForHarness()
     _ = try renderer.submitCommitForHarness()
     try renderer.drainCompletedOperationsForHarness()
+}
+
+@Test
+@MainActor
+func controllerStartsInFiniteDomainAndCanSwitchOnlyBeforeRasterEdit()
+    throws
+{
+    guard let renderer = try makeControllerRenderer(
+        finiteConfiguration: .radial(controllerRadialConfiguration)
+    ) else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    #expect(
+        controller.model.documentConfiguration
+            == .finite(.radial(controllerRadialConfiguration))
+    )
+    #expect(controller.model.tiling == .radialMandala)
+    #expect(!controller.model.documentDomainLocked)
+    #expect(!controller.model.radialGeometryLocked)
+
+    let revised = RadialSymmetryConfiguration(
+        kind: .rotation,
+        rayCount: 7,
+        center: WorldPoint(x: 29, y: 35),
+        referenceAngleRadians: -.pi / 9
+    )
+    controller.handleFiniteConfiguration(.radial(revised))
+    #expect(renderer.finiteConfiguration == .radial(revised))
+    #expect(controller.model.radialConfiguration == revised)
+    #expect(!controller.historyAvailabilityForTesting.canUndo)
+
+    let periodic = PeriodicSymmetryConfiguration.defaultConfiguration(
+        presetID: .halfDrop,
+        canonicalRasterSize: PixelSize(width: 64, height: 64)
+    )
+    controller.handlePeriodicConfiguration(periodic)
+    #expect(renderer.documentConfiguration == .periodic(periodic))
+    #expect(controller.model.documentConfiguration == .periodic(periodic))
+    #expect(!controller.historyAvailabilityForTesting.canUndo)
+
+    controller.handleFiniteConfiguration(.plain)
+    #expect(renderer.documentConfiguration == .finite(.plain))
+    #expect(controller.model.documentConfiguration == .finite(.plain))
+}
+
+@Test
+@MainActor
+func successfulRadialEditLocksGeometryPermanentlyAcrossUndo() throws {
+    guard let renderer = try makeControllerRenderer(
+        finiteConfiguration: .radial(controllerRadialConfiguration)
+    ) else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    var errors: [MetalRendererError] = []
+    controller.onError = { errors.append($0) }
+
+    try commitControllerStroke(controller, renderer: renderer, x: 47, y: 34)
+    let command = try #require(
+        controller.lastRecordedRasterCommandForTesting
+    )
+    #expect(controller.model.documentDomainLocked)
+    #expect(controller.model.radialGeometryLocked)
+
+    controller.undo()
+    try renderer.finishRasterOperationForHarness()
+    #expect(controller.model.documentDomainLocked)
+    #expect(controller.model.radialGeometryLocked)
+
+    let revised = RadialSymmetryConfiguration(
+        kind: .rotation,
+        rayCount: 5,
+        center: WorldPoint(x: 30, y: 31)
+    )
+    controller.handleFiniteConfiguration(.radial(revised))
+    #expect(errors.last == .radialGeometryLocked)
+    #expect(
+        controller.model.radialConfiguration
+            == controllerRadialConfiguration
+    )
+
+    controller.handleTiling(.grid)
+    #expect(errors.last == .documentDomainLocked)
+    #expect(
+        controller.model.documentConfiguration
+            == .finite(.radial(controllerRadialConfiguration))
+    )
+
+    renderer.releaseRasterRevisions([
+        command.before.id,
+        command.after.id,
+    ])
+}
+
+@Test
+@MainActor
+func failedFirstRadialCommitLeavesGeometryEditable() throws {
+    guard let renderer = try makeControllerRenderer(
+        finiteConfiguration: .radial(controllerRadialConfiguration)
+    ) else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    controller.handleStrokeSample(controllerSample(.began, x: 47, y: 34))
+    controller.handleStrokeSample(controllerSample(.ended, x: 47, y: 34))
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.submitCommitForHarness(forceFailure: true)
+    #expect(throws: MetalRendererError.self) {
+        try renderer.drainCompletedOperationsForHarness()
+    }
+
+    #expect(!controller.model.documentDomainLocked)
+    #expect(!controller.model.radialGeometryLocked)
+    let revised = RadialSymmetryConfiguration(
+        kind: .rotation,
+        rayCount: 6,
+        center: WorldPoint(x: 31, y: 29)
+    )
+    controller.handleFiniteConfiguration(.radial(revised))
+    #expect(renderer.finiteConfiguration == .radial(revised))
+    #expect(controller.model.radialConfiguration == revised)
 }
 
 @Test

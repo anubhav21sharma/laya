@@ -12,6 +12,27 @@ public enum BoundedWashSurfaceError: Error, Equatable, Sendable {
     case textureAllocationFailed(BoundedWashWorkingTexture)
     case regionBufferAllocationFailed
     case regionCountExceeded(Int)
+    case radialPageMetadataMissing
+    case radialPageNotResident(RadialPageCoordinate)
+}
+
+struct BoundedWashDirtyRegion: Equatable, Sendable {
+    let rectangle: PixelRect
+    let radialPage: RadialPageCoordinate?
+
+    init(
+        rectangle: PixelRect,
+        radialPage: RadialPageCoordinate? = nil
+    ) {
+        self.rectangle = rectangle
+        self.radialPage = radialPage
+    }
+}
+
+enum BoundedWashTopology: Equatable, Sendable {
+    case periodic
+    case finite
+    case radial(RadialSectorLayout)
 }
 
 /// Pixel work performed by one bounded-wash update.
@@ -205,6 +226,22 @@ public final class BoundedWashSurface {
         bleedRadius: Float,
         softenPasses: Int
     ) throws -> BoundedWashWorkPlan {
+        try makeWorkPlan(
+            dirtyRegions: dirtyRegions.map {
+                BoundedWashDirtyRegion(rectangle: $0)
+            },
+            topology: .periodic,
+            bleedRadius: bleedRadius,
+            softenPasses: softenPasses
+        )
+    }
+
+    func makeWorkPlan(
+        dirtyRegions: [BoundedWashDirtyRegion],
+        topology: BoundedWashTopology,
+        bleedRadius: Float,
+        softenPasses: Int
+    ) throws -> BoundedWashWorkPlan {
         guard bleedRadius.isFinite,
               bleedRadius >= 0,
               bleedRadius <= Float(Self.maximumHaloPixels)
@@ -218,13 +255,42 @@ public final class BoundedWashSurface {
         }
 
         let haloPixels = Int(ceil(bleedRadius))
-        var depositionRegions = wrapped(
-            dirtyRegions,
-            expansion: 0
+        let depositionRectangles: [PixelRect]
+        let processingRectangles: [PixelRect]
+        switch topology {
+        case .periodic:
+            depositionRectangles = wrapped(
+                dirtyRegions.map(\.rectangle),
+                expansion: 0
+            ).rectangles
+            processingRectangles = wrapped(
+                dirtyRegions.map(\.rectangle),
+                expansion: haloPixels
+            ).rectangles
+        case .finite:
+            depositionRectangles = dirtyRegions.map(\.rectangle)
+            processingRectangles = dirtyRegions.compactMap {
+                Self.expanded($0.rectangle, by: haloPixels)
+            }
+        case let .radial(layout):
+            depositionRectangles = try radialRectangles(
+                dirtyRegions,
+                expansion: 0,
+                layout: layout
+            )
+            processingRectangles = try radialRectangles(
+                dirtyRegions,
+                expansion: haloPixels,
+                layout: layout
+            )
+        }
+        var depositionRegions = PixelRegionSet(
+            depositionRectangles,
+            clippedTo: pixelSize
         )
-        var processingRegions = wrapped(
-            dirtyRegions,
-            expansion: haloPixels
+        var processingRegions = PixelRegionSet(
+            processingRectangles,
+            clippedTo: pixelSize
         )
         let exceededRegionCap =
             depositionRegions.rectangles.count
@@ -313,6 +379,122 @@ public final class BoundedWashSurface {
             )
         }
         return PixelRegionSet(rectangles, clippedTo: pixelSize)
+    }
+
+    private func radialRectangles(
+        _ dirtyRegions: [BoundedWashDirtyRegion],
+        expansion: Int,
+        layout: RadialSectorLayout
+    ) throws -> [PixelRect] {
+        let side = RadialSectorLayout.pageSide
+        var result: [PixelRect] = []
+        for dirty in dirtyRegions {
+            guard let coordinate = dirty.radialPage else {
+                throw BoundedWashSurfaceError.radialPageMetadataMissing
+            }
+            guard let sourcePage = layout.residentPage(at: coordinate) else {
+                throw BoundedWashSurfaceError.radialPageNotResident(coordinate)
+            }
+            let sourceAtlasX = sourcePage.atlasSlot % layout.atlasColumns
+                * side
+            let sourceAtlasY = sourcePage.atlasSlot / layout.atlasColumns
+                * side
+            guard let clipped = Self.intersection(
+                dirty.rectangle,
+                PixelRect(
+                    minX: sourceAtlasX,
+                    minY: sourceAtlasY,
+                    maxX: sourceAtlasX + side,
+                    maxY: sourceAtlasY + side
+                )!
+            ) else {
+                continue
+            }
+
+            let logical = PixelRect(
+                minX: coordinate.x * side
+                    + clipped.minX - sourceAtlasX - expansion,
+                minY: coordinate.y * side
+                    + clipped.minY - sourceAtlasY - expansion,
+                maxX: coordinate.x * side
+                    + clipped.maxX - sourceAtlasX + expansion,
+                maxY: coordinate.y * side
+                    + clipped.maxY - sourceAtlasY + expansion
+            )!
+            let minimumPageX = Self.floorDiv(logical.minX, by: side)
+            let minimumPageY = Self.floorDiv(logical.minY, by: side)
+            let maximumPageX = Self.floorDiv(logical.maxX - 1, by: side)
+            let maximumPageY = Self.floorDiv(logical.maxY - 1, by: side)
+            for pageY in minimumPageY...maximumPageY {
+                for pageX in minimumPageX...maximumPageX {
+                    let targetCoordinate = RadialPageCoordinate(
+                        x: pageX,
+                        y: pageY
+                    )
+                    guard let targetPage = layout.residentPage(
+                        at: targetCoordinate
+                    ) else {
+                        continue
+                    }
+                    let logicalPage = PixelRect(
+                        minX: pageX * side,
+                        minY: pageY * side,
+                        maxX: (pageX + 1) * side,
+                        maxY: (pageY + 1) * side
+                    )!
+                    guard let piece = Self.intersection(
+                        logical,
+                        logicalPage
+                    ) else {
+                        continue
+                    }
+                    let targetAtlasX =
+                        targetPage.atlasSlot % layout.atlasColumns * side
+                    let targetAtlasY =
+                        targetPage.atlasSlot / layout.atlasColumns * side
+                    result.append(
+                        PixelRect(
+                            minX: targetAtlasX + piece.minX - pageX * side,
+                            minY: targetAtlasY + piece.minY - pageY * side,
+                            maxX: targetAtlasX + piece.maxX - pageX * side,
+                            maxY: targetAtlasY + piece.maxY - pageY * side
+                        )!
+                    )
+                }
+            }
+        }
+        return result
+    }
+
+    private static func expanded(
+        _ rectangle: PixelRect,
+        by amount: Int
+    ) -> PixelRect? {
+        PixelRect(
+            minX: rectangle.minX - amount,
+            minY: rectangle.minY - amount,
+            maxX: rectangle.maxX + amount,
+            maxY: rectangle.maxY + amount
+        )
+    }
+
+    private static func intersection(
+        _ lhs: PixelRect,
+        _ rhs: PixelRect
+    ) -> PixelRect? {
+        PixelRect(
+            minX: max(lhs.minX, rhs.minX),
+            minY: max(lhs.minY, rhs.minY),
+            maxX: min(lhs.maxX, rhs.maxX),
+            maxY: min(lhs.maxY, rhs.maxY)
+        )
+    }
+
+    private static func floorDiv(_ value: Int, by divisor: Int) -> Int {
+        precondition(divisor > 0)
+        let quotient = value / divisor
+        let remainder = value % divisor
+        return remainder < 0 ? quotient - 1 : quotient
     }
 
     private static func wrapped(

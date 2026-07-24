@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "radial-erase",
+  "scenario": "erase",
+  "kind": 2,
+  "rayCount": 6,
+  "canvasWidth": 128,
+  "canvasHeight": 128,
+  "centerX": 64,
+  "centerY": 64,
+  "referenceAngleRadians": -0.13,
+  "probeX": 91,
+  "probeY": 70,
+  "diameter": 12,
+  "expectedMismatchCount": 0
+}

@@ -18,6 +18,10 @@ enum EditorFocusTarget: Hashable {
     case tileHeight
     case latticeRepeatSize
     case latticeOrientation
+    case radialRayCount
+    case radialCenterX
+    case radialCenterY
+    case radialReferenceAngle
 }
 
 struct ContentView: View {

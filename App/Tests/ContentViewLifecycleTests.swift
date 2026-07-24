@@ -123,6 +123,80 @@ func latticeInspectorPreservesUntouchedContinuousConfigurationFields(
 }
 
 @Test
+@MainActor
+func radialInspectorAcceptsArbitraryRaysAndRejectsInvalidGeometry() throws {
+    let size = PixelSize(width: 320, height: 192)
+    for rays in [2, 5, 17, 32] {
+        let configuration = try #require(
+            TilingInspector.radialConfiguration(
+                kind: .mandala,
+                rayDraft: " \(rays) ",
+                centerXDraft: "160.5",
+                centerYDraft: "91.25",
+                referenceAngleDraft: "-30",
+                pixelSize: size
+            )
+        )
+        #expect(configuration.rayCount == rays)
+        #expect(configuration.center == WorldPoint(x: 160.5, y: 91.25))
+        #expect(
+            abs(configuration.referenceAngleRadians + .pi / 6)
+                < 0.000_1
+        )
+    }
+
+    for invalidRays in ["1", "33", "2.5", "nan", ""] {
+        #expect(TilingInspector.radialConfiguration(
+            kind: .rotation,
+            rayDraft: invalidRays,
+            centerXDraft: "160",
+            centerYDraft: "96",
+            referenceAngleDraft: "0",
+            pixelSize: size
+        ) == nil)
+    }
+    #expect(TilingInspector.radialConfiguration(
+        kind: .rotation,
+        rayDraft: "8",
+        centerXDraft: "320",
+        centerYDraft: "96",
+        referenceAngleDraft: "0",
+        pixelSize: size
+    ) == nil)
+    #expect(TilingInspector.radialConfiguration(
+        kind: .rotation,
+        rayDraft: "8",
+        centerXDraft: "160",
+        centerYDraft: "96",
+        referenceAngleDraft: "infinity",
+        pixelSize: size
+    ) == nil)
+
+    let mirror = try #require(TilingInspector.radialConfiguration(
+        kind: .mirror,
+        rayDraft: "not-used",
+        centerXDraft: "160",
+        centerYDraft: "96",
+        referenceAngleDraft: "15",
+        pixelSize: size
+    ))
+    #expect(mirror.rayCount == 1)
+}
+
+@Test
+@MainActor
+func radialInspectorDefaultIsCenteredEightRayMandala() {
+    let configuration = TilingInspector.defaultRadialConfiguration(
+        pixelSize: PixelSize(width: 320, height: 192)
+    )
+
+    #expect(configuration.kind == .mandala)
+    #expect(configuration.rayCount == 8)
+    #expect(configuration.center == WorldPoint(x: 160, y: 96))
+    #expect(configuration.referenceAngleRadians == 0)
+}
+
+@Test
 func defaultContentViewInitializerDoesNotAllocateRenderer() throws {
     let source = try contentViewInitializerSource()
 
@@ -206,6 +280,26 @@ func hostedTileFieldReceivesNumberKeyEventsWithoutEditorShortcuts() async throws
 
     #expect(widthField.stringValue == "320")
     #expect(controller.model.tiling == .grid)
+}
+
+@Test
+func radialNumericFieldsUseDistinctNonEditorFocusTargets() throws {
+    let source = try tilingInspectorSource()
+
+    for target in [
+        "radialRayCount",
+        "radialCenterX",
+        "radialCenterY",
+        "radialReferenceAngle",
+    ] {
+        #expect(
+            source.contains(
+                ".focused(focusTarget, equals: .\(target))"
+            ) || source.contains(
+                "equals: .\(target)"
+            )
+        )
+    }
 }
 
 @Test
@@ -556,5 +650,18 @@ private func contentViewInitializerSource() throws -> String {
         )
     )
     return String(source[initializerStart.lowerBound..<bodyStart.lowerBound])
+}
+
+private func tilingInspectorSource() throws -> String {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    return try String(
+        contentsOf: repositoryRoot.appendingPathComponent(
+            "App/PatternSpike/Panels/TilingInspector.swift"
+        ),
+        encoding: .utf8
+    )
 }
 #endif

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "radial-generic",
+  "scenario": "generic",
+  "kind": 1,
+  "rayCount": 5,
+  "canvasWidth": 128,
+  "canvasHeight": 128,
+  "centerX": 53,
+  "centerY": 69,
+  "referenceAngleRadians": 0.17,
+  "probeX": 86,
+  "probeY": 75,
+  "diameter": 12,
+  "expectedMismatchCount": 0
+}

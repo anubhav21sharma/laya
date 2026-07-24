@@ -5,6 +5,7 @@
 #include <metal_stdlib>
 using namespace metal;
 typedef uint PatternUInt32;
+typedef int PatternInt32;
 typedef float2 PatternFloat2;
 typedef float4 PatternFloat4;
 #define PATTERN_WIRE_CONSTANT constant
@@ -12,6 +13,7 @@ typedef float4 PatternFloat4;
 #include <stdint.h>
 #include <simd/simd.h>
 typedef uint32_t PatternUInt32;
+typedef int32_t PatternInt32;
 typedef vector_float2 PatternFloat2;
 typedef vector_float4 PatternFloat4;
 #define PATTERN_WIRE_CONSTANT static const
@@ -41,6 +43,27 @@ typedef struct PatternGridFrameUniforms {
     PatternUInt32 guideKind;
     PatternUInt32 padding2;
 } PatternGridFrameUniforms;
+
+typedef struct PatternRadialFrameUniforms {
+    PatternFloat2 canvasSize;
+    PatternFloat2 center;
+    float referenceAngle;
+    float sectorAngle;
+    PatternUInt32 displayedSectorCount;
+    PatternUInt32 dihedral;
+    PatternFloat2 pageOrigin;
+    PatternFloat2 pageTableSize;
+    PatternUInt32 atlasColumns;
+    PatternUInt32 pageSide;
+    PatternFloat2 atlasSize;
+} PatternRadialFrameUniforms;
+
+typedef struct PatternRadialResizePageUniforms {
+    PatternInt32 logicalPageX;
+    PatternInt32 logicalPageY;
+    PatternUInt32 destinationSlot;
+    PatternUInt32 padding;
+} PatternRadialResizePageUniforms;
 
 typedef struct PatternClipHalfPlane {
     PatternFloat2 normal;
@@ -81,12 +104,17 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexFrameUniforms = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexGridFrameUniforms = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexDabInstances = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexBrushMaterial = 3;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexRadialFrameUniforms = 4;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternBufferIndexRadialResizeDestinationUniforms = 5;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexRadialResizePage = 6;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexCanonical = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexLive = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushShape = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushGrain = 3;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexReplayLive = 4;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexRadialPageTable = 5;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireInk = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireDry = 1;
@@ -125,6 +153,10 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireRotation3 = 10;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireRotation6 = 11;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireKaleidoscope60 = 12;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireKaleidoscope30 = 13;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWirePlainCanvas = 14;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireRadialMirror = 15;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireRadialRotation = 16;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTilingWireRadialMandala = 17;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireRectangular = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireSquareRotation = 1;
@@ -134,6 +166,10 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireTriangularRotation3 = 4;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireTriangularRotation6 = 5;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireTriangularKaleidoscope60 = 6;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireTriangularKaleidoscope30 = 7;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireFinitePlain = 8;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireRadialRotation = 9;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireRadialMirror = 10;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternGuideWireRadialMandala = 11;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireNone = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDiagnosticWireAsymmetricCoverage = 1;

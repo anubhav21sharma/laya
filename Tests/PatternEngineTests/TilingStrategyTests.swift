@@ -78,7 +78,7 @@ func tilingKindRawValuesAndDisplayFoldMatchTheGoverningTable() {
     )
     #expect(
         TilingKind.allCases.map(\.rawValue)
-            == Array(0...13).map(UInt32.init)
+            == Array(0...17).map(UInt32.init)
     )
 
     let probes: [(TilingKind, WorldPoint, CanonicalPoint)] = [
@@ -817,6 +817,10 @@ private func independentMSLDisplayMapping(
          .kaleidoscope30:
         preconditionFailure(
             "Triangular display fixtures use the Phase 3 mapping"
+        )
+    case .plainCanvas, .radialMirror, .radialRotation, .radialMandala:
+        preconditionFailure(
+            "Finite display fixtures use the Phase 4 mapping"
         )
     }
     return IndependentMSLDisplayMapping(

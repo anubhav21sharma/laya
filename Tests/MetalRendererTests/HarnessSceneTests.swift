@@ -1251,7 +1251,7 @@ func schemaThreeRejectsEachMissingRequiredKey(key: String) throws {
 @Test
 func schemaThreeRejectsUnknownNumericTilingWireValue() {
     #expect(throws: DecodingError.self) {
-        try HarnessScene.decode(schemaThreeData(tiling: 14))
+        try HarnessScene.decode(schemaThreeData(tiling: 18))
     }
 }
 
@@ -2219,6 +2219,8 @@ func displayMetricsUseIndependentMirrorRotationalAndGridLineFormulas() {
         case .hexagons, .rotation3, .rotation6, .kaleidoscope60,
              .kaleidoscope30:
             preconditionFailure("Phase 3 display fixture only")
+        case .plainCanvas, .radialMirror, .radialRotation, .radialMandala:
+            preconditionFailure("Phase 4 display fixture only")
         }
         let wrongParityOrAxis = independentTaskSevenDisplay(
             canonicalBGRA: canonical,

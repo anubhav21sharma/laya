@@ -16,6 +16,9 @@ public final class EditorModel {
             presetID: .grid,
             canonicalRasterSize: PixelSize(width: 256, height: 256)
         )
+    public private(set) var finiteConfiguration: FiniteSymmetryConfiguration?
+    public private(set) var radialGeometryLocked = false
+    public private(set) var documentDomainLocked = false
     public private(set) var canUndo = false
     public private(set) var canRedo = false
     public private(set) var isBusy = false
@@ -26,10 +29,40 @@ public final class EditorModel {
     }
 
     public var tiling: TilingKind {
-        periodicConfiguration.presetID
+        switch finiteConfiguration {
+        case nil:
+            periodicConfiguration.presetID
+        case .plain:
+            .plainCanvas
+        case let .radial(configuration):
+            switch configuration.kind {
+            case .mirror:
+                .radialMirror
+            case .rotation:
+                .radialRotation
+            case .mandala:
+                .radialMandala
+            }
+        }
+    }
+
+    public var documentConfiguration: SymmetryDocumentConfiguration {
+        finiteConfiguration.map(SymmetryDocumentConfiguration.finite)
+            ?? .periodic(periodicConfiguration)
+    }
+
+    public var radialConfiguration: RadialSymmetryConfiguration? {
+        guard case let .radial(configuration) = finiteConfiguration else {
+            return nil
+        }
+        return configuration
     }
 
     public init(tiling: TilingKind = .grid) {
+        precondition(
+            tiling.isPeriodic,
+            "EditorModel tiling initializer requires a periodic preset"
+        )
         periodicConfiguration = .defaultConfiguration(
             presetID: tiling,
             canonicalRasterSize: pixelSize
@@ -66,6 +99,7 @@ public final class EditorModel {
     }
 
     public func confirmTiling(_ tiling: TilingKind) {
+        guard tiling.isPeriodic else { return }
         periodicConfiguration = .defaultConfiguration(
             presetID: tiling,
             canonicalRasterSize: pixelSize
@@ -76,6 +110,32 @@ public final class EditorModel {
         _ configuration: PeriodicSymmetryConfiguration
     ) {
         periodicConfiguration = configuration
+        finiteConfiguration = nil
+    }
+
+    public func confirmFiniteConfiguration(
+        _ configuration: FiniteSymmetryConfiguration
+    ) {
+        finiteConfiguration = configuration
+    }
+
+    public func confirmDocumentConfiguration(
+        _ configuration: SymmetryDocumentConfiguration
+    ) {
+        switch configuration {
+        case let .periodic(periodic):
+            confirmPeriodicConfiguration(periodic)
+        case let .finite(finite):
+            confirmFiniteConfiguration(finite)
+        }
+    }
+
+    public func confirmGeometryLocks(
+        documentDomainLocked: Bool,
+        radialGeometryLocked: Bool
+    ) {
+        self.documentDomainLocked = documentDomainLocked
+        self.radialGeometryLocked = radialGeometryLocked
     }
 
     public func confirmPixelSize(_ pixelSize: PixelSize) {

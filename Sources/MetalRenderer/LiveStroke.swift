@@ -5,6 +5,7 @@ public struct IdentifiedDab {
     public let identity: UInt64
     public let renderEpoch: UInt64
     public let instance: PatternProjectedStampInstance
+    public let radialPage: RadialPageCoordinate?
 }
 
 public struct LiveStroke {
@@ -44,9 +45,14 @@ public struct LiveStroke {
 
     public mutating func append(
         _ instance: PatternProjectedStampInstance,
-        dirtyRect: PixelRect
+        dirtyRect: PixelRect,
+        radialPage: RadialPageCoordinate? = nil
     ) throws {
-        try append(instance, dirtyRect: Optional(dirtyRect))
+        try append(
+            instance,
+            dirtyRect: Optional(dirtyRect),
+            radialPage: radialPage
+        )
     }
 
     public func dirtyRegions(clippedTo pixelSize: PixelSize) -> PixelRegionSet {
@@ -68,7 +74,8 @@ public struct LiveStroke {
 
     private mutating func append(
         _ instance: PatternProjectedStampInstance,
-        dirtyRect: PixelRect?
+        dirtyRect: PixelRect?,
+        radialPage: RadialPageCoordinate? = nil
     ) throws {
         guard pending.count < capacity else {
             throw MetalRendererError.projectedInstanceCapacityExceeded(
@@ -79,7 +86,8 @@ public struct LiveStroke {
             IdentifiedDab(
                 identity: nextIdentity,
                 renderEpoch: renderEpoch,
-                instance: instance
+                instance: instance,
+                radialPage: radialPage
             )
         )
         if let dirtyRect {

@@ -18,6 +18,18 @@ public enum SymmetryPresetID: UInt32, CaseIterable, Codable, Sendable {
     case rotation6 = 11
     case kaleidoscope60 = 12
     case kaleidoscope30 = 13
+    case plainCanvas = 14
+    case radialMirror = 15
+    case radialRotation = 16
+    case radialMandala = 17
 }
 
 public typealias TilingKind = SymmetryPresetID
+
+public extension SymmetryPresetID {
+    static let periodicCases: [Self] = allCases.filter(\.isPeriodic)
+
+    var isPeriodic: Bool {
+        rawValue <= SymmetryPresetID.kaleidoscope30.rawValue
+    }
+}

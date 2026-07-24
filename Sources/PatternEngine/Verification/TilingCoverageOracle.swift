@@ -116,6 +116,11 @@ public enum TilingCoverageOracle {
         case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
              .rotational:
             break
+        case .plainCanvas, .radialMirror, .radialRotation,
+             .radialMandala:
+            preconditionFailure(
+                "Finite presets require the radial coverage oracle"
+            )
         }
         validateRenderInputs(
             footprint: footprint,
@@ -297,6 +302,11 @@ public enum TilingCoverageOracle {
                 tileSize: canonicalRasterSize,
                 tiling: configuration.presetID,
                 supersampling: supersampling
+            )
+        case .plainCanvas, .radialMirror, .radialRotation,
+             .radialMandala:
+            preconditionFailure(
+                "Finite presets cannot form a periodic oracle configuration"
             )
         }
     }
@@ -1076,7 +1086,8 @@ private func phaseAlignedWorldSample(
         )
     case .grid, .mirrorX, .mirrorY, .mirrorXY, .rotational,
          .squareRotation, .squareKaleidoscope, .hexagons, .rotation3,
-         .rotation6, .kaleidoscope60, .kaleidoscope30:
+         .rotation6, .kaleidoscope60, .kaleidoscope30, .plainCanvas,
+         .radialMirror, .radialRotation, .radialMandala:
         break
     }
     return SIMD2(worldX, worldY)
@@ -1184,7 +1195,8 @@ private func directTriangularGeometry(
          .kaleidoscope30:
         break
     case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
-         .rotational, .squareRotation, .squareKaleidoscope:
+         .rotational, .squareRotation, .squareKaleidoscope, .plainCanvas,
+         .radialMirror, .radialRotation, .radialMandala:
         preconditionFailure(
             "TilingCoverageOracle triangular geometry requires a triangular preset"
         )
@@ -1365,7 +1377,8 @@ private func directTriangularOperations(
         order = 6
         includesReflections = true
     case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
-         .rotational, .squareRotation, .squareKaleidoscope:
+         .rotational, .squareRotation, .squareKaleidoscope, .plainCanvas,
+         .radialMirror, .radialRotation, .radialMandala:
         preconditionFailure(
             "TilingCoverageOracle triangular operations require a triangular preset"
         )
@@ -2050,6 +2063,10 @@ private func directFoldDestinations(
         preconditionFailure(
             "Triangular folds must use the direct triangular oracle"
         )
+    case .plainCanvas, .radialMirror, .radialRotation, .radialMandala:
+        preconditionFailure(
+            "Finite folds must use the radial coverage oracle"
+        )
     }
 }
 
@@ -2090,6 +2107,10 @@ private func directCell(
          .kaleidoscope30:
         preconditionFailure(
             "Triangular cells must use the direct triangular oracle"
+        )
+    case .plainCanvas, .radialMirror, .radialRotation, .radialMandala:
+        preconditionFailure(
+            "Finite cells must use the radial coverage oracle"
         )
     }
 }
@@ -2532,6 +2553,10 @@ private func directCellOrigin(
          .kaleidoscope30:
         preconditionFailure(
             "Triangular origins must use the direct triangular oracle"
+        )
+    case .plainCanvas, .radialMirror, .radialRotation, .radialMandala:
+        preconditionFailure(
+            "Finite origins must use the radial coverage oracle"
         )
     }
 }

@@ -488,6 +488,11 @@ public final class HarnessRunner {
                 visible: WorldPoint(x: visible.x, y: visible.y),
                 visibleCell: CellIndex(column: 1, row: 0)
             )
+        case .plainCanvas, .radialMirror, .radialRotation,
+             .radialMandala:
+            preconditionFailure(
+                "Periodic harness input cannot use a finite preset"
+            )
         }
     }
 
@@ -1163,7 +1168,9 @@ public final class HarnessRunner {
             case .rotation6, .kaleidoscope60: 12
             case .kaleidoscope30: 24
             case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
-                 .rotational, .squareRotation, .squareKaleidoscope:
+                 .rotational, .squareRotation, .squareKaleidoscope,
+                 .plainCanvas, .radialMirror, .radialRotation,
+                 .radialMandala:
                 preconditionFailure(
                     "Triangular ordinal audit requires a triangular preset"
                 )
@@ -1635,7 +1642,8 @@ private func independentTriangularWorldToCanonical(
         rotationOrder = 6
         includesReflections = true
     case .grid, .halfDrop, .brick, .mirrorX, .mirrorY, .mirrorXY,
-         .rotational, .squareRotation, .squareKaleidoscope:
+         .rotational, .squareRotation, .squareKaleidoscope, .plainCanvas,
+         .radialMirror, .radialRotation, .radialMandala:
         return nil
     }
     guard ordinal < operationCount * 2 else { return nil }

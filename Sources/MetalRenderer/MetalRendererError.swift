@@ -17,6 +17,9 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case projectedInstanceCapacityExceeded(Int)
     case invalidTileDimensions(width: Int, height: Int)
     case invalidPeriodicConfiguration(String)
+    case invalidSymmetryConfiguration(String)
+    case radialGeometryLocked
+    case documentDomainLocked
     case tilingChangeRequiresIdle
     case invalidStrokeLifecycle
     case invalidRendererOperationToken
@@ -72,6 +75,12 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
             "Tile dimensions \(width)x\(height) are outside 64...4096."
         case let .invalidPeriodicConfiguration(message):
             "Invalid periodic symmetry: \(message)"
+        case let .invalidSymmetryConfiguration(message):
+            "Invalid symmetry: \(message)"
+        case .radialGeometryLocked:
+            "Radial geometry is locked because drawing has started."
+        case .documentDomainLocked:
+            "The document domain cannot change after the first raster edit."
         case .tilingChangeRequiresIdle:
             "Tiling can only change while the renderer is idle."
         case .invalidStrokeLifecycle:

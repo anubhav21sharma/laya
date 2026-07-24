@@ -55,7 +55,8 @@ struct HarnessTilingMutationSnapshot: Equatable {
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
     public let device: any MTLDevice
-    public var pixelSize: PixelSize { resources.pixelSize }
+    public var pixelSize: PixelSize { resources.canvasPixelSize }
+    var storagePixelSize: PixelSize { resources.pixelSize }
     public private(set) var lastError: MetalRendererError?
     public var onError: ((MetalRendererError) -> Void)?
     public var onIdleStateChange: ((Bool) -> Void)?
@@ -79,6 +80,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var periodicConfiguration: PeriodicSymmetryConfiguration {
         tilingStrategy.periodicConfiguration
     }
+    public var documentConfiguration: SymmetryDocumentConfiguration {
+        tilingStrategy.documentConfiguration
+    }
+    public var finiteConfiguration: FiniteSymmetryConfiguration? {
+        tilingStrategy.finiteConfiguration
+    }
+    public private(set) var radialGeometryLocked = false
+    public private(set) var documentDomainLocked = false
 
     struct FrameUpload {
         enum Layer: Equatable {
@@ -120,6 +129,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     struct ProjectedDabRecord {
         let instance: PatternProjectedStampInstance
         let dirtyRect: PixelRect
+        let radialPage: RadialPageCoordinate?
     }
 
     private struct PreparedGeneratedDab {
@@ -135,11 +145,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     struct RasterResources {
+        let canvasPixelSize: PixelSize
         let pixelSize: PixelSize
         let tileSize: PatternSize
         let canonical: CanonicalRaster
         let liveTile: PersistentLiveTile
         let replayTile: ReplayLiveTile
+    }
+
+    struct PreparedRasterReplacement {
+        let resources: RasterResources
+        let strategy: TilingStrategy
+        let radialPageTableTexture: any MTLTexture
     }
 
     struct PendingClearOperation {
@@ -161,7 +178,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     struct PendingResizeOperation {
         let submissionID: UInt64
         let token: RendererOperationToken
-        let replacement: RasterResources
+        let replacement: PreparedRasterReplacement
         let revisions: PendingRasterRevisionPair
         let captureTokens: [RasterRevisionOperationToken]
         let commandBuffer: any MTLCommandBuffer
@@ -170,7 +187,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     struct PendingResizeRestoreOperation {
         let submissionID: UInt64
         let token: RendererOperationToken
-        let replacement: RasterResources
+        let replacement: PreparedRasterReplacement
         let restoreToken: RasterRevisionOperationToken
         let commandBuffer: any MTLCommandBuffer
     }
@@ -243,6 +260,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     let completionMailbox = GridRenderCompletionMailbox()
     private let rasterCompletionMailbox = RendererRasterCompletionMailbox()
     var resources: RasterResources
+    private var radialPageTableTexture: (any MTLTexture)?
     var tileSize: PatternSize { resources.tileSize }
     var canonical: CanonicalRaster { resources.canonical }
     var liveTile: PersistentLiveTile { resources.liveTile }
@@ -301,9 +319,25 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard let commandQueue = device.makeCommandQueue() else {
             throw MetalRendererError.commandQueueUnavailable
         }
+        let strategy: TilingStrategy
+        do {
+            strategy = try TilingStrategy(
+                documentConfiguration: configuration.documentConfiguration,
+                canvasSize: configuration.pixelSize
+            )
+        } catch {
+            throw MetalRendererError.invalidSymmetryConfiguration(
+                error.localizedDescription
+            )
+        }
+        let storageSize = PixelSize(
+            width: Int(strategy.tileSize.width),
+            height: Int(strategy.tileSize.height)
+        )
         let resources = try Self.makeRasterResources(
             device: device,
-            pixelSize: configuration.pixelSize,
+            canvasPixelSize: configuration.pixelSize,
+            pixelSize: storageSize,
             initialRevision: RasterRevision(rawValue: 0),
             forceAllocationFailure: false
         )
@@ -321,9 +355,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeMaterialState = BrushMaterialState(recipe: .legacyEquivalent)
         boundedWashSurface = nil
         lastBoundedWashWorkPlan = nil
-        tilingStrategy = try TilingStrategy(
-            configuration: configuration.periodicConfiguration,
-            canonicalRasterSize: resources.pixelSize
+        tilingStrategy = strategy
+        radialPageTableTexture = try Self.makeRadialPageTableTexture(
+            device: device,
+            compiled: strategy.compiledSymmetry
         )
         pipelines = try GridPipelineLibrary(device: device, library: library)
         instancePool = try DabInstanceBufferPool(device: device)
@@ -331,8 +366,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         viewport = ViewportTransform(
             drawableSize: drawableSize,
             worldCenter: WorldPoint(
-                x: resources.tileSize.width * 0.5,
-                y: resources.tileSize.height * 0.5
+                x: Float(resources.canvasPixelSize.width) * 0.5,
+                y: Float(resources.canvasPixelSize.height) * 0.5
             ),
             zoom: 1
         )
@@ -344,6 +379,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     public func applyTiling(_ tiling: TilingKind) throws {
+        guard case .periodic = tilingStrategy.documentConfiguration else {
+            throw MetalRendererError.documentDomainLocked
+        }
         let current = tilingStrategy.periodicConfiguration
         let proposed: PeriodicSymmetryConfiguration
         if tiling.supportsSpacingAndOrientation {
@@ -386,7 +424,83 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 error.localizedDescription
             )
         }
+        if case .finite = tilingStrategy.documentConfiguration {
+            guard !documentDomainLocked else {
+                throw MetalRendererError.documentDomainLocked
+            }
+            try installEmptyStrategy(proposed)
+        } else {
+            tilingStrategy = proposed
+        }
+    }
+
+    public func applyFiniteConfiguration(
+        _ configuration: FiniteSymmetryConfiguration
+    ) throws {
+        guard isIdle else {
+            throw MetalRendererError.tilingChangeRequiresIdle
+        }
+        guard !documentDomainLocked else {
+            if case .finite(.radial) =
+                tilingStrategy.documentConfiguration
+            {
+                throw MetalRendererError.radialGeometryLocked
+            }
+            throw MetalRendererError.documentDomainLocked
+        }
+        let proposed: TilingStrategy
+        do {
+            proposed = try TilingStrategy(
+                finiteConfiguration: configuration,
+                canvasSize: pixelSize
+            )
+        } catch {
+            throw MetalRendererError.invalidSymmetryConfiguration(
+                error.localizedDescription
+            )
+        }
+        try installEmptyStrategy(proposed)
+    }
+
+    public func setFiniteConfiguration(
+        _ configuration: FiniteSymmetryConfiguration
+    ) throws {
+        try applyFiniteConfiguration(configuration)
+    }
+
+    private func installEmptyStrategy(
+        _ proposed: TilingStrategy
+    ) throws {
+        let proposedStorageSize = PixelSize(
+            width: Int(proposed.tileSize.width),
+            height: Int(proposed.tileSize.height)
+        )
+        let replacement = try Self.makeRasterResources(
+            device: device,
+            canvasPixelSize: proposed.canvasSize,
+            pixelSize: proposedStorageSize,
+            initialRevision: canonical.revision,
+            forceAllocationFailure: false
+        )
+        let replacementPageTable = try Self.makeRadialPageTableTexture(
+            device: device,
+            compiled: proposed.compiledSymmetry
+        )
+        let priorResources = resources
+        let priorStrategy = tilingStrategy
+        let priorPageTable = radialPageTableTexture
+        resources = replacement
         tilingStrategy = proposed
+        radialPageTableTexture = replacementPageTable
+        do {
+            try clearInitialTextures()
+            boundedWashSurface = nil
+        } catch {
+            resources = priorResources
+            tilingStrategy = priorStrategy
+            radialPageTableTexture = priorPageTable
+            throw error
+        }
     }
 
     public func setTiling(_ tiling: TilingKind) throws {
@@ -421,10 +535,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeMaterialState = BrushMaterialState(recipe: style.recipe)
         if style.recipe.material.family == .boundedWash {
             do {
-                if boundedWashSurface?.pixelSize != pixelSize {
+                if boundedWashSurface?.pixelSize != storagePixelSize {
                     boundedWashSurface = try BoundedWashSurface(
                         device: device,
-                        pixelSize: pixelSize
+                        pixelSize: storagePixelSize
                     )
                 }
             } catch {
@@ -763,18 +877,39 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard isIdle else {
             throw MetalRendererError.commitPendingInput
         }
-        try validateTileSize(revision.pixelSize)
+        try validateTileSize(revision.documentPixelSize)
         guard revision.regions == fullRasterRegions(for: revision.pixelSize) else {
             throw MetalRendererError.commandFailed(
                 "Resize restore requires a full-raster revision."
             )
         }
 
-        let replacement = try Self.makeRasterResources(
+        let replacementStrategy = try resizedStrategy(
+            canvasPixelSize: revision.documentPixelSize
+        )
+        let expectedStorageSize = storageSize(for: replacementStrategy)
+        guard revision.pixelSize == expectedStorageSize else {
+            throw MetalRendererError.rasterRevisionTextureSizeMismatch(
+                expectedWidth: expectedStorageSize.width,
+                expectedHeight: expectedStorageSize.height,
+                actualWidth: revision.pixelSize.width,
+                actualHeight: revision.pixelSize.height
+            )
+        }
+        let replacementResources = try Self.makeRasterResources(
             device: device,
+            canvasPixelSize: revision.documentPixelSize,
             pixelSize: revision.pixelSize,
             initialRevision: canonical.revision,
             forceAllocationFailure: false
+        )
+        let replacement = PreparedRasterReplacement(
+            resources: replacementResources,
+            strategy: replacementStrategy,
+            radialPageTableTexture: try Self.makeRadialPageTableTexture(
+                device: device,
+                compiled: replacementStrategy.compiledSymmetry
+            )
         )
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             throw MetalRendererError.commandBufferUnavailable
@@ -783,23 +918,28 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let restoreToken: RasterRevisionOperationToken
         do {
             try encodeTransparentClear(
-                of: replacement.canonical.front,
+                of: replacement.resources.canonical.front,
                 on: commandBuffer,
                 label: "Resize Restore Front Clear"
             )
             try encodeTransparentClear(
-                of: replacement.canonical.scratch,
+                of: replacement.resources.canonical.scratch,
                 on: commandBuffer,
                 label: "Resize Restore Scratch Clear"
             )
             try encodeTransparentClear(
-                of: replacement.liveTile.texture,
+                of: replacement.resources.liveTile.texture,
                 on: commandBuffer,
                 label: "Resize Restore Live Clear"
             )
+            try encodeTransparentClear(
+                of: replacement.resources.replayTile.texture,
+                on: commandBuffer,
+                label: "Resize Restore Replay Clear"
+            )
             restoreToken = try revisionStore.encodeRestore(
                 revision,
-                into: replacement.canonical.scratch,
+                into: replacement.resources.canonical.scratch,
                 on: commandBuffer
             )
         } catch {
@@ -842,14 +982,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.rasterRevisionStorageLimitExceeded
         }
 
-        let beforeRegions = fullRasterRegions(for: pixelSize)
-        let afterRegions = fullRasterRegions(for: newPixelSize)
+        let replacementStrategy = try resizedStrategy(
+            canvasPixelSize: newPixelSize
+        )
+        let newStoragePixelSize = storageSize(for: replacementStrategy)
+        let beforeRegions = fullRasterRegions(for: storagePixelSize)
+        let afterRegions = fullRasterRegions(for: newStoragePixelSize)
         let beforeBytes = try revisionStore.retainedBytes(
-            pixelSize: pixelSize,
+            pixelSize: storagePixelSize,
             regions: beforeRegions
         )
         let afterBytes = try revisionStore.retainedBytes(
-            pixelSize: newPixelSize,
+            pixelSize: newStoragePixelSize,
             regions: afterRegions
         )
         let (pairBytes, overflow) = beforeBytes.addingReportingOverflow(
@@ -859,16 +1003,27 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.rasterRevisionStorageLimitExceeded
         }
 
-        let replacement = try Self.makeRasterResources(
+        let replacementResources = try Self.makeRasterResources(
             device: device,
-            pixelSize: newPixelSize,
+            canvasPixelSize: newPixelSize,
+            pixelSize: newStoragePixelSize,
             initialRevision: canonical.revision,
             forceAllocationFailure: forceResourceAllocationFailure
         )
+        let replacement = PreparedRasterReplacement(
+            resources: replacementResources,
+            strategy: replacementStrategy,
+            radialPageTableTexture: try Self.makeRadialPageTableTexture(
+                device: device,
+                compiled: replacementStrategy.compiledSymmetry
+            )
+        )
         let revisions = try revisionStore.allocatePair(
-            beforePixelSize: pixelSize,
+            beforePixelSize: storagePixelSize,
+            beforeDocumentPixelSize: pixelSize,
             beforeRegions: beforeRegions,
-            afterPixelSize: newPixelSize,
+            afterPixelSize: newStoragePixelSize,
+            afterDocumentPixelSize: newPixelSize,
             afterRegions: afterRegions
         )
         precondition(
@@ -890,31 +1045,50 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 )
             )
             try encodeTransparentClear(
-                of: replacement.canonical.front,
+                of: replacement.resources.canonical.front,
                 on: commandBuffer,
                 label: "Resize Front Clear"
             )
             try encodeTransparentClear(
-                of: replacement.canonical.scratch,
+                of: replacement.resources.canonical.scratch,
                 on: commandBuffer,
                 label: "Resize Scratch Clear"
             )
             try encodeTransparentClear(
-                of: replacement.liveTile.texture,
+                of: replacement.resources.liveTile.texture,
                 on: commandBuffer,
                 label: "Resize Live Clear"
             )
-            try encodeResizeIntersectionCopy(
-                from: canonical.front,
-                oldPixelSize: pixelSize,
-                to: replacement.canonical.scratch,
-                newPixelSize: newPixelSize,
-                on: commandBuffer
+            try encodeTransparentClear(
+                of: replacement.resources.replayTile.texture,
+                on: commandBuffer,
+                label: "Resize Replay Clear"
             )
+            if tilingStrategy.compiledSymmetry.family == .radial,
+               replacementStrategy.compiledSymmetry.family == .radial,
+               tiling != .plainCanvas
+            {
+                try encodeRadialResizeCopy(
+                    from: canonical.front,
+                    sourceStrategy: tilingStrategy,
+                    sourcePageTable: radialPageTableTexture,
+                    to: replacement.resources.canonical.scratch,
+                    destinationStrategy: replacementStrategy,
+                    on: commandBuffer
+                )
+            } else {
+                try encodeResizeIntersectionCopy(
+                    from: canonical.front,
+                    oldPixelSize: storagePixelSize,
+                    to: replacement.resources.canonical.scratch,
+                    newPixelSize: newStoragePixelSize,
+                    on: commandBuffer
+                )
+            }
             captureTokens.append(
                 try revisionStore.encodeCapture(
                     revisions.after,
-                    from: replacement.canonical.scratch,
+                    from: replacement.resources.canonical.scratch,
                     on: commandBuffer
                 )
             )
@@ -963,14 +1137,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 PixelRect(
                     minX: 0,
                     minY: 0,
-                    maxX: pixelSize.width,
-                    maxY: pixelSize.height
+                    maxX: storagePixelSize.width,
+                    maxY: storagePixelSize.height
                 )!,
             ],
-            clippedTo: pixelSize
+            clippedTo: storagePixelSize
         )
         let oneRevisionBytes = try revisionStore.retainedBytes(
-            pixelSize: pixelSize,
+            pixelSize: storagePixelSize,
             regions: fullRegion
         )
         let (pairBytes, overflow) = oneRevisionBytes.multipliedReportingOverflow(
@@ -981,9 +1155,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
 
         let revisions = try revisionStore.allocatePair(
-            beforePixelSize: pixelSize,
+            beforePixelSize: storagePixelSize,
             beforeRegions: fullRegion,
-            afterPixelSize: pixelSize,
+            afterPixelSize: storagePixelSize,
             afterRegions: fullRegion
         )
         precondition(
@@ -1051,10 +1225,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard isIdle else {
             throw MetalRendererError.commitPendingInput
         }
-        guard revision.pixelSize == pixelSize else {
+        guard revision.pixelSize == storagePixelSize else {
             throw MetalRendererError.rasterRevisionTextureSizeMismatch(
-                expectedWidth: pixelSize.width,
-                expectedHeight: pixelSize.height,
+                expectedWidth: storagePixelSize.width,
+                expectedHeight: storagePixelSize.height,
                 actualWidth: revision.pixelSize.width,
                 actualHeight: revision.pixelSize.height
             )
@@ -1127,21 +1301,25 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.rasterRevisionStorageLimitExceeded
         }
 
-        let settledRegions = liveStroke.dirtyRegions(clippedTo: pixelSize)
-        let replayRegions = replayStroke.dirtyRegions(clippedTo: pixelSize)
+        let settledRegions = liveStroke.dirtyRegions(
+            clippedTo: storagePixelSize
+        )
+        let replayRegions = replayStroke.dirtyRegions(
+            clippedTo: storagePixelSize
+        )
         var regions = PixelRegionSet(
             settledRegions.rectangles + replayRegions.rectangles,
-            clippedTo: pixelSize
+            clippedTo: storagePixelSize
         )
         if activeMaterialState.family == .boundedWash {
             let washRegions = boundedWashHistoryRegions
             regions = PixelRegionSet(
                 regions.rectangles + washRegions.rectangles,
-                clippedTo: pixelSize
+                clippedTo: storagePixelSize
             )
         }
         let oneRevisionBytes = try revisionStore.retainedBytes(
-            pixelSize: pixelSize,
+            pixelSize: storagePixelSize,
             regions: regions
         )
         let (pairBytes, overflow) = oneRevisionBytes.multipliedReportingOverflow(
@@ -1152,9 +1330,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
 
         let pair = try revisionStore.allocatePair(
-            beforePixelSize: pixelSize,
+            beforePixelSize: storagePixelSize,
             beforeRegions: regions,
-            afterPixelSize: pixelSize,
+            afterPixelSize: storagePixelSize,
             afterRegions: regions
         )
         precondition(
@@ -1464,7 +1642,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
            !records.isEmpty
         {
             let plan = try boundedWashSurface.makeWorkPlan(
-                dirtyRegions: records.map(\.dirtyRect),
+                dirtyRegions: records.map {
+                    BoundedWashDirtyRegion(
+                        rectangle: $0.dirtyRect,
+                        radialPage: $0.radialPage
+                    )
+                },
+                topology: boundedWashTopology,
                 bleedRadius: activeMaterialState.bleedRadius,
                 softenPasses: Int(activeMaterialState.softenPasses)
             )
@@ -1543,7 +1727,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 ?? buffer.predictedChunks.first { !$0.dabs.isEmpty }?
                     .dabs.first
         )?.attributes.sourceDistance
-        let priorRegions = replayStroke.dirtyRegions(clippedTo: pixelSize)
+        let priorRegions = replayStroke.dirtyRegions(
+            clippedTo: storagePixelSize
+        )
         var replacementRecords: [ProjectedDabRecord] = []
         replacementRecords.reserveCapacity(
             min(
@@ -1614,13 +1800,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         let replacementRegions = PixelRegionSet(
             replacementRecords.map(\.dirtyRect),
-            clippedTo: pixelSize
+            clippedTo: storagePixelSize
         )
         if activeStroke.style.recipe.material.family == .boundedWash,
            let boundedWashSurface
         {
             let plan = try boundedWashSurface.makeWorkPlan(
-                dirtyRegions: replacementRegions.rectangles,
+                dirtyRegions: replacementRecords.map {
+                    BoundedWashDirtyRegion(
+                        rectangle: $0.dirtyRect,
+                        radialPage: $0.radialPage
+                    )
+                },
+                topology: boundedWashTopology,
                 bleedRadius: activeStroke.style.recipe.material.bleedRadius,
                 softenPasses: activeStroke.style.recipe.material.softenPasses
             )
@@ -1645,7 +1837,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         to stroke: inout LiveStroke
     ) throws {
         for record in records {
-            try stroke.append(record.instance, dirtyRect: record.dirtyRect)
+            try stroke.append(
+                record.instance,
+                dirtyRect: record.dirtyRect,
+                radialPage: record.radialPage
+            )
             counters.totalInstancesThisStroke += 1
         }
     }
@@ -1698,8 +1894,35 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 dirtyRect: TilingProjection.dirtyPixelRect(
                     for: fragment,
                     radius: minimumAffineScale
-                )
+                ),
+                radialPage: radialPage(for: fragment)
             )
+        }
+    }
+
+    private func radialPage(
+        for fragment: CellFragment
+    ) -> RadialPageCoordinate? {
+        guard tilingStrategy.compiledSymmetry.domain.finite?
+            .radial.layout != nil
+        else {
+            return nil
+        }
+        return RadialPageCoordinate(
+            x: fragment.cell.column,
+            y: fragment.cell.row
+        )
+    }
+
+    private var boundedWashTopology: BoundedWashTopology {
+        switch tilingStrategy.compiledSymmetry.domain {
+        case .periodic:
+            return .periodic
+        case let .finite(finite):
+            if let layout = finite.radial.layout {
+                return .radial(layout)
+            }
+            return .finite
         }
     }
 
@@ -1765,7 +1988,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 dirtyRect: TilingProjection.dirtyPixelRect(
                     for: fragment,
                     radius: radius
-                )
+                ),
+                radialPage: radialPage(for: fragment)
             )
             counters.totalInstancesThisStroke += 1
         }
@@ -1794,15 +2018,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) -> PatternGridFrameUniforms {
         let compositeMode = activeStroke?.style.compositeMode.rawValue
             ?? PatternCompositeWireDraw
-        let periodic = tilingStrategy.compiledSymmetry.domain.periodic!
-        let worldToLattice = periodic.worldToLattice
-        let displayRepeatSize =
-            tilingStrategy.compiledSymmetry.family == .triangular
-            ? SIMD2(
-                simd_length(periodic.translationBasis.u),
-                simd_length(periodic.translationBasis.v)
+        let worldToLattice: Affine2D
+        let displayRepeatSize: SIMD2<Float>
+        if let periodic = tilingStrategy.compiledSymmetry.domain.periodic {
+            worldToLattice = periodic.worldToLattice
+            displayRepeatSize =
+                tilingStrategy.compiledSymmetry.family == .triangular
+                ? SIMD2(
+                    simd_length(periodic.translationBasis.u),
+                    simd_length(periodic.translationBasis.v)
+                )
+                : periodic.configuration.repeatSize.simd
+        } else {
+            worldToLattice = .identity
+            displayRepeatSize = SIMD2(
+                Float(pixelSize.width),
+                Float(pixelSize.height)
             )
-            : periodic.configuration.repeatSize.simd
+        }
         return PatternGridFrameUniforms(
             drawableSize: drawableSize.simd,
             worldCenter: viewport.worldCenter.simd,
@@ -1825,6 +2058,60 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 tilingStrategy.compiledSymmetry.displayProgram.guideKind
                     .rawValue,
             padding2: 0
+        )
+    }
+
+    func radialFrameUniforms() -> PatternRadialFrameUniforms {
+        radialFrameUniforms(
+            strategy: tilingStrategy,
+            storagePixelSize: storagePixelSize
+        )
+    }
+
+    private func radialFrameUniforms(
+        strategy: TilingStrategy,
+        storagePixelSize: PixelSize
+    ) -> PatternRadialFrameUniforms {
+        guard let radial = strategy.compiledSymmetry.domain.finite?
+            .radial
+        else {
+            preconditionFailure(
+                "Radial uniforms require a finite descriptor"
+            )
+        }
+        let layout = radial.layout
+        let configuration = radial.configuration
+        let isDihedral = configuration.map {
+            $0.kind != .rotation
+        } ?? false
+        return PatternRadialFrameUniforms(
+            canvasSize: SIMD2(
+                Float(radial.canvasSize.width),
+                Float(radial.canvasSize.height)
+            ),
+            center: configuration?.center.simd ?? .zero,
+            referenceAngle: configuration?.referenceAngleRadians ?? 0,
+            sectorAngle: radial.sectorAngleRadians,
+            displayedSectorCount: UInt32(radial.displayedSectorCount),
+            dihedral: isDihedral ? 1 : 0,
+            pageOrigin: SIMD2(
+                Float(layout?.pageOrigin.x ?? 0),
+                Float(layout?.pageOrigin.y ?? 0)
+            ),
+            pageTableSize: SIMD2(
+                Float(layout?.pageTableSize.width ?? 1),
+                Float(layout?.pageTableSize.height ?? 1)
+            ),
+            atlasColumns: UInt32(layout?.atlasColumns ?? 1),
+            pageSide: UInt32(
+                layout == nil
+                    ? max(storagePixelSize.width, storagePixelSize.height)
+                    : RadialSectorLayout.pageSide
+            ),
+            atlasSize: SIMD2(
+                Float(storagePixelSize.width),
+                Float(storagePixelSize.height)
+            )
         )
     }
 
@@ -1858,16 +2145,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         throws -> any MTLTexture
     {
         let texture = try makeHarnessTexture(
-            width: pixelSize.width,
-            height: pixelSize.height
+            width: storagePixelSize.width,
+            height: storagePixelSize.height
         )
-        let bytesPerRow = pixelSize.width * 4
+        let bytesPerRow = storagePixelSize.width * 4
         var bytes = [UInt8](
             repeating: 0,
-            count: bytesPerRow * pixelSize.height
+            count: bytesPerRow * storagePixelSize.height
         )
-        for y in 0..<pixelSize.height {
-            for x in 0..<pixelSize.width {
+        for y in 0..<storagePixelSize.height {
+            for x in 0..<storagePixelSize.width {
                 let offset = y * bytesPerRow + x * 4
                 bytes[offset] = UInt8(
                     truncatingIfNeeded: x &* 37 &+ y &* 17
@@ -1882,8 +2169,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 region: MTLRegionMake2D(
                     0,
                     0,
-                    pixelSize.width,
-                    pixelSize.height
+                    storagePixelSize.width,
+                    storagePixelSize.height
                 ),
                 mipmapLevel: 0,
                 withBytes: buffer.baseAddress!,
@@ -1895,6 +2182,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     private static func makeRasterResources(
         device: any MTLDevice,
+        canvasPixelSize: PixelSize? = nil,
         pixelSize: PixelSize,
         initialRevision: RasterRevision,
         forceAllocationFailure: Bool
@@ -1916,6 +2204,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             pixelSize: pixelSize
         )
         return RasterResources(
+            canvasPixelSize: canvasPixelSize ?? pixelSize,
             pixelSize: pixelSize,
             tileSize: PatternSize(
                 width: Float(pixelSize.width),
@@ -1924,6 +2213,68 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             canonical: canonical,
             liveTile: liveTile,
             replayTile: replayTile
+        )
+    }
+
+    private static func makeRadialPageTableTexture(
+        device: any MTLDevice,
+        compiled: CompiledSymmetry
+    ) throws -> any MTLTexture {
+        let layout = compiled.domain.finite?.radial.layout
+        let width = layout?.pageTableSize.width ?? 1
+        let height = layout?.pageTableSize.height ?? 1
+        let values = layout?.pageTable ?? [Int32(0)]
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r32Sint,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .shared
+        descriptor.usage = [.shaderRead]
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw MetalRendererError.textureAllocationFailed
+        }
+        values.withUnsafeBytes { bytes in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: bytes.baseAddress!,
+                bytesPerRow: width * MemoryLayout<Int32>.stride
+            )
+        }
+        return texture
+    }
+
+    private func resizedStrategy(
+        canvasPixelSize: PixelSize
+    ) throws -> TilingStrategy {
+        do {
+            switch tilingStrategy.documentConfiguration {
+            case let .periodic(configuration):
+                return try TilingStrategy(
+                    configuration: configuration,
+                    canonicalRasterSize: canvasPixelSize
+                )
+            case let .finite(configuration):
+                return try TilingStrategy(
+                    finiteConfiguration: configuration,
+                    canvasSize: canvasPixelSize
+                )
+            }
+        } catch {
+            throw MetalRendererError.invalidSymmetryConfiguration(
+                error.localizedDescription
+            )
+        }
+    }
+
+    private func storageSize(
+        for strategy: TilingStrategy
+    ) -> PixelSize {
+        PixelSize(
+            width: Int(strategy.tileSize.width),
+            height: Int(strategy.tileSize.height)
         )
     }
 
@@ -1982,6 +2333,112 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             destinationLevel: 0,
             destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
         )
+        encoder.endEncoding()
+    }
+
+    private func encodeRadialResizeCopy(
+        from source: any MTLTexture,
+        sourceStrategy: TilingStrategy,
+        sourcePageTable: (any MTLTexture)?,
+        to destination: any MTLTexture,
+        destinationStrategy: TilingStrategy,
+        on commandBuffer: any MTLCommandBuffer
+    ) throws {
+        guard let sourcePageTable,
+              let layout = destinationStrategy.compiledSymmetry.domain.finite?
+                .radial.layout
+        else {
+            throw MetalRendererError.invalidSymmetryConfiguration(
+                "Radial resize requires source and destination page layouts."
+            )
+        }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalRendererError.commandFailed(
+                "Metal compute encoder creation failed."
+            )
+        }
+        encoder.label = "Radial Resize Crop/Expand Copy"
+        encoder.setComputePipelineState(pipelines.radialResizeCopy)
+        encoder.setTexture(
+            source,
+            index: Int(PatternTextureIndexCanonical)
+        )
+        encoder.setTexture(
+            destination,
+            index: Int(PatternTextureIndexLive)
+        )
+        encoder.setTexture(
+            sourcePageTable,
+            index: Int(PatternTextureIndexRadialPageTable)
+        )
+        var sourceUniforms = radialFrameUniforms(
+            strategy: sourceStrategy,
+            storagePixelSize: PixelSize(
+                width: source.width,
+                height: source.height
+            )
+        )
+        var destinationUniforms = radialFrameUniforms(
+            strategy: destinationStrategy,
+            storagePixelSize: PixelSize(
+                width: destination.width,
+                height: destination.height
+            )
+        )
+        encoder.setBytes(
+            &sourceUniforms,
+            length: MemoryLayout<PatternRadialFrameUniforms>.stride,
+            index: Int(PatternBufferIndexRadialFrameUniforms)
+        )
+        encoder.setBytes(
+            &destinationUniforms,
+            length: MemoryLayout<PatternRadialFrameUniforms>.stride,
+            index: Int(
+                PatternBufferIndexRadialResizeDestinationUniforms
+            )
+        )
+        let executionWidth = pipelines.radialResizeCopy.threadExecutionWidth
+        let executionHeight = max(
+            1,
+            pipelines.radialResizeCopy.maxTotalThreadsPerThreadgroup
+                / executionWidth
+        )
+        let threadsPerGroup = MTLSize(
+            width: executionWidth,
+            height: executionHeight,
+            depth: 1
+        )
+        let pageThreads = MTLSize(
+            width: RadialSectorLayout.pageSide,
+            height: RadialSectorLayout.pageSide,
+            depth: 1
+        )
+        for page in layout.residentPages {
+            guard let pageX = Int32(exactly: page.coordinate.x),
+                  let pageY = Int32(exactly: page.coordinate.y),
+                  let slot = UInt32(exactly: page.atlasSlot)
+            else {
+                encoder.endEncoding()
+                throw MetalRendererError.invalidSymmetryConfiguration(
+                    "Radial resize page coordinates exceed the shader ABI."
+                )
+            }
+            var pageUniforms = PatternRadialResizePageUniforms(
+                logicalPageX: pageX,
+                logicalPageY: pageY,
+                destinationSlot: slot,
+                padding: 0
+            )
+            encoder.setBytes(
+                &pageUniforms,
+                length: MemoryLayout<PatternRadialResizePageUniforms>.stride,
+                index: Int(PatternBufferIndexRadialResizePage)
+            )
+            encoder.dispatchThreads(
+                pageThreads,
+                threadsPerThreadgroup: threadsPerGroup
+            )
+        }
         encoder.endEncoding()
     }
 
@@ -2056,8 +2513,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             sourceLevel: 0,
             sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
             sourceSize: MTLSize(
-                width: pixelSize.width,
-                height: pixelSize.height,
+                width: storagePixelSize.width,
+                height: storagePixelSize.height,
                 depth: 1
             ),
             to: destination,
@@ -2442,11 +2899,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard let surface = boundedWashSurface else {
             throw MetalRendererError.boundedWashSurfaceAllocationFailed
         }
-        let dirty = instances.compactMap {
-            boundedWashDirtyRect(for: $0.instance)
+        let dirty = instances.compactMap { dab in
+            boundedWashDirtyRect(for: dab.instance).map {
+                BoundedWashDirtyRegion(
+                    rectangle: $0,
+                    radialPage: dab.radialPage
+                )
+            }
         }
         let plan = try surface.makeWorkPlan(
             dirtyRegions: dirty,
+            topology: boundedWashTopology,
             bleedRadius: activeMaterialState.bleedRadius,
             softenPasses: Int(activeMaterialState.softenPasses)
         )
@@ -2507,13 +2970,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private var boundedWashHistoryRegions: PixelRegionSet {
-        boundedWashHistory.regions(pixelSize: pixelSize)
+        boundedWashHistory.regions(pixelSize: storagePixelSize)
     }
 
     private func accumulateBoundedWashHistory(
         _ regions: PixelRegionSet
     ) {
-        boundedWashHistory.record(regions, pixelSize: pixelSize)
+        boundedWashHistory.record(regions, pixelSize: storagePixelSize)
     }
 
     private func boundedWashDirtyRect(
@@ -2621,6 +3084,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             length: MemoryLayout<PatternGridFrameUniforms>.stride,
             index: Int(PatternBufferIndexGridFrameUniforms)
         )
+        encoder.setFragmentBytes(
+            &uniforms,
+            length: MemoryLayout<PatternGridFrameUniforms>.stride,
+            index: Int(PatternBufferIndexGridFrameUniforms)
+        )
+        var radialUniforms = boundedWashRadialFrameUniforms
+        encoder.setFragmentBytes(
+            &radialUniforms,
+            length: MemoryLayout<PatternRadialFrameUniforms>.stride,
+            index: Int(PatternBufferIndexRadialFrameUniforms)
+        )
+        guard let radialPageTableTexture else {
+            throw MetalRendererError.textureAllocationFailed
+        }
+        encoder.setFragmentTexture(
+            radialPageTableTexture,
+            index: Int(PatternTextureIndexRadialPageTable)
+        )
         if let source {
             encoder.setFragmentTexture(
                 source,
@@ -2641,7 +3122,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
             index: Int(PatternBufferIndexBrushMaterial)
         )
-        for rectangle in regions.rectangles {
+        for (rectangle, radialPage) in washDrawRegions(regions) {
+            var pageUniforms = PatternRadialResizePageUniforms(
+                logicalPageX: Int32(radialPage?.coordinate.x ?? 0),
+                logicalPageY: Int32(radialPage?.coordinate.y ?? 0),
+                destinationSlot: UInt32(radialPage?.atlasSlot ?? 0),
+                padding: 0
+            )
+            encoder.setFragmentBytes(
+                &pageUniforms,
+                length: MemoryLayout<PatternRadialResizePageUniforms>.stride,
+                index: Int(PatternBufferIndexRadialResizePage)
+            )
             encoder.setScissorRect(
                 MTLScissorRect(
                     x: rectangle.minX,
@@ -2657,6 +3149,63 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         encoder.endEncoding()
+    }
+
+    private var boundedWashRadialFrameUniforms:
+        PatternRadialFrameUniforms
+    {
+        if tilingStrategy.compiledSymmetry.domain.finite != nil {
+            return radialFrameUniforms()
+        }
+        return PatternRadialFrameUniforms(
+            canvasSize: SIMD2(
+                Float(storagePixelSize.width),
+                Float(storagePixelSize.height)
+            ),
+            center: .zero,
+            referenceAngle: 0,
+            sectorAngle: 2 * .pi,
+            displayedSectorCount: 1,
+            dihedral: 0,
+            pageOrigin: .zero,
+            pageTableSize: SIMD2(repeating: 1),
+            atlasColumns: 1,
+            pageSide: UInt32(
+                max(storagePixelSize.width, storagePixelSize.height)
+            ),
+            atlasSize: SIMD2(
+                Float(storagePixelSize.width),
+                Float(storagePixelSize.height)
+            )
+        )
+    }
+
+    private func washDrawRegions(
+        _ regions: PixelRegionSet
+    ) -> [(rectangle: PixelRect, radialPage: RadialResidentPage?)] {
+        guard let layout = tilingStrategy.compiledSymmetry.domain.finite?
+            .radial.layout
+        else {
+            return regions.rectangles.map { ($0, nil) }
+        }
+        let side = RadialSectorLayout.pageSide
+        var result: [(PixelRect, RadialResidentPage?)] = []
+        for rectangle in regions.rectangles {
+            for page in layout.residentPages {
+                let atlasX = page.atlasSlot % layout.atlasColumns * side
+                let atlasY = page.atlasSlot / layout.atlasColumns * side
+                guard let intersection = PixelRect(
+                    minX: max(rectangle.minX, atlasX),
+                    minY: max(rectangle.minY, atlasY),
+                    maxX: min(rectangle.maxX, atlasX + side),
+                    maxY: min(rectangle.maxY, atlasY + side)
+                ) else {
+                    continue
+                }
+                result.append((intersection, page))
+            }
+        }
+        return result
     }
 
     func encodeCommit(
@@ -2755,7 +3304,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         commandBuffer: any MTLCommandBuffer,
         showGridLines: Bool,
         liveVisible: Bool,
-        canonicalTexture: (any MTLTexture)? = nil
+        canonicalTexture: (any MTLTexture)? = nil,
+        documentPixelMapping: Bool = false,
+        transparentBackground: Bool = false
     ) throws {
         guard texture.width > 0, texture.height > 0 else {
             throw MetalRendererError.invalidDrawableSize
@@ -2764,27 +3315,31 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         pass.colorAttachments[0].texture = texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(
-            red: 242.0 / 255.0,
-            green: 244.0 / 255.0,
-            blue: 241.0 / 255.0,
-            alpha: 1
-        )
+        pass.colorAttachments[0].clearColor = transparentBackground
+            ? MTLClearColorMake(0, 0, 0, 0)
+            : MTLClearColor(
+                red: 242.0 / 255.0,
+                green: 244.0 / 255.0,
+                blue: 241.0 / 255.0,
+                alpha: 1
+            )
         guard let encoder = commandBuffer.makeRenderCommandEncoder(
             descriptor: pass
         ) else {
             throw MetalRendererError.renderEncoderUnavailable
         }
-        let usesTriangularDisplay =
-            tilingStrategy.compiledSymmetry.family == .triangular
-        encoder.label = usesTriangularDisplay
-            ? "Triangular Grid Display"
-            : "Grid Display"
-        encoder.setRenderPipelineState(
-            usesTriangularDisplay
-                ? pipelines.triangularDisplay
-                : pipelines.display
-        )
+        let displayFamily = tilingStrategy.compiledSymmetry.family
+        switch displayFamily {
+        case .rectangular:
+            encoder.label = "Grid Display"
+            encoder.setRenderPipelineState(pipelines.display)
+        case .triangular:
+            encoder.label = "Triangular Grid Display"
+            encoder.setRenderPipelineState(pipelines.triangularDisplay)
+        case .radial:
+            encoder.label = "Radial Finite Display"
+            encoder.setRenderPipelineState(pipelines.radialDisplay)
+        }
         var uniforms = frameUniforms(
             drawableSize: PatternSize(
                 width: Float(texture.width),
@@ -2793,6 +3348,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             showGridLines: showGridLines,
             liveVisible: liveVisible
         )
+        if documentPixelMapping {
+            uniforms.worldCenter = SIMD2(
+                Float(pixelSize.width) * 0.5,
+                Float(pixelSize.height) * 0.5
+            )
+            uniforms.zoom = 1
+        }
         encoder.setVertexBytes(
             &uniforms,
             length: MemoryLayout<PatternGridFrameUniforms>.stride,
@@ -2809,6 +3371,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
             index: Int(PatternBufferIndexBrushMaterial)
         )
+        if displayFamily == .radial {
+            var radialUniforms = radialFrameUniforms()
+            encoder.setFragmentBytes(
+                &radialUniforms,
+                length: MemoryLayout<PatternRadialFrameUniforms>.stride,
+                index: Int(PatternBufferIndexRadialFrameUniforms)
+            )
+            guard let radialPageTableTexture else {
+                throw MetalRendererError.textureAllocationFailed
+            }
+            encoder.setFragmentTexture(
+                radialPageTableTexture,
+                index: Int(PatternTextureIndexRadialPageTable)
+            )
+        }
         encoder.setFragmentTexture(
             canonicalTexture ?? canonical.front,
             index: Int(PatternTextureIndexCanonical)
@@ -3031,6 +3608,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 }
                 canonical.acceptScratchCommit()
                 revisionStore.publish(operation.revisions)
+                lockDocumentGeometryAfterRasterMutation()
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
                 onOperationCompleted?(
@@ -3080,9 +3658,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 for token in operation.captureTokens {
                     try revisionStore.finalize(token, as: .succeeded)
                 }
-                operation.replacement.canonical.acceptScratchCommit()
+                operation.replacement.resources.canonical
+                    .acceptScratchCommit()
                 revisionStore.publish(operation.revisions)
                 install(operation.replacement)
+                lockDocumentGeometryAfterRasterMutation()
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
                 onOperationCompleted?(
@@ -3112,7 +3692,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     operation.restoreToken,
                     as: .succeeded
                 )
-                operation.replacement.canonical.acceptScratchCommit()
+                operation.replacement.resources.canonical
+                    .acceptScratchCommit()
                 install(operation.replacement)
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
@@ -3154,23 +3735,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return error
     }
 
-    private func install(_ replacement: RasterResources) {
-        let configuration = tilingStrategy.periodicConfiguration
-        let replacementStrategy: TilingStrategy
-        do {
-            replacementStrategy = try TilingStrategy(
-                configuration: configuration,
-                canonicalRasterSize: replacement.pixelSize
-            )
-        } catch {
-            preconditionFailure(
-                "Validated periodic configuration must survive raster resize"
-            )
-        }
-        replacement.liveTile.markCleared()
-        replacement.replayTile.markCleared(epoch: 0)
-        resources = replacement
-        tilingStrategy = replacementStrategy
+    private func install(_ replacement: PreparedRasterReplacement) {
+        replacement.resources.liveTile.markCleared()
+        replacement.resources.replayTile.markCleared(epoch: 0)
+        resources = replacement.resources
+        tilingStrategy = replacement.strategy
+        radialPageTableTexture = replacement.radialPageTableTexture
         needsLiveClear = false
         needsReplayClear = false
     }
@@ -3199,6 +3769,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let submissionID = nextRasterSubmissionID
         nextRasterSubmissionID += 1
         return submissionID
+    }
+
+    private func lockDocumentGeometryAfterRasterMutation() {
+        documentDomainLocked = true
+        if case let .finite(finite) = tilingStrategy.documentConfiguration,
+           case .radial = finite
+        {
+            radialGeometryLocked = true
+        }
     }
 
     private func installRasterCompletionHandler(
@@ -3320,6 +3899,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             canonical.acceptScratchCommit()
             revisionStore.publish(commit.revisions)
+            lockDocumentGeometryAfterRasterMutation()
             let receipt = RasterMutationReceipt(
                 token: commit.token,
                 before: commit.revisions.before,
