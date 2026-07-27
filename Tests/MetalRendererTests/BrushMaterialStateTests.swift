@@ -104,7 +104,12 @@ func materialUniformsPackEverySelectorAndBoundedValue() throws {
         material: wash,
         opacity: 0.65
     )
-    let state = BrushMaterialState(recipe: recipe)
+    let definition = try LegacyBrushRecipeAdapter.definition(
+        from: recipe,
+        displayName: "Material Uniforms"
+    )
+    let program = try BrushProgramCompiler.compile(definition)
+    let state = BrushMaterialState(program: program)
     let uniforms = state.uniforms
 
     #expect(uniforms.materialFamily == PatternMaterialWireBoundedWash)

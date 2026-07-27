@@ -37,7 +37,15 @@ private let style = StrokeRenderStyle(
     eraserStrength: 1
 )
 
-private let capturedRecipe = AnchorBrushCatalog.dryPencil.recipe
+private let capturedProgram = AnchorBrushCatalog.dryPencil.program
+private let capturedProgramStyle = StrokeRenderStyle(
+    color: .black,
+    diameter: 20,
+    compositeMode: .draw,
+    eraserStrength: 1,
+    program: capturedProgram,
+    seed: 41
+)
 
 private let squareConfiguration = PeriodicSymmetryConfiguration(
     presetID: .squareKaleidoscope,
@@ -109,8 +117,7 @@ func strokeSamplesUseOneTokenThroughCommit() {
             token,
             beganSample,
             tool,
-            beganStyle,
-            beganRecipe
+            beganStyle
         ) = began.first
     else {
         Issue.record("Expected beginStroke")
@@ -120,7 +127,7 @@ func strokeSamplesUseOneTokenThroughCommit() {
     #expect(beganSample == sample(.began))
     #expect(tool == .draw)
     #expect(beganStyle == style)
-    #expect(beganRecipe == AnchorBrushCatalog.defaultDraw.recipe)
+    #expect(beganStyle.program == style.program)
 
     #expect(
         transaction.apply(.pointerMoved(sample(.moved)))
@@ -146,7 +153,7 @@ func estimatedEndFinishesTransientlyThenCommitsAfterLastUpdate() {
     let began = transaction.apply(
         .pointerBegan(sample(.began), tool: .draw, style: style)
     )
-    guard case let .beginStroke(token, _, _, _, _) = began.first else {
+    guard case let .beginStroke(token, _, _, _) = began.first else {
         Issue.record("Expected beginStroke")
         return
     }
@@ -281,7 +288,7 @@ func pointerEventsRejectMismatchedSamplePhasesWithoutAllocatingTokens() {
     let began = idle.apply(
         .pointerBegan(sample(.began), tool: .draw, style: style)
     )
-    guard case let .beginStroke(token, _, _, _, _) = began.first else {
+    guard case let .beginStroke(token, _, _, _) = began.first else {
         Issue.record("Expected valid stroke after rejected mismatch")
         return
     }
@@ -297,30 +304,36 @@ func pointerEventsRejectMismatchedSamplePhasesWithoutAllocatingTokens() {
 }
 
 @Test
-func pointerDownCapturesImmutableRecipeValueInStateAndEffect() {
+func pointerDownCapturesProgramForWholeTransaction() {
     var transaction = EditorTransaction()
 
     let effects = transaction.apply(
         .pointerBegan(
             sample(.began),
             tool: .draw,
-            style: style,
-            recipe: capturedRecipe
+            style: capturedProgramStyle
         )
     )
 
-    guard case let .beginStroke(_, _, _, effectStyle, effectRecipe) = effects.first
+    guard
+        case let .beginStroke(_, _, _, effectStyle) = effects.first,
+        case let .drawing(drawing) = transaction.state
     else {
-        Issue.record("Expected beginStroke with captured recipe")
+        Issue.record("Expected beginStroke with captured program")
         return
     }
-    guard case let .drawing(drawing) = transaction.state else {
-        Issue.record("Expected drawing transaction")
+    #expect(effectStyle.program == capturedProgram)
+    #expect(drawing.program == capturedProgram)
+
+    #expect(
+        transaction.apply(.recipeIntent(AnchorBrushCatalog.glazeMarker.id))
+            == [.updateRecipe(AnchorBrushCatalog.glazeMarker.id)]
+    )
+    guard case let .drawing(afterIntent) = transaction.state else {
+        Issue.record("Expected the in-flight stroke to remain captured")
         return
     }
-    #expect(effectStyle == style)
-    #expect(effectRecipe == capturedRecipe)
-    #expect(drawing.recipe == capturedRecipe)
+    #expect(afterIntent.program == capturedProgram)
 }
 
 @Test
@@ -332,15 +345,19 @@ func recipeIntentFollowsConfigurationOrderingAcrossStrokeStates() {
     #expect(idle.state == .idle)
 
     var collecting = collectingDrawTransaction()
-    guard case let .drawing(drawing) = collecting.state else {
+    guard case let .drawing(drawingBeforeIntent) = collecting.state else {
         Issue.record("Expected collecting drawing transaction")
         return
     }
     #expect(
         collecting.apply(.recipeIntent(recipeID))
-            == [.cancelStroke(drawing.token), .updateRecipe(recipeID)]
+            == [.updateRecipe(recipeID)]
     )
-    #expect(collecting.state == .idle)
+    guard case let .drawing(drawingAfterIntent) = collecting.state else {
+        Issue.record("Expected collecting drawing transaction")
+        return
+    }
+    #expect(drawingAfterIntent == drawingBeforeIntent)
 
     var pending = commitPendingTransaction()
     let pendingState = pending.state
@@ -349,25 +366,24 @@ func recipeIntentFollowsConfigurationOrderingAcrossStrokeStates() {
 }
 
 @Test
-func failedStrokeReturnsIdleWithoutChangingCapturedRecipe() {
+func failedStrokeReturnsIdleWithoutChangingCapturedProgram() {
     var transaction = EditorTransaction()
     let effects = transaction.apply(
         .pointerBegan(
             sample(.began),
             tool: .draw,
-            style: style,
-            recipe: capturedRecipe
+            style: capturedProgramStyle
         )
     )
     guard
-        case let .beginStroke(token, _, _, _, recipe) = effects.first,
+        case let .beginStroke(token, _, _, style) = effects.first,
         case let .drawing(drawing) = transaction.state
     else {
         Issue.record("Expected captured drawing")
         return
     }
-    #expect(recipe == capturedRecipe)
-    #expect(drawing.recipe == capturedRecipe)
+    #expect(style.program == capturedProgram)
+    #expect(drawing.program == capturedProgram)
 
     #expect(
         transaction.apply(.operationCompleted(token, succeeded: false))

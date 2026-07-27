@@ -52,6 +52,75 @@ func anchorRecipesMatchTheSortedLogicalDabBaseline() throws {
     }
 }
 
+@Test
+func allAnchorTraceProgramBatchesMatchCompatibilityRecipeBatches() {
+    let viewport = ViewportTransform(
+        drawableSize: PatternSize(width: 256, height: 256),
+        worldCenter: WorldPoint(x: 128, y: 128)
+    )
+    let traces = [
+        StrokeTraceFixtures.pressureRamp,
+        StrokeTraceFixtures.curved,
+        StrokeTraceFixtures.predictionCorrection,
+    ]
+    var comparisonCount = 0
+
+    for anchor in AnchorBrushCatalog.all {
+        for trace in traces {
+            let programBatches = logicalBatches(
+                trace: trace,
+                viewport: viewport,
+                generator: BrushStrokeGenerator(
+                    program: anchor.program,
+                    nominalDiameter: 20,
+                    color: .black,
+                    seed: 41
+                )
+            )
+            let compatibilityBatches = logicalBatches(
+                trace: trace,
+                viewport: viewport,
+                generator: BrushStrokeGenerator(
+                    recipe: anchor.compatibilityRecipe,
+                    nominalDiameter: 20,
+                    color: .black,
+                    seed: 41
+                )
+            )
+
+            #expect(programBatches == compatibilityBatches)
+            comparisonCount += 1
+        }
+    }
+
+    #expect(comparisonCount == 15)
+}
+
+private func logicalBatches(
+    trace: StrokeTraceFixture,
+    viewport: ViewportTransform,
+    generator initialGenerator: BrushStrokeGenerator
+) -> [LogicalDabBatch] {
+    var input = BrushInputDeriver()
+    var generator = initialGenerator
+    var batches: [LogicalDabBatch] = []
+
+    for sample in trace.samples where sample.kind != .predicted {
+        let worldSample = input.derive(sample, viewport: viewport)
+        switch worldSample.phase {
+        case .began:
+            batches.append(contentsOf: generator.beginBatches(worldSample))
+        case .moved:
+            batches.append(contentsOf: generator.appendBatches(worldSample))
+        case .ended:
+            batches.append(contentsOf: generator.finishBatches(worldSample))
+        case .cancelled:
+            generator.cancel()
+        }
+    }
+    return batches
+}
+
 private func anchorRecords() -> [BrushCharacterizationRecord] {
     let viewport = ViewportTransform(
         drawableSize: PatternSize(width: 256, height: 256),
@@ -66,7 +135,7 @@ private func anchorRecords() -> [BrushCharacterizationRecord] {
         traces.map { trace in
             BrushCharacterizer.record(
                 trace: trace,
-                recipe: anchor.recipe,
+                program: anchor.program,
                 nominalDiameter: 20,
                 color: .black,
                 seed: 41,

@@ -30,18 +30,18 @@ public struct DrawingTransaction: Equatable, Sendable {
     public var token: EditorTransactionToken
     public var tool: StrokeTool
     public var phase: DrawingPhase
-    public var recipe: BrushRecipe
+    public var program: BrushProgram
 
     public init(
         token: EditorTransactionToken,
         tool: StrokeTool,
         phase: DrawingPhase,
-        recipe: BrushRecipe
+        program: BrushProgram
     ) {
         self.token = token
         self.tool = tool
         self.phase = phase
-        self.recipe = recipe
+        self.program = program
     }
 }
 
@@ -54,14 +54,13 @@ public enum EditorTransactionState: Equatable, Sendable {
 }
 
 public enum EditorTransactionEvent: Equatable, Sendable {
-    /// Box the large immutable recipe/style payload. Keeping it inline makes
+    /// Box the large immutable program/style payload. Keeping it inline makes
     /// every small intent event inherit the maximum payload size and has
     /// triggered invalid enum-copy code generation in current Swift runtimes.
     indirect case pointerBegan(
         StrokeSample,
         tool: StrokeTool,
-        style: StrokeRenderStyle,
-        recipe: BrushRecipe = AnchorBrushCatalog.defaultDraw.recipe
+        style: StrokeRenderStyle
     )
     case pointerMoved(StrokeSample)
     case pointerEnded(StrokeSample)
@@ -91,8 +90,7 @@ public enum EditorTransactionEffect: Equatable, Sendable {
         EditorTransactionToken,
         StrokeSample,
         StrokeTool,
-        StrokeRenderStyle,
-        BrushRecipe
+        StrokeRenderStyle
     )
     case appendStroke(EditorTransactionToken, StrokeSample)
     case requestStrokeCommit(EditorTransactionToken, StrokeSample)
@@ -200,17 +198,17 @@ public struct EditorTransaction: Equatable, Sendable {
         _ event: EditorTransactionEvent
     ) -> [EditorTransactionEffect] {
         switch event {
-        case let .pointerBegan(sample, tool, style, recipe):
+        case let .pointerBegan(sample, tool, style):
             let token = takeToken()
             state = .drawing(
                 DrawingTransaction(
                     token: token,
                     tool: tool,
                     phase: .collecting,
-                    recipe: recipe
+                    program: style.program
                 )
             )
-            return [.beginStroke(token, sample, tool, style, recipe)]
+            return [.beginStroke(token, sample, tool, style)]
         case .pointerMoved, .pointerEnded, .pointerCancelled:
             return []
         case .pointerEndedAwaitingEstimates,
@@ -261,7 +259,7 @@ public struct EditorTransaction: Equatable, Sendable {
                     token: drawing.token,
                     tool: drawing.tool,
                     phase: .commitPending,
-                    recipe: drawing.recipe
+                    program: drawing.program
                 )
             )
             return [.requestStrokeCommit(drawing.token, sample)]
@@ -271,7 +269,7 @@ public struct EditorTransaction: Equatable, Sendable {
                     token: drawing.token,
                     tool: drawing.tool,
                     phase: .awaitingEstimatedUpdates,
-                    recipe: drawing.recipe
+                    program: drawing.program
                 )
             )
             return [.finishStrokeTransient(drawing.token, sample)]
@@ -295,11 +293,7 @@ public struct EditorTransaction: Equatable, Sendable {
                 .updateBrushDiameter(diameter),
             ]
         case let .recipeIntent(recipeID):
-            state = .idle
-            return [
-                .cancelStroke(drawing.token),
-                .updateRecipe(recipeID),
-            ]
+            return [.updateRecipe(recipeID)]
         case let .gridVisibilityIntent(visible):
             return [.updateGridVisibility(visible)]
         case let .command(command):
@@ -338,7 +332,7 @@ public struct EditorTransaction: Equatable, Sendable {
                     token: drawing.token,
                     tool: drawing.tool,
                     phase: .commitPending,
-                    recipe: drawing.recipe
+                    program: drawing.program
                 )
             )
             return [
@@ -351,7 +345,7 @@ public struct EditorTransaction: Equatable, Sendable {
                     token: drawing.token,
                     tool: drawing.tool,
                     phase: .commitPending,
-                    recipe: drawing.recipe
+                    program: drawing.program
                 )
             )
             return [.commitFinishedStroke(drawing.token)]
@@ -579,7 +573,7 @@ public struct EditorTransaction: Equatable, Sendable {
         _ event: EditorTransactionEvent
     ) -> Bool {
         switch event {
-        case let .pointerBegan(sample, _, _, _):
+        case let .pointerBegan(sample, _, _):
             return sample.phase == .began
         case let .pointerMoved(sample):
             return sample.phase == .moved

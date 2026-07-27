@@ -62,6 +62,13 @@ public struct BrushProgram: Equatable, Sendable {
     public let requiredCapabilities: Set<BrushCapability>
     public let ignoredOptionalCapabilityIdentifiers: [String]
     public let requestedBackend: BrushBackendKind
+
+    public var replayContract: BrushReplayContract {
+        BrushReplayContract(
+            mode: definition.replayMode,
+            limits: definition.replayLimits
+        )
+    }
 }
 
 public enum BrushProgramCompilerError: Error, Equatable, Sendable {

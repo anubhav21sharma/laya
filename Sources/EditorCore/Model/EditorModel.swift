@@ -25,9 +25,23 @@ public final class EditorModel {
     public private(set) var canRedo = false
     public private(set) var isBusy = false
 
+    public var selectedProgram: BrushProgram {
+        AnchorBrushCatalog.drawEntry(for: selectedRecipeID)?.program
+            ?? AnchorBrushCatalog.defaultDraw.program
+    }
+
+    @available(
+        *,
+        deprecated,
+        message: "Use selectedProgram; this is a Stage-2 compatibility view."
+    )
     public var selectedRecipe: BrushRecipe {
-        AnchorBrushCatalog.drawEntry(for: selectedRecipeID)?.recipe
-            ?? AnchorBrushCatalog.defaultDraw.recipe
+        guard let recipe = selectedProgram.compatibilityRecipe else {
+            preconditionFailure(
+                "Built-in editor selection must remain legacy-compatible"
+            )
+        }
+        return recipe
     }
 
     public var tiling: TilingKind {

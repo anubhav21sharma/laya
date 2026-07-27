@@ -16,7 +16,25 @@ public struct BrushMaterialState: Equatable, Sendable {
     public let shape: BrushShapeDescriptor
     public let grain: BrushGrainDescriptor
 
+    public init(program: BrushProgram) {
+        guard let recipe = program.compatibilityRecipe else {
+            preconditionFailure(
+                "Stage-2 material rendering requires a compatible program"
+            )
+        }
+        self.init(compatibilityRecipe: recipe)
+    }
+
+    @available(
+        *,
+        deprecated,
+        message: "Initialize material state from a compiled BrushProgram."
+    )
     public init(recipe: BrushRecipe) {
+        self.init(compatibilityRecipe: recipe)
+    }
+
+    private init(compatibilityRecipe recipe: BrushRecipe) {
         family = recipe.material.family
         grainCoordinateMode = recipe.grainCoordinateMode
         strokeOpacity = recipe.strokeOpacity
@@ -29,6 +47,15 @@ public struct BrushMaterialState: Equatable, Sendable {
         shape = recipe.shape
         grain = recipe.grain
     }
+
+    static let legacyEquivalent = BrushMaterialState(
+        program: StrokeRenderStyle(
+            color: .black,
+            diameter: 1,
+            compositeMode: .draw,
+            eraserStrength: 1
+        ).program
+    )
 
     public var uniforms: PatternBrushMaterialUniforms {
         PatternBrushMaterialUniforms(

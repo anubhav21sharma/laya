@@ -1,7 +1,8 @@
-import EditorCore
+@testable import EditorCore
+import Foundation
 import Metal
 @testable import MetalRenderer
-import PatternEngine
+@testable import PatternEngine
 import Testing
 
 #if os(macOS)
@@ -924,7 +925,7 @@ func brushChangeKeepsSubsequentEditorActionsCoherent() throws {
 
 @Test
 @MainActor
-func pointerDownCapturesSelectedRecipeAndUniqueNonzeroSeed() throws {
+func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let sessionEntropy: UInt64 = 0xA5A5_1234_5678_9ABC
     let controller = EditorSessionController(
@@ -935,7 +936,7 @@ func pointerDownCapturesSelectedRecipeAndUniqueNonzeroSeed() throws {
     controller.handleRecipe(AnchorBrushCatalog.glazeMarker.id)
     controller.handleStrokeSample(controllerSample(.began))
     let first = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(first.recipe == AnchorBrushCatalog.glazeMarker.recipe)
+    #expect(first.program == AnchorBrushCatalog.glazeMarker.program)
     #expect(first.seed == EditorSessionController.derivedStrokeSeed(
         sequence: 1,
         sessionEntropy: sessionEntropy
@@ -945,7 +946,7 @@ func pointerDownCapturesSelectedRecipeAndUniqueNonzeroSeed() throws {
     controller.handleRecipe(AnchorBrushCatalog.boundedWash.id)
     controller.handleStrokeSample(controllerSample(.began))
     let second = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(second.recipe == AnchorBrushCatalog.boundedWash.recipe)
+    #expect(second.program == AnchorBrushCatalog.boundedWash.program)
     #expect(second.seed == EditorSessionController.derivedStrokeSeed(
         sequence: 2,
         sessionEntropy: sessionEntropy
@@ -956,7 +957,7 @@ func pointerDownCapturesSelectedRecipeAndUniqueNonzeroSeed() throws {
     controller.handleTool(.erase)
     controller.handleStrokeSample(controllerSample(.began))
     let eraser = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(eraser.recipe == AnchorBrushCatalog.hardRoundEraser.recipe)
+    #expect(eraser.program == AnchorBrushCatalog.hardRoundEraser.program)
     #expect(eraser.seed == EditorSessionController.derivedStrokeSeed(
         sequence: 3,
         sessionEntropy: sessionEntropy
@@ -965,6 +966,121 @@ func pointerDownCapturesSelectedRecipeAndUniqueNonzeroSeed() throws {
     #expect(eraser.compositeMode == .erase)
     controller.handleStrokeSample(controllerSample(.cancelled))
 }
+
+#if DEBUG
+private final class BrushProgramCompileSpy: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    func record() {
+        lock.withLock { storage += 1 }
+    }
+
+    var count: Int {
+        lock.withLock { storage }
+    }
+}
+
+@Test
+@MainActor
+func pointerDownDoesNotCompileABrushProgram() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let spy = BrushProgramCompileSpy()
+
+    BrushProgramCompiler.$testInvocationObserver.withValue({
+        spy.record()
+    }) {
+        controller.handleStrokeSample(controllerSample(.began))
+        controller.handleStrokeSample(controllerSample(.cancelled))
+    }
+
+    #expect(spy.count == 0)
+}
+
+@Test
+@MainActor
+func anchorCatalogInitializesAllProgramsBeforePointerInputInFreshProcess()
+    throws
+{
+    if ProcessInfo.processInfo.environment[
+        "LAYA_TEST_FRESH_ANCHOR_CATALOG"
+    ] == "1" {
+        guard let renderer = try makeControllerRenderer() else { return }
+        let spy = BrushProgramCompileSpy()
+
+        BrushProgramCompiler.$testInvocationObserver.withValue({
+            spy.record()
+        }) {
+            let model = EditorModel()
+            #expect(spy.count == 5)
+            #expect(model.selectedProgram == AnchorBrushCatalog.technicalInk.program)
+            #expect(AnchorBrushCatalog.all.count == 5)
+            #expect(spy.count == 5)
+
+            let controller = EditorSessionController(
+                model: model,
+                renderer: renderer
+            )
+            controller.handleTool(.erase)
+            controller.handleStrokeSample(controllerSample(.began))
+            controller.handleStrokeSample(controllerSample(.cancelled))
+            #expect(spy.count == 5)
+        }
+        return
+    }
+
+    let result = try runFreshAnchorCatalogSubprocess()
+    if result.status != 0 {
+        Issue.record(
+            "Fresh catalog subprocess failed: \(result.standardError)"
+        )
+    }
+    #expect(result.status == 0)
+}
+
+private func runFreshAnchorCatalogSubprocess()
+    throws -> (status: Int32, standardError: String)
+{
+    let testExecutablePath = editorControllerTestExecutablePath()
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.arguments = [
+        "--test-bundle-path", testExecutablePath,
+        "--filter",
+        "anchorCatalogInitializesAllProgramsBeforePointerInputInFreshProcess",
+        testExecutablePath,
+        "--testing-library", "swift-testing",
+    ]
+    process.environment = ProcessInfo.processInfo.environment.merging(
+        ["LAYA_TEST_FRESH_ANCHOR_CATALOG": "1"],
+        uniquingKeysWith: { _, new in new }
+    )
+    process.standardOutput = FileHandle.nullDevice
+    let standardError = Pipe()
+    process.standardError = standardError
+
+    try process.run()
+    process.waitUntilExit()
+    let errorOutput = String(
+        decoding: standardError.fileHandleForReading.readDataToEndOfFile(),
+        as: UTF8.self
+    )
+    return (process.terminationStatus, errorOutput)
+}
+
+private func editorControllerTestExecutablePath() -> String {
+    guard
+        let optionIndex = CommandLine.arguments.firstIndex(
+            of: "--test-bundle-path"
+        ),
+        CommandLine.arguments.indices.contains(optionIndex + 1)
+    else {
+        preconditionFailure("Swift Testing test executable path is unavailable")
+    }
+    return CommandLine.arguments[optionIndex + 1]
+}
+#endif
 
 @Test
 @MainActor

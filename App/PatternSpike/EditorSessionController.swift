@@ -193,9 +193,9 @@ final class EditorSessionController {
             else { return }
             resetEstimatedUpdatesForNewStroke()
             trackPendingEstimatedProperties(in: sample)
-            let recipe = tool == .draw
-                ? model.selectedRecipe
-                : AnchorBrushCatalog.hardRoundEraser.recipe
+            let program = tool == .draw
+                ? model.selectedProgram
+                : AnchorBrushCatalog.hardRoundEraser.program
             let seed = takeStrokeSeed()
             event = .pointerBegan(
                 sample,
@@ -205,10 +205,9 @@ final class EditorSessionController {
                     diameter: model.brushDiameter,
                     compositeMode: tool == .draw ? .draw : .erase,
                     eraserStrength: model.eraserStrength,
-                    recipe: recipe,
+                    program: program,
                     seed: seed
-                ),
-                recipe: recipe
+                )
             )
         case .moved:
             guard isCollectingStroke else { return }
@@ -592,8 +591,7 @@ final class EditorSessionController {
 
     private func execute(_ effect: EditorTransactionEffect) throws {
         switch effect {
-        case let .beginStroke(token, sample, _, style, recipe):
-            precondition(style.recipe == recipe)
+        case let .beginStroke(token, sample, _, style):
             try renderer.beginStroke(
                 token: rendererToken(token),
                 sample: sample,
@@ -831,7 +829,7 @@ final class EditorSessionController {
             report(error)
         }
         switch effect {
-        case let .beginStroke(token, _, _, _, _),
+        case let .beginStroke(token, _, _, _),
              let .appendStroke(token, _),
              let .finishStrokeTransient(token, _),
              let .applyEstimatedUpdate(token, _):

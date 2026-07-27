@@ -25,12 +25,67 @@ import Testing
     #expect(Set(entries.map(\.id)).count == entries.count)
 }
 
+@Test
+func anchorProgramsArePrecompiledAndLegacyExact() throws {
+    for entry in AnchorBrushCatalog.all {
+        #expect(entry.program.definition == entry.definition)
+        #expect(
+            try LegacyBrushRecipeAdapter.recipe(from: entry.definition)
+                == entry.compatibilityRecipe
+        )
+        #expect(entry.program.compatibilityRecipe == entry.compatibilityRecipe)
+    }
+}
+
+@Test
+func programRenderStylePreservesFieldsAndRecipeCompatibility() {
+    let entry = AnchorBrushCatalog.dryPencil
+    let color = InkColor(
+        red: 0.25,
+        green: 0.5,
+        blue: 0.75,
+        alpha: 0.8
+    )!
+    let style = StrokeRenderStyle(
+        color: color,
+        diameter: 37,
+        compositeMode: .draw,
+        eraserStrength: 0.6,
+        program: entry.program,
+        seed: 91
+    )
+    let compatibilityStyle = StrokeRenderStyle(
+        color: color,
+        diameter: 37,
+        compositeMode: .draw,
+        eraserStrength: 0.6,
+        recipe: entry.compatibilityRecipe,
+        seed: 91
+    )
+
+    #expect(style.color == color)
+    #expect(style.diameter == 37)
+    #expect(style.compositeMode == .draw)
+    #expect(style.eraserStrength == 0.6)
+    #expect(style.program == entry.program)
+    #expect(style.seed == 91)
+    #expect(
+        compatibilityStyle.program.compatibilityRecipe
+            == entry.compatibilityRecipe
+    )
+    #expect(compatibilityStyle.program.dynamics == entry.program.dynamics)
+    #expect(
+        compatibilityStyle.program.requestedBackend
+            == entry.program.requestedBackend
+    )
+}
+
 @Test func anchorCatalogRecipesAreDistinctValidatedFixtures() throws {
-    let technical = AnchorBrushCatalog.technicalInk.recipe
-    let pencil = AnchorBrushCatalog.dryPencil.recipe
-    let glaze = AnchorBrushCatalog.glazeMarker.recipe
-    let wash = AnchorBrushCatalog.boundedWash.recipe
-    let eraser = AnchorBrushCatalog.hardRoundEraser.recipe
+    let technical = AnchorBrushCatalog.technicalInk.compatibilityRecipe
+    let pencil = AnchorBrushCatalog.dryPencil.compatibilityRecipe
+    let glaze = AnchorBrushCatalog.glazeMarker.compatibilityRecipe
+    let wash = AnchorBrushCatalog.boundedWash.compatibilityRecipe
+    let eraser = AnchorBrushCatalog.hardRoundEraser.compatibilityRecipe
 
     #expect(technical.shape == .hardRound)
     #expect(technical.material.family == .ink)
@@ -70,7 +125,10 @@ import Testing
 
     for entry in AnchorBrushCatalog.all {
         #expect(AnchorBrushCatalog.entry(for: entry.id) == entry)
-        #expect(AnchorBrushCatalog.recipe(for: entry.id) == entry.recipe)
+        #expect(
+            AnchorBrushCatalog.compatibilityRecipe(for: entry.id)
+                == entry.compatibilityRecipe
+        )
     }
     #expect(
         AnchorBrushCatalog.entry(for: BrushRecipeID("missing.recipe")) == nil

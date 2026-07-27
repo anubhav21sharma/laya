@@ -22,6 +22,7 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case documentDomainLocked
     case tilingChangeRequiresIdle
     case invalidStrokeLifecycle
+    case unsupportedBrushProgram
     case invalidRendererOperationToken
     case commitPendingInput
     case committedSnapshotUnavailable
@@ -87,6 +88,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
             "Tiling can only change while the renderer is idle."
         case .invalidStrokeLifecycle:
             "The requested stroke transition is invalid."
+        case .unsupportedBrushProgram:
+            "The current renderer cannot render this brush program."
         case .invalidRendererOperationToken:
             "The renderer operation token does not match the active operation."
         case .commitPendingInput:

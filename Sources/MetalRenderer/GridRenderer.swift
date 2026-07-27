@@ -353,7 +353,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         self.brushTextureResolver = brushTextureResolver
         activeShapeResolution = defaultShape
         activeGrainResolution = defaultGrain
-        activeMaterialState = BrushMaterialState(recipe: .legacyEquivalent)
+        activeMaterialState = .legacyEquivalent
         boundedWashSurface = nil
         lastBoundedWashWorkPlan = nil
         tilingStrategy = strategy
@@ -563,17 +563,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard sample.phase == .began, isIdle else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        guard let compatibilityRecipe = style.program.compatibilityRecipe else {
+            throw MetalRendererError.unsupportedBrushProgram
+        }
 
         counters = GridStructuralCounters()
         resetLiveState()
         activeShapeResolution = try brushTextureResolver.resolve(
-            shape: style.recipe.shape
+            shape: compatibilityRecipe.shape
         )
         activeGrainResolution = try brushTextureResolver.resolve(
-            grain: style.recipe.grain
+            grain: compatibilityRecipe.grain
         )
-        activeMaterialState = BrushMaterialState(recipe: style.recipe)
-        if style.recipe.material.family == .boundedWash {
+        activeMaterialState = BrushMaterialState(program: style.program)
+        if activeMaterialState.family == .boundedWash {
             do {
                 if boundedWashSurface?.pixelSize != storagePixelSize {
                     boundedWashSurface = try BoundedWashSurface(
@@ -598,13 +601,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )!
         }
         strokeGenerator = BrushStrokeGenerator(
-            recipe: style.recipe,
+            program: style.program,
             nominalDiameter: style.diameter,
             color: generatorColor,
             seed: style.seed
         )
         transientStrokeBuffer = TransientStrokeBuffer(
-            replayContract: style.recipe.replayContract
+            replayContract: style.program.replayContract
         )
         activeStroke = ActiveStrokeExecution(
             token: token,
@@ -906,8 +909,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard var buffer = transientStrokeBuffer else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let update = brushInputDeriver.derive(sample, viewport: viewport)
-        let plan = try buffer.planEstimatedUpdate(update)
+        var updateDeriver = brushInputDeriver
+        let update = updateDeriver.derive(sample, viewport: viewport)
+        let plan: EstimatedStrokeUpdatePlan
+        do {
+            plan = try buffer.planEstimatedUpdate(update)
+        } catch let error as TransientStrokeBufferError {
+            switch error {
+            case .unknownEstimatedUpdateIndex,
+                 .estimatedUpdateAlreadyResolved:
+                #if DEBUG
+                print("Ignoring late or unknown estimated stroke update: \(error)")
+                #endif
+                return
+            default:
+                throw error
+            }
+        }
         guard var generator = plan.generatorBeforeReplacement else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -1557,20 +1575,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             compositeMode: .draw,
             eraserStrength: 1
         )
+        guard let compatibilityRecipe = style.program.compatibilityRecipe else {
+            throw MetalRendererError.unsupportedBrushProgram
+        }
         resetLiveState()
         strokeGenerator = BrushStrokeGenerator(
-            recipe: style.recipe,
+            program: style.program,
             nominalDiameter: style.diameter,
             color: style.color,
             seed: style.seed
         )
         activeShapeResolution = try brushTextureResolver.resolve(
-            shape: style.recipe.shape
+            shape: compatibilityRecipe.shape
         )
         activeGrainResolution = try brushTextureResolver.resolve(
-            grain: style.recipe.grain
+            grain: compatibilityRecipe.grain
         )
-        activeMaterialState = BrushMaterialState(recipe: style.recipe)
+        activeMaterialState = BrushMaterialState(program: style.program)
         activeStroke = ActiveStrokeExecution(
             token: token,
             style: style,
@@ -2008,12 +2029,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 for transientDab in chunk.dabs {
                     let attributes: DabAttributes
                     if let totalDistance = knownStrokeTotalDistance {
+                        guard let compatibilityRecipe =
+                            activeStroke.style.program.compatibilityRecipe
+                        else {
+                            throw MetalRendererError.unsupportedBrushProgram
+                        }
                         attributes = BrushDynamicsEngine()
                             .applyingKnownTotalDistance(
                                 transientDab.attributes,
                                 totalDistance: totalDistance,
                                 nominalDiameter: activeStroke.style.diameter,
-                                recipe: activeStroke.style.recipe,
+                                recipe: compatibilityRecipe,
                                 retainedReplayStartDistance:
                                     retainedReplayStartDistance
                             )
@@ -2047,7 +2073,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             replacementRecords.map(\.dirtyRect),
             clippedTo: storagePixelSize
         )
-        if activeStroke.style.recipe.material.family == .boundedWash,
+        if activeMaterialState.family == .boundedWash,
            let boundedWashSurface
         {
             let plan = try boundedWashSurface.makeWorkPlan(
@@ -2058,8 +2084,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     )
                 },
                 topology: boundedWashTopology,
-                bleedRadius: activeStroke.style.recipe.material.bleedRadius,
-                softenPasses: activeStroke.style.recipe.material.softenPasses
+                bleedRadius: activeMaterialState.bleedRadius,
+                softenPasses: Int(activeMaterialState.softenPasses)
             )
             lastBoundedWashWorkPlan = plan
             accumulateBoundedWashHistory(plan.processingRegions)
@@ -2104,14 +2130,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard minimumAffineScale.isFinite, minimumAffineScale > 0 else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        guard let compatibilityRecipe =
+            activeStroke.style.program.compatibilityRecipe
+        else {
+            throw MetalRendererError.unsupportedBrushProgram
+        }
         let footprint = StampFootprint(
             brushToWorld: dab.brushToWorld,
             localBounds: AxisAlignedRect(
                 minimum: SIMD2(-1, -1),
                 maximum: SIMD2(1, 1)
             ),
-            coverageSymmetry:
-                activeStroke.style.recipe.footprintCoverageSymmetry
+            coverageSymmetry: compatibilityRecipe.footprintCoverageSymmetry
         )
         let color = InkColor(
             red: dab.color.red,

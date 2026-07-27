@@ -3,7 +3,15 @@ import Foundation
 public enum BrushProgramCompiler {
     public static let sampleCount = 256
 
+    #if DEBUG
+    @TaskLocal
+    static var testInvocationObserver: (@Sendable () -> Void)?
+    #endif
+
     public static func compile(_ definition: BrushDefinition) throws -> BrushProgram {
+        #if DEBUG
+        testInvocationObserver?()
+        #endif
         guard definition.schemaVersion == BrushDefinition.currentSchemaVersion else {
             throw BrushProgramCompilerError.unsupportedSchemaVersion(
                 definition.schemaVersion

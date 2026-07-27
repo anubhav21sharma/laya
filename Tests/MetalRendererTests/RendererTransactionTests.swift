@@ -550,6 +550,104 @@ func appendOnlyEstimatedSuffixStaysVisibleAndCommitsOnFallback() throws {
 
 @Test
 @MainActor
+func unknownAndLateEstimatedUpdatesAreIgnoredWithoutMutation() throws {
+    guard let renderer = try makeRenderer() else { return }
+    let token = RendererOperationToken(rawValue: 141)
+    try renderer.beginStroke(
+        token: token,
+        sample: strokeSample(.began, x: 12),
+        style: drawStyle
+    )
+    try renderer.appendStroke(
+        token: token,
+        sample: estimatedStrokeSample(
+            .moved,
+            x: 28,
+            index: 60,
+            expecting: [.pressure]
+        )
+    )
+
+    let beforeUnknownBuffer = renderer.transientStrokeBuffer
+    let beforeUnknownGenerator = renderer.strokeGenerator
+    let beforeUnknownLive = (
+        pendingCount: renderer.liveStroke.pending.count,
+        emitted: renderer.liveStroke.emittedHighWater,
+        baked: renderer.liveStroke.bakedHighWater,
+        epoch: renderer.liveStroke.renderEpoch
+    )
+    let beforeUnknownReplay = (
+        pendingCount: renderer.replayStroke.pending.count,
+        emitted: renderer.replayStroke.emittedHighWater,
+        baked: renderer.replayStroke.bakedHighWater,
+        epoch: renderer.replayStroke.renderEpoch
+    )
+    let beforeUnknownRevision = renderer.harnessRevision
+    try renderer.applyEstimatedStrokeUpdate(
+        token: token,
+        sample: estimatedStrokeSample(
+            .moved,
+            kind: .estimatedUpdate,
+            x: 32,
+            index: 999,
+            expecting: []
+        )
+    )
+    #expect(renderer.transientStrokeBuffer == beforeUnknownBuffer)
+    #expect(renderer.strokeGenerator == beforeUnknownGenerator)
+    #expect(renderer.liveStroke.pending.count == beforeUnknownLive.pendingCount)
+    #expect(renderer.liveStroke.emittedHighWater == beforeUnknownLive.emitted)
+    #expect(renderer.liveStroke.bakedHighWater == beforeUnknownLive.baked)
+    #expect(renderer.liveStroke.renderEpoch == beforeUnknownLive.epoch)
+    #expect(
+        renderer.replayStroke.pending.count == beforeUnknownReplay.pendingCount
+    )
+    #expect(renderer.replayStroke.emittedHighWater == beforeUnknownReplay.emitted)
+    #expect(renderer.replayStroke.bakedHighWater == beforeUnknownReplay.baked)
+    #expect(renderer.replayStroke.renderEpoch == beforeUnknownReplay.epoch)
+    #expect(renderer.harnessRevision == beforeUnknownRevision)
+
+    let resolved = estimatedStrokeSample(
+        .moved,
+        kind: .estimatedUpdate,
+        x: 28,
+        index: 60,
+        expecting: []
+    )
+    try renderer.applyEstimatedStrokeUpdate(token: token, sample: resolved)
+    let beforeLateBuffer = renderer.transientStrokeBuffer
+    let beforeLateGenerator = renderer.strokeGenerator
+    let beforeLateLive = (
+        pendingCount: renderer.liveStroke.pending.count,
+        emitted: renderer.liveStroke.emittedHighWater,
+        baked: renderer.liveStroke.bakedHighWater,
+        epoch: renderer.liveStroke.renderEpoch
+    )
+    let beforeLateReplay = (
+        pendingCount: renderer.replayStroke.pending.count,
+        emitted: renderer.replayStroke.emittedHighWater,
+        baked: renderer.replayStroke.bakedHighWater,
+        epoch: renderer.replayStroke.renderEpoch
+    )
+    let beforeLateRevision = renderer.harnessRevision
+    try renderer.applyEstimatedStrokeUpdate(token: token, sample: resolved)
+    #expect(renderer.transientStrokeBuffer == beforeLateBuffer)
+    #expect(renderer.strokeGenerator == beforeLateGenerator)
+    #expect(renderer.liveStroke.pending.count == beforeLateLive.pendingCount)
+    #expect(renderer.liveStroke.emittedHighWater == beforeLateLive.emitted)
+    #expect(renderer.liveStroke.bakedHighWater == beforeLateLive.baked)
+    #expect(renderer.liveStroke.renderEpoch == beforeLateLive.epoch)
+    #expect(renderer.replayStroke.pending.count == beforeLateReplay.pendingCount)
+    #expect(renderer.replayStroke.emittedHighWater == beforeLateReplay.emitted)
+    #expect(renderer.replayStroke.bakedHighWater == beforeLateReplay.baked)
+    #expect(renderer.replayStroke.renderEpoch == beforeLateReplay.epoch)
+    #expect(renderer.harnessRevision == beforeLateRevision)
+
+    try renderer.cancelStroke(token: token)
+}
+
+@Test
+@MainActor
 func strokeBeginCapturesDiameterColorAndCompositeMode() throws {
     guard let renderer = try makeRenderer() else { return }
     let drawToken = RendererOperationToken(rawValue: 21)
@@ -566,6 +664,7 @@ func strokeBeginCapturesDiameterColorAndCompositeMode() throws {
         style: capturedDraw
     )
 
+    #expect(renderer.strokeGenerator?.program == capturedDraw.program)
     #expect(renderer.harnessInterpolatorSpacing == 5)
     #expect(renderer.harnessCompositeMode == .draw)
     #expect(
@@ -588,6 +687,7 @@ func strokeBeginCapturesDiameterColorAndCompositeMode() throws {
         style: capturedErase
     )
 
+    #expect(renderer.strokeGenerator?.program == capturedErase.program)
     #expect(renderer.harnessCompositeMode == .erase)
     #expect(
         renderer.harnessPendingInstanceColors.allSatisfy {

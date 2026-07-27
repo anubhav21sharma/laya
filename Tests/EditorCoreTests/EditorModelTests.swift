@@ -12,7 +12,7 @@ func editorModelDefaultsToGrid() {
     #expect(model.brushDiameter == 20)
     #expect(model.eraserStrength == 1)
     #expect(model.selectedRecipeID == AnchorBrushCatalog.defaultDraw.id)
-    #expect(model.selectedRecipe == AnchorBrushCatalog.defaultDraw.recipe)
+    #expect(model.selectedProgram == AnchorBrushCatalog.defaultDraw.program)
     #expect(model.showGrid == false)
     #expect(model.tiling == .grid)
     #expect(model.pixelSize == PixelSize(width: 256, height: 256))
@@ -28,7 +28,7 @@ func editorModelConfirmsOnlyCatalogDrawRecipes() {
 
     model.confirmRecipe(AnchorBrushCatalog.dryPencil.id)
     #expect(model.selectedRecipeID == AnchorBrushCatalog.dryPencil.id)
-    #expect(model.selectedRecipe == AnchorBrushCatalog.dryPencil.recipe)
+    #expect(model.selectedProgram == AnchorBrushCatalog.dryPencil.program)
 
     model.confirmRecipe(AnchorBrushCatalog.hardRoundEraser.id)
     #expect(model.selectedRecipeID == AnchorBrushCatalog.dryPencil.id)
