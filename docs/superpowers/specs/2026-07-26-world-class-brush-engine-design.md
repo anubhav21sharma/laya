@@ -10,7 +10,7 @@
 
 **Implementation status (2026-07-28):** Stage 1 characterization and Stage 2
 engine foundation are correctness complete at commit
-`fb660b99133ad7aa8116adab03c7c1297de69479`. Physical-device performance,
+`4a1b7158a095d67e78ce70466f9577722268b483`. Physical-device performance,
 Apple Pencil/Wacom feel, true input-to-photon latency, ProMotion stability,
 thermal behavior, and memory-warning recovery remain unaccepted hardware
 gates. See

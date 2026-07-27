@@ -4,7 +4,7 @@
   And Input Acceptance Pending
 - **Date:** 2026-07-28
 - **Branch:** `main`
-- **Evidence commit:** `fb660b99133ad7aa8116adab03c7c1297de69479`
+- **Evidence commit:** `4a1b7158a095d67e78ce70466f9577722268b483`
 - **Governing specification:**
   `docs/superpowers/specs/2026-07-26-world-class-brush-engine-design.md`
 - **Implementation plan:**
@@ -50,7 +50,7 @@ Terminal result:
 
 ```text
 BRUSH FOUNDATION PERFORMANCE PENDING: unstable real-Metal timing environment 'Apple Paravirtual device'.
-BRUSH FOUNDATION CORRECTNESS PASS; PERFORMANCE PENDING artifacts=/Users/anubhav/git/laya/.build/brush-foundation-artifacts commit=fb660b99133ad7aa8116adab03c7c1297de69479
+BRUSH FOUNDATION CORRECTNESS PASS; PERFORMANCE PENDING artifacts=/Users/anubhav/git/laya/.build/brush-foundation-artifacts commit=4a1b7158a095d67e78ce70466f9577722268b483
 ```
 
 The command exited `2`, with correctness accepted and stable physical-device
@@ -130,7 +130,7 @@ BrushFoundationEvidenceGate \
   Tests/EditorCoreTests/Fixtures/brush-logical-v1.json \
   App/PatternSpike/Harness/Baselines/brush-foundation-v1.json \
   .build/brush-foundation-artifacts \
-  fb660b99133ad7aa8116adab03c7c1297de69479
+  4a1b7158a095d67e78ce70466f9577722268b483
 ```
 
 The terminal boundary rechecked the commit, tracked tree, index, and untracked
@@ -142,11 +142,11 @@ untouched and is not a build input.
 The committed gate's generated logs record:
 
 - pure `PatternEngineTests`: `285 tests in 8 suites`, passed in
-  `127.153 seconds`;
-- Slice 4 serialized full suite: `897 tests in 34 suites`, passed in
-  `325.524 seconds`;
-- final fresh-scratch serialized full suite: `897 tests in 34 suites`, passed
-  in `327.403 seconds`;
+  `129.252 seconds`;
+- Slice 4 serialized full suite: `901 tests in 34 suites`, passed in
+  `334.007 seconds`;
+- final fresh-scratch serialized full suite: `901 tests in 34 suites`, passed
+  in `337.648 seconds`;
 - focused foundation validator suite: `12 tests in 1 suite`, passed, including
   the real Metal compiler-probe-to-production-validator round trip.
 
