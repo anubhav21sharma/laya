@@ -76,13 +76,17 @@ Phase 5 persistence migration and format matrix.
 13. The first successful raster commit atomically installs both the new
     canonical bytes and `geometryLocked = true`. Begin, projection,
     allocation, encoding, or command failure leaves bytes and lock unchanged.
-14. Once locked, group, ray count, centre, and reference angle are read-only.
-    Undoing the first edit, redoing it, erasing all content, or Clear never
-    unlocks geometry. A new geometry requires a new document.
+14. While the current committed history state contains edits, group, ray
+    count, centre, reference angle, and document domain are read-only. Undoing
+    to the initial blank state or a successful explicit Clear unlocks them.
+    Undoing Clear or redoing an edit relocks them. Erase alone does not infer
+    logical emptiness. A blank domain/geometry change atomically discards the
+    old domain's undo/redo history.
 15. Finite resize remains crop/expand without scaling. The centre and
     reference angle remain in document-world coordinates. The resize rebuilds
     the sector layout and copies a canonical orbit iff at least one generated
-    image remains inside the new canvas. Resize never unlocks geometry.
+    image remains inside the new canvas. Resize preserves the current
+    content-state lock, so a blank resize remains editable.
 16. Full finite export uses the same Metal fold/page-table sampler as display,
     at the document pixel dimensions. It supports transparency, makes no
     repeat claim, and cannot mutate pixels, history, viewport, or lock state.
@@ -207,6 +211,7 @@ Steps:
 - [x] Expose Plain, Mirror, Rotation, Mandala, arbitrary rays, quick presets,
   centre, reference angle, grid, and visible lock state.
 - [x] Lock only on successful first raster commit.
+- [x] Reconcile the lock with Clear and undo/redo blank-state transitions.
 - [x] Keep locked controls visible and disabled, not silently ignored.
 - [x] Preserve numeric-field shortcut isolation and existing controls.
 - [x] Prove failed first edit, undo/redo, Clear, eraser, and grid behavior.

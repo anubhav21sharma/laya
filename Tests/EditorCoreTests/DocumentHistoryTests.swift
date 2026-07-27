@@ -267,6 +267,46 @@ func preflightRejectsNegativeAndOversizedCommands() {
     }
 }
 
+@Test
+func documentEmptinessTracksClearUndoRedoAndPrunedHistory() throws {
+    let history = DocumentHistory()
+    let draw = makeRasterCommand(seed: 1, kind: .draw, bytes: 16)
+    let clear = makeRasterCommand(seed: 2, kind: .clear, bytes: 16)
+
+    #expect(history.currentDocumentIsEmpty)
+    _ = history.appendSuccessful(draw)
+    #expect(!history.currentDocumentIsEmpty)
+    _ = history.appendSuccessful(clear)
+    #expect(history.currentDocumentIsEmpty)
+
+    let undoClear = try #require(try history.beginUndo())
+    #expect(!undoClear.targetDocumentIsEmpty)
+    try history.finishNavigation(token: undoClear.token, succeeded: true)
+    #expect(!history.currentDocumentIsEmpty)
+
+    let undoDraw = try #require(try history.beginUndo())
+    #expect(undoDraw.targetDocumentIsEmpty)
+    try history.finishNavigation(token: undoDraw.token, succeeded: true)
+    #expect(history.currentDocumentIsEmpty)
+
+    let redoDraw = try #require(try history.beginRedo())
+    #expect(!redoDraw.targetDocumentIsEmpty)
+    try history.finishNavigation(token: redoDraw.token, succeeded: true)
+    #expect(!history.currentDocumentIsEmpty)
+
+    let imported = DocumentHistory(initialDocumentIsEmpty: false)
+    #expect(!imported.currentDocumentIsEmpty)
+    _ = imported.appendSuccessful(clear)
+    #expect(imported.currentDocumentIsEmpty)
+    let restoreImported = try #require(try imported.beginUndo())
+    #expect(!restoreImported.targetDocumentIsEmpty)
+
+    let pruned = DocumentHistory(maximumCommands: 0, maximumBytes: 16)
+    _ = pruned.appendSuccessful(draw)
+    #expect(!pruned.currentDocumentIsEmpty)
+    #expect(pruned.commandCount == 0)
+}
+
 private func makeRasterCommand(
     seed: UInt64 = 1,
     kind: RasterEditKind = .draw,

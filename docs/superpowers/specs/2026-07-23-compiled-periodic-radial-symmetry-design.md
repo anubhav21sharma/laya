@@ -199,7 +199,9 @@ The following requirements are load-bearing:
 2. Periodic preset changes never rewrite canonical bytes.
 3. Returning to a prior periodic configuration restores its exact prior
    rendering.
-4. Radial geometry is immutable after its first successful raster edit.
+4. Radial geometry is immutable while the document is logically nonblank.
+   Clear or undo to the initial blank state unlocks it; undoing Clear or
+   redoing an edit locks it again.
 5. World-space interpolation precedes symmetry projection.
 6. Group operations are Euclidean translations, rotations, or reflections in
    world space; no symmetry generator scales artwork.
@@ -423,12 +425,18 @@ commits.
 
 After lock:
 
-- geometry controls are read-only;
-- undoing the first edit does not unlock geometry;
-- clearing all pixels does not unlock geometry;
-- a different geometry requires a new document.
+- geometry controls are read-only while the current committed history state
+  contains raster edits;
+- undoing back to the initial blank state unlocks geometry;
+- a successful explicit Clear unlocks geometry;
+- undoing Clear or redoing an edit locks geometry again;
+- erasing until the raster happens to look transparent does not infer
+  emptiness and does not unlock geometry;
+- changing domain or radial geometry while blank replaces the empty storage
+  atomically and discards the prior domain's undo/redo history.
 
-This prevents history and saved canonical pixels from changing meaning.
+This prevents history and saved canonical pixels from changing meaning while
+still allowing an empty document to be reconfigured.
 
 Finite-canvas resize is not a radial geometry change. It follows the existing
 crop-or-expand rule without scaling: the centre and reference axis remain at
@@ -437,7 +445,8 @@ operates on canonical orbits: a source pixel survives while any generated
 image remains inside the new canvas, and is removed only when its complete
 orbit is outside. Expansion allocates newly reachable pages as transparent,
 except where a surviving canonical orbit already supplies the newly visible
-image. Resize does not unlock geometry.
+image. Resize preserves the current content-state lock: resizing a blank
+document remains editable, while resizing an edited document remains locked.
 
 ## 8. Stamp Equivalence And Deduplication
 
@@ -511,6 +520,11 @@ Creation presents:
 - Seamless Pattern;
 - Radial / Mandala;
 - Plain Canvas as the identity finite preset.
+
+Seamless Pattern starts at a `256 x 256` canonical repeat. Radial and Plain
+start at a `2048 x 2048` finite canvas. Switching domains while blank installs
+the target domain's default size; switching between Plain and Radial preserves
+the current finite canvas size.
 
 ### 10.2 Pattern inspector
 
@@ -716,7 +730,8 @@ Radial tests additionally cover:
 
 - Domain selection creates the intended inspector.
 - Pattern parameters remain editable only while the editor is idle.
-- Radial controls lock after the first successful edit.
+- Radial controls lock after the first successful edit and unlock only after
+  Clear or undo restores the initial blank state.
 - A failed first edit does not lock them.
 - Keyboard shortcuts do not capture focused numeric entry.
 - Grid visibility does not disable preset, clear, or drawing controls.
@@ -802,7 +817,7 @@ The expansion is complete only when:
 - existing seven modes remain byte-compatible;
 - Kaleidoscope 30 degrees produces a genuinely repeatable rectangular export;
 - radial edits remain linked through one canonical sector;
-- radial geometry cannot change after lock;
+- radial geometry cannot change while the current committed state is locked;
 - every raster-changing tool uses the shared projector;
 - CPU oracle and real Metal show no holes or phantom copies;
 - fixed-point dabs do not multiply opacity unless distinct oriented images are
@@ -824,7 +839,8 @@ symmetries from rotational and mandala artwork.
 
 Laya deliberately differs in two areas:
 
-- radial geometry becomes immutable after the first committed edit;
+- radial geometry remains immutable while the document is logically nonblank,
+  but Clear or undo to the initial blank state unlocks it;
 - per-layer symmetry remains deferred.
 
 References:

@@ -180,8 +180,8 @@ Attached-terminal UI acceptance covered both storage models:
 - the archive passed system `unzip -t`;
 - a fresh open restored exact dimensions, pixels, viewport-backed display,
   grid control, and tiling selection;
-- an eight-ray Mandala committed a dab and permanently exposed the radial
-  geometry lock;
+- an eight-ray Mandala committed a dab and exposed the radial geometry lock
+  while committed edits remained;
 - the radial archive contained the manifest, tiling, layer, surface, and one
   sparse logical page;
 - a fresh open restored the radial pixels, eight-ray configuration, and

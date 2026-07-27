@@ -18,7 +18,7 @@ Phase 4 adds the approved finite document domain beside Seamless Pattern:
 - arbitrary Mandala/Kaleidoscope (`D_n`) for integer rays `2...32`;
 - quick ray presets `4`, `6`, `8`, `12`, and `16`;
 - one linked Cartesian canonical sector stored in deterministic sparse pages;
-- pre-edit centre/reference/group/ray setup and permanent first-edit locking;
+- pre-edit centre/reference/group/ray setup and content-state locking;
 - finite crop/transparent-fill resize and full-canvas flattened export;
 - an independent radial oracle and real-Metal evidence matrix.
 
@@ -44,9 +44,10 @@ reject, rather than clamp, values outside `2...32`.
 
 The centre must lie inside the half-open finite canvas. Reference angles are
 finite and normalized to `[-π, π)`. The first successful raster operation
-permanently locks the finite domain and radial geometry. Begin, projection,
-allocation, encoding, and GPU command failures leave both pixels and lock
-state unchanged.
+locks the finite domain and radial geometry while committed edits remain.
+Clear or undo to the initial blank state unlocks it; undoing Clear or redoing
+an edit relocks it. Begin, projection, allocation, encoding, and GPU command
+failures leave both pixels and lock state unchanged.
 
 ## Cartesian Sector And Page Storage
 
@@ -105,10 +106,25 @@ creation states. The finite inspector provides:
 - centre X/Y and reference-angle entry;
 - grid/guide visibility and an explicit lock explanation.
 
-Geometry controls remain visible but disabled after lock. Numeric fields use
+Seamless Pattern defaults to `256 x 256`; both finite modes default to
+`2048 x 2048`. Geometry controls remain visible but disabled while locked.
+Numeric fields use
 non-editor focus targets, so digit input is not consumed by tiling shortcuts.
 Controller/model tests prove successful lock, failed-first-edit rollback,
 undo/redo, Clear, eraser, grid, resize, and domain switching behavior.
+
+Changing domain or radial geometry after Clear or undo to the initial blank
+state discards the prior domain's history before installing new empty storage,
+so no retained revision changes meaning.
+
+### Content-state correction verification — 2026-07-26
+
+The default-size and empty-document correction is covered across all three
+document modes. Real-Metal controller tests prove that a successful edit locks
+mode changes, undo to the initial state unlocks them, Clear unlocks them, and
+undo/redo restores the matching lock state. Blank resize remains editable.
+The final package run passed `664 tests in 25 suites`; freshly generated macOS
+and generic iPad Simulator builds and both Xcode `analyze` passes exited `0`.
 
 ## Complete Regression Gate
 

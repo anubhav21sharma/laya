@@ -425,9 +425,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         if case .finite = tilingStrategy.documentConfiguration {
-            guard !documentDomainLocked else {
-                throw MetalRendererError.documentDomainLocked
-            }
+            try requireEmptyConfigurationChangeAllowed()
             try installEmptyStrategy(proposed)
         } else {
             tilingStrategy = proposed
@@ -437,29 +435,47 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public func applyFiniteConfiguration(
         _ configuration: FiniteSymmetryConfiguration
     ) throws {
+        try replaceEmptyDocumentConfiguration(
+            .finite(configuration),
+            pixelSize: pixelSize
+        )
+    }
+
+    public func replaceEmptyDocumentConfiguration(
+        _ configuration: SymmetryDocumentConfiguration,
+        pixelSize proposedPixelSize: PixelSize
+    ) throws {
         guard isIdle else {
             throw MetalRendererError.tilingChangeRequiresIdle
         }
-        guard !documentDomainLocked else {
-            if case .finite(.radial) =
-                tilingStrategy.documentConfiguration
-            {
-                throw MetalRendererError.radialGeometryLocked
-            }
-            throw MetalRendererError.documentDomainLocked
-        }
+        try requireEmptyConfigurationChangeAllowed()
+        try validateTileSize(proposedPixelSize)
         let proposed: TilingStrategy
         do {
             proposed = try TilingStrategy(
-                finiteConfiguration: configuration,
-                canvasSize: pixelSize
+                documentConfiguration: configuration,
+                canvasSize: proposedPixelSize
             )
         } catch {
-            throw MetalRendererError.invalidSymmetryConfiguration(
-                error.localizedDescription
-            )
+            switch configuration {
+            case .periodic:
+                throw MetalRendererError.invalidPeriodicConfiguration(
+                    error.localizedDescription
+                )
+            case .finite:
+                throw MetalRendererError.invalidSymmetryConfiguration(
+                    error.localizedDescription
+                )
+            }
         }
         try installEmptyStrategy(proposed)
+    }
+
+    public func reconcileGeometryLock(documentIsEmpty: Bool) throws {
+        guard isIdle else {
+            throw MetalRendererError.commitPendingInput
+        }
+        setDocumentGeometryLocked(!documentIsEmpty)
     }
 
     public func setFiniteConfiguration(
@@ -471,6 +487,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func installEmptyStrategy(
         _ proposed: TilingStrategy
     ) throws {
+        let canvasSizeChanged = proposed.canvasSize != pixelSize
         let proposedStorageSize = PixelSize(
             width: Int(proposed.tileSize.width),
             height: Int(proposed.tileSize.height)
@@ -500,6 +517,28 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             tilingStrategy = priorStrategy
             radialPageTableTexture = priorPageTable
             throw error
+        }
+        setDocumentGeometryLocked(false)
+        if canvasSizeChanged {
+            viewport = ViewportTransform(
+                drawableSize: viewport.drawableSize,
+                worldCenter: WorldPoint(
+                    x: Float(proposed.canvasSize.width) * 0.5,
+                    y: Float(proposed.canvasSize.height) * 0.5
+                ),
+                zoom: 1
+            )
+        }
+    }
+
+    private func requireEmptyConfigurationChangeAllowed() throws {
+        guard !documentDomainLocked else {
+            if case .finite(.radial) =
+                tilingStrategy.documentConfiguration
+            {
+                throw MetalRendererError.radialGeometryLocked
+            }
+            throw MetalRendererError.documentDomainLocked
         }
     }
 
@@ -3634,7 +3673,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 }
                 canonical.acceptScratchCommit()
                 revisionStore.publish(operation.revisions)
-                lockDocumentGeometryAfterRasterMutation()
+                setDocumentGeometryLocked(false)
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
                 onOperationCompleted?(
@@ -3688,7 +3727,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     .acceptScratchCommit()
                 revisionStore.publish(operation.revisions)
                 install(operation.replacement)
-                lockDocumentGeometryAfterRasterMutation()
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
                 onOperationCompleted?(
@@ -3797,13 +3835,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return submissionID
     }
 
-    private func lockDocumentGeometryAfterRasterMutation() {
-        documentDomainLocked = true
-        if case let .finite(finite) = tilingStrategy.documentConfiguration,
-           case .radial = finite
-        {
-            radialGeometryLocked = true
-        }
+    private func setDocumentGeometryLocked(_ locked: Bool) {
+        documentDomainLocked = locked
+        radialGeometryLocked =
+            locked
+            && tilingStrategy.compiledSymmetry.domain.finite?
+                .radial.layout != nil
     }
 
     private func installRasterCompletionHandler(
@@ -3925,7 +3962,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             canonical.acceptScratchCommit()
             revisionStore.publish(commit.revisions)
-            lockDocumentGeometryAfterRasterMutation()
+            setDocumentGeometryLocked(true)
             let receipt = RasterMutationReceipt(
                 token: commit.token,
                 before: commit.revisions.before,

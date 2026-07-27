@@ -54,6 +54,45 @@ struct CommittedDocumentSnapshotTests {
 
     @Test
     @MainActor
+    func transparentButLogicallyEditedPeriodicSnapshotStaysLocked()
+        throws
+    {
+        guard let (device, library) = try snapshotTestMetal() else {
+            return
+        }
+        let size = PixelSize(width: 64, height: 64)
+        let configuration = SymmetryDocumentConfiguration.periodic(
+            .legacy(
+                presetID: .grid,
+                tileSize: PatternSize(width: 64, height: 64)
+            )
+        )
+        let renderer = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 64, height: 64),
+            configuration: TilingCanvasConfiguration(
+                pixelSize: size,
+                documentConfiguration: configuration
+            )
+        )
+        try renderer.reconcileGeometryLock(documentIsEmpty: false)
+        #expect(renderer.documentDomainLocked)
+
+        let snapshot = try renderer.captureCommittedDocument()
+        let restored = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 64, height: 64),
+            committedSnapshot: snapshot
+        )
+
+        #expect(restored.documentDomainLocked)
+        #expect(!restored.radialGeometryLocked)
+    }
+
+    @Test
+    @MainActor
     func activeDraftIsExcludedFromCommittedCapture() throws {
         guard let (device, library) = try snapshotTestMetal() else {
             return

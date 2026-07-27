@@ -95,15 +95,18 @@ public struct HistoryNavigation: Equatable, Sendable {
     public let token: UInt64
     public let direction: Direction
     public let command: DocumentHistoryCommand
+    public let targetDocumentIsEmpty: Bool
 
     public init(
         token: UInt64,
         direction: Direction,
-        command: DocumentHistoryCommand
+        command: DocumentHistoryCommand,
+        targetDocumentIsEmpty: Bool
     ) {
         self.token = token
         self.direction = direction
         self.command = command
+        self.targetDocumentIsEmpty = targetDocumentIsEmpty
     }
 }
 
@@ -125,15 +128,18 @@ public final class DocumentHistory {
     private var cursor = 0
     private var pendingNavigation: HistoryNavigation?
     private var nextNavigationToken: UInt64 = 0
+    private var baseDocumentIsEmpty: Bool
 
     public init(
         maximumCommands: Int = 100,
-        maximumBytes: Int = 200 * 1_024 * 1_024
+        maximumBytes: Int = 200 * 1_024 * 1_024,
+        initialDocumentIsEmpty: Bool = true
     ) {
         precondition(maximumCommands >= 0)
         precondition(maximumBytes >= 0)
         self.maximumCommands = maximumCommands
         self.maximumBytes = maximumBytes
+        baseDocumentIsEmpty = initialDocumentIsEmpty
     }
 
     public var canUndo: Bool {
@@ -142,6 +148,10 @@ public final class DocumentHistory {
 
     public var canRedo: Bool {
         cursor < commands.count
+    }
+
+    public var currentDocumentIsEmpty: Bool {
+        documentIsEmpty(at: cursor)
     }
 
     public func beginUndo() throws -> HistoryNavigation? {
@@ -197,6 +207,7 @@ public final class DocumentHistory {
         cursor = 0
         commandCount = 0
         retainedRasterBytes = 0
+        baseDocumentIsEmpty = true
         return released
     }
 
@@ -214,7 +225,11 @@ public final class DocumentHistory {
         updateRetainedRasterBytes()
 
         while commands.count > maximumCommands || retainedRasterBytes > maximumBytes {
-            commands.removeFirst()
+            let removed = commands.removeFirst()
+            baseDocumentIsEmpty = documentIsEmpty(
+                after: removed,
+                startingEmpty: baseDocumentIsEmpty
+            )
             cursor -= 1
             updateRetainedRasterBytes()
         }
@@ -233,10 +248,12 @@ public final class DocumentHistory {
         direction: HistoryNavigation.Direction,
         command: DocumentHistoryCommand
     ) -> HistoryNavigation {
+        let targetCursor = direction == .undo ? cursor - 1 : cursor + 1
         let navigation = HistoryNavigation(
             token: nextNavigationToken,
             direction: direction,
-            command: command
+            command: command,
+            targetDocumentIsEmpty: documentIsEmpty(at: targetCursor)
         )
         nextNavigationToken &+= 1
         pendingNavigation = navigation
@@ -252,6 +269,30 @@ public final class DocumentHistory {
     private func updateRetainedRasterBytes() {
         retainedRasterBytes = commands.reduce(into: 0) { total, command in
             total = saturatedSum(total, command.retainedBytes)
+        }
+    }
+
+    private func documentIsEmpty(at cursor: Int) -> Bool {
+        precondition((0...commands.count).contains(cursor))
+        return commands[..<cursor].reduce(baseDocumentIsEmpty) {
+            documentIsEmpty(after: $1, startingEmpty: $0)
+        }
+    }
+
+    private func documentIsEmpty(
+        after command: DocumentHistoryCommand,
+        startingEmpty: Bool
+    ) -> Bool {
+        switch command {
+        case let .raster(command):
+            switch command.kind {
+            case .draw, .erase:
+                false
+            case .clear:
+                true
+            }
+        case .tiling, .periodicConfiguration, .tileResize:
+            startingEmpty
         }
     }
 }

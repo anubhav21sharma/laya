@@ -10,11 +10,13 @@ public final class EditorModel {
     public private(set) var eraserStrength: Float = 1
     public private(set) var selectedRecipeID = AnchorBrushCatalog.defaultDraw.id
     public private(set) var showGrid = false
-    public private(set) var pixelSize = PixelSize(width: 256, height: 256)
+    public private(set) var pixelSize =
+        EditorConfiguration.defaultPeriodicPixelSize
     public private(set) var periodicConfiguration =
         PeriodicSymmetryConfiguration.defaultConfiguration(
             presetID: .grid,
-            canonicalRasterSize: PixelSize(width: 256, height: 256)
+            canonicalRasterSize:
+                EditorConfiguration.defaultPeriodicPixelSize
         )
     public private(set) var finiteConfiguration: FiniteSymmetryConfiguration?
     public private(set) var radialGeometryLocked = false

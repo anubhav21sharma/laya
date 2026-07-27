@@ -321,20 +321,11 @@ struct TilingInspector: View {
                 runtimeError = nil
                 switch mode {
                 case .seamlessPattern:
-                    controller.handlePeriodicConfiguration(
-                        controller.model.periodicConfiguration
-                    )
+                    controller.selectSeamlessPatternMode()
                 case .plainCanvas:
-                    controller.handleFiniteConfiguration(.plain)
+                    controller.selectPlainCanvasMode()
                 case .radial:
-                    controller.handleFiniteConfiguration(
-                        .radial(
-                            controller.model.radialConfiguration
-                                ?? Self.defaultRadialConfiguration(
-                                    pixelSize: controller.model.pixelSize
-                                )
-                        )
-                    )
+                    controller.selectRadialMode()
                 }
                 requestEditorFocus()
             }

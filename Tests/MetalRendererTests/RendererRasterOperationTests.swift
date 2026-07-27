@@ -288,6 +288,7 @@ func failedClearKeepsCanonicalAndDiscardsOnlyProvisionalPair() throws {
     )
     #expect(try centerBGRA(renderer) == centerBefore)
     #expect(renderer.harnessRasterRevisionResidentBytes == publishedBytes)
+    #expect(renderer.documentDomainLocked)
     #expect(completions.count == 1)
     guard case let .failure(token, _) = completions.first else {
         Issue.record("Expected clear failure without a raster receipt")

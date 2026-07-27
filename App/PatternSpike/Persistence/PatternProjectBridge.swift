@@ -112,6 +112,7 @@ enum PatternProjectBridge {
                 offsetY: viewport.worldCenter.y
             ),
             documentConfiguration: snapshot.documentConfiguration,
+            documentDomainLocked: snapshot.documentDomainLocked,
             radialGeometryLocked: snapshot.radialGeometryLocked,
             activeLayerID: identity.layerID,
             layers: [
@@ -193,9 +194,32 @@ enum PatternProjectBridge {
             }
             storage = .radialPages(pages)
         }
+        let documentDomainLocked: Bool
+        if project.metadata.sourceSchemaVersion
+            == PatternProjectFormat.currentSchemaVersion
+        {
+            documentDomainLocked = metadata.documentDomainLocked
+        } else {
+            switch storage {
+            case let .singleRaster(bytes):
+                documentDomainLocked = metadata.radialGeometryLocked
+                    || bytes.contains(where: { $0 != 0 })
+            case let .radialPages(pages):
+                documentDomainLocked = metadata.radialGeometryLocked
+                    || pages.contains {
+                        $0.bgra8PremultipliedBytes.contains {
+                            $0 != 0
+                        }
+                }
+            }
+        }
+        guard documentDomainLocked || !storage.containsNonzeroBytes else {
+            throw PatternProjectBridgeError.incompatibleSurface
+        }
         return CommittedDocumentSnapshot(
             canvasSize: metadata.canvasSize,
             documentConfiguration: metadata.documentConfiguration,
+            documentDomainLocked: documentDomainLocked,
             radialGeometryLocked: metadata.radialGeometryLocked,
             storage: storage
         )
@@ -220,5 +244,18 @@ enum PatternProjectBridge {
             zoom: viewport.scale
         )
         return renderer
+    }
+}
+
+private extension CommittedRasterStorage {
+    var containsNonzeroBytes: Bool {
+        switch self {
+        case let .singleRaster(bytes):
+            bytes.contains(where: { $0 != 0 })
+        case let .radialPages(pages):
+            pages.contains {
+                $0.bgra8PremultipliedBytes.contains(where: { $0 != 0 })
+            }
+        }
     }
 }

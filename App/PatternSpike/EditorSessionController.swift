@@ -27,7 +27,7 @@ final class EditorSessionController {
     private var nextStrokeSequence: UInt64 = 1
 
     private var transaction = EditorTransaction()
-    private var history = DocumentHistory()
+    private var history: DocumentHistory
     private var pendingRasterMutation: PendingRasterMutation?
     private var pendingTileResize: PendingTileResize?
     private var pendingHistoryNavigation: PendingHistoryNavigation?
@@ -93,6 +93,9 @@ final class EditorSessionController {
     ) {
         self.model = model
         self.renderer = renderer
+        history = DocumentHistory(
+            initialDocumentIsEmpty: !renderer.documentDomainLocked
+        )
         self.strokeSeedSessionEntropy = strokeSeedSessionEntropy
         self.releaseRasterRevisions = releaseRasterRevisions ?? {
             renderer.releaseRasterRevisions($0)
@@ -113,8 +116,8 @@ final class EditorSessionController {
         self.requestStrokeCancellation = requestStrokeCancellation ?? {
             try renderer.cancelStroke(token: $0)
         }
-        model.confirmPixelSize(renderer.pixelSize)
         model.confirmDocumentConfiguration(renderer.documentConfiguration)
+        model.confirmPixelSize(renderer.pixelSize)
         model.confirmGeometryLocks(
             documentDomainLocked: renderer.documentDomainLocked,
             radialGeometryLocked: renderer.radialGeometryLocked
@@ -243,6 +246,28 @@ final class EditorSessionController {
         _ configuration: FiniteSymmetryConfiguration
     ) {
         replaceEmptyDocumentConfiguration(.finite(configuration))
+    }
+
+    func selectSeamlessPatternMode() {
+        handlePeriodicConfiguration(model.periodicConfiguration)
+    }
+
+    func selectPlainCanvasMode() {
+        handleFiniteConfiguration(.plain)
+    }
+
+    func selectRadialMode() {
+        let targetSize = targetPixelSize(for: .finite(.plain))
+        let radial = model.radialConfiguration
+            ?? RadialSymmetryConfiguration(
+                kind: .mandala,
+                rayCount: 8,
+                center: WorldPoint(
+                    x: Float(targetSize.width) * 0.5,
+                    y: Float(targetSize.height) * 0.5
+                )
+            )
+        handleFiniteConfiguration(.radial(radial))
     }
 
     func handleTileSize(_ pixelSize: PixelSize) {
@@ -821,6 +846,11 @@ final class EditorSessionController {
                 token: pendingHistoryNavigation.historyToken,
                 succeeded: succeeded
             )
+            if succeeded {
+                try renderer.reconcileGeometryLock(
+                    documentIsEmpty: history.currentDocumentIsEmpty
+                )
+            }
             self.pendingHistoryNavigation = nil
         } catch {
             preconditionFailure(
@@ -831,6 +861,7 @@ final class EditorSessionController {
 
     private func refreshDerivedModelState() {
         model.confirmDocumentConfiguration(renderer.documentConfiguration)
+        model.confirmPixelSize(renderer.pixelSize)
         model.confirmGeometryLocks(
             documentDomainLocked: renderer.documentDomainLocked,
             radialGeometryLocked: renderer.radialGeometryLocked
@@ -852,15 +883,20 @@ final class EditorSessionController {
             report(.tilingChangeRequiresIdle)
             return
         }
-        do {
-            switch configuration {
-            case let .periodic(periodic):
-                try renderer.applyPeriodicConfiguration(periodic)
-            case let .finite(finite):
-                try renderer.applyFiniteConfiguration(finite)
+        guard history.currentDocumentIsEmpty else {
+            if case .finite(.radial) = renderer.documentConfiguration {
+                report(.radialGeometryLocked)
+            } else {
+                report(.documentDomainLocked)
             }
+            return
+        }
+        do {
+            try renderer.replaceEmptyDocumentConfiguration(
+                configuration,
+                pixelSize: targetPixelSize(for: configuration)
+            )
             releaseRasterRevisions(history.removeAll())
-            model.confirmDocumentConfiguration(renderer.documentConfiguration)
             refreshDerivedModelState()
         } catch let error as MetalRendererError {
             report(error)
@@ -871,6 +907,21 @@ final class EditorSessionController {
 
     private func confirmPixelSizeAndClampDiameter(_ pixelSize: PixelSize) {
         model.confirmPixelSize(pixelSize)
+    }
+
+    private func targetPixelSize(
+        for configuration: SymmetryDocumentConfiguration
+    ) -> PixelSize {
+        guard configuration.domainID != model.documentConfiguration.domainID
+        else {
+            return model.pixelSize
+        }
+        switch configuration {
+        case .periodic:
+            return EditorConfiguration.defaultPeriodicPixelSize
+        case .finite:
+            return EditorConfiguration.defaultFinitePixelSize
+        }
     }
 
     private func report(_ error: MetalRendererError) {

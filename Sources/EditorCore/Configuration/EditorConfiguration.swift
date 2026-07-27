@@ -4,6 +4,14 @@ public enum EditorConfiguration {
     public static let defaultBrushDiameter: Float = 20
     public static let minimumBrushDiameter: Float = 2
     public static let maximumBrushDiameter: Float = 2_000
+    public static let defaultPeriodicPixelSize = PixelSize(
+        width: 256,
+        height: 256
+    )
+    public static let defaultFinitePixelSize = PixelSize(
+        width: 2_048,
+        height: 2_048
+    )
     public static let minimumTileDimension = 64
     public static let maximumTileDimension = 4_096
 

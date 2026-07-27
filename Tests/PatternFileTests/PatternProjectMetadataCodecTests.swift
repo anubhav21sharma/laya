@@ -34,6 +34,52 @@ struct PatternProjectMetadataCodecTests {
     }
 
     @Test
+    func schemaThreeAcceptsIndependentPeriodicDocumentLock() throws {
+        let current = try PatternProjectMetadataCodec.encode(
+            fixture(preset: .grid)
+        )
+        let schemaThree = PatternProjectMetadataFiles(
+            manifest: try mutateJSON(current.manifest) {
+                $0["schemaVersion"] = 3
+            },
+            symmetry: try mutateJSON(current.symmetry) {
+                $0["documentDomainLocked"] = true
+            },
+            layersByPath: current.layersByPath
+        )
+
+        let decoded = try PatternProjectMetadataCodec.decode(schemaThree)
+
+        #expect(decoded.sourceSchemaVersion == 3)
+        #expect(decoded.metadata.documentDomainLocked)
+        #expect(!decoded.metadata.radialGeometryLocked)
+    }
+
+    @Test
+    func schemaTwoPeriodicProjectRetainsItsHistoricalLockInference()
+        throws
+    {
+        let current = try PatternProjectMetadataCodec.encode(
+            fixture(preset: .grid)
+        )
+        let schemaTwo = PatternProjectMetadataFiles(
+            manifest: try mutateJSON(current.manifest) {
+                $0["schemaVersion"] = 2
+            },
+            symmetry: try mutateJSON(current.symmetry) {
+                $0.removeValue(forKey: "documentDomainLocked")
+            },
+            layersByPath: current.layersByPath
+        )
+
+        let decoded = try PatternProjectMetadataCodec.decode(schemaTwo)
+
+        #expect(decoded.sourceSchemaVersion == 2)
+        #expect(decoded.wasMigrated)
+        #expect(!decoded.metadata.documentDomainLocked)
+    }
+
+    @Test
     func legacyRawValuesMigrateToExactPeriodicMeaning() throws {
         for rawValue in UInt32(0)...UInt32(6) {
             let files = try legacyFiles(tilingRawValue: rawValue)

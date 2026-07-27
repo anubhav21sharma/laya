@@ -202,7 +202,7 @@ struct RadialShaderTests {
 
     @Test
     @MainActor
-    func radialEraseAndClearAffectEveryLinkedImageAndKeepLock() throws {
+    func radialEraseAndClearAffectEveryLinkedImageAndUnlockEmptyCanvas() throws {
         let radial = RadialSymmetryConfiguration(
             kind: .mandala,
             rayCount: 6,
@@ -272,8 +272,10 @@ struct RadialShaderTests {
             stride(from: 3, to: cleared.bgra8Bytes.count, by: 4)
                 .allSatisfy { cleared.bgra8Bytes[$0] == 0 }
         )
-        #expect(renderer.documentDomainLocked)
-        #expect(renderer.radialGeometryLocked)
+        #expect(!renderer.documentDomainLocked)
+        #expect(!renderer.radialGeometryLocked)
+        try renderer.applyFiniteConfiguration(.plain)
+        #expect(renderer.documentConfiguration == .finite(.plain))
     }
 
     @Test

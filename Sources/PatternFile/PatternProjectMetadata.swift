@@ -3,7 +3,8 @@ import PatternEngine
 
 public enum PatternProjectFormat {
     public static let legacySchemaVersion = 1
-    public static let currentSchemaVersion = 2
+    public static let previousSchemaVersion = 2
+    public static let currentSchemaVersion = 3
     public static let canonicalSurfaceLayoutVersion = 1
     public static let radialSurfaceLayoutVersion = 1
 
@@ -124,6 +125,7 @@ public struct PatternProjectMetadata: Equatable, Sendable {
     public let canvasSize: PixelSize
     public let viewport: PatternProjectViewport
     public let documentConfiguration: SymmetryDocumentConfiguration
+    public let documentDomainLocked: Bool
     public let radialGeometryLocked: Bool
     public let activeLayerID: UUID
     public let layers: [PatternProjectLayer]
@@ -137,6 +139,7 @@ public struct PatternProjectMetadata: Equatable, Sendable {
         canvasSize: PixelSize,
         viewport: PatternProjectViewport,
         documentConfiguration: SymmetryDocumentConfiguration,
+        documentDomainLocked: Bool? = nil,
         radialGeometryLocked: Bool,
         activeLayerID: UUID,
         layers: [PatternProjectLayer]
@@ -149,6 +152,8 @@ public struct PatternProjectMetadata: Equatable, Sendable {
         self.canvasSize = canvasSize
         self.viewport = viewport
         self.documentConfiguration = documentConfiguration
+        self.documentDomainLocked = documentDomainLocked
+            ?? radialGeometryLocked
         self.radialGeometryLocked = radialGeometryLocked
         self.activeLayerID = activeLayerID
         self.layers = layers

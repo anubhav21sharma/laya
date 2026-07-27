@@ -39,6 +39,7 @@ public enum PatternProjectMetadataCodec {
             preset: compiled.presetID.rawValue,
             periodic: periodicWire(normalizedConfiguration),
             radial: radialWire(normalizedConfiguration),
+            documentDomainLocked: metadata.documentDomainLocked,
             radialGeometryLocked: metadata.radialGeometryLocked,
             rasterMetric: RasterMetricWire(compiled.rasterMetric)
         )
@@ -124,8 +125,13 @@ public enum PatternProjectMetadataCodec {
         switch manifest.schemaVersion {
         case PatternProjectFormat.legacySchemaVersion:
             return try decodeLegacy(manifest: manifest, files: files)
-        case PatternProjectFormat.currentSchemaVersion:
-            return try decodeCurrent(manifest: manifest, files: files)
+        case PatternProjectFormat.previousSchemaVersion,
+             PatternProjectFormat.currentSchemaVersion:
+            return try decodeCurrent(
+                manifest: manifest,
+                files: files,
+                sourceSchemaVersion: manifest.schemaVersion
+            )
         default:
             throw PatternProjectLoadError.unsupportedSchema(
                 manifest.schemaVersion
@@ -160,6 +166,8 @@ private extension PatternProjectMetadataCodec {
         guard manifest.schemaVersion
                 == PatternProjectFormat.legacySchemaVersion
                 || manifest.schemaVersion
+                    == PatternProjectFormat.previousSchemaVersion
+                || manifest.schemaVersion
                     == PatternProjectFormat.currentSchemaVersion
         else {
             throw PatternProjectLoadError.unsupportedSchema(
@@ -190,7 +198,7 @@ private extension PatternProjectMetadataCodec {
             }
             layersByPath[path] = layerData
             if manifest.schemaVersion
-                == PatternProjectFormat.currentSchemaVersion
+                != PatternProjectFormat.legacySchemaVersion
             {
                 let layer: LayerWire = try decodeJSON(
                     layerData,
@@ -276,6 +284,7 @@ private extension PatternProjectMetadataCodec {
             manifest: manifest,
             canvasSize: canvasSize,
             configuration: configuration,
+            documentDomainLocked: false,
             radialGeometryLocked: false,
             layers: layers
         )
@@ -289,7 +298,8 @@ private extension PatternProjectMetadataCodec {
 
     static func decodeCurrent(
         manifest: ManifestWire,
-        files: PatternProjectMetadataFiles
+        files: PatternProjectMetadataFiles,
+        sourceSchemaVersion: Int
     ) throws -> ValidatedPatternProjectMetadata {
         guard manifest.canonicalSurfaceLayoutVersion
             == PatternProjectFormat.canonicalSurfaceLayoutVersion
@@ -320,18 +330,28 @@ private extension PatternProjectMetadataCodec {
             files: files,
             canvasSize: canvasSize,
             compiled: compiled,
-            schemaVersion: PatternProjectFormat.currentSchemaVersion
+            schemaVersion: sourceSchemaVersion
         )
+        let documentDomainLocked: Bool
+        if sourceSchemaVersion == PatternProjectFormat.currentSchemaVersion {
+            guard let locked = symmetry.documentDomainLocked else {
+                throw PatternProjectLoadError.symmetryConfigurationMismatch
+            }
+            documentDomainLocked = locked
+        } else {
+            documentDomainLocked = symmetry.radialGeometryLocked
+        }
         let metadata = try makeMetadata(
             manifest: manifest,
             canvasSize: canvasSize,
             configuration: configuration,
+            documentDomainLocked: documentDomainLocked,
             radialGeometryLocked: symmetry.radialGeometryLocked,
             layers: layers
         )
         _ = try validate(metadata)
         return ValidatedPatternProjectMetadata(
-            sourceSchemaVersion: PatternProjectFormat.currentSchemaVersion,
+            sourceSchemaVersion: sourceSchemaVersion,
             metadata: metadata,
             compiledSymmetry: compiled
         )
@@ -357,7 +377,11 @@ private extension PatternProjectMetadataCodec {
                 throw PatternProjectLoadError.symmetryConfigurationMismatch
             }
         case .finite(.radial):
-            break
+            guard metadata.documentDomainLocked
+                == metadata.radialGeometryLocked
+            else {
+                throw PatternProjectLoadError.symmetryConfigurationMismatch
+            }
         }
         try validateLayers(
             metadata.layers,
@@ -879,6 +903,7 @@ private extension PatternProjectMetadataCodec {
         manifest: ManifestWire,
         canvasSize: PixelSize,
         configuration: SymmetryDocumentConfiguration,
+        documentDomainLocked: Bool,
         radialGeometryLocked: Bool,
         layers: [PatternProjectLayer]
     ) throws -> PatternProjectMetadata {
@@ -891,6 +916,7 @@ private extension PatternProjectMetadataCodec {
             canvasSize: canvasSize,
             viewport: manifest.viewport.value,
             documentConfiguration: configuration,
+            documentDomainLocked: documentDomainLocked,
             radialGeometryLocked: radialGeometryLocked,
             activeLayerID: manifest.activeLayerID,
             layers: layers
@@ -1071,6 +1097,7 @@ private struct SymmetryWire: Codable {
     let preset: UInt32
     let periodic: PeriodicWire?
     let radial: RadialWire?
+    let documentDomainLocked: Bool?
     let radialGeometryLocked: Bool
     let rasterMetric: RasterMetricWire
 }

@@ -23,19 +23,36 @@ public enum CommittedRasterStorage: Equatable, Sendable {
 public struct CommittedDocumentSnapshot: Equatable, Sendable {
     public let canvasSize: PixelSize
     public let documentConfiguration: SymmetryDocumentConfiguration
+    public let documentDomainLocked: Bool
     public let radialGeometryLocked: Bool
     public let storage: CommittedRasterStorage
 
     public init(
         canvasSize: PixelSize,
         documentConfiguration: SymmetryDocumentConfiguration,
+        documentDomainLocked: Bool? = nil,
         radialGeometryLocked: Bool,
         storage: CommittedRasterStorage
     ) {
         self.canvasSize = canvasSize
         self.documentConfiguration = documentConfiguration
+        self.documentDomainLocked = documentDomainLocked
+            ?? (radialGeometryLocked || storage.containsNonzeroBytes)
         self.radialGeometryLocked = radialGeometryLocked
         self.storage = storage
+    }
+}
+
+private extension CommittedRasterStorage {
+    var containsNonzeroBytes: Bool {
+        switch self {
+        case let .singleRaster(bytes):
+            bytes.contains(where: { $0 != 0 })
+        case let .radialPages(pages):
+            pages.contains {
+                $0.bgra8PremultipliedBytes.contains(where: { $0 != 0 })
+            }
+        }
     }
 }
 
@@ -119,6 +136,7 @@ public extension GridRenderer {
         return CommittedDocumentSnapshot(
             canvasSize: pixelSize,
             documentConfiguration: documentConfiguration,
+            documentDomainLocked: documentDomainLocked,
             radialGeometryLocked: radialGeometryLocked,
             storage: storage
         )
@@ -192,17 +210,17 @@ private extension GridRenderer {
             }
             bytes = atlas
         }
-        if snapshot.radialGeometryLocked,
-           tilingStrategy.compiledSymmetry.domain.finite?
-            .radial.layout == nil
-        {
-            throw MetalRendererError.committedSnapshotIncompatible
-        }
+        let isRadial = tilingStrategy.compiledSymmetry.domain.finite?
+            .radial.layout != nil
+        guard (!isRadial && !snapshot.radialGeometryLocked)
+            || (isRadial
+                && snapshot.documentDomainLocked
+                    == snapshot.radialGeometryLocked),
+              snapshot.documentDomainLocked || !bytes.contains(where: { $0 != 0 })
+        else { throw MetalRendererError.committedSnapshotIncompatible }
         try uploadCommittedCanonicalBytes(bytes)
         radialGeometryLocked = snapshot.radialGeometryLocked
-        documentDomainLocked =
-            snapshot.radialGeometryLocked
-            || bytes.contains(where: { $0 != 0 })
+        documentDomainLocked = snapshot.documentDomainLocked
     }
 
     func copyCommittedCanonicalBytes() throws -> [UInt8] {

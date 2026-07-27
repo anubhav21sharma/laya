@@ -29,6 +29,14 @@ func brushConfigurationUsesExactDefaultsAndTileDependentMaximum() {
 
 @Test
 func tileConfigurationUsesExactBoundsAndValidatesBothDimensions() {
+    #expect(
+        EditorConfiguration.defaultPeriodicPixelSize
+            == PixelSize(width: 256, height: 256)
+    )
+    #expect(
+        EditorConfiguration.defaultFinitePixelSize
+            == PixelSize(width: 2_048, height: 2_048)
+    )
     #expect(EditorConfiguration.minimumTileDimension == 64)
     #expect(EditorConfiguration.maximumTileDimension == 4_096)
 

@@ -78,6 +78,110 @@ struct PatternProjectBridgeTests {
 
     @Test
     @MainActor
+    func transparentButLogicallyEditedPeriodicProjectStaysLocked()
+        throws
+    {
+        guard let (device, library) = try bridgeTestMetal() else {
+            return
+        }
+        let size = PixelSize(width: 64, height: 64)
+        let renderer = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 64, height: 64),
+            configuration: TilingCanvasConfiguration(
+                pixelSize: size,
+                tiling: .grid
+            )
+        )
+        try renderer.reconcileGeometryLock(documentIsEmpty: false)
+        let identity = PatternProjectIdentity(
+            documentID: UUID(),
+            layerID: UUID(),
+            title: "Transparent edit",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+
+        let captured = try PatternProjectBridge.capture(
+            renderer: renderer,
+            identity: identity,
+            appVersion: "0.1.0",
+            modifiedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let decoded = try PatternProjectPackageCodec.open(
+            PatternProjectPackageCodec.encode(
+                metadata: captured.metadata,
+                rastersByPath: captured.rastersByPath
+            )
+        )
+        let restored = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 64, height: 64),
+            committedSnapshot: try PatternProjectBridge.committedSnapshot(
+                from: decoded
+            )
+        )
+
+        #expect(restored.documentDomainLocked)
+        #expect(!restored.radialGeometryLocked)
+    }
+
+    @Test
+    @MainActor
+    func schemaThreeUnlockedProjectRejectsNonzeroCommittedPixels()
+        throws
+    {
+        guard let (device, library) = try bridgeTestMetal() else {
+            return
+        }
+        let size = PixelSize(width: 64, height: 64)
+        let renderer = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 64, height: 64),
+            configuration: TilingCanvasConfiguration(
+                pixelSize: size,
+                tiling: .grid
+            )
+        )
+        try renderer.replaceCanonicalPixelsForHarness(
+            bridgeOpaqueBytes(size, salt: 31)
+        )
+        let captured = try PatternProjectBridge.capture(
+            renderer: renderer,
+            identity: .new(),
+            appVersion: "0.1.0"
+        )
+        let metadata = captured.metadata
+        let invalidMetadata = PatternProjectMetadata(
+            documentID: metadata.documentID,
+            title: metadata.title,
+            appVersion: metadata.appVersion,
+            createdAt: metadata.createdAt,
+            modifiedAt: metadata.modifiedAt,
+            canvasSize: metadata.canvasSize,
+            viewport: metadata.viewport,
+            documentConfiguration: metadata.documentConfiguration,
+            documentDomainLocked: false,
+            radialGeometryLocked: metadata.radialGeometryLocked,
+            activeLayerID: metadata.activeLayerID,
+            layers: metadata.layers
+        )
+        let decoded = try PatternProjectPackageCodec.open(
+            PatternProjectPackageCodec.encode(
+                metadata: invalidMetadata,
+                rastersByPath: captured.rastersByPath
+            )
+        )
+
+        #expect(throws: PatternProjectBridgeError.incompatibleSurface) {
+            try PatternProjectBridge.committedSnapshot(from: decoded)
+        }
+    }
+
+    @Test
+    @MainActor
     func radialBridgeUsesLogicalPageCoordinatesAndPreservesLock()
         throws
     {

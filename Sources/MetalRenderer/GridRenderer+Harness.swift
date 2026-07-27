@@ -675,6 +675,9 @@ extension GridRenderer {
         )
         commandBuffer.commit()
         try waitForHarnessCommand(commandBuffer)
+        try reconcileGeometryLock(
+            documentIsEmpty: !bytes.contains(where: { $0 != 0 })
+        )
     }
 
     public var harnessCounters: GridStructuralCounters { counters }
