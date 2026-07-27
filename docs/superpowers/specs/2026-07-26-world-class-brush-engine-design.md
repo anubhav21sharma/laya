@@ -8,6 +8,14 @@
 
 **Secondary target:** macOS 14+ development and Wacom use
 
+**Implementation status (2026-07-28):** Stage 1 characterization and Stage 2
+engine foundation are correctness complete at commit
+`fb660b99133ad7aa8116adab03c7c1297de69479`. Physical-device performance,
+Apple Pencil/Wacom feel, true input-to-photon latency, ProMotion stability,
+thermal behavior, and memory-warning recovery remain unaccepted hardware
+gates. See
+`docs/superpowers/milestones/10-world-class-brush-engine-foundation.md`.
+
 ## 1. Purpose
 
 Laya's brushes are a make-or-break product capability. The current engine

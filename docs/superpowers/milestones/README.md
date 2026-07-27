@@ -15,3 +15,4 @@ does not upgrade an earlier pending or unaccepted status.
 | Compiled symmetry Phase 3 | [Triangular Symmetry Families](07-triangular-symmetry-families.md) | Implementation Complete — Acceptance Pending Environment-Only Gates |
 | Compiled symmetry Phase 4 | [Radial / Mandala Domain](08-radial-mandala-domain.md) | Implementation Complete — Acceptance Pending Environment-Only Gates |
 | Compiled symmetry Phase 5 | [Product Completion](09-product-completion.md) | Implementation Complete — Physical-Device Performance Acceptance Pending |
+| Brush engine Stages 1–2 | [World-Class Brush Engine Foundation](10-world-class-brush-engine-foundation.md) | Stage 1–2 Correctness Complete — Physical-Device Performance And Input Acceptance Pending |
