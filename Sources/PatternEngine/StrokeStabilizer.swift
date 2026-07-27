@@ -79,7 +79,13 @@ private extension WorldStrokeSample {
             capabilities: capabilities,
             altitude: altitude,
             azimuth: azimuth,
-            roll: roll
+            roll: roll,
+            tangentialPressure: tangentialPressure,
+            deviceIdentifier: deviceIdentifier,
+            estimationUpdateIndex: estimationUpdateIndex,
+            estimatedProperties: estimatedProperties,
+            estimatedPropertiesExpectingUpdates:
+                estimatedPropertiesExpectingUpdates
         )
         return WorldStrokeSample(
             sample: copiedSample,

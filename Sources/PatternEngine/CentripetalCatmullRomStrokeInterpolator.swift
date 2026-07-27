@@ -9,6 +9,11 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
     public let altitude: Float?
     public let azimuth: Float?
     public let roll: Float?
+    public let tangentialPressure: Float?
+    public let deviceIdentifier: UInt64?
+    public let estimationUpdateIndex: Int?
+    public let estimatedProperties: StrokeEstimatedProperties
+    public let estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties
     public let velocity: Float
     public let phase: StrokePhase
     public let source: StrokeSource
@@ -26,7 +31,12 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
         phase: StrokePhase,
         source: StrokeSource,
         kind: StrokeSampleKind,
-        capabilities: StrokeInputCapabilities
+        capabilities: StrokeInputCapabilities,
+        tangentialPressure: Float? = nil,
+        deviceIdentifier: UInt64? = nil,
+        estimationUpdateIndex: Int? = nil,
+        estimatedProperties: StrokeEstimatedProperties = [],
+        estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties = []
     ) {
         self.position = position
         self.pressure = pressure
@@ -34,6 +44,12 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
         self.altitude = altitude
         self.azimuth = azimuth
         self.roll = roll
+        self.tangentialPressure = tangentialPressure
+        self.deviceIdentifier = deviceIdentifier
+        self.estimationUpdateIndex = estimationUpdateIndex
+        self.estimatedProperties = estimatedProperties
+        self.estimatedPropertiesExpectingUpdates =
+            estimatedPropertiesExpectingUpdates
         self.velocity = velocity
         self.phase = phase
         self.source = source
@@ -53,7 +69,13 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
             phase: sample.phase,
             source: sample.source,
             kind: sample.kind,
-            capabilities: sample.capabilities
+            capabilities: sample.capabilities,
+            tangentialPressure: sample.tangentialPressure,
+            deviceIdentifier: sample.deviceIdentifier,
+            estimationUpdateIndex: sample.estimationUpdateIndex,
+            estimatedProperties: sample.estimatedProperties,
+            estimatedPropertiesExpectingUpdates:
+                sample.estimatedPropertiesExpectingUpdates
         )
     }
 
@@ -70,6 +92,7 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
             return end.replacingPosition(position)
         }
 
+        let discrete = clamped < 0.5 ? self : end
         return InterpolatedStrokeSample(
             position: position,
             pressure: lerp(pressure, end.pressure, clamped),
@@ -79,10 +102,20 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
             azimuth: Self.optionalAngle(azimuth, end.azimuth, clamped),
             roll: Self.optionalAngle(roll, end.roll, clamped),
             velocity: lerp(velocity, end.velocity, clamped),
-            phase: end.phase,
-            source: end.source,
-            kind: end.kind,
-            capabilities: end.capabilities
+            phase: discrete.phase,
+            source: discrete.source,
+            kind: discrete.kind,
+            capabilities: discrete.capabilities,
+            tangentialPressure: Self.optionalLinear(
+                tangentialPressure,
+                end.tangentialPressure,
+                clamped
+            ),
+            deviceIdentifier: discrete.deviceIdentifier,
+            estimationUpdateIndex: discrete.estimationUpdateIndex,
+            estimatedProperties: discrete.estimatedProperties,
+            estimatedPropertiesExpectingUpdates:
+                discrete.estimatedPropertiesExpectingUpdates
         )
     }
 
@@ -100,7 +133,13 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
             phase: phase,
             source: source,
             kind: kind,
-            capabilities: capabilities
+            capabilities: capabilities,
+            tangentialPressure: tangentialPressure,
+            deviceIdentifier: deviceIdentifier,
+            estimationUpdateIndex: estimationUpdateIndex,
+            estimatedProperties: estimatedProperties,
+            estimatedPropertiesExpectingUpdates:
+                estimatedPropertiesExpectingUpdates
         )
     }
 
@@ -146,6 +185,14 @@ private func lerp(_ start: Float, _ end: Float, _ fraction: Float) -> Float {
 public struct AttributedStrokePathSegment: Equatable, Sendable {
     public let start: InterpolatedStrokeSample
     public let end: InterpolatedStrokeSample
+
+    public init(
+        start: InterpolatedStrokeSample,
+        end: InterpolatedStrokeSample
+    ) {
+        self.start = start
+        self.end = end
+    }
 
     public var length: Float {
         simd_distance(start.position.simd, end.position.simd)

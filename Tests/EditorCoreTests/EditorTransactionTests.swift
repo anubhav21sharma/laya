@@ -10,6 +10,26 @@ private func sample(_ phase: StrokePhase) -> StrokeSample {
     )
 }
 
+private func estimatedSample(
+    _ phase: StrokePhase,
+    kind: StrokeSampleKind,
+    index: Int,
+    expecting: StrokeEstimatedProperties
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: 32, y: 48),
+        pressure: 0.5,
+        timestamp: 1,
+        phase: phase,
+        source: .pencil,
+        kind: kind,
+        capabilities: [.pressure],
+        estimationUpdateIndex: index,
+        estimatedProperties: expecting,
+        estimatedPropertiesExpectingUpdates: expecting
+    )
+}
+
 private let style = StrokeRenderStyle(
     color: .black,
     diameter: 20,
@@ -118,6 +138,132 @@ func strokeSamplesUseOneTokenThroughCommit() {
     #expect(drawing.token == token)
     #expect(drawing.tool == .draw)
     #expect(drawing.phase == .commitPending)
+}
+
+@Test
+func estimatedEndFinishesTransientlyThenCommitsAfterLastUpdate() {
+    var transaction = EditorTransaction()
+    let began = transaction.apply(
+        .pointerBegan(sample(.began), tool: .draw, style: style)
+    )
+    guard case let .beginStroke(token, _, _, _, _) = began.first else {
+        Issue.record("Expected beginStroke")
+        return
+    }
+    let ended = estimatedSample(
+        .ended,
+        kind: .actual,
+        index: 7,
+        expecting: [.pressure]
+    )
+
+    #expect(
+        transaction.apply(.pointerEndedAwaitingEstimates(ended))
+            == [.finishStrokeTransient(token, ended)]
+    )
+    guard case let .drawing(waiting) = transaction.state else {
+        Issue.record("Expected awaiting drawing")
+        return
+    }
+    #expect(waiting.phase == .awaitingEstimatedUpdates)
+    #expect(!transaction.isBusy)
+
+    let partial = estimatedSample(
+        .moved,
+        kind: .estimatedUpdate,
+        index: 7,
+        expecting: [.pressure]
+    )
+    #expect(
+        transaction.apply(
+            .estimatedPropertiesUpdated(
+                partial,
+                resolvesLastPending: false
+            )
+        ) == [.applyEstimatedUpdate(token, partial)]
+    )
+
+    let resolved = StrokeSample(
+        position: ScreenPoint(x: 32, y: 48),
+        pressure: 0.8,
+        timestamp: 1,
+        phase: .moved,
+        source: .pencil,
+        kind: .estimatedUpdate,
+        capabilities: [.pressure],
+        estimationUpdateIndex: 7
+    )
+    #expect(
+        transaction.apply(
+            .estimatedPropertiesUpdated(
+                resolved,
+                resolvesLastPending: true
+            )
+        ) == [
+            .applyEstimatedUpdate(token, resolved),
+            .commitFinishedStroke(token),
+        ]
+    )
+    guard case let .drawing(committing) = transaction.state else {
+        Issue.record("Expected committing drawing")
+        return
+    }
+    #expect(committing.phase == .commitPending)
+}
+
+@Test
+func awaitingEstimateCanCancelOrFinalizeLatestEstimate() {
+    var cancelling = EditorTransaction()
+    _ = cancelling.apply(
+        .pointerBegan(sample(.began), tool: .draw, style: style)
+    )
+    _ = cancelling.apply(
+        .pointerEndedAwaitingEstimates(
+            estimatedSample(
+                .ended,
+                kind: .actual,
+                index: 3,
+                expecting: [.pressure]
+            )
+        )
+    )
+    guard case let .drawing(cancelDrawing) = cancelling.state else {
+        Issue.record("Expected awaiting drawing")
+        return
+    }
+    #expect(
+        cancelling.apply(.pointerCancelled)
+            == [.cancelStroke(cancelDrawing.token)]
+    )
+    #expect(cancelling.state == .idle)
+
+    var finalizing = EditorTransaction()
+    _ = finalizing.apply(
+        .pointerBegan(sample(.began), tool: .draw, style: style)
+    )
+    _ = finalizing.apply(
+        .pointerEndedAwaitingEstimates(
+            estimatedSample(
+                .ended,
+                kind: .actual,
+                index: 4,
+                expecting: [.pressure]
+            )
+        )
+    )
+    guard case let .drawing(finalDrawing) = finalizing.state else {
+        Issue.record("Expected awaiting drawing")
+        return
+    }
+    #expect(
+        finalizing.apply(.finalizeAwaitingEstimates)
+            == [.commitFinishedStroke(finalDrawing.token)]
+    )
+    guard case let .drawing(committing) = finalizing.state else {
+        Issue.record("Expected committing drawing")
+        return
+    }
+    #expect(committing.phase == .commitPending)
 }
 
 @Test

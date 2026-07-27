@@ -19,7 +19,12 @@ private func validatedSample(
     capabilities: StrokeInputCapabilities = [],
     altitude: Float? = nil,
     azimuth: Float? = nil,
-    roll: Float? = nil
+    roll: Float? = nil,
+    tangentialPressure: Float? = nil,
+    deviceIdentifier: UInt64? = nil,
+    estimationUpdateIndex: Int? = nil,
+    estimatedProperties: StrokeEstimatedProperties = [],
+    estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties = []
 ) throws -> StrokeSample {
     try #require(
         StrokeSample.validated(
@@ -32,9 +37,146 @@ private func validatedSample(
             capabilities: capabilities,
             altitude: altitude,
             azimuth: azimuth,
-            roll: roll
+            roll: roll,
+            tangentialPressure: tangentialPressure,
+            deviceIdentifier: deviceIdentifier,
+            estimationUpdateIndex: estimationUpdateIndex,
+            estimatedProperties: estimatedProperties,
+            estimatedPropertiesExpectingUpdates:
+                estimatedPropertiesExpectingUpdates
         )
     )
+}
+
+@Test
+func tangentialPressureAndEstimationIdentitySurviveDerivation() throws {
+    let sample = try validatedSample(
+        x: 1,
+        y: 2,
+        pressure: 0.7,
+        timestamp: 1,
+        phase: .moved,
+        source: .tablet,
+        kind: .estimatedUpdate,
+        capabilities: [.pressure, .tangentialPressure],
+        tangentialPressure: 2,
+        deviceIdentifier: 42,
+        estimationUpdateIndex: 9,
+        estimatedProperties: [.pressure],
+        estimatedPropertiesExpectingUpdates: [.pressure]
+    )
+    var input = BrushInputDeriver()
+    let world = input.derive(sample, viewport: brushInputViewport)
+
+    #expect(world.tangentialPressure == 1)
+    #expect(world.deviceIdentifier == 42)
+    #expect(world.estimationUpdateIndex == 9)
+    #expect(world.estimatedProperties == [.pressure])
+    #expect(world.estimatedPropertiesExpectingUpdates == [.pressure])
+}
+
+@Test
+func estimationValidationRejectsInvalidIdentityAndFlagRelationships() {
+    let base = {
+        (
+            kind: StrokeSampleKind,
+            index: Int?,
+            capabilities: StrokeInputCapabilities,
+            estimated: StrokeEstimatedProperties,
+            expecting: StrokeEstimatedProperties
+        ) in
+        StrokeSample.validated(
+            position: ScreenPoint(x: 1, y: 2),
+            pressure: 0.5,
+            timestamp: 1,
+            phase: .moved,
+            source: .pencil,
+            kind: kind,
+            capabilities: capabilities,
+            estimationUpdateIndex: index,
+            estimatedProperties: estimated,
+            estimatedPropertiesExpectingUpdates: expecting
+        )
+    }
+
+    #expect(base(.estimatedUpdate, nil, [.pressure], [], []) == nil)
+    #expect(base(.actual, -1, [.pressure], [], []) == nil)
+    #expect(base(.actual, 3, [], [.pressure], []) == nil)
+    #expect(base(.actual, 3, [.pressure], [], [.pressure]) == nil)
+    #expect(base(.actual, 3, [], [.location], [.location]) != nil)
+    #expect(base(.actual, 3, [.pressure], [.pressure], [.pressure]) != nil)
+    #expect(
+        base(
+            .actual,
+            3,
+            [.pressure],
+            StrokeEstimatedProperties(rawValue: 1 << 7),
+            []
+        ) == nil
+    )
+    #expect(
+        base(
+            .actual,
+            3,
+            StrokeInputCapabilities(rawValue: 1 << 7),
+            [],
+            []
+        ) == nil
+    )
+}
+
+@Test
+func missingOptionalTabletFieldsRemainAbsent() throws {
+    let sample = try validatedSample(
+        x: 4,
+        y: 5,
+        timestamp: 2,
+        phase: .moved,
+        source: .tablet,
+        capabilities: [.pressure, .tangentialPressure]
+    )
+
+    #expect(sample.tangentialPressure == nil)
+    #expect(sample.deviceIdentifier == nil)
+    #expect(sample.estimationUpdateIndex == nil)
+    #expect(sample.estimatedProperties.isEmpty)
+    #expect(sample.estimatedPropertiesExpectingUpdates.isEmpty)
+}
+
+@Test
+func estimatedUpdatesDoNotAdvanceAuthoritativeVelocityCursor() throws {
+    var input = BrushInputDeriver()
+    _ = input.derive(
+        try validatedSample(
+            x: 100,
+            y: 100,
+            timestamp: 1,
+            phase: .began
+        ),
+        viewport: brushInputViewport
+    )
+    _ = input.derive(
+        try validatedSample(
+            x: 190,
+            y: 100,
+            timestamp: 1.5,
+            phase: .moved,
+            kind: .estimatedUpdate,
+            estimationUpdateIndex: 7
+        ),
+        viewport: brushInputViewport
+    )
+    let actual = input.derive(
+        try validatedSample(
+            x: 110,
+            y: 100,
+            timestamp: 2,
+            phase: .moved
+        ),
+        viewport: brushInputViewport
+    )
+
+    #expect(abs(actual.velocity - 10) < 0.001)
 }
 
 @Test

@@ -57,12 +57,37 @@ func makeControllerRenderer(
 private func controllerSample(
     _ phase: StrokePhase,
     x: Float = 32,
-    y: Float = 32
+    y: Float = 32,
+    timestamp: TimeInterval = 0
 ) -> StrokeSample {
     .mouse(
         position: ScreenPoint(x: x, y: y),
-        timestamp: 0,
+        timestamp: timestamp,
         phase: phase
+    )
+}
+
+private func estimatedControllerSample(
+    phase: StrokePhase,
+    kind: StrokeSampleKind,
+    index: Int,
+    pressure: Float,
+    expecting: StrokeEstimatedProperties,
+    estimated: StrokeEstimatedProperties? = nil,
+    x: Float = 32,
+    timestamp: TimeInterval? = nil
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x, y: 32),
+        pressure: pressure,
+        timestamp: timestamp ?? (phase == .ended ? 2 : 1),
+        phase: phase,
+        source: .pencil,
+        kind: kind,
+        capabilities: [.pressure],
+        estimationUpdateIndex: index,
+        estimatedProperties: estimated ?? expecting,
+        estimatedPropertiesExpectingUpdates: expecting
     )
 }
 
@@ -939,6 +964,678 @@ func pointerDownCapturesSelectedRecipeAndUniqueNonzeroSeed() throws {
     #expect(eraser.seed != second.seed)
     #expect(eraser.compositeMode == .erase)
     controller.handleStrokeSample(controllerSample(.cancelled))
+}
+
+@Test
+@MainActor
+func controllerDefersEstimatedEndAndCommitsResolvedStrokeExactlyOnce()
+    throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    var reportedErrors: [MetalRendererError] = []
+    controller.onError = { reportedErrors.append($0) }
+    controller.handleStrokeSample(controllerSample(.began))
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .ended,
+            kind: .actual,
+            index: 44,
+            pressure: 0.2,
+            expecting: [.pressure]
+        )
+    )
+
+    guard case let .drawing(waiting) = controller.transactionStateForTesting
+    else {
+        Issue.record("Expected stroke to await estimated properties")
+        return
+    }
+    #expect(waiting.phase == .awaitingEstimatedUpdates)
+    #expect(controller.lastRecordedRasterCommandForTesting == nil)
+
+    let resolved = estimatedControllerSample(
+        phase: .moved,
+        kind: .estimatedUpdate,
+        index: 44,
+        pressure: 0.9,
+        expecting: []
+    )
+    controller.handleStrokeSample(resolved)
+    #expect(reportedErrors.isEmpty)
+    guard case let .drawing(committing) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected resolved stroke commit")
+        return
+    }
+    #expect(committing.phase == .commitPending)
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(controller.transactionStateForTesting == .idle)
+    let firstCommand = try #require(
+        controller.lastRecordedRasterCommandForTesting
+    )
+
+    controller.handleStrokeSample(resolved)
+    #expect(controller.lastRecordedRasterCommandForTesting == firstCommand)
+    #expect(controller.transactionStateForTesting == .idle)
+}
+
+@Test
+@MainActor
+func cancellingWhileAwaitingEstimatesDiscardsWithoutHistory() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleStrokeSample(controllerSample(.began))
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .ended,
+            kind: .actual,
+            index: 45,
+            pressure: 0.3,
+            expecting: [.pressure]
+        )
+    )
+    controller.handleStrokeSample(controllerSample(.cancelled))
+
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(controller.lastRecordedRasterCommandForTesting == nil)
+    #expect(renderer.isIdle)
+}
+
+@Test
+@MainActor
+func newPointerFinalizesEstimateFallbackThenBeginsDeferredStroke() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleStrokeSample(controllerSample(.began))
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .ended,
+            kind: .actual,
+            index: 46,
+            pressure: 0.3,
+            expecting: [.pressure]
+        )
+    )
+
+    controller.handleStrokeSample(controllerSample(.began, x: 40))
+    guard case let .drawing(committing) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected fallback commit before deferred pointer")
+        return
+    }
+    #expect(committing.phase == .commitPending)
+
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+
+    guard case let .drawing(collecting) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected deferred pointer to begin after commit")
+        return
+    }
+    #expect(collecting.phase == .collecting)
+    #expect(renderer.hasActiveStroke)
+    let firstCommand = try #require(
+        controller.lastRecordedRasterCommandForTesting
+    )
+
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .moved,
+            kind: .estimatedUpdate,
+            index: 46,
+            pressure: 0.9,
+            expecting: []
+        )
+    )
+    #expect(controller.lastRecordedRasterCommandForTesting == firstCommand)
+    controller.handleStrokeSample(controllerSample(.cancelled, x: 40))
+    #expect(controller.transactionStateForTesting == .idle)
+}
+
+@Test
+@MainActor
+func movedBatchTracksEstimateUntilASeparateUpdateResolvesIt() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleStrokeSample(controllerSample(.began, x: 16))
+    controller.handleStrokeSamples([
+        estimatedControllerSample(
+            phase: .moved,
+            kind: .actual,
+            index: 48,
+            pressure: 0.2,
+            expecting: [.pressure],
+            x: 24,
+            timestamp: 1
+        ),
+        controllerMovedSample(x: 32, timestamp: 2, kind: .coalesced),
+    ])
+    controller.handleStrokeSample(controllerSample(.ended, x: 40))
+
+    guard case let .drawing(waiting) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected batched estimate to defer the commit")
+        return
+    }
+    #expect(waiting.phase == .awaitingEstimatedUpdates)
+
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .moved,
+            kind: .estimatedUpdate,
+            index: 48,
+            pressure: 0.9,
+            expecting: [],
+            estimated: [],
+            x: 24,
+            timestamp: 3
+        )
+    )
+    guard case let .drawing(committing) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected resolution to request one commit")
+        return
+    }
+    #expect(committing.phase == .commitPending)
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(controller.transactionStateForTesting == .idle)
+}
+
+@Test
+@MainActor
+func completeDeferredPointerStreamReplaysAfterPriorCommit() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleStrokeSample(controllerSample(.began, x: 12))
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .ended,
+            kind: .actual,
+            index: 49,
+            pressure: 0.3,
+            expecting: [.pressure],
+            x: 20
+        )
+    )
+
+    controller.handleStrokeSample(controllerSample(.began, x: 36))
+    controller.handleStrokeSample(
+        controllerMovedSample(x: 44, timestamp: 3, kind: .actual)
+    )
+    controller.handleStrokeSample(controllerSample(.ended, x: 52))
+
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    guard case let .drawing(secondCommit) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected the complete deferred stroke to replay")
+        return
+    }
+    #expect(secondCommit.phase == .commitPending)
+
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(renderer.harnessRevision.rawValue == 2)
+}
+
+@Test
+@MainActor
+func deferredPointerCanReuseAnOldEstimatedUpdateIndex() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleStrokeSample(
+        controllerSample(.began, x: 12),
+        inputGeneration: 2_001
+    )
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .ended,
+            kind: .actual,
+            index: 52,
+            pressure: 0.3,
+            expecting: [.pressure],
+            x: 20
+        ),
+        inputGeneration: 2_001
+    )
+
+    controller.handleStrokeSample(
+        controllerSample(.began, x: 36),
+        inputGeneration: 2_002
+    )
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .moved,
+            kind: .actual,
+            index: 52,
+            pressure: 0.2,
+            expecting: [.pressure],
+            x: 44,
+            timestamp: 3
+        ),
+        inputGeneration: 2_002
+    )
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .moved,
+            kind: .estimatedUpdate,
+            index: 52,
+            pressure: 0.8,
+            expecting: [],
+            estimated: [],
+            x: 44,
+            timestamp: 4
+        ),
+        inputGeneration: 2_002
+    )
+    controller.handleStrokeSample(
+        controllerSample(.ended, x: 52),
+        inputGeneration: 2_002
+    )
+
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    guard case let .drawing(secondCommit) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected reused index update to reach deferred stroke")
+        return
+    }
+    #expect(secondCommit.phase == .commitPending)
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(controller.transactionStateForTesting == .idle)
+}
+
+@Test
+@MainActor
+func deferredPointerRejectsLatePriorGenerationUpdateForReusedIndex()
+    throws
+{
+    func render(includeLatePriorUpdate: Bool) throws -> [UInt8]? {
+        guard let renderer = try makeControllerRenderer() else {
+            return nil
+        }
+        let controller = EditorSessionController(
+            renderer: renderer,
+            strokeSeedSessionEntropy: 0xD3FE_2233_4455_6677
+        )
+        controller.handleStrokeSample(
+            controllerSample(.began, x: 12, timestamp: 1),
+            inputGeneration: 1_001
+        )
+        controller.handleStrokeSample(
+            estimatedControllerSample(
+                phase: .ended,
+                kind: .actual,
+                index: 58,
+                pressure: 0.3,
+                expecting: [.pressure],
+                x: 20,
+                timestamp: 2
+            ),
+            inputGeneration: 1_001
+        )
+
+        controller.handleStrokeSample(
+            controllerSample(.began, x: 36, timestamp: 2),
+            inputGeneration: 1_002
+        )
+        controller.handleStrokeSample(
+            estimatedControllerSample(
+                phase: .moved,
+                kind: .actual,
+                index: 58,
+                pressure: 0.2,
+                expecting: [.pressure],
+                x: 44,
+                timestamp: 2
+            ),
+            inputGeneration: 1_002
+        )
+        if includeLatePriorUpdate {
+            controller.handleStrokeSample(
+                estimatedControllerSample(
+                    phase: .moved,
+                    kind: .estimatedUpdate,
+                    index: 58,
+                    pressure: 0.05,
+                    expecting: [],
+                    estimated: [],
+                    x: 20,
+                    timestamp: 2
+                ),
+                inputGeneration: 1_001
+            )
+        }
+        controller.handleStrokeSample(
+            estimatedControllerSample(
+                phase: .moved,
+                kind: .estimatedUpdate,
+                index: 58,
+                pressure: 0.9,
+                expecting: [],
+                estimated: [],
+                x: 44,
+                timestamp: 2
+            ),
+            inputGeneration: 1_002
+        )
+        controller.handleStrokeSample(
+            controllerSample(.ended, x: 52, timestamp: 2),
+            inputGeneration: 1_002
+        )
+
+        _ = try renderer.flushPendingLiveForHarness()
+        _ = try renderer.finishCommitForHarness()
+        guard case let .drawing(secondCommit) =
+            controller.transactionStateForTesting
+        else {
+            Issue.record("Expected deferred stroke to request its commit")
+            return nil
+        }
+        #expect(secondCommit.phase == .commitPending)
+        _ = try renderer.flushPendingLiveForHarness()
+        _ = try renderer.finishCommitForHarness()
+        #expect(controller.transactionStateForTesting == .idle)
+        return try canonicalBytes(renderer)
+    }
+
+    let expectedResult = try render(includeLatePriorUpdate: false)
+    let interleavedResult = try render(includeLatePriorUpdate: true)
+    let expected = try #require(expectedResult)
+    let interleaved = try #require(interleavedResult)
+    #expect(interleaved.elementsEqual(expected))
+}
+
+@Test
+@MainActor
+func deferredPointerOverflowCancelsInsteadOfReplayingPartialInput() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleStrokeSample(controllerSample(.began, x: 12))
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .ended,
+            kind: .actual,
+            index: 53,
+            pressure: 0.3,
+            expecting: [.pressure],
+            x: 20
+        )
+    )
+
+    controller.handleStrokeSample(controllerSample(.began, x: 36))
+    for index in 0..<TransientStrokeBufferContract
+        .wholeStrokeSampleCapacity
+    {
+        controller.handleStrokeSample(
+            controllerMovedSample(
+                x: 40 + Float(index % 8),
+                timestamp: TimeInterval(index + 3),
+                kind: .actual
+            )
+        )
+    }
+    controller.handleStrokeSample(controllerSample(.ended, x: 52))
+
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(renderer.isIdle)
+    #expect(renderer.harnessRevision.rawValue == 1)
+}
+
+@Test
+@MainActor
+func cancellingWhileCommitIsPendingDiscardsDeferredPointerStream() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleStrokeSample(controllerSample(.began, x: 12))
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .ended,
+            kind: .actual,
+            index: 55,
+            pressure: 0.3,
+            expecting: [.pressure],
+            x: 20
+        )
+    )
+
+    controller.handleStrokeSample(controllerSample(.began, x: 36))
+    controller.handleStrokeSample(
+        controllerMovedSample(x: 44, timestamp: 3, kind: .actual)
+    )
+    controller.cancelTransientEdit()
+
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(renderer.isIdle)
+    #expect(renderer.harnessRevision.rawValue == 1)
+}
+
+@Test
+@MainActor
+func ignoredToolInputDoesNotLeakEstimatedStateIntoNextStroke() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleTool(.select)
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .began,
+            kind: .actual,
+            index: 56,
+            pressure: 0.2,
+            expecting: [.pressure],
+            x: 16
+        )
+    )
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .moved,
+            kind: .actual,
+            index: 57,
+            pressure: 0.3,
+            expecting: [.pressure],
+            x: 24
+        )
+    )
+
+    controller.handleTool(.draw)
+    controller.handleStrokeSample(controllerSample(.began, x: 36))
+    controller.handleStrokeSample(controllerSample(.ended, x: 44))
+    guard case let .drawing(committing) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected ordinary stroke to ignore stale estimates")
+        return
+    }
+    #expect(committing.phase == .commitPending)
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(controller.transactionStateForTesting == .idle)
+}
+
+@Test
+@MainActor
+func failedEstimatedFallbackCommitLeavesRendererReusable() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(
+        renderer: renderer,
+        historyMaximumBytes: 0
+    )
+    controller.handleStrokeSample(controllerSample(.began, x: 16))
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .ended,
+            kind: .actual,
+            index: 50,
+            pressure: 0.2,
+            expecting: [.pressure],
+            x: 24
+        )
+    )
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .moved,
+            kind: .estimatedUpdate,
+            index: 50,
+            pressure: 0.8,
+            expecting: [],
+            estimated: [],
+            x: 24
+        )
+    )
+
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(renderer.isIdle)
+
+    controller.handleStrokeSample(controllerSample(.began, x: 40))
+    #expect(renderer.hasActiveStroke)
+    controller.handleStrokeSample(controllerSample(.cancelled, x: 40))
+    #expect(renderer.isIdle)
+}
+
+@Test
+@MainActor
+func cancellationClearsPendingEstimateBookkeepingForNextStroke() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleStrokeSample(controllerSample(.began, x: 16))
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .moved,
+            kind: .actual,
+            index: 51,
+            pressure: 0.2,
+            expecting: [.pressure],
+            x: 24
+        )
+    )
+    controller.cancelTransientEdit()
+    #expect(renderer.isIdle)
+
+    controller.handleStrokeSample(controllerSample(.began, x: 36))
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .moved,
+            kind: .actual,
+            index: 54,
+            pressure: 0.3,
+            expecting: [.pressure],
+            x: 40
+        )
+    )
+    controller.handleTool(.erase)
+    #expect(renderer.isIdle)
+    #expect(controller.model.tool == .erase)
+
+    controller.handleTool(.draw)
+    controller.handleStrokeSample(controllerSample(.began, x: 44))
+    controller.handleStrokeSample(controllerSample(.ended, x: 52))
+    guard case let .drawing(committing) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected ordinary stroke to commit without stale waits")
+        return
+    }
+    #expect(committing.phase == .commitPending)
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(controller.transactionStateForTesting == .idle)
+}
+
+@Test
+@MainActor
+func synchronousRendererFailureClearsEstimateBookkeeping() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleStrokeSample(controllerSample(.began, x: 16))
+    guard case let .drawing(drawing) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected active drawing transaction")
+        return
+    }
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .moved,
+            kind: .actual,
+            index: 55,
+            pressure: 0.2,
+            expecting: [.pressure],
+            x: 24
+        )
+    )
+    try renderer.cancelStroke(
+        token: RendererOperationToken(rawValue: drawing.token.rawValue)
+    )
+    controller.handleStrokeSample(
+        controllerMovedSample(x: 28, timestamp: 2, kind: .actual)
+    )
+    #expect(controller.transactionStateForTesting == .idle)
+
+    controller.handleStrokeSample(controllerSample(.began, x: 36))
+    controller.handleStrokeSample(controllerSample(.ended, x: 44))
+    guard case let .drawing(committing) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected next stroke to commit after failure cleanup")
+        return
+    }
+    #expect(committing.phase == .commitPending)
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(controller.transactionStateForTesting == .idle)
+}
+
+@Test
+@MainActor
+func focusLossFinalizesAwaitingEstimateExactlyOnce() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.handleStrokeSample(controllerSample(.began))
+    controller.handleStrokeSample(
+        estimatedControllerSample(
+            phase: .ended,
+            kind: .actual,
+            index: 47,
+            pressure: 0.3,
+            expecting: [.pressure]
+        )
+    )
+
+    controller.handleFocusLoss()
+    guard case let .drawing(committing) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected focus-loss fallback commit")
+        return
+    }
+    #expect(committing.phase == .commitPending)
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(controller.transactionStateForTesting == .idle)
+    let firstCommand = try #require(
+        controller.lastRecordedRasterCommandForTesting
+    )
+
+    controller.handleFocusLoss()
+    #expect(controller.lastRecordedRasterCommandForTesting == firstCommand)
+    #expect(controller.transactionStateForTesting == .idle)
 }
 
 @Test

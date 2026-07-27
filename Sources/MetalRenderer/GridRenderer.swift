@@ -114,6 +114,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         var commitRequested: Bool
         var pendingRevisions: PendingRasterRevisionPair?
         var pendingTokenBearingFrameCount: Int
+        var isFinishedTransiently: Bool
 
         var isCommitSubmitted: Bool {
             !commitRequested && pendingRevisions != nil
@@ -610,10 +611,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             style: style,
             commitRequested: false,
             pendingRevisions: nil,
-            pendingTokenBearingFrameCount: 0
+            pendingTokenBearingFrameCount: 0,
+            isFinishedTransiently: false
         )
         do {
             counters.newDabsThisEvent = 0
+            let inputBefore = brushInputDeriver
+            let generatorBefore = strokeGenerator
             let worldSample = brushInputDeriver.derive(
                 sample,
                 viewport: viewport
@@ -629,7 +633,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             try ingestGeneratedSample(
                 worldSample,
                 dabs: dabs,
+                generatorBeforeSample: generatorBefore,
                 generatorSnapshot: generator,
+                inputDeriverBeforeSample: inputBefore,
                 isFinishing: false
             )
         } catch {
@@ -714,6 +720,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         preparedDabsByChunk.reserveCapacity(samples.count)
 
         for sample in samples {
+            let inputBefore = previewDeriver
+            let generatorBefore = previewGenerator
             let worldSample = previewDeriver.deriveAdvancingPrediction(
                 sample,
                 viewport: viewport
@@ -748,7 +756,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 TransientStrokeChunk(
                     sample: worldSample,
                     dabs: prepared.map(\.transient),
-                    generatorSnapshotAfterSample: previewGenerator
+                    generatorSnapshotBeforeSample: generatorBefore,
+                    generatorSnapshotAfterSample: previewGenerator,
+                    inputDeriverSnapshotBeforeSample: inputBefore
                 )
             )
             preparedDabsByChunk.append(prepared)
@@ -786,8 +796,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
         predictedInputDeriver = nil
         predictedStrokeGenerator = nil
+        let inputBefore = brushInputDeriver
         let worldSample = brushInputDeriver.derive(sample, viewport: viewport)
         var generator = authoritativeGenerator
+        let generatorBefore = generator
         let dabs = try prepareGeneratedDabs(generator: &generator) {
             generator, emit in
             try generator.append(worldSample, emit: emit)
@@ -796,7 +808,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try ingestGeneratedSample(
             worldSample,
             dabs: dabs,
+            generatorBeforeSample: generatorBefore,
             generatorSnapshot: generator,
+            inputDeriverBeforeSample: inputBefore,
             isFinishing: false
         )
     }
@@ -812,27 +826,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         try requireCollectingStroke(token: token)
-
         do {
-            counters.newDabsThisEvent = 0
-            let worldSample = brushInputDeriver.derive(
-                sample,
-                viewport: viewport
-            )
-            guard var generator = strokeGenerator else {
-                throw MetalRendererError.invalidStrokeLifecycle
-            }
-            let dabs = try prepareGeneratedDabs(generator: &generator) {
-                generator, emit in
-                try generator.finish(worldSample, emit: emit)
-            }
-            strokeGenerator = generator
-            try ingestGeneratedSample(
-                worldSample,
-                dabs: dabs,
-                generatorSnapshot: generator,
-                isFinishing: true
-            )
+            try finishStrokeTransient(token: token, sample: sample)
             try prepareCurrentStrokeCommit(
                 maximumRetainedBytes: maximumRetainedBytes
             )
@@ -844,10 +839,160 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    public func finishStrokeTransient(
+        token: RendererOperationToken,
+        sample: StrokeSample
+    ) throws {
+        guard sample.phase == .ended else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        try requireCollectingStroke(token: token)
+        counters.newDabsThisEvent = 0
+        let inputBefore = brushInputDeriver
+        let worldSample = brushInputDeriver.derive(
+            sample,
+            viewport: viewport
+        )
+        guard var generator = strokeGenerator else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let generatorBefore = generator
+        let dabs = try prepareGeneratedDabs(generator: &generator) {
+            generator, emit in
+            try generator.finish(worldSample, emit: emit)
+        }
+        strokeGenerator = generator
+        try ingestGeneratedSample(
+            worldSample,
+            dabs: dabs,
+            generatorBeforeSample: generatorBefore,
+            generatorSnapshot: generator,
+            inputDeriverBeforeSample: inputBefore,
+            isFinishing: true
+        )
+        activeStroke?.isFinishedTransiently = true
+    }
+
+    public func commitFinishedStroke(
+        token: RendererOperationToken,
+        maximumRetainedBytes: Int
+    ) throws {
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        try requireEditableStroke(token: token)
+        guard activeStroke?.isFinishedTransiently == true else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        do {
+            try prepareCurrentStrokeCommit(
+                maximumRetainedBytes: maximumRetainedBytes
+            )
+        } catch {
+            discardPendingRevisionsIfPossible()
+            activeStroke = nil
+            resetLiveState()
+            throw error
+        }
+    }
+
+    public func applyEstimatedStrokeUpdate(
+        token: RendererOperationToken,
+        sample: StrokeSample
+    ) throws {
+        guard sample.kind == .estimatedUpdate else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        try requireEditableStroke(token: token)
+        guard var buffer = transientStrokeBuffer else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let update = brushInputDeriver.derive(sample, viewport: viewport)
+        let plan = try buffer.planEstimatedUpdate(update)
+        guard var generator = plan.generatorBeforeReplacement else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        var deriver = plan.inputDeriverBeforeReplacement
+            ?? (plan.target == .predicted
+                ? brushInputDeriver
+                : BrushInputDeriver())
+        let sourceSamples = [plan.mergedSample] + plan.samplesToReplay
+        var rebuilt: [TransientStrokeChunk] = []
+        var preparedByChunk: [[PreparedGeneratedDab]] = []
+        rebuilt.reserveCapacity(sourceSamples.count)
+        preparedByChunk.reserveCapacity(sourceSamples.count)
+
+        for plannedSample in sourceSamples {
+            let inputBefore = deriver
+            let replayedSample = deriver.rederive(plannedSample)
+            precondition(
+                replayedSample == plannedSample,
+                "Estimated update plan and replay derivation diverged."
+            )
+            let generatorBefore = generator
+            let prepared = try prepareGeneratedDabs(generator: &generator) {
+                generator, emit in
+                switch replayedSample.phase {
+                case .began:
+                    try generator.begin(replayedSample, emit: emit)
+                case .moved:
+                    try generator.append(replayedSample, emit: emit)
+                case .ended:
+                    try generator.finish(replayedSample, emit: emit)
+                case .cancelled:
+                    throw MetalRendererError.invalidStrokeLifecycle
+                }
+            }
+            rebuilt.append(
+                TransientStrokeChunk(
+                    sample: replayedSample,
+                    dabs: prepared.map(\.transient),
+                    generatorSnapshotBeforeSample: generatorBefore,
+                    generatorSnapshotAfterSample: generator,
+                    inputDeriverSnapshotBeforeSample: inputBefore
+                )
+            )
+            preparedByChunk.append(prepared)
+        }
+        let bufferUpdate = try buffer.replaceEstimatedSuffix(
+            using: plan,
+            with: rebuilt
+        )
+        try preflightSettledAppend(bufferUpdate.settledPrefix)
+        transientStrokeBuffer = buffer
+        try appendSettled(bufferUpdate.settledPrefix)
+        switch plan.target {
+        case .authoritative:
+            strokeGenerator = generator
+            brushInputDeriver = deriver
+            predictedStrokeGenerator = nil
+            predictedInputDeriver = nil
+            try rebuildReplayLayer(
+                preparedActualSuffix: Array(
+                    preparedByChunk.suffix(
+                        min(
+                            preparedByChunk.count,
+                            buffer.actualChunks.count
+                        )
+                    )
+                )
+            )
+        case .predicted:
+            predictedStrokeGenerator = generator
+            predictedInputDeriver = deriver
+            try rebuildReplayLayer(
+                preparedPredictedSuffix: preparedByChunk
+            )
+        }
+        counters.newDabsThisEvent = rebuilt.reduce(0) {
+            $0 + $1.dabs.count
+        }
+        counters.totalDabsThisStroke += counters.newDabsThisEvent
+    }
+
     public func cancelStroke(token: RendererOperationToken) throws {
         let wasIdle = isIdle
         defer { notifyIdleStateIfChanged(from: wasIdle) }
-        try requireCollectingStroke(token: token)
+        try requireEditableStroke(token: token)
         activeStroke = nil
         resetLiveState()
     }
@@ -1310,15 +1455,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func requireCollectingStroke(
         token: RendererOperationToken
     ) throws {
+        try requireEditableStroke(token: token)
+        guard activeStroke?.isFinishedTransiently == false else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+    }
+
+    private func requireEditableStroke(
+        token: RendererOperationToken
+    ) throws {
         guard let activeStroke else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         guard activeStroke.token == token else {
             throw MetalRendererError.invalidRendererOperationToken
         }
-        guard
-            !activeStroke.commitRequested,
-            activeStroke.pendingRevisions == nil
+        guard !activeStroke.commitRequested,
+              activeStroke.pendingRevisions == nil
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -1423,7 +1576,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             style: style,
             commitRequested: false,
             pendingRevisions: nil,
-            pendingTokenBearingFrameCount: 0
+            pendingTokenBearingFrameCount: 0,
+            isFinishedTransiently: false
         )
     }
 
@@ -1585,7 +1739,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func ingestGeneratedSample(
         _ sample: WorldStrokeSample,
         dabs: [PreparedGeneratedDab],
+        generatorBeforeSample: BrushStrokeGenerator?,
         generatorSnapshot: BrushStrokeGenerator,
+        inputDeriverBeforeSample: BrushInputDeriver,
         isFinishing: Bool
     ) throws {
         guard var buffer = transientStrokeBuffer else {
@@ -1597,7 +1753,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let chunk = TransientStrokeChunk(
             sample: sample,
             dabs: transientDabs,
-            generatorSnapshotAfterSample: generatorSnapshot
+            generatorSnapshotBeforeSample: generatorBeforeSample,
+            generatorSnapshotAfterSample: generatorSnapshot,
+            inputDeriverSnapshotBeforeSample: inputDeriverBeforeSample
         )
 
         if sample.kind == .predicted {
@@ -1611,6 +1769,35 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
 
         let update = buffer.appendActual(chunk)
+        if case let .unresolvedSuffixExceedsCapacity(
+            sampleCount,
+            dabCount,
+            projectedInstanceCount
+        ) = update.rejection {
+            let limits = buffer.activeReplayLimits
+            if sampleCount > limits.maximumSamples {
+                throw MetalRendererError.strokeSampleCapacityExceeded(
+                    limits.maximumSamples
+                )
+            }
+            if dabCount > limits.maximumDabs {
+                throw MetalRendererError.generatedDabCapacityExceeded(
+                    limits.maximumDabs
+                )
+            }
+            if projectedInstanceCount > limits.maximumProjectedInstances {
+                throw MetalRendererError.projectedInstanceCapacityExceeded(
+                    limits.maximumProjectedInstances
+                )
+            }
+            preconditionFailure(
+                "Rejected unresolved suffix must exceed an active limit"
+            )
+        }
+        precondition(
+            update.rejection == nil,
+            "Renderer must handle every transient buffer rejection"
+        )
         transientStrokeBuffer = buffer
         if buffer.mode == .appendOnly,
            update.settledPrefix.count == 1,
@@ -1640,9 +1827,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             || !buffer.predictedChunks.isEmpty
         {
             try rebuildReplayLayer(
-                preparedActualTail: buffer.mode == .appendOnly || isFinishing
-                    ? nil
-                    : dabs
+                preparedActualSuffix:
+                    buffer.mode == .appendOnly || isFinishing
+                        ? []
+                        : [dabs]
             )
         }
     }
@@ -1771,7 +1959,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func rebuildReplayLayer(
-        preparedActualTail: [PreparedGeneratedDab]? = nil,
+        preparedActualSuffix: [[PreparedGeneratedDab]] = [],
         preparedPredictedSuffix: [[PreparedGeneratedDab]] = []
     ) throws {
         guard let buffer = transientStrokeBuffer,
@@ -1840,7 +2028,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         try appendReplayChunks(
             buffer.actualChunks,
-            preparedSuffix: preparedActualTail.map { [$0] } ?? []
+            preparedSuffix: preparedActualSuffix
         )
         try appendReplayChunks(
             buffer.predictedChunks,

@@ -12,6 +12,11 @@ public struct WorldStrokeSample: Equatable, Sendable {
     public let altitude: Float?
     public let azimuth: Float?
     public let roll: Float?
+    public let tangentialPressure: Float?
+    public let deviceIdentifier: UInt64?
+    public let estimationUpdateIndex: Int?
+    public let estimatedProperties: StrokeEstimatedProperties
+    public let estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties
     public let velocity: Float
     public let phase: StrokePhase
     public let source: StrokeSource
@@ -29,11 +34,87 @@ public struct WorldStrokeSample: Equatable, Sendable {
         altitude = sample.altitude
         azimuth = sample.azimuth
         roll = sample.roll
+        tangentialPressure = sample.tangentialPressure
+        deviceIdentifier = sample.deviceIdentifier
+        estimationUpdateIndex = sample.estimationUpdateIndex
+        estimatedProperties = sample.estimatedProperties
+        estimatedPropertiesExpectingUpdates =
+            sample.estimatedPropertiesExpectingUpdates
         self.velocity = velocity
         phase = sample.phase
         source = sample.source
         kind = sample.kind
         capabilities = sample.capabilities
+    }
+
+    init(
+        position: WorldPoint,
+        pressure: Float,
+        timestamp: TimeInterval,
+        altitude: Float?,
+        azimuth: Float?,
+        roll: Float?,
+        tangentialPressure: Float?,
+        deviceIdentifier: UInt64?,
+        estimationUpdateIndex: Int?,
+        estimatedProperties: StrokeEstimatedProperties,
+        estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties,
+        velocity: Float,
+        phase: StrokePhase,
+        source: StrokeSource,
+        kind: StrokeSampleKind,
+        capabilities: StrokeInputCapabilities
+    ) {
+        self.position = position
+        self.pressure = pressure
+        self.timestamp = timestamp
+        self.altitude = altitude
+        self.azimuth = azimuth
+        self.roll = roll
+        self.tangentialPressure = tangentialPressure
+        self.deviceIdentifier = deviceIdentifier
+        self.estimationUpdateIndex = estimationUpdateIndex
+        self.estimatedProperties = estimatedProperties
+        self.estimatedPropertiesExpectingUpdates =
+            estimatedPropertiesExpectingUpdates
+        self.velocity = velocity
+        self.phase = phase
+        self.source = source
+        self.kind = kind
+        self.capabilities = capabilities
+    }
+
+    func replacing(
+        position: WorldPoint? = nil,
+        pressure: Float? = nil,
+        altitude: Float?? = nil,
+        azimuth: Float?? = nil,
+        roll: Float?? = nil,
+        estimatedProperties: StrokeEstimatedProperties? = nil,
+        estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties? = nil,
+        velocity: Float? = nil
+    ) -> WorldStrokeSample {
+        WorldStrokeSample(
+            position: position ?? self.position,
+            pressure: pressure ?? self.pressure,
+            timestamp: timestamp,
+            altitude: altitude ?? self.altitude,
+            azimuth: azimuth ?? self.azimuth,
+            roll: roll ?? self.roll,
+            tangentialPressure: tangentialPressure,
+            deviceIdentifier: deviceIdentifier,
+            estimationUpdateIndex: estimationUpdateIndex,
+            estimatedProperties:
+                estimatedProperties ?? self.estimatedProperties,
+            estimatedPropertiesExpectingUpdates:
+                estimatedPropertiesExpectingUpdates
+                    ?? self.estimatedPropertiesExpectingUpdates,
+            velocity: velocity ?? self.velocity,
+            phase: phase,
+            source: source,
+            kind: kind,
+            capabilities: capabilities
+        )
     }
 }
 
@@ -70,6 +151,17 @@ public struct BrushInputDeriver: Equatable, Sendable {
                 sample: sample,
                 position: position,
                 velocity: 0
+            )
+        }
+
+        if sample.kind == .estimatedUpdate {
+            return WorldStrokeSample(
+                sample: sample,
+                position: position,
+                velocity: derivedVelocity(
+                    to: position,
+                    timestamp: sample.timestamp
+                )
             )
         }
 
@@ -124,6 +216,40 @@ public struct BrushInputDeriver: Equatable, Sendable {
             previousPosition = result.position
             previousTimestamp = result.timestamp
             lastVelocity = result.velocity
+        }
+        return result
+    }
+
+    /// Recomputes velocity for a retained world-space sample during estimated
+    /// property replay. This advances an exact copied checkpoint and does not
+    /// require the original viewport.
+    public mutating func rederive(
+        _ sample: WorldStrokeSample
+    ) -> WorldStrokeSample {
+        if sample.phase == .cancelled {
+            if sample.kind != .predicted {
+                reset()
+            }
+            return sample.replacing(velocity: 0)
+        }
+        if sample.phase == .began {
+            reset()
+            previousPosition = sample.position
+            previousTimestamp = sample.timestamp
+            return sample.replacing(velocity: 0)
+        }
+
+        let velocity = derivedVelocity(
+            to: sample.position,
+            timestamp: sample.timestamp
+        )
+        let result = sample.replacing(velocity: velocity)
+        if sample.phase == .ended {
+            reset()
+        } else {
+            previousPosition = sample.position
+            previousTimestamp = sample.timestamp
+            lastVelocity = velocity
         }
         return result
     }

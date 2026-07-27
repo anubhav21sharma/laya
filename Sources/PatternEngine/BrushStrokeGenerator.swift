@@ -312,7 +312,8 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             sample: attributed,
             traveledDistance: 0,
             direction: 0,
-            totalDistance: sample.phase == .ended ? 0 : nil
+            totalDistance: sample.phase == .ended ? 0 : nil,
+            isPredicted: sample.kind == .predicted
         )
         try emit(dab)
         lastEmittedSourcePosition = attributed.position
@@ -324,11 +325,16 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         _ sample: WorldStrokeSample,
         emit: (DabAttributes) throws -> Void
     ) rethrows {
+        let isPredicted = sample.kind == .predicted
         let stabilized = stabilizer.process(sample)
         let attributed = InterpolatedStrokeSample(stabilized)
         var updatedPath = path
         try updatedPath.append(attributed) { segment in
-            try consume(segment, emit: emit)
+            try consume(
+                segment,
+                isPredicted: isPredicted,
+                emit: emit
+            )
         }
         path = updatedPath
     }
@@ -337,11 +343,16 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         _ sample: WorldStrokeSample,
         emit: (DabAttributes) throws -> Void
     ) rethrows {
+        let isPredicted = sample.kind == .predicted
         let stabilized = stabilizer.process(sample)
         let attributed = InterpolatedStrokeSample(stabilized)
         var updatedPath = path
         let endpoint = try updatedPath.finish(at: attributed) { segment in
-            try consume(segment, emit: emit)
+            try consume(
+                segment,
+                isPredicted: isPredicted,
+                emit: emit
+            )
         }
         path = updatedPath
 
@@ -350,7 +361,8 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
                 sample: endpoint,
                 traveledDistance: processedPathDistance,
                 direction: lastDirection,
-                totalDistance: nil
+                totalDistance: nil,
+                isPredicted: isPredicted
             )
             try emit(dab)
             lastEmittedSourcePosition = endpoint.position
@@ -361,6 +373,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     private mutating func consume(
         _ segment: AttributedStrokePathSegment,
+        isPredicted: Bool,
         emit: (DabAttributes) throws -> Void
     ) rethrows {
         let length = segment.length
@@ -387,7 +400,8 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
                     sample: sample,
                     traveledDistance: sourceDistance,
                     direction: direction,
-                    totalDistance: nil
+                    totalDistance: nil,
+                    isPredicted: isPredicted
                 )
                 try emit(dab)
                 lastEmittedSourcePosition = sample.position
@@ -410,7 +424,8 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         sample: InterpolatedStrokeSample,
         traveledDistance: Float,
         direction: Float,
-        totalDistance: Float?
+        totalDistance: Float?,
+        isPredicted: Bool
     ) -> DabAttributes {
         let start = strokeStartTimestamp ?? sample.timestamp
         let age = max(0, Float(sample.timestamp - start))
@@ -422,7 +437,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             traveledDistance: traveledDistance,
             totalDistance: totalDistance,
             ordinal: emittedDabCount,
-            isPredicted: sample.kind == .predicted
+            isPredicted: isPredicted
         )
         let dab = BrushDynamicsEngine().evaluate(
             sample: sample,

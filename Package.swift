@@ -6,7 +6,7 @@ let package = Package(
     name: "Pattern",
     platforms: [
         .macOS(.v14),
-        .iOS(.v17),
+        .iOS(.v18),
     ],
     products: [
         .library(name: "PatternEngine", targets: ["PatternEngine"]),

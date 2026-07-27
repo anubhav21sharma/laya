@@ -22,6 +22,27 @@ private func strokeSample(
     )
 }
 
+private func estimatedStrokeSample(
+    _ phase: StrokePhase,
+    kind: StrokeSampleKind = .actual,
+    x: Float,
+    index: Int,
+    expecting: StrokeEstimatedProperties
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x, y: 32),
+        pressure: 0.4,
+        timestamp: TimeInterval(x),
+        phase: phase,
+        source: .pencil,
+        kind: kind,
+        capabilities: [.pressure],
+        estimationUpdateIndex: index,
+        estimatedProperties: expecting,
+        estimatedPropertiesExpectingUpdates: expecting
+    )
+}
+
 @Test
 @MainActor
 func earlyHarnessReleaseDoesNotHoldTheNextFrameOutcome() {
@@ -416,6 +437,115 @@ func historyLimitFailureCleansProvisionalRevisionsBeforeSubmission() throws {
             == initialSnapshot.canonicalFront
     )
     #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+}
+
+@Test
+@MainActor
+func finishedStrokeHistoryFailureCleansTransientState() throws {
+    guard let renderer = try makeRenderer() else { return }
+    let token = RendererOperationToken(rawValue: 12)
+    try renderer.beginStroke(
+        token: token,
+        sample: strokeSample(.began, x: 16),
+        style: drawStyle
+    )
+    try renderer.finishStrokeTransient(
+        token: token,
+        sample: strokeSample(.ended, x: 40)
+    )
+
+    #expect(throws: MetalRendererError.rasterRevisionStorageLimitExceeded) {
+        try renderer.commitFinishedStroke(
+            token: token,
+            maximumRetainedBytes: 0
+        )
+    }
+    #expect(renderer.isIdle)
+
+    let next = RendererOperationToken(rawValue: 13)
+    try renderer.beginStroke(
+        token: next,
+        sample: strokeSample(.began),
+        style: drawStyle
+    )
+    try renderer.cancelStroke(token: next)
+    #expect(renderer.isIdle)
+}
+
+@Test
+@MainActor
+func invalidFinishedStrokeTokenDoesNotDestroyAcceptedStroke() throws {
+    guard let renderer = try makeRenderer() else { return }
+    let accepted = RendererOperationToken(rawValue: 15)
+    let mismatched = RendererOperationToken(rawValue: 16)
+    try renderer.beginStroke(
+        token: accepted,
+        sample: strokeSample(.began, x: 16),
+        style: drawStyle
+    )
+    try renderer.finishStrokeTransient(
+        token: accepted,
+        sample: strokeSample(.ended, x: 40)
+    )
+
+    #expect(throws: MetalRendererError.invalidRendererOperationToken) {
+        try renderer.commitFinishedStroke(
+            token: mismatched,
+            maximumRetainedBytes: 1_000_000
+        )
+    }
+    #expect(renderer.hasActiveStroke)
+    try renderer.cancelStroke(token: accepted)
+    #expect(renderer.isIdle)
+}
+
+@Test
+@MainActor
+func appendOnlyEstimatedSuffixStaysVisibleAndCommitsOnFallback() throws {
+    guard let renderer = try makeRenderer() else { return }
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("test.renderer.append-only-estimated"),
+        replayMode: .appendOnly
+    )
+    let token = RendererOperationToken(rawValue: 14)
+    try renderer.beginStroke(
+        token: token,
+        sample: strokeSample(.began, x: 12),
+        style: StrokeRenderStyle(
+            color: .black,
+            diameter: 16,
+            compositeMode: .draw,
+            eraserStrength: 1,
+            recipe: recipe,
+            seed: 14
+        )
+    )
+    try renderer.appendStroke(
+        token: token,
+        sample: estimatedStrokeSample(
+            .moved,
+            x: 28,
+            index: 60,
+            expecting: [.pressure]
+        )
+    )
+    #expect(renderer.transientStrokeBuffer?.actualSampleCount == 1)
+    #expect(!renderer.replayStroke.pending.isEmpty)
+
+    try renderer.finishStrokeTransient(
+        token: token,
+        sample: strokeSample(.ended, x: 44)
+    )
+    #expect(renderer.transientStrokeBuffer?.actualSampleCount == 2)
+    #expect(!renderer.replayStroke.pending.isEmpty)
+    try renderer.commitFinishedStroke(
+        token: token,
+        maximumRetainedBytes: 1_000_000
+    )
+    _ = try renderer.flushPendingLiveForHarness()
+    _ = try renderer.finishCommitForHarness()
+    #expect(renderer.isIdle)
+    #expect(renderer.harnessRevision.rawValue == 1)
 }
 
 @Test

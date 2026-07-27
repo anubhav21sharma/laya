@@ -336,10 +336,34 @@ public struct HarnessAttributedSample: Codable, Equatable, Sendable {
     public let altitude: Float?
     public let azimuth: Float?
     public let roll: Float?
+    public let tangentialPressure: Float?
+    public let deviceIdentifier: UInt64?
+    public let estimationUpdateIndex: Int?
+    public let estimatedProperties: UInt8
+    public let estimatedPropertiesExpectingUpdates: UInt8
     public let phase: HarnessStrokePhase
     public let source: HarnessStrokeSource
     public let kind: HarnessStrokeSampleKind
     public let capabilities: UInt8
+
+    private enum CodingKeys: String, CodingKey {
+        case x
+        case y
+        case pressure
+        case timestamp
+        case altitude
+        case azimuth
+        case roll
+        case tangentialPressure
+        case deviceIdentifier
+        case estimationUpdateIndex
+        case estimatedProperties
+        case estimatedPropertiesExpectingUpdates
+        case phase
+        case source
+        case kind
+        case capabilities
+    }
 
     public init(
         x: Float,
@@ -349,6 +373,11 @@ public struct HarnessAttributedSample: Codable, Equatable, Sendable {
         altitude: Float? = nil,
         azimuth: Float? = nil,
         roll: Float? = nil,
+        tangentialPressure: Float? = nil,
+        deviceIdentifier: UInt64? = nil,
+        estimationUpdateIndex: Int? = nil,
+        estimatedProperties: UInt8 = 0,
+        estimatedPropertiesExpectingUpdates: UInt8 = 0,
         phase: HarnessStrokePhase,
         source: HarnessStrokeSource,
         kind: HarnessStrokeSampleKind = .actual,
@@ -361,10 +390,100 @@ public struct HarnessAttributedSample: Codable, Equatable, Sendable {
         self.altitude = altitude
         self.azimuth = azimuth
         self.roll = roll
+        self.tangentialPressure = tangentialPressure
+        self.deviceIdentifier = deviceIdentifier
+        self.estimationUpdateIndex = estimationUpdateIndex
+        self.estimatedProperties = estimatedProperties
+        self.estimatedPropertiesExpectingUpdates =
+            estimatedPropertiesExpectingUpdates
         self.phase = phase
         self.source = source
         self.kind = kind
         self.capabilities = capabilities
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        x = try values.decode(Float.self, forKey: .x)
+        y = try values.decode(Float.self, forKey: .y)
+        pressure = try values.decode(Float.self, forKey: .pressure)
+        timestamp = try values.decode(TimeInterval.self, forKey: .timestamp)
+        altitude = try values.decodeIfPresent(Float.self, forKey: .altitude)
+        azimuth = try values.decodeIfPresent(Float.self, forKey: .azimuth)
+        roll = try values.decodeIfPresent(Float.self, forKey: .roll)
+        tangentialPressure = try values.decodeIfPresent(
+            Float.self,
+            forKey: .tangentialPressure
+        )
+        deviceIdentifier = try values.decodeIfPresent(
+            UInt64.self,
+            forKey: .deviceIdentifier
+        )
+        estimationUpdateIndex = try values.decodeIfPresent(
+            Int.self,
+            forKey: .estimationUpdateIndex
+        )
+        estimatedProperties = try values.decodeIfPresent(
+            UInt8.self,
+            forKey: .estimatedProperties
+        ) ?? 0
+        estimatedPropertiesExpectingUpdates = try values.decodeIfPresent(
+            UInt8.self,
+            forKey: .estimatedPropertiesExpectingUpdates
+        ) ?? 0
+        phase = try values.decode(HarnessStrokePhase.self, forKey: .phase)
+        source = try values.decode(HarnessStrokeSource.self, forKey: .source)
+        kind = try values.decodeIfPresent(
+            HarnessStrokeSampleKind.self,
+            forKey: .kind
+        ) ?? .actual
+        capabilities = try values.decodeIfPresent(
+            UInt8.self,
+            forKey: .capabilities
+        ) ?? 0
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(x, forKey: .x)
+        try values.encode(y, forKey: .y)
+        try values.encode(pressure, forKey: .pressure)
+        try values.encode(timestamp, forKey: .timestamp)
+        try values.encodeIfPresent(altitude, forKey: .altitude)
+        try values.encodeIfPresent(azimuth, forKey: .azimuth)
+        try values.encodeIfPresent(roll, forKey: .roll)
+        try values.encodeIfPresent(
+            tangentialPressure,
+            forKey: .tangentialPressure
+        )
+        try values.encodeIfPresent(
+            deviceIdentifier,
+            forKey: .deviceIdentifier
+        )
+        try values.encodeIfPresent(
+            estimationUpdateIndex,
+            forKey: .estimationUpdateIndex
+        )
+        if estimatedProperties != 0 {
+            try values.encode(
+                estimatedProperties,
+                forKey: .estimatedProperties
+            )
+        }
+        if estimatedPropertiesExpectingUpdates != 0 {
+            try values.encode(
+                estimatedPropertiesExpectingUpdates,
+                forKey: .estimatedPropertiesExpectingUpdates
+            )
+        }
+        try values.encode(phase, forKey: .phase)
+        try values.encode(source, forKey: .source)
+        if kind != .actual {
+            try values.encode(kind, forKey: .kind)
+        }
+        if capabilities != 0 {
+            try values.encode(capabilities, forKey: .capabilities)
+        }
     }
 
     public var strokeSample: StrokeSample? {
@@ -378,7 +497,17 @@ public struct HarnessAttributedSample: Codable, Equatable, Sendable {
             capabilities: StrokeInputCapabilities(rawValue: capabilities),
             altitude: altitude,
             azimuth: azimuth,
-            roll: roll
+            roll: roll,
+            tangentialPressure: tangentialPressure,
+            deviceIdentifier: deviceIdentifier,
+            estimationUpdateIndex: estimationUpdateIndex,
+            estimatedProperties: StrokeEstimatedProperties(
+                rawValue: estimatedProperties
+            ),
+            estimatedPropertiesExpectingUpdates:
+                StrokeEstimatedProperties(
+                    rawValue: estimatedPropertiesExpectingUpdates
+                )
         )
     }
 }
@@ -776,8 +905,15 @@ public struct HarnessScene: Codable, Equatable, Sendable {
                 throw HarnessSceneError.missingAttributedSamples
             }
             for (index, sample) in attributedSamples.enumerated() {
-                let unknownCapabilities = sample.capabilities & ~UInt8(0x0F)
+                let unknownCapabilities = sample.capabilities & ~UInt8(0x1F)
+                let unknownEstimated =
+                    sample.estimatedProperties & ~UInt8(0x1F)
+                let unknownExpecting =
+                    sample.estimatedPropertiesExpectingUpdates
+                        & ~UInt8(0x1F)
                 guard unknownCapabilities == 0,
+                      unknownEstimated == 0,
+                      unknownExpecting == 0,
                       sample.strokeSample != nil
                 else {
                     throw HarnessSceneError.invalidAttributedSample(index)

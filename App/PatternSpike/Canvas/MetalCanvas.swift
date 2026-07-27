@@ -19,7 +19,6 @@ private func configure(
     view.framebufferOnly = true
     view.isPaused = false
     view.enableSetNeedsDisplay = false
-    view.preferredFramesPerSecond = 60
 }
 
 #if os(macOS)
@@ -72,12 +71,32 @@ struct MetalCanvas: UIViewRepresentable {
     let requestEditorFocus: @MainActor () -> Void
     let pointerCancellationGeneration: UInt
 
-    func makeUIView(context: Context) -> MTKView {
-        let view = MTKView(frame: .zero, device: renderer.device)
+    func makeUIView(context: Context) -> InteractiveMetalView {
+        let view = InteractiveMetalView(
+            frame: .zero,
+            controller: controller,
+            renderer: renderer,
+            requestEditorFocus: requestEditorFocus,
+            pointerCancellationGeneration: pointerCancellationGeneration
+        )
         configure(view, renderer: renderer)
         return view
     }
 
-    func updateUIView(_ view: MTKView, context: Context) {}
+    func updateUIView(_ view: InteractiveMetalView, context: Context) {
+        #if DEBUG
+        precondition(
+            view.controller === controller,
+            "MetalCanvas reused a view with a different editor controller."
+        )
+        precondition(
+            view.gridRenderer === renderer,
+            "MetalCanvas reused a view with a different renderer."
+        )
+        #endif
+        view.applyPointerCancellation(
+            generation: pointerCancellationGeneration
+        )
+    }
 }
 #endif

@@ -35,6 +35,8 @@ private struct HostedEditorCanvas: View {
     }
 }
 
+private final class EstimatedTouchIdentity {}
+
 #if DEBUG
 @Test func debugHUDToggleAcceptsPhysicalGraveAndShiftedTilde() {
     #expect(isDebugHUDToggleCharacter("`"))
@@ -549,7 +551,16 @@ func brushInputAdapterKeepsMouseNeutralAndOrdersValidSamples() throws {
 @Test
 @MainActor
 func brushInputAdapterNormalizesTabletPressureTiltAndRotation() throws {
-    let adapter = BrushInputAdapter()
+    var adapter = BrushInputAdapter()
+    adapter.updateTabletProximity(
+        deviceIdentifier: 7,
+        capabilityMask:
+            BrushInputAdapter.TabletCapability.pressure
+                | BrushInputAdapter.TabletCapability.tiltX
+                | BrushInputAdapter.TabletCapability.tiltY
+                | BrushInputAdapter.TabletCapability.rotation,
+        isEntering: true
+    )
     let sample = try #require(adapter.orderedSamples([
         .init(
             position: ScreenPoint(x: 12, y: 34),
@@ -557,6 +568,7 @@ func brushInputAdapterNormalizesTabletPressureTiltAndRotation() throws {
             timestamp: 5,
             tilt: SIMD2(0.3, 0.4),
             rotationDegrees: 270,
+            deviceIdentifier: 7,
             phase: .moved,
             kind: .coalesced,
             isTablet: true
@@ -567,9 +579,246 @@ func brushInputAdapterNormalizesTabletPressureTiltAndRotation() throws {
     #expect(sample.kind == .coalesced)
     #expect(sample.pressure == 1)
     #expect(sample.capabilities == [.pressure, .altitude, .azimuth, .roll])
+    #expect(sample.deviceIdentifier == 7)
     #expect(abs(try #require(sample.altitude) - Float.pi / 3) < 0.0001)
     #expect(abs(try #require(sample.azimuth) - atan2(0.4, 0.3)) < 0.0001)
     #expect(abs(try #require(sample.roll) + Float.pi / 2) < 0.0001)
+}
+
+@Test
+@MainActor
+func brushInputAdapterUsesOnlyCachedDeclaredTabletCapabilities() throws {
+    var adapter = BrushInputAdapter()
+    adapter.updateTabletProximity(
+        deviceIdentifier: 9,
+        capabilityMask:
+            BrushInputAdapter.TabletCapability.tangentialPressure,
+        isEntering: true
+    )
+
+    let sample = try #require(adapter.orderedSamples([
+        .init(
+            position: ScreenPoint(x: 12, y: 34),
+            pressure: 0.8,
+            timestamp: 5,
+            tilt: SIMD2(0.3, 0.4),
+            rotationDegrees: 30,
+            tangentialPressure: -1.4,
+            deviceIdentifier: 9,
+            phase: .moved,
+            isTablet: true
+        ),
+    ]).first)
+
+    #expect(sample.pressure == 0.5)
+    #expect(sample.tangentialPressure == -1)
+    #expect(sample.capabilities == [.tangentialPressure])
+    #expect(sample.altitude == nil)
+    #expect(sample.azimuth == nil)
+    #expect(sample.roll == nil)
+
+    adapter.updateTabletProximity(
+        deviceIdentifier: 9,
+        capabilityMask: 0,
+        isEntering: false
+    )
+    let afterExit = try #require(adapter.orderedSamples([
+        .init(
+            position: ScreenPoint(x: 12, y: 34),
+            pressure: 0.8,
+            timestamp: 6,
+            tangentialPressure: 0.4,
+            deviceIdentifier: 9,
+            phase: .moved,
+            isTablet: true
+        ),
+    ]).first)
+    #expect(afterExit.capabilities.isEmpty)
+    #expect(afterExit.tangentialPressure == nil)
+}
+
+@Test
+func brushInputBatchPolicyIsStableAndKeepsLifecycleOffEarlierSamples() {
+    let ordered = BrushInputBatchPolicy.stableOrder(
+        [(timestamp: 3.0, id: 0), (timestamp: 1.0, id: 1),
+         (timestamp: 3.0, id: 2)],
+        timestamp: \.timestamp
+    )
+    #expect(ordered.map(\.id) == [1, 0, 2])
+    #expect(
+        BrushInputBatchPolicy.phase(
+            at: 0,
+            count: 2,
+            terminalPhase: .ended
+        ) == .moved
+    )
+    #expect(
+        BrushInputBatchPolicy.phase(
+            at: 1,
+            count: 2,
+            terminalPhase: .ended
+        ) == .ended
+    )
+}
+
+@Test
+func brushInputBatchPolicyDiscoversAndPersistsRollWithoutAdvertisingZero() {
+    #expect(!BrushInputBatchPolicy.discoversRoll(
+        previouslyDiscovered: false,
+        rollIsEstimated: false,
+        rollExpectsUpdate: false,
+        nativeRoll: 0
+    ))
+    #expect(BrushInputBatchPolicy.discoversRoll(
+        previouslyDiscovered: false,
+        rollIsEstimated: true,
+        rollExpectsUpdate: false,
+        nativeRoll: 0
+    ))
+    #expect(BrushInputBatchPolicy.discoversRoll(
+        previouslyDiscovered: true,
+        rollIsEstimated: false,
+        rollExpectsUpdate: false,
+        nativeRoll: 0
+    ))
+}
+
+@Test
+func brushInputBatchPolicySelectsUniquePencilAmongIncidentalTouches() {
+    struct Candidate: Equatable {
+        let id: Int
+        let isPencil: Bool
+    }
+    let pencil = Candidate(id: 1, isPencil: true)
+    let palm = Candidate(id: 2, isPencil: false)
+    let secondPencil = Candidate(id: 3, isPencil: true)
+
+    #expect(
+        BrushInputBatchPolicy.primaryInput(
+            [palm, pencil],
+            isPencil: \.isPencil
+        ) == pencil
+    )
+    #expect(
+        BrushInputBatchPolicy.primaryInput(
+            [palm],
+            isPencil: \.isPencil
+        ) == palm
+    )
+    #expect(
+        BrushInputBatchPolicy.primaryInput(
+            [palm, Candidate(id: 4, isPencil: false)],
+            isPencil: \.isPencil
+        ) == nil
+    )
+    #expect(
+        BrushInputBatchPolicy.primaryInput(
+            [pencil, secondPencil],
+            isPencil: \.isPencil
+        ) == nil
+    )
+}
+
+@Test
+func pendingEstimatedInputRegistryRetainsEarlierSamplesThroughCleanEnd() {
+    var registry = PendingEstimatedInputRegistry<String>()
+    registry.record(
+        "coalesced",
+        index: 71,
+        expecting: [.pressure],
+        isPredicted: false
+    )
+    registry.record(
+        "clean-end",
+        index: nil,
+        expecting: [],
+        isPredicted: false
+    )
+
+    #expect(registry.count == 1)
+    #expect(registry.value(for: 71) == "coalesced")
+    registry.record(
+        "resolved",
+        index: 71,
+        expecting: [],
+        isPredicted: false
+    )
+    #expect(registry.isEmpty)
+}
+
+@Test
+func pendingEstimatedInputRegistryResolvesIndicesIndependently() {
+    var registry = PendingEstimatedInputRegistry<Int>()
+    registry.record(
+        1,
+        index: 81,
+        expecting: [.pressure],
+        isPredicted: false
+    )
+    registry.record(
+        2,
+        index: 82,
+        expecting: [.roll],
+        isPredicted: true
+    )
+    #expect(registry.indices == [81, 82])
+
+    registry.record(
+        3,
+        index: 81,
+        expecting: [],
+        isPredicted: false
+    )
+    #expect(registry.indices == [82])
+    registry.discardPredicted()
+    #expect(registry.isEmpty)
+}
+
+@Test
+func pendingEstimatedInputRegistryRequiresStoredObjectIdentity() {
+    let priorTouch = EstimatedTouchIdentity()
+    let currentTouch = EstimatedTouchIdentity()
+    var registry = PendingEstimatedInputRegistry<EstimatedTouchIdentity>()
+    registry.record(
+        currentTouch,
+        index: 91,
+        expecting: [.pressure],
+        isPredicted: false,
+        inputGeneration: 7
+    )
+
+    #expect(registry.containsIdentical(currentTouch, for: 91))
+    #expect(!registry.containsIdentical(priorTouch, for: 91))
+    #expect(registry.inputGeneration(for: 91) == 7)
+}
+
+@Test
+func tabletEventDeduplicatorKeepsPressureChangesAndDropsDuplicates() {
+    var deduplicator = TabletEventDeduplicator()
+    let first = TabletEventSignature(
+        timestamp: 1,
+        position: ScreenPoint(x: 10, y: 20),
+        pressure: 0.4,
+        deviceIdentifier: 9,
+        phase: .moved
+    )
+    let acceptsFirst = deduplicator.shouldDeliver(first)
+    let rejectsDuplicate = !deduplicator.shouldDeliver(first)
+    let acceptsPressureChange = deduplicator.shouldDeliver(
+        TabletEventSignature(
+        timestamp: 1,
+        position: ScreenPoint(x: 10, y: 20),
+        pressure: 0.7,
+        deviceIdentifier: 9,
+        phase: .moved
+        )
+    )
+    #expect(acceptsFirst)
+    #expect(rejectsDuplicate)
+    #expect(acceptsPressureChange)
+    deduplicator.reset()
+    let acceptsAfterReset = deduplicator.shouldDeliver(first)
+    #expect(acceptsAfterReset)
 }
 
 @Test

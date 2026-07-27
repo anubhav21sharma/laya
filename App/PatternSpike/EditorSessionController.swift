@@ -25,6 +25,20 @@ final class EditorSessionController {
     private(set) var isSpaceDown = false
     private let strokeSeedSessionEntropy: UInt64
     private var nextStrokeSequence: UInt64 = 1
+    private var pendingEstimatedProperties:
+        [Int: StrokeEstimatedProperties] = [:]
+    private var predictedEstimationIndices: Set<Int> = []
+    private var ignoredLateEstimationIndices: Set<Int> = []
+    private struct RoutedStrokeSample {
+        let sample: StrokeSample
+        let inputGeneration: UInt64?
+    }
+
+    private var deferredPointerSamples: [RoutedStrokeSample] = []
+    private var deferredPointerOverflowed = false
+    private var deferredEstimationIndices: Set<Int> = []
+    private static let deferredPointerSampleCapacity =
+        TransientStrokeBufferContract.wholeStrokeSampleCapacity
 
     private var transaction = EditorTransaction()
     private var history: DocumentHistory
@@ -88,12 +102,14 @@ final class EditorSessionController {
         requestStrokeCancellation: ((
             RendererOperationToken
         ) throws -> Void)? = nil,
+        historyMaximumBytes: Int = 200 * 1_024 * 1_024,
         strokeSeedSessionEntropy: UInt64 = EditorSessionController
             .makeStrokeSeedSessionEntropy()
     ) {
         self.model = model
         self.renderer = renderer
         history = DocumentHistory(
+            maximumBytes: historyMaximumBytes,
             initialDocumentIsEmpty: !renderer.documentDomainLocked
         )
         self.strokeSeedSessionEntropy = strokeSeedSessionEntropy
@@ -137,11 +153,46 @@ final class EditorSessionController {
         transaction.state
     }
 
-    func handleStrokeSample(_ sample: StrokeSample) {
+    func handleStrokeSample(
+        _ sample: StrokeSample,
+        inputGeneration: UInt64? = nil
+    ) {
+        if hasDeferredPointerStream {
+            enqueueDeferredPointerSample(
+                sample,
+                inputGeneration: inputGeneration
+            )
+            return
+        }
+        if sample.kind == .estimatedUpdate,
+           let index = sample.estimationUpdateIndex,
+           ignoredLateEstimationIndices.contains(index)
+        {
+            return
+        }
+        if sample.kind == .estimatedUpdate {
+            handleEstimatedPropertiesUpdate(sample)
+            return
+        }
+        if sample.phase == .began, isAwaitingEstimatedUpdates {
+            enqueueDeferredPointerSample(
+                sample,
+                inputGeneration: inputGeneration
+            )
+            ignorePendingEstimatedUpdates()
+            emitEstimatedUpdateFallbackDiagnostic()
+            apply(.finalizeAwaitingEstimates)
+            return
+        }
         let event: EditorTransactionEvent
         switch sample.phase {
         case .began:
-            guard let tool = strokeTool else { return }
+            guard let tool = strokeTool,
+                  transaction.state == .idle,
+                  transaction.pendingOperation == nil
+            else { return }
+            resetEstimatedUpdatesForNewStroke()
+            trackPendingEstimatedProperties(in: sample)
             let recipe = tool == .draw
                 ? model.selectedRecipe
                 : AnchorBrushCatalog.hardRoundEraser.recipe
@@ -160,16 +211,35 @@ final class EditorSessionController {
                 recipe: recipe
             )
         case .moved:
+            guard isCollectingStroke else { return }
+            trackPendingEstimatedProperties(in: sample)
             event = .pointerMoved(sample)
         case .ended:
-            event = .pointerEnded(sample)
+            guard isCollectingStroke else { return }
+            trackPendingEstimatedProperties(in: sample)
+            event = pendingEstimatedProperties.isEmpty
+                ? .pointerEnded(sample)
+                : .pointerEndedAwaitingEstimates(sample)
         case .cancelled:
+            ignorePendingEstimatedUpdates()
             event = .pointerCancelled
         }
         apply(event)
     }
 
-    func handleStrokeSamples(_ samples: [StrokeSample]) {
+    func handleStrokeSamples(
+        _ samples: [StrokeSample],
+        inputGeneration: UInt64? = nil
+    ) {
+        if hasDeferredPointerStream {
+            for sample in samples {
+                handleStrokeSample(
+                    sample,
+                    inputGeneration: inputGeneration
+                )
+            }
+            return
+        }
         guard samples.count > 1,
               samples.allSatisfy({ $0.phase == .moved }),
               case let .drawing(drawing) = transaction.state,
@@ -177,11 +247,17 @@ final class EditorSessionController {
               transaction.pendingOperation == nil
         else {
             for sample in samples {
-                handleStrokeSample(sample)
+                handleStrokeSample(
+                    sample,
+                    inputGeneration: inputGeneration
+                )
             }
             return
         }
 
+        for sample in samples {
+            trackPendingEstimatedProperties(in: sample)
+        }
         let effects = samples.flatMap {
             transaction.apply(.pointerMoved($0))
         }
@@ -215,6 +291,7 @@ final class EditorSessionController {
             )
         }
         refreshDerivedModelState()
+        resumeDeferredPointerIfIdle()
     }
 
     func handleTiling(_ tiling: TilingKind) {
@@ -355,12 +432,20 @@ final class EditorSessionController {
     }
 
     func cancelTransientEdit() {
+        discardDeferredPointerStream()
+        ignorePendingEstimatedUpdates()
         apply(.pointerCancelled)
     }
 
     func handleFocusLoss() {
         isSpaceDown = false
-        cancelTransientEdit()
+        if isAwaitingEstimatedUpdates {
+            ignorePendingEstimatedUpdates()
+            emitEstimatedUpdateFallbackDiagnostic()
+            apply(.finalizeAwaitingEstimates)
+        } else {
+            cancelTransientEdit()
+        }
     }
 
     func pan(byScreenDelta delta: SIMD2<Float>) {
@@ -386,6 +471,93 @@ final class EditorSessionController {
         case .select, .transform:
             nil
         }
+    }
+
+    private var isAwaitingEstimatedUpdates: Bool {
+        guard case let .drawing(drawing) = transaction.state else {
+            return false
+        }
+        return drawing.phase == .awaitingEstimatedUpdates
+    }
+
+    private var isCollectingStroke: Bool {
+        guard case let .drawing(drawing) = transaction.state else {
+            return false
+        }
+        return drawing.phase == .collecting
+            && transaction.pendingOperation == nil
+    }
+
+    private func resetEstimatedUpdatesForNewStroke() {
+        pendingEstimatedProperties.removeAll(keepingCapacity: true)
+        predictedEstimationIndices.removeAll(keepingCapacity: true)
+        ignoredLateEstimationIndices.removeAll(keepingCapacity: true)
+    }
+
+    private func trackPendingEstimatedProperties(
+        in sample: StrokeSample
+    ) {
+        if sample.kind == .actual || sample.kind == .coalesced {
+            for index in predictedEstimationIndices {
+                pendingEstimatedProperties.removeValue(forKey: index)
+            }
+            predictedEstimationIndices.removeAll(keepingCapacity: true)
+        }
+        guard let index = sample.estimationUpdateIndex else { return }
+        if sample.estimatedPropertiesExpectingUpdates.isEmpty {
+            pendingEstimatedProperties.removeValue(forKey: index)
+            predictedEstimationIndices.remove(index)
+        } else {
+            pendingEstimatedProperties[index] =
+                sample.estimatedPropertiesExpectingUpdates
+            if sample.kind == .predicted {
+                predictedEstimationIndices.insert(index)
+            }
+        }
+    }
+
+    private func handleEstimatedPropertiesUpdate(
+        _ sample: StrokeSample
+    ) {
+        guard let index = sample.estimationUpdateIndex,
+              !ignoredLateEstimationIndices.contains(index),
+              pendingEstimatedProperties[index] != nil
+        else {
+            return
+        }
+        if sample.estimatedPropertiesExpectingUpdates.isEmpty {
+            pendingEstimatedProperties.removeValue(forKey: index)
+            predictedEstimationIndices.remove(index)
+        } else {
+            pendingEstimatedProperties[index] =
+                sample.estimatedPropertiesExpectingUpdates
+        }
+        apply(
+            .estimatedPropertiesUpdated(
+                sample,
+                resolvesLastPending:
+                    pendingEstimatedProperties.isEmpty
+            )
+        )
+        if pendingEstimatedProperties.isEmpty {
+            ignoredLateEstimationIndices.insert(index)
+        }
+    }
+
+    private func ignorePendingEstimatedUpdates() {
+        ignoredLateEstimationIndices.formUnion(
+            pendingEstimatedProperties.keys
+        )
+        pendingEstimatedProperties.removeAll(keepingCapacity: true)
+        predictedEstimationIndices.removeAll(keepingCapacity: true)
+    }
+
+    private func emitEstimatedUpdateFallbackDiagnostic() {
+        #if DEBUG
+        debugPrint(
+            "Laya: finalizing stroke before pending estimated properties resolved."
+        )
+        #endif
     }
 
     private func apply(_ event: EditorTransactionEvent) {
@@ -438,8 +610,24 @@ final class EditorSessionController {
                 sample: sample,
                 maximumRetainedBytes: history.maximumBytes
             )
+        case let .finishStrokeTransient(token, sample):
+            try renderer.finishStrokeTransient(
+                token: rendererToken(token),
+                sample: sample
+            )
+        case let .applyEstimatedUpdate(token, sample):
+            try renderer.applyEstimatedStrokeUpdate(
+                token: rendererToken(token),
+                sample: sample
+            )
+        case let .commitFinishedStroke(token):
+            try renderer.commitFinishedStroke(
+                token: rendererToken(token),
+                maximumRetainedBytes: history.maximumBytes
+            )
         case let .cancelStroke(token):
             try requestStrokeCancellation(rendererToken(token))
+            ignorePendingEstimatedUpdates()
         case let .updateTool(tool):
             model.confirmTool(tool)
         case let .updateColor(color):
@@ -644,14 +832,19 @@ final class EditorSessionController {
         }
         switch effect {
         case let .beginStroke(token, _, _, _, _),
-             let .appendStroke(token, _):
+             let .appendStroke(token, _),
+             let .finishStrokeTransient(token, _),
+             let .applyEstimatedUpdate(token, _):
+            ignorePendingEstimatedUpdates()
             try? renderer.cancelStroke(token: rendererToken(token))
             _ = transaction.apply(.pointerCancelled)
         case let .requestStrokeCommit(token, _),
+             let .commitFinishedStroke(token),
              let .performCommand(token, _),
              let .applyTiling(token, _),
              let .applyPeriodicConfiguration(token, _),
              let .applyTileSize(token, _):
+            ignorePendingEstimatedUpdates()
             finishHistoryNavigationIfNeeded(
                 operationToken: token,
                 succeeded: false
@@ -663,13 +856,16 @@ final class EditorSessionController {
                 pendingTileResize = nil
             }
             apply(.operationCompleted(token, succeeded: false))
-        case .cancelStroke, .updateTool, .updateColor,
+        case .cancelStroke:
+            ignorePendingEstimatedUpdates()
+        case .updateTool, .updateColor,
              .updateBrushDiameter, .updateRecipe, .updateGridVisibility,
              .clearSelectionOverlay, .beginTransform, .cancelTransform,
              .busy, .reportOperationFailure:
             break
         }
         refreshDerivedModelState()
+        resumeDeferredPointerIfIdle()
     }
 
     private func failUnexecutedEffects(
@@ -740,6 +936,7 @@ final class EditorSessionController {
                drawing.phase == .commitPending,
                drawing.token == completedToken
             {
+                ignorePendingEstimatedUpdates()
                 kind = drawing.tool == .draw ? .draw : .erase
             } else if let pendingRasterMutation,
                       pendingRasterMutation.token == completedToken
@@ -814,6 +1011,11 @@ final class EditorSessionController {
         case let .failure(token, error):
             report(error)
             let completedToken = editorToken(token)
+            if case let .drawing(drawing) = transaction.state,
+               drawing.token == completedToken
+            {
+                ignorePendingEstimatedUpdates()
+            }
             finishHistoryNavigationIfNeeded(
                 operationToken: completedToken,
                 succeeded: false
@@ -832,6 +1034,101 @@ final class EditorSessionController {
             )
         }
         refreshDerivedModelState()
+        resumeDeferredPointerIfIdle()
+    }
+
+    private func resumeDeferredPointerIfIdle() {
+        guard transaction.state == .idle,
+              hasDeferredPointerStream
+        else { return }
+        let samples = deferredPointerSamples
+        let overflowed = deferredPointerOverflowed
+        discardDeferredPointerStream()
+        guard let began = samples.first(where: {
+            $0.sample.phase == .began
+        }) else {
+            return
+        }
+        if overflowed {
+            handleStrokeSample(
+                began.sample,
+                inputGeneration: began.inputGeneration
+            )
+            handleStrokeSample(
+                .mouse(
+                    position: began.sample.position,
+                    timestamp: began.sample.timestamp,
+                    phase: .cancelled
+                ),
+                inputGeneration: began.inputGeneration
+            )
+            return
+        }
+        for routedSample in samples {
+            handleStrokeSample(
+                routedSample.sample,
+                inputGeneration: routedSample.inputGeneration
+            )
+        }
+    }
+
+    private var hasDeferredPointerStream: Bool {
+        !deferredPointerSamples.isEmpty || deferredPointerOverflowed
+    }
+
+    private func discardDeferredPointerStream() {
+        deferredPointerSamples.removeAll(keepingCapacity: true)
+        deferredPointerOverflowed = false
+        deferredEstimationIndices.removeAll(keepingCapacity: true)
+    }
+
+    private func enqueueDeferredPointerSample(
+        _ sample: StrokeSample,
+        inputGeneration: UInt64?
+    ) {
+        guard !deferredPointerOverflowed else { return }
+        guard shouldEnqueueDeferredPointerSample(
+            sample,
+            inputGeneration: inputGeneration
+        ) else {
+            return
+        }
+        guard deferredPointerSamples.count
+                < Self.deferredPointerSampleCapacity
+        else {
+            deferredPointerOverflowed = true
+            deferredEstimationIndices.removeAll(keepingCapacity: true)
+            return
+        }
+        deferredPointerSamples.append(
+            RoutedStrokeSample(
+                sample: sample,
+                inputGeneration: inputGeneration
+            )
+        )
+        if let index = sample.estimationUpdateIndex {
+            if sample.estimatedPropertiesExpectingUpdates.isEmpty {
+                deferredEstimationIndices.remove(index)
+            } else {
+                deferredEstimationIndices.insert(index)
+            }
+        }
+    }
+
+    private func shouldEnqueueDeferredPointerSample(
+        _ sample: StrokeSample,
+        inputGeneration: UInt64?
+    ) -> Bool {
+        guard let first = deferredPointerSamples.first else {
+            return sample.phase == .began
+                && sample.kind != .estimatedUpdate
+        }
+        guard inputGeneration == first.inputGeneration else { return false }
+        guard sample.kind == .estimatedUpdate else { return true }
+        guard inputGeneration != nil,
+              let index = sample.estimationUpdateIndex
+        else { return false }
+        return deferredEstimationIndices.contains(index)
     }
 
     private func finishHistoryNavigationIfNeeded(

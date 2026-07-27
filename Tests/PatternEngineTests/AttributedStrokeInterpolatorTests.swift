@@ -13,7 +13,12 @@ private func attributedSample(
     roll: Float? = nil,
     phase: StrokePhase,
     kind: StrokeSampleKind = .actual,
-    capabilities: StrokeInputCapabilities = [.pressure]
+    capabilities: StrokeInputCapabilities = [.pressure],
+    tangentialPressure: Float? = nil,
+    deviceIdentifier: UInt64? = nil,
+    estimationUpdateIndex: Int? = nil,
+    estimatedProperties: StrokeEstimatedProperties = [],
+    estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties = []
 ) -> InterpolatedStrokeSample {
     InterpolatedStrokeSample(
         position: WorldPoint(x: x, y: y),
@@ -26,7 +31,13 @@ private func attributedSample(
         phase: phase,
         source: .pencil,
         kind: kind,
-        capabilities: capabilities
+        capabilities: capabilities,
+        tangentialPressure: tangentialPressure,
+        deviceIdentifier: deviceIdentifier,
+        estimationUpdateIndex: estimationUpdateIndex,
+        estimatedProperties: estimatedProperties,
+        estimatedPropertiesExpectingUpdates:
+            estimatedPropertiesExpectingUpdates
     )
 }
 
@@ -38,6 +49,48 @@ private func angleDistance(_ lhs: Float, _ rhs: Float) -> Float {
 
 @Suite("AttributedStrokeInterpolator")
 struct AttributedStrokeInterpolatorTests {
+    @Test
+    func continuousTangentialPressureInterpolatesAndDiscreteFieldsChooseNearest()
+        throws
+    {
+        let start = attributedSample(
+            x: 0,
+            timestamp: 0,
+            phase: .moved,
+            kind: .actual,
+            capabilities: [.pressure, .tangentialPressure],
+            tangentialPressure: -1,
+            deviceIdentifier: 10,
+            estimationUpdateIndex: 1,
+            estimatedProperties: [.pressure],
+            estimatedPropertiesExpectingUpdates: [.pressure]
+        )
+        let end = attributedSample(
+            x: 10,
+            timestamp: 1,
+            phase: .ended,
+            kind: .coalesced,
+            capabilities: [.pressure, .tangentialPressure, .roll],
+            tangentialPressure: 1,
+            deviceIdentifier: 20,
+            estimationUpdateIndex: 2,
+            estimatedProperties: [.roll],
+            estimatedPropertiesExpectingUpdates: [.roll]
+        )
+        let segment = AttributedStrokePathSegment(start: start, end: end)
+        let beforeMidpoint = segment.sample(at: 0.49)
+        let midpoint = segment.sample(at: 0.5)
+
+        #expect(abs(try #require(beforeMidpoint.tangentialPressure) + 0.02) < 0.001)
+        #expect(beforeMidpoint.deviceIdentifier == 10)
+        #expect(beforeMidpoint.estimationUpdateIndex == 1)
+        #expect(beforeMidpoint.estimatedProperties == [.pressure])
+        #expect(beforeMidpoint.phase == .moved)
+        #expect(midpoint.deviceIdentifier == 20)
+        #expect(midpoint.estimationUpdateIndex == 2)
+        #expect(midpoint.estimatedProperties == [.roll])
+        #expect(midpoint.phase == .ended)
+    }
     @Test
     func pressureTimestampAndVelocityFollowArcFraction() {
         var interpolator = AttributedStrokeInterpolator(spacing: 2.5)

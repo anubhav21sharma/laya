@@ -22,6 +22,7 @@ public struct SelectionRegion: Equatable, Sendable {
 
 public enum DrawingPhase: UInt8, Equatable, Sendable {
     case collecting
+    case awaitingEstimatedUpdates
     case commitPending
 }
 
@@ -64,6 +65,12 @@ public enum EditorTransactionEvent: Equatable, Sendable {
     )
     case pointerMoved(StrokeSample)
     case pointerEnded(StrokeSample)
+    case pointerEndedAwaitingEstimates(StrokeSample)
+    case estimatedPropertiesUpdated(
+        StrokeSample,
+        resolvesLastPending: Bool
+    )
+    case finalizeAwaitingEstimates
     case pointerCancelled
     case toolIntent(EditorTool)
     case colorIntent(InkColor)
@@ -89,6 +96,9 @@ public enum EditorTransactionEffect: Equatable, Sendable {
     )
     case appendStroke(EditorTransactionToken, StrokeSample)
     case requestStrokeCommit(EditorTransactionToken, StrokeSample)
+    case finishStrokeTransient(EditorTransactionToken, StrokeSample)
+    case applyEstimatedUpdate(EditorTransactionToken, StrokeSample)
+    case commitFinishedStroke(EditorTransactionToken)
     case cancelStroke(EditorTransactionToken)
     case updateTool(EditorTool)
     case updateColor(InkColor)
@@ -203,6 +213,10 @@ public struct EditorTransaction: Equatable, Sendable {
             return [.beginStroke(token, sample, tool, style, recipe)]
         case .pointerMoved, .pointerEnded, .pointerCancelled:
             return []
+        case .pointerEndedAwaitingEstimates,
+             .estimatedPropertiesUpdated,
+             .finalizeAwaitingEstimates:
+            return []
         case let .toolIntent(tool):
             return [.updateTool(tool)]
         case let .colorIntent(color):
@@ -233,6 +247,9 @@ public struct EditorTransaction: Equatable, Sendable {
         _ event: EditorTransactionEvent,
         drawing: DrawingTransaction
     ) -> [EditorTransactionEffect] {
+        if drawing.phase == .awaitingEstimatedUpdates {
+            return applyWhileAwaitingEstimates(event, drawing: drawing)
+        }
         switch event {
         case .pointerBegan:
             return [.busy]
@@ -248,6 +265,20 @@ public struct EditorTransaction: Equatable, Sendable {
                 )
             )
             return [.requestStrokeCommit(drawing.token, sample)]
+        case let .pointerEndedAwaitingEstimates(sample):
+            state = .drawing(
+                DrawingTransaction(
+                    token: drawing.token,
+                    tool: drawing.tool,
+                    phase: .awaitingEstimatedUpdates,
+                    recipe: drawing.recipe
+                )
+            )
+            return [.finishStrokeTransient(drawing.token, sample)]
+        case let .estimatedPropertiesUpdated(sample, _):
+            return [.applyEstimatedUpdate(drawing.token, sample)]
+        case .finalizeAwaitingEstimates:
+            return []
         case .pointerCancelled:
             state = .idle
             return [.cancelStroke(drawing.token)]
@@ -293,12 +324,62 @@ public struct EditorTransaction: Equatable, Sendable {
         }
     }
 
+    private mutating func applyWhileAwaitingEstimates(
+        _ event: EditorTransactionEvent,
+        drawing: DrawingTransaction
+    ) -> [EditorTransactionEffect] {
+        switch event {
+        case let .estimatedPropertiesUpdated(sample, resolvesLastPending):
+            guard resolvesLastPending else {
+                return [.applyEstimatedUpdate(drawing.token, sample)]
+            }
+            state = .drawing(
+                DrawingTransaction(
+                    token: drawing.token,
+                    tool: drawing.tool,
+                    phase: .commitPending,
+                    recipe: drawing.recipe
+                )
+            )
+            return [
+                .applyEstimatedUpdate(drawing.token, sample),
+                .commitFinishedStroke(drawing.token),
+            ]
+        case .finalizeAwaitingEstimates:
+            state = .drawing(
+                DrawingTransaction(
+                    token: drawing.token,
+                    tool: drawing.tool,
+                    phase: .commitPending,
+                    recipe: drawing.recipe
+                )
+            )
+            return [.commitFinishedStroke(drawing.token)]
+        case .pointerCancelled:
+            state = .idle
+            return [.cancelStroke(drawing.token)]
+        case .pointerBegan, .pointerMoved, .pointerEnded,
+             .pointerEndedAwaitingEstimates, .toolIntent, .colorIntent,
+             .brushDiameterIntent, .recipeIntent, .command, .tilingIntent,
+             .periodicConfigurationIntent, .tileSizeIntent,
+             .selectionChanged, .selectionEnded:
+            return [.busy]
+        case let .gridVisibilityIntent(visible):
+            return [.updateGridVisibility(visible)]
+        case .operationCompleted:
+            return []
+        }
+    }
+
     private mutating func applyWhileSelectingDraft(
         _ event: EditorTransactionEvent,
         region: SelectionRegion?
     ) -> [EditorTransactionEffect] {
         switch event {
-        case .pointerBegan, .pointerMoved, .pointerEnded:
+        case .pointerBegan, .pointerMoved, .pointerEnded,
+             .pointerEndedAwaitingEstimates:
+            return []
+        case .estimatedPropertiesUpdated, .finalizeAwaitingEstimates:
             return []
         case .pointerCancelled:
             state = .idle
@@ -352,7 +433,10 @@ public struct EditorTransaction: Equatable, Sendable {
         region: SelectionRegion
     ) -> [EditorTransactionEffect] {
         switch event {
-        case .pointerBegan, .pointerMoved, .pointerEnded:
+        case .pointerBegan, .pointerMoved, .pointerEnded,
+             .pointerEndedAwaitingEstimates:
+            return []
+        case .estimatedPropertiesUpdated, .finalizeAwaitingEstimates:
             return []
         case .pointerCancelled:
             state = .idle
@@ -407,7 +491,10 @@ public struct EditorTransaction: Equatable, Sendable {
         _ event: EditorTransactionEvent
     ) -> [EditorTransactionEffect] {
         switch event {
-        case .pointerBegan, .pointerMoved, .pointerEnded:
+        case .pointerBegan, .pointerMoved, .pointerEnded,
+             .pointerEndedAwaitingEstimates:
+            return []
+        case .estimatedPropertiesUpdated, .finalizeAwaitingEstimates:
             return []
         case .pointerCancelled:
             state = .idle
@@ -498,6 +585,13 @@ public struct EditorTransaction: Equatable, Sendable {
             return sample.phase == .moved
         case let .pointerEnded(sample):
             return sample.phase == .ended
+        case let .pointerEndedAwaitingEstimates(sample):
+            return sample.phase == .ended
+        case let .estimatedPropertiesUpdated(sample, _):
+            return sample.kind == .estimatedUpdate
+                && sample.estimationUpdateIndex != nil
+        case .finalizeAwaitingEstimates:
+            return true
         case .pointerCancelled, .toolIntent, .colorIntent,
              .brushDiameterIntent, .recipeIntent, .gridVisibilityIntent,
              .command,

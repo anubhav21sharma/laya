@@ -1937,6 +1937,19 @@ git commit -m "feat(brush): add native brush package"
 - Modify: `Tests/PatternEngineTests/AttributedStrokeInterpolatorTests.swift`
 - Modify: `Tests/PatternEngineTests/TransientStrokeBufferTests.swift`
 - Modify: `App/Tests/EditorSessionControllerTests.swift`
+- Modify: `Sources/MetalRenderer/GridRenderer.swift`
+- Modify: `Sources/MetalRenderer/MetalRendererError.swift`
+- Modify: `Sources/EditorCore/Transactions/EditorTransaction.swift`
+- Modify: `App/PatternSpike/ContentView.swift`
+- Modify: `Sources/MetalRenderer/Capture/HarnessScene.swift`
+- Modify: relevant MetalRenderer, EditorCore, and harness tests
+
+The renderer and transaction files above are required Task 8 integration, not
+Task 11 work: the renderer owns the transient buffer, input derivers, and
+generator snapshots, while the transaction currently couples pointer-up
+directly to canonical commit. `App/PatternSpike.xcodeproj/` is generated and
+ignored; update `project.yml`, regenerate it for verification, and do not stage
+the generated project.
 
 **Interfaces:**
 
@@ -2009,14 +2022,21 @@ public struct EstimatedStrokeUpdatePlan: Equatable, Sendable {
 - Estimated/expecting flags must be subsets of the sample's input
   capabilities, except location, and `expectingUpdates` must be a subset of
   `estimatedProperties`.
+- Tangential pressure dynamics normalize `-1...1` to `0...1`; absence uses the
+  mapping's declared missing-input value.
+- Travel direction remains a deterministic dab-placement value derived from
+  the interpolated path in `BrushStrokeContext`. Normalized traces retain the
+  positions that reproduce it; do not add a competing raw-sample direction
+  source of truth.
 - An estimated update replaces only a retained sample with the same index.
   For actual/coalesced input, rebuild the authoritative replay suffix from the
   generator snapshot immediately before the replaced sample. For predicted
   input, rebuild only the predicted suffix from the authoritative checkpoint.
   Never append the update as a new path point.
-- macOS reads `NSEvent.capabilityMask`, `deviceID`, `pressure`, `tilt`,
-  `rotation`, and `tangentialPressure` for tablet-point events. A sensor is
-  present only when the event declares that capability. Preserve the existing
+- macOS caches `NSEvent.capabilityMask` from tablet-proximity events by checked
+  nonnegative device ID, then reads `deviceID`, `pressure`, `tilt`, `rotation`,
+  and `tangentialPressure` from tablet-point events only when the cached
+  capability declares that sensor. Preserve the existing
   tilt-to-altitude/azimuth conversion and degrees-to-radians barrel rotation.
 - iPad reads `UITouch.force / maximumPossibleForce`, `altitudeAngle`,
   `azimuthAngle(in:)`, `rollAngle`, `estimationUpdateIndex`,
@@ -2107,11 +2127,25 @@ prediction; predicted replacement changes only prediction. Either path
 increments the epoch exactly once and rejects stale plans, target/index
 mismatches, or capacity overflow without mutating the buffer.
 
+The plan's `sourceReplayEpoch` must be backed by a true buffer mutation version,
+distinct from a render-only epoch if necessary: every retained sample or
+structural mutation invalidates an older plan. `samplesToReplay` excludes the
+merged sample; rebuilt chunks contain the merged replacement followed by the
+complete later suffix. Location updates recompute velocity for that suffix
+from a retained input-deriver checkpoint. Append-only recipes pin the suffix
+from the earliest unresolved estimate in replaceable storage instead of
+settling it permanently.
+
 An `.ended` sample with expected updates renders as transient preview but does
 not commit. `EditorSessionController` finalizes exactly once after the last
 expected property resolves. Cancellation discards it. If lifecycle teardown or
 a new pointer begins first, finalize using the latest retained estimate, emit a
 development diagnostic, and ignore subsequent late updates.
+
+This requires separate renderer operations for transient finish, estimated
+suffix rebuild, and commit of an already-finished stroke. The final commit must
+not call generator finish a second time. Extend the transaction state so
+waiting for estimates is distinct from a submitted commit.
 
 Tests must cover force-only, location-only, and multi-property replacement;
 multiple updates for one index; replay from the preceding generator snapshot;
@@ -2158,6 +2192,15 @@ array order for ties.
 The final member of a began/ended batch receives the lifecycle phase; earlier
 coalesced members use `.moved`. Cancellation sends one actual `.cancelled`
 sample and clears local touch state.
+
+UIKit touch callbacks provide sets. Track one active touch and never depend on
+set iteration order. Retain ended-touch state until pending estimates resolve;
+roll capability persists for that active touch and resets on cancellation or
+finalization.
+
+Extend the versioned harness attributed-sample schema with backward-compatible
+tangential-pressure, device-ID, estimation-index, and estimated-property
+fields. Existing trace fixtures must decode unchanged.
 
 - [ ] **Step 7: Raise only the iPad baseline**
 

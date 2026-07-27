@@ -74,6 +74,14 @@ func schemaFiveRoundTripsRequiredStrokeProvenanceAndChecks() throws {
     #expect(scene.attributedSamples[0].source == .tablet)
     #expect(scene.attributedSamples[0].kind == .actual)
     #expect(scene.attributedSamples[0].capabilities == 7)
+    #expect(scene.attributedSamples[0].tangentialPressure == nil)
+    #expect(scene.attributedSamples[0].deviceIdentifier == nil)
+    #expect(scene.attributedSamples[0].estimationUpdateIndex == nil)
+    #expect(scene.attributedSamples[0].estimatedProperties == 0)
+    #expect(
+        scene.attributedSamples[0]
+            .estimatedPropertiesExpectingUpdates == 0
+    )
     #expect(scene.attributedSamples[0].strokeSample?.pressure == 0.25)
     #expect(scene.structuralChecks[0].metric == .peakRetainedSampleCount)
 
@@ -131,12 +139,49 @@ func schemaFiveRejectsUnknownSampleCapabilities() throws {
     var samples = try #require(
         object["attributedSamples"] as? [[String: Any]]
     )
-    samples[1]["capabilities"] = 16
+    samples[1]["capabilities"] = 32
     object["attributedSamples"] = samples
 
     #expect(throws: HarnessSceneError.invalidAttributedSample(1)) {
         try HarnessScene.decode(JSONSerialization.data(withJSONObject: object))
     }
+}
+
+@Test
+func schemaFiveRoundTripsCompleteTabletAndPencilMetadata() throws {
+    let attributed = HarnessAttributedSample(
+        x: 12,
+        y: 18,
+        pressure: 0.25,
+        timestamp: 1,
+        altitude: 0.8,
+        azimuth: 0.2,
+        roll: 0.4,
+        tangentialPressure: -0.6,
+        deviceIdentifier: 42,
+        estimationUpdateIndex: 3,
+        estimatedProperties: 0x11,
+        estimatedPropertiesExpectingUpdates: 0x01,
+        phase: .moved,
+        source: .tablet,
+        kind: .coalesced,
+        capabilities: 0x1F
+    )
+
+    let encoded = try JSONEncoder().encode(attributed)
+    let decoded = try JSONDecoder().decode(
+        HarnessAttributedSample.self,
+        from: encoded
+    )
+    #expect(decoded == attributed)
+    #expect(decoded.strokeSample?.tangentialPressure == -0.6)
+    #expect(decoded.strokeSample?.deviceIdentifier == 42)
+    #expect(decoded.strokeSample?.estimationUpdateIndex == 3)
+    #expect(decoded.strokeSample?.estimatedProperties.rawValue == 0x11)
+    #expect(
+        decoded.strokeSample?
+            .estimatedPropertiesExpectingUpdates.rawValue == 0x01
+    )
 }
 
 @Test

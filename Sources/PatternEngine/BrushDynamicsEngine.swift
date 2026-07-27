@@ -848,6 +848,8 @@ private extension BrushDynamicsEngine {
         let hasAzimuth: Bool
         let roll: Float
         let hasRoll: Bool
+        let tangentialPressure: Float
+        let hasTangentialPressure: Bool
         let age: Float
         let distance: Float
 
@@ -885,6 +887,17 @@ private extension BrushDynamicsEngine {
                 roll = 0
                 hasRoll = false
             }
+            if sample.capabilities.contains(.tangentialPressure),
+               let sampleTangentialPressure = sample.tangentialPressure
+            {
+                tangentialPressure = clamp01(
+                    (sampleTangentialPressure + 1) * 0.5
+                )
+                hasTangentialPressure = true
+            } else {
+                tangentialPressure = 0
+                hasTangentialPressure = false
+            }
             age = clamp01(context.strokeAge / context.ageReference)
             distance = clamp01(
                 context.traveledDistance / context.distanceReference
@@ -903,7 +916,7 @@ private extension BrushDynamicsEngine {
             case .tilt: tilt
             case .azimuth: azimuth
             case .roll: roll
-            case .tangentialPressure: 0
+            case .tangentialPressure: tangentialPressure
             case .age: age
             case .distance: distance
             case .random: 0
@@ -925,7 +938,9 @@ private extension BrushDynamicsEngine {
             case .roll:
                 return hasRoll ? roll : missingInputValue
             case .tangentialPressure:
-                return missingInputValue
+                return hasTangentialPressure
+                    ? tangentialPressure
+                    : missingInputValue
             case .random:
                 return randomValue
             case .speed, .direction, .age, .distance:
