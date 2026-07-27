@@ -29,29 +29,53 @@ if arguments.first == "merge-renderer" {
     )
     try baseline.validate(expectedRecordCount: expectedCount)
     print("BRUSH CHARACTERIZATION VALID records=\(baseline.records.count)")
-} else {
-    let viewport = ViewportTransform(
-        drawableSize: PatternSize(width: 256, height: 256),
-        worldCenter: WorldPoint(x: 128, y: 128)
+} else if arguments.first == "record-foundation" {
+    guard arguments.count == 7,
+          arguments[1] == "--logical-output",
+          arguments[3] == "--parity-output",
+          arguments[5] == "--commit"
+    else {
+        throw ToolError.usage
+    }
+    let records = anchorCharacterizationRecords()
+    let baseline = try BrushLogicalBaseline(
+        validatingSchemaVersion: BrushLogicalBaseline.schemaVersion,
+        records: records.map(\.program)
     )
-    let traces = [
-        StrokeTraceFixtures.pressureRamp,
-        StrokeTraceFixtures.curved,
-        StrokeTraceFixtures.predictionCorrection,
-    ]
-    let records = AnchorBrushCatalog.all.flatMap { anchor in
-        traces.map { trace in
-            BrushCharacterizer.record(
-                trace: trace,
-                recipe: anchor.recipe,
-                nominalDiameter: 20,
-                color: .black,
-                seed: 41,
-                viewport: viewport
+    let parity = BrushAnchorAdapterParityEvidence(
+        commit: arguments[6],
+        records: records.map {
+            BrushAnchorAdapterParityRecord(
+                recipeID: $0.program.recipeID,
+                traceName: $0.program.traceName,
+                programLogicalDabCount: $0.program.logicalDabCount,
+                compatibilityLogicalDabCount:
+                    $0.compatibility.logicalDabCount,
+                programLogicalDabDigest: $0.program.logicalDabDigest,
+                compatibilityLogicalDabDigest:
+                    $0.compatibility.logicalDabDigest
             )
         }
-    }
-    .sorted { ($0.recipeID, $0.traceName) < ($1.recipeID, $1.traceName) }
+    )
+    let logicalEncoder = JSONEncoder()
+    logicalEncoder.outputFormatting = [.sortedKeys]
+    try logicalEncoder.encode(baseline).write(
+        to: URL(fileURLWithPath: arguments[2]),
+        options: .atomic
+    )
+    let parityEncoder = JSONEncoder()
+    parityEncoder.outputFormatting = [
+        .prettyPrinted, .sortedKeys, .withoutEscapingSlashes,
+    ]
+    try parityEncoder.encode(parity).write(
+        to: URL(fileURLWithPath: arguments[4]),
+        options: .atomic
+    )
+    print(
+        "BRUSH FOUNDATION LOGICAL EVIDENCE records=\(baseline.records.count)"
+    )
+} else {
+    let records = anchorCharacterizationRecords().map(\.program)
 
     let baseline = try BrushLogicalBaseline(
         validatingSchemaVersion: BrushLogicalBaseline.schemaVersion,
@@ -62,10 +86,51 @@ if arguments.first == "merge-renderer" {
     FileHandle.standardOutput.write(try encoder.encode(baseline))
 }
 
+private func anchorCharacterizationRecords() -> [(
+    program: BrushCharacterizationRecord,
+    compatibility: BrushCharacterizationRecord
+)] {
+    let viewport = ViewportTransform(
+        drawableSize: PatternSize(width: 256, height: 256),
+        worldCenter: WorldPoint(x: 128, y: 128)
+    )
+    let traces = [
+        StrokeTraceFixtures.pressureRamp,
+        StrokeTraceFixtures.curved,
+        StrokeTraceFixtures.predictionCorrection,
+    ]
+    return AnchorBrushCatalog.all.flatMap { anchor in
+        traces.map { trace in
+            (
+                program: BrushCharacterizer.record(
+                    trace: trace,
+                    program: anchor.program,
+                    nominalDiameter: 20,
+                    color: .black,
+                    seed: 41,
+                    viewport: viewport
+                ),
+                compatibility: BrushCharacterizer.record(
+                    trace: trace,
+                    recipe: anchor.compatibilityRecipe,
+                    nominalDiameter: 20,
+                    color: .black,
+                    seed: 41,
+                    viewport: viewport
+                )
+            )
+        }
+    }
+    .sorted {
+        ($0.program.recipeID, $0.program.traceName)
+            < ($1.program.recipeID, $1.program.traceName)
+    }
+}
+
 private enum ToolError: Error, LocalizedError {
     case usage
 
     var errorDescription: String? {
-        "Usage: BrushCharacterizationTool merge-renderer --input-root <path> --output <path> | validate-renderer --baseline <path> --expected-record-count <count>"
+        "Usage: BrushCharacterizationTool merge-renderer --input-root <path> --output <path> | validate-renderer --baseline <path> --expected-record-count <count> | record-foundation --logical-output <path> --parity-output <path> --commit <commit>"
     }
 }

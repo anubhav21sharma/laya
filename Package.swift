@@ -27,6 +27,10 @@ let package = Package(
             name: "BrushCharacterizationTool",
             targets: ["BrushCharacterizationTool"]
         ),
+        .executable(
+            name: "BrushFoundationEvidenceGate",
+            targets: ["BrushFoundationEvidenceGate"]
+        ),
         .library(name: "PatternFile", targets: ["PatternFile"]),
     ],
     targets: [
@@ -64,6 +68,10 @@ let package = Package(
         .executableTarget(
             name: "BrushCharacterizationTool",
             dependencies: ["PatternEngine", "EditorCore", "MetalRenderer"]
+        ),
+        .executableTarget(
+            name: "BrushFoundationEvidenceGate",
+            dependencies: ["MetalRenderer"]
         ),
         .testTarget(
             name: "PatternEngineTests",
