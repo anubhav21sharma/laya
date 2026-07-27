@@ -42,12 +42,23 @@ iPadOS 18+.
   during migration and must never receive a packaged-resource ID.
 - Source assets remain lossless in `.layabrush`; compiled GPU resources are
   disposable caches.
+- Any `Set` or `Dictionary` traversal that can affect serialized bytes,
+  digests, compiled arrays, reports, cache eviction, or renderer output must
+  first sort by an explicitly documented stable key. Never rely on Swift hash
+  iteration order.
+- Product and evidence-gate scripts may use only tools provided by macOS,
+  Xcode, or this repository unless they perform an explicit dependency
+  preflight with an actionable error. In particular, this plan does not
+  require `jq`; `rg` is an authoring convenience, not a gate dependency.
 - No public Brush Studio, Procreate parser, new deposition backend, Wet Mix
   backend, tile shader, sparse texture, or final preset calibration belongs to
   this plan.
 - Existing tests and the complete Slice 4 correctness matrix remain mandatory.
 - Tests that require Metal may skip only when `MTLCreateSystemDefaultDevice()`
   returns `nil`; pure tests never skip.
+- Use `--no-parallel` only where tests share a Metal device, fixed harness
+  artifact paths, generated baselines, or another documented process-global
+  resource. Pure suites run with normal Swift Testing parallelism.
 
 ---
 
@@ -124,6 +135,22 @@ under `Tests/PatternEngineTests/Support`; none of these are production APIs.
 - Converter, Brush Lab, new deposition pipelines, Wet Mix, public editor, and
   final hardware calibration remain in Stages 3–7 exactly as the approved spec
   requires.
+- The eight names in design §7.2 are responsibility boundaries, not a mandate
+  for eight Stage 2 objects. This plan introduces the compiler and resource
+  cache while the existing `GridRenderer` continues to co-locate coordination,
+  deposition encoding, live surfaces, and canvas interaction. Extraction is
+  allowed in later backend plans only when it improves ownership or measured
+  performance.
+- Task 8 removes the fixed 60 Hz refresh and completes normalized input; it
+  does not claim the complete design §14 frame scheduler. CPU work budgets,
+  excess-authoritative-work carry, late drawable acquisition, upload rings,
+  and full latency telemetry belong to the Stage 4 deposition plan. Ordered
+  dirty-region carry for Wet Mix belongs to Stage 6.
+- Stage 2 proves compatibility-path parity, prediction independence, and
+  logical batching invariance. Backend-specific zoom/translation/batching and
+  CPU/GPU differential matrices expand in Stage 4; transform-order and Wet Mix
+  interaction invariants expand with their owning Stage 6 backend. Every
+  already-existing invariant test remains mandatory in Task 12.
 
 ---
 
@@ -202,14 +229,17 @@ public struct BrushLogicalBaseline:
   RGBA, material-family raw value, material contribution, source distance, and
   prediction flag. Then append the Stage 2 extension payload: presence tags
   and derived primary/secondary grain-frame columns, secondary-color mix,
-  accumulation/interaction/edge tags and material scalars, the five
+  accumulation/interaction/edge tags and material scalars, the seven
   compatibility random values, ten zeroed extension-random channels, and
   conservative world-bounds min/max. Prefix the stream with characterization
   schema version `1`.
 
-  During Task 1 those extension values are derived from the current recipe,
-  dab, seed, and ordinal without changing renderer types. Task 6 stores the
-  same values directly on `LogicalDab` and proves the digest remains identical.
+  One `BrushCharacterizationDigestPayload` value type and one encoder own this
+  byte order. During Task 1, a legacy factory derives that payload from the
+  current recipe, dab, seed, and ordinal without changing renderer types.
+  Task 6 adds a `LogicalDab` factory for the same payload and proves payload
+  equality as well as digest equality for all 15 trace/anchor records. Do not
+  duplicate the field list or byte-encoding logic between Tasks 1 and 6.
 
 - [ ] **Step 1: Write failing pure characterization tests**
 
@@ -348,8 +378,8 @@ Run:
 
 ```bash
 swift test --filter BrushCharacterization
-swift test --no-parallel --filter PatternEngineTests
-swift test --no-parallel --filter EditorCoreTests
+swift test --filter PatternEngineTests
+swift test --filter EditorCoreTests
 ```
 
 Expected: all selected tests pass.
@@ -388,6 +418,8 @@ git commit -m "test(brush): pin logical dab baseline"
   `Tests/MetalRendererTests/BrushCharacterizationEvidenceTests.swift`
 - Create:
   `App/PatternSpike/Harness/Baselines/brush-foundation-v1.json`
+- Modify: `Package.swift`
+- Modify: `Sources/BrushCharacterizationTool/main.swift`
 
 **Interfaces:**
 
@@ -517,25 +549,29 @@ do
     --configuration Debug
 done
 
-jq -s \
-  '{schemaVersion: 1, records: sort_by(.sceneName)}' \
-  .build/brush-foundation-baseline/*/*.brush-characterization.json \
-  > App/PatternSpike/Harness/Baselines/brush-foundation-v1.json
+swift run BrushCharacterizationTool merge-renderer \
+  --input-root .build/brush-foundation-baseline \
+  --output App/PatternSpike/Harness/Baselines/brush-foundation-v1.json
 ```
 
 Validate:
 
 ```bash
-jq -e '
-  .schemaVersion == 1 and
-  (.records | length) == 8 and
-  ([.records[].sceneName] | unique | length) == 8 and
-  ([.records[].canonicalBGRA8Digest |
-    test("^[0-9a-f]{16}$")] | all)
-' App/PatternSpike/Harness/Baselines/brush-foundation-v1.json
+swift run BrushCharacterizationTool validate-renderer \
+  --baseline App/PatternSpike/Harness/Baselines/brush-foundation-v1.json \
+  --expected-record-count 8
 ```
 
-Expected: `true`.
+The Task 2 extension makes the existing tool a thin command-line wrapper over
+`BrushCharacterizationBaseline.merge` and `.validate`; validation and sorting
+logic remain in `MetalRenderer` and are unit tested. Merge recursively finds
+exactly one characterization file for each expected scene, sorts records by
+`sceneName`, rejects duplicates or malformed digests, and writes atomically.
+Expected terminal line:
+
+```text
+BRUSH CHARACTERIZATION VALID records=8
+```
 
 - [ ] **Step 5: Make the harness fail closed against the baseline**
 
@@ -552,12 +588,16 @@ swift test --no-parallel --filter BrushCharacterization
 swift test --no-parallel --filter SliceFourHarnessRunnerTests
 ```
 
-Expected: positive records equal the baseline and the mutated record fails.
+These filters are serialized because they run the Metal harness against shared
+baseline/artifact locations. Expected: positive records equal the baseline and
+the mutated record fails.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add \
+  Package.swift \
+  Sources/BrushCharacterizationTool/main.swift \
   Sources/MetalRenderer/BenchmarkRecord.swift \
   Sources/MetalRenderer/Capture/BrushCharacterizationEvidence.swift \
   Sources/MetalRenderer/Capture/SliceFourHarnessRunner.swift \
@@ -691,9 +731,9 @@ must compile unchanged.
 Run:
 
 ```bash
-swift test --no-parallel --filter SafeArchiveTests
-swift test --no-parallel --filter PatternProjectArchiveTests
-swift test --no-parallel --filter PatternFileTests
+swift test --filter SafeArchiveTests
+swift test --filter PatternProjectArchiveTests
+swift test --filter PatternFileTests
 ```
 
 Expected: all tests pass, including injected atomic-save failure.
@@ -1252,7 +1292,7 @@ public enum BrushProgramCompiler {
   endpoints, using piecewise-linear interpolation and a defined lower-bound
   segment search. Linear or power mappings with inversion, jitter, or
   nonlegacy clamping use the same sampled representation.
-- Existing five-channel `BrushRandom` consumption remains unchanged for
+- Existing seven-channel `BrushRandom` consumption remains unchanged for
   compatibility programs. New mapping jitter uses a counter-based value keyed
   by `(strokeSeed, logicalDabOrdinal, outputChannel)` so enabling one new
   channel cannot perturb another channel or the compatibility stream.
@@ -1264,9 +1304,11 @@ public enum BrushProgramCompiler {
 - Keep deprecated recipe-taking overloads during this plan; they immediately
   adapt and compile for source compatibility in tests only. Production
   stroke creation must use `BrushProgram`.
-- `BrushStrokeGenerator` stores `program`; its recipe initializer remains a
-  compatibility convenience marked unavailable to production call sites by
-  the end of Task 11.
+- `BrushStrokeGenerator` stores `program`; its deprecated recipe initializer
+  remains temporarily available to harness and test call sites. Task 11 proves
+  that the production pointer-down path never invokes it. Do not make the
+  overload compile-time unavailable until every remaining compatibility caller
+  is deliberately migrated or removed in a later cleanup.
 
 - [ ] **Step 1: Write failing compiler and parity tests**
 
@@ -1541,6 +1583,10 @@ public enum LogicalDabTransformer {
   canonical or brush-local anchoring selected by the definition.
 - Isometry enumeration never consumes random values or rewrites the source
   logical dab.
+- Splitting the same authoritative sample sequence across different generator
+  batch boundaries must produce the same ordered `LogicalDab` values and
+  digest. Adding or removing predicted samples must not change the
+  authoritative sequence or its random cursor.
 
 - [ ] **Step 1: Write failing batch and symmetry-frame tests**
 
@@ -1607,8 +1653,10 @@ append the new fully evaluated fields with an overload supplying exact neutral
 compatibility values. The current renderer continues reading the old fields.
 Add tests that bounds include rotated chisel corners and material halo, and
 that the recorded random values stay identical across every projected copy.
-Switch the characterizer from its Task 1 derived extension payload to these
-stored values and assert every digest is unchanged.
+Add metamorphic tests for alternate batch boundaries and prediction on/off.
+Switch the characterizer from its Task 1 legacy
+`BrushCharacterizationDigestPayload` factory to the `LogicalDab` factory and
+assert every payload and digest is unchanged.
 
 - [ ] **Step 4: Add batch-returning generator methods**
 
@@ -1732,6 +1780,13 @@ public enum BrushPackageIO {
 - Archive paths are exactly `manifest.json`, `definition.json`, and
   `resources/<content-hash>.<extension>`.
 - Manifest and definition use sorted-key UTF-8 JSON with no nonfinite floats.
+- Raw ZIP bytes and `JSONEncoder`'s textual spelling of finite floats are not
+  the cross-toolchain semantic identity. `BrushContentHash` owns a versioned
+  canonical semantic digest that appends definition scalars by IEEE bit
+  pattern in schema order, sorted declarations/resources by stable key, and
+  resource content hashes. Reports and caches use this digest. Tests prove the
+  digest is unchanged by JSON key order or equivalent finite-number spelling
+  and changes when any semantic field or resource hash changes.
 - Decoding ignores unknown JSON keys within a supported schema version and
   preserves string capability declarations. It rejects unsupported schema
   versions; Task 5/10 compilation rejects unknown required capabilities.
@@ -1811,9 +1866,9 @@ Decode must reject these exact cases in parameterized tests:
 Run:
 
 ```bash
-swift test --no-parallel --filter BrushFormatTests
-swift test --no-parallel --filter SafeArchiveTests
-swift test --no-parallel --filter BrushDefinitionTests
+swift test --filter BrushFormatTests
+swift test --filter SafeArchiveTests
+swift test --filter BrushDefinitionTests
 ```
 
 Expected: all tests pass.
@@ -2006,6 +2061,8 @@ public mutating func replaceEstimatedSuffix(
 ) throws -> TransientStrokeBufferUpdate
 ```
 
+Both APIs are members of `TransientStrokeBuffer`; it owns lookup, plan
+creation, stale-epoch validation, and transactional suffix replacement.
 `planEstimatedUpdate` requires exactly one retained match, identifies whether
 it is authoritative or predicted, replaces only properties that the original
 sample marked as expecting an update (`location` may replace position),
@@ -2267,6 +2324,13 @@ public enum BrushAssetDecoder {
 ```
 
 - Add `BrushFormat` as a `MetalRenderer` dependency.
+- `targetFramesPerSecond` is injected from the active display capability
+  (`maximumFramesPerSecond` on iPadOS and the active screen/view refresh
+  capability on macOS) when an app or Brush Lab compiler is created. Pure
+  tests provide it explicitly. Reject zero or negative values.
+- `deviceRegistryID` is intentionally device-specific report/failure
+  provenance. It participates in neither `.layabrush` semantic content hashes
+  nor portable characterization baselines.
 - Portable working ceiling is 4096 × 4096 R8. This supplies at least two
   source texels for the current maximum 2000-pixel canonical brush diameter.
 - Preserve aspect ratio; never upscale.
@@ -2603,7 +2667,8 @@ swift test --filter BrushCompilerTests
 swift test --no-parallel --filter MetalRendererTests
 ```
 
-Expected: all tests pass.
+The full Metal filter is serialized because compiler tests share the process
+Metal device and injected resource/cache state. Expected: all tests pass.
 
 - [ ] **Step 8: Commit**
 
@@ -2633,6 +2698,22 @@ git commit -m "feat(brush): compile and cache GPU resources"
 - Modify: `Tests/MetalRendererTests/RendererTransactionTests.swift`
 - Modify: `App/Tests/EditorSessionControllerTests.swift`
 
+**Compatibility call-site audit (expected to compile without destructive
+rewrites):**
+
+- `App/PatternSpike/Harness/SliceThreeHarnessRunner.swift`
+- `Sources/MetalRenderer/Capture/HarnessRunner.swift`
+- `Sources/MetalRenderer/Capture/RadialHarness.swift`
+- `Sources/MetalRenderer/Capture/SliceFourHarnessRunner.swift`
+- `Tests/MetalRendererTests/BrushMaterialStateTests.swift`
+- `Tests/MetalRendererTests/RadialShaderTests.swift`
+- `Tests/MetalRendererTests/RendererRasterOperationTests.swift`
+
+These harness and test sites may continue using the deprecated recipe-taking
+initializer during Stage 2. They are not allowed on the interactive
+pointer-down path, and they must not force a destructive repository-wide
+rename.
+
 **Interfaces:**
 
 `AnchorBrushEntry` becomes:
@@ -2659,6 +2740,13 @@ public struct AnchorBrushEntry: Equatable, Sendable {
 - Build definitions and programs once in static catalog initialization.
 - `DrawingTransaction` and `StrokeRenderStyle` capture `BrushProgram`, not a
   mutable definition and not a newly compiled recipe.
+- Migrate `StrokeRenderStyle` additively: store `program`, add a program-taking
+  initializer, and retain a deprecated recipe-taking compatibility initializer.
+  A temporary computed `recipe` view may expose
+  `program.compatibilityRecipe` only to the current legacy renderer and must
+  fail validation before rendering rather than create a second source of
+  truth. Future noncompatibility programs use the compiled renderer and never
+  request that view.
 - `GridRenderer` constructs `BrushStrokeGenerator(program:...)`.
 - `GridRenderer` applies `EstimatedStrokeUpdatePlan` to the retained transient
   suffix. A late or unknown update is ignored with a development diagnostic;
@@ -2714,6 +2802,18 @@ Keep user-visible recipe IDs and selection behavior unchanged. Rename
 `selectedRecipe` only if every app binding is updated in the same commit; do
 not leave duplicate selected recipe/program sources of truth.
 
+Before editing, record the migration surface with repository-provided Git:
+
+```bash
+git grep -n -E 'StrokeRenderStyle\(|selectedRecipe|\.recipe([^A-Za-z0-9_]|$)' \
+  -- App Sources Tests
+```
+
+After editing, rerun the audit. Every remaining recipe-taking construction
+must be in the compatibility list above or a test helper; the production
+`EditorSessionController` pointer-down path must construct the style from an
+already compiled `BrushProgram`.
+
 - [ ] **Step 4: Migrate renderer stroke creation**
 
 At pointer-down, capture the selected `BrushProgram` in `StrokeRenderStyle`.
@@ -2734,12 +2834,17 @@ Run:
 swift test --filter AnchorBrushCatalogTests
 swift test --filter EditorTransactionTests
 swift test --filter RendererTransactionTests
+swift test --filter RendererRasterOperationTests
+swift test --filter RadialShaderTests
+swift test --filter BrushMaterialStateTests
 swift test --filter EditorSessionControllerTests
 swift test --filter BrushCharacterization
 swift test --no-parallel --filter SliceFourHarnessRunnerTests
 ```
 
-Expected: all tests pass and the checked-in baseline is unchanged.
+`SliceFourHarnessRunnerTests` is serialized because its cases share a Metal
+device and fixed harness artifact layout. Expected: all tests pass and the
+checked-in baseline is unchanged.
 
 - [ ] **Step 7: Commit**
 
@@ -2789,7 +2894,10 @@ git commit -m "refactor(brush): route anchors through programs"
   positive/negative Slice 4 evidence.
 - Exit `0` for correctness plus accepted stable performance, `2` only for the
   existing explicitly recognized paravirtual performance-pending condition,
-  and `1` for every correctness/provenance failure.
+  and `1` for every correctness/provenance failure. Reuse the existing
+  case-insensitive `gpuName.contains("paravirtual")` recognition and exit-2
+  semantics from `scripts/verify-slice3.sh`; do not introduce a second
+  heuristic.
 - All validation logic lives in
   `MetalRenderer.BrushFoundationEvidenceValidator`; the executable is a thin
   argument/exit-code wrapper so the tests exercise the production validator.
@@ -2828,11 +2936,12 @@ The script must:
 
 1. require committed, clean build inputs;
 2. record `git rev-parse HEAD`;
-3. run `swift test --no-parallel`;
+3. run `swift test --no-parallel` because the full gate includes Metal and
+   fixed-path harness suites with process-global resources;
 4. run `./scripts/bootstrap.sh`;
 5. build and analyze `PatternSpikeMac`;
 6. build and analyze `PatternSpikePad` for generic iOS Simulator;
-7. run all eight positive and negative Slice 4 scenes;
+7. run all eight positive/negative Slice 4 scene pairs (16 scene runs);
 8. compare logical and renderer characterization files with both checked-in
    baselines;
 9. build and run `BrushFoundationEvidenceGate`;
@@ -2882,8 +2991,11 @@ Run:
 
 ```bash
 incomplete_pattern='T''BD|T''ODO|F''IXME|P''LACEHOLDER'
-rg -n -i "$incomplete_pattern" \
+if grep -Eni "$incomplete_pattern" \
   docs/superpowers/milestones/10-world-class-brush-engine-foundation.md
+then
+  exit 1
+fi
 git diff --check
 ./scripts/verify-brush-foundation.sh
 ```
