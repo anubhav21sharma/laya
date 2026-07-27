@@ -1242,7 +1242,12 @@ extension HarnessRunner {
                             measurements.longStrokeDabGPUMilliseconds,
                         projectedInstanceCounts:
                             measurements
-                                .longStrokeProjectedInstanceCounts
+                                .longStrokeProjectedInstanceCounts,
+                        validatesPerformance:
+                            !BenchmarkHardware
+                                .isPerformancePendingEnvironment(
+                                    gpuName: gridRenderer.device.name
+                                )
                     )
             } catch {
                 throw HarnessRunError.counterInvariant(

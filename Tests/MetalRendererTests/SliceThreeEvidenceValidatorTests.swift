@@ -178,6 +178,35 @@ func paravirtualEvidenceIsValidatedBeforeReturningPending() throws {
     }
 }
 
+@Test
+func noisyLongStrokeIsPendingOnlyOnParavirtualGPU() throws {
+    let paravirtual = try makeCompletePerformanceFixture(
+        gpuName: "Apple Paravirtual device"
+    )
+    defer { paravirtual.remove() }
+    try overwriteLongStrokeWithBudgetViolation(paravirtual)
+    #expect(
+        try SliceThreeEvidenceValidator.validate(
+            sliceTwoRoot: paravirtual.sliceTwo,
+            sliceThreeRoot: paravirtual.sliceThree,
+            sliceOneRoot: paravirtual.sliceOne,
+            expectedCommit: "fixture-commit"
+        ) == .performancePending(gpuName: "Apple Paravirtual device")
+    )
+
+    let stable = try makeCompletePerformanceFixture()
+    defer { stable.remove() }
+    try overwriteLongStrokeWithBudgetViolation(stable)
+    #expect(throws: SliceThreeEvidenceValidationError.self) {
+        try SliceThreeEvidenceValidator.validate(
+            sliceTwoRoot: stable.sliceTwo,
+            sliceThreeRoot: stable.sliceThree,
+            sliceOneRoot: stable.sliceOne,
+            expectedCommit: "fixture-commit"
+        )
+    }
+}
+
 private func makeSliceThreeArtifactFixture() throws -> URL {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString)
@@ -575,6 +604,40 @@ private func makeCompletePerformanceFixture(
         sliceThree: sliceThree,
         sliceOne: sliceOne
     )
+}
+
+private func overwriteLongStrokeWithBudgetViolation(
+    _ fixture: CompletePerformanceFixture
+) throws {
+    let cpu = (0..<400).map { 0.2 + Double($0) * 0.002 }
+    let gpu = (0..<400).map { 0.4 + Double($0) * 0.003 }
+    let counts = [Int](repeating: 1, count: 400)
+    let summary = try BenchmarkLongStrokeMetrics.measure(
+        cpuMilliseconds: cpu,
+        dabGPUMilliseconds: gpu,
+        projectedInstanceCounts: counts,
+        validatesPerformance: false
+    )
+    let long = fixture.sliceTwo
+        .appendingPathComponent(
+            "projected-long-stroke/projected-long-stroke.benchmark.json"
+        )
+    try mutateRecord(long) {
+        $0["eventToSubmitMilliseconds"] = [1.0] + cpu
+        $0["dabGPUMilliseconds"] = [1.0] + gpu
+        $0["longStrokeEarlyCPUP95Milliseconds"] =
+            summary.earlyCPUP95Milliseconds
+        $0["longStrokeLateCPUP95Milliseconds"] =
+            summary.lateCPUP95Milliseconds
+        $0["longStrokeEarlyDabGPUP95Milliseconds"] =
+            summary.earlyDabGPUP95Milliseconds
+        $0["longStrokeLateDabGPUP95Milliseconds"] =
+            summary.lateDabGPUP95Milliseconds
+        $0["longStrokeCPUMillisecondsPerFrameSlope"] =
+            summary.cpuMillisecondsPerFrameSlope
+        $0["longStrokeDabGPUMillisecondsPerFrameSlope"] =
+            summary.dabGPUMillisecondsPerFrameSlope
+    }
 }
 
 private func corruptPerformanceFixture(

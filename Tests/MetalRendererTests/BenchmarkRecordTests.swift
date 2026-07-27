@@ -830,6 +830,82 @@ func longStrokeSummaryFailsClosedOnP95Growth() {
 }
 
 @Test
+func longStrokeSummaryCanRecordPendingEnvironmentPerformance() throws {
+    let cpu = (0..<400).map { 0.2 + Double($0) * 0.002 }
+    let gpu = (0..<400).map { 0.4 + Double($0) * 0.003 }
+
+    let summary = try BenchmarkLongStrokeMetrics.measure(
+        cpuMilliseconds: cpu,
+        dabGPUMilliseconds: gpu,
+        projectedInstanceCounts: [Int](repeating: 13, count: 400),
+        validatesPerformance: false
+    )
+
+    #expect(
+        summary.lateCPUP95Milliseconds
+            > max(
+                summary.earlyCPUP95Milliseconds * 1.15,
+                summary.earlyCPUP95Milliseconds + 0.1
+            )
+    )
+    #expect(
+        summary.lateDabGPUP95Milliseconds
+            > max(
+                summary.earlyDabGPUP95Milliseconds * 1.15,
+                summary.earlyDabGPUP95Milliseconds + 0.1
+            )
+    )
+    #expect(
+        summary.cpuMillisecondsPerFrameSlope
+            > BenchmarkLongStrokeMetrics.maximumSlopeMillisecondsPerFrame
+    )
+    #expect(
+        summary.dabGPUMillisecondsPerFrameSlope
+            > BenchmarkLongStrokeMetrics.maximumSlopeMillisecondsPerFrame
+    )
+}
+
+@Test
+func pendingEnvironmentPerformanceStillRejectsMalformedEvidence() {
+    var counts = [Int](repeating: 13, count: 400)
+    counts[80] = 12
+
+    #expect(
+        throws: BenchmarkMetricError.nonUniformProjectedInstanceCount(
+            frame: 80,
+            expected: 13,
+            actual: 12
+        )
+    ) {
+        try BenchmarkLongStrokeMetrics.measure(
+            cpuMilliseconds: [Double](repeating: 0.2, count: 400),
+            dabGPUMilliseconds: [Double](repeating: 0.4, count: 400),
+            projectedInstanceCounts: counts,
+            validatesPerformance: false
+        )
+    }
+}
+
+@Test
+func performancePendingGPURecognitionUsesExactSharedHeuristic() {
+    #expect(
+        BenchmarkHardware.isPerformancePendingEnvironment(
+            gpuName: "Apple Paravirtual device"
+        )
+    )
+    #expect(
+        BenchmarkHardware.isPerformancePendingEnvironment(
+            gpuName: "APPLE PARAVIRTUAL DEVICE"
+        )
+    )
+    #expect(
+        !BenchmarkHardware.isPerformancePendingEnvironment(
+            gpuName: "Virtual Apple GPU"
+        )
+    )
+}
+
+@Test
 func longStrokeSummaryFailsClosedOnPositiveSlopeAboveLimit() {
     let cpu = (0..<400).map { 10 + Double($0) * 0.002 }
 

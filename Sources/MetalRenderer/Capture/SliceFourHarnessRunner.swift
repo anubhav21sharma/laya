@@ -2426,7 +2426,9 @@ public enum SliceFourEvidenceValidator {
             )
         }
         guard let provenance else { throw invalid("benchmark provenance is unavailable") }
-        if provenance.0.gpuName.lowercased().contains("paravirtual") {
+        if BenchmarkHardware.isPerformancePendingEnvironment(
+            gpuName: provenance.0.gpuName
+        ) {
             return .performancePending(gpuName: provenance.0.gpuName)
         }
         try validateStableGPUBudgets(positiveRoot: positiveRoot)

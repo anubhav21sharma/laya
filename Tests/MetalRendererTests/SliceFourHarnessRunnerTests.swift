@@ -99,7 +99,11 @@ func sliceFourRealRunnerProducesMeasuredPNGsAndRejectsEveryNegativeControl()
     case .passed:
         break
     case let .performancePending(gpuName):
-        #expect(gpuName.lowercased().contains("paravirtual"))
+        #expect(
+            BenchmarkHardware.isPerformancePendingEnvironment(
+                gpuName: gpuName
+            )
+        )
     }
 
     let firstName = try #require(SliceFourEvidenceValidator.sceneNames.first)

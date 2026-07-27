@@ -636,7 +636,9 @@ public enum BrushFoundationEvidenceValidator {
             }
             return .passed
         case let .performancePending(gpuName):
-            guard gpuName.lowercased().contains("paravirtual") else {
+            guard BenchmarkHardware.isPerformancePendingEnvironment(
+                gpuName: gpuName
+            ) else {
                 throw invalid(
                     "only a GPU name containing 'paravirtual' may be performance pending"
                 )

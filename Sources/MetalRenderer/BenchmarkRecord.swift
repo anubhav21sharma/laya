@@ -14,6 +14,12 @@ public struct BenchmarkHardware: Codable, Equatable, Sendable {
         self.logicalProcessorCount = logicalProcessorCount
         self.physicalMemoryBytes = physicalMemoryBytes
     }
+
+    public static func isPerformancePendingEnvironment(
+        gpuName: String
+    ) -> Bool {
+        gpuName.lowercased().contains("paravirtual")
+    }
 }
 
 public struct BenchmarkBuild: Codable, Equatable, Sendable {
@@ -81,7 +87,8 @@ public struct BenchmarkLongStrokeMetrics: Equatable, Sendable {
     public static func measure(
         cpuMilliseconds: [Double],
         dabGPUMilliseconds: [Double],
-        projectedInstanceCounts: [Int]
+        projectedInstanceCounts: [Int],
+        validatesPerformance: Bool = true
     ) throws -> BenchmarkLongStrokeMetrics {
         let measuredCount = min(
             cpuMilliseconds.count,
@@ -124,21 +131,22 @@ public struct BenchmarkLongStrokeMetrics: Equatable, Sendable {
         let lateDabGPU = BenchmarkRecord.percentile95(
             Array(dabGPUMilliseconds[lateWindow])
         )
-        try validateP95(
-            series: "cpu",
-            early: earlyCPU,
-            late: lateCPU
-        )
-        try validateP95(
-            series: "dabGPU",
-            early: earlyDabGPU,
-            late: lateDabGPU
-        )
-
         let cpuSlope = leastSquaresSlope(cpuMilliseconds)
         let dabGPUSlope = leastSquaresSlope(dabGPUMilliseconds)
-        try validateSlope(series: "cpu", slope: cpuSlope)
-        try validateSlope(series: "dabGPU", slope: dabGPUSlope)
+        if validatesPerformance {
+            try validateP95(
+                series: "cpu",
+                early: earlyCPU,
+                late: lateCPU
+            )
+            try validateP95(
+                series: "dabGPU",
+                early: earlyDabGPU,
+                late: lateDabGPU
+            )
+            try validateSlope(series: "cpu", slope: cpuSlope)
+            try validateSlope(series: "dabGPU", slope: dabGPUSlope)
+        }
 
         return BenchmarkLongStrokeMetrics(
             earlyCPUP95Milliseconds: earlyCPU,

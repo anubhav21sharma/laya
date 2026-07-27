@@ -185,7 +185,9 @@ public enum SliceThreeEvidenceValidator {
             }
         }
 
-        if reference.hardware.gpuName.lowercased().contains("paravirtual") {
+        if BenchmarkHardware.isPerformancePendingEnvironment(
+            gpuName: reference.hardware.gpuName
+        ) {
             return .performancePending(gpuName: reference.hardware.gpuName)
         }
 
