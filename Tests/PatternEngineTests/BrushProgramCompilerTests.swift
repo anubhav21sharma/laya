@@ -411,6 +411,273 @@ func placementJitterIsDeterministicAndIsolatedFromOtherPlacementChannels() throw
     #expect(first.brushToWorld.translation == first.position.simd)
 }
 
+@Test
+func nativeLogicalDabCarriesShapeGrainMaterialAndCounterRandomFrames() throws {
+    let base = try nativeDefinition()
+    let coverage = BrushCoverageDefinition(
+        shapes: [
+            BrushShapeLayerDefinition(
+                shape: .chisel,
+                combination: .replace,
+                scale: 0.5,
+                rotation: .pi / 2,
+                offset: SIMD2(0.25, -0.5)
+            ),
+        ],
+        grains: [
+            BrushGrainLayerDefinition(
+                grain: .paper,
+                coordinateMode: .canonical,
+                transform: BrushGrainTransform(
+                    scale: 2,
+                    rotation: 0.25,
+                    offset: SIMD2(3, 4)
+                ),
+                grainMovementFraction: 0,
+                grainFollowsBrushRotation: false,
+                strength: 1
+            ),
+            BrushGrainLayerDefinition(
+                grain: .noise,
+                coordinateMode: .brushLocal,
+                transform: BrushGrainTransform(
+                    scale: 3,
+                    rotation: 0.5,
+                    offset: SIMD2(5, 6)
+                ),
+                grainMovementFraction: 0,
+                grainFollowsBrushRotation: true,
+                strength: 1
+            ),
+        ],
+        baseHardness: 1,
+        aspectRatio: 1,
+        tipThreshold: 0,
+        antialiasing: true
+    )
+    let program = try BrushProgramCompiler.compile(replacing(
+        base,
+        capabilities: [
+            BrushCapabilityDeclaration(identifier: "dualGrain", required: true),
+            BrushCapabilityDeclaration(
+                identifier: "future.capability",
+                required: false
+            ),
+        ],
+        coverage: coverage
+    ))
+    let random = BrushRandomValues(
+        spacing: 0.1,
+        scatterX: 0.2,
+        scatterY: 0.3,
+        rotation: 0.4,
+        grainX: 0.5,
+        grainY: 0.6,
+        materialVariation: 0.7
+    )
+    let dab = evaluateNative(
+        program,
+        random: random,
+        seed: 71,
+        ordinal: 4
+    )
+
+    #expect(dab.brushToWorld.translation == SIMD2(4.5, -2))
+    #expect(abs(dab.brushToWorld.xAxis.x) < 0.000_001)
+    #expect(dab.brushToWorld.xAxis.y == 5)
+    #expect(dab.brushToWorld.yAxis.x == -5)
+    #expect(abs(dab.brushToWorld.yAxis.y) < 0.000_001)
+    #expect(abs(dab.worldBounds.minimum.x - -0.5) < 0.000_01)
+    #expect(abs(dab.worldBounds.minimum.y - -7) < 0.000_01)
+    #expect(abs(dab.worldBounds.maximum.x - 9.5) < 0.000_01)
+    #expect(abs(dab.worldBounds.maximum.y - 3) < 0.000_01)
+    #expect(dab.primaryGrainToWorld != nil)
+    #expect(dab.secondaryGrainToWorld != nil)
+    #expect(dab.materialInputs.accumulation == base.material.accumulation)
+    #expect(dab.randomValues.compatibility == random)
+    #expect(dab.randomValues.size == BrushRandom.extensionUnitFloat(
+        strokeSeed: 71,
+        logicalDabOrdinal: 4,
+        outputChannel: .size
+    ))
+}
+
+@Test
+func nativeLogicalDabBoundsEncloseEveryShapeLayer() throws {
+    let base = try nativeDefinition()
+    let coverage = BrushCoverageDefinition(
+        shapes: [
+            BrushShapeLayerDefinition(
+                shape: .hardRound,
+                combination: .replace,
+                scale: 0.5,
+                rotation: 0,
+                offset: .zero
+            ),
+            BrushShapeLayerDefinition(
+                shape: .chisel,
+                combination: .maximum,
+                scale: 0.25,
+                rotation: .pi / 2,
+                offset: SIMD2(3, -2)
+            ),
+        ],
+        grains: [],
+        baseHardness: 1,
+        aspectRatio: 1,
+        tipThreshold: 0,
+        antialiasing: true
+    )
+    let program = try BrushProgramCompiler.compile(replacing(
+        base,
+        capabilities: [
+            BrushCapabilityDeclaration(identifier: "dualShape", required: true),
+            BrushCapabilityDeclaration(
+                identifier: "future.capability",
+                required: false
+            ),
+        ],
+        coverage: coverage
+    ))
+
+    let dab = evaluateNative(program)
+
+    #expect(dab.brushToWorld.translation == SIMD2(2, 3))
+    #expect(dab.brushToWorld.xAxis == SIMD2(5, 0))
+    #expect(dab.brushToWorld.yAxis == SIMD2(0, 5))
+    #expect(dab.worldBounds.minimum == SIMD2(-3, -19.5))
+    #expect(dab.worldBounds.maximum == SIMD2(34.5, 8))
+}
+
+@Test
+func nativeGrainFramesHonorCoordinateModeAndMovementFraction() throws {
+    let base = try nativeDefinition()
+
+    func evaluate(
+        mode: BrushGrainCoordinateMode,
+        movement: Float
+    ) throws -> DabAttributes {
+        let grain = BrushGrainLayerDefinition(
+            grain: .paper,
+            coordinateMode: mode,
+            transform: BrushGrainTransform(
+                scale: 2,
+                rotation: 0,
+                offset: SIMD2(1, 0)
+            ),
+            grainMovementFraction: movement,
+            grainFollowsBrushRotation: false,
+            strength: 1
+        )
+        let coverage = BrushCoverageDefinition(
+            shapes: base.coverage.shapes,
+            grains: [grain],
+            baseHardness: base.coverage.baseHardness,
+            aspectRatio: base.coverage.aspectRatio,
+            tipThreshold: base.coverage.tipThreshold,
+            antialiasing: base.coverage.antialiasing
+        )
+        return evaluateNative(try BrushProgramCompiler.compile(replacing(
+            base,
+            coverage: coverage
+        )))
+    }
+
+    let anchored = try evaluate(mode: .canonical, movement: 0)
+    let halfway = try evaluate(mode: .canonical, movement: 0.5)
+    let traveling = try evaluate(mode: .canonical, movement: 1)
+    let local = try evaluate(mode: .brushLocal, movement: 0)
+
+    #expect(anchored.primaryGrainToWorld?.translation == SIMD2(1, 0))
+    #expect(halfway.primaryGrainToWorld?.translation == SIMD2(2, 1.5))
+    #expect(traveling.primaryGrainToWorld?.translation == SIMD2(3, 3))
+    #expect(local.primaryGrainToWorld?.translation == SIMD2(3, 3))
+    #expect(anchored.primaryGrainToWorld?.xAxis == SIMD2(2, 0))
+    #expect(anchored.primaryGrainToWorld?.yAxis == SIMD2(0, 2))
+}
+
+@Test
+func nativeGrainFollowRotatesAxesAndOffsetBeforeProjection() throws {
+    let base = try nativeDefinition()
+
+    func evaluate(followsBrush: Bool) throws -> DabAttributes {
+        let grain = BrushGrainLayerDefinition(
+            grain: .paper,
+            coordinateMode: .canonical,
+            transform: BrushGrainTransform(
+                scale: 2,
+                rotation: 0,
+                offset: SIMD2(1, 0)
+            ),
+            grainMovementFraction: 0,
+            grainFollowsBrushRotation: followsBrush,
+            strength: 1
+        )
+        let coverage = BrushCoverageDefinition(
+            shapes: base.coverage.shapes,
+            grains: [grain],
+            baseHardness: base.coverage.baseHardness,
+            aspectRatio: base.coverage.aspectRatio,
+            tipThreshold: base.coverage.tipThreshold,
+            antialiasing: base.coverage.antialiasing
+        )
+        let placement = BrushPlacementDefinition(
+            baseSpacingFraction: base.placement.baseSpacingFraction,
+            maximumSpacingFraction: base.placement.maximumSpacingFraction,
+            baseFlow: base.placement.baseFlow,
+            strokeOpacity: base.placement.strokeOpacity,
+            baseScatterFraction: base.placement.baseScatterFraction,
+            baseRotation: .pi / 2,
+            baseJitterFraction: base.placement.baseJitterFraction,
+            baseOffset: base.placement.baseOffset
+        )
+        return evaluateNative(try BrushProgramCompiler.compile(replacing(
+            base,
+            placement: placement,
+            coverage: coverage
+        )))
+    }
+
+    let fixed = try evaluate(followsBrush: false)
+    let following = try evaluate(followsBrush: true)
+    let fixedFrame = try #require(fixed.primaryGrainToWorld)
+    let followingFrame = try #require(following.primaryGrainToWorld)
+
+    #expect(fixedFrame.translation == SIMD2(1, 0))
+    #expect(fixedFrame.xAxis == SIMD2(2, 0))
+    #expect(abs(followingFrame.translation.x) < 0.000_001)
+    #expect(abs(followingFrame.translation.y - 1) < 0.000_001)
+    #expect(abs(followingFrame.xAxis.x) < 0.000_001)
+    #expect(abs(followingFrame.xAxis.y - 2) < 0.000_001)
+    #expect(abs(followingFrame.yAxis.x + 2) < 0.000_001)
+    #expect(abs(followingFrame.yAxis.y) < 0.000_001)
+
+    let source = try LogicalDabBatch(
+        seed: 9,
+        startingOrdinal: following.ordinal,
+        isPredicted: false,
+        dabs: [following]
+    )
+    let projection = Affine2D(
+        xAxis: SIMD2(0, 1),
+        yAxis: SIMD2(-1, 0),
+        translation: SIMD2(20, 30)
+    )
+    let frames = LogicalDabTransformer.transform(
+        batch: source,
+        through: [CompiledIsometry(
+            ordinal: 0,
+            localToCanonical: projection,
+            operation: .identity
+        )]
+    )
+
+    #expect(
+        frames[0].primaryGrainToCanonical
+            == followingFrame.concatenating(projection)
+    )
+}
+
 private let zeroColorJitter = BrushColorJitter(
     hue: 0, saturation: 0, brightness: 0, secondaryColorMix: 0
 )
@@ -441,7 +708,8 @@ private func replacing(
     schemaVersion: UInt16? = nil,
     material: BrushMaterialDefinition? = nil,
     placement: BrushPlacementDefinition? = nil,
-    color: BrushColorBehaviorDefinition? = nil
+    color: BrushColorBehaviorDefinition? = nil,
+    coverage: BrushCoverageDefinition? = nil
 ) throws -> BrushDefinition {
     try BrushDefinition(
         id: definition.id,
@@ -449,7 +717,7 @@ private func replacing(
         metadata: definition.metadata,
         capabilities: capabilities ?? definition.capabilities,
         resources: definition.resources,
-        coverage: definition.coverage,
+        coverage: coverage ?? definition.coverage,
         placement: placement ?? definition.placement,
         dynamics: dynamics ?? definition.dynamics,
         color: color ?? definition.color,

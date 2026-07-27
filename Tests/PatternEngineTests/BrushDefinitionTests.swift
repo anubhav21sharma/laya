@@ -174,6 +174,37 @@ func legacyRecipeRoundTripsExactly(_ fixture: AnchorRecipeFixture) throws {
     }
 }
 
+@Test
+func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
+    let base = try BrushDefinition.fixture(capabilities: [
+        BrushCapabilityDeclaration(identifier: "smudge", required: true),
+    ])
+    let interaction = BrushMaterialDefinition(
+        accumulation: .flow,
+        interaction: .smudge,
+        edgeTreatment: .none,
+        strength: 1,
+        wetness: 0.5,
+        bleedRadius: 0,
+        softenPasses: 0,
+        accumulationLimit: 1,
+        interactionParameters: BrushInteractionDefinition(
+            pickup: 0,
+            pull: 0,
+            dilution: 0,
+            charge: 0,
+            persistence: 0,
+            dirtyHaloRadius: BrushRecipePolicy.maximumWashBleedRadius + 1
+        )
+    )
+
+    #expect(throws: BrushDefinitionValidationError.outOfRange(
+        field: "material.dirtyHaloRadius"
+    )) {
+        try base.replacing(material: interaction)
+    }
+}
+
 @Test func definitionRejectsInvalidCollectionAndResourceSemantics() throws {
     #expect(throws: BrushDefinitionValidationError.self) {
         try BrushDefinition.fixture(capabilities: [
@@ -302,6 +333,7 @@ private extension BrushDefinition {
         dynamics: BrushDynamicsDefinition? = nil,
         coverage: BrushCoverageDefinition? = nil,
         color: BrushColorBehaviorDefinition? = nil,
+        material: BrushMaterialDefinition? = nil,
         resources: [BrushResourceReference]? = nil,
         placement: BrushPlacementDefinition? = nil,
         limits: BrushDefinitionLimits? = nil,
@@ -312,7 +344,8 @@ private extension BrushDefinition {
             capabilities: capabilities, resources: resources ?? self.resources,
             coverage: coverage ?? self.coverage, placement: placement ?? self.placement,
             dynamics: dynamics ?? self.dynamics, color: color ?? self.color,
-            material: material, stabilization: stabilization, taper: taper ?? self.taper,
+            material: material ?? self.material,
+            stabilization: stabilization, taper: taper ?? self.taper,
             replayMode: replayMode, replayLimits: replayLimits,
             seedPolicy: seedPolicy, limits: limits ?? self.limits,
             performanceIntent: performanceIntent, compatibility: compatibility

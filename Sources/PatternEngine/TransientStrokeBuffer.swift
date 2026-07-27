@@ -11,11 +11,11 @@ public enum TransientStrokeBufferContract {
 
 /// One generated dab plus its post-tiling cost in the visible replay epoch.
 public struct TransientStrokeDab: Equatable, Sendable {
-    public let attributes: DabAttributes
+    public let attributes: LogicalDab
     public let projectedInstanceCount: Int
 
     public init(
-        attributes: DabAttributes,
+        attributes: LogicalDab,
         projectedInstanceCount: Int
     ) {
         precondition(

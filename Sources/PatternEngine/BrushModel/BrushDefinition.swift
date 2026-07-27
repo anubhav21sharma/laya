@@ -160,7 +160,69 @@ private enum BrushDefinitionValidator {
         switch mapping.response { case let .constant(value): try finite(value, "mapping.constant"); guard mapping.scale == 1, mapping.offset == 0, !mapping.inverted, mapping.jitter == 0, mapping.lowerClamp == value, mapping.upperClamp == value else { throw BrushDefinitionValidationError.invalidMapping(field: "constant") }; case .linear: break; case let .boundedPower(exponent): guard exponent.isFinite, exponent >= 0.125, exponent <= 8 else { throw BrushDefinitionValidationError.invalidMapping(field: "boundedPower") }; case let .curve(curve): try curveValidation(curve) }
     }
     static func curveValidation(_ curve: BrushCurveDefinition) throws { guard (2...32).contains(curve.points.count), curve.points.first?.x == 0, curve.points.last?.x == 1 else { throw BrushDefinitionValidationError.invalidCurve }; var previous: Float = -1; for point in curve.points { guard point.x.isFinite, point.y.isFinite, (0...1).contains(point.x), (0...1).contains(point.y), point.x > previous else { throw BrushDefinitionValidationError.invalidCurve }; previous = point.x } }
-    static func materialValidation(_ material: BrushMaterialDefinition, capabilities: [BrushCapabilityDeclaration]) throws { for (field, value) in [("material.strength", material.strength), ("material.wetness", material.wetness), ("material.accumulationLimit", material.accumulationLimit)] { try range(value, field) }; try finite(material.bleedRadius, "material.bleedRadius"); guard material.bleedRadius >= 0, material.bleedRadius <= BrushRecipePolicy.maximumWashBleedRadius, material.softenPasses >= 0, material.softenPasses <= BrushRecipePolicy.maximumWashSoftenPasses else { throw BrushDefinitionValidationError.outOfRange(field: "material") }; let needed: BrushCapability? = switch material.interaction { case .none: nil; case .pickup: .canvasInteraction; case .smudge: .smudge; case .wetMix: .wetMix }; if let needed, !capabilities.contains(where: { $0.identifier == needed.rawValue }) { throw BrushDefinitionValidationError.missingCapability(needed.rawValue) }; if material.interaction == .none { guard material.interactionParameters == nil else { throw BrushDefinitionValidationError.invalidInteraction } } else { guard let parameters = material.interactionParameters else { throw BrushDefinitionValidationError.invalidInteraction }; for value in [parameters.pickup, parameters.pull, parameters.dilution, parameters.charge, parameters.persistence] { try range(value, "material.interaction") }; try finite(parameters.dirtyHaloRadius, "material.dirtyHaloRadius"); guard parameters.dirtyHaloRadius >= 0 else { throw BrushDefinitionValidationError.outOfRange(field: "material.dirtyHaloRadius") } } }
+    static func materialValidation(
+        _ material: BrushMaterialDefinition,
+        capabilities: [BrushCapabilityDeclaration]
+    ) throws {
+        for (field, value) in [
+            ("material.strength", material.strength),
+            ("material.wetness", material.wetness),
+            ("material.accumulationLimit", material.accumulationLimit),
+        ] {
+            try range(value, field)
+        }
+        try finite(material.bleedRadius, "material.bleedRadius")
+        guard material.bleedRadius >= 0,
+              material.bleedRadius <= BrushRecipePolicy.maximumWashBleedRadius,
+              material.softenPasses >= 0,
+              material.softenPasses <= BrushRecipePolicy.maximumWashSoftenPasses
+        else {
+            throw BrushDefinitionValidationError.outOfRange(field: "material")
+        }
+        let needed: BrushCapability? = switch material.interaction {
+        case .none: nil
+        case .pickup: .canvasInteraction
+        case .smudge: .smudge
+        case .wetMix: .wetMix
+        }
+        if let needed,
+           !capabilities.contains(where: { $0.identifier == needed.rawValue })
+        {
+            throw BrushDefinitionValidationError.missingCapability(
+                needed.rawValue
+            )
+        }
+        if material.interaction == .none {
+            guard material.interactionParameters == nil else {
+                throw BrushDefinitionValidationError.invalidInteraction
+            }
+        } else {
+            guard let parameters = material.interactionParameters else {
+                throw BrushDefinitionValidationError.invalidInteraction
+            }
+            for value in [
+                parameters.pickup,
+                parameters.pull,
+                parameters.dilution,
+                parameters.charge,
+                parameters.persistence,
+            ] {
+                try range(value, "material.interaction")
+            }
+            try finite(
+                parameters.dirtyHaloRadius,
+                "material.dirtyHaloRadius"
+            )
+            guard parameters.dirtyHaloRadius >= 0,
+                  parameters.dirtyHaloRadius
+                    <= BrushRecipePolicy.maximumWashBleedRadius
+            else {
+                throw BrushDefinitionValidationError.outOfRange(
+                    field: "material.dirtyHaloRadius"
+                )
+            }
+        }
+    }
     static func taperValidation(_ taper: BrushTaperConfiguration) throws { for length in [taper.start, taper.end] { switch length { case .disabled: break; case let .worldPixels(value), let .diameterMultiples(value): try finite(value, "taper"); guard value > 0 else { throw BrushDefinitionValidationError.outOfRange(field: "taper") } } }; try range(taper.minimumSize, "taper.minimumSize"); try range(taper.minimumFlow, "taper.minimumFlow"); let supportedEffects = BrushTaperEffects.size.rawValue | BrushTaperEffects.flow.rawValue; guard taper.effects.rawValue & ~supportedEffects == 0 else { throw BrushDefinitionValidationError.outOfRange(field: "taper.effects") } }
     static func replayValidation(_ mode: BrushReplayMode, _ limits: BrushReplayLimits?, _ end: BrushTaperLength) throws { if mode == .appendOnly { guard limits == nil, { if case .disabled = end { return true }; return false }() else { throw BrushDefinitionValidationError.invalidReplay }; return }; guard let limits else { throw BrushDefinitionValidationError.invalidReplay }; let cap = mode == .replayTail ? BrushRecipePolicy.replayTailLimits : BrushRecipePolicy.wholeStrokeLimits; guard limits.maximumSamples > 0, limits.maximumSamples <= cap.maximumSamples, limits.maximumDabs > 0, limits.maximumDabs <= cap.maximumDabs, limits.maximumProjectedInstances > 0, limits.maximumProjectedInstances <= cap.maximumProjectedInstances else { throw BrushDefinitionValidationError.invalidReplay } }
 }

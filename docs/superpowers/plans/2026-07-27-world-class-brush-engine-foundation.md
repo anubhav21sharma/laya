@@ -1574,13 +1574,25 @@ public enum LogicalDabTransformer {
   dabs. Nonempty dab provenance must match the explicit `isPredicted` flag.
   Empty batches retain that flag and the supplied zero-length ordinal range so
   samples that emit no dab remain ordered and replayable.
+- Finite validation covers every logical-dab float group, including color
+  adjustments, brush and optional grain affine frames, material inputs, random
+  values, and computed bounds.
 - Each dab's conservative bounds and the batch union come from all four
-  transformed local tip corners plus declared material halo, not center ±
-  radius; chisel/aspect/offset transforms must be enclosed.
+  transformed local tip corners of every evaluated native shape layer plus
+  the declared material halo exactly once, not center ± radius;
+  chisel/aspect/offset transforms must be enclosed. `brushToWorld` remains the
+  primary shape frame for source compatibility.
 - Transform composition is
   `dab.brushToWorld.concatenating(isometry.localToCanonical)`.
 - Each present grain frame composes with the same isometry, preserving its
   canonical or brush-local anchoring selected by the definition.
+- Native canonical grain translation is
+  `dab.position * grainMovementFraction + evaluatedOffset`. Brush-local grain
+  translation is `dab.position + evaluatedOffset`. When
+  `grainFollowsBrushRotation` is true, brush rotation applies to both the
+  authored grain axes and the evaluated authored/random offset before symmetry
+  projection. Legacy compatibility evaluation retains its exact historical
+  grain frame.
 - Isometry enumeration never consumes random values or rewrites the source
   logical dab.
 - Splitting the same authoritative sample sequence across different generator
@@ -1663,23 +1675,42 @@ assert every payload and digest is unchanged.
 Add transactional convenience APIs:
 
 ```swift
+public mutating func beginBatches(
+    _ sample: WorldStrokeSample
+) -> [LogicalDabBatch]
+
+public mutating func appendBatches(
+    _ sample: WorldStrokeSample
+) -> [LogicalDabBatch]
+
+public mutating func finishBatches(
+    _ sample: WorldStrokeSample
+) -> [LogicalDabBatch]
+
 public mutating func beginBatch(
     _ sample: WorldStrokeSample
-) -> LogicalDabBatch
+) throws -> LogicalDabBatch
 
 public mutating func appendBatch(
     _ sample: WorldStrokeSample
-) -> LogicalDabBatch
+) throws -> LogicalDabBatch
 
 public mutating func finishBatch(
     _ sample: WorldStrokeSample
-) -> LogicalDabBatch
+) throws -> LogicalDabBatch
 ```
 
-They collect the existing callback output. If validation unexpectedly fails,
-the generator remains unchanged. Capture `emittedDabCount` before evaluation
-and pass it as `startingOrdinal`, including when no dab is emitted. Existing
-callback APIs remain available for the current renderer until Task 11.
+They collect the existing callback output exactly once. The nonthrowing plural
+APIs split valid emissions losslessly into ordered chunks of at most 512 dabs;
+an empty emission returns exactly one empty batch. The singular APIs preserve
+the bounded batch contract by throwing when one sample emits more than 512
+dabs. Validate every required batch before committing the candidate generator,
+so any failure leaves it unchanged. Capture `emittedDabCount` before evaluation
+for append/finish and pass the correct offset as each `startingOrdinal`,
+including an empty emission. A begin operation follows callback reset
+semantics, so its first chunk starts at ordinal zero even when it replaces an
+active stroke. Existing callback APIs remain available for the current
+renderer until Task 11.
 
 - [ ] **Step 5: Update transient replay to store `LogicalDab`**
 
@@ -1693,6 +1724,7 @@ Run:
 ```bash
 swift test --filter LogicalDabBatchTests
 swift test --filter BrushStrokeGeneratorTests
+swift test --filter BrushProgramCompilerTests
 swift test --filter TransientStrokeBufferTests
 swift test --filter SymmetryDescriptorCompilerTests
 swift test --filter BrushCharacterization

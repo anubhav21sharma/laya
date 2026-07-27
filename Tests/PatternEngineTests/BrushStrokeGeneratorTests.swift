@@ -1,5 +1,5 @@
 import Foundation
-import PatternEngine
+@testable import PatternEngine
 import Testing
 
 private let generatorViewport = ViewportTransform(
@@ -373,4 +373,262 @@ func clickAndShortStrokeTaperStayFiniteAndBounded() throws {
     #expect(tapered.diameter == 2)
     #expect(tapered.flow == 0.15)
     #expect(tapered.brushToWorld.xAxis.x.isFinite)
+}
+
+@Test
+func batchAPIsPreserveCallbackOutputAcrossEmptyBoundaries() {
+    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
+    let moved = generatorSample(x: 0.1, timestamp: 0.5, phase: .moved)
+    let ended = generatorSample(x: 6, timestamp: 1, phase: .ended)
+    var callback = legacyGenerator(seed: 51)
+    var expected: [LogicalDab] = []
+    callback.begin(began) { expected.append($0) }
+    callback.append(moved) { expected.append($0) }
+    callback.finish(ended) { expected.append($0) }
+
+    var batched = legacyGenerator(seed: 51)
+    let batches = batched.beginBatches(began)
+        + batched.appendBatches(moved)
+        + batched.finishBatches(ended)
+
+    #expect(batches.flatMap(\.dabs) == expected)
+    #expect(batches[0].ordinalRange == 0..<1)
+    #expect(batches[1].dabs.isEmpty)
+    #expect(batches[1].ordinalRange == 1..<1)
+    #expect(batches[2].ordinalRange.lowerBound == 1)
+    #expect(batched == callback)
+}
+
+@Test
+func batchBeginResetsOrdinalsForActiveAndProgressedStrokes() throws {
+    let first = generatorSample(x: 0, timestamp: 0, phase: .began)
+    let replacement = generatorSample(x: 40, timestamp: 2, phase: .began)
+
+    var activeCallback = legacyGenerator(seed: 53)
+    activeCallback.begin(first) { _ in }
+    var expectedActiveReset: [LogicalDab] = []
+    activeCallback.begin(replacement) { expectedActiveReset.append($0) }
+
+    var activeSingular = legacyGenerator(seed: 53)
+    _ = try activeSingular.beginBatch(first)
+    let activeSingularReset = try activeSingular.beginBatch(replacement)
+
+    #expect(activeSingularReset.ordinalRange == 0..<1)
+    #expect(activeSingularReset.dabs == expectedActiveReset)
+    #expect(activeSingular == activeCallback)
+
+    var activePlural = legacyGenerator(seed: 53)
+    _ = activePlural.beginBatches(first)
+    let activePluralReset = activePlural.beginBatches(replacement)
+
+    #expect(activePluralReset.map(\.ordinalRange) == [0..<1])
+    #expect(activePluralReset.flatMap(\.dabs) == expectedActiveReset)
+    #expect(activePlural == activeCallback)
+
+    let moved = generatorSample(x: 30, timestamp: 1, phase: .moved)
+    var progressedCallback = legacyGenerator(seed: 55)
+    progressedCallback.begin(first) { _ in }
+    progressedCallback.append(moved) { _ in }
+    #expect(progressedCallback.emittedDabCount > 1)
+    var expectedProgressedReset: [LogicalDab] = []
+    progressedCallback.begin(replacement) { expectedProgressedReset.append($0) }
+
+    var progressedSingular = legacyGenerator(seed: 55)
+    _ = try progressedSingular.beginBatch(first)
+    _ = try progressedSingular.appendBatch(moved)
+    #expect(progressedSingular.emittedDabCount > 1)
+    let progressedSingularReset = try progressedSingular.beginBatch(replacement)
+
+    #expect(progressedSingularReset.ordinalRange == 0..<1)
+    #expect(progressedSingularReset.dabs == expectedProgressedReset)
+    #expect(progressedSingular == progressedCallback)
+
+    var progressedPlural = legacyGenerator(seed: 55)
+    _ = progressedPlural.beginBatches(first)
+    _ = progressedPlural.appendBatches(moved)
+    #expect(progressedPlural.emittedDabCount > 1)
+    let progressedPluralReset = progressedPlural.beginBatches(replacement)
+
+    #expect(progressedPluralReset.map(\.ordinalRange) == [0..<1])
+    #expect(progressedPluralReset.flatMap(\.dabs) == expectedProgressedReset)
+    #expect(progressedPlural == progressedCallback)
+}
+
+@Test
+func pluralBatchesSplitAnEightHundredDabSampleWithoutLoss() throws {
+    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
+    let ended = generatorSample(x: 2_000, timestamp: 1, phase: .ended)
+
+    var callback = legacyGenerator(seed: 57)
+    callback.begin(began) { _ in }
+    var expected: [LogicalDab] = []
+    callback.finish(ended) { expected.append($0) }
+    #expect(expected.count == 800)
+
+    var plural = legacyGenerator(seed: 57)
+    _ = plural.beginBatches(began)
+    let batches = plural.finishBatches(ended)
+
+    #expect(batches.map(\.dabs.count) == [512, 288])
+    #expect(batches.map(\.ordinalRange) == [1..<513, 513..<801])
+    #expect(batches.flatMap(\.dabs) == expected)
+    #expect(plural == callback)
+
+    var singular = legacyGenerator(seed: 57)
+    _ = try singular.beginBatch(began)
+    let beforeRejectedSample = singular
+    #expect(throws: LogicalDabBatchError.tooManyDabs(
+        actual: 800,
+        maximum: LogicalDabBatch.maximumDabCount
+    )) {
+        try singular.finishBatch(ended)
+    }
+    #expect(singular == beforeRejectedSample)
+
+    enum ExpectedFailure: Error, Equatable {
+        case rejectedSecondChunk
+    }
+    var transactional = legacyGenerator(seed: 57)
+    _ = transactional.beginBatches(began)
+    let beforeRejectedChunks = transactional
+    var validationCount = 0
+    #expect(throws: ExpectedFailure.rejectedSecondChunk) {
+        try transactional.validatedBatches(
+            ended,
+            operation: .finish
+        ) { seed, startingOrdinal, isPredicted, dabs in
+            validationCount += 1
+            guard validationCount < 2 else {
+                throw ExpectedFailure.rejectedSecondChunk
+            }
+            return try LogicalDabBatch(
+                seed: seed,
+                startingOrdinal: startingOrdinal,
+                isPredicted: isPredicted,
+                dabs: dabs
+            )
+        }
+    }
+    #expect(validationCount == 2)
+    #expect(transactional == beforeRejectedChunks)
+}
+
+@Test
+func predictionBatchDoesNotAdvanceAuthoritativeDabsOrRandomCursor() throws {
+    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
+    var authoritative = legacyGenerator(seed: 63)
+    _ = try authoritative.beginBatch(began)
+    var predicted = authoritative
+    let predictedBatch = try predicted.finishBatch(
+        generatorSample(
+            x: 9,
+            timestamp: 0.5,
+            phase: .ended
+        ).replacingKindForTest(.predicted)
+    )
+    #expect(!predictedBatch.dabs.isEmpty)
+
+    var withoutPrediction = authoritative
+    let actual = generatorSample(x: 6, timestamp: 1, phase: .ended)
+    let afterPrediction = try authoritative.finishBatch(actual)
+    let baseline = try withoutPrediction.finishBatch(actual)
+
+    #expect(afterPrediction == baseline)
+    #expect(authoritative == withoutPrediction)
+}
+
+@Test
+func failedBatchValidationLeavesGeneratorExactlyUnchanged() {
+    enum ExpectedFailure: Error, Equatable {
+        case rejected
+    }
+    var generator = legacyGenerator(seed: 75)
+    let original = generator
+
+    #expect(throws: ExpectedFailure.rejected) {
+        try generator.validatedBatch(
+            generatorSample(x: 0, timestamp: 0, phase: .began),
+            operation: .begin
+        ) { _, _, _, _ in
+            throw ExpectedFailure.rejected
+        }
+    }
+    #expect(generator == original)
+}
+
+@Test
+func generatedLogicalDabStoresConsumedCompatibilityRandomValues() throws {
+    var generator = legacyGenerator(seed: 81)
+    let batch = try generator.beginBatch(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    )
+    var random = BrushRandom(seed: 81)
+    let expected = random.nextValues()
+
+    #expect(batch.dabs.first?.randomValues.compatibility == expected)
+    #expect(batch.dabs.first?.randomValues.extensionValues == Array(
+        repeating: 0,
+        count: 10
+    ))
+}
+
+@Test
+func retroactiveTaperPreservesAppendedLogicalDabInputs() throws {
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("test.generator.logical-taper"),
+        taper: BrushTaperConfiguration(
+            start: .worldPixels(4),
+            end: .worldPixels(4),
+            minimumSize: 0.25,
+            minimumFlow: 0.2,
+            effects: [.size, .flow]
+        ),
+        replayMode: .replayTail,
+        replayLimits: BrushRecipePolicy.replayTailLimits
+    )
+    var generator = BrushStrokeGenerator(
+        recipe: recipe,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 91
+    )
+    _ = try generator.beginBatch(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    )
+    let original = try #require(
+        try generator.finishBatch(
+            generatorSample(x: 12, timestamp: 1, phase: .ended)
+        ).dabs.last
+    )
+    let tapered = BrushDynamicsEngine().applyingKnownTotalDistance(
+        original,
+        totalDistance: 12,
+        nominalDiameter: 20,
+        recipe: recipe
+    )
+
+    #expect(tapered.materialInputs == original.materialInputs)
+    #expect(tapered.randomValues == original.randomValues)
+    #expect(tapered.primaryGrainToWorld == original.primaryGrainToWorld)
+    #expect(tapered.secondaryGrainToWorld == original.secondaryGrainToWorld)
+    #expect(tapered.worldBounds != original.worldBounds)
+}
+
+private extension WorldStrokeSample {
+    func replacingKindForTest(_ kind: StrokeSampleKind) -> WorldStrokeSample {
+        let source = StrokeSample(
+            position: ScreenPoint(x: position.x + 1, y: position.y + 1),
+            pressure: pressure,
+            timestamp: timestamp,
+            phase: phase,
+            source: self.source,
+            kind: kind,
+            capabilities: capabilities,
+            altitude: altitude,
+            azimuth: azimuth,
+            roll: roll
+        )
+        var input = BrushInputDeriver()
+        return input.derive(source, viewport: generatorViewport)
+    }
 }

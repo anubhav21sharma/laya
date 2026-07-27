@@ -1,6 +1,12 @@
 import Foundation
 import simd
 
+enum BrushStrokeBatchOperation {
+    case begin
+    case append
+    case finish
+}
+
 /// Deterministic input-to-dab generator for one captured stroke configuration.
 public struct BrushStrokeGenerator: Equatable, Sendable {
     public let program: BrushProgram
@@ -127,6 +133,169 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     public mutating func cancel() {
         resetRuntimeState()
+    }
+
+    public mutating func beginBatches(
+        _ sample: WorldStrokeSample
+    ) -> [LogicalDabBatch] {
+        invariantBatches(sample, operation: .begin)
+    }
+
+    public mutating func appendBatches(
+        _ sample: WorldStrokeSample
+    ) -> [LogicalDabBatch] {
+        invariantBatches(sample, operation: .append)
+    }
+
+    public mutating func finishBatches(
+        _ sample: WorldStrokeSample
+    ) -> [LogicalDabBatch] {
+        invariantBatches(sample, operation: .finish)
+    }
+
+    public mutating func beginBatch(
+        _ sample: WorldStrokeSample
+    ) throws -> LogicalDabBatch {
+        try validatedBatch(sample, operation: .begin)
+    }
+
+    public mutating func appendBatch(
+        _ sample: WorldStrokeSample
+    ) throws -> LogicalDabBatch {
+        try validatedBatch(sample, operation: .append)
+    }
+
+    public mutating func finishBatch(
+        _ sample: WorldStrokeSample
+    ) throws -> LogicalDabBatch {
+        try validatedBatch(sample, operation: .finish)
+    }
+
+    mutating func validatedBatch(
+        _ sample: WorldStrokeSample,
+        operation: BrushStrokeBatchOperation,
+        validator: (
+            _ seed: UInt64,
+            _ startingOrdinal: UInt64,
+            _ isPredicted: Bool,
+            _ dabs: [LogicalDab]
+        ) throws -> LogicalDabBatch
+    ) throws -> LogicalDabBatch {
+        let emission = collectCandidateEmission(sample, operation: operation)
+        let batch = try validator(
+            seed,
+            emission.startingOrdinal,
+            sample.kind == .predicted,
+            emission.dabs
+        )
+        self = emission.candidate
+        return batch
+    }
+
+    mutating func validatedBatch(
+        _ sample: WorldStrokeSample,
+        operation: BrushStrokeBatchOperation
+    ) throws -> LogicalDabBatch {
+        try validatedBatch(
+            sample,
+            operation: operation
+        ) { seed, startingOrdinal, isPredicted, dabs in
+            try LogicalDabBatch(
+                seed: seed,
+                startingOrdinal: startingOrdinal,
+                isPredicted: isPredicted,
+                dabs: dabs
+            )
+        }
+    }
+
+    mutating func validatedBatches(
+        _ sample: WorldStrokeSample,
+        operation: BrushStrokeBatchOperation,
+        validator: (
+            _ seed: UInt64,
+            _ startingOrdinal: UInt64,
+            _ isPredicted: Bool,
+            _ dabs: [LogicalDab]
+        ) throws -> LogicalDabBatch
+    ) throws -> [LogicalDabBatch] {
+        let emission = collectCandidateEmission(sample, operation: operation)
+        let starts: [Int]
+        if emission.dabs.isEmpty {
+            starts = [0]
+        } else {
+            starts = Array(
+                stride(
+                    from: 0,
+                    to: emission.dabs.count,
+                    by: LogicalDabBatch.maximumDabCount
+                )
+            )
+        }
+        var batches: [LogicalDabBatch] = []
+        batches.reserveCapacity(starts.count)
+        for start in starts {
+            let end = min(
+                start + LogicalDabBatch.maximumDabCount,
+                emission.dabs.count
+            )
+            let batch = try validator(
+                seed,
+                emission.startingOrdinal + UInt64(start),
+                sample.kind == .predicted,
+                Array(emission.dabs[start..<end])
+            )
+            batches.append(batch)
+        }
+        self = emission.candidate
+        return batches
+    }
+
+    private mutating func invariantBatches(
+        _ sample: WorldStrokeSample,
+        operation: BrushStrokeBatchOperation
+    ) -> [LogicalDabBatch] {
+        do {
+            return try validatedBatches(
+                sample,
+                operation: operation
+            ) { seed, startingOrdinal, isPredicted, dabs in
+                try LogicalDabBatch(
+                    seed: seed,
+                    startingOrdinal: startingOrdinal,
+                    isPredicted: isPredicted,
+                    dabs: dabs
+                )
+            }
+        } catch {
+            preconditionFailure(
+                "Generated logical-dab chunks violated an invariant: \(error)"
+            )
+        }
+    }
+
+    private func collectCandidateEmission(
+        _ sample: WorldStrokeSample,
+        operation: BrushStrokeBatchOperation
+    ) -> (
+        candidate: BrushStrokeGenerator,
+        startingOrdinal: UInt64,
+        dabs: [LogicalDab]
+    ) {
+        let startingOrdinal: UInt64 = operation == .begin
+            ? 0
+            : emittedDabCount
+        var candidate = self
+        var dabs: [LogicalDab] = []
+        switch operation {
+        case .begin:
+            candidate.begin(sample) { dabs.append($0) }
+        case .append:
+            candidate.append(sample) { dabs.append($0) }
+        case .finish:
+            candidate.finish(sample) { dabs.append($0) }
+        }
+        return (candidate, startingOrdinal, dabs)
     }
 
     private mutating func start(

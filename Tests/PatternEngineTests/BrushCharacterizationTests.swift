@@ -255,3 +255,151 @@ func legacyPayloadUsesTheFullyEvaluatedGrainFrameFromItsDab() throws {
     #expect(abs(payload.primaryGrainFrame.yAxis.y) < 0.000_001)
     #expect(payload.primaryGrainFrame.translation == SIMD2(4, 5))
 }
+
+@Test
+func logicalDabFactoryPreservesFrozenLegacyPayloadWhileRuntimeBoundsUseHalo()
+    throws
+{
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("characterization.logical-dab"),
+        grain: .paper,
+        material: BrushMaterial(
+            family: .boundedWash,
+            strength: 0.8,
+            wetness: 0.7,
+            bleedRadius: 12,
+            softenPasses: 2,
+            accumulationLimit: 0.75
+        ),
+        randomization: BrushRandomization(
+            spacing: 0.2,
+            scatter: 0.3,
+            rotation: 0.4,
+            grain: 0.5,
+            material: 0.6
+        )
+    )
+    let definition = try LegacyBrushRecipeAdapter.definition(
+        from: recipe,
+        displayName: "Logical"
+    )
+    let program = try BrushProgramCompiler.compile(definition)
+    let sample = InterpolatedStrokeSample(
+        position: WorldPoint(x: 20, y: 30),
+        pressure: 0.5,
+        timestamp: 0,
+        altitude: nil,
+        azimuth: nil,
+        roll: nil,
+        velocity: 0,
+        phase: .began,
+        source: .mouse,
+        kind: .actual,
+        capabilities: []
+    )
+    let dab = BrushDynamicsEngine().evaluate(
+        sample: sample,
+        context: BrushStrokeContext(
+            nominalDiameter: 20,
+            color: .black,
+            direction: 0,
+            strokeAge: 0,
+            traveledDistance: 0,
+            ordinal: 0,
+            isPredicted: false
+        ),
+        program: program,
+        random: BrushRandom(seed: 41).predictedValues(),
+        strokeSeed: 41
+    )
+    let legacy = BrushCharacterizationDigestPayload.legacy(
+        recipe: recipe,
+        dab: dab,
+        seed: 41,
+        ordinal: 0
+    )
+    let logical = BrushCharacterizationDigestPayload.logicalDab(
+        dab,
+        compatibilityRecipe: recipe
+    )
+
+    #expect(logical == legacy)
+    #expect(dab.worldBounds.minimum.x < logical.worldBoundsMinimum.x)
+    #expect(dab.worldBounds.maximum.x > logical.worldBoundsMaximum.x)
+    #expect(BrushCharacterizationDigest.digest([logical])
+        == BrushCharacterizationDigest.digest([legacy]))
+}
+
+@Test
+func everyAnchorTracePreservesLegacyPayloadsAndDigests() throws {
+    let viewport = ViewportTransform(
+        drawableSize: PatternSize(width: 256, height: 256),
+        worldCenter: WorldPoint(x: 128, y: 128)
+    )
+    let traces = [
+        StrokeTraceFixtures.pressureRamp,
+        StrokeTraceFixtures.curved,
+        StrokeTraceFixtures.predictionCorrection,
+    ]
+    var comparisonCount = 0
+
+    for fixture in AnchorRecipeFixtures.all {
+        let definition = try LegacyBrushRecipeAdapter.definition(
+            from: fixture.recipe,
+            displayName: fixture.displayName
+        )
+        let program = try BrushProgramCompiler.compile(definition)
+
+        for trace in traces {
+            var input = BrushInputDeriver()
+            var generator = BrushStrokeGenerator(
+                program: program,
+                nominalDiameter: 20,
+                color: .black,
+                seed: 41
+            )
+            var dabs: [LogicalDab] = []
+
+            for sample in trace.samples where sample.kind != .predicted {
+                let worldSample = input.derive(sample, viewport: viewport)
+                switch worldSample.phase {
+                case .began:
+                    dabs.append(contentsOf: generator.beginBatches(worldSample)
+                        .flatMap(\.dabs))
+                case .moved:
+                    dabs.append(contentsOf: generator.appendBatches(worldSample)
+                        .flatMap(\.dabs))
+                case .ended:
+                    dabs.append(contentsOf: generator.finishBatches(worldSample)
+                        .flatMap(\.dabs))
+                case .cancelled:
+                    generator.cancel()
+                }
+            }
+
+            let legacy = dabs.map {
+                BrushCharacterizationDigestPayload.legacy(
+                    recipe: fixture.recipe,
+                    dab: $0,
+                    seed: 41,
+                    ordinal: $0.ordinal
+                )
+            }
+            let logical = dabs.map {
+                BrushCharacterizationDigestPayload.logicalDab(
+                    $0,
+                    compatibilityRecipe: fixture.recipe
+                )
+            }
+
+            #expect(logical == legacy)
+            #expect(
+                BrushCharacterizationDigest.digest(logical)
+                    == BrushCharacterizationDigest.digest(legacy)
+            )
+            comparisonCount += 1
+        }
+    }
+
+    #expect(comparisonCount == 15)
+}

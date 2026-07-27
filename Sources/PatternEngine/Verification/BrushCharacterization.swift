@@ -114,7 +114,7 @@ public struct BrushLogicalBaseline: Codable, Equatable, Sendable {
 /// stable boundary rather than another renderer representation.
 public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
     public let ordinal: UInt64
-    public let dab: DabAttributes
+    public let dab: LogicalDab
     public let primaryGrainFrame: Affine2D
     public let secondaryGrainFrame: Affine2D
     public let hasPrimaryGrain: Bool
@@ -135,7 +135,7 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
 
     public init(
         ordinal: UInt64,
-        dab: DabAttributes,
+        dab: LogicalDab,
         primaryGrainFrame: Affine2D,
         secondaryGrainFrame: Affine2D,
         hasPrimaryGrain: Bool,
@@ -177,7 +177,7 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
 
     public static func legacy(
         recipe: BrushRecipe,
-        dab: DabAttributes,
+        dab: LogicalDab,
         seed: UInt64,
         ordinal: UInt64
     ) -> Self {
@@ -192,7 +192,7 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
 
     static func legacy(
         recipe: BrushRecipe,
-        dab: DabAttributes,
+        dab: LogicalDab,
         seed: UInt64,
         ordinal: UInt64,
         compatibilityRandom: BrushRandomValues
@@ -225,6 +225,57 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
             materialAccumulationLimit: recipe.material.accumulationLimit,
             compatibilityRandom: compatibilityRandom,
             extensionRandom: .zero,
+            worldBoundsMinimum: dab.position.simd - extent,
+            worldBoundsMaximum: dab.position.simd + extent
+        )
+    }
+
+    /// Builds the frozen schema-v1 payload from a runtime logical dab.
+    ///
+    /// Runtime bounds include the material halo. Schema v1 predates that
+    /// contract and permanently records tip-only bounds, so this factory
+    /// deliberately derives the legacy footprint instead of serializing
+    /// `dab.worldBounds`. The recipe remains necessary only for the legacy
+    /// soften-pass scalar, which is not part of `BrushMaterialInputs`.
+    public static func logicalDab(
+        _ dab: LogicalDab,
+        compatibilityRecipe recipe: BrushRecipe
+    ) -> Self {
+        // Schema v1 encoded the evaluated frame even when the recipe's
+        // primary grain was opaque. Reconstructing it here also preserves the
+        // signed-zero bits produced by the legacy trigonometric path.
+        let primaryGrainFrame = dab.primaryGrainToWorld ?? grainFrame(
+            scale: dab.grainScale,
+            rotation: dab.grainRotation,
+            offset: dab.grainOffset
+        )
+        let secondaryGrainFrame = dab.secondaryGrainToWorld ?? .identity
+        let extent = SIMD2(
+            abs(dab.brushToWorld.xAxis.x) + abs(dab.brushToWorld.yAxis.x),
+            abs(dab.brushToWorld.xAxis.y) + abs(dab.brushToWorld.yAxis.y)
+        )
+        return Self(
+            ordinal: dab.ordinal,
+            dab: dab,
+            primaryGrainFrame: primaryGrainFrame,
+            secondaryGrainFrame: secondaryGrainFrame,
+            hasPrimaryGrain: recipe.grain != .opaque,
+            hasSecondaryGrain: dab.secondaryGrainToWorld != nil,
+            secondaryColorMix: dab.secondaryColorMix,
+            // These scalar-derived flags are part of the frozen schema-v1
+            // digest contract; do not reinterpret them through new enums.
+            accumulationEnabled: dab.materialInputs.accumulationLimit < 1,
+            interactionEnabled: dab.materialInputs.wetness > 0,
+            edgeEnabled: dab.materialInputs.bleedRadius > 0,
+            materialStrength: dab.materialInputs.strength,
+            materialWetness: dab.materialInputs.wetness,
+            materialBleedRadius: dab.materialInputs.bleedRadius,
+            materialSoftenPasses: UInt64(recipe.material.softenPasses),
+            materialAccumulationLimit: dab.materialInputs.accumulationLimit,
+            compatibilityRandom: dab.randomValues.compatibility,
+            extensionRandom: BrushExtensionRandomChannels(
+                values: dab.randomValues.extensionValues
+            ),
             worldBoundsMinimum: dab.position.simd - extent,
             worldBoundsMaximum: dab.position.simd + extent
         )
@@ -318,24 +369,14 @@ public enum BrushCharacterizer {
         )
         var sampleCount = 0
         var payloads: [BrushCharacterizationDigestPayload] = []
-        var random = BrushRandom(seed: seed)
-        var compatibilityRandom = BrushRandomValues.centered
-        var nextRandomOrdinal: UInt64 = 0
 
         for sample in trace.samples where sample.kind != .predicted {
             let worldSample = input.derive(sample, viewport: viewport)
             sampleCount += 1
-            let emit: (DabAttributes) -> Void = { dab in
-                while nextRandomOrdinal <= dab.ordinal {
-                    compatibilityRandom = random.nextValues()
-                    nextRandomOrdinal += 1
-                }
-                let payload = BrushCharacterizationDigestPayload.legacy(
-                    recipe: compatibilityRecipe,
-                    dab: dab,
-                    seed: seed,
-                    ordinal: dab.ordinal,
-                    compatibilityRandom: compatibilityRandom
+            let emit: (LogicalDab) -> Void = { dab in
+                let payload = BrushCharacterizationDigestPayload.logicalDab(
+                    dab,
+                    compatibilityRecipe: compatibilityRecipe
                 )
                 payloads.append(payload)
             }

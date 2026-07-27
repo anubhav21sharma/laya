@@ -71,7 +71,7 @@ public struct BrushStrokeContext: Equatable, Sendable {
     }
 }
 
-public struct DabAttributes: Equatable, Sendable {
+public struct LogicalDab: Equatable, Sendable {
     public let position: WorldPoint
     public let brushToWorld: Affine2D
     public let radius: Float
@@ -94,6 +94,11 @@ public struct DabAttributes: Equatable, Sendable {
     public let sourceDistance: Float
     public let ordinal: UInt64
     public let isPredicted: Bool
+    public let primaryGrainToWorld: Affine2D?
+    public let secondaryGrainToWorld: Affine2D?
+    public let materialInputs: BrushMaterialInputs
+    public let randomValues: BrushLogicalRandomValues
+    public let worldBounds: AxisAlignedRect
 
     public init(
         position: WorldPoint,
@@ -116,8 +121,74 @@ public struct DabAttributes: Equatable, Sendable {
         sourceDistance: Float,
         ordinal: UInt64,
         isPredicted: Bool,
-        secondaryColorMix: Float = 0
+        secondaryColorMix: Float = 0,
+        primaryGrainToWorld: Affine2D? = nil,
+        secondaryGrainToWorld: Affine2D? = nil,
+        materialInputs: BrushMaterialInputs = .neutral,
+        randomValues: BrushLogicalRandomValues = .neutral
     ) {
+        self.init(
+            position: position,
+            brushToWorld: brushToWorld,
+            radius: radius,
+            diameter: diameter,
+            spacing: spacing,
+            flow: flow,
+            strokeOpacity: strokeOpacity,
+            rotation: rotation,
+            scatter: scatter,
+            hardness: hardness,
+            grainOffset: grainOffset,
+            grainScale: grainScale,
+            grainRotation: grainRotation,
+            color: color,
+            colorAdjustment: colorAdjustment,
+            materialFamily: materialFamily,
+            materialContribution: materialContribution,
+            sourceDistance: sourceDistance,
+            ordinal: ordinal,
+            isPredicted: isPredicted,
+            secondaryColorMix: secondaryColorMix,
+            primaryGrainToWorld: primaryGrainToWorld,
+            secondaryGrainToWorld: secondaryGrainToWorld,
+            materialInputs: materialInputs,
+            randomValues: randomValues,
+            evaluatedShapeFrames: [brushToWorld]
+        )
+    }
+
+    init(
+        position: WorldPoint,
+        brushToWorld: Affine2D,
+        radius: Float,
+        diameter: Float,
+        spacing: Float,
+        flow: Float,
+        strokeOpacity: Float,
+        rotation: Float,
+        scatter: SIMD2<Float>,
+        hardness: Float,
+        grainOffset: SIMD2<Float>,
+        grainScale: Float,
+        grainRotation: Float,
+        color: InkColor,
+        colorAdjustment: BrushColorAdjustment,
+        materialFamily: BrushMaterialFamily,
+        materialContribution: Float,
+        sourceDistance: Float,
+        ordinal: UInt64,
+        isPredicted: Bool,
+        secondaryColorMix: Float,
+        primaryGrainToWorld: Affine2D?,
+        secondaryGrainToWorld: Affine2D?,
+        materialInputs: BrushMaterialInputs,
+        randomValues: BrushLogicalRandomValues,
+        evaluatedShapeFrames: [Affine2D]
+    ) {
+        precondition(
+            !evaluatedShapeFrames.isEmpty,
+            "A logical dab requires at least one evaluated shape frame"
+        )
         self.position = position
         self.brushToWorld = brushToWorld
         self.radius = radius
@@ -139,11 +210,96 @@ public struct DabAttributes: Equatable, Sendable {
         self.sourceDistance = sourceDistance
         self.ordinal = ordinal
         self.isPredicted = isPredicted
+        self.primaryGrainToWorld = primaryGrainToWorld
+        self.secondaryGrainToWorld = secondaryGrainToWorld
+        self.materialInputs = materialInputs
+        self.randomValues = randomValues
+        worldBounds = Self.conservativeWorldBounds(
+            shapeFrames: evaluatedShapeFrames,
+            haloRadius: materialInputs.conservativeHaloRadius
+        )
     }
 
     public var flowContribution: Float { flow }
     public var strokeOpacityContribution: Float { strokeOpacity }
+
+    var hasFiniteBatchValues: Bool {
+        [
+            position.x,
+            position.y,
+            radius,
+            diameter,
+            spacing,
+            flow,
+            strokeOpacity,
+            rotation,
+            scatter.x,
+            scatter.y,
+            hardness,
+            grainOffset.x,
+            grainOffset.y,
+            grainScale,
+            grainRotation,
+            color.red,
+            color.green,
+            color.blue,
+            color.alpha,
+            colorAdjustment.redMultiplier,
+            colorAdjustment.greenMultiplier,
+            colorAdjustment.blueMultiplier,
+            colorAdjustment.alphaMultiplier,
+            secondaryColorMix,
+            materialContribution,
+            sourceDistance,
+            worldBounds.minimum.x,
+            worldBounds.minimum.y,
+            worldBounds.maximum.x,
+            worldBounds.maximum.y,
+        ].allSatisfy(\.isFinite)
+            && Self.affineHasFiniteValues(brushToWorld)
+            && primaryGrainToWorld.map(Self.affineHasFiniteValues) != false
+            && secondaryGrainToWorld.map(Self.affineHasFiniteValues) != false
+            && materialInputs.isFinite
+            && randomValues.isFinite
+    }
+
+    private static func conservativeWorldBounds(
+        shapeFrames: [Affine2D],
+        haloRadius: Float
+    ) -> AxisAlignedRect {
+        let unitCorners = [
+            SIMD2<Float>(-1, -1),
+            SIMD2<Float>(1, -1),
+            SIMD2<Float>(1, 1),
+            SIMD2<Float>(-1, 1),
+        ]
+        let corners = shapeFrames.flatMap { frame in
+            unitCorners.map(frame.applying(to:))
+        }
+        let minimum = SIMD2(
+            corners.map(\.x).min()! - haloRadius,
+            corners.map(\.y).min()! - haloRadius
+        )
+        let maximum = SIMD2(
+            corners.map(\.x).max()! + haloRadius,
+            corners.map(\.y).max()! + haloRadius
+        )
+        return AxisAlignedRect(minimum: minimum, maximum: maximum)
+    }
+
+    private static func affineHasFiniteValues(_ affine: Affine2D) -> Bool {
+        [
+            affine.xAxis.x,
+            affine.xAxis.y,
+            affine.yAxis.x,
+            affine.yAxis.y,
+            affine.translation.x,
+            affine.translation.y,
+        ].allSatisfy(\.isFinite)
+    }
 }
+
+public typealias DabAttributes = LogicalDab
 
 /// Pure, renderer-free evaluation of one attributed path point.
 public struct BrushDynamicsEngine: Sendable {
@@ -346,7 +502,17 @@ public struct BrushDynamicsEngine: Sendable {
             materialContribution: materialContribution,
             sourceDistance: context.traveledDistance,
             ordinal: context.ordinal,
-            isPredicted: context.isPredicted
+            isPredicted: context.isPredicted,
+            primaryGrainToWorld: recipe.grain == .opaque
+                ? nil
+                : grainFrame(
+                    scale: grainScale,
+                    rotation: recipe.grainTransform.rotation,
+                    offset: grainOffset
+                ),
+            secondaryGrainToWorld: nil,
+            materialInputs: materialInputs(recipe.material),
+            randomValues: compatibilityRandomValues(random)
         )
     }
 
@@ -429,11 +595,21 @@ public struct BrushDynamicsEngine: Sendable {
         let position = WorldPoint(sample.position.simd + scatter + offset + placementJitter)
         let cosine = cos(rotation)
         let sine = sin(rotation)
-        let brushToWorld = Affine2D(
+        let tipToWorld = Affine2D(
             xAxis: SIMD2(cosine, sine) * radius,
             yAxis: SIMD2(-sine, cosine) * radius * definition.coverage.aspectRatio,
             translation: position.simd
         )
+        let evaluatedShapeFrames = definition.coverage.shapes.map { shape in
+            let shapeCosine = cos(shape.rotation) * shape.scale
+            let shapeSine = sin(shape.rotation) * shape.scale
+            return Affine2D(
+                xAxis: SIMD2(shapeCosine, shapeSine),
+                yAxis: SIMD2(-shapeSine, shapeCosine),
+                translation: shape.offset
+            ).concatenating(tipToWorld)
+        }
+        let brushToWorld = evaluatedShapeFrames[0]
         let hardness = clamp01(definition.coverage.baseHardness * evaluate(
             dynamics.hardness, inputs: inputs, strokeSeed: strokeSeed,
             ordinal: context.ordinal, channel: .hardness
@@ -487,6 +663,35 @@ public struct BrushDynamicsEngine: Sendable {
                     * definition.dynamics.randomization.material
             )
         )
+        let primaryGrainToWorld = grain.map {
+            nativeGrainFrame(
+                layer: $0,
+                scale: grainScale,
+                offset: grainOffset,
+                position: position,
+                brushRotation: rotation
+            )
+        }
+        let secondaryGrainToWorld = definition.coverage.grains.dropFirst().first.map {
+            nativeGrainFrame(
+                layer: $0,
+                scale: $0.transform.scale * evaluate(
+                    dynamics.grain,
+                    inputs: inputs,
+                    strokeSeed: strokeSeed,
+                    ordinal: context.ordinal,
+                    channel: .grain
+                ),
+                offset: $0.transform.offset + SIMD2(
+                    symmetric(random.grainX)
+                        * definition.dynamics.randomization.grain,
+                    symmetric(random.grainY)
+                        * definition.dynamics.randomization.grain
+                ),
+                position: position,
+                brushRotation: rotation
+            )
+        }
         return DabAttributes(
             position: position, brushToWorld: brushToWorld, radius: radius,
             diameter: diameter, spacing: spacing, flow: flow,
@@ -505,7 +710,16 @@ public struct BrushDynamicsEngine: Sendable {
             materialContribution: materialContribution,
             sourceDistance: context.traveledDistance, ordinal: context.ordinal,
             isPredicted: context.isPredicted,
-            secondaryColorMix: secondaryColorMix
+            secondaryColorMix: secondaryColorMix,
+            primaryGrainToWorld: primaryGrainToWorld,
+            secondaryGrainToWorld: secondaryGrainToWorld,
+            materialInputs: materialInputs(definition.material),
+            randomValues: nativeRandomValues(
+                compatibility: random,
+                strokeSeed: strokeSeed,
+                ordinal: context.ordinal
+            ),
+            evaluatedShapeFrames: evaluatedShapeFrames
         )
     }
 
@@ -608,7 +822,11 @@ public struct BrushDynamicsEngine: Sendable {
             sourceDistance: dab.sourceDistance,
             ordinal: dab.ordinal,
             isPredicted: dab.isPredicted,
-            secondaryColorMix: dab.secondaryColorMix
+            secondaryColorMix: dab.secondaryColorMix,
+            primaryGrainToWorld: dab.primaryGrainToWorld,
+            secondaryGrainToWorld: dab.secondaryGrainToWorld,
+            materialInputs: dab.materialInputs,
+            randomValues: dab.randomValues
         )
     }
 }
@@ -1021,6 +1239,142 @@ private extension BrushDynamicsEngine {
         case (.flow, .wetConcentration): return .boundedWash
         default: return .ink
         }
+    }
+
+    func materialInputs(
+        _ material: BrushMaterial
+    ) -> BrushMaterialInputs {
+        let semantics: (BrushAccumulationMode, BrushEdgeTreatment) = switch material.family {
+        case .ink: (.flow, .none)
+        case .dry: (.flow, .dryBreakup)
+        case .glaze: (.uniformGlaze, .markerOverlap)
+        case .boundedWash: (.flow, .wetConcentration)
+        }
+        return BrushMaterialInputs(
+            accumulation: semantics.0,
+            interaction: .none,
+            edgeTreatment: semantics.1,
+            strength: material.strength,
+            wetness: material.wetness,
+            bleedRadius: material.bleedRadius,
+            accumulationLimit: material.accumulationLimit,
+            interactionParameters: nil
+        )
+    }
+
+    func materialInputs(
+        _ material: BrushMaterialDefinition
+    ) -> BrushMaterialInputs {
+        BrushMaterialInputs(
+            accumulation: material.accumulation,
+            interaction: material.interaction,
+            edgeTreatment: material.edgeTreatment,
+            strength: material.strength,
+            wetness: material.wetness,
+            bleedRadius: material.bleedRadius,
+            accumulationLimit: material.accumulationLimit,
+            interactionParameters: material.interactionParameters
+        )
+    }
+
+    /// Stage 2 preserves the evaluated grain transform without introducing
+    /// renderer anchoring semantics that are intentionally deferred.
+    func grainFrame(
+        scale: Float,
+        rotation: Float,
+        offset: SIMD2<Float>
+    ) -> Affine2D {
+        let cosine = cos(rotation) * scale
+        let sine = sin(rotation) * scale
+        return Affine2D(
+            xAxis: SIMD2(cosine, sine),
+            yAxis: SIMD2(-sine, cosine),
+            translation: offset
+        )
+    }
+
+    /// Native grain frames carry their Stage 2 anchoring convention in world
+    /// space. Canonical grains slide from a fixed canvas anchor to the dab
+    /// position according to `grainMovementFraction`; brush-local grains stay
+    /// centered on the dab. Brush-follow rotation rotates both the authored
+    /// axes and authored/random offset before the frame is projected through
+    /// symmetry.
+    func nativeGrainFrame(
+        layer: BrushGrainLayerDefinition,
+        scale: Float,
+        offset: SIMD2<Float>,
+        position: WorldPoint,
+        brushRotation: Float
+    ) -> Affine2D {
+        let followRotation = layer.grainFollowsBrushRotation
+            ? brushRotation
+            : 0
+        let rotation = layer.transform.rotation + followRotation
+        let cosine = cos(rotation) * scale
+        let sine = sin(rotation) * scale
+        let followCosine = cos(followRotation)
+        let followSine = sin(followRotation)
+        let rotatedOffset = SIMD2(
+            followCosine * offset.x - followSine * offset.y,
+            followSine * offset.x + followCosine * offset.y
+        )
+        let anchor: SIMD2<Float>
+        switch layer.coordinateMode {
+        case .canonical:
+            anchor = position.simd * layer.grainMovementFraction
+        case .brushLocal:
+            anchor = position.simd
+        }
+        return Affine2D(
+            xAxis: SIMD2(cosine, sine),
+            yAxis: SIMD2(-sine, cosine),
+            translation: anchor + rotatedOffset
+        )
+    }
+
+    func compatibilityRandomValues(
+        _ compatibility: BrushRandomValues
+    ) -> BrushLogicalRandomValues {
+        BrushLogicalRandomValues(
+            compatibility: compatibility,
+            size: 0,
+            flow: 0,
+            opacity: 0,
+            hardness: 0,
+            offsetX: 0,
+            offsetY: 0,
+            hue: 0,
+            saturation: 0,
+            brightness: 0,
+            secondaryColorMix: 0
+        )
+    }
+
+    func nativeRandomValues(
+        compatibility: BrushRandomValues,
+        strokeSeed: UInt64,
+        ordinal: UInt64
+    ) -> BrushLogicalRandomValues {
+        func value(_ channel: BrushProgramRandomChannel) -> Float {
+            BrushRandom.extensionUnitFloat(
+                strokeSeed: strokeSeed,
+                logicalDabOrdinal: ordinal,
+                outputChannel: channel
+            )
+        }
+        return BrushLogicalRandomValues(
+            compatibility: compatibility,
+            size: value(.size),
+            flow: value(.flow),
+            opacity: value(.opacity),
+            hardness: value(.hardness),
+            offsetX: value(.offsetX),
+            offsetY: value(.offsetY),
+            hue: value(.hue),
+            saturation: value(.saturation),
+            brightness: value(.brightness),
+            secondaryColorMix: value(.secondaryColorMix)
+        )
     }
 }
 
