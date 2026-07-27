@@ -91,6 +91,30 @@ public enum StrokeTraceFixtures {
         ]
     )
 
+    /// Authoritative input replaces an earlier predicted tail without allowing
+    /// that tail to advance the committed stroke generator.
+    public static let predictionCorrection = StrokeTraceFixture(
+        name: "prediction-correction",
+        samples: [
+            sample(24, 32, pressure: 0.2, timestamp: 5, phase: .began,
+                   source: .pencil),
+            sample(30, 32, pressure: 0.35, timestamp: 5.01, phase: .moved,
+                   source: .pencil, kind: .coalesced),
+            sample(36, 32, pressure: 0.5, timestamp: 5.02, phase: .moved,
+                   source: .pencil, kind: .coalesced),
+            sample(42, 32, pressure: 0.65, timestamp: 5.03, phase: .moved,
+                   source: .pencil, kind: .predicted),
+            sample(48, 32, pressure: 0.8, timestamp: 5.04, phase: .moved,
+                   source: .pencil, kind: .predicted),
+            sample(43, 32, pressure: 0.7, timestamp: 5.03, phase: .moved,
+                   source: .pencil),
+            sample(46, 32, pressure: 0.85, timestamp: 5.04, phase: .moved,
+                   source: .pencil),
+            sample(50, 32, pressure: 1, timestamp: 5.05, phase: .ended,
+                   source: .pencil),
+        ]
+    )
+
     public static let gridSeam = StrokeTraceFixture(
         name: "grid-seam",
         samples: [
@@ -141,6 +165,7 @@ public enum StrokeTraceFixtures {
         curved,
         repeatedTimestamp,
         pressureRamp,
+        predictionCorrection,
         gridSeam,
         reflectedCell,
         long,
@@ -152,7 +177,8 @@ public enum StrokeTraceFixtures {
         pressure: Float,
         timestamp: TimeInterval,
         phase: StrokePhase,
-        source: StrokeSource = .mouse
+        source: StrokeSource = .mouse,
+        kind: StrokeSampleKind = .actual
     ) -> StrokeSample {
         StrokeSample(
             position: ScreenPoint(x: x, y: y),
@@ -160,6 +186,7 @@ public enum StrokeTraceFixtures {
             timestamp: timestamp,
             phase: phase,
             source: source,
+            kind: kind,
             capabilities: source == .mouse ? [] : [.pressure]
         )
     }

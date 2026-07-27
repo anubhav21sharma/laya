@@ -21,6 +21,10 @@ let package = Package(
             name: "SliceFourEvidenceGate",
             targets: ["SliceFourEvidenceGate"]
         ),
+        .executable(
+            name: "BrushCharacterizationTool",
+            targets: ["BrushCharacterizationTool"]
+        ),
         .library(name: "PatternFile", targets: ["PatternFile"]),
     ],
     targets: [
@@ -50,13 +54,18 @@ let package = Package(
             name: "SliceFourEvidenceGate",
             dependencies: ["MetalRenderer"]
         ),
+        .executableTarget(
+            name: "BrushCharacterizationTool",
+            dependencies: ["PatternEngine", "EditorCore"]
+        ),
         .testTarget(
             name: "PatternEngineTests",
             dependencies: ["PatternEngine"]
         ),
         .testTarget(
             name: "EditorCoreTests",
-            dependencies: ["EditorCore"]
+            dependencies: ["EditorCore"],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "MetalRendererTests",

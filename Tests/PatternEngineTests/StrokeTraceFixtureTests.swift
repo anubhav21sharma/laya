@@ -9,6 +9,7 @@ func strokeTraceCatalogPinsTheSliceThreeInputBaseline() {
         "curved",
         "repeated-timestamp",
         "pressure-ramp",
+        "prediction-correction",
         "grid-seam",
         "reflected-cell",
         "long",
