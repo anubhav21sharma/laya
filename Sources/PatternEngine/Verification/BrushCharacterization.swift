@@ -266,6 +266,29 @@ public enum BrushCharacterizer {
         seed: UInt64,
         viewport: ViewportTransform
     ) -> BrushCharacterizationRecord {
+        let definition = try! LegacyBrushRecipeAdapter.definition(
+            from: recipe,
+            displayName: recipe.id.rawValue
+        )
+        let program = try! BrushProgramCompiler.compile(definition)
+        return record(
+            trace: trace,
+            program: program,
+            nominalDiameter: nominalDiameter,
+            color: color,
+            seed: seed,
+            viewport: viewport
+        )
+    }
+
+    public static func record(
+        trace: StrokeTraceFixture,
+        program: BrushProgram,
+        nominalDiameter: Float,
+        color: InkColor,
+        seed: UInt64,
+        viewport: ViewportTransform
+    ) -> BrushCharacterizationRecord {
         precondition(trace.samples.first?.phase == .began)
         precondition(
             trace.samples.last?.phase == .ended
@@ -277,10 +300,18 @@ public enum BrushCharacterizer {
                 $0.phase == .ended || $0.phase == .cancelled
             }.count == 1
         )
+        let compatibilityRecipe: BrushRecipe
+        if let recipe = program.compatibilityRecipe {
+            compatibilityRecipe = recipe
+        } else {
+            preconditionFailure(
+                "Native program characterization belongs to logical batches"
+            )
+        }
 
         var input = BrushInputDeriver()
         var generator = BrushStrokeGenerator(
-            recipe: recipe,
+            program: program,
             nominalDiameter: nominalDiameter,
             color: color,
             seed: seed
@@ -300,7 +331,7 @@ public enum BrushCharacterizer {
                     nextRandomOrdinal += 1
                 }
                 let payload = BrushCharacterizationDigestPayload.legacy(
-                    recipe: recipe,
+                    recipe: compatibilityRecipe,
                     dab: dab,
                     seed: seed,
                     ordinal: dab.ordinal,
@@ -323,7 +354,7 @@ public enum BrushCharacterizer {
         return BrushCharacterizationRecord(
             schemaVersion: BrushLogicalBaseline.schemaVersion,
             traceName: trace.name,
-            recipeID: recipe.id.rawValue,
+            recipeID: program.definition.id.rawValue,
             nominalDiameter: nominalDiameter,
             seed: seed,
             sampleCount: sampleCount,

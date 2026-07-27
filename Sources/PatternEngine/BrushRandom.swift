@@ -93,4 +93,19 @@ public struct BrushRandom: Equatable, Sendable {
         var copy = self
         return copy.nextValues()
     }
+
+    /// Deterministic extension randomness that does not mutate the legacy
+    /// cursor. Each output channel has an independent counter namespace.
+    public static func extensionUnitFloat(
+        strokeSeed: UInt64,
+        logicalDabOrdinal: UInt64,
+        outputChannel: BrushProgramRandomChannel
+    ) -> Float {
+        var word = strokeSeed
+            &+ logicalDabOrdinal &* 0xd2b7_4407_b1ce_6e93
+            &+ outputChannel.rawValue &* 0xca5a_8263_9512_1157
+        word = (word ^ (word >> 30)) &* 0xbf58_476d_1ce4_e5b9
+        word = (word ^ (word >> 27)) &* 0x94d0_49bb_1331_11eb
+        return unitFloat(from: word ^ (word >> 31))
+    }
 }

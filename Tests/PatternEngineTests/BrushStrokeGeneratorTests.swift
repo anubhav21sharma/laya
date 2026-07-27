@@ -37,6 +37,23 @@ private func legacyGenerator(seed: UInt64 = 1) -> BrushStrokeGenerator {
 }
 
 @Test
+func generatorAcceptsAPrecompiledProgram() throws {
+    let definition = try LegacyBrushRecipeAdapter.definition(
+        from: .legacyEquivalent,
+        displayName: "Legacy"
+    )
+    let program = try BrushProgramCompiler.compile(definition)
+    let generator = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 17
+    )
+
+    #expect(generator.program == program)
+}
+
+@Test
 func generatorPreservesLegacyStraightPlacementAndExactEndpoint() {
     var generator = legacyGenerator()
     var dabs: [DabAttributes] = []

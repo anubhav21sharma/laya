@@ -1,0 +1,527 @@
+import Testing
+@testable import PatternEngine
+
+@Test(arguments: AnchorRecipeFixtures.all)
+func compiledProgramMatchesLegacyEvaluation(
+    _ fixture: AnchorRecipeFixture
+) throws {
+    let definition = try LegacyBrushRecipeAdapter.definition(
+        from: fixture.recipe,
+        displayName: fixture.displayName
+    )
+
+    let program = try BrushProgramCompiler.compile(definition)
+
+    let viewport = ViewportTransform(
+        drawableSize: PatternSize(width: 256, height: 256),
+        worldCenter: WorldPoint(x: 128, y: 128)
+    )
+    #expect(program.compatibilityRecipe == fixture.recipe)
+    for trace in [
+        StrokeTraceFixtures.pressureRamp,
+        StrokeTraceFixtures.curved,
+        StrokeTraceFixtures.predictionCorrection,
+    ] {
+        let legacy = BrushCharacterizer.record(
+            trace: trace, recipe: fixture.recipe, nominalDiameter: 20,
+            color: .black, seed: 71, viewport: viewport
+        )
+        let compiled = BrushCharacterizer.record(
+            trace: trace, program: program, nominalDiameter: 20,
+            color: .black, seed: 71, viewport: viewport
+        )
+        #expect(compiled == legacy)
+    }
+}
+
+@Test
+func dynamicsEvaluatesACompiledProgram() throws {
+    let definition = try LegacyBrushRecipeAdapter.definition(
+        from: .legacyEquivalent,
+        displayName: "Legacy"
+    )
+    let program = try BrushProgramCompiler.compile(definition)
+    let sample = InterpolatedStrokeSample(
+        position: WorldPoint(x: 2, y: 3), pressure: 0.5, timestamp: 0,
+        altitude: nil, azimuth: nil, roll: nil, velocity: 0, phase: .moved,
+        source: .mouse, kind: .actual, capabilities: []
+    )
+    let context = BrushStrokeContext(
+        nominalDiameter: 20, color: .black, direction: 0, strokeAge: 0,
+        traveledDistance: 0, ordinal: 0, isPredicted: false
+    )
+
+    let dab = BrushDynamicsEngine().evaluate(
+        sample: sample,
+        context: context,
+        program: program,
+        random: .centered,
+        strokeSeed: 1
+    )
+
+    #expect(dab.position == WorldPoint(x: 2, y: 3))
+}
+
+@Test
+func compilerRejectsUnknownRequiredCapabilityAndPreservesOptionalOne() throws {
+    let base = try legacyDefinition()
+    let optional = try replacing(
+        base,
+        capabilities: [BrushCapabilityDeclaration(identifier: "future.capability", required: false)]
+    )
+    let program = try BrushProgramCompiler.compile(optional)
+    #expect(program.ignoredOptionalCapabilityIdentifiers == ["future.capability"])
+
+    let required = try replacing(
+        base,
+        capabilities: [BrushCapabilityDeclaration(identifier: "future.capability", required: true)]
+    )
+    #expect(throws: BrushProgramCompilerError.unknownRequiredCapability("future.capability")) {
+        try BrushProgramCompiler.compile(required)
+    }
+}
+
+@Test
+func definitionValidationRejectsMalformedCurvesUnsupportedSchemasAndMissingCapabilities() throws {
+    let base = try legacyDefinition()
+    let malformed = BrushMappingDefinition(
+        input: .pressure,
+        response: .curve(BrushCurveDefinition(points: [
+            BrushCurvePoint(x: 0.2, y: 0),
+            BrushCurvePoint(x: 1, y: 1),
+        ])),
+        scale: 0.9, offset: 0.1, lowerClamp: 0.1, upperClamp: 1,
+        inverted: false, jitter: 0, missingInputValue: 1
+    )
+    #expect(throws: BrushDefinitionValidationError.invalidCurve) {
+        try replacing(base, dynamics: replacing(base.dynamics, size: malformed))
+    }
+    #expect(throws: BrushDefinitionValidationError.unsupportedSchema) {
+        try replacing(base, schemaVersion: 2)
+    }
+    let wetMix = BrushMaterialDefinition(
+        accumulation: .flow, interaction: .wetMix, edgeTreatment: .none,
+        strength: 1, wetness: 0, bleedRadius: 0, softenPasses: 0,
+        accumulationLimit: 1,
+        interactionParameters: BrushInteractionDefinition(
+            pickup: 0, pull: 0, dilution: 0, charge: 0, persistence: 0,
+            dirtyHaloRadius: 0
+        )
+    )
+    #expect(throws: BrushDefinitionValidationError.missingCapability("wetMix")) {
+        try replacing(base, material: wetMix)
+    }
+}
+
+@Test
+func compilerSamplesThreePointCurveAtBothEndpoints() throws {
+    let base = try legacyDefinition()
+    let curve = BrushMappingDefinition(
+        input: .pressure,
+        response: .curve(BrushCurveDefinition(points: [
+            BrushCurvePoint(x: 0, y: 0),
+            BrushCurvePoint(x: 0.5, y: 0.25),
+            BrushCurvePoint(x: 1, y: 1),
+        ])),
+        scale: 0.9, offset: 0.1, lowerClamp: 0.1, upperClamp: 1,
+        inverted: false, jitter: 0, missingInputValue: 1
+    )
+    let dynamics = replacing(base.dynamics, size: curve)
+    let program = try BrushProgramCompiler.compile(
+        replacing(base, dynamics: dynamics)
+    )
+    guard case let .sampledCurve(_, samples, _, _, _, _, _, _, _) = program.dynamics.size
+    else { Issue.record("curve must use a sampled response"); return }
+
+    #expect(samples.count == BrushProgramCompiler.sampleCount)
+    #expect(samples[0] == 0)
+    #expect(samples[127] == Float(127) / 510)
+    #expect(abs(samples[128] - (0.25 + Float(3) / 1020)) < 0.000_001)
+    #expect(samples[255] == 1)
+}
+
+@Test
+func fixedSeedPolicyOverridesPerStrokeSeed() throws {
+    let base = try legacyDefinition()
+    let fixed = try replacing(base, seedPolicy: .fixed(99))
+    let program = try BrushProgramCompiler.compile(fixed)
+    let first = BrushStrokeGenerator(program: program, nominalDiameter: 20, color: .black, seed: 1)
+    let second = BrushStrokeGenerator(program: program, nominalDiameter: 20, color: .black, seed: 2)
+    #expect(first.seed == 99)
+    #expect(first == second)
+}
+
+@Test
+func extensionRandomChannelsDoNotAdvanceCompatibilityCursor() {
+    var baseline = BrushRandom(seed: 73)
+    var withHue = BrushRandom(seed: 73)
+    _ = BrushRandom.extensionUnitFloat(
+        strokeSeed: 73,
+        logicalDabOrdinal: 4,
+        outputChannel: .hue
+    )
+    #expect(baseline.nextValues() == withHue.nextValues())
+}
+
+@Test
+func nativeDynamicsApplyColorChannelsAndCarrySecondaryMix() throws {
+    let base = try legacyDefinition()
+    let dynamics = replacing(
+        base.dynamics,
+        hue: nativeConstant(0.5),
+        saturation: nativeConstant(0),
+        brightness: nativeConstant(0),
+        secondaryColorMix: nativeConstant(0.35)
+    )
+    let program = try BrushProgramCompiler.compile(
+        replacing(base, dynamics: dynamics)
+    )
+    let dab = evaluateNative(program, color: InkColor(red: 1, green: 0, blue: 0, alpha: 0.8)!)
+
+    // Hue is expressed in turns; saturation and brightness are additive HSB
+    // adjustments. Zero is the exact neutral for every channel.
+    #expect(dab.color == InkColor(red: 0, green: 1, blue: 1, alpha: 0.8))
+    #expect(dab.secondaryColorMix == 0.35)
+}
+
+@Test
+func nativeSaturationAndBrightnessMappingsAdjustHSBColor() throws {
+    let base = try legacyDefinition()
+    let dynamics = replacing(
+        base.dynamics,
+        saturation: nativeConstant(-1),
+        brightness: nativeConstant(0.2)
+    )
+    let program = try BrushProgramCompiler.compile(
+        replacing(base, dynamics: dynamics)
+    )
+    let dab = evaluateNative(program, color: InkColor(red: 1, green: 0, blue: 0, alpha: 0.8)!)
+    #expect(dab.color == InkColor(red: 1, green: 1, blue: 1, alpha: 0.8))
+}
+
+@Test
+func presentZeroSensorsDoNotUseMissingInputFallback() throws {
+    let base = try legacyDefinition()
+    let tiltSize = BrushMappingDefinition(
+        input: .tilt, response: .linear, scale: 0.9, offset: 0.1,
+        lowerClamp: 0.1, upperClamp: 1, inverted: false, jitter: 0,
+        missingInputValue: 0.7
+    )
+    let program = try BrushProgramCompiler.compile(
+        replacing(base, dynamics: replacing(base.dynamics, size: tiltSize))
+    )
+    let presentZero = evaluateNative(
+        program,
+        altitude: .pi / 2,
+        azimuth: 0,
+        roll: 0,
+        capabilities: [.altitude]
+    )
+    let absent = evaluateNative(program)
+
+    #expect(presentZero.diameter == 2)
+    #expect(absent.diameter == 14.6)
+}
+
+@Test
+func presentZeroAzimuthAndRollDoNotUseMissingFallback() throws {
+    let base = try legacyDefinition()
+    let flow = BrushMappingDefinition(
+        input: .azimuth, response: .linear, scale: 0.8, offset: 0.1,
+        lowerClamp: 0.1, upperClamp: 0.9, inverted: false, jitter: 0,
+        missingInputValue: 0.2
+    )
+    let opacity = BrushMappingDefinition(
+        input: .roll, response: .linear, scale: 1, offset: 0,
+        lowerClamp: 0, upperClamp: 1, inverted: false, jitter: 0,
+        missingInputValue: 0.2
+    )
+    let program = try BrushProgramCompiler.compile(
+        replacing(base, dynamics: replacing(base.dynamics, flow: flow, opacity: opacity))
+    )
+    let present = evaluateNative(
+        program, azimuth: 0, roll: 0, capabilities: [.azimuth, .roll]
+    )
+    let absent = evaluateNative(program)
+    #expect(present.flow == 0.5)
+    #expect(present.strokeOpacity == 0.5)
+    #expect(abs(absent.flow - 0.26) < 0.000_001)
+    #expect(absent.strokeOpacity == 0.2)
+}
+
+@Test
+func fixedSeedProgramAcceptsZeroCallerSeedAndPerStrokeRetainsNonzeroSeed() throws {
+    let base = try legacyDefinition()
+    let fixed = try BrushProgramCompiler.compile(
+        replacing(base, seedPolicy: .fixed(99))
+    )
+    let perStroke = try BrushProgramCompiler.compile(base)
+
+    #expect(BrushStrokeGenerator(program: fixed, nominalDiameter: 20, color: .black, seed: 0).seed == 99)
+    #expect(BrushStrokeGenerator(program: perStroke, nominalDiameter: 20, color: .black, seed: 7).seed == 7)
+}
+
+@Test
+func hueJitterDoesNotChangeNativeScatterSpacingOrLegacyRandomValues() throws {
+    let base = try legacyDefinition()
+    let nativeBase = try replacing(
+        base,
+        capabilities: [BrushCapabilityDeclaration(identifier: "future.capability", required: false)]
+    )
+    let hue = BrushMappingDefinition(
+        input: .random, response: .linear, scale: 1, offset: -0.5,
+        lowerClamp: -1, upperClamp: 1, inverted: false, jitter: 0.25,
+        missingInputValue: 0
+    )
+    let baseline = try BrushProgramCompiler.compile(nativeBase)
+    let withHue = try BrushProgramCompiler.compile(
+        replacing(nativeBase, dynamics: replacing(nativeBase.dynamics, hue: hue))
+    )
+    var cursorA = BrushRandom(seed: 71)
+    var cursorB = BrushRandom(seed: 71)
+    let randomA = cursorA.nextValues()
+    let randomB = cursorB.nextValues()
+    let baselineDab = evaluateNative(baseline, random: randomA, seed: 71)
+    let hueDab = evaluateNative(withHue, random: randomB, seed: 71)
+
+    #expect(baselineDab.scatter == hueDab.scatter)
+    #expect(baselineDab.spacing == hueDab.spacing)
+    #expect(cursorA == cursorB)
+}
+
+@Test
+func perStampColorJitterVariesByOrdinalAndLeavesSecondaryMixIsolated() throws {
+    let base = try nativeDefinition()
+    let color = BrushColorBehaviorDefinition(
+        baseAdjustment: base.color.baseAdjustment,
+        perStampJitter: BrushColorJitter(
+            hue: 0.25, saturation: 0, brightness: 0, secondaryColorMix: 0
+        ),
+        perStrokeJitter: zeroColorJitter
+    )
+    let program = try BrushProgramCompiler.compile(replacing(base, color: color))
+
+    let first = evaluateNative(
+        program, color: InkColor(red: 1, green: 0, blue: 0, alpha: 1)!,
+        seed: 71, ordinal: 2
+    )
+    let repeated = evaluateNative(
+        program, color: InkColor(red: 1, green: 0, blue: 0, alpha: 1)!,
+        seed: 71, ordinal: 2
+    )
+    let next = evaluateNative(
+        program, color: InkColor(red: 1, green: 0, blue: 0, alpha: 1)!,
+        seed: 71, ordinal: 3
+    )
+    let otherStroke = evaluateNative(
+        program, color: InkColor(red: 1, green: 0, blue: 0, alpha: 1)!,
+        seed: 72, ordinal: 2
+    )
+
+    #expect(first == repeated)
+    #expect(first.color != next.color)
+    #expect(first.color != otherStroke.color)
+    #expect(first.secondaryColorMix == 0)
+    #expect(next.secondaryColorMix == 0)
+}
+
+@Test
+func perStrokeColorJitterIsConstantWithinStrokeAndVariesBySeed() throws {
+    let base = try nativeDefinition()
+    let color = BrushColorBehaviorDefinition(
+        baseAdjustment: base.color.baseAdjustment,
+        perStampJitter: zeroColorJitter,
+        perStrokeJitter: BrushColorJitter(
+            hue: 0.2, saturation: 0, brightness: 0, secondaryColorMix: 0.2
+        )
+    )
+    let program = try BrushProgramCompiler.compile(replacing(base, color: color))
+    let first = evaluateNative(
+        program, color: InkColor(red: 1, green: 0, blue: 0, alpha: 1)!,
+        seed: 71, ordinal: 0
+    )
+    let later = evaluateNative(
+        program, color: InkColor(red: 1, green: 0, blue: 0, alpha: 1)!,
+        seed: 71, ordinal: 9
+    )
+    let otherStroke = evaluateNative(
+        program, color: InkColor(red: 1, green: 0, blue: 0, alpha: 1)!,
+        seed: 72, ordinal: 0
+    )
+
+    #expect(first.color == later.color)
+    #expect(first.secondaryColorMix == later.secondaryColorMix)
+    #expect(first.color != otherStroke.color)
+    #expect(first.secondaryColorMix != otherStroke.secondaryColorMix)
+}
+
+@Test
+func secondaryMixJitterDoesNotChangeColorChannels() throws {
+    let base = try nativeDefinition()
+    let color = BrushColorBehaviorDefinition(
+        baseAdjustment: base.color.baseAdjustment,
+        perStampJitter: BrushColorJitter(
+            hue: 0, saturation: 0, brightness: 0, secondaryColorMix: 0.4
+        ),
+        perStrokeJitter: zeroColorJitter
+    )
+    let dynamics = replacing(
+        base.dynamics, secondaryColorMix: nativeConstant(0.5)
+    )
+    let program = try BrushProgramCompiler.compile(
+        replacing(base, dynamics: dynamics, color: color)
+    )
+    let first = evaluateNative(program, seed: 71, ordinal: 1)
+    let next = evaluateNative(program, seed: 71, ordinal: 2)
+
+    #expect(first.color == next.color)
+    #expect(first.secondaryColorMix != next.secondaryColorMix)
+}
+
+@Test
+func placementJitterIsDeterministicAndIsolatedFromOtherPlacementChannels() throws {
+    let base = try nativeDefinition()
+    let baseline = try BrushProgramCompiler.compile(base)
+    let jitteredPlacement = BrushPlacementDefinition(
+        baseSpacingFraction: base.placement.baseSpacingFraction,
+        maximumSpacingFraction: base.placement.maximumSpacingFraction,
+        baseFlow: base.placement.baseFlow,
+        strokeOpacity: base.placement.strokeOpacity,
+        baseScatterFraction: base.placement.baseScatterFraction,
+        baseRotation: base.placement.baseRotation,
+        baseJitterFraction: 0.25,
+        baseOffset: base.placement.baseOffset
+    )
+    let jittered = try BrushProgramCompiler.compile(
+        replacing(base, placement: jitteredPlacement)
+    )
+    let unchanged = evaluateNative(baseline, seed: 71, ordinal: 2)
+    let first = evaluateNative(jittered, seed: 71, ordinal: 2)
+    let repeated = evaluateNative(jittered, seed: 71, ordinal: 2)
+    let next = evaluateNative(jittered, seed: 71, ordinal: 3)
+    let otherStroke = evaluateNative(jittered, seed: 72, ordinal: 2)
+
+    #expect(first == repeated)
+    #expect(unchanged.position == WorldPoint(x: 2, y: 3))
+    #expect(first.position != unchanged.position)
+    #expect(first.position != next.position)
+    #expect(first.position != otherStroke.position)
+    #expect(first.scatter == unchanged.scatter)
+    #expect(first.spacing == unchanged.spacing)
+    #expect(first.brushToWorld.translation == first.position.simd)
+}
+
+private let zeroColorJitter = BrushColorJitter(
+    hue: 0, saturation: 0, brightness: 0, secondaryColorMix: 0
+)
+
+private func nativeDefinition() throws -> BrushDefinition {
+    try replacing(
+        legacyDefinition(),
+        capabilities: [
+            BrushCapabilityDeclaration(
+                identifier: "future.capability", required: false
+            ),
+        ]
+    )
+}
+
+private func legacyDefinition() throws -> BrushDefinition {
+    try LegacyBrushRecipeAdapter.definition(
+        from: .legacyEquivalent,
+        displayName: "Legacy"
+    )
+}
+
+private func replacing(
+    _ definition: BrushDefinition,
+    dynamics: BrushDynamicsDefinition? = nil,
+    capabilities: [BrushCapabilityDeclaration]? = nil,
+    seedPolicy: BrushSeedPolicy? = nil,
+    schemaVersion: UInt16? = nil,
+    material: BrushMaterialDefinition? = nil,
+    placement: BrushPlacementDefinition? = nil,
+    color: BrushColorBehaviorDefinition? = nil
+) throws -> BrushDefinition {
+    try BrushDefinition(
+        id: definition.id,
+        schemaVersion: schemaVersion ?? definition.schemaVersion,
+        metadata: definition.metadata,
+        capabilities: capabilities ?? definition.capabilities,
+        resources: definition.resources,
+        coverage: definition.coverage,
+        placement: placement ?? definition.placement,
+        dynamics: dynamics ?? definition.dynamics,
+        color: color ?? definition.color,
+        material: material ?? definition.material,
+        stabilization: definition.stabilization,
+        taper: definition.taper,
+        replayMode: definition.replayMode,
+        replayLimits: definition.replayLimits,
+        seedPolicy: seedPolicy ?? definition.seedPolicy,
+        limits: definition.limits,
+        performanceIntent: definition.performanceIntent,
+        compatibility: definition.compatibility
+    )
+}
+
+private func replacing(
+    _ dynamics: BrushDynamicsDefinition,
+    size: BrushMappingDefinition? = nil,
+    flow: BrushMappingDefinition? = nil,
+    opacity: BrushMappingDefinition? = nil,
+    hue: BrushMappingDefinition? = nil,
+    saturation: BrushMappingDefinition? = nil,
+    brightness: BrushMappingDefinition? = nil,
+    secondaryColorMix: BrushMappingDefinition? = nil
+) -> BrushDynamicsDefinition {
+    BrushDynamicsDefinition(
+        size: size ?? dynamics.size, flow: flow ?? dynamics.flow,
+        opacity: opacity ?? dynamics.opacity,
+        spacing: dynamics.spacing, rotation: dynamics.rotation,
+        scatter: dynamics.scatter, hardness: dynamics.hardness,
+        grain: dynamics.grain, offsetX: dynamics.offsetX,
+        offsetY: dynamics.offsetY, hue: hue ?? dynamics.hue,
+        saturation: saturation ?? dynamics.saturation,
+        brightness: brightness ?? dynamics.brightness,
+        secondaryColorMix: secondaryColorMix ?? dynamics.secondaryColorMix,
+        noPressureNeutral: dynamics.noPressureNeutral,
+        randomization: dynamics.randomization
+    )
+}
+
+private func nativeConstant(_ value: Float) -> BrushMappingDefinition {
+    BrushMappingDefinition(
+        input: .pressure, response: .constant(value), scale: 1, offset: 0,
+        lowerClamp: value, upperClamp: value, inverted: false, jitter: 0,
+        missingInputValue: 1
+    )
+}
+
+private func evaluateNative(
+    _ program: BrushProgram,
+    color: InkColor = .black,
+    altitude: Float? = nil,
+    azimuth: Float? = nil,
+    roll: Float? = nil,
+    capabilities: StrokeInputCapabilities = [],
+    random: BrushRandomValues = .centered,
+    seed: UInt64 = 1,
+    ordinal: UInt64 = 0
+) -> DabAttributes {
+    let sample = InterpolatedStrokeSample(
+        position: WorldPoint(x: 2, y: 3), pressure: 0.5, timestamp: 0,
+        altitude: altitude, azimuth: azimuth, roll: roll, velocity: 0,
+        phase: .moved, source: .mouse, kind: .actual, capabilities: capabilities
+    )
+    return BrushDynamicsEngine().evaluate(
+        sample: sample,
+        context: BrushStrokeContext(
+            nominalDiameter: 20, color: color, direction: 0, strokeAge: 0,
+            traveledDistance: 0, ordinal: ordinal, isPredicted: false
+        ),
+        program: program,
+        random: random,
+        strokeSeed: seed
+    )
+}

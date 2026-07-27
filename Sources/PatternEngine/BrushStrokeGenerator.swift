@@ -3,7 +3,7 @@ import simd
 
 /// Deterministic input-to-dab generator for one captured stroke configuration.
 public struct BrushStrokeGenerator: Equatable, Sendable {
-    public let recipe: BrushRecipe
+    public let program: BrushProgram
     public let nominalDiameter: Float
     public let color: InkColor
     public let seed: UInt64
@@ -21,8 +21,31 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     private var lastDirection: Float
     private var lastEmittedSourcePosition: WorldPoint?
 
+    @available(
+        *, deprecated,
+        message: "Compile BrushDefinition to BrushProgram and initialize BrushStrokeGenerator(program:nominalDiameter:color:seed:)."
+    )
     public init(
         recipe: BrushRecipe,
+        nominalDiameter: Float,
+        color: InkColor,
+        seed: UInt64
+    ) {
+        let definition = try! LegacyBrushRecipeAdapter.definition(
+            from: recipe,
+            displayName: recipe.id.rawValue
+        )
+        let program = try! BrushProgramCompiler.compile(definition)
+        self.init(
+            program: program,
+            nominalDiameter: nominalDiameter,
+            color: color,
+            seed: seed
+        )
+    }
+
+    public init(
+        program: BrushProgram,
         nominalDiameter: Float,
         color: InkColor,
         seed: UInt64
@@ -31,24 +54,30 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             nominalDiameter.isFinite && nominalDiameter > 0,
             "Nominal brush diameter must be finite and positive"
         )
-        precondition(seed != 0, "Brush stroke seed must be nonzero")
-
+        let effectiveSeed: UInt64
+        switch program.definition.seedPolicy {
+        case .perStroke:
+            effectiveSeed = seed
+        case let .fixed(value):
+            effectiveSeed = value
+        }
+        precondition(effectiveSeed != 0, "Brush stroke seed must be nonzero")
         let spacing = Self.initialSpacing(
-            recipe: recipe,
+            program: program,
             nominalDiameter: nominalDiameter
         )
-        self.recipe = recipe
+        self.program = program
         self.nominalDiameter = nominalDiameter
         self.color = color
-        self.seed = seed
+        self.seed = effectiveSeed
         currentSpacing = spacing
         emittedDabCount = 0
-        stabilizer = StrokeStabilizer(strength: recipe.stabilization)
+        stabilizer = StrokeStabilizer(strength: program.definition.stabilization)
         path = CentripetalCatmullRomPathInterpolator(
             maximumSegmentLength: min(0.5, spacing * 0.2),
             minimumSubdivisionEstimate: spacing
         )
-        random = BrushRandom(seed: seed)
+        random = BrushRandom(seed: effectiveSeed)
         isActive = false
         strokeStartTimestamp = nil
         processedPathDistance = 0
@@ -229,8 +258,9 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         let dab = BrushDynamicsEngine().evaluate(
             sample: sample,
             context: context,
-            recipe: recipe,
-            random: random.nextValues()
+            program: program,
+            random: random.nextValues(),
+            strokeSeed: seed
         )
         emittedDabCount &+= 1
         return dab
@@ -238,12 +268,12 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     private mutating func resetRuntimeState() {
         let spacing = Self.initialSpacing(
-            recipe: recipe,
+            program: program,
             nominalDiameter: nominalDiameter
         )
         currentSpacing = spacing
         emittedDabCount = 0
-        stabilizer = StrokeStabilizer(strength: recipe.stabilization)
+        stabilizer = StrokeStabilizer(strength: program.definition.stabilization)
         path = CentripetalCatmullRomPathInterpolator(
             maximumSegmentLength: min(0.5, spacing * 0.2),
             minimumSubdivisionEstimate: spacing
@@ -258,16 +288,17 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     }
 
     private static func initialSpacing(
-        recipe: BrushRecipe,
+        program: BrushProgram,
         nominalDiameter: Float
     ) -> Float {
+        let placement = program.definition.placement
         let upperBound = max(
             1,
-            min(8, nominalDiameter * recipe.maximumSpacingFraction)
+            min(8, nominalDiameter * placement.maximumSpacingFraction)
         )
         return min(
             upperBound,
-            max(1, nominalDiameter * recipe.baseSpacingFraction)
+            max(1, nominalDiameter * placement.baseSpacingFraction)
         )
     }
 }
