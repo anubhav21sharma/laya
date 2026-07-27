@@ -1,4 +1,6 @@
+import Foundation
 import Metal
+import PatternEngine
 
 public enum BrushTextureKind: UInt8, Equatable, Hashable, Sendable {
     case shape
@@ -37,11 +39,55 @@ public struct BrushTextureFactory {
     public static let mipmappedTextureByteCount = 5_461
     public static let validationPackByteCount =
         mipmappedTextureByteCount * BrushTextureIdentity.allCases.count
+    static let cpuPyramidContentVersion = "builtin-r8-cpu-pyramid-v1"
 
     private let device: any MTLDevice
 
     public init(device: any MTLDevice) {
         self.device = device
+    }
+
+    /// CPU-only compiler seam. The new compiler uploads this deterministic
+    /// pyramid through its private-texture path; it never reuses the legacy
+    /// `.shared` allocation below.
+    static func makeCPUPyramid(
+        identity: BrushTextureIdentity,
+        resourceID: String? = nil,
+        maximumDimension: Int = textureSize
+    ) -> DecodedBrushTexture {
+        precondition(maximumDimension > 0)
+        let workingDimension = min(textureSize, maximumDimension)
+        var width = workingDimension
+        var height = workingDimension
+        var level = baseLevel(identity: identity)
+        if workingDimension != textureSize {
+            level = areaAverage(
+                level,
+                width: textureSize,
+                height: textureSize,
+                outputWidth: workingDimension,
+                outputHeight: workingDimension
+            )
+        }
+        var mipLevels: [Data] = []
+        while true {
+            mipLevels.append(Data(level))
+            guard width > 1 || height > 1 else { break }
+            level = boxAverage(level, width: width, height: height)
+            width = max(1, width / 2)
+            height = max(1, height / 2)
+        }
+        return DecodedBrushTexture(
+            resourceID: resourceID ?? identity.rawValue,
+            kind: identity.kind == .shape ? .shape : .grain,
+            sourceWidth: textureSize,
+            sourceHeight: textureSize,
+            workingWidth: workingDimension,
+            workingHeight: workingDimension,
+            mipLevels: mipLevels,
+            residentByteCount: mipLevels.reduce(0) { $0 + $1.count },
+            wasResampled: workingDimension != textureSize
+        )
     }
 
     public func makeTexture(
@@ -178,22 +224,44 @@ public struct BrushTextureFactory {
     ) -> [UInt8] {
         let outputWidth = max(1, width / 2)
         let outputHeight = max(1, height / 2)
+        return areaAverage(
+            input,
+            width: width,
+            height: height,
+            outputWidth: outputWidth,
+            outputHeight: outputHeight
+        )
+    }
+
+    private static func areaAverage(
+        _ input: [UInt8],
+        width: Int,
+        height: Int,
+        outputWidth: Int,
+        outputHeight: Int
+    ) -> [UInt8] {
         var output = [UInt8](
             repeating: 0,
             count: outputWidth * outputHeight
         )
 
         for y in 0..<outputHeight {
+            let y0 = y * height / outputHeight
+            let y1 = (y + 1) * height / outputHeight
             for x in 0..<outputWidth {
-                let x0 = min(width - 1, x * 2)
-                let x1 = min(width - 1, x0 + 1)
-                let y0 = min(height - 1, y * 2)
-                let y1 = min(height - 1, y0 + 1)
-                let sum = Int(input[y0 * width + x0])
-                    + Int(input[y0 * width + x1])
-                    + Int(input[y1 * width + x0])
-                    + Int(input[y1 * width + x1])
-                output[y * outputWidth + x] = UInt8((sum + 2) / 4)
+                let x0 = x * width / outputWidth
+                let x1 = (x + 1) * width / outputWidth
+                var sum = 0
+                var count = 0
+                for sourceY in y0..<y1 {
+                    for sourceX in x0..<x1 {
+                        sum += Int(input[sourceY * width + sourceX])
+                        count += 1
+                    }
+                }
+                output[y * outputWidth + x] = UInt8(
+                    (sum + count / 2) / count
+                )
             }
         }
         return output
