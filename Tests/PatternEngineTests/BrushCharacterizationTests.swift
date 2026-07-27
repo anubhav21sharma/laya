@@ -70,6 +70,33 @@ func characterizationIgnoresPredictedTailAndUsesReplacementActualSamples() {
 }
 
 @Test
+func characterizationCompletesTheLongTraceWithStableLogicalOutput() {
+    let viewport = ViewportTransform(
+        drawableSize: PatternSize(width: 256, height: 256),
+        worldCenter: WorldPoint(x: 128, y: 128)
+    )
+    let first = BrushCharacterizer.record(
+        trace: StrokeTraceFixtures.long,
+        recipe: .legacyEquivalent,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 41,
+        viewport: viewport
+    )
+    let repeated = BrushCharacterizer.record(
+        trace: StrokeTraceFixtures.long,
+        recipe: .legacyEquivalent,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 41,
+        viewport: viewport
+    )
+
+    #expect(first == repeated)
+    #expect(first.logicalDabCount > 0)
+}
+
+@Test
 func baselineRejectsSchemaMismatchDigestMutationAndOrderMismatch() throws {
     let record = BrushCharacterizationRecord(
         schemaVersion: 1,

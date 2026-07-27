@@ -384,6 +384,39 @@ public final class SliceFourHarnessRunner {
         let liveBytes = Self.textureBytes(liveFrame.texture)
         let committedBytes = Self.textureBytes(committedFrame.texture)
         let canonicalBytes = Self.textureBytes(canonical)
+        let logical = BrushCharacterizer.record(
+            trace: StrokeTraceFixture(name: scene.name, samples: samples),
+            recipe: recipe,
+            nominalDiameter: style.diameter,
+            color: style.color,
+            seed: seed,
+            viewport: ViewportTransform(
+                drawableSize: PatternSize(
+                    width: Float(scene.width),
+                    height: Float(scene.height)
+                ),
+                worldCenter: WorldPoint(
+                    x: Float(canonical.width) * 0.5,
+                    y: Float(canonical.height) * 0.5
+                )
+            )
+        )
+        let resolvedAssets = renderer.harnessResolvedBrushTextureIdentities
+        let characterization = try BrushCharacterizationEvidence.validated(
+            schemaVersion: BrushCharacterizationEvidence.currentVersion,
+            sceneName: scene.name,
+            logical: logical,
+            canonicalWidth: canonical.width,
+            canonicalHeight: canonical.height,
+            canonicalBGRA8Digest:
+                BrushCharacterizationEvidence.canonicalBGRA8Digest(
+                    width: canonical.width,
+                    height: canonical.height,
+                    bytes: canonicalBytes
+                ),
+            resolvedShapeIdentity: resolvedAssets.shape,
+            resolvedGrainIdentity: resolvedAssets.grain
+        )
         let liveCommitDelta = Self.maximumByteDelta(liveBytes, committedBytes)
         let canonicalChanged = Self.differingByteCount(
             canonicalBeforeBytes,
@@ -480,6 +513,17 @@ public final class SliceFourHarnessRunner {
         try PNGWriter.write(texture: liveFrame.texture, to: liveURL)
         try PNGWriter.write(texture: committedFrame.texture, to: committedURL)
         try PNGWriter.write(texture: canonical, to: canonicalURL)
+        let characterizationURL = outputDirectory.appendingPathComponent(
+            "\(scene.name).brush-characterization.json"
+        )
+        let characterizationEncoder = JSONEncoder()
+        characterizationEncoder.outputFormatting = [
+            .prettyPrinted, .sortedKeys, .withoutEscapingSlashes,
+        ]
+        try characterizationEncoder.encode(characterization).write(
+            to: characterizationURL,
+            options: .atomic
+        )
 
         try Self.evaluatePixelChecks(
             scene: scene,
@@ -536,7 +580,8 @@ public final class SliceFourHarnessRunner {
             build: build,
             measurements: measurements,
             values: structural,
-            recipe: recipe
+            recipe: recipe,
+            characterization: characterization
         )
         let benchmarkURL = outputDirectory.appendingPathComponent(
             "\(scene.name).benchmark.json"
@@ -550,7 +595,8 @@ public final class SliceFourHarnessRunner {
             benchmarkURL: benchmarkURL,
             benchmark: record,
             artifactURLs: [
-                liveURL, committedURL, canonicalURL, evidenceURL, benchmarkURL,
+                liveURL, committedURL, canonicalURL, characterizationURL,
+                evidenceURL, benchmarkURL,
             ]
         )
     }
@@ -1425,13 +1471,14 @@ private extension SliceFourHarnessRunner {
         build: BenchmarkBuild,
         measurements: Measurements,
         values: [HarnessStructuralMetric: Int],
-        recipe: BrushRecipe
+        recipe: BrushRecipe,
+        characterization: BrushCharacterizationEvidence
     ) throws -> BenchmarkRecord {
         let processInfo = ProcessInfo.processInfo
         let eventTimes = measurements.eventToSubmit.isEmpty
             ? measurements.cpu : measurements.eventToSubmit
         return BenchmarkRecord(
-            schemaVersion: 5,
+            schemaVersion: 6,
             timestampUTC: ISO8601DateFormatter().string(from: Date()),
             sceneName: scene.name,
             hardware: BenchmarkHardware(
@@ -1499,6 +1546,11 @@ private extension SliceFourHarnessRunner {
                 measurements.fiveHundredDabStressNewDabCount,
             processedWashPixelCount: values[.processedWashPixelCount],
             washWorkingBytes: values[.washWorkingBytes],
+            brushCharacterizationVersion: characterization.schemaVersion,
+            logicalDabDigest: characterization.logical.logicalDabDigest,
+            canonicalBGRA8Digest: characterization.canonicalBGRA8Digest,
+            inputSampleCount: characterization.logical.sampleCount,
+            logicalDabCount: characterization.logical.logicalDabCount,
             program: scene.program?.rawValue
         )
     }
@@ -2120,6 +2172,7 @@ public enum SliceFourEvidenceValidator {
                 "stdout.log", "stderr.log",
                 "\(name).live.png", "\(name).committed.png",
                 "\(name).canonical.png", "\(name).benchmark.json",
+                "\(name).brush-characterization.json",
                 "\(name).slice4-evidence.json",
             ]
             guard try directoryNames(at: directory) == expectedFiles else {
@@ -2156,6 +2209,25 @@ public enum SliceFourEvidenceValidator {
                     == scene.attributedSamples.filter({ $0.kind == .predicted }).count
             else {
                 throw invalid("\(name): measured evidence provenance is invalid")
+            }
+            let characterization = try JSONDecoder().decode(
+                BrushCharacterizationEvidence.self,
+                from: Data(contentsOf: directory.appendingPathComponent(
+                    "\(name).brush-characterization.json"
+                ))
+            )
+            guard characterization.sceneName == name,
+                  characterization.logical.recipeID == scene.recipeID,
+                  characterization.logical.seed == scene.seed,
+                  characterization.logical.sampleCount
+                    == scene.attributedSamples.filter({ $0.kind != .predicted }).count,
+                  characterization.logical.logicalDabCount > 0,
+                  characterization.canonicalWidth == scene.tileWidth,
+                  characterization.canonicalHeight == scene.tileHeight,
+                  !characterization.resolvedShapeIdentity.isEmpty,
+                  !characterization.resolvedGrainIdentity.isEmpty
+            else {
+                throw invalid("\(name): characterization provenance is invalid")
             }
             let expectedCoverage = Set(SliceFourHarnessRunner.coverage(
                 for: scene,
@@ -2261,7 +2333,7 @@ public enum SliceFourEvidenceValidator {
                 directory.appendingPathComponent("\(name).benchmark.json"),
                 scene: name
             )
-            guard record.schemaVersion == 5,
+            guard record.schemaVersion == 6,
                   record.sceneName == name,
                   record.build.configuration == "Debug",
                   record.build.gitCommit == expectedCommit,
@@ -2276,7 +2348,7 @@ public enum SliceFourEvidenceValidator {
                   record.cpuEncodeMilliseconds.allSatisfy({ $0.isFinite && $0 >= 0 }),
                   record.gpuMilliseconds.allSatisfy({ $0.isFinite && $0 >= 0 })
             else {
-                throw invalid("\(name): schema-5 benchmark is invalid")
+                throw invalid("\(name): schema-6 benchmark is invalid")
             }
             guard record.historyCommandCount
                     == evidence.structuralValues[HarnessStructuralMetric.historyCommandCount.rawValue],
@@ -2294,6 +2366,11 @@ public enum SliceFourEvidenceValidator {
                     == evidence.structuralValues[HarnessStructuralMetric.processedWashPixelCount.rawValue],
                   record.washWorkingBytes
                     == evidence.structuralValues[HarnessStructuralMetric.washWorkingBytes.rawValue],
+                  record.brushCharacterizationVersion == characterization.schemaVersion,
+                  record.logicalDabDigest == characterization.logical.logicalDabDigest,
+                  record.canonicalBGRA8Digest == characterization.canonicalBGRA8Digest,
+                  record.inputSampleCount == characterization.logical.sampleCount,
+                  record.logicalDabCount == characterization.logical.logicalDabCount,
                   record.materialGPUMilliseconds == record.dabGPUMilliseconds,
                   record.newInstanceCounts?.count
                     == record.dabGPUMilliseconds?.count,

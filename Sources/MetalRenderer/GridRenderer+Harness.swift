@@ -704,6 +704,12 @@ extension GridRenderer {
     var harnessActiveStrokeStyle: StrokeRenderStyle? {
         activeStroke?.style
     }
+    var harnessResolvedBrushTextureIdentities: (shape: String, grain: String) {
+        (
+            shape: activeShapeResolution.resolvedIdentity.rawValue,
+            grain: activeGrainResolution.resolvedIdentity.rawValue
+        )
+    }
     var sliceFourRendererCounters: SliceFourRendererCounters {
         let shapeMismatch = activeShapeResolution.isExact ? 0 : 1
         let grainMismatch = activeGrainResolution.isExact ? 0 : 1

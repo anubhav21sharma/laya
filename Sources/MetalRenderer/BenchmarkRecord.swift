@@ -283,6 +283,11 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     public let fiveHundredDabStressNewDabCount: Int?
     public let processedWashPixelCount: Int?
     public let washWorkingBytes: Int?
+    public let brushCharacterizationVersion: UInt16?
+    public let logicalDabDigest: String?
+    public let canonicalBGRA8Digest: String?
+    public let inputSampleCount: Int?
+    public let logicalDabCount: Int?
 
     public init(
         schemaVersion: Int,
@@ -348,6 +353,11 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         fiveHundredDabStressNewDabCount: Int? = nil,
         processedWashPixelCount: Int? = nil,
         washWorkingBytes: Int? = nil,
+        brushCharacterizationVersion: UInt16? = nil,
+        logicalDabDigest: String? = nil,
+        canonicalBGRA8Digest: String? = nil,
+        inputSampleCount: Int? = nil,
+        logicalDabCount: Int? = nil,
         program: String? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -420,6 +430,11 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         self.fiveHundredDabStressNewDabCount = fiveHundredDabStressNewDabCount
         self.processedWashPixelCount = processedWashPixelCount
         self.washWorkingBytes = washWorkingBytes
+        self.brushCharacterizationVersion = brushCharacterizationVersion
+        self.logicalDabDigest = logicalDabDigest
+        self.canonicalBGRA8Digest = canonicalBGRA8Digest
+        self.inputSampleCount = inputSampleCount
+        self.logicalDabCount = logicalDabCount
     }
 
     public static func encode(_ record: BenchmarkRecord) throws -> Data {
@@ -452,11 +467,14 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     }
 
     private func validateVersionedMetrics() throws {
-        if schemaVersion == 4 || schemaVersion == 5 {
+        if schemaVersion == 4 || schemaVersion == 5 || schemaVersion == 6 {
             try validateSchemaFourMetrics()
         }
-        if schemaVersion == 5 {
+        if schemaVersion == 5 || schemaVersion == 6 {
             try validateSchemaFiveMetrics()
+        }
+        if schemaVersion == 6 {
+            try validateSchemaSixMetrics()
         }
     }
 
@@ -704,6 +722,55 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         }
     }
 
+    private func validateSchemaSixMetrics() throws {
+        guard brushCharacterizationVersion != nil else {
+            throw BenchmarkRecordError.missingSchemaSixMetric(
+                "brushCharacterizationVersion"
+            )
+        }
+        guard let logicalDabDigest else {
+            throw BenchmarkRecordError.missingSchemaSixMetric("logicalDabDigest")
+        }
+        guard let canonicalBGRA8Digest else {
+            throw BenchmarkRecordError.missingSchemaSixMetric("canonicalBGRA8Digest")
+        }
+        guard let inputSampleCount else {
+            throw BenchmarkRecordError.missingSchemaSixMetric("inputSampleCount")
+        }
+        guard let logicalDabCount else {
+            throw BenchmarkRecordError.missingSchemaSixMetric("logicalDabCount")
+        }
+        guard brushCharacterizationVersion == 1 else {
+            throw BenchmarkRecordError.invalidNumericValue(
+                field: "brushCharacterizationVersion"
+            )
+        }
+        guard Self.isDigest(logicalDabDigest) else {
+            throw BenchmarkRecordError.invalidTextValue(
+                field: "logicalDabDigest",
+                value: logicalDabDigest
+            )
+        }
+        guard Self.isDigest(canonicalBGRA8Digest) else {
+            throw BenchmarkRecordError.invalidTextValue(
+                field: "canonicalBGRA8Digest",
+                value: canonicalBGRA8Digest
+            )
+        }
+        guard inputSampleCount > 0 else {
+            throw BenchmarkRecordError.invalidNumericValue(field: "inputSampleCount")
+        }
+        guard logicalDabCount > 0 else {
+            throw BenchmarkRecordError.invalidNumericValue(field: "logicalDabCount")
+        }
+    }
+
+    private static func isDigest(_ value: String) -> Bool {
+        value.count == 16 && value.allSatisfy {
+            $0.isHexDigit && !$0.isUppercase
+        }
+    }
+
     private static func validateNonnegativeFinite(
         _ values: [Double],
         field: String
@@ -717,6 +784,7 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
 public enum BenchmarkRecordError: Error, Equatable, LocalizedError {
     case missingSchemaFourMetric(String)
     case missingSchemaFiveMetric(String)
+    case missingSchemaSixMetric(String)
     case invalidNumericValue(field: String)
     case invalidTextValue(field: String, value: String)
 
@@ -726,6 +794,8 @@ public enum BenchmarkRecordError: Error, Equatable, LocalizedError {
             "Schema 4 benchmark record requires '\(field)'."
         case let .missingSchemaFiveMetric(field):
             "Schema 5 benchmark record requires '\(field)'."
+        case let .missingSchemaSixMetric(field):
+            "Schema 6 benchmark record requires '\(field)'."
         case let .invalidNumericValue(field):
             "Benchmark field '\(field)' contains an invalid numeric value."
         case let .invalidTextValue(field, value):

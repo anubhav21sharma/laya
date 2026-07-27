@@ -251,6 +251,69 @@ func sliceFourRealRunnerProducesMeasuredPNGsAndRejectsEveryNegativeControl()
 
 @Test
 @MainActor
+func sliceFourCharacterizationMatchesCheckedInRendererBaseline() throws {
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let root = sliceFourSceneRoot()
+    let repository = root
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let baseline = try JSONDecoder().decode(
+        BrushCharacterizationBaseline.self,
+        from: Data(contentsOf: repository.appendingPathComponent(
+            "App/PatternSpike/Harness/Baselines/brush-foundation-v1.json"
+        ))
+    )
+    let output = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "slice4-characterization-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: output) }
+    let library = try makeSliceFourTestLibrary(device: device)
+    let build = BenchmarkBuild(
+        configuration: "Debug",
+        gitCommit: "slice4-characterization-test"
+    )
+    var actual: [BrushCharacterizationEvidence] = []
+    for name in SliceFourEvidenceValidator.sceneNames {
+        let scene = try HarnessScene.decode(Data(contentsOf:
+            root.appendingPathComponent("\(name).json")
+        ))
+        let directory = output.appendingPathComponent(name)
+        _ = try makeSliceFourRunner(device: device, library: library).run(
+            scene: scene,
+            outputDirectory: directory,
+            build: build
+        )
+        actual.append(try JSONDecoder().decode(
+            BrushCharacterizationEvidence.self,
+            from: Data(contentsOf: directory.appendingPathComponent(
+                "\(name).brush-characterization.json"
+            ))
+        ))
+    }
+    actual.sort { $0.sceneName < $1.sceneName }
+    try baseline.requireMatches(actual)
+
+    let first = try #require(actual.first)
+    let mutated = try BrushCharacterizationEvidence.validated(
+        schemaVersion: first.schemaVersion,
+        sceneName: first.sceneName,
+        logical: first.logical,
+        canonicalWidth: first.canonicalWidth,
+        canonicalHeight: first.canonicalHeight,
+        canonicalBGRA8Digest: "0000000000000000",
+        resolvedShapeIdentity: first.resolvedShapeIdentity,
+        resolvedGrainIdentity: first.resolvedGrainIdentity
+    )
+    actual[0] = mutated
+    #expect(throws: BrushCharacterizationEvidenceError.digestMismatch) {
+        try baseline.requireMatches(actual)
+    }
+}
+
+@Test
+@MainActor
 func sliceFourRunnerRejectsIncompleteAttributedTrace() throws {
     let url = sliceFourSceneRoot().appendingPathComponent(
         "slice4-legacy-ink-parity.json"

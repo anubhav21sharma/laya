@@ -159,7 +159,7 @@ func schemaFourRejectsSliceFourOnlyStructuralMetrics() throws {
 
 @Test
 func sliceFourTraceCatalogIsReusableAtTheHarnessBoundary() {
-    #expect(StrokeTraceFixtures.all.count == 8)
+    #expect(StrokeTraceFixtures.all.count == 9)
     #expect(StrokeTraceFixtures.gridSeam.samples.map(\.phase) == [
         .began,
         .moved,

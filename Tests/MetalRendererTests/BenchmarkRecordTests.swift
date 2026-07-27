@@ -174,6 +174,31 @@ func sliceFourBenchmarkRecordRoundTripsRequiredMetrics() throws {
 }
 
 @Test(arguments: [
+    "brushCharacterizationVersion",
+    "logicalDabDigest",
+    "canonicalBGRA8Digest",
+    "inputSampleCount",
+    "logicalDabCount",
+])
+func schemaSixBenchmarkParserRequiresEveryCharacterizationMetric(
+    _ key: String
+) throws {
+    let valid = try BenchmarkRecord.encode(
+        sliceSixBenchmarkFixture()
+    )
+    var object = try #require(
+        JSONSerialization.jsonObject(with: valid) as? [String: Any]
+    )
+    object.removeValue(forKey: key)
+
+    #expect(throws: BenchmarkRecordError.missingSchemaSixMetric(key)) {
+        try BenchmarkRecord.decode(
+            JSONSerialization.data(withJSONObject: object)
+        )
+    }
+}
+
+@Test(arguments: [
     "recipeID",
     "material",
     "seed",
@@ -510,6 +535,61 @@ private func sliceFourBenchmarkFixture(
         fiveHundredDabStressNewDabCount: 500,
         processedWashPixelCount: 4_096,
         washWorkingBytes: 32_768,
+        program: "pressureDynamics"
+    )
+}
+
+private func sliceSixBenchmarkFixture() -> BenchmarkRecord {
+    BenchmarkRecord(
+        schemaVersion: 6,
+        timestampUTC: "2026-07-27T12:00:00Z",
+        sceneName: "slice4-legacy-ink-parity",
+        hardware: BenchmarkHardware(
+            gpuName: "Test GPU",
+            logicalProcessorCount: 8,
+            physicalMemoryBytes: 16_000_000_000
+        ),
+        operatingSystem: "macOS Test",
+        build: BenchmarkBuild(
+            configuration: "Debug",
+            gitCommit: "0123456789abcdef"
+        ),
+        frameCount: 2,
+        cpuEncodeMilliseconds: [0, 0.1],
+        gpuMilliseconds: [0, 0.2],
+        peakResidentBytes: 42_000_000,
+        dabGPUMilliseconds: [0.2],
+        newInstanceCounts: [12],
+        revisionCaptureMilliseconds: [0],
+        revisionRestoreMilliseconds: [0],
+        historyResidentBytes: 0,
+        historyCommandCount: 1,
+        historyCanUndo: true,
+        historyCanRedo: false,
+        historyAppendCount: 1,
+        historyNavigationFinishCount: 0,
+        historyReleasedRevisionCount: 0,
+        changedRegionCount: 1,
+        coloredOutputMismatchCount: 0,
+        previewCommitViolationCount: 0,
+        recipeID: "anchor.ink",
+        material: "ink",
+        seed: 42,
+        replayMode: "replayTail",
+        peakRetainedSampleCount: 128,
+        peakRetainedDabCount: 512,
+        replayCount: 3,
+        promotedSettledPrefixCount: 2,
+        replayDegradationCount: 1,
+        assetResidentBytes: 8_192,
+        materialGPUMilliseconds: [0.2],
+        processedWashPixelCount: 4_096,
+        washWorkingBytes: 32_768,
+        brushCharacterizationVersion: 1,
+        logicalDabDigest: "0123456789abcdef",
+        canonicalBGRA8Digest: "fedcba9876543210",
+        inputSampleCount: 3,
+        logicalDabCount: 12,
         program: "pressureDynamics"
     )
 }

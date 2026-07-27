@@ -56,7 +56,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "BrushCharacterizationTool",
-            dependencies: ["PatternEngine", "EditorCore"]
+            dependencies: ["PatternEngine", "EditorCore", "MetalRenderer"]
         ),
         .testTarget(
             name: "PatternEngineTests",
@@ -87,6 +87,7 @@ let package = Package(
             exclude: [
                 "PatternSpike/Assets.xcassets",
                 "PatternSpike/Harness/HarnessLaunch.swift",
+                "PatternSpike/Harness/Baselines",
                 "PatternSpike/Harness/Scenes",
                 "PatternSpike/PatternSpikeMac-Info.plist",
                 "PatternSpike/PatternSpikePad-Info.plist",

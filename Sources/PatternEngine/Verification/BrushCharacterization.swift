@@ -181,6 +181,22 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
         seed: UInt64,
         ordinal: UInt64
     ) -> Self {
+        legacy(
+            recipe: recipe,
+            dab: dab,
+            seed: seed,
+            ordinal: ordinal,
+            compatibilityRandom: randomValues(seed: seed, ordinal: ordinal)
+        )
+    }
+
+    static func legacy(
+        recipe: BrushRecipe,
+        dab: DabAttributes,
+        seed: UInt64,
+        ordinal: UInt64,
+        compatibilityRandom: BrushRandomValues
+    ) -> Self {
         let primaryGrainFrame = grainFrame(
             scale: dab.grainScale,
             rotation: dab.grainRotation,
@@ -207,7 +223,7 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
             materialBleedRadius: recipe.material.bleedRadius,
             materialSoftenPasses: UInt64(recipe.material.softenPasses),
             materialAccumulationLimit: recipe.material.accumulationLimit,
-            compatibilityRandom: randomValues(seed: seed, ordinal: ordinal),
+            compatibilityRandom: compatibilityRandom,
             extensionRandom: .zero,
             worldBoundsMinimum: dab.position.simd - extent,
             worldBoundsMaximum: dab.position.simd + extent
@@ -251,9 +267,16 @@ public enum BrushCharacterizer {
         viewport: ViewportTransform
     ) -> BrushCharacterizationRecord {
         precondition(trace.samples.first?.phase == .began)
-        precondition(trace.samples.last?.phase == .ended)
+        precondition(
+            trace.samples.last?.phase == .ended
+                || trace.samples.last?.phase == .cancelled
+        )
         precondition(trace.samples.filter { $0.phase == .began }.count == 1)
-        precondition(trace.samples.filter { $0.phase == .ended }.count == 1)
+        precondition(
+            trace.samples.filter {
+                $0.phase == .ended || $0.phase == .cancelled
+            }.count == 1
+        )
 
         var input = BrushInputDeriver()
         var generator = BrushStrokeGenerator(
@@ -264,16 +287,24 @@ public enum BrushCharacterizer {
         )
         var sampleCount = 0
         var payloads: [BrushCharacterizationDigestPayload] = []
+        var random = BrushRandom(seed: seed)
+        var compatibilityRandom = BrushRandomValues.centered
+        var nextRandomOrdinal: UInt64 = 0
 
         for sample in trace.samples where sample.kind != .predicted {
             let worldSample = input.derive(sample, viewport: viewport)
             sampleCount += 1
             let emit: (DabAttributes) -> Void = { dab in
+                while nextRandomOrdinal <= dab.ordinal {
+                    compatibilityRandom = random.nextValues()
+                    nextRandomOrdinal += 1
+                }
                 let payload = BrushCharacterizationDigestPayload.legacy(
                     recipe: recipe,
                     dab: dab,
                     seed: seed,
-                    ordinal: dab.ordinal
+                    ordinal: dab.ordinal,
+                    compatibilityRandom: compatibilityRandom
                 )
                 payloads.append(payload)
             }
