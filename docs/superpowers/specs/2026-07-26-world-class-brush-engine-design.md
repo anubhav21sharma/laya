@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-26
 
-**Status:** Approved design; awaiting written-spec review
+**Status:** Approved
 
 **Primary target:** iPadOS 18+
 
