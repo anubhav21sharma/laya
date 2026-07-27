@@ -451,8 +451,10 @@ private extension BrushDynamicsEngine {
             case .tilt: tilt
             case .azimuth: azimuth
             case .roll: roll
+            case .tangentialPressure: 0
             case .age: age
             case .distance: distance
+            case .random: 0
             }
         }
     }

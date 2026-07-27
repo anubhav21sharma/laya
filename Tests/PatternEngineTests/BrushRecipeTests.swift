@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import PatternEngine
 
@@ -144,6 +145,43 @@ import Testing
                 effects: [.size, .flow]
             )
         )
+    }
+}
+
+@Test func recipeValidationRejectsUnknownTaperEffectBits() throws {
+    for effects in [BrushTaperEffects(), .size, .flow, [.size, .flow]] {
+        let recipe = try BrushRecipe(
+            id: BrushRecipeID("test.taper.effects.\(effects.rawValue)"),
+            taper: BrushTaperConfiguration(start: .disabled, end: .disabled, minimumSize: 1, minimumFlow: 1, effects: effects)
+        )
+        #expect(recipe.taper.effects == effects)
+    }
+    for rawValue: UInt8 in [4, 5, 6, 7] {
+        expectRecipeError(.outOfRange(field: "taper.effects")) {
+            try BrushRecipe(
+                id: BrushRecipeID("test.taper.effects.\(rawValue)"),
+                taper: BrushTaperConfiguration(start: .disabled, end: .disabled, minimumSize: 1, minimumFlow: 1, effects: BrushTaperEffects(rawValue: rawValue))
+            )
+        }
+    }
+}
+
+@Test func recipeDecodingRejectsUnknownTaperEffectBits() throws {
+    let recipe = try BrushRecipe(id: BrushRecipeID("test.taper.decode"))
+    let data = try JSONEncoder().encode(recipe)
+    var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    var taper = try #require(object["taper"] as? [String: Any])
+    for rawValue in [4, 5, 6, 7] {
+        taper["effects"] = rawValue
+        object["taper"] = taper
+        do {
+            _ = try JSONDecoder().decode(BrushRecipe.self, from: JSONSerialization.data(withJSONObject: object))
+            Issue.record("Expected recipe decoding to reject taper effect bit \(rawValue)")
+        } catch let error as BrushRecipeValidationError {
+            #expect(error == .outOfRange(field: "taper.effects"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
     }
 }
 

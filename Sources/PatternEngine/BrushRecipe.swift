@@ -1,7 +1,7 @@
 import Foundation
 import simd
 
-public struct BrushRecipeID: RawRepresentable, Hashable, Sendable {
+public struct BrushRecipeID: RawRepresentable, Hashable, Codable, Sendable {
     public let rawValue: String
 
     public init(rawValue: String) {
@@ -27,7 +27,7 @@ public enum BrushGrainDescriptor: Equatable, Sendable {
     case asset(String)
 }
 
-public enum BrushGrainCoordinateMode: UInt8, Equatable, Sendable {
+public enum BrushGrainCoordinateMode: UInt8, Codable, Equatable, Sendable {
     case canonical
     case brushLocal
 }
@@ -54,14 +54,14 @@ public struct BrushGrainTransform: Equatable, Sendable {
     )
 }
 
-public enum BrushMaterialFamily: UInt8, Equatable, Sendable {
+public enum BrushMaterialFamily: UInt8, Codable, Equatable, Sendable {
     case ink
     case dry
     case glaze
     case boundedWash
 }
 
-public struct BrushMaterial: Equatable, Sendable {
+public struct BrushMaterial: Codable, Equatable, Sendable {
     public let family: BrushMaterialFamily
     public let strength: Float
     public let wetness: Float
@@ -95,18 +95,20 @@ public struct BrushMaterial: Equatable, Sendable {
     )
 }
 
-public enum BrushDynamicsInput: UInt8, CaseIterable, Equatable, Sendable {
+public enum BrushDynamicsInput: String, CaseIterable, Codable, Equatable, Sendable {
     case pressure
     case speed
     case direction
     case tilt
     case azimuth
     case roll
+    case tangentialPressure
     case age
     case distance
+    case random
 }
 
-public enum BrushMappingResponse: UInt8, Equatable, Sendable {
+public enum BrushMappingResponse: UInt8, Codable, Equatable, Sendable {
     case disabled
     case linear
     case boundedPower
@@ -114,7 +116,7 @@ public enum BrushMappingResponse: UInt8, Equatable, Sendable {
 
 /// One normalized-input response. Inputs are normalized to `0...1` by the
 /// dynamics engine before this response maps them into its bounded output.
-public struct BrushMapping: Equatable, Sendable {
+public struct BrushMapping: Codable, Equatable, Sendable {
     public let response: BrushMappingResponse
     public let input: BrushDynamicsInput
     public let outputMinimum: Float
@@ -171,7 +173,7 @@ public struct BrushMapping: Equatable, Sendable {
     }
 }
 
-public struct BrushRandomization: Equatable, Sendable {
+public struct BrushRandomization: Codable, Equatable, Sendable {
     public let spacing: Float
     public let scatter: Float
     public let rotation: Float
@@ -201,7 +203,7 @@ public struct BrushRandomization: Equatable, Sendable {
     )
 }
 
-public struct BrushColorAdjustment: Equatable, Sendable {
+public struct BrushColorAdjustment: Codable, Equatable, Sendable {
     public let redMultiplier: Float
     public let greenMultiplier: Float
     public let blueMultiplier: Float
@@ -233,7 +235,7 @@ public enum BrushTaperLength: Equatable, Sendable {
     case diameterMultiples(Float)
 }
 
-public struct BrushTaperEffects: OptionSet, Equatable, Sendable {
+public struct BrushTaperEffects: OptionSet, Codable, Equatable, Sendable {
     public let rawValue: UInt8
 
     public init(rawValue: UInt8) {
@@ -244,7 +246,7 @@ public struct BrushTaperEffects: OptionSet, Equatable, Sendable {
     public static let flow = BrushTaperEffects(rawValue: 1 << 1)
 }
 
-public struct BrushTaperConfiguration: Equatable, Sendable {
+public struct BrushTaperConfiguration: Codable, Equatable, Sendable {
     public let start: BrushTaperLength
     public let end: BrushTaperLength
     public let minimumSize: Float
@@ -274,13 +276,13 @@ public struct BrushTaperConfiguration: Equatable, Sendable {
     )
 }
 
-public enum BrushReplayMode: UInt8, Equatable, Sendable {
+public enum BrushReplayMode: UInt8, Codable, Equatable, Sendable {
     case appendOnly
     case replayTail
     case boundedWholeStroke
 }
 
-public struct BrushReplayLimits: Equatable, Sendable {
+public struct BrushReplayLimits: Codable, Equatable, Sendable {
     public let maximumSamples: Int
     public let maximumDabs: Int
     public let maximumProjectedInstances: Int
@@ -339,7 +341,7 @@ public enum BrushRecipeValidationError: Error, Equatable, Sendable {
     case washLimitExceeded(field: String)
 }
 
-public struct BrushRecipe: Equatable, Sendable {
+public struct BrushRecipe: Codable, Equatable, Sendable {
     public let id: BrushRecipeID
     public let schemaVersion: UInt16
     public let shape: BrushShapeDescriptor
@@ -738,6 +740,10 @@ private extension BrushRecipe {
                 throw BrushRecipeValidationError.outOfRange(field: field)
             }
         }
+        let supportedEffects = BrushTaperEffects.size.rawValue | BrushTaperEffects.flow.rawValue
+        guard taper.effects.rawValue & ~supportedEffects == 0 else {
+            throw BrushRecipeValidationError.outOfRange(field: "taper.effects")
+        }
     }
 
     static func validate(
@@ -795,5 +801,114 @@ private extension BrushRecipe {
         guard value.isFinite else {
             throw BrushRecipeValidationError.nonfinite(field: field)
         }
+    }
+}
+
+struct BrushSIMD2Codable: Codable {
+    let x: Float
+    let y: Float
+
+    init(_ value: SIMD2<Float>) { x = value.x; y = value.y }
+    var value: SIMD2<Float> { SIMD2(x, y) }
+}
+
+extension BrushShapeDescriptor: Codable {
+    private enum CodingKeys: String, CodingKey { case kind, identifier }
+    private enum Kind: String, Codable { case hardRound, softRound, chisel, asset }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .hardRound: self = .hardRound
+        case .softRound: self = .softRound
+        case .chisel: self = .chisel
+        case .asset: self = .asset(try container.decode(String.self, forKey: .identifier))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .hardRound: try container.encode(Kind.hardRound, forKey: .kind)
+        case .softRound: try container.encode(Kind.softRound, forKey: .kind)
+        case .chisel: try container.encode(Kind.chisel, forKey: .kind)
+        case let .asset(identifier):
+            try container.encode(Kind.asset, forKey: .kind)
+            try container.encode(identifier, forKey: .identifier)
+        }
+    }
+}
+
+extension BrushGrainDescriptor: Codable {
+    private enum CodingKeys: String, CodingKey { case kind, identifier }
+    private enum Kind: String, Codable { case opaque, paper, noise, asset }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .opaque: self = .opaque
+        case .paper: self = .paper
+        case .noise: self = .noise
+        case .asset: self = .asset(try container.decode(String.self, forKey: .identifier))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .opaque: try container.encode(Kind.opaque, forKey: .kind)
+        case .paper: try container.encode(Kind.paper, forKey: .kind)
+        case .noise: try container.encode(Kind.noise, forKey: .kind)
+        case let .asset(identifier):
+            try container.encode(Kind.asset, forKey: .kind)
+            try container.encode(identifier, forKey: .identifier)
+        }
+    }
+}
+
+extension BrushGrainTransform: Codable {
+    private enum CodingKeys: String, CodingKey { case scale, rotation, offset }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(scale: try container.decode(Float.self, forKey: .scale), rotation: try container.decode(Float.self, forKey: .rotation), offset: try container.decode(BrushSIMD2Codable.self, forKey: .offset).value)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(scale, forKey: .scale)
+        try container.encode(rotation, forKey: .rotation)
+        try container.encode(BrushSIMD2Codable(offset), forKey: .offset)
+    }
+}
+
+extension BrushTaperLength: Codable {
+    private enum CodingKeys: String, CodingKey { case kind, value }
+    private enum Kind: String, Codable { case disabled, worldPixels, diameterMultiples }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .disabled: self = .disabled
+        case .worldPixels: self = .worldPixels(try container.decode(Float.self, forKey: .value))
+        case .diameterMultiples: self = .diameterMultiples(try container.decode(Float.self, forKey: .value))
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .disabled: try container.encode(Kind.disabled, forKey: .kind)
+        case let .worldPixels(value): try container.encode(Kind.worldPixels, forKey: .kind); try container.encode(value, forKey: .value)
+        case let .diameterMultiples(value): try container.encode(Kind.diameterMultiples, forKey: .kind); try container.encode(value, forKey: .value)
+        }
+    }
+}
+
+extension BrushRecipe {
+    private enum CodingKeys: String, CodingKey {
+        case id, schemaVersion, shape, grain, grainCoordinateMode, grainTransform, material, baseSpacingFraction, maximumSpacingFraction, baseFlow, strokeOpacity, baseHardness, baseScatterFraction, baseRotation, aspectRatio, sizeMapping, flowMapping, spacingMapping, rotationMapping, scatterMapping, hardnessMapping, grainMapping, noPressureNeutral, randomization, colorAdjustment, stabilization, taper, replayMode, replayLimits
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            id: try c.decode(BrushRecipeID.self, forKey: .id), schemaVersion: try c.decode(UInt16.self, forKey: .schemaVersion), shape: try c.decode(BrushShapeDescriptor.self, forKey: .shape), grain: try c.decode(BrushGrainDescriptor.self, forKey: .grain), grainCoordinateMode: try c.decode(BrushGrainCoordinateMode.self, forKey: .grainCoordinateMode), grainTransform: try c.decode(BrushGrainTransform.self, forKey: .grainTransform), material: try c.decode(BrushMaterial.self, forKey: .material), baseSpacingFraction: try c.decode(Float.self, forKey: .baseSpacingFraction), maximumSpacingFraction: try c.decode(Float.self, forKey: .maximumSpacingFraction), baseFlow: try c.decode(Float.self, forKey: .baseFlow), strokeOpacity: try c.decode(Float.self, forKey: .strokeOpacity), baseHardness: try c.decode(Float.self, forKey: .baseHardness), baseScatterFraction: try c.decode(Float.self, forKey: .baseScatterFraction), baseRotation: try c.decode(Float.self, forKey: .baseRotation), aspectRatio: try c.decode(Float.self, forKey: .aspectRatio), sizeMapping: try c.decode(BrushMapping.self, forKey: .sizeMapping), flowMapping: try c.decode(BrushMapping.self, forKey: .flowMapping), spacingMapping: try c.decode(BrushMapping.self, forKey: .spacingMapping), rotationMapping: try c.decode(BrushMapping.self, forKey: .rotationMapping), scatterMapping: try c.decode(BrushMapping.self, forKey: .scatterMapping), hardnessMapping: try c.decode(BrushMapping.self, forKey: .hardnessMapping), grainMapping: try c.decode(BrushMapping.self, forKey: .grainMapping), noPressureNeutral: try c.decode(Float.self, forKey: .noPressureNeutral), randomization: try c.decode(BrushRandomization.self, forKey: .randomization), colorAdjustment: try c.decode(BrushColorAdjustment.self, forKey: .colorAdjustment), stabilization: try c.decode(Float.self, forKey: .stabilization), taper: try c.decode(BrushTaperConfiguration.self, forKey: .taper), replayMode: try c.decode(BrushReplayMode.self, forKey: .replayMode), replayLimits: try c.decodeIfPresent(BrushReplayLimits.self, forKey: .replayLimits)
+        )
     }
 }
