@@ -207,6 +207,15 @@ struct PatternProjectArchiveTests {
             )
         }
         #expect(
+            throws: PatternProjectArchiveError.unsafePath("../unsafe")
+        ) {
+            try PatternProjectArchiveIO.save(
+                entries: ["../unsafe": Data()],
+                to: destination,
+                injecting: .beforeReplacement
+            )
+        }
+        #expect(
             try PatternProjectArchiveCodec.open(at: destination)
                 .data(for: "manifest.json") == Data("old".utf8)
         )

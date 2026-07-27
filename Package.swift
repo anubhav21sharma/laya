@@ -13,6 +13,7 @@ let package = Package(
         .library(name: "EditorCore", targets: ["EditorCore"]),
         .library(name: "CShaderTypes", targets: ["CShaderTypes"]),
         .library(name: "MetalRenderer", targets: ["MetalRenderer"]),
+        .library(name: "SafeArchive", targets: ["SafeArchive"]),
         .executable(
             name: "SliceThreeEvidenceGate",
             targets: ["SliceThreeEvidenceGate"]
@@ -44,8 +45,9 @@ let package = Package(
         ),
         .target(
             name: "PatternFile",
-            dependencies: ["PatternEngine"]
+            dependencies: ["PatternEngine", "SafeArchive"]
         ),
+        .target(name: "SafeArchive"),
         .executableTarget(
             name: "SliceThreeEvidenceGate",
             dependencies: ["MetalRenderer"]
@@ -74,6 +76,10 @@ let package = Package(
         .testTarget(
             name: "PatternFileTests",
             dependencies: ["PatternFile"]
+        ),
+        .testTarget(
+            name: "SafeArchiveTests",
+            dependencies: ["SafeArchive"]
         ),
         .testTarget(
             name: "EditorSessionControllerTests",
