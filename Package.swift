@@ -41,7 +41,7 @@ let package = Package(
         ),
         .target(
             name: "MetalRenderer",
-            dependencies: ["PatternEngine", "CShaderTypes"],
+            dependencies: ["PatternEngine", "CShaderTypes", "BrushFormat"],
             exclude: ["Shaders.metal"]
         ),
         .target(
@@ -76,7 +76,12 @@ let package = Package(
         ),
         .testTarget(
             name: "MetalRendererTests",
-            dependencies: ["MetalRenderer", "CShaderTypes", "EditorCore"]
+            dependencies: [
+                "MetalRenderer",
+                "CShaderTypes",
+                "EditorCore",
+                "BrushFormat",
+            ]
         ),
         .testTarget(
             name: "PatternFileTests",
