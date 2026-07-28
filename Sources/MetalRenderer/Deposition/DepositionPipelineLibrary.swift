@@ -59,6 +59,7 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
     var debugPreparedPipelineCount: Int {
         prepared.count
     }
+    private(set) var debugPrepareCallCount = 0
 
     private let device: any MTLDevice
     private let library: (any MTLLibrary)?
@@ -83,6 +84,7 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
     public func prepare(
         for key: DepositionPipelineKey
     ) async throws -> DepositionPipelineBinding {
+        debugPrepareCallCount += 1
         if let binding = prepared[key] {
             return binding
         }

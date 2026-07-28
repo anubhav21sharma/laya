@@ -44,22 +44,32 @@ public final class DepositionHarnessRunner {
 
     private let device: any MTLDevice
     private let library: any MTLLibrary
+    private let productionAnchorDefinitions: [String: BrushDefinition]
 
     public init(
         device: any MTLDevice,
-        library: any MTLLibrary
+        library: any MTLLibrary,
+        productionAnchorDefinitions: [String: BrushDefinition]
     ) {
         self.device = device
         self.library = library
+        self.productionAnchorDefinitions = productionAnchorDefinitions
     }
 
-    public convenience init(device: any MTLDevice) throws {
+    public convenience init(
+        device: any MTLDevice,
+        productionAnchorDefinitions: [String: BrushDefinition]
+    ) throws {
         guard let library = device.makeDefaultLibrary() else {
             throw DepositionHarnessRunError.metalResourceUnavailable(
                 "the app Metal library"
             )
         }
-        self.init(device: device, library: library)
+        self.init(
+            device: device,
+            library: library,
+            productionAnchorDefinitions: productionAnchorDefinitions
+        )
     }
 
     public func run(
@@ -78,7 +88,7 @@ public final class DepositionHarnessRunner {
             throw DepositionHarnessRunError.unknownScene(scene.name)
         }
 
-        let package = try DepositionHarnessFixtures.package(for: stem)
+        let package = try package(for: stem)
         let tiling: TilingKind =
             stem == "deposition-periodic-seams"
                 ? .squareKaleidoscope
@@ -120,6 +130,9 @@ public final class DepositionHarnessRunner {
         )
         invariants["strokeCompilerCountersUnchanged"] =
             countersBeforeStroke == countersAfterStroke
+            && capture.pipelinePreparationUnchanged
+        invariants["strokePipelinePreparationUnchanged"] =
+            capture.pipelinePreparationUnchanged
         for key in scene.depositionInvariantExpectations.keys
         where invariants[key] == nil {
             invariants[key] = false
@@ -257,6 +270,9 @@ private extension DepositionHarnessRunner {
         let renderer: GridRenderer
         let compiler: BrushCompiler
         let compiled: CompiledBrush
+        let pipelineLibrary: DepositionPipelineLibrary
+        let pipelineFailurePreparer:
+            ArmableDepositionPipelinePreparer?
     }
 
     struct StrokeCapture {
@@ -271,6 +287,12 @@ private extension DepositionHarnessRunner {
         let flushMetrics: GPUFrameMetrics
         let commitMetrics: GPUFrameMetrics
         let displayMetrics: [GPUFrameMetrics]
+        let pipelinePreparationUnchanged: Bool
+    }
+
+    struct SeededFailureContext {
+        let context: Context
+        let baseline: RendererFailureSnapshot
     }
 
     enum PartitionMode {
@@ -285,11 +307,38 @@ private extension DepositionHarnessRunner {
             : name
     }
 
+    func package(for stem: String) throws -> BrushPackage {
+        if Self.productionAnchorSceneNames.contains(stem) {
+            guard let definition = productionAnchorDefinitions[stem] else {
+                throw DepositionHarnessRunError.invariantFailed(
+                    scene: stem,
+                    invariant: "productionAnchorDefinitionInjected"
+                )
+            }
+            return try BrushPackage(
+                manifest: BrushPackageManifest(resources: []),
+                definition: definition,
+                resourceData: [:]
+            )
+        }
+        return try DepositionHarnessFixtures.package(for: stem)
+    }
+
+    static let productionAnchorSceneNames: Set<String> = [
+        "deposition-airbrush",
+        "deposition-dry",
+        "deposition-erase",
+        "deposition-glaze",
+        "deposition-ink",
+        "deposition-marker",
+    ]
+
     func makeContext(
         scene: HarnessScene,
         package: BrushPackage,
         tiling: TilingKind = .grid,
-        cacheBudgetBytes: Int = 64 * 1_024 * 1_024
+        cacheBudgetBytes: Int = 64 * 1_024 * 1_024,
+        armablePipelineFailure: Bool = false
     ) async throws -> Context {
         guard let commandQueue = device.makeCommandQueue() else {
             throw DepositionHarnessRunError.metalResourceUnavailable(
@@ -308,11 +357,14 @@ private extension DepositionHarnessRunner {
             brushCacheBudgetBytes: cacheBudgetBytes,
             targetFramesPerSecond: 120
         )
+        let failurePreparer = armablePipelineFailure
+            ? ArmableDepositionPipelinePreparer(delegate: pipelineLibrary)
+            : nil
         let compiler = BrushCompiler(
             device: device,
             commandQueue: commandQueue,
             profile: profile,
-            pipelinePreparing: pipelineLibrary,
+            pipelinePreparing: failurePreparer ?? pipelineLibrary,
             testHooks: .none
         )
         let renderer = try GridRenderer(
@@ -341,31 +393,29 @@ private extension DepositionHarnessRunner {
         return Context(
             renderer: renderer,
             compiler: compiler,
-            compiled: compiled
+            compiled: compiled,
+            pipelineLibrary: pipelineLibrary,
+            pipelineFailurePreparer: failurePreparer
         )
     }
 
     func seedEraseCanvas(_ context: Context, scene: HarnessScene)
         async throws
     {
-        let inkPackage = try DepositionHarnessFixtures.package(
-            for: "deposition-ink"
-        )
+        let inkPackage = try package(for: "deposition-ink")
         let ink = try await context.compiler.compileAndActivate(
             package: inkPackage
         )
         try context.renderer.activateDrawBrush(ink)
         _ = try commitOnly(
-            renderer: context.renderer,
+            context: context,
             brush: ink,
             compositeMode: .draw,
             color: .black,
             trace: Self.trace(width: scene.width, height: scene.height)
         )
         let eraser = try await context.compiler.compileAndActivate(
-            package: DepositionHarnessFixtures.package(
-                for: "deposition-erase"
-            )
+            package: package(for: "deposition-erase")
         )
         try context.renderer.activateEraserBrush(eraser)
     }
@@ -387,6 +437,8 @@ private extension DepositionHarnessRunner {
         diameter: Float? = nil
     ) throws -> StrokeCapture {
         let renderer = context.renderer
+        let pipelinePrepareCallsBefore =
+            context.pipelineLibrary.debugPrepareCallCount
         let compositeMode: StrokeCompositeMode =
             context.compiled.program.definition.material.accumulation
                 == .destinationOut ? .erase : .draw
@@ -501,18 +553,24 @@ private extension DepositionHarnessRunner {
             flushMetrics: flushMetrics,
             commitMetrics: commitMetrics,
             displayMetrics: intermediateMetrics
-                + [liveFrame.metrics, committedFrame.metrics]
+                + [liveFrame.metrics, committedFrame.metrics],
+            pipelinePreparationUnchanged:
+                pipelinePrepareCallsBefore
+                == context.pipelineLibrary.debugPrepareCallCount
         )
     }
 
     func commitOnly(
-        renderer: GridRenderer,
+        context: Context,
         brush: CompiledBrush,
         compositeMode: StrokeCompositeMode,
         color: InkColor,
         trace: [StrokeSample],
         partitionMode: PartitionMode = .oneFrame
     ) throws -> [UInt8] {
+        let renderer = context.renderer
+        let pipelinePrepareCallsBefore =
+            context.pipelineLibrary.debugPrepareCallCount
         let token = RendererOperationToken(rawValue: Self.seed &+ 1)
         var receipt: RasterMutationReceipt?
         renderer.onOperationCompleted = {
@@ -552,7 +610,91 @@ private extension DepositionHarnessRunner {
                 receipt.after.id,
             ])
         }
+        guard pipelinePrepareCallsBefore
+                == context.pipelineLibrary.debugPrepareCallCount
+        else {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: brush.program.definition.id.rawValue,
+                invariant: "strokePipelinePreparationUnchanged"
+            )
+        }
         return Self.textureBytes(try renderer.copyCanonicalForHarness())
+    }
+
+    func seededFailureContext(
+        scene: HarnessScene,
+        package: BrushPackage,
+        armablePipelineFailure: Bool = false
+    ) async throws -> SeededFailureContext {
+        let context = try await makeContext(
+            scene: scene,
+            package: package,
+            armablePipelineFailure: armablePipelineFailure
+        )
+        _ = try commitRetainingHistory(
+            context: context,
+            brush: context.compiled,
+            trace: Self.trace(width: scene.width, height: scene.height)
+        )
+        let baseline = try failureSnapshot(context.renderer)
+        guard baseline.isIdle,
+              Self.hasNontransparentPixel(baseline.canonicalBytes),
+              baseline.historyResidentBytes > 0,
+              baseline.historySnapshots.count == 2,
+              baseline.historySnapshots.contains(where: {
+                  $0.retainedBytes.contains(where: { $0 != 0 })
+              })
+        else {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: scene.name,
+                invariant: "failureStartsFromNonemptyExactHistory"
+            )
+        }
+        return SeededFailureContext(
+            context: context,
+            baseline: baseline
+        )
+    }
+
+    func commitRetainingHistory(
+        context: Context,
+        brush: CompiledBrush,
+        trace: [StrokeSample]
+    ) throws -> RasterMutationReceipt {
+        let renderer = context.renderer
+        let pipelinePrepareCallsBefore =
+            context.pipelineLibrary.debugPrepareCallCount
+        let token = RendererOperationToken(rawValue: Self.seed &+ 20)
+        var receipt: RasterMutationReceipt?
+        renderer.onOperationCompleted = {
+            if case let .rasterSuccess(value) = $0 {
+                receipt = value
+            }
+        }
+        try renderer.beginStroke(
+            token: token,
+            sample: trace[0],
+            style: Self.style(brush)
+        )
+        for sample in trace.dropFirst().dropLast() {
+            try renderer.appendStroke(token: token, sample: sample)
+        }
+        try renderer.requestStrokeCommit(
+            token: token,
+            sample: trace.last!,
+            maximumRetainedBytes: 64 * 1_024 * 1_024
+        )
+        _ = try renderer.finishCommitForHarness()
+        guard let receipt,
+              pipelinePrepareCallsBefore
+                == context.pipelineLibrary.debugPrepareCallCount
+        else {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: brush.program.definition.id.rawValue,
+                invariant: "seededFailureHistoryCommit"
+            )
+        }
+        return receipt
     }
 }
 
@@ -566,15 +708,34 @@ private extension DepositionHarnessRunner {
     ) async throws -> [String: Bool] {
         var results: [String: Bool] = [:]
         let definition = context.compiled.program.definition
-        let expected = DepositionHarnessFixtures.expectedPipeline(for: stem)
-        results["familyAndAccumulationCorrect"] =
-            expected.map {
-                definition.id.rawValue == $0.definitionID
-                    && definition.material.accumulation == $0.accumulation
-                    && definition.material.edgeTreatment == $0.edge
-                    && definition.coverage.shapes.first?.shape == $0.shape
-                    && definition.placement.baseFlow == $0.flow
-            } ?? true
+        if let productionDefinition = productionAnchorDefinitions[stem] {
+            let expectedProgram = try BrushProgramCompiler.compile(
+                productionDefinition
+            )
+            let expectedSemanticHash = try package.contentHash
+            let identityIsExact =
+                package.definition == productionDefinition
+                && definition == productionDefinition
+                && context.compiled.program == expectedProgram
+                && context.compiled.renderIdentity.definitionID
+                    == productionDefinition.id
+                && context.compiled.renderIdentity.semanticHash
+                    == expectedSemanticHash
+            results["productionAnchorIdentityExact"] = identityIsExact
+            results["familyAndAccumulationCorrect"] = identityIsExact
+        } else {
+            let expected = DepositionHarnessFixtures.expectedPipeline(
+                for: stem
+            )
+            results["familyAndAccumulationCorrect"] =
+                expected.map {
+                    definition.id.rawValue == $0.definitionID
+                        && definition.material.accumulation == $0.accumulation
+                        && definition.material.edgeTreatment == $0.edge
+                        && definition.coverage.shapes.first?.shape == $0.shape
+                        && definition.placement.baseFlow == $0.flow
+                } ?? true
+        }
         results["previewCommitMaximumDeltaWithinTolerance"] =
             primary.previewCommitMaximumChannelDelta <= 1
 
@@ -583,8 +744,10 @@ private extension DepositionHarnessRunner {
             results["customTexturesExact"] =
                 customTexturesAreExact(context.compiled)
         case "deposition-layer-matrix":
-            results["secondaryLayerPresent"] =
-                try await layerMatrixIsComplete(scene: scene)
+            let audit = try await layerMatrixAudit(scene: scene)
+            results["secondaryLayerPresent"] = audit.complete
+            results["layerCartesianRenderDistinct"] =
+                audit.renderDistinct
         case "deposition-stamp-size-mips":
             results["textureMipSelectionCorrect"] =
                 try await mipMatrixIsComplete(scene: scene)
@@ -646,14 +809,22 @@ private extension DepositionHarnessRunner {
                     package: package
                 )
         case "deposition-cache-pinning":
+            let audit = try await cachePinningAudit(scene: scene)
             results["activeCompiledBrushPinned"] =
-                try await cachePinningAudit(scene: scene)
+                audit.activeCompiledBrushPinned
+            results["activeBrushSurvivesPressureAndFailure"] =
+                audit.activeBrushSurvivesPressureAndFailure
         case "deposition-failure-matrix":
+            let audit = try await failureMatrixAudit(
+                scene: scene,
+                package: package
+            )
             results["failurePreservesCanonicalAndHistory"] =
-                try await failureMatrixAudit(
-                    scene: scene,
-                    package: package
-                )
+                audit.allFailuresPreservedState
+            results["failureStartsFromNonemptyExactHistory"] =
+                audit.startedFromNonemptyExactHistory
+            results["pipelineFailureUsesSeededRenderer"] =
+                audit.pipelineFailureUsesSeededRenderer
         default:
             break
         }
@@ -683,6 +854,12 @@ private extension DepositionHarnessRunner {
             zoom: zoom,
             diameter: diameter
         )
+        guard capture.pipelinePreparationUnchanged else {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: scene.name,
+                invariant: "strokePipelinePreparationUnchanged"
+            )
+        }
         return Self.textureBytes(capture.canonical)
     }
 
@@ -910,28 +1087,24 @@ private extension DepositionHarnessRunner {
         scene: HarnessScene,
         color: InkColor
     ) async throws -> [UInt8] {
-        let inkPackage = try DepositionHarnessFixtures.package(
-            for: "deposition-ink"
-        )
+        let inkPackage = try package(for: "deposition-ink")
         let context = try await makeContext(
             scene: scene,
             package: inkPackage
         )
         _ = try commitOnly(
-            renderer: context.renderer,
+            context: context,
             brush: context.compiled,
             compositeMode: .draw,
             color: .black,
             trace: Self.trace(width: scene.width, height: scene.height)
         )
         let eraser = try await context.compiler.compileAndActivate(
-            package: DepositionHarnessFixtures.package(
-                for: "deposition-erase"
-            )
+            package: package(for: "deposition-erase")
         )
         try context.renderer.activateEraserBrush(eraser)
         return try commitOnly(
-            renderer: context.renderer,
+            context: context,
             brush: eraser,
             compositeMode: .erase,
             color: color,
@@ -1154,11 +1327,21 @@ private extension DepositionHarnessRunner {
             }
     }
 
-    func layerMatrixIsComplete(scene: HarnessScene) async throws -> Bool {
+    struct LayerMatrixAudit {
+        let complete: Bool
+        let renderDistinct: Bool
+    }
+
+    func layerMatrixAudit(scene: HarnessScene) async throws
+        -> LayerMatrixAudit
+    {
         var observed = Set<BrushShapeCombinationMode>()
         var sawOneShape = false
         var sawTwoShapes = false
         var grainCounts = Set<Int>()
+        var outputs: [String: String] = [:]
+        var resourceSlotsAreExact = true
+        var everyVariantRendered = true
         for combination in [
             BrushShapeCombinationMode.multiply,
             .minimum,
@@ -1188,6 +1371,23 @@ private extension DepositionHarnessRunner {
                             coverage.shapes[1].combination
                         )
                     }
+                    var expectedSlots =
+                        Set<DepositionTextureSlot>([.primaryShape])
+                    if twoShapes {
+                        expectedSlots.insert(.secondaryShape)
+                    }
+                    if grainCount > 0 {
+                        expectedSlots.insert(.primaryGrain)
+                    }
+                    if grainCount > 1 {
+                        expectedSlots.insert(.secondaryGrain)
+                    }
+                    resourceSlotsAreExact =
+                        resourceSlotsAreExact
+                        && Set(
+                            context.compiled.depositionMaterial
+                                .textures.boundSlots
+                        ) == expectedSlots
                     guard context.compiled.pipelineKey
                             .functionConstants.usesSecondaryShape
                             == twoShapes,
@@ -1198,21 +1398,115 @@ private extension DepositionHarnessRunner {
                             .functionConstants.usesSecondaryGrain
                             == (grainCount > 1)
                     else {
-                        return false
+                        return LayerMatrixAudit(
+                            complete: false,
+                            renderDistinct: false
+                        )
                     }
+                    let capture = try performStroke(
+                        context: context,
+                        scene: scene,
+                        stem: "deposition-layer-matrix"
+                    )
+                    let bytes = Self.textureBytes(capture.canonical)
+                    everyVariantRendered =
+                        everyVariantRendered
+                        && Self.hasNontransparentPixel(bytes)
+                        && capture.pipelinePreparationUnchanged
+                    outputs[
+                        Self.layerVariantKey(
+                            combination: combination,
+                            twoShapes: twoShapes,
+                            grainCount: grainCount
+                        )
+                    ] = DepositionSceneEvidence.sha256(bytes)
                 }
             }
         }
-        return sawOneShape
+        let complete = sawOneShape
             && sawTwoShapes
             && grainCounts == [0, 1, 2]
             && observed == [.multiply, .minimum, .maximum]
+            && resourceSlotsAreExact
+            && outputs.count == 18
+
+        var pixelsAreDistinct = true
+        for grainCount in 0...2 {
+            let twoShapeDigests = Set(
+                [
+                    BrushShapeCombinationMode.multiply,
+                    .minimum,
+                    .maximum,
+                ].compactMap {
+                    outputs[
+                        Self.layerVariantKey(
+                            combination: $0,
+                            twoShapes: true,
+                            grainCount: grainCount
+                        )
+                    ]
+                }
+            )
+            pixelsAreDistinct =
+                pixelsAreDistinct && twoShapeDigests.count == 3
+        }
+        for combination in [
+            BrushShapeCombinationMode.multiply,
+            .minimum,
+            .maximum,
+        ] {
+            for twoShapes in [false, true] {
+                let grainDigests = Set((0...2).compactMap {
+                    outputs[
+                        Self.layerVariantKey(
+                            combination: combination,
+                            twoShapes: twoShapes,
+                            grainCount: $0
+                        )
+                    ]
+                })
+                pixelsAreDistinct =
+                    pixelsAreDistinct && grainDigests.count == 3
+            }
+            for grainCount in 0...2 {
+                let oneShape = outputs[
+                    Self.layerVariantKey(
+                        combination: combination,
+                        twoShapes: false,
+                        grainCount: grainCount
+                    )
+                ]
+                let twoShapes = outputs[
+                    Self.layerVariantKey(
+                        combination: combination,
+                        twoShapes: true,
+                        grainCount: grainCount
+                    )
+                ]
+                pixelsAreDistinct =
+                    pixelsAreDistinct
+                    && oneShape != nil
+                    && twoShapes != nil
+                    && oneShape != twoShapes
+            }
+        }
+        return LayerMatrixAudit(
+            complete: complete,
+            renderDistinct:
+                complete && everyVariantRendered && pixelsAreDistinct
+        )
+    }
+
+    static func layerVariantKey(
+        combination: BrushShapeCombinationMode,
+        twoShapes: Bool,
+        grainCount: Int
+    ) -> String {
+        "\(combination.rawValue):\(twoShapes):\(grainCount)"
     }
 
     func mipMatrixIsComplete(scene: HarnessScene) async throws -> Bool {
-        let package = try DepositionHarnessFixtures.package(
-            for: "deposition-stamp-size-mips"
-        )
+        let package = try package(for: "deposition-stamp-size-mips")
         let context = try await makeContext(
             scene: scene,
             package: package
@@ -1369,61 +1663,166 @@ private extension DepositionHarnessRunner {
 }
 
 private extension DepositionHarnessRunner {
-    func cachePinningAudit(scene: HarnessScene) async throws -> Bool {
-        guard let commandQueue = device.makeCommandQueue() else {
-            throw DepositionHarnessRunError.metalResourceUnavailable(
-                "a cache-audit command queue"
+    struct FailureMatrixAudit {
+        let allFailuresPreservedState: Bool
+        let startedFromNonemptyExactHistory: Bool
+        let pipelineFailureUsesSeededRenderer: Bool
+    }
+
+    struct CachePinningAudit {
+        let activeCompiledBrushPinned: Bool
+        let activeBrushSurvivesPressureAndFailure: Bool
+    }
+
+    func cachePinningAudit(scene: HarnessScene) async throws
+        -> CachePinningAudit
+    {
+        let firstPackage =
+            try DepositionHarnessFixtures.cachePackage(index: 1)
+        let context = try await makeContext(
+            scene: scene,
+            package: firstPackage,
+            cacheBudgetBytes: 6_000,
+            armablePipelineFailure: true
+        )
+        let compiler = context.compiler
+        let first = context.compiled
+        let firstKeys = first.cacheKeys
+        let firstPinned =
+            Set(compiler.pinnedKeys) == firstKeys
+            && Set(compiler.cachedKeys).isSuperset(of: firstKeys)
+            && context.renderer.harnessPreparedDrawBrushIdentity
+                == first.renderIdentity
+        let firstBytes = try commitOnly(
+            context: context,
+            brush: first,
+            compositeMode: .draw,
+            color: .black,
+            trace: Self.trace(width: scene.width, height: scene.height)
+        )
+        let originalCacheKeys = compiler.cachedKeys
+        let originalPinnedKeys = compiler.pinnedKeys
+        let originalResidentBytes = compiler.residentByteCount
+        let pressure = compiler.handleMemoryPressure(
+            targetResidentBytes: max(0, originalResidentBytes - 1)
+        )
+        let pressurePreservedOriginal: Bool
+        if case let .activeBrushExceedsTarget(
+            requiredBytes,
+            targetBytes
+        ) = pressure {
+            pressurePreservedOriginal =
+                requiredBytes == originalResidentBytes
+                && targetBytes == max(0, originalResidentBytes - 1)
+                && compiler.activeBrush === first
+                && compiler.cachedKeys == originalCacheKeys
+                && compiler.pinnedKeys == originalPinnedKeys
+                && compiler.residentByteCount == originalResidentBytes
+        } else {
+            pressurePreservedOriginal = false
+        }
+
+        guard let failurePreparer = context.pipelineFailurePreparer else {
+            return CachePinningAudit(
+                activeCompiledBrushPinned: false,
+                activeBrushSurvivesPressureAndFailure: false
             )
         }
-        let profile = try BrushDeviceProfile(
-            registryID: device.registryID,
-            recommendedWorkingSetBytes: 64 * 1_024 * 1_024,
-            maximumWorkingTextureDimension: 4_096,
-            brushCacheBudgetBytes: 6_000,
-            targetFramesPerSecond: 120
+        let secondPackage =
+            try DepositionHarnessFixtures.cachePackage(index: 2)
+        failurePreparer.armFailure()
+        let failedActivationPreservedOriginal: Bool
+        do {
+            _ = try await compiler.compileAndActivate(
+                package: secondPackage
+            )
+            failedActivationPreservedOriginal = false
+        } catch let failure as BrushCompilationFailure {
+            failedActivationPreservedOriginal =
+                failure.stage == .pipelineSelection
+                && compiler.activeBrush === first
+                && compiler.cachedKeys == originalCacheKeys
+                && compiler.pinnedKeys == originalPinnedKeys
+                && compiler.residentByteCount == originalResidentBytes
+                && context.renderer.harnessPreparedDrawBrushIdentity
+                    == first.renderIdentity
+        }
+        let recoveredOriginalBytes = try commitOnly(
+            context: context,
+            brush: first,
+            compositeMode: .draw,
+            color: .black,
+            trace: Self.disjointTrace(
+                width: scene.width,
+                height: scene.height,
+                upper: false
+            )
         )
-        let compiler = BrushCompiler(
-            device: device,
-            commandQueue: commandQueue,
-            profile: profile,
-            pipelinePreparing: DepositionPipelineLibrary(
-                device: device,
-                library: library
-            ),
-            testHooks: .none
-        )
-        let first = try await compiler.compileAndActivate(
-            package: DepositionHarnessFixtures.cachePackage(index: 1)
-        )
-        let firstPinned = Set(compiler.pinnedKeys) == first.cacheKeys
-        let firstKeys = first.cacheKeys
+        let originalRemainedRenderable =
+            Self.hasNontransparentPixel(firstBytes)
+            && Self.hasNontransparentPixel(recoveredOriginalBytes)
+            && recoveredOriginalBytes != firstBytes
+
         let second = try await compiler.compileAndActivate(
-            package: DepositionHarnessFixtures.cachePackage(index: 2)
+            package: secondPackage
         )
+        try context.renderer.activateDrawBrush(second)
         let inactiveWasEvicted =
             Set(compiler.cachedKeys).isDisjoint(with: firstKeys)
         let activeIsPinned =
             Set(compiler.pinnedKeys) == second.cacheKeys
         let counters = compiler.debugCounters
-        _ = try await compiler.compileAndActivate(
-            package: DepositionHarnessFixtures.cachePackage(index: 2)
+        let secondCacheHit = try await compiler.compileAndActivate(
+            package: secondPackage
         )
+        try context.renderer.activateDrawBrush(secondCacheHit)
         let churnHit = compiler.debugCounters.cacheHitCount
             > counters.cacheHitCount
-        return firstPinned
-            && inactiveWasEvicted
-            && activeIsPinned
-            && churnHit
+        let recoveredSecondBytes = try commitOnly(
+            context: context,
+            brush: secondCacheHit,
+            compositeMode: .draw,
+            color: .black,
+            trace: Self.disjointTrace(
+                width: scene.width,
+                height: scene.height,
+                upper: true
+            )
+        )
+        let recoveredAndUsed =
+            Self.hasNontransparentPixel(recoveredSecondBytes)
+            && recoveredSecondBytes != recoveredOriginalBytes
+            && compiler.activeBrush === secondCacheHit
+            && context.renderer.harnessPreparedDrawBrushIdentity
+                == secondCacheHit.renderIdentity
+        return CachePinningAudit(
+            activeCompiledBrushPinned:
+                firstPinned
+                && inactiveWasEvicted
+                && activeIsPinned
+                && churnHit,
+            activeBrushSurvivesPressureAndFailure:
+                firstPinned
+                && pressurePreservedOriginal
+                && failedActivationPreservedOriginal
+                && originalRemainedRenderable
+                && inactiveWasEvicted
+                && activeIsPinned
+                && churnHit
+                && recoveredAndUsed
+        )
     }
 
     func failureMatrixAudit(
         scene: HarnessScene,
         package: BrushPackage
-    ) async throws -> Bool {
+    ) async throws -> FailureMatrixAudit {
         var passed = true
-        passed = try await pipelineFailureIsAtomic(
+        let pipelinePassed = try await pipelineFailureIsAtomic(
+            scene: scene,
             package: package
-        ) && passed
+        )
+        passed = pipelinePassed && passed
         passed = try await bufferFailureIsAtomic(
             scene: scene,
             package: package
@@ -1444,62 +1843,68 @@ private extension DepositionHarnessRunner {
             scene: scene,
             package: package
         ) && passed
-        let recovery = try await canonicalVariant(
-            scene: scene,
-            package: package
+        return FailureMatrixAudit(
+            allFailuresPreservedState: passed,
+            startedFromNonemptyExactHistory: passed,
+            pipelineFailureUsesSeededRenderer: pipelinePassed
         )
-        return passed && Self.hasNontransparentPixel(recovery)
     }
 
-    func pipelineFailureIsAtomic(package: BrushPackage) async throws -> Bool {
-        guard let commandQueue = device.makeCommandQueue() else {
+    func pipelineFailureIsAtomic(
+        scene: HarnessScene,
+        package: BrushPackage
+    ) async throws -> Bool {
+        let seeded = try await seededFailureContext(
+            scene: scene,
+            package: package,
+            armablePipelineFailure: true
+        )
+        let context = seeded.context
+        guard let preparer = context.pipelineFailurePreparer else {
             return false
         }
-        let preparer = FailOnceDepositionPipelinePreparer(
-            delegate: DepositionPipelineLibrary(
-                device: device,
-                library: library
-            )
-        )
-        let compiler = BrushCompiler(
-            device: device,
-            commandQueue: commandQueue,
-            profile: try BrushDeviceProfile(
-                registryID: device.registryID,
-                recommendedWorkingSetBytes: 64 * 1_024 * 1_024,
-                maximumWorkingTextureDimension: 4_096,
-                targetFramesPerSecond: 120
-            ),
-            pipelinePreparing: preparer,
-            testHooks: .none
-        )
+        let compilerKeys = context.compiler.cachedKeys
+        let compilerPins = context.compiler.pinnedKeys
+        let compilerBytes = context.compiler.residentByteCount
+        preparer.armFailure()
         let failureWasAtomic: Bool
         do {
-            _ = try await compiler.compileAndActivate(package: package)
+            _ = try await context.compiler.compileAndActivate(
+                package: DepositionHarnessFixtures.layerPackage(
+                    combination: .maximum,
+                    grainCount: 1,
+                    twoShapes: true
+                )
+            )
             return false
         } catch let failure as BrushCompilationFailure {
+            let rendererSnapshot = try failureSnapshot(context.renderer)
             failureWasAtomic =
                 failure.stage == .pipelineSelection
-                && compiler.activeBrush == nil
-                && compiler.residentByteCount == 0
+                && context.compiler.activeBrush === context.compiled
+                && context.compiler.cachedKeys == compilerKeys
+                && context.compiler.pinnedKeys == compilerPins
+                && context.compiler.residentByteCount == compilerBytes
+                && rendererSnapshot == seeded.baseline
         }
         guard failureWasAtomic else { return false }
-        let recovery = try await compiler.compileAndActivate(
-            package: package
+        return try validRecovery(
+            context: context,
+            scene: scene,
+            preservedState: seeded.baseline
         )
-        return compiler.activeBrush?.renderIdentity
-            == recovery.renderIdentity
     }
 
     func bufferFailureIsAtomic(
         scene: HarnessScene,
         package: BrushPackage
     ) async throws -> Bool {
-        let context = try await makeContext(
+        let seeded = try await seededFailureContext(
             scene: scene,
             package: package
         )
-        let before = try failureSnapshot(context.renderer)
+        let context = seeded.context
+        let before = seeded.baseline
         guard let leases = context.renderer.instancePool.acquire(
             count: GridCanvasContract.inFlightBufferCount
         ) else {
@@ -1533,7 +1938,8 @@ private extension DepositionHarnessRunner {
                 && before == after
             let recovered = try validRecovery(
                 context: context,
-                scene: scene
+                scene: scene,
+                preservedState: before
             )
             return failureWasAtomic && recovered
         }
@@ -1543,11 +1949,12 @@ private extension DepositionHarnessRunner {
         scene: HarnessScene,
         package: BrushPackage
     ) async throws -> Bool {
-        let context = try await makeContext(
+        let seeded = try await seededFailureContext(
             scene: scene,
             package: package
         )
-        let before = try failureSnapshot(context.renderer)
+        let context = seeded.context
+        let before = seeded.baseline
         let token = RendererOperationToken(rawValue: Self.seed &+ 32)
         try context.renderer.beginStroke(
             token: token,
@@ -1573,7 +1980,8 @@ private extension DepositionHarnessRunner {
                 && before == after
             let recovered = try validRecovery(
                 context: context,
-                scene: scene
+                scene: scene,
+                preservedState: before
             )
             return failureWasAtomic && recovered
         }
@@ -1583,11 +1991,12 @@ private extension DepositionHarnessRunner {
         scene: HarnessScene,
         package: BrushPackage
     ) async throws -> Bool {
-        let context = try await makeContext(
+        let seeded = try await seededFailureContext(
             scene: scene,
             package: package
         )
-        let before = try failureSnapshot(context.renderer)
+        let context = seeded.context
+        let before = seeded.baseline
         do {
             try context.renderer.requestResizeForHarness(
                 token: RendererOperationToken(
@@ -1607,7 +2016,8 @@ private extension DepositionHarnessRunner {
                 && before == after
             let recovered = try validRecovery(
                 context: context,
-                scene: scene
+                scene: scene,
+                preservedState: before
             )
             return failureWasAtomic && recovered
         }
@@ -1617,11 +2027,12 @@ private extension DepositionHarnessRunner {
         scene: HarnessScene,
         package: BrushPackage
     ) async throws -> Bool {
-        let context = try await makeContext(
+        let seeded = try await seededFailureContext(
             scene: scene,
             package: package
         )
-        let before = try failureSnapshot(context.renderer)
+        let context = seeded.context
+        let before = seeded.baseline
         let token = RendererOperationToken(rawValue: Self.seed &+ 34)
         var completions: [RendererOperationCompletion] = []
         context.renderer.onOperationCompleted = {
@@ -1653,7 +2064,8 @@ private extension DepositionHarnessRunner {
                 && before == after
             let recovered = try validRecovery(
                 context: context,
-                scene: scene
+                scene: scene,
+                preservedState: before
             )
             return failureWasAtomic && recovered
         }
@@ -1663,11 +2075,12 @@ private extension DepositionHarnessRunner {
         scene: HarnessScene,
         package: BrushPackage
     ) async throws -> Bool {
-        let context = try await makeContext(
+        let seeded = try await seededFailureContext(
             scene: scene,
             package: package
         )
-        let before = try failureSnapshot(context.renderer)
+        let context = seeded.context
+        let before = seeded.baseline
         let token = RendererOperationToken(rawValue: Self.seed &+ 35)
         let trace = Self.trace(width: scene.width, height: scene.height)
         try context.renderer.beginStroke(
@@ -1686,11 +2099,11 @@ private extension DepositionHarnessRunner {
         } catch MetalRendererError.rasterRevisionStorageLimitExceeded {
             let after = try failureSnapshot(context.renderer)
             let failureWasAtomic = context.renderer.isIdle
-                && context.renderer.harnessRasterRevisionResidentBytes == 0
                 && before == after
             let recovered = try validRecovery(
                 context: context,
-                scene: scene
+                scene: scene,
+                preservedState: before
             )
             return failureWasAtomic && recovered
         }
@@ -1706,33 +2119,57 @@ private extension DepositionHarnessRunner {
             revision: renderer.harnessRevision,
             historyResidentBytes:
                 renderer.harnessRasterRevisionResidentBytes,
+            historySnapshots:
+                try renderer.harnessRasterRevisionSnapshots,
+            isIdle: renderer.isIdle,
+            hasActiveStroke: renderer.hasActiveStroke,
+            preparedDrawBrushIdentity:
+                renderer.harnessPreparedDrawBrushIdentity,
+            preparedEraserBrushIdentity:
+                renderer.harnessPreparedEraserBrushIdentity,
+            capturedCompiledBrushIdentity:
+                renderer.harnessCapturedCompiledBrushIdentity,
             reservedInstanceBufferCount:
                 renderer.harnessReservedInstanceBufferCount,
-            scheduledAuthoritativeCount:
-                renderer.harnessScheduledAuthoritativeRecords.count,
-            scheduledPredictedCount:
-                renderer.harnessScheduledPredictedRecords.count,
-            pendingInstanceColorCount:
-                renderer.harnessPendingInstanceColors.count
+            scheduledAuthoritativeRecords:
+                renderer.harnessScheduledAuthoritativeRecords,
+            scheduledPredictedRecords:
+                renderer.harnessScheduledPredictedRecords,
+            pendingInstanceColors:
+                renderer.harnessPendingInstanceColors
         )
     }
 
-    func validRecovery(context: Context, scene: HarnessScene) throws
+    func validRecovery(
+        context: Context,
+        scene: HarnessScene,
+        preservedState: RendererFailureSnapshot
+    ) throws
         -> Bool
     {
         let bytes = try commitOnly(
-            renderer: context.renderer,
+            context: context,
             brush: context.compiled,
             compositeMode: .draw,
             color: .black,
-            trace: Self.trace(width: scene.width, height: scene.height)
+            trace: Self.disjointTrace(
+                width: scene.width,
+                height: scene.height,
+                upper: false
+            )
         )
+        let historySnapshots =
+            try context.renderer.harnessRasterRevisionSnapshots
         return Self.hasNontransparentPixel(bytes)
+            && bytes != preservedState.canonicalBytes
+            && context.renderer.harnessRevision
+                != preservedState.revision
             && context.renderer.isIdle
             && context.renderer.harnessReservedInstanceBufferCount == 0
             && context.renderer.harnessScheduledAuthoritativeRecords.isEmpty
             && context.renderer.harnessScheduledPredictedRecords.isEmpty
             && context.renderer.harnessPendingInstanceColors.isEmpty
+            && historySnapshots == preservedState.historySnapshots
     }
 }
 
@@ -1740,28 +2177,38 @@ private struct RendererFailureSnapshot: Equatable {
     let canonicalBytes: [UInt8]
     let revision: RasterRevision
     let historyResidentBytes: Int
+    let historySnapshots: [RasterRevisionHarnessSnapshot]
+    let isIdle: Bool
+    let hasActiveStroke: Bool
+    let preparedDrawBrushIdentity: BrushRenderIdentity?
+    let preparedEraserBrushIdentity: BrushRenderIdentity?
+    let capturedCompiledBrushIdentity: BrushRenderIdentity?
     let reservedInstanceBufferCount: Int
-    let scheduledAuthoritativeCount: Int
-    let scheduledPredictedCount: Int
-    let pendingInstanceColorCount: Int
+    let scheduledAuthoritativeRecords: [ProjectedDepositionRecord]
+    let scheduledPredictedRecords: [ProjectedDepositionRecord]
+    let pendingInstanceColors: [SIMD4<Float>]
 }
 
 @MainActor
-private final class FailOnceDepositionPipelinePreparer:
+private final class ArmableDepositionPipelinePreparer:
     DepositionPipelinePreparing
 {
     private let delegate: any DepositionPipelinePreparing
-    private var hasFailed = false
+    private var shouldFailNext = false
 
     init(delegate: any DepositionPipelinePreparing) {
         self.delegate = delegate
     }
 
+    func armFailure() {
+        shouldFailNext = true
+    }
+
     func prepare(
         for key: DepositionPipelineKey
     ) async throws -> DepositionPipelineBinding {
-        if !hasFailed {
-            hasFailed = true
+        if shouldFailNext {
+            shouldFailNext = false
             throw DepositionPipelineLibraryError.pipelineCreationFailed(
                 "injected deposition harness pipeline failure"
             )
@@ -2023,6 +2470,68 @@ private extension DepositionHarnessRunner {
 }
 
 private extension DepositionHarnessRunner {
+    static func disjointTrace(
+        width: Int,
+        height: Int,
+        upper: Bool
+    ) -> [StrokeSample] {
+        let normalized: [SIMD2<Float>] = upper
+            ? [
+                SIMD2(0.60, 0.16),
+                SIMD2(0.66, 0.18),
+                SIMD2(0.72, 0.20),
+                SIMD2(0.78, 0.22),
+                SIMD2(0.84, 0.24),
+            ]
+            : [
+                SIMD2(0.16, 0.76),
+                SIMD2(0.21, 0.78),
+                SIMD2(0.26, 0.80),
+                SIMD2(0.31, 0.82),
+                SIMD2(0.36, 0.84),
+            ]
+        let points = normalized.map {
+            SIMD2($0.x * Float(width), $0.y * Float(height))
+        }
+        return [
+            sample(
+                x: points[0].x,
+                y: points[0].y,
+                pressure: 0.45,
+                timestamp: 0,
+                phase: .began
+            ),
+            sample(
+                x: points[1].x,
+                y: points[1].y,
+                pressure: 0.58,
+                timestamp: 0.01,
+                phase: .moved
+            ),
+            sample(
+                x: points[2].x,
+                y: points[2].y,
+                pressure: 0.72,
+                timestamp: 0.02,
+                phase: .moved
+            ),
+            sample(
+                x: points[3].x,
+                y: points[3].y,
+                pressure: 0.64,
+                timestamp: 0.03,
+                phase: .moved
+            ),
+            sample(
+                x: points[4].x,
+                y: points[4].y,
+                pressure: 0.70,
+                timestamp: 0.04,
+                phase: .ended
+            ),
+        ]
+    }
+
     static func trace(
         width: Int,
         height: Int,
@@ -2414,77 +2923,15 @@ private enum DepositionHarnessFixtures {
 
     static func package(for stem: String) throws -> BrushPackage {
         switch stem {
-        case "deposition-ink":
-            try builtInPackage(
-                id: "builtin.native-ink",
-                name: "Native Ink",
-                shape: .hardRound,
-                grains: [],
-                flow: 0.82,
-                hardness: 0.9,
-                aspect: 1,
-                accumulation: .flow,
-                edge: .none
-            )
-        case "deposition-dry":
-            try builtInPackage(
-                id: "builtin.native-dry-media",
-                name: "Native Dry Media",
-                shape: .hardRound,
-                grains: [grain(.paper, strength: 0.72)],
-                flow: 0.68,
-                hardness: 0.74,
-                aspect: 0.72,
-                accumulation: .flow,
-                edge: .dryBreakup
-            )
-        case "deposition-glaze":
-            try builtInPackage(
-                id: "builtin.native-glaze",
-                name: "Native Glaze",
-                shape: .softRound,
-                grains: [],
-                flow: 0.42,
-                hardness: 0.35,
-                aspect: 1,
-                accumulation: .uniformGlaze,
-                edge: .none
-            )
-        case "deposition-marker":
-            try builtInPackage(
-                id: "builtin.native-marker",
-                name: "Native Marker",
-                shape: .chisel,
-                grains: [],
-                flow: 0.46,
-                hardness: 0.78,
-                aspect: 0.68,
-                accumulation: .uniformGlaze,
-                edge: .markerOverlap
-            )
-        case "deposition-airbrush":
-            try builtInPackage(
-                id: "builtin.native-airbrush",
-                name: "Native Airbrush",
-                shape: .softRound,
-                grains: [],
-                flow: 0.14,
-                hardness: 0.12,
-                aspect: 1,
-                accumulation: .flow,
-                edge: .none
-            )
-        case "deposition-erase":
-            try builtInPackage(
-                id: "builtin.native-eraser",
-                name: "Native Eraser",
-                shape: .hardRound,
-                grains: [],
-                flow: 1,
-                hardness: 0.92,
-                aspect: 1,
-                accumulation: .destinationOut,
-                edge: .none
+        case "deposition-ink",
+             "deposition-dry",
+             "deposition-glaze",
+             "deposition-marker",
+             "deposition-airbrush",
+             "deposition-erase":
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: stem,
+                invariant: "productionAnchorDefinitionInjected"
             )
         case "deposition-custom-asymmetric",
              "deposition-periodic-seams",
@@ -2524,10 +2971,99 @@ private enum DepositionHarnessFixtures {
         grainCount: Int,
         twoShapes: Bool
     ) throws -> BrushPackage {
+        let primaryShapeID = "matrix.primary.shape"
+        let secondaryShapeID = "matrix.secondary.shape"
+        let primaryGrainID = "matrix.primary.grain"
+        let secondaryGrainID = "matrix.secondary.grain"
+        let primaryShapeData = try asymmetricPNG(seed: 17)
+        let secondaryShapeData = try asymmetricPNG(seed: 53)
+        let primaryGrainData = try asymmetricPNG(seed: 107)
+        let secondaryGrainData = try asymmetricPNG(seed: 211)
+        var manifestResources: [BrushPackageResource] = []
+        var resourceReferences: [BrushResourceReference] = []
+        var resourceData: [String: Data] = [:]
+        let primaryShapeResource = try BrushPackageResource(
+            id: primaryShapeID,
+            kind: .shape,
+            mediaType: "image/png",
+            data: primaryShapeData,
+            pixelWidth: 64,
+            pixelHeight: 64
+        )
+        manifestResources.append(primaryShapeResource)
+        resourceReferences.append(
+            BrushResourceReference(
+                identifier: primaryShapeID,
+                kind: .shape,
+                required: true,
+                fallback: nil
+            )
+        )
+        resourceData[primaryShapeID] = primaryShapeData
+        if twoShapes {
+            let resource = try BrushPackageResource(
+                id: secondaryShapeID,
+                kind: .shape,
+                mediaType: "image/png",
+                data: secondaryShapeData,
+                pixelWidth: 64,
+                pixelHeight: 64
+            )
+            manifestResources.append(resource)
+            resourceReferences.append(
+                BrushResourceReference(
+                    identifier: secondaryShapeID,
+                    kind: .shape,
+                    required: true,
+                    fallback: nil
+                )
+            )
+            resourceData[secondaryShapeID] = secondaryShapeData
+        }
+        if grainCount > 0 {
+            let resource = try BrushPackageResource(
+                id: primaryGrainID,
+                kind: .grain,
+                mediaType: "image/png",
+                data: primaryGrainData,
+                pixelWidth: 64,
+                pixelHeight: 64
+            )
+            manifestResources.append(resource)
+            resourceReferences.append(
+                BrushResourceReference(
+                    identifier: primaryGrainID,
+                    kind: .grain,
+                    required: true,
+                    fallback: nil
+                )
+            )
+            resourceData[primaryGrainID] = primaryGrainData
+        }
+        if grainCount > 1 {
+            let resource = try BrushPackageResource(
+                id: secondaryGrainID,
+                kind: .grain,
+                mediaType: "image/png",
+                data: secondaryGrainData,
+                pixelWidth: 64,
+                pixelHeight: 64
+            )
+            manifestResources.append(resource)
+            resourceReferences.append(
+                BrushResourceReference(
+                    identifier: secondaryGrainID,
+                    kind: .grain,
+                    required: true,
+                    fallback: nil
+                )
+            )
+            resourceData[secondaryGrainID] = secondaryGrainData
+        }
         let secondary: [BrushShapeLayerDefinition] = twoShapes
             ? [
                 BrushShapeLayerDefinition(
-                    shape: .softRound,
+                    shape: .asset(secondaryShapeID),
                     combination: combination,
                     scale: 0.72,
                     rotation: 0.37,
@@ -2536,17 +3072,19 @@ private enum DepositionHarnessFixtures {
             ]
             : []
         let grains = [
-            grain(.paper, strength: 0.55),
-            grain(.noise, strength: 0.35),
+            grain(.asset(primaryGrainID), strength: 0.55),
+            grain(.asset(secondaryGrainID), strength: 0.35),
         ]
+        manifestResources.sort { $0.id < $1.id }
+        resourceReferences.sort { $0.identifier < $1.identifier }
         let definition = try definition(
             id:
                 "evidence.layer-\(combination.rawValue)-\(grainCount)-\(twoShapes)",
             name: "Native Layer Matrix",
-            resources: [],
+            resources: resourceReferences,
             shapes: [
                 BrushShapeLayerDefinition(
-                    shape: .hardRound,
+                    shape: .asset(primaryShapeID),
                     combination: .replace,
                     scale: 1,
                     rotation: 0,
@@ -2561,9 +3099,9 @@ private enum DepositionHarnessFixtures {
             edge: .none
         )
         return try BrushPackage(
-            manifest: BrushPackageManifest(resources: []),
+            manifest: BrushPackageManifest(resources: manifestResources),
             definition: definition,
-            resourceData: [:]
+            resourceData: resourceData
         )
     }
 

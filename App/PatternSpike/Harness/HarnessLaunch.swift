@@ -34,7 +34,21 @@ enum HarnessLaunch {
                 Task { @MainActor in
                     do {
                         let result = try await DepositionHarnessRunner(
-                            device: device
+                            device: device,
+                            productionAnchorDefinitions: [
+                                "deposition-airbrush":
+                                    AnchorBrushCatalog.airbrush.definition,
+                                "deposition-dry":
+                                    AnchorBrushCatalog.dryMedia.definition,
+                                "deposition-erase":
+                                    AnchorBrushCatalog.eraser.definition,
+                                "deposition-glaze":
+                                    AnchorBrushCatalog.glaze.definition,
+                                "deposition-ink":
+                                    AnchorBrushCatalog.ink.definition,
+                                "deposition-marker":
+                                    AnchorBrushCatalog.marker.definition,
+                            ]
                         ).run(
                             scene: scene,
                             outputDirectory: outputDirectory,

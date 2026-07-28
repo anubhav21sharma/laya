@@ -72,12 +72,18 @@ public enum DepositionEvidenceValidator {
     public static let allowedInvariantNames: Set<String> =
         namedMetamorphicInvariants.union([
             "activeCompiledBrushPinned",
+            "activeBrushSurvivesPressureAndFailure",
             "customTexturesExact",
             "failurePreservesCanonicalAndHistory",
+            "failureStartsFromNonemptyExactHistory",
             "familyAndAccumulationCorrect",
+            "layerCartesianRenderDistinct",
+            "pipelineFailureUsesSeededRenderer",
             "previewCommitMaximumDeltaWithinTolerance",
+            "productionAnchorIdentityExact",
             "secondaryLayerPresent",
             "strokeCompilerCountersUnchanged",
+            "strokePipelinePreparationUnchanged",
             "textureMipSelectionCorrect",
         ])
 

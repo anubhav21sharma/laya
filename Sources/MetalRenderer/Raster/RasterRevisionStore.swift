@@ -42,6 +42,11 @@ public struct PendingRasterRevisionPair: Equatable, Sendable {
     }
 }
 
+struct RasterRevisionHarnessSnapshot: Equatable {
+    let reference: RasterRevisionReference
+    let retainedBytes: Data
+}
+
 public final class RasterRevisionStore: @unchecked Sendable {
     private enum Lifetime {
         case provisional
@@ -102,6 +107,65 @@ public final class RasterRevisionStore: @unchecked Sendable {
 
     public var residentBytes: Int {
         withLock { residentByteCount }
+    }
+
+    func snapshotsForHarness() throws
+        -> [RasterRevisionHarnessSnapshot]
+    {
+        let payloads = withLock {
+            entries.values.compactMap { entry -> Payload? in
+                guard case .published = entry.lifetime else { return nil }
+                return entry.payload
+            }
+        }
+        .sorted {
+            $0.reference.id.rawValue < $1.reference.id.rawValue
+        }
+        guard !payloads.isEmpty else { return [] }
+        var staging: [(RasterRevisionReference, any MTLBuffer)] = []
+        staging.reserveCapacity(payloads.count)
+        for payload in payloads {
+            guard let buffer = device.makeBuffer(
+                length: payload.reference.retainedBytes,
+                options: .storageModeShared
+            ) else {
+                throw MetalRendererError.rasterRevisionBufferAllocationFailed
+            }
+            staging.append((payload.reference, buffer))
+        }
+        guard let commandQueue = device.makeCommandQueue(),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeBlitCommandEncoder()
+        else {
+            throw MetalRendererError.commandBufferUnavailable
+        }
+        for (payload, staged) in zip(payloads, staging) {
+            encoder.copy(
+                from: payload.buffer,
+                sourceOffset: 0,
+                to: staged.1,
+                destinationOffset: 0,
+                size: payload.reference.retainedBytes
+            )
+        }
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else {
+            throw MetalRendererError.commandFailed(
+                commandBuffer.error?.localizedDescription
+                    ?? "Retained revision snapshot failed."
+            )
+        }
+        return staging.map { reference, buffer in
+            RasterRevisionHarnessSnapshot(
+                reference: reference,
+                retainedBytes: Data(
+                    bytes: buffer.contents(),
+                    count: reference.retainedBytes
+                )
+            )
+        }
     }
 
     public func retainedBytes(

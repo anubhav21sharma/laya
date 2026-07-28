@@ -751,6 +751,9 @@ extension GridRenderer {
     var harnessRasterRevisionResidentBytes: Int {
         revisionStore.residentBytes
     }
+    var harnessRasterRevisionSnapshots: [RasterRevisionHarnessSnapshot] {
+        get throws { try revisionStore.snapshotsForHarness() }
+    }
     var harnessReservedInstanceBufferCount: Int {
         instancePool.unavailableSlotCount
     }

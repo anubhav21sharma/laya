@@ -1,5 +1,8 @@
+import BrushFormat
+import EditorCore
 import Foundation
 import Metal
+import PatternEngine
 @testable import MetalRenderer
 import Testing
 
@@ -94,7 +97,7 @@ struct DepositionHarnessRunnerTests {
         )
         defer { try? FileManager.default.removeItem(at: output) }
 
-        let result = try await DepositionHarnessRunner(
+        let result = try await depositionHarnessRunner(
             device: device,
             library: library
         ).run(
@@ -151,7 +154,7 @@ struct DepositionHarnessRunnerTests {
         defer { try? FileManager.default.removeItem(at: output) }
 
         await #expect(throws: DepositionEvidenceValidationError.self) {
-            _ = try await DepositionHarnessRunner(
+            _ = try await depositionHarnessRunner(
                 device: device,
                 library: library
             ).run(
@@ -174,7 +177,7 @@ struct DepositionHarnessRunnerTests {
         let output = temporaryDirectory(named: name)
         defer { try? FileManager.default.removeItem(at: output) }
 
-        _ = try await DepositionHarnessRunner(
+        _ = try await depositionHarnessRunner(
             device: device,
             library: depositionHarnessTestLibrary(device: device)
         ).run(
@@ -207,7 +210,7 @@ struct DepositionHarnessRunnerTests {
         defer { try? FileManager.default.removeItem(at: output) }
 
         await #expect(throws: DepositionEvidenceValidationError.self) {
-            _ = try await DepositionHarnessRunner(
+            _ = try await depositionHarnessRunner(
                 device: device,
                 library: depositionHarnessTestLibrary(device: device)
             ).run(
@@ -219,6 +222,115 @@ struct DepositionHarnessRunnerTests {
                 )
             )
         }
+    }
+
+    @Test
+    @MainActor
+    func sixAnchorScenesUseExactProductionCatalogDefinitions() async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try depositionHarnessTestLibrary(device: device)
+        let fixtures: [(String, AnchorBrushEntry)] = [
+            ("deposition-airbrush", AnchorBrushCatalog.airbrush),
+            ("deposition-dry", AnchorBrushCatalog.dryMedia),
+            ("deposition-erase", AnchorBrushCatalog.eraser),
+            ("deposition-glaze", AnchorBrushCatalog.glaze),
+            ("deposition-ink", AnchorBrushCatalog.ink),
+            ("deposition-marker", AnchorBrushCatalog.marker),
+        ]
+
+        for (sceneName, anchor) in fixtures {
+            let output = temporaryDirectory(
+                named: "production-anchor-\(sceneName)"
+            )
+            defer { try? FileManager.default.removeItem(at: output) }
+            _ = try await depositionHarnessRunner(
+                device: device,
+                library: library
+            ).run(
+                scene: repositoryScene(named: sceneName),
+                outputDirectory: output,
+                build: BenchmarkBuild(
+                    configuration: "Testing",
+                    gitCommit: String(repeating: "c", count: 40)
+                )
+            )
+            let evidence = try DepositionSceneEvidence.decode(
+                Data(
+                    contentsOf: output.appendingPathComponent(
+                        "\(sceneName).deposition-evidence.json"
+                    )
+                )
+            )
+            let package = try BrushPackage(
+                manifest: BrushPackageManifest(resources: []),
+                definition: anchor.definition,
+                resourceData: [:]
+            )
+            let expectedSemanticHash = try package.contentHash
+
+            #expect(evidence.definitionID == anchor.id.rawValue)
+            #expect(evidence.semanticHash == expectedSemanticHash)
+            #expect(
+                evidence.invariantResults[
+                    "productionAnchorIdentityExact"
+                ] == true
+            )
+        }
+    }
+
+    @Test(arguments: [
+        (
+            "deposition-ink",
+            "strokePipelinePreparationUnchanged"
+        ),
+        (
+            "deposition-failure-matrix",
+            "failureStartsFromNonemptyExactHistory"
+        ),
+        (
+            "deposition-failure-matrix",
+            "pipelineFailureUsesSeededRenderer"
+        ),
+        (
+            "deposition-layer-matrix",
+            "layerCartesianRenderDistinct"
+        ),
+        (
+            "deposition-cache-pinning",
+            "activeBrushSurvivesPressureAndFailure"
+        ),
+    ])
+    @MainActor
+    func strengthenedEvidenceGuaranteeIsObservable(
+        _ sceneName: String,
+        _ invariant: String
+    ) async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let output = temporaryDirectory(
+            named: "strengthened-\(sceneName)-\(invariant)"
+        )
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        _ = try await depositionHarnessRunner(
+            device: device,
+            library: depositionHarnessTestLibrary(device: device)
+        ).run(
+            scene: repositoryScene(named: sceneName),
+            outputDirectory: output,
+            build: BenchmarkBuild(
+                configuration: "Testing",
+                gitCommit: String(repeating: "d", count: 40)
+            )
+        )
+        let evidence = try DepositionSceneEvidence.decode(
+            Data(
+                contentsOf: output.appendingPathComponent(
+                    "\(sceneName).deposition-evidence.json"
+                )
+            )
+        )
+
+        #expect(evidence.invariantResults[invariant] == true)
     }
 }
 
@@ -243,6 +355,25 @@ func temporaryDirectory(named name: String) -> URL {
     FileManager.default.temporaryDirectory.appendingPathComponent(
         "laya-deposition-\(name)-\(UUID().uuidString)",
         isDirectory: true
+    )
+}
+
+@MainActor
+func depositionHarnessRunner(
+    device: any MTLDevice,
+    library: any MTLLibrary
+) -> DepositionHarnessRunner {
+    DepositionHarnessRunner(
+        device: device,
+        library: library,
+        productionAnchorDefinitions: [
+            "deposition-airbrush": AnchorBrushCatalog.airbrush.definition,
+            "deposition-dry": AnchorBrushCatalog.dryMedia.definition,
+            "deposition-erase": AnchorBrushCatalog.eraser.definition,
+            "deposition-glaze": AnchorBrushCatalog.glaze.definition,
+            "deposition-ink": AnchorBrushCatalog.ink.definition,
+            "deposition-marker": AnchorBrushCatalog.marker.definition,
+        ]
     )
 }
 

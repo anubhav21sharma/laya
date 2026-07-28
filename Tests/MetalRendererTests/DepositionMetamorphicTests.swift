@@ -43,7 +43,7 @@ struct DepositionMetamorphicTests {
         let output = temporaryDirectory(named: fixture.name)
         defer { try? FileManager.default.removeItem(at: output) }
 
-        _ = try await DepositionHarnessRunner(
+        _ = try await depositionHarnessRunner(
             device: device,
             library: library
         ).run(

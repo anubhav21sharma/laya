@@ -46,6 +46,8 @@ struct DepositionPipelineLibraryTests {
         #expect(firstBinding === secondBinding)
         #expect(firstBinding === repeated)
         #expect(firstBinding.state === repeated.state)
+        #expect(context.pipelines.debugPrepareCallCount == 3)
+        #expect(context.pipelines.debugPreparedPipelineCount == 1)
         #expect(
             try context.pipelines.preparedBinding(for: requested)
                 === firstBinding
