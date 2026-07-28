@@ -1,6 +1,6 @@
+@testable import BrushFormat
 import Foundation
 import Testing
-@testable import BrushFormat
 
 @Test func packageIOSavesLoadsAndAtomicallyReplaces() throws {
     let directory = try BrushFormatTestSupport.temporaryDirectory()
@@ -62,13 +62,32 @@ import Testing
     #expect(try temporaryFiles(in: directory).isEmpty)
 }
 
+@Test func saveWithoutReplacementNeverOverwritesExistingBytes() throws {
+    let directory = try BrushFormatTestSupport.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let destination = directory.appendingPathComponent("brush.layabrush")
+    let original = Data("existing destination".utf8)
+    try original.write(to: destination)
+
+    #expect(throws: BrushPackageError.ioFailure) {
+        try BrushPackageIO.save(
+            BrushFormatTestSupport.package(),
+            to: destination,
+            replacingExisting: false
+        )
+    }
+
+    #expect(try Data(contentsOf: destination) == original)
+    #expect(try temporaryFiles(in: directory).isEmpty)
+}
+
 @Test func concurrentIndependentPackageSavesRemainValid() async throws {
     let directory = try BrushFormatTestSupport.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let package = try BrushFormatTestSupport.package()
 
     try await withThrowingTaskGroup(of: Void.self) { group in
-        for index in 0..<8 {
+        for index in 0 ..< 8 {
             group.addTask {
                 let destination = directory.appendingPathComponent("\(index).layabrush")
                 try BrushPackageIO.save(package, to: destination)

@@ -5,12 +5,31 @@ public enum BrushPackageIO {
         _ package: BrushPackage,
         to destination: URL
     ) throws {
-        try save(package, to: destination, beforeReplacement: { _ in })
+        try save(
+            package,
+            to: destination,
+            replacingExisting: true,
+            beforeReplacement: { _ in }
+        )
+    }
+
+    public static func save(
+        _ package: BrushPackage,
+        to destination: URL,
+        replacingExisting: Bool
+    ) throws {
+        try save(
+            package,
+            to: destination,
+            replacingExisting: replacingExisting,
+            beforeReplacement: { _ in }
+        )
     }
 
     package static func save(
         _ package: BrushPackage,
         to destination: URL,
+        replacingExisting: Bool = true,
         beforeReplacement: (URL) throws -> Void
     ) throws {
         let encoded = try BrushPackageCodec.encode(package)
@@ -32,6 +51,9 @@ public enum BrushPackageIO {
             }
             try beforeReplacement(temporary)
             if fileManager.fileExists(atPath: destination.path) {
+                guard replacingExisting else {
+                    throw BrushPackageError.ioFailure
+                }
                 _ = try fileManager.replaceItemAt(
                     destination,
                     withItemAt: temporary,

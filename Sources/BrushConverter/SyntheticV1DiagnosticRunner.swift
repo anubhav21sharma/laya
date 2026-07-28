@@ -126,17 +126,17 @@ public enum SyntheticV1DiagnosticRunner {
                 $0.sourceSemanticKey == SyntheticV1SemanticKeys.wet
             }
             guard definition.compatibility.requiredSemanticKeys
-                    == [SyntheticV1SemanticKeys.wet],
-                  definition.material.interaction == .wetMix,
-                  definition.capabilities
-                    == [
-                        BrushCapabilityDeclaration(
-                            identifier: BrushCapability.wetMix.rawValue,
-                            required: true
-                        ),
-                    ],
-                  wetEntry?.disposition == .unsupported,
-                  wetEntry?.requiredForFaithfulRendering == true
+                == [SyntheticV1SemanticKeys.wet],
+                definition.material.interaction == .wetMix,
+                definition.capabilities
+                == [
+                    BrushCapabilityDeclaration(
+                        identifier: BrushCapability.wetMix.rawValue,
+                        required: true
+                    ),
+                ],
+                wetEntry?.disposition == .unsupported,
+                wetEntry?.requiredForFaithfulRendering == true
             else {
                 throw SyntheticV1DiagnosticFailure(stage: .activation)
             }
@@ -149,89 +149,15 @@ public enum SyntheticV1DiagnosticRunner {
             approximated: summary.approximated,
             exact: summary.exact,
             nativeFeatureVersion:
-                definition.compatibility.nativeFeatureVersion,
+            definition.compatibility.nativeFeatureVersion,
             packageRoundTrip: true,
             requiredSemanticKeys:
-                definition.compatibility.requiredSemanticKeys,
+            definition.compatibility.requiredSemanticKeys,
             resourceResampled: summary.resourceResampled,
             scenario: scenario,
             sourceSettingCount:
-                definition.compatibility.sourceSettingKeys.count,
+            definition.compatibility.sourceSettingKeys.count,
             unsupported: summary.unsupported
-        )
-    }
-}
-
-public struct LayabrushConvertCommandOutput: Equatable, Sendable {
-    public let exitStatus: Int32
-    public let standardOutput: String
-    public let standardError: String
-}
-
-public enum LayabrushConvertCommandRunner {
-    public static let usage =
-        "usage: layabrush-convert diagnostic synthetic-v1 <dry|wet>\n"
-
-    public static func run(
-        arguments: [String]
-    ) -> LayabrushConvertCommandOutput {
-        run(arguments: arguments) {
-            try SyntheticV1DiagnosticRunner.run(scenario: $0)
-        }
-    }
-
-    static func run(
-        arguments: [String],
-        execute: (SyntheticV1DiagnosticScenario) throws
-            -> SyntheticV1DiagnosticResult
-    ) -> LayabrushConvertCommandOutput {
-        guard arguments.count == 3,
-              arguments[0] == "diagnostic",
-              arguments[1] == "synthetic-v1",
-              let scenario = SyntheticV1DiagnosticScenario(
-                rawValue: arguments[2]
-              )
-        else {
-            return LayabrushConvertCommandOutput(
-                exitStatus: 64,
-                standardOutput: "",
-                standardError: usage
-            )
-        }
-
-        do {
-            let result = try execute(scenario)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [
-                .sortedKeys,
-                .withoutEscapingSlashes,
-            ]
-            guard let data = try? encoder.encode(result),
-                  let output = String(data: data, encoding: .utf8)
-            else {
-                return failure(stage: .map)
-            }
-            return LayabrushConvertCommandOutput(
-                exitStatus: 0,
-                standardOutput: output + "\n",
-                standardError: ""
-            )
-        } catch let failure as SyntheticV1DiagnosticFailure {
-            return self.failure(stage: failure.stage)
-        } catch {
-            return failure(stage: .fixture)
-        }
-    }
-
-    private static func failure(
-        stage: SyntheticV1DiagnosticStage
-    ) -> LayabrushConvertCommandOutput {
-        LayabrushConvertCommandOutput(
-            exitStatus: 70,
-            standardOutput: "",
-            standardError:
-                "layabrush-convert: synthetic-v1 diagnostic failed at "
-                + "\(stage.rawValue)\n"
         )
     }
 }
