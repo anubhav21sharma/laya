@@ -287,6 +287,166 @@ struct BrushCompilerTests {
     }
 
     @Test
+    func compiledBrushRenderIdentityUsesPackageSemanticHash() async throws {
+        guard let setup = try compilerSetup() else { return }
+        let package = try compilerPackage(definitionID: "brush.identity")
+
+        let compiled = try await setup.compiler.compileAndActivate(
+            package: package
+        )
+
+        #expect(
+            compiled.renderIdentity
+                == (try BrushRenderIdentity(
+                    definitionID: package.definition.id,
+                    semanticHash: package.contentHash
+                ))
+        )
+    }
+
+    @Test
+    func wetDefinitionFailsBeforeDecodeUploadOrActivation() async throws {
+        guard let setup = try compilerSetup() else { return }
+        let wet = try compilerPackage(
+            definitionID: "brush.wet",
+            interaction: .wetMix
+        )
+
+        let before = setup.compiler.debugCounters
+        let failure = try await compilationFailure {
+            _ = try await setup.compiler.compileAndActivate(package: wet)
+        }
+
+        #expect(failure.stage == .pipelineSelection)
+        #expect(failure.backend == .canvasInteraction)
+        #expect(failure.reason == "unsupportedInteraction")
+        #expect(
+            setup.compiler.debugCounters.packageDecodeCount
+                == before.packageDecodeCount
+        )
+        #expect(
+            setup.compiler.debugCounters.imageDecodeCount
+                == before.imageDecodeCount
+        )
+        #expect(
+            setup.compiler.debugCounters.textureUploadCount
+                == before.textureUploadCount
+        )
+        #expect(
+            setup.compiler.debugCounters.activationCount
+                == before.activationCount
+        )
+        #expect(setup.compiler.activeBrush == nil)
+    }
+
+    @Test
+    func wetConcentrationFailsBeforeDecodeUploadOrActivation() async throws {
+        guard let setup = try compilerSetup() else { return }
+        let wetEdge = try compilerPackage(
+            definitionID: "brush.wet-edge",
+            edgeTreatment: .wetConcentration
+        )
+
+        let before = setup.compiler.debugCounters
+        let failure = try await compilationFailure {
+            _ = try await setup.compiler.compileAndActivate(package: wetEdge)
+        }
+
+        #expect(failure.stage == .pipelineSelection)
+        #expect(failure.backend == .deposition)
+        #expect(failure.reason == "unsupportedWetConcentration")
+        #expect(
+            setup.compiler.debugCounters.packageDecodeCount
+                == before.packageDecodeCount
+        )
+        #expect(
+            setup.compiler.debugCounters.imageDecodeCount
+                == before.imageDecodeCount
+        )
+        #expect(
+            setup.compiler.debugCounters.textureUploadCount
+                == before.textureUploadCount
+        )
+        #expect(
+            setup.compiler.debugCounters.activationCount
+                == before.activationCount
+        )
+        #expect(setup.compiler.activeBrush == nil)
+    }
+
+    @Test
+    func failedReplacementLeavesPriorCompiledBrushPinned() async throws {
+        guard let setup = try compilerSetup() else { return }
+        let active = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(definitionID: "brush.active")
+        )
+        let keys = setup.compiler.cachedKeys
+        let pinned = setup.compiler.pinnedKeys
+        let bytes = setup.compiler.residentByteCount
+        let counters = setup.compiler.debugCounters
+        let replacement = try compilerPackage(
+            definitionID: "brush.failed-replacement",
+            interaction: .smudge
+        )
+
+        _ = try await compilationFailure {
+            _ = try await setup.compiler.compileAndActivate(
+                package: replacement
+            )
+        }
+
+        #expect(setup.compiler.activeBrush === active)
+        #expect(setup.compiler.cachedKeys == keys)
+        #expect(setup.compiler.pinnedKeys == pinned)
+        #expect(setup.compiler.residentByteCount == bytes)
+        #expect(
+            setup.compiler.debugCounters.packageDecodeCount
+                == counters.packageDecodeCount
+        )
+        #expect(
+            setup.compiler.debugCounters.imageDecodeCount
+                == counters.imageDecodeCount
+        )
+        #expect(
+            setup.compiler.debugCounters.textureUploadCount
+                == counters.textureUploadCount
+        )
+        #expect(
+            setup.compiler.debugCounters.activationCount
+                == counters.activationCount
+        )
+    }
+
+    @Test
+    func equalDefinitionWithDifferentResourceHashHasDifferentRenderIdentity()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let firstPackage = try compilerPackage(
+            definitionID: "brush.resource-identity"
+        )
+        let secondPackage = try compilerPackage(
+            definitionID: "brush.resource-identity",
+            resourceBytes: Data(compilerFixturePNG + [0])
+        )
+        #expect(firstPackage.definition == secondPackage.definition)
+        #expect(try firstPackage.contentHash != secondPackage.contentHash)
+
+        let first = try await setup.compiler.compileAndActivate(
+            package: firstPackage
+        )
+        let second = try await setup.compiler.compileAndActivate(
+            package: secondPackage
+        )
+
+        #expect(
+            first.renderIdentity.definitionID
+                == second.renderIdentity.definitionID
+        )
+        #expect(first.renderIdentity != second.renderIdentity)
+    }
+
+    @Test
     func effectiveDefinitionAndDeviceCeilingsAreAppliedBeforeDecode() async throws {
         guard let setup = try compilerSetup(
             maximumWorkingTextureDimension: 4,
@@ -527,7 +687,7 @@ struct BrushCompilerTests {
             _ = try await setup.compiler.compileAndActivate(package: interaction)
         }
         #expect(interactionFailure.stage == .pipelineSelection)
-        #expect(interactionFailure.reason == "unsupportedBackend")
+        #expect(interactionFailure.reason == "unsupportedInteraction")
 
         let invalidInteractionProgram = try compilerPackage(
             definitionID: "brush.invalid-interaction-program",
@@ -1081,6 +1241,7 @@ private func compilerPackage(
     performanceIntent: BrushPerformanceIntent = .realtime120,
     requiredSemanticKeys: [String] = [],
     interaction: BrushInteractionMode = .none,
+    edgeTreatment: BrushEdgeTreatment? = nil,
     includePreview: Bool = false,
     includeExtraShapeResource: Bool = false,
     additionalDirectShape: BrushShapeDescriptor? = nil,
@@ -1159,33 +1320,47 @@ private func compilerPackage(
     }
     var capabilities: [BrushCapabilityDeclaration]
     let material: BrushMaterialDefinition
-    if interaction == .none {
+    if interaction == .none, edgeTreatment == nil {
         capabilities = base.capabilities
         material = base.material
     } else {
-        capabilities = [
-            BrushCapabilityDeclaration(
-                identifier: BrushCapability.canvasInteraction.rawValue,
-                required: true
-            ),
-        ]
+        let interactionCapability: BrushCapability? = switch interaction {
+        case .none:
+            nil
+        case .pickup:
+            .canvasInteraction
+        case .smudge:
+            .smudge
+        case .wetMix:
+            .wetMix
+        }
+        capabilities = interactionCapability.map {
+            [
+                BrushCapabilityDeclaration(
+                    identifier: $0.rawValue,
+                    required: true
+                ),
+            ]
+        } ?? base.capabilities
         material = BrushMaterialDefinition(
             accumulation: base.material.accumulation,
             interaction: interaction,
-            edgeTreatment: base.material.edgeTreatment,
+            edgeTreatment: edgeTreatment ?? base.material.edgeTreatment,
             strength: base.material.strength,
             wetness: base.material.wetness,
             bleedRadius: base.material.bleedRadius,
             softenPasses: base.material.softenPasses,
             accumulationLimit: base.material.accumulationLimit,
-            interactionParameters: BrushInteractionDefinition(
-                pickup: 0.5,
-                pull: 0,
-                dilution: 0,
-                charge: 0,
-                persistence: 0,
-                dirtyHaloRadius: 0
-            )
+            interactionParameters: interaction == .none
+                ? nil
+                : BrushInteractionDefinition(
+                    pickup: 0.5,
+                    pull: 0,
+                    dilution: 0,
+                    charge: 0,
+                    persistence: 0,
+                    dirtyHaloRadius: 0
+                )
         )
     }
     capabilities.append(contentsOf: extraCapabilities)

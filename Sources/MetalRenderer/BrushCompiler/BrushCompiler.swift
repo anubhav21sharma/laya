@@ -153,12 +153,15 @@ public final class BrushCompiler {
         package: BrushPackage
     ) async throws -> CompiledBrush {
         let generation = try beginRequest()
-        increment(.packageDecode)
         let definitionID = package.definition.id.rawValue
         let packageHash = try await packageContentHash(
             package,
             definitionID: definitionID,
             generation: generation
+        )
+        let renderIdentity = try BrushRenderIdentity(
+            definitionID: package.definition.id,
+            semanticHash: packageHash
         )
         let requestedBackend: BrushBackendKind =
             package.definition.material.interaction == .none
@@ -179,6 +182,19 @@ public final class BrushCompiler {
             )
         }
 
+        do {
+            try validateDepositionSupport(program)
+        } catch let error as DepositionPreparationError {
+            throw try failure(
+                packageHash: packageHash,
+                backend: program.requestedBackend,
+                stage: .pipelineSelection,
+                resourceID: nil,
+                requestedBytes: nil,
+                reason: depositionFailureReason(error),
+                definitionID: definitionID
+            )
+        }
         guard package.definition.compatibility.requiredSemanticKeys.isEmpty else {
             throw try failure(
                 packageHash: packageHash,
@@ -201,6 +217,7 @@ public final class BrushCompiler {
                 definitionID: definitionID
             )
         }
+        increment(.packageDecode)
 
         let effectiveDimension = min(
             BrushDeviceProfile.maximumPortableTextureDimension,
@@ -216,7 +233,8 @@ public final class BrushCompiler {
             recommendedWorkingSetBytes: profile.recommendedWorkingSetBytes,
             maximumWorkingTextureDimension: effectiveDimension,
             brushCacheBudgetBytes: effectiveBudget,
-            targetFramesPerSecond: profile.targetFramesPerSecond
+            targetFramesPerSecond: profile.targetFramesPerSecond,
+            depositionFrameBudget: profile.depositionFrameBudget
         )
 
         let work: [BrushCompilerResourceWork]
@@ -465,6 +483,7 @@ public final class BrushCompiler {
         )
         let compiled = CompiledBrush(
             program: program,
+            renderIdentity: renderIdentity,
             pipelineKey: pipelineKey,
             uniformTemplate: uniformTemplate,
             textures: textures,
@@ -481,6 +500,39 @@ public final class BrushCompiler {
         activeBrush = compiled
         increment(.activation)
         return compiled
+    }
+
+    private func validateDepositionSupport(
+        _ program: BrushProgram
+    ) throws {
+        let material = program.definition.material
+        guard material.interaction == .none else {
+            throw DepositionPreparationError.unsupportedInteraction(
+                material.interaction
+            )
+        }
+        guard material.edgeTreatment != .wetConcentration else {
+            throw DepositionPreparationError.unsupportedEdgeTreatment(
+                material.edgeTreatment
+            )
+        }
+    }
+
+    private func depositionFailureReason(
+        _ error: DepositionPreparationError
+    ) -> String {
+        switch error {
+        case .unsupportedInteraction:
+            "unsupportedInteraction"
+        case .unsupportedEdgeTreatment(.wetConcentration):
+            "unsupportedWetConcentration"
+        case .unsupportedEdgeTreatment:
+            "unsupportedEdgeTreatment"
+        case .missingRequiredResource:
+            "missingRequiredResource"
+        case .pipelinePreparationFailed:
+            "pipelinePreparationFailed"
+        }
     }
 
     public func handleMemoryPressure(

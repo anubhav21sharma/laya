@@ -81,15 +81,14 @@ private enum BrushCompilationReportValidator {
         definitionID: String,
         packageContentHash: String
     ) throws {
-        guard !definitionID.isEmpty else {
+        do {
+            _ = try BrushRenderIdentity(
+                definitionID: BrushRecipeID(definitionID),
+                semanticHash: packageContentHash
+            )
+        } catch BrushRenderIdentityError.emptyDefinitionID {
             throw BrushCompilationReportValidationError.emptyDefinitionID
-        }
-        let hashBytes = packageContentHash.utf8
-        guard hashBytes.count == 64,
-              hashBytes.allSatisfy({
-                  (48...57).contains($0) || (97...102).contains($0)
-              })
-        else {
+        } catch {
             throw BrushCompilationReportValidationError
                 .invalidPackageContentHash
         }

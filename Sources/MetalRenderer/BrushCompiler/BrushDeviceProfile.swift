@@ -1,4 +1,5 @@
 import Foundation
+import PatternEngine
 
 public enum BrushDeviceProfileError: Error, Equatable, Sendable {
     case invalidRecommendedWorkingSetBytes
@@ -15,13 +16,15 @@ public struct BrushDeviceProfile: Equatable, Sendable {
     public let maximumWorkingTextureDimension: Int
     public let brushCacheBudgetBytes: Int
     public let targetFramesPerSecond: Int
+    public let depositionFrameBudget: DepositionFrameBudget
 
     public init(
         registryID: UInt64,
         recommendedWorkingSetBytes: UInt64,
         maximumWorkingTextureDimension: Int,
         brushCacheBudgetBytes: Int? = nil,
-        targetFramesPerSecond: Int
+        targetFramesPerSecond: Int,
+        depositionFrameBudget: DepositionFrameBudget? = nil
     ) throws {
         guard recommendedWorkingSetBytes > 0 else {
             throw BrushDeviceProfileError.invalidRecommendedWorkingSetBytes
@@ -60,5 +63,25 @@ public struct BrushDeviceProfile: Equatable, Sendable {
         self.maximumWorkingTextureDimension = maximumWorkingTextureDimension
         self.brushCacheBudgetBytes = cacheBudget
         self.targetFramesPerSecond = targetFramesPerSecond
+        if let depositionFrameBudget {
+            self.depositionFrameBudget = depositionFrameBudget
+        } else {
+            self.depositionFrameBudget = try DepositionFrameBudget(
+                cpuPreparationNanoseconds:
+                    targetFramesPerSecond >= 120 ? 1_500_000 : 2_000_000,
+                maximumAuthoritativeInstances:
+                    GridCanvasContract.instanceCapacity,
+                maximumPredictedInstances:
+                    TransientStrokeBufferContract
+                        .visibleEpochProjectedInstanceCapacity,
+                maximumPendingAuthoritativeInstances:
+                    GridCanvasContract.pendingCapacity,
+                maximumPendingPredictedInstances:
+                    TransientStrokeBufferContract
+                        .visibleEpochProjectedInstanceCapacity,
+                inFlightUploadBufferCount:
+                    GridCanvasContract.inFlightBufferCount
+            )
+        }
     }
 }

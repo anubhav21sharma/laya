@@ -87,6 +87,77 @@ struct BrushDeviceProfileTests {
         #expect(profile.targetFramesPerSecond == 60)
     }
 
+    @Test
+    func explicitDepositionFrameBudgetIsPreserved() throws {
+        let budget = try DepositionFrameBudget(
+            cpuPreparationNanoseconds: 900_000,
+            maximumAuthoritativeInstances: 1_000,
+            maximumPredictedInstances: 500,
+            maximumPendingAuthoritativeInstances: 2_000,
+            maximumPendingPredictedInstances: 1_000,
+            inFlightUploadBufferCount: 2
+        )
+        let profile = try BrushDeviceProfile(
+            registryID: 99,
+            recommendedWorkingSetBytes: 512 * 1_024 * 1_024,
+            maximumWorkingTextureDimension: 2_048,
+            targetFramesPerSecond: 60,
+            depositionFrameBudget: budget
+        )
+
+        #expect(profile.depositionFrameBudget == budget)
+    }
+
+    @Test
+    func depositionFrameBudgetDefaultsDependOnlyOnRefreshTier() throws {
+        let realtime120 = try BrushDeviceProfile(
+            registryID: 1,
+            recommendedWorkingSetBytes: 512 * 1_024 * 1_024,
+            maximumWorkingTextureDimension: 4_096,
+            targetFramesPerSecond: 120
+        )
+        let realtime60 = try BrushDeviceProfile(
+            registryID: UInt64.max,
+            recommendedWorkingSetBytes: 8 * 1_024 * 1_024 * 1_024,
+            maximumWorkingTextureDimension: 1_024,
+            targetFramesPerSecond: 60
+        )
+
+        #expect(
+            realtime120.depositionFrameBudget.cpuPreparationNanoseconds
+                == 1_500_000
+        )
+        #expect(
+            realtime60.depositionFrameBudget.cpuPreparationNanoseconds
+                == 2_000_000
+        )
+        for profile in [realtime120, realtime60] {
+            let budget = profile.depositionFrameBudget
+            #expect(
+                budget.maximumAuthoritativeInstances
+                    == GridCanvasContract.instanceCapacity
+            )
+            #expect(
+                budget.maximumPredictedInstances
+                    == TransientStrokeBufferContract
+                        .visibleEpochProjectedInstanceCapacity
+            )
+            #expect(
+                budget.maximumPendingAuthoritativeInstances
+                    == GridCanvasContract.pendingCapacity
+            )
+            #expect(
+                budget.maximumPendingPredictedInstances
+                    == TransientStrokeBufferContract
+                        .visibleEpochProjectedInstanceCapacity
+            )
+            #expect(
+                budget.inFlightUploadBufferCount
+                    == GridCanvasContract.inFlightBufferCount
+            )
+        }
+    }
+
     private func profile(workingSetBytes: UInt64) throws -> BrushDeviceProfile {
         try BrushDeviceProfile(
             registryID: 1,

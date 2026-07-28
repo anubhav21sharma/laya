@@ -120,6 +120,7 @@ public struct BrushCompilerDiagnosticSnapshot: Equatable, Sendable {
 @MainActor
 public final class CompiledBrush {
     public let program: BrushProgram
+    public let renderIdentity: BrushRenderIdentity
     public let pipelineKey: BrushPipelineKey
     public let uniformTemplate: BrushUniformTemplate
     public let textures: [String: any MTLTexture]
@@ -131,6 +132,7 @@ public final class CompiledBrush {
 
     init(
         program: BrushProgram,
+        renderIdentity: BrushRenderIdentity,
         pipelineKey: BrushPipelineKey,
         uniformTemplate: BrushUniformTemplate,
         textures: [String: any MTLTexture],
@@ -140,6 +142,7 @@ public final class CompiledBrush {
         cacheKeys: Set<String>
     ) {
         self.program = program
+        self.renderIdentity = renderIdentity
         self.pipelineKey = pipelineKey
         self.uniformTemplate = uniformTemplate
         self.textures = textures
