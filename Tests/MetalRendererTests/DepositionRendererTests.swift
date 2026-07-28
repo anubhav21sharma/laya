@@ -60,6 +60,67 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
+    func installedCompiledBrushPreservesLegacyCompatibilityFallback()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(id: "brush.compatibility")
+        try setup.renderer.activateDrawBrush(brush)
+
+        let legacyStyle = StrokeRenderStyle(
+            color: .black,
+            diameter: 20,
+            compositeMode: .draw,
+            eraserStrength: 1
+        )
+        let legacyToken = RendererOperationToken(rawValue: 91)
+        try setup.renderer.beginStroke(
+            token: legacyToken,
+            sample: depositionSample(.began),
+            style: legacyStyle
+        )
+        #expect(setup.renderer.harnessCapturedCompiledBrushIdentity == nil)
+        try setup.renderer.cancelStroke(token: legacyToken)
+
+        let mismatchedIdentity = try BrushRenderIdentity(
+            definitionID: brush.program.definition.id,
+            semanticHash: String(repeating: "f", count: 64)
+        )
+        let mismatchedNativeStyle = StrokeRenderStyle(
+            color: .black,
+            diameter: 20,
+            compositeMode: .draw,
+            eraserStrength: 1,
+            program: brush.program,
+            renderIdentity: mismatchedIdentity,
+            seed: 2
+        )
+        let beforeMismatch = setup.renderer.harnessTilingMutationSnapshot
+        #expect(throws: MetalRendererError.compiledBrushIdentityMismatch) {
+            try setup.renderer.beginStroke(
+                token: RendererOperationToken(rawValue: 92),
+                sample: depositionSample(.began),
+                style: mismatchedNativeStyle
+            )
+        }
+        #expect(setup.renderer.harnessTilingMutationSnapshot == beforeMismatch)
+        #expect(setup.renderer.isIdle)
+
+        let matchingToken = RendererOperationToken(rawValue: 93)
+        try setup.renderer.beginStroke(
+            token: matchingToken,
+            sample: depositionSample(.began),
+            style: depositionStyle(brush, compositeMode: .draw)
+        )
+        #expect(
+            setup.renderer.harnessCapturedCompiledBrushIdentity
+                == brush.renderIdentity
+        )
+        try setup.renderer.cancelStroke(token: matchingToken)
+    }
+
+    @Test
+    @MainActor
     func drawAndEraseCaptureDistinctPreparedBrushes() async throws {
         guard let setup = try makeDepositionRendererSetup() else { return }
         let draw = try await setup.compileBrush(id: "brush.draw")

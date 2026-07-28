@@ -766,12 +766,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         case .erase:
             activeEraserBrush
         }
-        if let brush {
-            guard brush.renderIdentity == style.renderIdentity,
-                  brush.program == style.program
-            else {
-                throw MetalRendererError.compiledBrushIdentityMismatch
-            }
+        if let brush,
+           brush.renderIdentity == style.renderIdentity,
+           brush.program == style.program
+        {
             return brush
         }
 
@@ -780,6 +778,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             == Self.uncompiledCompatibilitySemanticHash
         {
             return nil
+        }
+        if brush != nil {
+            throw MetalRendererError.compiledBrushIdentityMismatch
         }
         throw MetalRendererError.compiledBrushUnavailable(style.compositeMode)
     }
