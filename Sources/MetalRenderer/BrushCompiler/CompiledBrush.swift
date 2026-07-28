@@ -88,6 +88,31 @@ public struct BrushCompilerCounters: Equatable, Sendable {
     )
 }
 
+public struct BrushCompilerDiagnosticSnapshot: Equatable, Sendable {
+    public let counters: BrushCompilerCounters
+    public let cacheResidentBytes: Int
+    public let cacheBudgetBytes: Int
+    public let cachedResourceCount: Int
+    public let pinnedResourceCount: Int
+    public let activeDefinitionID: String?
+
+    public init(
+        counters: BrushCompilerCounters,
+        cacheResidentBytes: Int,
+        cacheBudgetBytes: Int,
+        cachedResourceCount: Int,
+        pinnedResourceCount: Int,
+        activeDefinitionID: String?
+    ) {
+        self.counters = counters
+        self.cacheResidentBytes = cacheResidentBytes
+        self.cacheBudgetBytes = cacheBudgetBytes
+        self.cachedResourceCount = cachedResourceCount
+        self.pinnedResourceCount = pinnedResourceCount
+        self.activeDefinitionID = activeDefinitionID
+    }
+}
+
 /// Immutable render-time brush state. `textures` deliberately retains its GPU
 /// resources even if the compiler later evicts its own cache references.
 /// Residency therefore measures compiler-owned references, not guaranteed

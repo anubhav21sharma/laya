@@ -129,6 +129,36 @@ func rendererRejectsMismatchedAppendCommitAndCancelTokens() throws {
 
 @Test
 @MainActor
+func rendererPublishesAcceptedLogicalDabsAndDiagnosticMetrics() throws {
+    guard let renderer = try makeRenderer() else { return }
+    let token = RendererOperationToken(rawValue: 43)
+    var observed: [LogicalDab] = []
+    renderer.onLogicalDabsGenerated = { observed.append(contentsOf: $0) }
+
+    try renderer.beginStroke(
+        token: token,
+        sample: strokeSample(.began),
+        style: drawStyle
+    )
+    try renderer.appendStroke(
+        token: token,
+        sample: strokeSample(.moved, x: 48)
+    )
+
+    #expect(!observed.isEmpty)
+    #expect(observed.allSatisfy { !$0.isPredicted })
+    let snapshot = renderer.brushLabDiagnosticSnapshot
+    #expect(snapshot.totalDabsThisStroke == observed.count)
+    #expect(snapshot.actualDabCount == observed.count)
+    #expect(snapshot.predictedDabCount == 0)
+    #expect(snapshot.dirtyRegionCount > 0)
+    #expect(snapshot.builtInTextureCount > 0)
+
+    try renderer.cancelStroke(token: token)
+}
+
+@Test
+@MainActor
 func submittedCommitPublishesExactlyOneReceiptOnlyAfterCompletionDrain()
     throws
 {

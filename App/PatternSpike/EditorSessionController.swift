@@ -22,9 +22,12 @@ final class EditorSessionController {
     let model: EditorModel
     let renderer: GridRenderer
     var onError: ((MetalRendererError) -> Void)?
+    var onNormalizedInput: ((StrokeSample) -> Void)?
     private(set) var isSpaceDown = false
     private let strokeSeedSessionEntropy: UInt64
     private var nextStrokeSequence: UInt64 = 1
+    private var diagnosticDrawProgram: BrushProgram?
+    private var diagnosticFixedStrokeSeed: UInt64?
     private var pendingEstimatedProperties:
         [Int: StrokeEstimatedProperties] = [:]
     private var predictedEstimationIndices: Set<Int> = []
@@ -171,6 +174,7 @@ final class EditorSessionController {
             return
         }
         if sample.kind == .estimatedUpdate {
+            onNormalizedInput?(sample)
             handleEstimatedPropertiesUpdate(sample)
             return
         }
@@ -184,6 +188,7 @@ final class EditorSessionController {
             apply(.finalizeAwaitingEstimates)
             return
         }
+        onNormalizedInput?(sample)
         let event: EditorTransactionEvent
         switch sample.phase {
         case .began:
@@ -194,7 +199,7 @@ final class EditorSessionController {
             resetEstimatedUpdatesForNewStroke()
             trackPendingEstimatedProperties(in: sample)
             let program = tool == .draw
-                ? model.selectedProgram
+                ? diagnosticDrawProgram ?? model.selectedProgram
                 : AnchorBrushCatalog.hardRoundEraser.program
             let seed = takeStrokeSeed()
             event = .pointerBegan(
@@ -255,6 +260,7 @@ final class EditorSessionController {
         }
 
         for sample in samples {
+            onNormalizedInput?(sample)
             trackPendingEstimatedProperties(in: sample)
         }
         let effects = samples.flatMap {
@@ -372,7 +378,28 @@ final class EditorSessionController {
     }
 
     func handleRecipe(_ recipeID: BrushRecipeID) {
+        diagnosticDrawProgram = nil
         apply(.recipeIntent(recipeID))
+    }
+
+    func installDiagnosticDrawProgram(_ program: BrushProgram?) throws {
+        guard renderer.isIdle else {
+            throw MetalRendererError.commitPendingInput
+        }
+        if let program, program.compatibilityRecipe == nil {
+            throw MetalRendererError.unsupportedBrushProgram
+        }
+        diagnosticDrawProgram = program
+    }
+
+    func setDiagnosticFixedStrokeSeed(_ seed: UInt64?) throws {
+        guard renderer.isIdle else {
+            throw MetalRendererError.commitPendingInput
+        }
+        if let seed, seed == 0 {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        diagnosticFixedStrokeSeed = seed
     }
 
     func stepBrush(larger: Bool) {
@@ -913,6 +940,9 @@ final class EditorSessionController {
     }
 
     private func takeStrokeSeed() -> UInt64 {
+        if let diagnosticFixedStrokeSeed {
+            return diagnosticFixedStrokeSeed
+        }
         let sequence = nextStrokeSequence
         let (nextSequence, overflow) = sequence.addingReportingOverflow(1)
         precondition(!overflow, "Stroke seed sequence exhausted")

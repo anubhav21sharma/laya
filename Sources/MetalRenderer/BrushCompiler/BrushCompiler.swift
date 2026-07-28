@@ -88,6 +88,17 @@ public final class BrushCompiler {
         counters
     }
 
+    public var diagnosticSnapshot: BrushCompilerDiagnosticSnapshot {
+        BrushCompilerDiagnosticSnapshot(
+            counters: counters,
+            cacheResidentBytes: cache.residentByteCount,
+            cacheBudgetBytes: profile.brushCacheBudgetBytes,
+            cachedResourceCount: cache.keys.count,
+            pinnedResourceCount: cache.pinnedKeys.count,
+            activeDefinitionID: activeBrush?.program.definition.id.rawValue
+        )
+    }
+
     var cachedKeys: [String] {
         cache.keys
     }

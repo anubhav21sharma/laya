@@ -10,8 +10,19 @@ struct PatternSpikeApp: App {
         WindowGroup {
             ContentView()
         }
-        #if os(macOS)
-        .commands { EditorFocusedCommands() }
+        .commands {
+            #if os(macOS)
+            EditorFocusedCommands()
+            #endif
+            #if DEBUG
+            BrushLabCommands()
+            #endif
+        }
+
+        #if DEBUG
+        WindowGroup("Brush Lab", id: "brush-lab") {
+            BrushLabView()
+        }
         #endif
     }
 }

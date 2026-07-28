@@ -967,6 +967,36 @@ func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
     controller.handleStrokeSample(controllerSample(.cancelled))
 }
 
+@Test
+@MainActor
+func diagnosticProgramSeedAndNormalizedInputAreCapturedAtStrokeStart()
+    throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let program = AnchorBrushCatalog.glazeMarker.program
+    var observed: [StrokeSample] = []
+    controller.onNormalizedInput = { observed.append($0) }
+
+    try controller.installDiagnosticDrawProgram(program)
+    try controller.setDiagnosticFixedStrokeSeed(0xCAFE)
+    let began = controllerSample(.began, x: 20, y: 24, timestamp: 1)
+    controller.handleStrokeSample(began)
+
+    let style = try #require(renderer.harnessActiveStrokeStyle)
+    #expect(style.program == program)
+    #expect(style.seed == 0xCAFE)
+    #expect(observed == [began])
+
+    controller.handleStrokeSample(controllerSample(.cancelled, timestamp: 2))
+    controller.handleRecipe(AnchorBrushCatalog.defaultDraw.id)
+    controller.handleStrokeSample(controllerSample(.began, timestamp: 3))
+    let builtIn = try #require(renderer.harnessActiveStrokeStyle)
+    #expect(builtIn.program == AnchorBrushCatalog.defaultDraw.program)
+    #expect(builtIn.seed == 0xCAFE)
+    controller.handleStrokeSample(controllerSample(.cancelled, timestamp: 4))
+}
+
 #if DEBUG
 private final class BrushProgramCompileSpy: @unchecked Sendable {
     private let lock = NSLock()

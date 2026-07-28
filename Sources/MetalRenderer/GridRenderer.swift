@@ -14,6 +14,43 @@ public struct GridStructuralCounters: Equatable, Sendable {
     public init() {}
 }
 
+public struct BrushLabRendererDiagnosticSnapshot: Equatable, Sendable {
+    public let totalDabsThisStroke: Int
+    public let totalInstancesThisStroke: Int
+    public let renderedFramesThisStroke: Int
+    public let actualDabCount: Int
+    public let predictedDabCount: Int
+    public let replayCount: UInt64
+    public let dirtyRegionCount: Int
+    public let rasterRevisionResidentBytes: Int
+    public let builtInTextureCount: Int
+    public let assetFallbackCount: Int
+
+    public init(
+        totalDabsThisStroke: Int,
+        totalInstancesThisStroke: Int,
+        renderedFramesThisStroke: Int,
+        actualDabCount: Int,
+        predictedDabCount: Int,
+        replayCount: UInt64,
+        dirtyRegionCount: Int,
+        rasterRevisionResidentBytes: Int,
+        builtInTextureCount: Int,
+        assetFallbackCount: Int
+    ) {
+        self.totalDabsThisStroke = totalDabsThisStroke
+        self.totalInstancesThisStroke = totalInstancesThisStroke
+        self.renderedFramesThisStroke = renderedFramesThisStroke
+        self.actualDabCount = actualDabCount
+        self.predictedDabCount = predictedDabCount
+        self.replayCount = replayCount
+        self.dirtyRegionCount = dirtyRegionCount
+        self.rasterRevisionResidentBytes = rasterRevisionResidentBytes
+        self.builtInTextureCount = builtInTextureCount
+        self.assetFallbackCount = assetFallbackCount
+    }
+}
+
 struct HarnessDiagnosticRenderedFrame {
     let canonical: any MTLTexture
     let screen: any MTLTexture
@@ -61,11 +98,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var onError: ((MetalRendererError) -> Void)?
     public var onIdleStateChange: ((Bool) -> Void)?
     public var onOperationCompleted: ((RendererOperationCompletion) -> Void)?
-    #if DEBUG && os(macOS)
+    public var onLogicalDabsGenerated: (([LogicalDab]) -> Void)?
+    #if DEBUG
     public var onInteractiveFramePresented: ((TimeInterval, Int) -> Void)?
+    public var onInteractiveFrameMetrics: ((GPUFrameMetrics) -> Void)?
     #endif
     public private(set) var viewport: ViewportTransform
     public internal(set) var counters = GridStructuralCounters()
+    private var brushLabActualDabCount = 0
+    private var brushLabPredictedDabCount = 0
     public private(set) var interactiveGridVisibility = false
     public var isIdle: Bool {
         activeStroke == nil && pendingRasterOperation == nil
@@ -77,6 +118,29 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             && activeStroke.pendingRevisions == nil
     }
     public var tiling: TilingKind { tilingStrategy.kind }
+    public var brushLabDiagnosticSnapshot:
+        BrushLabRendererDiagnosticSnapshot
+    {
+        let liveDirty = liveStroke.dirtyRegions(
+            clippedTo: storagePixelSize
+        ).rectangles.count
+        let replayDirty = replayStroke.dirtyRegions(
+            clippedTo: storagePixelSize
+        ).rectangles.count
+        return BrushLabRendererDiagnosticSnapshot(
+            totalDabsThisStroke: counters.totalDabsThisStroke,
+            totalInstancesThisStroke: counters.totalInstancesThisStroke,
+            renderedFramesThisStroke: counters.renderedFramesThisStroke,
+            actualDabCount: brushLabActualDabCount,
+            predictedDabCount: brushLabPredictedDabCount,
+            replayCount: transientStrokeBuffer?.replayEpoch ?? 0,
+            dirtyRegionCount: liveDirty + replayDirty,
+            rasterRevisionResidentBytes: revisionStore.residentBytes,
+            builtInTextureCount: brushTextureResolver.cachedTextureCount,
+            assetFallbackCount: brushTextureResolver.reportedFallbackCount
+        )
+    }
+
     public var periodicConfiguration: PeriodicSymmetryConfiguration {
         tilingStrategy.periodicConfiguration
     }
@@ -568,6 +632,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
 
         counters = GridStructuralCounters()
+        brushLabActualDabCount = 0
+        brushLabPredictedDabCount = 0
         resetLiveState()
         activeShapeResolution = try brushTextureResolver.resolve(
             shape: compatibilityRecipe.shape
@@ -781,6 +847,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         predictedStrokeGenerator = previewGenerator
         counters.newDabsThisEvent = generatedDabCount
         counters.totalDabsThisStroke += generatedDabCount
+        publishLogicalDabs(
+            preparedDabsByChunk.flatMap { $0.map(\.attributes) }
+        )
     }
 
     private func appendAuthoritativeStroke(
@@ -1005,6 +1074,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             $0 + $1.dabs.count
         }
         counters.totalDabsThisStroke += counters.newDabsThisEvent
+        publishLogicalDabs(
+            preparedByChunk.flatMap { $0.map(\.attributes) }
+        )
     }
 
     public func cancelStroke(token: RendererOperationToken) throws {
@@ -1650,6 +1722,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             failActiveOperationIfNeeded(.commandBufferUnavailable)
             return
         }
+        #if DEBUG
+        let cpuEncodeStart = CFAbsoluteTimeGetCurrent()
+        #endif
 
         var uploads: [FrameUpload] = []
         var rasterCommit: EncodedRasterCommit?
@@ -1694,10 +1769,30 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 rasterCommit: rasterCommit,
                 commandBuffer: commandBuffer
             )
-            #if DEBUG && os(macOS)
+            #if DEBUG
+            let cpuEncodeMilliseconds = elapsedMilliseconds(
+                since: cpuEncodeStart
+            )
+            commandBuffer.addCompletedHandler { [weak self] completedBuffer in
+                guard completedBuffer.status == .completed else { return }
+                let frameMetrics = GPUFrameMetrics(
+                    cpuEncodeMilliseconds: cpuEncodeMilliseconds,
+                    gpuMilliseconds: max(
+                        0,
+                        (
+                            completedBuffer.gpuEndTime
+                                - completedBuffer.gpuStartTime
+                        ) * 1_000
+                    )
+                )
+                Task { @MainActor [weak self] in
+                    self?.onInteractiveFrameMetrics?(frameMetrics)
+                }
+            }
             let targetFramesPerSecond = max(1, view.preferredFramesPerSecond)
             let fallbackPresentationTimestamp =
                 ProcessInfo.processInfo.systemUptime
+            #if os(macOS)
             drawable.addPresentedHandler { [weak self] presentedDrawable in
                 let timestamp = Self.interactivePresentationTimestamp(
                     presentedTime: presentedDrawable.presentedTime,
@@ -1710,6 +1805,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     )
                 }
             }
+            #else
+            onInteractiveFramePresented?(
+                fallbackPresentationTimestamp,
+                targetFramesPerSecond
+            )
+            #endif
             #endif
             commandBuffer.present(drawable)
             if activeStroke != nil {
@@ -1729,7 +1830,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    #if DEBUG && os(macOS)
+    #if DEBUG
     nonisolated static func interactivePresentationTimestamp(
         presentedTime: TimeInterval,
         fallback: TimeInterval
@@ -1786,6 +1887,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             try rebuildReplayLayer(
                 preparedPredictedSuffix: [dabs]
             )
+            publishLogicalDabs(dabs.map(\.attributes))
             return
         }
 
@@ -1854,6 +1956,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                         : [dabs]
             )
         }
+        publishLogicalDabs(dabs.map(\.attributes))
+    }
+
+    private func publishLogicalDabs(_ dabs: [LogicalDab]) {
+        guard !dabs.isEmpty else { return }
+        brushLabActualDabCount += dabs.lazy.filter { !$0.isPredicted }.count
+        brushLabPredictedDabCount += dabs.lazy.filter(\.isPredicted).count
+        onLogicalDabsGenerated?(dabs)
     }
 
     private func appendSettled(
