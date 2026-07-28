@@ -60,7 +60,7 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
-    func installedCompiledBrushPreservesLegacyCompatibilityFallback()
+    func installedCompiledBrushRejectsLegacyFallbackAndRequiresIdentity()
         async throws
     {
         guard let setup = try makeDepositionRendererSetup() else { return }
@@ -74,13 +74,15 @@ struct DepositionRendererTests {
             eraserStrength: 1
         )
         let legacyToken = RendererOperationToken(rawValue: 91)
-        try setup.renderer.beginStroke(
-            token: legacyToken,
-            sample: depositionSample(.began),
-            style: legacyStyle
-        )
-        #expect(setup.renderer.harnessCapturedCompiledBrushIdentity == nil)
-        try setup.renderer.cancelStroke(token: legacyToken)
+        let beforeLegacy = setup.renderer.harnessTilingMutationSnapshot
+        #expect(throws: MetalRendererError.compiledBrushIdentityMismatch) {
+            try setup.renderer.beginStroke(
+                token: legacyToken,
+                sample: depositionSample(.began),
+                style: legacyStyle
+            )
+        }
+        #expect(setup.renderer.harnessTilingMutationSnapshot == beforeLegacy)
 
         let mismatchedIdentity = try BrushRenderIdentity(
             definitionID: brush.program.definition.id,

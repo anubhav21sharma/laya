@@ -26,7 +26,6 @@ final class EditorSessionController {
     private(set) var isSpaceDown = false
     private let strokeSeedSessionEntropy: UInt64
     private var nextStrokeSequence: UInt64 = 1
-    private var diagnosticDrawProgram: BrushProgram?
     private var activeDrawBrush: CompiledBrush?
     private var activeEraserBrush: CompiledBrush?
     private var selectionGeneration: UInt64 = 0
@@ -118,6 +117,8 @@ final class EditorSessionController {
     ) {
         self.model = model
         self.renderer = renderer
+        activeDrawBrush = renderer.preparedBrush(for: .draw)
+        activeEraserBrush = renderer.preparedBrush(for: .erase)
         history = DocumentHistory(
             maximumBytes: historyMaximumBytes,
             initialDocumentIsEmpty: !renderer.documentDomainLocked
@@ -216,41 +217,23 @@ final class EditorSessionController {
             let compiledBrush = tool == .draw
                 ? activeDrawBrush
                 : activeEraserBrush
-            var program = compiledBrush?.program ?? (tool == .draw
-                ? diagnosticDrawProgram ?? model.selectedProgram
-                : AnchorBrushCatalog.eraser.program)
-            if compiledBrush == nil, program.compatibilityRecipe == nil {
-                // Test-only/unbootstrapped controllers retain the pre-Stage-4
-                // fallback. Production installs ink and eraser before ready.
-                program = StrokeRenderStyle(
-                    color: .black,
-                    diameter: 1,
-                    compositeMode: .draw,
-                    eraserStrength: 1
-                ).program
+            guard let compiledBrush else {
+                report(.compiledBrushUnavailable(
+                    tool == .draw ? .draw : .erase
+                ))
+                return
             }
+            let program = compiledBrush.program
             let seed = takeStrokeSeed()
-            let style: StrokeRenderStyle
-            if let compiledBrush {
-                style = StrokeRenderStyle(
-                    color: model.inkColor,
-                    diameter: model.brushDiameter,
-                    compositeMode: tool == .draw ? .draw : .erase,
-                    eraserStrength: model.eraserStrength,
-                    program: program,
-                    renderIdentity: compiledBrush.renderIdentity,
-                    seed: seed
-                )
-            } else {
-                style = StrokeRenderStyle(
-                    color: model.inkColor,
-                    diameter: model.brushDiameter,
-                    compositeMode: tool == .draw ? .draw : .erase,
-                    eraserStrength: model.eraserStrength,
-                    program: program,
-                    seed: seed
-                )
-            }
+            let style = StrokeRenderStyle(
+                color: model.inkColor,
+                diameter: model.brushDiameter,
+                compositeMode: tool == .draw ? .draw : .erase,
+                eraserStrength: model.eraserStrength,
+                program: program,
+                renderIdentity: compiledBrush.renderIdentity,
+                seed: seed
+            )
             event = .pointerBegan(
                 sample,
                 tool: tool,
@@ -435,7 +418,6 @@ final class EditorSessionController {
             else { return }
             try renderer.activateDrawBrush(compiled)
             activeDrawBrush = compiled
-            diagnosticDrawProgram = compiled.program
             model.confirmRecipe(id)
         } catch let error as MetalRendererError {
             if generation == selectionGeneration {
@@ -459,7 +441,6 @@ final class EditorSessionController {
         }
         try renderer.activateDrawBrush(brush)
         activeDrawBrush = brush
-        diagnosticDrawProgram = brush.program
     }
 
     func installBootstrapBrushes(

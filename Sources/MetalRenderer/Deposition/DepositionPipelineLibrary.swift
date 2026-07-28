@@ -121,9 +121,61 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
         return binding
     }
 
+    func prepareImmediately(
+        for key: DepositionPipelineKey
+    ) throws -> DepositionPipelineBinding {
+        if let binding = prepared[key] {
+            return binding
+        }
+        let binding = DepositionPipelineBinding(
+            key: key,
+            state: try makePipelineStateImmediately(for: key)
+        )
+        prepared[key] = binding
+        return binding
+    }
+
     private func makePipelineState(
         for key: DepositionPipelineKey
     ) async throws -> any MTLRenderPipelineState {
+        let descriptor = try makePipelineDescriptor(for: key)
+        return try await withCheckedThrowingContinuation { continuation in
+            device.makeRenderPipelineState(descriptor: descriptor) {
+                state,
+                error in
+                if let state {
+                    continuation.resume(returning: state)
+                } else {
+                    continuation.resume(
+                        throwing:
+                            DepositionPipelineLibraryError
+                            .pipelineCreationFailed(
+                                error?.localizedDescription
+                                    ?? "Metal returned no pipeline state."
+                            )
+                    )
+                }
+            }
+        }
+    }
+
+    private func makePipelineStateImmediately(
+        for key: DepositionPipelineKey
+    ) throws -> any MTLRenderPipelineState {
+        do {
+            return try device.makeRenderPipelineState(
+                descriptor: makePipelineDescriptor(for: key)
+            )
+        } catch {
+            throw DepositionPipelineLibraryError.pipelineCreationFailed(
+                error.localizedDescription
+            )
+        }
+    }
+
+    private func makePipelineDescriptor(
+        for key: DepositionPipelineKey
+    ) throws -> MTLRenderPipelineDescriptor {
         guard key.abiVersion == DepositionABI.version else {
             throw DepositionPipelineLibraryError.unsupportedABI(
                 key.abiVersion
@@ -187,25 +239,7 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
         }
         attachment.pixelFormat = pixelFormat
         configureBlend(attachment, accumulation: key.brush.accumulation)
-
-        return try await withCheckedThrowingContinuation { continuation in
-            device.makeRenderPipelineState(descriptor: descriptor) {
-                state,
-                error in
-                if let state {
-                    continuation.resume(returning: state)
-                } else {
-                    continuation.resume(
-                        throwing:
-                            DepositionPipelineLibraryError
-                            .pipelineCreationFailed(
-                                error?.localizedDescription
-                                    ?? "Metal returned no pipeline state."
-                            )
-                    )
-                }
-            }
-        }
+        return descriptor
     }
 
     private func makeSpecializedFunction(

@@ -610,10 +610,10 @@ public enum SliceThreeEvidenceValidator {
             throw invalid("\(name): missed frames do not derive from event-to-submit samples")
         }
         guard truth.instanceBytes == truth.fragments
-                * MemoryLayout<PatternProjectedStampInstance>.stride,
-              MemoryLayout<PatternProjectedStampInstance>.stride == 128
+                * MemoryLayout<PatternDepositionStampInstance>.stride,
+              MemoryLayout<PatternDepositionStampInstance>.stride == 256
         else {
-            throw invalid("\(name): projected fragments violate the approved 128-byte ABI")
+            throw invalid("\(name): projected fragments violate the approved 256-byte ABI")
         }
         return record
     }
@@ -698,7 +698,7 @@ public enum SliceThreeEvidenceValidator {
                 restoreCount: 2, historyBytes: 4_224, historyCommands: 1,
                 historyNavigationFinishes: 2,
                 changedRegions: 1, fragments: 1, maximumFragments: 1,
-                instanceBytes: 128, primarySuffix: "live.screen.png",
+                instanceBytes: 256, primarySuffix: "live.screen.png",
                 pngSizes: strokePNGs
             ),
             "eraser-live-commit": Truth(
@@ -708,7 +708,7 @@ public enum SliceThreeEvidenceValidator {
                 restoreCount: 2, historyBytes: 8_448, historyCommands: 2,
                 historyNavigationFinishes: 2,
                 changedRegions: 1, fragments: 1, maximumFragments: 1,
-                instanceBytes: 128, primarySuffix: "live.screen.png",
+                instanceBytes: 256, primarySuffix: "live.screen.png",
                 pngSizes: strokePNGs
             ),
             "region-undo-seam": Truth(
@@ -718,7 +718,7 @@ public enum SliceThreeEvidenceValidator {
                 restoreCount: 2, historyBytes: 1_792, historyCommands: 1,
                 historyNavigationFinishes: 2,
                 changedRegions: 2, fragments: 2, maximumFragments: 2,
-                instanceBytes: 256, primarySuffix: "live.screen.png",
+                instanceBytes: 512, primarySuffix: "live.screen.png",
                 pngSizes: strokePNGs
             ),
             "clear-undo": Truth(
@@ -728,7 +728,7 @@ public enum SliceThreeEvidenceValidator {
                 restoreCount: 2, historyBytes: 135_296, historyCommands: 2,
                 historyNavigationFinishes: 2,
                 changedRegions: 1, fragments: 1, maximumFragments: 1,
-                instanceBytes: 128, primarySuffix: "committed.screen.png",
+                instanceBytes: 256, primarySuffix: "committed.screen.png",
                 pngSizes: [
                     "committed.screen.png": square,
                     "before-clear.canonical.png": square,
@@ -745,7 +745,7 @@ public enum SliceThreeEvidenceValidator {
                 restoreCount: 0, historyBytes: 4_416, historyCommands: 2,
                 historyNavigationFinishes: 2,
                 changedRegions: 0, fragments: 1, maximumFragments: 1,
-                instanceBytes: 128,
+                instanceBytes: 256,
                 primarySuffix: "initial-tiling.screen.png",
                 pngSizes: [
                     "initial-tiling.screen.png": PixelSize(width: 256, height: 128),

@@ -119,7 +119,7 @@ struct ReflectedRotationalShaderTests {
         #expect(shader.contains("float2(-0.75, -0.60)"))
         #expect(shader.contains("float2(0.85, -0.20)"))
         #expect(shader.contains("float2(-0.10, 0.90)"))
-        #expect(pipelines.contains("vertex: \"patternProjectedStampVertex\""))
+        #expect(pipelines.contains("vertex: \"patternProjectedDepositionVertex\""))
         #expect(pipelines.contains("fragment: \"patternDiagnosticFootprintFragment\""))
         #expect(!shader.contains("PatternDiagnosticWireAsymmetricCoverage ="))
     }
@@ -154,7 +154,7 @@ struct ReflectedRotationalShaderTests {
         let source = try normalizedSource("Sources/MetalRenderer/Shaders.metal")
 
         #expect(source.contains(
-            "return patternCompositeLive( live.sample(tileSampler, uv), replayLive.sample(tileSampler, uv), canonical.sample(tileSampler, uv), frame.compositeMode, material.strokeOpacity, material.accumulationLimit, material.materialStrength );"
+            "return patternCompositeLive( live.sample(tileSampler, uv), replayLive.sample(tileSampler, uv), canonical.sample(tileSampler, uv), frame.compositeMode, material.parameters.x, material.parameters.y, material.parameters.z );"
         ))
         #expect(source.contains(
             "return canonical * ( 1.0 - live.a * clamp(eraserStrength, 0.0, 1.0) );"

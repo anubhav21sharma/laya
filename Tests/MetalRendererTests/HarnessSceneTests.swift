@@ -3269,7 +3269,7 @@ func fragmentAuditMeasuresCountsPlanesAndInstanceBytes() throws {
     #expect(audit.maximumClipPlaneCount == 2)
     #expect(
         audit.instanceBytes
-            == MemoryLayout<PatternProjectedStampInstance>.stride
+            == MemoryLayout<PatternDepositionStampInstance>.stride
     )
 }
 

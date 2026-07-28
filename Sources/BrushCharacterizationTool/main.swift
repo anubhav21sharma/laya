@@ -112,7 +112,7 @@ private func anchorCharacterizationRecords() -> [(
                 ),
                 compatibility: BrushCharacterizer.record(
                     trace: trace,
-                    recipe: anchor.compatibilityRecipe,
+                    program: anchor.program,
                     nominalDiameter: 20,
                     color: .black,
                     seed: 41,

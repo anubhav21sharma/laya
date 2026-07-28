@@ -2,6 +2,7 @@ import BrushConverter
 import BrushFormat
 import Metal
 @testable import MetalRenderer
+import PatternEngine
 import Testing
 
 @Suite("Synthetic converter Metal integration", .serialized)
@@ -80,6 +81,27 @@ struct SyntheticBrushCompilerIntegrationTests {
         #expect(after.activationCount == before.activationCount)
     }
 
+    @Test
+    func wetConcentrationFailsWithTypedDepositionRejection() async throws {
+        guard let compiler = try makeCompiler() else { return }
+        let dry = try await compiler.compileAndActivate(
+            package: try mappedPackage(includeWet: false)
+        )
+        let before = compiler.debugCounters
+        let wetEdge = try wetConcentrationPackage()
+
+        let failure = try await compilationFailure {
+            _ = try await compiler.compileAndActivate(package: wetEdge)
+        }
+        let after = compiler.debugCounters
+
+        #expect(failure.stage == .pipelineSelection)
+        #expect(failure.reason == "unsupportedWetConcentration")
+        #expect(failure.backend == .deposition)
+        #expect(compiler.activeBrush === dry)
+        #expect(after == before)
+    }
+
     private func mappedPackage(includeWet: Bool) throws -> BrushPackage {
         let source = try SyntheticV1DiagnosticFixture.source(
             includeWet: includeWet
@@ -95,6 +117,52 @@ struct SyntheticBrushCompilerIntegrationTests {
             )
         }
         return try SyntheticV1BrushMapper().map(document).package
+    }
+
+    private func wetConcentrationPackage() throws -> BrushPackage {
+        let dry = try mappedPackage(includeWet: false)
+        let definition = dry.definition
+        let material = definition.material
+        let wetDefinition = try BrushDefinition(
+            id: definition.id,
+            schemaVersion: definition.schemaVersion,
+            metadata: definition.metadata,
+            capabilities: definition.capabilities,
+            resources: definition.resources,
+            coverage: definition.coverage,
+            placement: definition.placement,
+            dynamics: definition.dynamics,
+            color: definition.color,
+            material: BrushMaterialDefinition(
+                accumulation: material.accumulation,
+                interaction: .none,
+                edgeTreatment: .wetConcentration,
+                strength: material.strength,
+                wetness: material.wetness,
+                bleedRadius: material.bleedRadius,
+                softenPasses: material.softenPasses,
+                accumulationLimit: material.accumulationLimit,
+                interactionParameters: nil
+            ),
+            stabilization: definition.stabilization,
+            taper: definition.taper,
+            replayMode: definition.replayMode,
+            replayLimits: definition.replayLimits,
+            seedPolicy: definition.seedPolicy,
+            limits: definition.limits,
+            performanceIntent: definition.performanceIntent,
+            compatibility: definition.compatibility
+        )
+        let manifest = try BrushPackageManifest(
+            schemaVersion: dry.manifest.schemaVersion,
+            resources: dry.manifest.resources,
+            provenance: dry.manifest.provenance
+        )
+        return try BrushPackage(
+            manifest: manifest,
+            definition: wetDefinition,
+            resourceData: dry.resourceData
+        )
     }
 
     private func makeCompiler() throws -> BrushCompiler? {

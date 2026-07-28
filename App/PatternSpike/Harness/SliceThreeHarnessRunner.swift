@@ -243,7 +243,7 @@ public final class SliceThreeHarnessRunner {
             maximumFragmentsPerFootprint:
                 result.projectedFragmentCount,
             totalInstanceBytes: result.projectedFragmentCount
-                * ShaderABI.projectedStampInstanceStride,
+                * ShaderABI.depositionStampInstanceStride,
             diagnosticMode: scene.diagnosticMode?.rawValue,
             revisionCaptureMilliseconds:
                 measurements.revisionCaptureMilliseconds,

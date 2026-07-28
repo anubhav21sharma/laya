@@ -29,10 +29,6 @@ let package = Package(
             targets: ["SliceThreeEvidenceGate"]
         ),
         .executable(
-            name: "SliceFourEvidenceGate",
-            targets: ["SliceFourEvidenceGate"]
-        ),
-        .executable(
             name: "BrushCharacterizationTool",
             targets: ["BrushCharacterizationTool"]
         ),
@@ -85,10 +81,6 @@ let package = Package(
         ),
         .executableTarget(
             name: "SliceThreeEvidenceGate",
-            dependencies: ["MetalRenderer"]
-        ),
-        .executableTarget(
-            name: "SliceFourEvidenceGate",
             dependencies: ["MetalRenderer"]
         ),
         .executableTarget(

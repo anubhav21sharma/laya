@@ -132,7 +132,7 @@ public final class DabInstanceBufferPool {
 
         let destination = lease.buffer.contents()
             .bindMemory(
-                to: PatternProjectedStampInstance.self,
+                to: PatternDepositionStampInstance.self,
                 capacity: lease.capacity
             )
         for (offset, dab) in instances.enumerated() {

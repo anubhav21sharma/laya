@@ -393,7 +393,7 @@ private func sliceThreeArtifactFixtureTruths()
             gridCount: 2, commitCount: 1, captureCount: 1, restoreCount: 2,
             historyBytes: 4_224, historyCommands: 1,
             historyNavigationFinishes: 2, changedRegions: 1,
-            fragments: 1, maximumFragments: 1, instanceBytes: 128,
+            fragments: 1, maximumFragments: 1, instanceBytes: 256,
             primarySuffix: "live.screen.png", pngSizes: strokePNGs
         ),
         "eraser-live-commit": SliceThreeArtifactFixtureTruth(
@@ -402,7 +402,7 @@ private func sliceThreeArtifactFixtureTruths()
             gridCount: 3, commitCount: 2, captureCount: 2, restoreCount: 2,
             historyBytes: 8_448, historyCommands: 2,
             historyNavigationFinishes: 2, changedRegions: 1,
-            fragments: 1, maximumFragments: 1, instanceBytes: 128,
+            fragments: 1, maximumFragments: 1, instanceBytes: 256,
             primarySuffix: "live.screen.png", pngSizes: strokePNGs
         ),
         "region-undo-seam": SliceThreeArtifactFixtureTruth(
@@ -411,7 +411,7 @@ private func sliceThreeArtifactFixtureTruths()
             gridCount: 2, commitCount: 1, captureCount: 1, restoreCount: 2,
             historyBytes: 1_792, historyCommands: 1,
             historyNavigationFinishes: 2, changedRegions: 2,
-            fragments: 2, maximumFragments: 2, instanceBytes: 256,
+            fragments: 2, maximumFragments: 2, instanceBytes: 512,
             primarySuffix: "live.screen.png", pngSizes: strokePNGs
         ),
         "clear-undo": SliceThreeArtifactFixtureTruth(
@@ -420,7 +420,7 @@ private func sliceThreeArtifactFixtureTruths()
             gridCount: 2, commitCount: 1, captureCount: 2, restoreCount: 2,
             historyBytes: 135_296, historyCommands: 2,
             historyNavigationFinishes: 2, changedRegions: 1,
-            fragments: 1, maximumFragments: 1, instanceBytes: 128,
+            fragments: 1, maximumFragments: 1, instanceBytes: 256,
             primarySuffix: "committed.screen.png",
             pngSizes: [
                 "committed.screen.png": square,
@@ -437,7 +437,7 @@ private func sliceThreeArtifactFixtureTruths()
             gridCount: 5, commitCount: 1, captureCount: 1, restoreCount: 0,
             historyBytes: 4_416, historyCommands: 2,
             historyNavigationFinishes: 2, changedRegions: 0,
-            fragments: 1, maximumFragments: 1, instanceBytes: 128,
+            fragments: 1, maximumFragments: 1, instanceBytes: 256,
             primarySuffix: "initial-tiling.screen.png",
             pngSizes: [
                 "initial-tiling.screen.png": PixelSize(width: 256, height: 128),

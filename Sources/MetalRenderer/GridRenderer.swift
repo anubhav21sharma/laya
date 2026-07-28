@@ -61,14 +61,6 @@ struct HarnessDiagnosticRenderedFrame {
     let metrics: GPUFrameMetrics
 }
 
-struct HarnessBrushRenderedFrame {
-    let canonical: any MTLTexture
-    let fragments: [CellFragment]
-    let shapeIdentity: BrushTextureIdentity
-    let grainIdentity: BrushTextureIdentity
-    let assetsWereExact: Bool
-}
-
 public struct HarnessLiveFlushResult {
     public let metrics: GPUFrameMetrics
     public let emittedHighWater: UInt64
@@ -91,10 +83,6 @@ struct HarnessTilingMutationSnapshot: Equatable {
 
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
-    private static let uncompiledCompatibilitySemanticHash =
-        "b29442ec35ff6345e89176318f449c4e"
-        + "57d31b68a007fbea32d8176383a55f9e"
-
     public let device: any MTLDevice
     public var pixelSize: PixelSize { resources.canvasPixelSize }
     var storagePixelSize: PixelSize { resources.pixelSize }
@@ -140,8 +128,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             replayCount: transientStrokeBuffer?.replayEpoch ?? 0,
             dirtyRegionCount: liveDirty + replayDirty,
             rasterRevisionResidentBytes: revisionStore.residentBytes,
-            builtInTextureCount: brushTextureResolver.cachedTextureCount,
-            assetFallbackCount: brushTextureResolver.reportedFallbackCount
+            builtInTextureCount:
+                (activeDrawBrush?.textures.count ?? 0)
+                    + (activeEraserBrush?.textures.count ?? 0),
+            assetFallbackCount: 0
         )
     }
 
@@ -212,8 +202,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     struct ProjectedDabRecord {
-        let legacyInstance: PatternProjectedStampInstance?
-        let depositionRecord: ProjectedDepositionRecord?
+        let depositionRecord: ProjectedDepositionRecord
         let dirtyRect: PixelRect
         let radialPage: RadialPageCoordinate?
     }
@@ -330,20 +319,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     var depositionFrameBudget: DepositionFrameBudget
     private(set) var activeDrawBrush: CompiledBrush?
     private(set) var activeEraserBrush: CompiledBrush?
-    let brushTextureResolver: BrushTextureResolver
-    private(set) var activeShapeResolution: BrushTextureResolution
-    private(set) var activeGrainResolution: BrushTextureResolution
-    private var activeShapeTexture: any MTLTexture {
-        activeShapeResolution.texture
-    }
-    private var activeGrainTexture: any MTLTexture {
-        activeGrainResolution.texture
-    }
-    private var activeMaterialState: BrushMaterialState
-    private(set) var boundedWashSurface: BoundedWashSurface?
-    private(set) var lastBoundedWashWorkPlan: BoundedWashWorkPlan?
-    private(set) var boundedWashEncodedWork = BoundedWashEncodedWork()
-    private var boundedWashHistory = BoundedWashHistoryAccumulator()
     let instancePool: DabInstanceBufferPool
     var depositionEncoder: DepositionEncoder?
     let revisionStore: RasterRevisionStore
@@ -431,10 +406,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             initialRevision: RasterRevision(rawValue: 0),
             forceAllocationFailure: false
         )
-        let brushTextureResolver = BrushTextureResolver(device: device)
-        try brushTextureResolver.preloadValidationPack()
-        let defaultShape = try brushTextureResolver.resolve(shape: .hardRound)
-        let defaultGrain = try brushTextureResolver.resolve(grain: .opaque)
         self.device = device
         self.commandQueue = commandQueue
         self.library = library
@@ -456,12 +427,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         activeDrawBrush = nil
         activeEraserBrush = nil
-        self.brushTextureResolver = brushTextureResolver
-        activeShapeResolution = defaultShape
-        activeGrainResolution = defaultGrain
-        activeMaterialState = .legacyEquivalent
-        boundedWashSurface = nil
-        lastBoundedWashWorkPlan = nil
         tilingStrategy = strategy
         radialPageTableTexture = try Self.makeRadialPageTableTexture(
             device: device,
@@ -627,7 +592,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         radialPageTableTexture = replacementPageTable
         do {
             try clearInitialTextures()
-            boundedWashSurface = nil
         } catch {
             resources = priorResources
             tilingStrategy = priorStrategy
@@ -668,6 +632,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     public func activateEraserBrush(_ brush: CompiledBrush) throws {
         try installCompiledBrush(brush, for: .erase)
+    }
+
+    public func preparedBrush(
+        for mode: StrokeCompositeMode
+    ) -> CompiledBrush? {
+        switch mode {
+        case .draw: activeDrawBrush
+        case .erase: activeEraserBrush
+        }
     }
 
     private func installCompiledBrush(
@@ -759,7 +732,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     private func compiledBrush(
         for style: StrokeRenderStyle
-    ) throws -> CompiledBrush? {
+    ) throws -> CompiledBrush {
         let brush: CompiledBrush? = switch style.compositeMode {
         case .draw:
             activeDrawBrush
@@ -773,12 +746,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             return brush
         }
 
-        if style.program.compatibilityRecipe != nil,
-           style.renderIdentity.semanticHash
-            == Self.uncompiledCompatibilitySemanticHash
-        {
-            return nil
-        }
         if brush != nil {
             throw MetalRendererError.compiledBrushIdentityMismatch
         }
@@ -802,36 +769,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let compiledBrush = try compiledBrush(for: style)
-        let compatibilityRecipe = style.program.compatibilityRecipe
-        guard compiledBrush != nil || compatibilityRecipe != nil else {
-            throw MetalRendererError.unsupportedBrushProgram
-        }
-
         counters = GridStructuralCounters()
         brushLabActualDabCount = 0
         brushLabPredictedDabCount = 0
         resetLiveState()
-        if let compatibilityRecipe, compiledBrush == nil {
-            activeShapeResolution = try brushTextureResolver.resolve(
-                shape: compatibilityRecipe.shape
-            )
-            activeGrainResolution = try brushTextureResolver.resolve(
-                grain: compatibilityRecipe.grain
-            )
-        }
-        activeMaterialState = BrushMaterialState(program: style.program)
-        if activeMaterialState.family == .boundedWash {
-            do {
-                if boundedWashSurface?.pixelSize != storagePixelSize {
-                    boundedWashSurface = try BoundedWashSurface(
-                        device: device,
-                        pixelSize: storagePixelSize
-                    )
-                }
-            } catch {
-                throw MetalRendererError.boundedWashSurfaceAllocationFailed
-            }
-        }
         let generatorColor: InkColor
         switch style.compositeMode {
         case .draw:
@@ -858,9 +799,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             style: style,
             compiledBrush: compiledBrush,
             renderIdentity: style.renderIdentity,
-            scheduler: compiledBrush.map { _ in
-                FrameScheduler(budget: depositionFrameBudget)
-            },
+            scheduler: FrameScheduler(budget: depositionFrameBudget),
             commitRequested: false,
             commitRetainedByteLimit: nil,
             pendingRevisions: nil,
@@ -1841,17 +1780,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let replayRegions = replayStroke.dirtyRegions(
             clippedTo: storagePixelSize
         )
-        var regions = PixelRegionSet(
+        let regions = PixelRegionSet(
             settledRegions.rectangles + replayRegions.rectangles,
             clippedTo: storagePixelSize
         )
-        if activeMaterialState.family == .boundedWash {
-            regions = PixelRegionSet(
-                regions.rectangles
-                    + boundedWashHistoryRegions.rectangles,
-                clippedTo: storagePixelSize
-            )
-        }
         let oneRevisionBytes = try revisionStore.retainedBytes(
             pixelSize: storagePixelSize,
             regions: regions
@@ -1896,29 +1828,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             compositeMode: .draw,
             eraserStrength: 1
         )
-        guard let compatibilityRecipe = style.program.compatibilityRecipe else {
-            throw MetalRendererError.unsupportedBrushProgram
-        }
         resetLiveState()
-        strokeGenerator = BrushStrokeGenerator(
-            program: style.program,
-            nominalDiameter: style.diameter,
-            color: style.color,
-            seed: style.seed
-        )
-        activeShapeResolution = try brushTextureResolver.resolve(
-            shape: compatibilityRecipe.shape
-        )
-        activeGrainResolution = try brushTextureResolver.resolve(
-            grain: compatibilityRecipe.grain
-        )
-        activeMaterialState = BrushMaterialState(program: style.program)
         activeStroke = ActiveStrokeExecution(
             token: token,
             style: style,
             compiledBrush: nil,
             renderIdentity: style.renderIdentity,
-            scheduler: nil,
+            scheduler: FrameScheduler(budget: depositionFrameBudget),
             commitRequested: false,
             commitRetainedByteLimit: nil,
             pendingRevisions: nil,
@@ -1990,27 +1906,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let cpuEncodeStart = CFAbsoluteTimeGetCurrent()
         #endif
 
-        var uploads: [FrameUpload] = []
+        let uploads: [FrameUpload] = []
         var nativeEncoding: NativeDepositionFrameEncoding?
         var rasterCommit: EncodedRasterCommit?
         do {
             let hasEarlierPendingUploads = !completedUploadRanges.isEmpty
             let encodedLiveClear: Bool
             let encodedReplayClear: Bool
-            if activeStroke?.compiledBrush != nil {
-                let encoding = try encodeScheduledDeposition(commandBuffer)
-                nativeEncoding = encoding
-                encodedLiveClear = encoding.encodedLiveClear
-                encodedReplayClear = encoding.encodedReplayClear
-            } else {
-                encodedLiveClear = needsLiveClear
-                if encodedLiveClear {
-                    try encodeLiveClear(commandBuffer)
-                }
-                let liveEncoding = try encodePendingLiveDabs(commandBuffer)
-                uploads = liveEncoding.uploads
-                encodedReplayClear = liveEncoding.encodedReplayClear
-            }
+            let encoding = try encodeScheduledDeposition(commandBuffer)
+            nativeEncoding = encoding
+            encodedLiveClear = encoding.encodedLiveClear
+            encodedReplayClear = encoding.encodedReplayClear
             let plannedSettledThrough = uploads.last {
                 $0.layer == .settled
             }?.throughExclusive ?? liveStroke.bakedHighWater
@@ -2286,18 +2192,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             projectedCount = nextCount
         }
-        let availableCapacity: Int
-        if let scheduler = activeStroke?.scheduler {
-            availableCapacity = scheduler.authoritativeAvailableCapacity
-        } else {
-            availableCapacity = liveStroke.capacity - liveStroke.pending.count
+        guard let scheduler = activeStroke?.scheduler else {
+            throw MetalRendererError.invalidStrokeLifecycle
         }
+        let availableCapacity = scheduler.authoritativeAvailableCapacity
         guard projectedCount <= availableCapacity else {
             throw MetalRendererError.projectedInstanceCapacityExceeded(
-                activeStroke?.scheduler == nil
-                    ? liveStroke.capacity
-                    : depositionFrameBudget
-                        .maximumPendingAuthoritativeInstances
+                depositionFrameBudget.maximumPendingAuthoritativeInstances
             )
         }
     }
@@ -2305,35 +2206,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func appendSettledRecords(
         _ records: [ProjectedDabRecord]
     ) throws {
-        if activeStroke?.compiledBrush != nil {
-            try enqueueCompiledAuthoritative(records)
-            return
-        }
-        guard records.count <= liveStroke.capacity - liveStroke.pending.count
-        else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                liveStroke.capacity
-            )
-        }
-        if activeMaterialState.family == .boundedWash,
-           let boundedWashSurface,
-           !records.isEmpty
-        {
-            let plan = try boundedWashSurface.makeWorkPlan(
-                dirtyRegions: records.map {
-                    BoundedWashDirtyRegion(
-                        rectangle: $0.dirtyRect,
-                        radialPage: $0.radialPage
-                    )
-                },
-                topology: boundedWashTopology,
-                bleedRadius: activeMaterialState.bleedRadius,
-                softenPasses: Int(activeMaterialState.softenPasses)
-            )
-            lastBoundedWashWorkPlan = plan
-            accumulateBoundedWashHistory(plan.processingRegions)
-        }
-        try append(records, to: &liveStroke)
+        try enqueueCompiledAuthoritative(records)
     }
 
     private func enqueueCompiledAuthoritative(
@@ -2344,14 +2217,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let deposition = try records.map { record in
-            guard let deposition = record.depositionRecord,
-                  record.legacyInstance == nil
-            else {
-                throw MetalRendererError.invalidCompiledBrush
-            }
-            return deposition
-        }
+        let deposition = records.map(\.depositionRecord)
         do {
             try scheduler.enqueueAuthoritative(deposition)
         } catch let error as FrameSchedulerError {
@@ -2470,17 +2336,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 for transientDab in chunk.dabs {
                     let attributes: DabAttributes
                     if let totalDistance = knownStrokeTotalDistance {
-                        guard let compatibilityRecipe =
-                            activeStroke.style.program.compatibilityRecipe
-                        else {
-                            throw MetalRendererError.unsupportedBrushProgram
-                        }
                         attributes = BrushDynamicsEngine()
                             .applyingKnownTotalDistance(
                                 transientDab.attributes,
                                 totalDistance: totalDistance,
                                 nominalDiameter: activeStroke.style.diameter,
-                                recipe: compatibilityRecipe,
+                                definition:
+                                    activeStroke.style.program.definition,
                                 retainedReplayStartDistance:
                                     retainedReplayStartDistance
                             )
@@ -2514,42 +2376,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             replacementRecords.map(\.dirtyRect),
             clippedTo: storagePixelSize
         )
-        if activeMaterialState.family == .boundedWash,
-           let boundedWashSurface
-        {
-            let plan = try boundedWashSurface.makeWorkPlan(
-                dirtyRegions: replacementRecords.map {
-                    BoundedWashDirtyRegion(
-                        rectangle: $0.dirtyRect,
-                        radialPage: $0.radialPage
-                    )
-                },
-                topology: boundedWashTopology,
-                bleedRadius: activeMaterialState.bleedRadius,
-                softenPasses: Int(activeMaterialState.softenPasses)
-            )
-            lastBoundedWashWorkPlan = plan
-            accumulateBoundedWashHistory(plan.processingRegions)
-        } else {
-            lastBoundedWashWorkPlan = nil
-        }
-        if activeStroke.compiledBrush != nil {
-            try replaceCompiledReplay(
-                replacementRecords,
-                priorRegions: priorRegions,
-                replacementRegions: replacementRegions
-            )
-        } else {
-            let epoch = takeReplayEpoch()
-            _ = replayTile.planReplacement(
-                epoch: epoch,
-                prior: priorRegions,
-                replacement: replacementRegions
-            )
-            replayStroke.beginReplacementEpoch(epoch)
-            try append(replacementRecords, to: &replayStroke)
-            needsReplayClear = true
-        }
+        try replaceCompiledReplay(
+            replacementRecords,
+            priorRegions: priorRegions,
+            replacementRegions: replacementRegions
+        )
     }
 
     private func replaceCompiledReplay(
@@ -2562,14 +2393,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let deposition = try records.map { record in
-            guard let deposition = record.depositionRecord,
-                  record.legacyInstance == nil
-            else {
-                throw MetalRendererError.invalidCompiledBrush
-            }
-            return deposition
-        }
+        let deposition = records.map(\.depositionRecord)
         do {
             try scheduler.replacePrediction(deposition)
         } catch let error as FrameSchedulerError {
@@ -2603,111 +2427,54 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func append(
-        _ records: [ProjectedDabRecord],
-        to stroke: inout LiveStroke
-    ) throws {
-        for record in records {
-            guard let instance = record.legacyInstance,
-                  record.depositionRecord == nil
-            else {
-                throw MetalRendererError.invalidStrokeLifecycle
-            }
-            try stroke.append(
-                instance,
-                dirtyRect: record.dirtyRect,
-                radialPage: record.radialPage
-            )
-            counters.totalInstancesThisStroke += 1
-        }
-    }
-
     private func projectedRecords(
         for dab: DabAttributes
     ) throws -> [ProjectedDabRecord] {
         guard let activeStroke else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let minimumAffineScale = min(
-            simd_length(dab.brushToWorld.xAxis),
-            simd_length(dab.brushToWorld.yAxis)
-        )
-        guard minimumAffineScale.isFinite, minimumAffineScale > 0 else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        // Native definitions do not need a legacy recipe. Their coverage can
-        // be asymmetric, so use the conservative projection symmetry.
-        let coverageSymmetry = activeStroke.style.program.compatibilityRecipe?
-            .footprintCoverageSymmetry ?? .oriented
         let footprint = StampFootprint(
             brushToWorld: dab.brushToWorld,
             localBounds: AxisAlignedRect(
                 minimum: SIMD2(-1, -1),
                 maximum: SIMD2(1, 1)
             ),
-            coverageSymmetry: coverageSymmetry
+            coverageSymmetry: .oriented
         )
         let fragments = TilingProjection.fragments(
             for: footprint,
             using: tilingStrategy
         )
-        if activeStroke.compiledBrush != nil {
-            return try fragments.map { fragment in
-                let isometryOrdinal = try compiledIsometryOrdinal(
-                    for: fragment
-                )
-                return ProjectedDabRecord(
-                    legacyInstance: nil,
-                    depositionRecord: ProjectedDepositionRecord(
-                        identity: dab.ordinal,
-                        instance: try PatternDepositionStampInstance(
-                            fragment: fragment,
-                            dab: dab,
-                            logicalOrdinal: dab.ordinal,
-                            isometryOrdinal: isometryOrdinal
-                        ),
-                        radialPage: radialPage(for: fragment)
-                    ),
-                    dirtyRect: TilingProjection.dirtyPixelRect(
-                        for: fragment,
-                        radius: dab.radius
+        guard activeStroke.compiledBrush != nil else {
+            throw MetalRendererError.compiledBrushUnavailable(
+                activeStroke.style.compositeMode
+            )
+        }
+        return try fragments.map { fragment in
+            let isometryOrdinal = try compiledIsometryOrdinal(
+                for: fragment
+            )
+            return ProjectedDabRecord(
+                depositionRecord: ProjectedDepositionRecord(
+                    identity: dab.ordinal,
+                    instance: try PatternDepositionStampInstance(
+                        fragment: fragment,
+                        dab: dab,
+                        logicalOrdinal: dab.ordinal,
+                        isometryOrdinal: isometryOrdinal
                     ),
                     radialPage: radialPage(for: fragment)
-                )
-            }
-        }
-
-        let color = InkColor(
-            red: dab.color.red,
-            green: dab.color.green,
-            blue: dab.color.blue,
-            alpha: dab.color.alpha * dab.flow * dab.materialContribution
-        )!
-        let brushAttributes = SIMD4(
-            dab.hardness,
-            dab.grainScale,
-            dab.grainOffset.x,
-            dab.grainOffset.y
-        )
-        return fragments.map { fragment in
-            ProjectedDabRecord(
-                legacyInstance: PatternProjectedStampInstance(
-                    fragment: fragment,
-                    radius: minimumAffineScale,
-                    color: color,
-                    brushAttributes: brushAttributes
                 ),
-                depositionRecord: nil,
                 dirtyRect: TilingProjection.dirtyPixelRect(
                     for: fragment,
-                    radius: minimumAffineScale
+                    radius: dab.radius
                 ),
                 radialPage: radialPage(for: fragment)
             )
         }
     }
 
-    private func compiledIsometryOrdinal(
+    func compiledIsometryOrdinal(
         for fragment: CellFragment
     ) throws -> UInt8 {
         guard let isometry = tilingStrategy.compiledSymmetry.images.first(
@@ -2737,18 +2504,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    private var boundedWashTopology: BoundedWashTopology {
-        switch tilingStrategy.compiledSymmetry.domain {
-        case .periodic:
-            return .periodic
-        case let .finite(finite):
-            if let layout = finite.radial.layout {
-                return .radial(layout)
-            }
-            return .finite
-        }
-    }
-
     private func takeReplayEpoch() -> UInt64 {
         let epoch = nextReplayEpoch
         nextReplayEpoch &+= 1
@@ -2769,53 +2524,68 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             requested: requestedRadius ?? activeStroke.style.diameter / 2,
             tileSize: tileSize
         )
+        let brushToWorld = Affine2D(
+            xAxis: SIMD2(radius, 0),
+            yAxis: SIMD2(0, radius),
+            translation: point.simd
+        )
         let footprint = StampFootprint(
-            brushToWorld: Affine2D(
-                xAxis: SIMD2(radius, 0),
-                yAxis: SIMD2(0, radius),
-                translation: point.simd
-            ),
+            brushToWorld: brushToWorld,
             localBounds: AxisAlignedRect(
                 minimum: SIMD2(-1, -1),
                 maximum: SIMD2(1, 1)
             ),
             coverageSymmetry: coverageSymmetry
         )
-        return try appendProjectedFragments(
-            footprint: footprint,
-            radius: radius,
-            color: color(for: activeStroke.style),
-            brushAttributes: SIMD4(1, 1, 0, 0)
-        )
-    }
-
-    private func appendProjectedFragments(
-        footprint: StampFootprint,
-        radius: Float,
-        color: InkColor,
-        brushAttributes: SIMD4<Float>
-    ) throws -> [CellFragment] {
         let fragments = TilingProjection.fragments(
             for: footprint,
             using: tilingStrategy
         )
-        for fragment in fragments {
-            let instance = PatternProjectedStampInstance(
-                fragment: fragment,
-                radius: radius,
-                color: color,
-                brushAttributes: brushAttributes
-            )
-            try liveStroke.append(
-                instance,
+        let baseOrdinal = UInt64(counters.totalInstancesThisStroke)
+        let dab = LogicalDab(
+            position: point,
+            brushToWorld: brushToWorld,
+            radius: radius,
+            diameter: radius * 2,
+            spacing: 1,
+            flow: 1,
+            strokeOpacity: 1,
+            rotation: 0,
+            scatter: .zero,
+            hardness: 1,
+            grainOffset: .zero,
+            grainScale: 1,
+            grainRotation: 0,
+            color: color(for: activeStroke.style),
+            colorAdjustment: .identity,
+            materialFamily: .ink,
+            materialContribution: 1,
+            sourceDistance: 0,
+            ordinal: baseOrdinal,
+            isPredicted: false
+        )
+        let records = try fragments.enumerated().map { offset, fragment in
+            let ordinal = baseOrdinal + UInt64(offset)
+            let radialPage = radialPage(for: fragment)
+            return ProjectedDabRecord(
+                depositionRecord: ProjectedDepositionRecord(
+                    identity: ordinal,
+                    instance: try PatternDepositionStampInstance(
+                        fragment: fragment,
+                        dab: dab,
+                        logicalOrdinal: ordinal,
+                        isometryOrdinal: compiledIsometryOrdinal(for: fragment)
+                    ),
+                    radialPage: radialPage
+                ),
                 dirtyRect: TilingProjection.dirtyPixelRect(
                     for: fragment,
                     radius: radius
                 ),
-                radialPage: radialPage(for: fragment)
+                radialPage: radialPage
             )
-            counters.totalInstancesThisStroke += 1
         }
+        try enqueueCompiledAuthoritative(records)
         return fragments
     }
 
@@ -2938,12 +2708,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    private var compositeMaterialUniforms: PatternBrushMaterialUniforms {
-        var uniforms = activeMaterialState.uniforms
-        if activeStroke?.style.compositeMode == .erase {
-            uniforms.materialStrength = activeStroke?.style.eraserStrength ?? 1
-        }
-        return uniforms
+    private var compositeMaterialUniforms: PatternCompositeUniforms {
+        PatternCompositeUniforms(
+            parameters: SIMD4(
+                activeStroke?.style.color.alpha ?? 1,
+                activeStroke?.compiledBrush?.program.definition.material
+                    .accumulationLimit ?? 1,
+                activeStroke?.style.compositeMode == .erase
+                    ? activeStroke?.style.eraserStrength ?? 1
+                    : 1,
+                0
+            )
+        )
     }
 
     func makeHarnessTexture(
@@ -3482,11 +3258,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         _ commandBuffer: any MTLCommandBuffer
     ) throws -> NativeDepositionFrameEncoding {
         guard var execution = activeStroke,
-              let brush = execution.compiledBrush,
               let scheduler = execution.scheduler
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        let binding = execution.compiledBrush?.depositionPipeline
+            ?? pipelines.harnessDeposition
+        let material = execution.compiledBrush?.depositionMaterial
+            ?? pipelines.harnessDepositionMaterial
 
         // Authoritative work owns the frame whenever it is present. This
         // keeps a frame to one render target, so preflight and submission are
@@ -3525,8 +3304,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 ? nil
                 : try encoder.preflight(
                     records: records,
-                    binding: brush.depositionPipeline,
-                    material: brush.depositionMaterial,
+                    binding: binding,
+                    material: material,
                     target: target
                 )
         } catch {
@@ -3775,20 +3554,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         _ commandBuffer: any MTLCommandBuffer,
         lease: DabInstanceBufferPool.Lease,
         count: Int,
-        instances: ArraySlice<IdentifiedDab>,
+        instances _: ArraySlice<IdentifiedDab>,
         texture: any MTLTexture,
         layer: FrameUpload.Layer
     ) throws {
-        if activeMaterialState.family == .boundedWash {
-            try encodeBoundedWash(
-                commandBuffer,
-                lease: lease,
-                count: count,
-                instances: instances,
-                destination: texture,
-                layer: layer
-            )
-            return
+        guard let brush = activeStroke?.compiledBrush else {
+            throw MetalRendererError.invalidStrokeLifecycle
         }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = texture
@@ -3802,7 +3573,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         encoder.label = layer == .settled
             ? "Stamp Persistent Live Dabs"
             : "Stamp Replay Live Dabs"
-        encoder.setRenderPipelineState(pipelines.stamp)
+        encoder.setRenderPipelineState(brush.depositionPipeline.state)
         var uniforms = frameUniforms(
             drawableSize: tileSize,
             showGridLines: false,
@@ -3818,18 +3589,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             offset: 0,
             index: Int(PatternBufferIndexDabInstances)
         )
-        encoder.setFragmentTexture(
-            activeShapeTexture,
-            index: Int(PatternTextureIndexBrushShape)
-        )
-        encoder.setFragmentTexture(
-            activeGrainTexture,
-            index: Int(PatternTextureIndexBrushGrain)
-        )
-        var materialUniforms = activeMaterialState.uniforms
+        for slot in brush.depositionMaterial.textures.boundSlots {
+            guard let texture = brush.depositionMaterial.textures[slot] else {
+                throw MetalRendererError.invalidCompiledBrush
+            }
+            encoder.setFragmentTexture(
+                texture,
+                index: slot.rawValue
+            )
+        }
+        var materialUniforms = brush.depositionMaterial.uniforms
         encoder.setFragmentBytes(
             &materialUniforms,
-            length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
+            length: MemoryLayout<PatternDepositionMaterialUniforms>.stride,
             index: Int(PatternBufferIndexBrushMaterial)
         )
         encoder.drawPrimitives(
@@ -3839,326 +3611,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             instanceCount: count
         )
         encoder.endEncoding()
-    }
-
-    private func encodeBoundedWash(
-        _ commandBuffer: any MTLCommandBuffer,
-        lease: DabInstanceBufferPool.Lease,
-        count: Int,
-        instances: ArraySlice<IdentifiedDab>,
-        destination: any MTLTexture,
-        layer: FrameUpload.Layer
-    ) throws {
-        guard let surface = boundedWashSurface else {
-            throw MetalRendererError.boundedWashSurfaceAllocationFailed
-        }
-        let dirty = instances.compactMap { dab in
-            boundedWashDirtyRect(for: dab.instance).map {
-                BoundedWashDirtyRegion(
-                    rectangle: $0,
-                    radialPage: dab.radialPage
-                )
-            }
-        }
-        let plan = try surface.makeWorkPlan(
-            dirtyRegions: dirty,
-            topology: boundedWashTopology,
-            bleedRadius: activeMaterialState.bleedRadius,
-            softenPasses: Int(activeMaterialState.softenPasses)
-        )
-        guard !plan.processingRegions.rectangles.isEmpty else { return }
-        let regionMetadata = try surface.prepareProcessingRegions(
-            plan.processingRegions,
-            slot: lease.slot
-        )
-        lastBoundedWashWorkPlan = plan
-
-        try encodeWashRegionalPass(
-            commandBuffer,
-            pipeline: pipelines.washClear,
-            destination: surface.depositTexture,
-            source: nil,
-            regions: plan.processingRegions,
-            regionMetadata: nil,
-            label: "Clear Bounded Wash Deposit"
-        )
-        try encodeWashDeposit(
-            commandBuffer,
-            lease: lease,
-            count: count,
-            destination: surface.depositTexture,
-            layer: layer
-        )
-
-        var source = surface.depositTexture
-        if plan.softenPasses > 0 {
-            for passIndex in 0..<plan.softenPasses {
-                let target = passIndex.isMultiple(of: 2)
-                    ? surface.scratchTexture
-                    : surface.depositTexture
-                try encodeWashRegionalPass(
-                    commandBuffer,
-                    pipeline: pipelines.washSoften,
-                    destination: target,
-                    source: source,
-                    regions: plan.processingRegions,
-                    regionMetadata: regionMetadata,
-                    label: "Bounded Wash Soften \(passIndex + 1)"
-                )
-                source = target
-            }
-        }
-        try encodeWashRegionalPass(
-            commandBuffer,
-            pipeline: pipelines.washResolve,
-            destination: destination,
-            source: source,
-            regions: plan.processingRegions,
-            regionMetadata: nil,
-            label: layer == .settled
-                ? "Resolve Bounded Wash To Settled Live"
-                : "Resolve Bounded Wash To Replay Live"
-        )
-        boundedWashEncodedWork.record(plan)
-    }
-
-    private var boundedWashHistoryRegions: PixelRegionSet {
-        boundedWashHistory.regions(pixelSize: storagePixelSize)
-    }
-
-    private func accumulateBoundedWashHistory(
-        _ regions: PixelRegionSet
-    ) {
-        boundedWashHistory.record(regions, pixelSize: storagePixelSize)
-    }
-
-    private func boundedWashDirtyRect(
-        for instance: PatternProjectedStampInstance
-    ) -> PixelRect? {
-        let radius = instance.radius
-        guard radius.isFinite, radius > 0 else { return nil }
-        let expansion = 1 + 1 / radius
-        let extent = (
-            abs(instance.canonicalXAxis) + abs(instance.canonicalYAxis)
-        ) * expansion
-        return PixelRect(
-            minX: Int(floor(instance.canonicalTranslation.x - extent.x)),
-            minY: Int(floor(instance.canonicalTranslation.y - extent.y)),
-            maxX: Int(ceil(instance.canonicalTranslation.x + extent.x)),
-            maxY: Int(ceil(instance.canonicalTranslation.y + extent.y))
-        )
-    }
-
-    private func encodeWashDeposit(
-        _ commandBuffer: any MTLCommandBuffer,
-        lease: DabInstanceBufferPool.Lease,
-        count: Int,
-        destination: any MTLTexture,
-        layer: FrameUpload.Layer
-    ) throws {
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = destination
-        pass.colorAttachments[0].loadAction = .load
-        pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        encoder.label = layer == .settled
-            ? "Deposit Bounded Wash Settled Dabs"
-            : "Deposit Bounded Wash Replay Dabs"
-        encoder.setRenderPipelineState(pipelines.washDeposit)
-        var uniforms = frameUniforms(
-            drawableSize: tileSize,
-            showGridLines: false,
-            liveVisible: true
-        )
-        encoder.setVertexBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setVertexBuffer(
-            lease.buffer,
-            offset: 0,
-            index: Int(PatternBufferIndexDabInstances)
-        )
-        encoder.setFragmentTexture(
-            activeShapeTexture,
-            index: Int(PatternTextureIndexBrushShape)
-        )
-        encoder.setFragmentTexture(
-            activeGrainTexture,
-            index: Int(PatternTextureIndexBrushGrain)
-        )
-        var material = activeMaterialState.uniforms
-        encoder.setFragmentBytes(
-            &material,
-            length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
-            index: Int(PatternBufferIndexBrushMaterial)
-        )
-        encoder.drawPrimitives(
-            type: .triangle,
-            vertexStart: 0,
-            vertexCount: 6,
-            instanceCount: count
-        )
-        encoder.endEncoding()
-    }
-
-    private func encodeWashRegionalPass(
-        _ commandBuffer: any MTLCommandBuffer,
-        pipeline: any MTLRenderPipelineState,
-        destination: any MTLTexture,
-        source: (any MTLTexture)?,
-        regions: PixelRegionSet,
-        regionMetadata: (buffer: any MTLBuffer, count: Int)?,
-        label: String
-    ) throws {
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = destination
-        pass.colorAttachments[0].loadAction = .load
-        pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        encoder.label = label
-        encoder.setRenderPipelineState(pipeline)
-        var uniforms = frameUniforms(
-            drawableSize: tileSize,
-            showGridLines: false,
-            liveVisible: true
-        )
-        encoder.setVertexBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setFragmentBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        var radialUniforms = boundedWashRadialFrameUniforms
-        encoder.setFragmentBytes(
-            &radialUniforms,
-            length: MemoryLayout<PatternRadialFrameUniforms>.stride,
-            index: Int(PatternBufferIndexRadialFrameUniforms)
-        )
-        guard let radialPageTableTexture else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        encoder.setFragmentTexture(
-            radialPageTableTexture,
-            index: Int(PatternTextureIndexRadialPageTable)
-        )
-        if let source {
-            encoder.setFragmentTexture(
-                source,
-                index: Int(PatternTextureIndexCanonical)
-            )
-        }
-        if let regionMetadata {
-            encoder.setFragmentBuffer(
-                regionMetadata.buffer,
-                offset: 0,
-                index: Int(PatternBufferIndexDabInstances)
-            )
-        }
-        var material = activeMaterialState.uniforms
-        material.padding1 = UInt32(regionMetadata?.count ?? 0)
-        encoder.setFragmentBytes(
-            &material,
-            length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
-            index: Int(PatternBufferIndexBrushMaterial)
-        )
-        for (rectangle, radialPage) in washDrawRegions(regions) {
-            var pageUniforms = PatternRadialResizePageUniforms(
-                logicalPageX: Int32(radialPage?.coordinate.x ?? 0),
-                logicalPageY: Int32(radialPage?.coordinate.y ?? 0),
-                destinationSlot: UInt32(radialPage?.atlasSlot ?? 0),
-                padding: 0
-            )
-            encoder.setFragmentBytes(
-                &pageUniforms,
-                length: MemoryLayout<PatternRadialResizePageUniforms>.stride,
-                index: Int(PatternBufferIndexRadialResizePage)
-            )
-            encoder.setScissorRect(
-                MTLScissorRect(
-                    x: rectangle.minX,
-                    y: rectangle.minY,
-                    width: rectangle.width,
-                    height: rectangle.height
-                )
-            )
-            encoder.drawPrimitives(
-                type: .triangle,
-                vertexStart: 0,
-                vertexCount: 3
-            )
-        }
-        encoder.endEncoding()
-    }
-
-    private var boundedWashRadialFrameUniforms:
-        PatternRadialFrameUniforms
-    {
-        if tilingStrategy.compiledSymmetry.domain.finite != nil {
-            return radialFrameUniforms()
-        }
-        return PatternRadialFrameUniforms(
-            canvasSize: SIMD2(
-                Float(storagePixelSize.width),
-                Float(storagePixelSize.height)
-            ),
-            center: .zero,
-            referenceAngle: 0,
-            sectorAngle: 2 * .pi,
-            displayedSectorCount: 1,
-            dihedral: 0,
-            pageOrigin: .zero,
-            pageTableSize: SIMD2(repeating: 1),
-            atlasColumns: 1,
-            pageSide: UInt32(
-                max(storagePixelSize.width, storagePixelSize.height)
-            ),
-            atlasSize: SIMD2(
-                Float(storagePixelSize.width),
-                Float(storagePixelSize.height)
-            )
-        )
-    }
-
-    private func washDrawRegions(
-        _ regions: PixelRegionSet
-    ) -> [(rectangle: PixelRect, radialPage: RadialResidentPage?)] {
-        guard let layout = tilingStrategy.compiledSymmetry.domain.finite?
-            .radial.layout
-        else {
-            return regions.rectangles.map { ($0, nil) }
-        }
-        let side = RadialSectorLayout.pageSide
-        var result: [(PixelRect, RadialResidentPage?)] = []
-        for rectangle in regions.rectangles {
-            for page in layout.residentPages {
-                let atlasX = page.atlasSlot % layout.atlasColumns * side
-                let atlasY = page.atlasSlot / layout.atlasColumns * side
-                guard let intersection = PixelRect(
-                    minX: max(rectangle.minX, atlasX),
-                    minY: max(rectangle.minY, atlasY),
-                    maxX: min(rectangle.maxX, atlasX + side),
-                    maxY: min(rectangle.maxY, atlasY + side)
-                ) else {
-                    continue
-                }
-                result.append((intersection, page))
-            }
-        }
-        return result
     }
 
     func encodeCommit(
@@ -4212,7 +3664,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             var materialUniforms = compositeMaterialUniforms
             encoder.setFragmentBytes(
                 &materialUniforms,
-                length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
+                length: MemoryLayout<PatternCompositeUniforms>.stride,
                 index: Int(PatternBufferIndexBrushMaterial)
             )
             encoder.setFragmentTexture(
@@ -4329,7 +3781,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         var materialUniforms = compositeMaterialUniforms
         encoder.setFragmentBytes(
             &materialUniforms,
-            length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
+            length: MemoryLayout<PatternCompositeUniforms>.stride,
             index: Int(PatternBufferIndexBrushMaterial)
         )
         if displayFamily == .radial {
@@ -4967,9 +4419,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         needsReplayClear = true
         nextReplayEpoch = 1
         knownStrokeTotalDistance = nil
-        lastBoundedWashWorkPlan = nil
-        boundedWashEncodedWork = BoundedWashEncodedWork()
-        boundedWashHistory = BoundedWashHistoryAccumulator()
     }
 
     func report(_ error: MetalRendererError) {

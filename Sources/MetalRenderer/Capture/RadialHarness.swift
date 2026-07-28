@@ -255,6 +255,7 @@ public enum RadialHarnessRunner {
                 finiteConfiguration: .radial(scene.configuration)
             )
         )
+        try renderer.installNativeHarnessBrushes()
         let commitMetrics = try commit(
             renderer,
             at: scene.probe,
@@ -381,11 +382,17 @@ public enum RadialHarnessRunner {
         mode: StrokeCompositeMode
     ) throws -> GPUFrameMetrics {
         let token = RendererOperationToken(rawValue: rawToken)
+        guard let brush = renderer.preparedBrush(for: mode) else {
+            throw MetalRendererError.compiledBrushUnavailable(mode)
+        }
         let style = StrokeRenderStyle(
             color: .black,
             diameter: diameter,
             compositeMode: mode,
-            eraserStrength: 1
+            eraserStrength: 1,
+            program: brush.program,
+            renderIdentity: brush.renderIdentity,
+            seed: rawToken
         )
         try renderer.beginStroke(
             token: token,

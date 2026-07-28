@@ -163,13 +163,13 @@ func baselineWriterCreatesItsOutputDirectoryAtomically() throws {
 }
 
 @Test
-func rendererBaselineMergeFindsAndSortsOneRecordForEverySliceFourScene() throws {
+func rendererBaselineMergeFindsAndSortsOneRecordForEveryDepositionScene() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
         "brush-baseline-merge-\(UUID().uuidString)"
     )
     defer { try? FileManager.default.removeItem(at: root) }
     let encoder = JSONEncoder()
-    for (index, scene) in SliceFourEvidenceValidator.sceneNames.enumerated() {
+    for (index, scene) in DepositionEvidenceValidator.sceneNames.enumerated() {
         let logical = BrushCharacterizationRecord(
             schemaVersion: 1,
             traceName: scene,
@@ -203,5 +203,5 @@ func rendererBaselineMergeFindsAndSortsOneRecordForEverySliceFourScene() throws 
     let merged = try BrushCharacterizationBaseline.merge(inputRoot: root)
 
     #expect(merged.records.map(\.sceneName)
-        == SliceFourEvidenceValidator.sceneNames.sorted())
+        == DepositionEvidenceValidator.sceneNames.sorted())
 }

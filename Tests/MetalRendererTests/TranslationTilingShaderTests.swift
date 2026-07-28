@@ -128,7 +128,7 @@ struct TranslationTilingShaderTests {
             "const float4 composite00 = patternCompositeLive( live00, replay00, canonical.read(texel00), compositeMode, strokeOpacity, accumulationLimit, eraserStrength );"
         ))
         #expect(source.contains(
-            "float4 result = patternCompositeThenBilinearSample( canonical, live, replayLive, mapping.canonicalPixel, frame.compositeMode, frame.liveVisible, material.strokeOpacity, material.accumulationLimit, material.materialStrength );"
+            "float4 result = patternCompositeThenBilinearSample( canonical, live, replayLive, mapping.canonicalPixel, frame.compositeMode, frame.liveVisible, material.parameters.x, material.parameters.y, material.parameters.z );"
         ))
     }
 

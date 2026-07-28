@@ -146,6 +146,9 @@ run_logged cli-atomicity \
 run_logged compiler-dry-wet-activation \
   swift test --no-parallel \
     --filter SyntheticBrushCompilerIntegrationTests
+run_logged compiler-typed-wet-rejection \
+  swift test --no-parallel \
+    --filter wetConcentrationFailsWithTypedDepositionRejection
 run_logged headless-brush-lab \
   swift test --no-parallel --filter BrushLabSessionTests
 

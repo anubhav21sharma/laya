@@ -126,107 +126,11 @@ func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
     #expect(MemoryLayout<PatternClipHalfPlane>.offset(of: \.offset) == 8)
     #expect(MemoryLayout<PatternClipHalfPlane>.offset(of: \.padding) == 12)
 
-    #expect(MemoryLayout<PatternProjectedStampInstance>.size == 128)
-    #expect(MemoryLayout<PatternProjectedStampInstance>.stride == 128)
-    #expect(MemoryLayout<PatternProjectedStampInstance>.alignment == 16)
+    #expect(MemoryLayout<PatternCompositeUniforms>.size == 16)
+    #expect(MemoryLayout<PatternCompositeUniforms>.stride == 16)
+    #expect(MemoryLayout<PatternCompositeUniforms>.alignment == 16)
     #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(
-            of: \.canonicalXAxis
-        ) == 0
-    )
-    #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(
-            of: \.canonicalYAxis
-        ) == 8
-    )
-    #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(
-            of: \.canonicalTranslation
-        ) == 16
-    )
-    #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.radius)
-            == 24
-    )
-    #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clipCount)
-            == 28
-    )
-    #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.color)
-            == 32
-    )
-    #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip0)
-            == 48
-    )
-    #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip1)
-            == 64
-    )
-    #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip2)
-            == 80
-    )
-    #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(of: \.clip3)
-            == 96
-    )
-    #expect(
-        MemoryLayout<PatternProjectedStampInstance>.offset(
-            of: \.brushAttributes
-        ) == 112
-    )
-
-    #expect(MemoryLayout<PatternBrushMaterialUniforms>.size == 48)
-    #expect(MemoryLayout<PatternBrushMaterialUniforms>.stride == 48)
-    #expect(MemoryLayout<PatternBrushMaterialUniforms>.alignment == 4)
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.materialFamily)
-            == 0
-    )
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(
-            of: \.grainCoordinateMode
-        ) == 4
-    )
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.strokeOpacity)
-            == 8
-    )
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.materialStrength)
-            == 12
-    )
-    #expect(MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.wetness) == 16)
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.bleedRadius)
-            == 20
-    )
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.softenPasses)
-            == 24
-    )
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(
-            of: \.accumulationLimit
-        ) == 28
-    )
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.shapeKind)
-            == 32
-    )
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.grainKind)
-            == 36
-    )
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.grainRotation)
-            == 40
-    )
-    #expect(
-        MemoryLayout<PatternBrushMaterialUniforms>.offset(of: \.padding1)
-            == 44
+        MemoryLayout<PatternCompositeUniforms>.offset(of: \.parameters) == 0
     )
     #expect(ShaderABI.isValid)
 }

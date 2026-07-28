@@ -52,6 +52,31 @@ public struct DepositionMaterialBinding {
         )
     }
 
+    static var harnessOpaque: Self {
+        Self(
+            uniforms: PatternDepositionMaterialUniforms(
+                coverageParameters: SIMD4(0, 0, 0, 1),
+                secondaryShapeTransform: SIMD4(1, 0, 0, 0),
+                edgeParameters: SIMD4(1, 0, 0, 0),
+                options: SIMD4(
+                    PatternDepositionShapeCombinationReplace,
+                    1,
+                    PatternDepositionShapeKindHardRound,
+                    PatternDepositionShapeKindHardRound
+                )
+            ),
+            textures: DepositionTextureBindings([:])
+        )
+    }
+
+    private init(
+        uniforms: PatternDepositionMaterialUniforms,
+        textures: DepositionTextureBindings
+    ) {
+        self.uniforms = uniforms
+        self.textures = textures
+    }
+
     init(
         uniformTemplate: BrushUniformTemplate,
         textures: [String: any MTLTexture]

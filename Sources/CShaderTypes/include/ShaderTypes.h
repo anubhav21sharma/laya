@@ -74,20 +74,6 @@ typedef struct PatternClipHalfPlane {
     float padding;
 } PatternClipHalfPlane;
 
-typedef struct PatternProjectedStampInstance {
-    PatternFloat2 canonicalXAxis;
-    PatternFloat2 canonicalYAxis;
-    PatternFloat2 canonicalTranslation;
-    float radius;
-    PatternUInt32 clipCount;
-    PatternFloat4 color;
-    PatternClipHalfPlane clip0;
-    PatternClipHalfPlane clip1;
-    PatternClipHalfPlane clip2;
-    PatternClipHalfPlane clip3;
-    PatternFloat4 brushAttributes;
-} PatternProjectedStampInstance;
-
 typedef struct PatternDepositionStampInstance {
     PatternFloat4 tipFrame0;
     PatternFloat4 tipFrame1;
@@ -203,20 +189,10 @@ PatternDepositionStampInstanceOffsetReserved1(void) {
 }
 #endif
 
-typedef struct PatternBrushMaterialUniforms {
-    PatternUInt32 materialFamily;
-    PatternUInt32 grainCoordinateMode;
-    float strokeOpacity;
-    float materialStrength;
-    float wetness;
-    float bleedRadius;
-    PatternUInt32 softenPasses;
-    float accumulationLimit;
-    PatternUInt32 shapeKind;
-    PatternUInt32 grainKind;
-    float grainRotation;
-    PatternUInt32 padding1;
-} PatternBrushMaterialUniforms;
+typedef struct PatternCompositeUniforms {
+    // (stroke opacity, accumulation limit, eraser strength, reserved)
+    PatternFloat4 parameters;
+} PatternCompositeUniforms;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexFrameUniforms = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexGridFrameUniforms = 1;
@@ -242,11 +218,6 @@ PATTERN_WIRE_CONSTANT PatternUInt32
     PatternTextureIndexDepositionPrimaryGrain = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternTextureIndexDepositionSecondaryGrain = 3;
-
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireInk = 0;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireDry = 1;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireGlaze = 2;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireBoundedWash = 3;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionABIVersion = 1;
 
@@ -287,17 +258,6 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionEdgeDryBreakup = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionEdgeMarkerOverlap = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternDepositionEdgeWetConcentration = 3;
-
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainCoordinateWireCanonical = 0;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainCoordinateWireBrushLocal = 1;
-
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternShapeWireHardRound = 0;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternShapeWireSoftRound = 1;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternShapeWireChisel = 2;
-
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainWireOpaque = 0;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainWirePaper = 1;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainWireNoise = 2;
 
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternSymmetryFamilyWireRectangular = 0;

@@ -47,12 +47,14 @@ func makeControllerRenderer(
         pixelSize: pixelSize,
         tiling: .grid
     )
-    return try GridRenderer(
+    let renderer = try GridRenderer(
         device: device,
         library: library,
         drawableSize: PatternSize(width: 64, height: 64),
         configuration: canvasConfiguration
     )
+    try renderer.installNativeHarnessBrushes()
+    return renderer
 }
 
 private func controllerSample(
@@ -217,9 +219,7 @@ private func commitControllerStroke(
 ) throws {
     controller.handleStrokeSample(controllerSample(.began, x: x, y: y))
     controller.handleStrokeSample(controllerSample(.ended, x: x, y: y))
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.submitCommitForHarness()
-    try renderer.drainCompletedOperationsForHarness()
+    _ = try renderer.finishCommitForHarness()
 }
 
 @Test
@@ -466,10 +466,8 @@ func failedFirstRadialCommitLeavesGeometryEditable() throws {
 
     controller.handleStrokeSample(controllerSample(.began, x: 47, y: 34))
     controller.handleStrokeSample(controllerSample(.ended, x: 47, y: 34))
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.submitCommitForHarness(forceFailure: true)
     #expect(throws: MetalRendererError.self) {
-        try renderer.drainCompletedOperationsForHarness()
+        _ = try renderer.finishCommitForHarness(forceCommitFailure: true)
     }
 
     #expect(!controller.model.documentDomainLocked)
@@ -1029,7 +1027,7 @@ func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
     controller.model.confirmRecipe(AnchorBrushCatalog.marker.id)
     controller.handleStrokeSample(controllerSample(.began))
     let first = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(first.program.compatibilityRecipe != nil)
+    #expect(first.program.compatibilityRecipe == nil)
     #expect(first.seed == EditorSessionController.derivedStrokeSeed(
         sequence: 1,
         sessionEntropy: sessionEntropy
@@ -1039,7 +1037,7 @@ func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
     controller.model.confirmRecipe(AnchorBrushCatalog.glaze.id)
     controller.handleStrokeSample(controllerSample(.began))
     let second = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(second.program.compatibilityRecipe != nil)
+    #expect(second.program.compatibilityRecipe == nil)
     #expect(second.seed == EditorSessionController.derivedStrokeSeed(
         sequence: 2,
         sessionEntropy: sessionEntropy
@@ -1050,7 +1048,7 @@ func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
     controller.handleTool(.erase)
     controller.handleStrokeSample(controllerSample(.began))
     let eraser = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(eraser.program.compatibilityRecipe != nil)
+    #expect(eraser.program.compatibilityRecipe == nil)
     #expect(eraser.seed == EditorSessionController.derivedStrokeSeed(
         sequence: 3,
         sessionEntropy: sessionEntropy
@@ -1247,7 +1245,7 @@ func diagnosticProgramSeedAndNormalizedInputAreCapturedAtStrokeStart()
     controller.handleStrokeSample(began)
 
     let style = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(style.program.compatibilityRecipe != nil)
+    #expect(style.program.compatibilityRecipe == nil)
     #expect(style.seed == 0xCAFE)
     #expect(observed == [began])
 
@@ -1255,7 +1253,7 @@ func diagnosticProgramSeedAndNormalizedInputAreCapturedAtStrokeStart()
     controller.model.confirmRecipe(AnchorBrushCatalog.defaultDraw.id)
     controller.handleStrokeSample(controllerSample(.began, timestamp: 3))
     let builtIn = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(builtIn.program.compatibilityRecipe != nil)
+    #expect(builtIn.program.compatibilityRecipe == nil)
     #expect(builtIn.seed == 0xCAFE)
     controller.handleStrokeSample(controllerSample(.cancelled, timestamp: 4))
 }
@@ -1909,6 +1907,9 @@ func failedEstimatedFallbackCommitLeavesRendererReusable() throws {
         )
     )
 
+    #expect(throws: MetalRendererError.self) {
+        _ = try renderer.finishCommitForHarness()
+    }
     #expect(controller.transactionStateForTesting == .idle)
     #expect(renderer.isIdle)
 

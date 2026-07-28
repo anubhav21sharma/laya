@@ -277,10 +277,8 @@ func sliceFourBenchmarkRejectsZeroSeedAndNonfiniteMaterialTiming() throws {
 func sliceFourFiveHundredDabBudgetUsesPerFrameInstanceCounts() throws {
     let record = sliceFourBenchmarkFixture(materialGPU: [0.2, 0.3])
 
-    #expect(
-        try SliceFourEvidenceValidator.fiveHundredDabGPUTimings(record: record)
-            == [0.3]
-    )
+    #expect(record.fiveHundredDabStressFrameIndex == 1)
+    #expect(record.fiveHundredDabStressNewDabCount == 500)
 
     var object = try #require(
         JSONSerialization.jsonObject(

@@ -3,24 +3,29 @@ import CShaderTypes
 import PatternEngine
 import Testing
 
-private func instance(_ x: Float) -> PatternProjectedStampInstance {
+private func instance(_ x: Float) -> PatternDepositionStampInstance {
     let zeroClip = PatternClipHalfPlane(
         normal: .zero,
         offset: 0,
         padding: 0
     )
-    return PatternProjectedStampInstance(
-        canonicalXAxis: SIMD2<Float>(10, 0),
-        canonicalYAxis: SIMD2<Float>(0, 10),
-        canonicalTranslation: SIMD2<Float>(x, 0),
-        radius: 10,
-        clipCount: 0,
-        color: SIMD4<Float>(0, 0, 0, 1),
+    return PatternDepositionStampInstance(
+        tipFrame0: SIMD4<Float>(10, 0, 0, 10),
+        tipFrame1: SIMD4<Float>(x, 0, 10, 0),
+        primaryGrainFrame0: .zero,
+        primaryGrainFrame1: .zero,
+        secondaryGrainFrame0: .zero,
+        secondaryGrainFrame1: .zero,
+        premultipliedColor: SIMD4<Float>(0, 0, 0, 1),
+        coverageInputs: SIMD4<Float>(1, 1, 1, 1),
         clip0: zeroClip,
         clip1: zeroClip,
         clip2: zeroClip,
         clip3: zeroClip,
-        brushAttributes: SIMD4(1, 1, 0, 0)
+        identity: .zero,
+        metadata: SIMD4(0, 0, 0, UInt32(DepositionABI.version)),
+        reserved0: .zero,
+        reserved1: .zero
     )
 }
 

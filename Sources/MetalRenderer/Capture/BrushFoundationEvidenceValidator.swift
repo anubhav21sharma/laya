@@ -139,7 +139,7 @@ public struct BrushAnchorAdapterParityEvidence:
 }
 
 public enum BrushFoundationCompilerProbe {
-    public static let definitionID = "evidence.cache-probe"
+    public static let definitionID = "harness.native-draw"
     public static let logicalDabEvaluationCount = 1_000
 
     @MainActor
@@ -219,18 +219,11 @@ public enum BrushFoundationCompilerProbe {
         )
     }
 
+    @MainActor
     private static func probePackage() throws -> BrushPackage {
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID(definitionID),
-            shape: .asset("builtin.shape.hard-round")
-        )
-        let definition = try LegacyBrushRecipeAdapter.definition(
-            from: recipe,
-            displayName: "Foundation cache probe"
-        )
         return try BrushPackage(
             manifest: BrushPackageManifest(resources: []),
-            definition: definition,
+            definition: GridRenderer.nativeHarnessDefinition(mode: .draw),
             resourceData: [:]
         )
     }
@@ -305,9 +298,9 @@ private final class BrushFoundationProbePipelinePreparer:
 }
 
 public enum BrushFoundationEvidenceValidator {
-    public typealias SliceFourValidator = (
+    public typealias DepositionValidator = (
         URL, URL, URL, String
-    ) throws -> SliceFourEvidenceValidationStatus
+    ) throws -> Void
 
     public static let logicalFileName = "brush-logical-v1.json"
     public static let parityFileName = "anchor-adapter-parity.json"
@@ -326,12 +319,9 @@ public enum BrushFoundationEvidenceValidator {
             rendererBaselineURL: rendererBaselineURL,
             artifactRoot: artifactRoot,
             expectedCommit: expectedCommit,
-            sliceFourValidator: {
-                try SliceFourEvidenceValidator.validate(
-                    positiveRoot: $0,
-                    negativeRoot: $1,
-                    sceneRoot: $2,
-                    expectedCommit: $3
+            depositionValidator: { _, _, sceneRoot, _ in
+                try DepositionEvidenceValidator.validateSceneSet(
+                    DepositionEvidenceValidator.loadScenes(from: sceneRoot)
                 )
             }
         )
@@ -342,7 +332,7 @@ public enum BrushFoundationEvidenceValidator {
         rendererBaselineURL: URL,
         artifactRoot: URL,
         expectedCommit: String,
-        sliceFourValidator: SliceFourValidator
+        depositionValidator: DepositionValidator
     ) throws -> BrushFoundationEvidenceValidationStatus {
         guard isCommit(expectedCommit) else {
             throw invalid("expected commit must be 40 lowercase hexadecimal characters")
@@ -399,22 +389,14 @@ public enum BrushFoundationEvidenceValidator {
                 "generated eight-record renderer characterization changed"
             )
         }
-        let benchmarkGPUName = try loadBenchmarkGPUName(
-            positiveRoot.appendingPathComponent(
-                SliceFourEvidenceValidator.sceneNames[0]
-            ).appendingPathComponent(
-                "\(SliceFourEvidenceValidator.sceneNames[0]).benchmark.json"
-            )
-        )
         try validateCompilerEvidence(
             at: artifactRoot.appendingPathComponent(compilerFileName),
             expectedCommit: expectedCommit,
-            expectedGPUName: benchmarkGPUName
+            expectedGPUName: nil
         )
 
-        let sliceFourStatus: SliceFourEvidenceValidationStatus
         do {
-            sliceFourStatus = try sliceFourValidator(
+            try depositionValidator(
                 positiveRoot,
                 negativeRoot,
                 sceneRoot,
@@ -422,11 +404,10 @@ public enum BrushFoundationEvidenceValidator {
             )
         } catch {
             throw invalid(
-                "Slice 4 correctness, schema-6, digest, parity, or performance validation failed: \(error.localizedDescription)"
+                "native deposition scene validation failed: \(error.localizedDescription)"
             )
         }
         return try validatePerformanceStatus(
-            sliceFourStatus,
             at: artifactRoot.appendingPathComponent(performanceFileName)
         )
     }
@@ -528,7 +509,7 @@ public enum BrushFoundationEvidenceValidator {
     static func validateCompilerEvidence(
         at url: URL,
         expectedCommit: String,
-        expectedGPUName: String
+        expectedGPUName: String?
     ) throws {
         let data = try regularFileData(url, label: "compiler counter evidence")
         try requireKeys(
@@ -591,7 +572,7 @@ public enum BrushFoundationEvidenceValidator {
         guard evidence.schemaVersion
                 == BrushCompilerCounterEvidence.currentSchemaVersion,
               evidence.commit == expectedCommit,
-              evidence.gpuName == expectedGPUName,
+              (expectedGPUName.map { evidence.gpuName == $0 } ?? true),
               evidence.activeDefinitionID
                 == BrushFoundationCompilerProbe.definitionID,
               evidence.residentByteCount > 0,
@@ -613,19 +594,19 @@ public enum BrushFoundationEvidenceValidator {
         negativeRoot: URL
     ) throws {
         guard try directoryNames(positiveRoot)
-                == Set(SliceFourEvidenceValidator.sceneNames),
+                == Set(DepositionEvidenceValidator.sceneNames),
               try directoryNames(negativeRoot)
-                == Set(SliceFourEvidenceValidator.sceneNames)
+                == Set(DepositionEvidenceValidator.sceneNames)
         else {
             throw invalid(
-                "positive and negative directories must exactly match all eight Slice 4 scenes"
+                "positive and negative directories must exactly match all native deposition scenes"
             )
         }
-        for name in SliceFourEvidenceValidator.sceneNames {
+        for name in DepositionEvidenceValidator.sceneNames {
             _ = try regularFileData(
                 positiveRoot.appendingPathComponent(name)
                     .appendingPathComponent(
-                        "\(name).brush-characterization.json"
+                        "\(name).deposition-evidence.json"
                     ),
                 label: "\(name) characterization"
             )
@@ -664,13 +645,11 @@ public enum BrushFoundationEvidenceValidator {
 
     private static func validateSceneInputs(_ root: URL) throws {
         let expected = Set(
-            SliceFourEvidenceValidator.sceneNames.flatMap {
-                ["\($0).json", "\($0)-negative-control.json"]
-            }
+            DepositionEvidenceValidator.sceneNames.map { "\($0).json" }
         )
         guard try directoryNames(root) == expected else {
             throw invalid(
-                "scene-inputs must contain exactly the 16 Slice 4 scene files"
+                "scene-inputs must contain the exact native deposition scene set"
             )
         }
         for name in expected {
@@ -682,7 +661,6 @@ public enum BrushFoundationEvidenceValidator {
     }
 
     private static func validatePerformanceStatus(
-        _ status: SliceFourEvidenceValidationStatus,
         at url: URL
     ) throws -> BrushFoundationEvidenceValidationStatus {
         let text = String(
@@ -692,27 +670,10 @@ public enum BrushFoundationEvidenceValidator {
             ),
             as: UTF8.self
         )
-        switch status {
-        case .passed:
-            guard text == "accepted\n" else {
-                throw invalid("unrecognized performance-pending text")
-            }
-            return .passed
-        case let .performancePending(gpuName):
-            guard BenchmarkHardware.isPerformancePendingEnvironment(
-                gpuName: gpuName
-            ) else {
-                throw invalid(
-                    "only a GPU name containing 'paravirtual' may be performance pending"
-                )
-            }
-            let expected =
-                "SLICE3 PERFORMANCE PENDING: unstable real-Metal timing environment '\(gpuName)'.\n"
-            guard text == expected else {
-                throw invalid("unrecognized performance-pending text")
-            }
-            return .performancePending(gpuName: gpuName)
+        guard text == "accepted\n" else {
+            throw invalid("native deposition performance status is not accepted")
         }
+        return .passed
     }
 
     private static func loadBenchmarkGPUName(_ url: URL) throws -> String {

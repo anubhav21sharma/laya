@@ -62,32 +62,7 @@ enum HarnessLaunch {
                 return
             }
             let result: HarnessRunResult
-            if scene.schemaVersion == 5 {
-                let history = SliceThreeHarnessHistory(
-                    releaseRasterRevisions: { _ in }
-                )
-                let runner = SliceFourHarnessRunner(
-                    device: device,
-                    anchorRecipes: AnchorBrushCatalog.drawAnchors.map(\.recipe),
-                    catalogRecipeVerifier: { recipe in
-                        AnchorBrushCatalog.recipe(for: recipe.id) == recipe
-                    },
-                    historyRecorder: { receipt in
-                        if let receipt {
-                            try history.appendRaster(
-                                kind: .draw,
-                                receipt: receipt
-                            )
-                        }
-                        return history.evidence.commandCount
-                    }
-                )
-                result = try runner.run(
-                    scene: scene,
-                    outputDirectory: outputDirectory,
-                    build: build
-                )
-            } else if scene.schemaVersion == 4 {
+            if scene.schemaVersion == 4 {
                 result = try SliceThreeHarnessRunner(device: device).run(
                     scene: scene,
                     outputDirectory: outputDirectory,

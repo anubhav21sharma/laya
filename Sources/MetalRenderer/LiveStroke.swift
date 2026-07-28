@@ -4,7 +4,7 @@ import PatternEngine
 public struct IdentifiedDab {
     public let identity: UInt64
     public let renderEpoch: UInt64
-    public let instance: PatternProjectedStampInstance
+    public let instance: PatternDepositionStampInstance
     public let radialPage: RadialPageCoordinate?
 }
 
@@ -38,13 +38,13 @@ public struct LiveStroke {
     }
 
     public mutating func append(
-        _ instance: PatternProjectedStampInstance
+        _ instance: PatternDepositionStampInstance
     ) throws {
         try append(instance, dirtyRect: nil)
     }
 
     public mutating func append(
-        _ instance: PatternProjectedStampInstance,
+        _ instance: PatternDepositionStampInstance,
         dirtyRect: PixelRect,
         radialPage: RadialPageCoordinate? = nil
     ) throws {
@@ -77,7 +77,7 @@ public struct LiveStroke {
     }
 
     private mutating func append(
-        _ instance: PatternProjectedStampInstance,
+        _ instance: PatternDepositionStampInstance,
         dirtyRect: PixelRect?,
         radialPage: RadialPageCoordinate? = nil
     ) throws {

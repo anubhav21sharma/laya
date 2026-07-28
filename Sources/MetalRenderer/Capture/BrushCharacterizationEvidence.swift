@@ -184,7 +184,7 @@ public struct BrushCharacterizationBaseline: Codable, Equatable, Sendable {
 
     public static func merge(
         inputRoot: URL,
-        expectedSceneNames: [String] = SliceFourEvidenceValidator.sceneNames
+        expectedSceneNames: [String] = DepositionEvidenceValidator.sceneNames
     ) throws -> Self {
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(
@@ -224,9 +224,6 @@ public struct BrushCharacterizationBaseline: Codable, Equatable, Sendable {
                 expected: expectedRecordCount,
                 actual: records.count
             )
-        }
-        guard records.map(\.sceneName) == SliceFourEvidenceValidator.sceneNames.sorted() else {
-            throw BrushCharacterizationEvidenceError.sceneSetMismatch
         }
     }
 

@@ -20,20 +20,6 @@ public struct AnchorBrushEntry: Equatable, Sendable {
     }
 
     public var id: BrushRecipeID { definition.id }
-
-    /// Legacy characterization tooling remains source-compatible while native
-    /// activation always uses `definition` and `program` above.
-    @available(*, deprecated, message: "Native anchors have no compatibility program.")
-    public var compatibilityRecipe: BrushRecipe {
-        do {
-            return try BrushRecipe(id: id)
-        } catch {
-            preconditionFailure("Invalid compatibility diagnostic recipe: \(error)")
-        }
-    }
-
-    @available(*, deprecated, renamed: "compatibilityRecipe")
-    public var recipe: BrushRecipe { compatibilityRecipe }
 }
 
 /// Fixed native Stage 4 anchors, intentionally not a user-editable library.
@@ -51,7 +37,6 @@ public enum AnchorBrushCatalog {
     @available(*, deprecated, renamed: "ink") public static let technicalInk = ink
     @available(*, deprecated, renamed: "dryMedia") public static let dryPencil = dryMedia
     @available(*, deprecated, renamed: "marker") public static let glazeMarker = marker
-    @available(*, deprecated, renamed: "glaze") public static let boundedWash = glaze
     @available(*, deprecated, renamed: "eraser") public static let hardRoundEraser = eraser
 
     public static func entry(for id: BrushRecipeID) -> AnchorBrushEntry? {
@@ -60,11 +45,6 @@ public enum AnchorBrushCatalog {
 
     public static func drawEntry(for id: BrushRecipeID) -> AnchorBrushEntry? {
         drawAnchors.first { $0.id == id }
-    }
-
-    @available(*, deprecated, message: "Native activation uses entry(for:).")
-    public static func recipe(for id: BrushRecipeID) -> BrushRecipe? {
-        entry(for: id)?.compatibilityRecipe
     }
 
     private static func entry(

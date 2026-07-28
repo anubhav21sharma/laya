@@ -1,3 +1,4 @@
+import CShaderTypes
 import Metal
 
 @MainActor
@@ -5,33 +6,16 @@ public struct GridPipelineLibrary {
     public static let colorPixelFormat: MTLPixelFormat = .bgra8Unorm
     public static let sampleCount = 1
 
-    public let stamp: any MTLRenderPipelineState
     public let display: any MTLRenderPipelineState
     public let triangularDisplay: any MTLRenderPipelineState
     public let radialDisplay: any MTLRenderPipelineState
     public let radialResizeCopy: any MTLComputePipelineState
     public let commit: any MTLRenderPipelineState
-    public let washDeposit: any MTLRenderPipelineState
     public let replayClear: any MTLRenderPipelineState
-    public let washClear: any MTLRenderPipelineState
-    public let washSoften: any MTLRenderPipelineState
-    public let washResolve: any MTLRenderPipelineState
+    let harnessDeposition: DepositionPipelineBinding
+    let harnessDepositionMaterial: DepositionMaterialBinding
 
     public init(device: any MTLDevice, library: any MTLLibrary) throws {
-        stamp = try Self.makePipeline(
-            device: device,
-            library: library,
-            label: "Projected Brush Stamp",
-            vertex: "patternProjectedStampVertex",
-            fragment: "patternBrushStampFragment",
-            configure: { attachment in
-                attachment.isBlendingEnabled = true
-                attachment.sourceRGBBlendFactor = .sourceAlpha
-                attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
-                attachment.sourceAlphaBlendFactor = .one
-                attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-            }
-        )
         display = try Self.makePipeline(
             device: device,
             library: library,
@@ -100,48 +84,60 @@ public struct GridPipelineLibrary {
                 attachment.isBlendingEnabled = false
             }
         )
-        washDeposit = try Self.makePipeline(
-            device: device,
-            library: library,
-            label: "Bounded Wash Deposit",
-            vertex: "patternProjectedStampVertex",
-            fragment: "patternBrushStampFragment",
-            pixelFormat: BoundedWashSurface.pixelFormat,
-            configure: Self.configureStraightSourceOver
-        )
         replayClear = try Self.makePipeline(
             device: device,
             library: library,
             label: "Replay Tail Regional Clear",
             vertex: "patternFullscreenVertex",
-            fragment: "patternWashClearFragment",
+            fragment: "patternClearFragment",
             configure: { $0.isBlendingEnabled = false }
         )
-        washClear = try Self.makePipeline(
-            device: device,
-            library: library,
-            label: "Bounded Wash Regional Clear",
-            vertex: "patternFullscreenVertex",
-            fragment: "patternWashClearFragment",
-            pixelFormat: BoundedWashSurface.pixelFormat,
-            configure: { $0.isBlendingEnabled = false }
+        let harnessBrushKey = BrushPipelineKey(
+            backend: .deposition,
+            accumulation: .opaque,
+            edgeTreatment: .none,
+            functionConstants: BrushFunctionConstants(
+                usesSecondaryShape: false,
+                usesGrain: false,
+                usesSecondaryGrain: false,
+                usesDestinationSampling: false
+            )
         )
-        washSoften = try Self.makePipeline(
-            device: device,
-            library: library,
-            label: "Bounded Wash Local Soften",
-            vertex: "patternFullscreenVertex",
-            fragment: "patternWashSoftenFragment",
-            pixelFormat: BoundedWashSurface.pixelFormat,
-            configure: { $0.isBlendingEnabled = false }
+        let harnessKey = DepositionPipelineKey(
+            brush: harnessBrushKey,
+            abiVersion: DepositionABI.version,
+            colorPixelFormatRawValue: Self.colorPixelFormat.rawValue,
+            sampleCount: Self.sampleCount
         )
-        washResolve = try Self.makePipeline(
+        harnessDeposition = DepositionPipelineBinding(
+            key: harnessKey,
+            state: try Self.makeHarnessDepositionPipeline(
+                device: device,
+                library: library
+            )
+        )
+        harnessDepositionMaterial = .harnessOpaque
+    }
+
+    private static func makeHarnessDepositionPipeline(
+        device: any MTLDevice,
+        library: any MTLLibrary
+    ) throws -> any MTLRenderPipelineState {
+        let constants = harnessDepositionFunctionConstants()
+        return try makePipeline(
             device: device,
             library: library,
-            label: "Bounded Wash Premultiplied Resolve",
-            vertex: "patternFullscreenVertex",
-            fragment: "patternWashResolveFragment",
-            configure: Self.configurePremultipliedSourceOver
+            label: "Harness Native Deposition",
+            vertex: "patternProjectedDepositionVertex",
+            fragment: "patternDepositionFragment",
+            constants: constants,
+            configure: { attachment in
+                attachment.isBlendingEnabled = true
+                attachment.sourceRGBBlendFactor = .one
+                attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                attachment.sourceAlphaBlendFactor = .one
+                attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            }
         )
     }
 
@@ -149,12 +145,14 @@ public struct GridPipelineLibrary {
         device: any MTLDevice,
         library: any MTLLibrary
     ) throws -> any MTLRenderPipelineState {
-        try makePipeline(
+        let constants = harnessDepositionFunctionConstants()
+        return try makePipeline(
             device: device,
             library: library,
             label: "Harness Diagnostic Projected Footprint",
-            vertex: "patternProjectedStampVertex",
+            vertex: "patternProjectedDepositionVertex",
             fragment: "patternDiagnosticFootprintFragment",
+            constants: constants,
             configure: { attachment in
                 attachment.isBlendingEnabled = true
                 attachment.sourceRGBBlendFactor = .sourceAlpha
@@ -165,18 +163,39 @@ public struct GridPipelineLibrary {
         )
     }
 
-    static func makeHarnessBrushPipeline(
-        device: any MTLDevice,
-        library: any MTLLibrary
-    ) throws -> any MTLRenderPipelineState {
-        try makePipeline(
-            device: device,
-            library: library,
-            label: "Harness Recipe Brush Footprint",
-            vertex: "patternProjectedStampVertex",
-            fragment: "patternBrushStampFragment",
-            configure: configureStraightSourceOver
+    private static func harnessDepositionFunctionConstants()
+        -> MTLFunctionConstantValues
+    {
+        let constants = MTLFunctionConstantValues()
+        var disabled = false
+        constants.setConstantValue(
+            &disabled,
+            type: .bool,
+            index: Int(PatternDepositionFunctionConstantSecondaryShape)
         )
+        constants.setConstantValue(
+            &disabled,
+            type: .bool,
+            index: Int(PatternDepositionFunctionConstantPrimaryGrain)
+        )
+        constants.setConstantValue(
+            &disabled,
+            type: .bool,
+            index: Int(PatternDepositionFunctionConstantSecondaryGrain)
+        )
+        var accumulation = PatternDepositionAccumulationOpaque
+        constants.setConstantValue(
+            &accumulation,
+            type: .uint,
+            index: Int(PatternDepositionFunctionConstantAccumulation)
+        )
+        var edge = PatternDepositionEdgeNone
+        constants.setConstantValue(
+            &edge,
+            type: .uint,
+            index: Int(PatternDepositionFunctionConstantEdgeTreatment)
+        )
+        return constants
     }
 
     private static func makePipeline(
@@ -185,14 +204,36 @@ public struct GridPipelineLibrary {
         label: String,
         vertex: String,
         fragment: String,
+        constants: MTLFunctionConstantValues? = nil,
         pixelFormat: MTLPixelFormat = GridPipelineLibrary.colorPixelFormat,
         configure: (MTLRenderPipelineColorAttachmentDescriptor) -> Void
     ) throws -> any MTLRenderPipelineState {
-        guard let vertexFunction = library.makeFunction(name: vertex) else {
-            throw MetalRendererError.shaderFunctionUnavailable(vertex)
-        }
-        guard let fragmentFunction = library.makeFunction(name: fragment) else {
-            throw MetalRendererError.shaderFunctionUnavailable(fragment)
+        let vertexFunction: any MTLFunction
+        let fragmentFunction: any MTLFunction
+        if let constants {
+            do {
+                vertexFunction = try library.makeFunction(
+                    name: vertex,
+                    constantValues: constants
+                )
+                fragmentFunction = try library.makeFunction(
+                    name: fragment,
+                    constantValues: constants
+                )
+            } catch {
+                throw MetalRendererError.pipelineCreationFailed(
+                    error.localizedDescription
+                )
+            }
+        } else {
+            guard let vertex = library.makeFunction(name: vertex) else {
+                throw MetalRendererError.shaderFunctionUnavailable(vertex)
+            }
+            guard let fragment = library.makeFunction(name: fragment) else {
+                throw MetalRendererError.shaderFunctionUnavailable(fragment)
+            }
+            vertexFunction = vertex
+            fragmentFunction = fragment
         }
 
         let descriptor = MTLRenderPipelineDescriptor()
@@ -209,16 +250,6 @@ public struct GridPipelineLibrary {
                 error.localizedDescription
             )
         }
-    }
-
-    private static func configureStraightSourceOver(
-        _ attachment: MTLRenderPipelineColorAttachmentDescriptor
-    ) {
-        attachment.isBlendingEnabled = true
-        attachment.sourceRGBBlendFactor = .sourceAlpha
-        attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
-        attachment.sourceAlphaBlendFactor = .one
-        attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
     }
 
     private static func configurePremultipliedSourceOver(

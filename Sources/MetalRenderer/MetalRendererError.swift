@@ -7,7 +7,6 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case shaderFunctionUnavailable(String)
     case pipelineCreationFailed(String)
     case textureAllocationFailed
-    case boundedWashSurfaceAllocationFailed
     case sharedEventUnavailable
     case instanceBufferAllocationFailed
     case depositionEncoderUnavailable
@@ -63,8 +62,6 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
             "Metal pipeline creation failed: \(message)"
         case .textureAllocationFailed:
             "Metal render texture allocation failed."
-        case .boundedWashSurfaceAllocationFailed:
-            "Bounded-wash working texture allocation failed."
         case .sharedEventUnavailable:
             "Metal shared-event creation failed."
         case .instanceBufferAllocationFailed:

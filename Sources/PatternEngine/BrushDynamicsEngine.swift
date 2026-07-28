@@ -729,7 +729,39 @@ public struct BrushDynamicsEngine: Sendable {
         _ dab: DabAttributes,
         totalDistance: Float,
         nominalDiameter: Float,
+        definition: BrushDefinition,
+        retainedReplayStartDistance: Float? = nil
+    ) -> DabAttributes {
+        applyingKnownTotalDistance(
+            dab,
+            totalDistance: totalDistance,
+            nominalDiameter: nominalDiameter,
+            taper: definition.taper,
+            retainedReplayStartDistance: retainedReplayStartDistance
+        )
+    }
+
+    public func applyingKnownTotalDistance(
+        _ dab: DabAttributes,
+        totalDistance: Float,
+        nominalDiameter: Float,
         recipe: BrushRecipe,
+        retainedReplayStartDistance: Float? = nil
+    ) -> DabAttributes {
+        applyingKnownTotalDistance(
+            dab,
+            totalDistance: totalDistance,
+            nominalDiameter: nominalDiameter,
+            taper: recipe.taper,
+            retainedReplayStartDistance: retainedReplayStartDistance
+        )
+    }
+
+    private func applyingKnownTotalDistance(
+        _ dab: DabAttributes,
+        totalDistance: Float,
+        nominalDiameter: Float,
+        taper: BrushTaperConfiguration,
         retainedReplayStartDistance: Float? = nil
     ) -> DabAttributes {
         precondition(totalDistance.isFinite && totalDistance >= 0)
@@ -743,19 +775,19 @@ public struct BrushDynamicsEngine: Sendable {
         }
         let startEnvelope = envelope(
             distance: dab.sourceDistance,
-            length: recipe.taper.start,
+            length: taper.start,
             nominalDiameter: nominalDiameter
         )
         let absoluteEndEnvelope = envelope(
             distance: max(0, totalDistance - dab.sourceDistance),
-            length: recipe.taper.end,
+            length: taper.end,
             nominalDiameter: nominalDiameter
         )
         let endEnvelope: Float
         if let retainedReplayStartDistance {
             let boundaryEnvelope = envelope(
                 distance: max(0, totalDistance - retainedReplayStartDistance),
-                length: recipe.taper.end,
+                length: taper.end,
                 nominalDiameter: nominalDiameter
             )
             endEnvelope = boundaryEnvelope > 0
@@ -766,31 +798,31 @@ public struct BrushDynamicsEngine: Sendable {
         }
         let originalEnvelope = startEnvelope
         let finalEnvelope = min(startEnvelope, endEnvelope)
-        let originalSize = recipe.taper.effects.contains(.size)
+        let originalSize = taper.effects.contains(.size)
             ? interpolate(
-                from: recipe.taper.minimumSize,
+                from: taper.minimumSize,
                 to: 1,
                 fraction: originalEnvelope
             )
             : 1
-        let finalSize = recipe.taper.effects.contains(.size)
+        let finalSize = taper.effects.contains(.size)
             ? interpolate(
-                from: recipe.taper.minimumSize,
+                from: taper.minimumSize,
                 to: 1,
                 fraction: finalEnvelope
             )
             : 1
         let sizeRatio = originalSize > 0 ? finalSize / originalSize : 1
-        let originalFlow = recipe.taper.effects.contains(.flow)
+        let originalFlow = taper.effects.contains(.flow)
             ? interpolate(
-                from: recipe.taper.minimumFlow,
+                from: taper.minimumFlow,
                 to: 1,
                 fraction: originalEnvelope
             )
             : 1
-        let finalFlow = recipe.taper.effects.contains(.flow)
+        let finalFlow = taper.effects.contains(.flow)
             ? interpolate(
-                from: recipe.taper.minimumFlow,
+                from: taper.minimumFlow,
                 to: 1,
                 fraction: finalEnvelope
             )

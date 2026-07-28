@@ -83,73 +83,6 @@ struct RadialShaderTests {
 
     @Test
     @MainActor
-    func boundedWashCrossingRadialPageBoundaryReachesEveryOrbit() throws {
-        let size = PixelSize(width: 600, height: 600)
-        let radial = RadialSymmetryConfiguration(
-            kind: .mandala,
-            rayCount: 8,
-            center: WorldPoint(x: 300, y: 300)
-        )
-        guard let renderer = try makeRadialRenderer(
-            radial,
-            size: size
-        ) else {
-            return
-        }
-        let source = ScreenPoint(x: 555, y: 305)
-        try commitRadialDab(
-            renderer,
-            at: source,
-            tokenValue: 70,
-            style: try finiteWashStyle(diameter: 20)
-        )
-
-        let exported = try renderer.exportFiniteCanvas(
-            transparentBackground: true
-        )
-        let orbit = RadialCoverageOracle.orbit(
-            of: WorldPoint(x: source.x, y: source.y),
-            configuration: radial
-        )
-        #expect(orbit.count == 16)
-        #expect(orbit.allSatisfy {
-            radialPixelIsInk(
-                exported.bgra8Bytes,
-                width: size.width,
-                height: size.height,
-                point: $0
-            )
-        })
-    }
-
-    @Test
-    @MainActor
-    func boundedWashOnPlainCanvasDoesNotWrapAtFiniteEdge() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
-        let size = PixelSize(width: 128, height: 128)
-        let renderer = try makeFiniteRenderer(
-            device: device,
-            configuration: .plain,
-            size: size
-        )
-        try commitRadialDab(
-            renderer,
-            at: ScreenPoint(x: 2, y: 64),
-            tokenValue: 71,
-            style: try finiteWashStyle(diameter: 4)
-        )
-
-        let exported = try renderer.exportFiniteCanvas(
-            transparentBackground: true
-        )
-        let oppositeAlpha = exported.bgra8Bytes[
-            (64 * size.width + 125) * 4 + 3
-        ]
-        #expect(oppositeAlpha == 0)
-    }
-
-    @Test
-    @MainActor
     func radialGeometryLocksOnlyAfterSuccessfulCommit() throws {
         let initial = RadialSymmetryConfiguration(
             kind: .rotation,
@@ -163,20 +96,24 @@ struct RadialShaderTests {
         #expect(!renderer.radialGeometryLocked)
 
         let failedToken = RendererOperationToken(rawValue: 1)
+        let failedStyle = try nativeRadialStyle(
+            radialDrawStyle,
+            renderer: renderer
+        )
         try renderer.beginStroke(
             token: failedToken,
             sample: radialSample(.began, x: 90, y: 64),
-            style: radialDrawStyle
+            style: failedStyle
         )
         try renderer.requestStrokeCommit(
             token: failedToken,
             sample: radialSample(.ended, x: 90, y: 64),
             maximumRetainedBytes: 4_000_000
         )
-        _ = try renderer.flushPendingLiveForHarness()
-        _ = try renderer.submitCommitForHarness(forceFailure: true)
         #expect(throws: MetalRendererError.self) {
-            try renderer.drainCompletedOperationsForHarness()
+            _ = try renderer.finishCommitForHarness(
+                forceCommitFailure: true
+            )
         }
         #expect(!renderer.documentDomainLocked)
         #expect(!renderer.radialGeometryLocked)
@@ -607,7 +544,7 @@ private func makeRadialRenderer(
         ),
         options: nil
     )
-    return try GridRenderer(
+    let renderer = try GridRenderer(
         device: device,
         library: library,
         drawableSize: PatternSize(
@@ -619,38 +556,8 @@ private func makeRadialRenderer(
             finiteConfiguration: .radial(radial)
         )
     )
-}
-
-private func finiteWashStyle(
-    diameter: Float
-) throws -> StrokeRenderStyle {
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("test.finite.wash.\(diameter)"),
-        shape: .hardRound,
-        grain: .opaque,
-        material: BrushMaterial(
-            family: .boundedWash,
-            strength: 1,
-            wetness: 1,
-            bleedRadius: 8,
-            softenPasses: 2,
-            accumulationLimit: 1
-        ),
-        baseSpacingFraction: 0.2,
-        maximumSpacingFraction: 0.2,
-        baseFlow: 1,
-        strokeOpacity: 1,
-        replayMode: .boundedWholeStroke,
-        replayLimits: BrushRecipePolicy.wholeStrokeLimits
-    )
-    return StrokeRenderStyle(
-        color: .black,
-        diameter: diameter,
-        compositeMode: .draw,
-        eraserStrength: 1,
-        recipe: recipe,
-        seed: 70
-    )
+    try renderer.installNativeHarnessBrushes()
+    return renderer
 }
 
 @MainActor
@@ -682,7 +589,7 @@ private func makeFiniteRenderer(
         ),
         options: nil
     )
-    return try GridRenderer(
+    let renderer = try GridRenderer(
         device: device,
         library: library,
         drawableSize: PatternSize(
@@ -694,6 +601,8 @@ private func makeFiniteRenderer(
             finiteConfiguration: configuration
         )
     )
+    try renderer.installNativeHarnessBrushes()
+    return renderer
 }
 
 @MainActor
@@ -703,20 +612,43 @@ private func commitRadialDab(
     tokenValue: UInt64 = 1,
     style: StrokeRenderStyle = radialDrawStyle
 ) throws {
+    let nativeStyle = try nativeRadialStyle(style, renderer: renderer)
     let token = RendererOperationToken(rawValue: tokenValue)
     try renderer.beginStroke(
         token: token,
         sample: radialSample(.began, x: point.x, y: point.y),
-        style: style
+        style: nativeStyle
     )
     try renderer.requestStrokeCommit(
         token: token,
         sample: radialSample(.ended, x: point.x, y: point.y),
         maximumRetainedBytes: 4_000_000
     )
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.submitCommitForHarness()
-    try renderer.drainCompletedOperationsForHarness()
+    _ = try renderer.finishCommitForHarness()
+}
+
+@MainActor
+private func nativeRadialStyle(
+    _ style: StrokeRenderStyle,
+    renderer: GridRenderer
+) throws -> StrokeRenderStyle {
+    guard let brush = renderer.preparedBrush(
+        for: style.compositeMode
+    ) else {
+        throw MetalRendererError.compiledBrushUnavailable(
+            style.compositeMode
+        )
+    }
+    let nativeStyle = StrokeRenderStyle(
+        color: style.color,
+        diameter: style.diameter,
+        compositeMode: style.compositeMode,
+        eraserStrength: style.eraserStrength,
+        program: brush.program,
+        renderIdentity: brush.renderIdentity,
+        seed: style.seed
+    )
+    return nativeStyle
 }
 
 private func radialSample(

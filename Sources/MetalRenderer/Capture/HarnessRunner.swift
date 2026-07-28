@@ -600,7 +600,7 @@ public final class HarnessRunner {
         }
         let (instanceBytes, overflow) = fragments.count
             .multipliedReportingOverflow(
-                by: MemoryLayout<PatternProjectedStampInstance>.stride
+                by: MemoryLayout<PatternDepositionStampInstance>.stride
             )
         guard !overflow else {
             throw HarnessRunError.counterInvariant(

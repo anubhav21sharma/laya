@@ -3,42 +3,227 @@ import Foundation
 import Metal
 import PatternEngine
 
-struct SliceFourRendererCounters: Equatable, Sendable {
-    let retainedSampleCount: Int
-    let retainedDabCount: Int
-    let settledDabCount: Int
-    let predictedDabCount: Int
-    let replayCount: Int
-    let replayRenderEpoch: UInt64
-    let replayVisibleEpoch: UInt64
-    let promotedSettledPrefixCount: Int
-    let replayDegradationCount: Int
-    let assetResidentBytes: Int
-    let assetFallbackCount: Int
-    let assetIdentityMismatchCount: Int
-    let processedWashPixelCount: Int
-    let washWorkingBytes: Int
-}
-
-struct SliceFourReplayEpochAudit: Equatable, Sendable {
-    let newerEpoch: UInt64
-    let visibleBeforeStaleCompletion: UInt64
-    let visibleAfterStaleCompletion: UInt64
-    let staleCompletionViolationCount: Int
-}
-
 @MainActor
 extension GridRenderer {
+    func installNativeHarnessBrushes() throws {
+        try activateDrawBrush(
+            makeNativeHarnessBrush(mode: .draw)
+        )
+        try activateEraserBrush(
+            makeNativeHarnessBrush(mode: .erase)
+        )
+    }
+
+    private func makeNativeHarnessBrush(
+        mode: StrokeCompositeMode
+    ) throws -> CompiledBrush {
+        let definition = try Self.nativeHarnessDefinition(mode: mode)
+        let program = try BrushProgramCompiler.compile(definition)
+        let coverage = definition.coverage
+        let pipelineKey = BrushPipelineKey(
+            backend: .deposition,
+            accumulation: definition.material.accumulation,
+            edgeTreatment: definition.material.edgeTreatment,
+            functionConstants: BrushFunctionConstants(
+                usesSecondaryShape: coverage.shapes.count > 1,
+                usesGrain: !coverage.grains.isEmpty,
+                usesSecondaryGrain: coverage.grains.count > 1,
+                usesDestinationSampling: false
+            )
+        )
+        let depositionKey = DepositionPipelineKey(
+            brush: pipelineKey,
+            abiVersion: DepositionABI.version,
+            colorPixelFormatRawValue:
+                GridPipelineLibrary.colorPixelFormat.rawValue,
+            sampleCount: GridPipelineLibrary.sampleCount
+        )
+        let pipeline = try DepositionPipelineLibrary(
+            device: device,
+            library: library
+        ).prepareImmediately(for: depositionKey)
+        let uniforms = BrushUniformTemplate(
+            placement: definition.placement,
+            coverage: definition.coverage,
+            color: definition.color,
+            material: definition.material
+        )
+        let hash = String(
+            repeating: mode == .draw ? "d" : "e",
+            count: 64
+        )
+        let identity = try BrushRenderIdentity(
+            definitionID: definition.id,
+            semanticHash: hash
+        )
+        let report = try BrushCompilationReport(
+            definitionID: definition.id.rawValue,
+            packageContentHash: hash,
+            backend: .deposition,
+            compatibility: [],
+            performance: BrushPerformanceClassification(
+                tier: .realtime120,
+                basis: .estimated,
+                reason: "native harness fixture"
+            ),
+            encodedResourceBytes: 0,
+            residentResourceBytes: 0,
+            deviceRegistryID: device.registryID
+        )
+        return CompiledBrush(
+            program: program,
+            renderIdentity: identity,
+            pipelineKey: pipelineKey,
+            uniformTemplate: uniforms,
+            textures: [:],
+            depositionPipeline: pipeline,
+            depositionMaterial: try DepositionMaterialBinding(
+                uniformTemplate: uniforms,
+                textures: [:]
+            ),
+            residentByteCount: 0,
+            report: report,
+            diagnostics: [],
+            cacheKeys: []
+        )
+    }
+
+    static func nativeHarnessDefinition(
+        mode: StrokeCompositeMode
+    ) throws -> BrushDefinition {
+        let one = BrushMappingDefinition(
+            input: .pressure,
+            response: .constant(1),
+            scale: 1,
+            offset: 0,
+            lowerClamp: 1,
+            upperClamp: 1,
+            inverted: false,
+            jitter: 0,
+            missingInputValue: 1
+        )
+        let zero = BrushMappingDefinition(
+            input: .pressure,
+            response: .constant(0),
+            scale: 1,
+            offset: 0,
+            lowerClamp: 0,
+            upperClamp: 0,
+            inverted: false,
+            jitter: 0,
+            missingInputValue: 1
+        )
+        return try BrushDefinition(
+            id: BrushRecipeID(
+                mode == .draw
+                    ? "harness.native-draw"
+                    : "harness.native-erase"
+            ),
+            metadata: BrushMetadata(
+                displayName: mode == .draw
+                    ? "Harness Native Draw"
+                    : "Harness Native Erase"
+            ),
+            capabilities: [],
+            resources: [],
+            coverage: BrushCoverageDefinition(
+                shapes: [
+                    BrushShapeLayerDefinition(
+                        shape: .hardRound,
+                        combination: .replace,
+                        scale: 1,
+                        rotation: 0,
+                        offset: .zero
+                    ),
+                ],
+                grains: [],
+                baseHardness: 0.9,
+                aspectRatio: 1,
+                tipThreshold: 0.01,
+                antialiasing: true
+            ),
+            placement: BrushPlacementDefinition(
+                baseSpacingFraction: 0.1,
+                maximumSpacingFraction: 0.25,
+                baseFlow: 1,
+                strokeOpacity: 1,
+                baseScatterFraction: 0,
+                baseRotation: 0,
+                baseJitterFraction: 0,
+                baseOffset: .zero
+            ),
+            dynamics: BrushDynamicsDefinition(
+                size: one,
+                flow: one,
+                opacity: one,
+                spacing: one,
+                rotation: zero,
+                scatter: zero,
+                hardness: one,
+                grain: one,
+                offsetX: zero,
+                offsetY: zero,
+                hue: zero,
+                saturation: zero,
+                brightness: zero,
+                secondaryColorMix: zero,
+                noPressureNeutral: 0.5,
+                randomization: .none
+            ),
+            color: BrushColorBehaviorDefinition(
+                baseAdjustment: .identity,
+                perStampJitter: BrushColorJitter(
+                    hue: 0,
+                    saturation: 0,
+                    brightness: 0,
+                    secondaryColorMix: 0
+                ),
+                perStrokeJitter: BrushColorJitter(
+                    hue: 0,
+                    saturation: 0,
+                    brightness: 0,
+                    secondaryColorMix: 0
+                )
+            ),
+            material: BrushMaterialDefinition(
+                accumulation: mode == .draw ? .flow : .destinationOut,
+                interaction: .none,
+                edgeTreatment: .none,
+                strength: 1,
+                wetness: 0,
+                bleedRadius: 0,
+                softenPasses: 0,
+                accumulationLimit: 1,
+                interactionParameters: nil
+            ),
+            stabilization: 0,
+            taper: .none,
+            replayMode: .appendOnly,
+            replayLimits: nil,
+            seedPolicy: .perStroke,
+            limits: BrushDefinitionLimits(
+                minimumDiameter: 0.01,
+                maximumDiameter: 16_384,
+                maximumOpacity: 1,
+                maximumSpacingFraction: 4,
+                maximumResourceDimension: 4_096,
+                maximumResidentBytes: 64 * 1_024 * 1_024
+            ),
+            performanceIntent: .realtime120,
+            compatibility: BrushCompatibilityMetadata(
+                nativeFeatureVersion: 1,
+                sourceSettingKeys: [],
+                requiredSemanticKeys: []
+            )
+        )
+    }
+
     public func flushPendingLiveForHarness(
         forceFailure: Bool = false,
         forceCommandBufferUnavailable: Bool = false
     ) throws -> HarnessLiveFlushResult {
         drainFrameOutcomes()
         drainCompletedUploadRanges()
-        let usesCompiledDeposition = activeStroke?.compiledBrush != nil
-        if !usesCompiledDeposition {
-            try clearLiveForHarnessIfNeeded()
-        }
         guard !forceCommandBufferUnavailable,
               let commandBuffer = commandQueue.makeCommandBuffer()
         else {
@@ -47,7 +232,7 @@ extension GridRenderer {
             throw error
         }
 
-        var uploads: [FrameUpload] = []
+        let uploads: [FrameUpload] = []
         var nativeEncoding: NativeDepositionFrameEncoding?
         var submissions: [DabBufferSubmissionIdentity] = []
         var didFinalize = false
@@ -55,17 +240,10 @@ extension GridRenderer {
         do {
             let encodedLiveClear: Bool
             let encodedReplayClear: Bool
-            if usesCompiledDeposition {
-                let encoding = try encodeScheduledDeposition(commandBuffer)
-                nativeEncoding = encoding
-                encodedLiveClear = encoding.encodedLiveClear
-                encodedReplayClear = encoding.encodedReplayClear
-            } else {
-                let liveEncoding = try encodePendingLiveDabs(commandBuffer)
-                uploads = liveEncoding.uploads
-                encodedLiveClear = false
-                encodedReplayClear = liveEncoding.encodedReplayClear
-            }
+            let encoding = try encodeScheduledDeposition(commandBuffer)
+            nativeEncoding = encoding
+            encodedLiveClear = encoding.encodedLiveClear
+            encodedReplayClear = encoding.encodedReplayClear
             submissions = try finalizeFrameEncoding(
                 encodedClear: encodedLiveClear,
                 encodedReplayClear: encodedReplayClear,
@@ -102,9 +280,7 @@ extension GridRenderer {
                     commandBuffer: commandBuffer,
                     cpuMilliseconds: cpuMilliseconds
                 ),
-                emittedHighWater: usesCompiledDeposition
-                    ? UInt64(counters.totalInstancesThisStroke)
-                    : liveStroke.emittedHighWater,
+                emittedHighWater: UInt64(counters.totalInstancesThisStroke),
                 encodedIdentityRanges: uploads.map(\.identityRange)
             )
         } catch {
@@ -195,8 +371,35 @@ extension GridRenderer {
             for: footprint,
             using: tilingStrategy
         )
-        let instances = fragments.map {
-            PatternProjectedStampInstance(fragment: $0, radius: radius)
+        let instances = try fragments.enumerated().map { ordinal, fragment in
+            let dab = LogicalDab(
+                position: WorldPoint(footprint.brushToWorld.translation),
+                brushToWorld: footprint.brushToWorld,
+                radius: radius,
+                diameter: radius * 2,
+                spacing: 1,
+                flow: 1,
+                strokeOpacity: 1,
+                rotation: 0,
+                scatter: .zero,
+                hardness: 1,
+                grainOffset: .zero,
+                grainScale: 1,
+                grainRotation: 0,
+                color: .black,
+                colorAdjustment: .identity,
+                materialFamily: .ink,
+                materialContribution: 1,
+                sourceDistance: 0,
+                ordinal: UInt64(ordinal),
+                isPredicted: false
+            )
+            return try PatternDepositionStampInstance(
+                fragment: fragment,
+                dab: dab,
+                logicalOrdinal: UInt64(ordinal),
+                isometryOrdinal: compiledIsometryOrdinal(for: fragment)
+            )
         }
         guard
             !instances.isEmpty,
@@ -207,7 +410,8 @@ extension GridRenderer {
             )
         }
         let instanceByteCount =
-            instances.count * MemoryLayout<PatternProjectedStampInstance>.stride
+            instances.count
+                * MemoryLayout<PatternDepositionStampInstance>.stride
         guard let instanceBuffer = device.makeBuffer(
             length: instanceByteCount,
             options: .storageModeShared
@@ -332,118 +536,6 @@ extension GridRenderer {
                 commandBuffer: commandBuffer,
                 cpuMilliseconds: cpuMilliseconds
             )
-        )
-    }
-
-    func renderBrushFootprintForHarness(
-        footprint: StampFootprint,
-        radius: Float,
-        recipe: BrushRecipe,
-        brushAttributes: SIMD4<Float>
-    ) throws -> HarnessBrushRenderedFrame {
-        let fragments = TilingProjection.fragments(
-            for: footprint,
-            using: tilingStrategy
-        )
-        let instances = fragments.map {
-            PatternProjectedStampInstance(
-                fragment: $0,
-                radius: radius,
-                color: .black,
-                brushAttributes: brushAttributes
-            )
-        }
-        guard !instances.isEmpty,
-              instances.count <= GridCanvasContract.pendingCapacity
-        else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                GridCanvasContract.pendingCapacity
-            )
-        }
-        let instanceByteCount = instances.count
-            * MemoryLayout<PatternProjectedStampInstance>.stride
-        guard let instanceBuffer = device.makeBuffer(
-            length: instanceByteCount,
-            options: .storageModeShared
-        ) else {
-            throw MetalRendererError.instanceBufferAllocationFailed
-        }
-        instances.withUnsafeBytes { bytes in
-            instanceBuffer.contents().copyMemory(
-                from: bytes.baseAddress!,
-                byteCount: bytes.count
-            )
-        }
-
-        let shape = try brushTextureResolver.resolve(shape: recipe.shape)
-        let grain = try brushTextureResolver.resolve(grain: recipe.grain)
-        let canonicalTexture = try makeHarnessTexture(
-            width: storagePixelSize.width,
-            height: storagePixelSize.height
-        )
-        let pipeline = try GridPipelineLibrary.makeHarnessBrushPipeline(
-            device: device,
-            library: library
-        )
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = canonicalTexture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        encoder.label = "Harness Recipe Brush Footprint"
-        encoder.setRenderPipelineState(pipeline)
-        var frame = frameUniforms(
-            drawableSize: tileSize,
-            showGridLines: false,
-            liveVisible: false
-        )
-        var material = BrushMaterialState(recipe: recipe).uniforms
-        encoder.setVertexBytes(
-            &frame,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setVertexBuffer(
-            instanceBuffer,
-            offset: 0,
-            index: Int(PatternBufferIndexDabInstances)
-        )
-        encoder.setFragmentTexture(
-            shape.texture,
-            index: Int(PatternTextureIndexBrushShape)
-        )
-        encoder.setFragmentTexture(
-            grain.texture,
-            index: Int(PatternTextureIndexBrushGrain)
-        )
-        encoder.setFragmentBytes(
-            &material,
-            length: MemoryLayout<PatternBrushMaterialUniforms>.stride,
-            index: Int(PatternBufferIndexBrushMaterial)
-        )
-        encoder.drawPrimitives(
-            type: .triangle,
-            vertexStart: 0,
-            vertexCount: 6,
-            instanceCount: instances.count
-        )
-        encoder.endEncoding()
-        commandBuffer.commit()
-        try waitForHarnessCommand(commandBuffer)
-        return HarnessBrushRenderedFrame(
-            canonical: canonicalTexture,
-            fragments: fragments,
-            shapeIdentity: shape.resolvedIdentity,
-            grainIdentity: grain.resolvedIdentity,
-            assetsWereExact: shape.isExact && grain.isExact
         )
     }
 
@@ -801,77 +893,10 @@ extension GridRenderer {
         depositionFrameBudget = budget
         return previous
     }
-    var harnessResolvedBrushTextureIdentities: (shape: String, grain: String) {
-        (
-            shape: activeShapeResolution.resolvedIdentity.rawValue,
-            grain: activeGrainResolution.resolvedIdentity.rawValue
-        )
-    }
-    var sliceFourRendererCounters: SliceFourRendererCounters {
-        let shapeMismatch = activeShapeResolution.isExact ? 0 : 1
-        let grainMismatch = activeGrainResolution.isExact ? 0 : 1
-        return SliceFourRendererCounters(
-            retainedSampleCount:
-                transientStrokeBuffer?.retainedSampleCount ?? 0,
-            retainedDabCount:
-                transientStrokeBuffer?.retainedDabCount ?? 0,
-            settledDabCount:
-                transientStrokeBuffer?.actualDabCount ?? 0,
-            predictedDabCount:
-                transientStrokeBuffer?.predictedDabCount ?? 0,
-            replayCount: Int(transientStrokeBuffer?.replayEpoch ?? 0),
-            replayRenderEpoch: replayStroke.renderEpoch,
-            replayVisibleEpoch: replayTile.visibleEpoch,
-            promotedSettledPrefixCount:
-                transientStrokeBuffer?.settledPrefixPromotionCount ?? 0,
-            replayDegradationCount:
-                transientStrokeBuffer?.degradationCount ?? 0,
-            assetResidentBytes:
-                brushTextureResolver.cachedTextureCount
-                    * BrushTextureFactory.mipmappedTextureByteCount,
-            assetFallbackCount: brushTextureResolver.reportedFallbackCount,
-            assetIdentityMismatchCount: shapeMismatch + grainMismatch,
-            processedWashPixelCount:
-                lastBoundedWashWorkPlan?.processedPixelCount ?? 0,
-            washWorkingBytes:
-                boundedWashSurface?.workingByteCount ?? 0
-        )
-    }
-
-    /// Deterministically delivers a delayed older replay completion after a
-    /// newer epoch is visible. This exercises the same renderer-owned epoch
-    /// guard used by asynchronously completed replay command buffers.
-    func auditDelayedStaleReplayCompletionForHarness()
-        -> SliceFourReplayEpochAudit
-    {
-        let base = max(replayTile.visibleEpoch, replayStroke.renderEpoch)
-        let staleEpoch = base &+ 1
-        let newerEpoch = base &+ 2
-        _ = replayTile.planReplacement(
-            epoch: staleEpoch,
-            prior: PixelRegionSet([], clippedTo: storagePixelSize),
-            replacement: PixelRegionSet([], clippedTo: storagePixelSize)
-        )
-        replayTile.markVisible(epoch: staleEpoch)
-        _ = replayTile.planReplacement(
-            epoch: newerEpoch,
-            prior: PixelRegionSet([], clippedTo: storagePixelSize),
-            replacement: PixelRegionSet([], clippedTo: storagePixelSize)
-        )
-        replayTile.markVisible(epoch: newerEpoch)
-        let before = replayTile.visibleEpoch
-        replayTile.markVisible(epoch: staleEpoch)
-        let after = replayTile.visibleEpoch
-        return SliceFourReplayEpochAudit(
-            newerEpoch: newerEpoch,
-            visibleBeforeStaleCompletion: before,
-            visibleAfterStaleCompletion: after,
-            staleCompletionViolationCount:
-                before == newerEpoch && after == newerEpoch ? 0 : 1
-        )
-    }
     var harnessPendingInstanceColors: [SIMD4<Float>] {
-        liveStroke.pending.map(\.instance.color)
+        activeStroke?.scheduler?.authoritativeRecords.map(
+            \.instance.premultipliedColor
+        ) ?? []
     }
     var harnessTilingMutationSnapshot: HarnessTilingMutationSnapshot {
         HarnessTilingMutationSnapshot(
