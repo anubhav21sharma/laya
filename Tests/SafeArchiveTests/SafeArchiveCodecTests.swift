@@ -5,6 +5,16 @@ import Testing
 @Suite("Safe archive codec")
 struct SafeArchiveCodecTests {
     @Test
+    func factoredPackagePrimitivesPreserveKnownCRCAndEndianValues() throws {
+        let bytes = Data("123456789".utf8)
+        #expect(CRC32.checksum(bytes) == 0xCBF4_3926)
+
+        let littleEndian = Data([0x78, 0x56, 0x34, 0x12])
+        #expect(try littleEndian.uint16(at: 0) == 0x5678)
+        #expect(try littleEndian.uint32(at: 0) == 0x1234_5678)
+    }
+
+    @Test
     func encodingIsDeterministicAndSorted() throws {
         let limits = SafeArchiveLimits.testing
         let first = try SafeArchiveCodec.encode(

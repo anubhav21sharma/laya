@@ -13,14 +13,14 @@ extension Data {
         append(UInt8(truncatingIfNeeded: value >> 24))
     }
 
-    func uint16(at offset: Int) throws -> UInt16 {
+    package func uint16(at offset: Int) throws -> UInt16 {
         guard offset >= 0, offset <= count - 2 else {
             throw SafeArchiveError.malformedArchive
         }
         return UInt16(self[offset]) | UInt16(self[offset + 1]) << 8
     }
 
-    func uint32(at offset: Int) throws -> UInt32 {
+    package func uint32(at offset: Int) throws -> UInt32 {
         guard offset >= 0, offset <= count - 4 else {
             throw SafeArchiveError.malformedArchive
         }
@@ -30,7 +30,7 @@ extension Data {
             | UInt32(self[offset + 3]) << 24
     }
 
-    func uint64(at offset: Int) throws -> UInt64 {
+    package func uint64(at offset: Int) throws -> UInt64 {
         guard offset >= 0, offset <= count - 8 else {
             throw SafeArchiveError.malformedArchive
         }

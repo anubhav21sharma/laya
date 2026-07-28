@@ -221,6 +221,7 @@ Foreign limits are separate from the smaller native-package limits:
 |---|---:|
 | source file bytes | 512 MiB |
 | entries per container | 4,096 |
+| aggregate entries across nested containers | 4,096 |
 | nested container depth | 2 |
 | cumulative expanded bytes | 1 GiB |
 | expanded bytes per entry | 256 MiB |
@@ -229,6 +230,8 @@ Foreign limits are separate from the smaller native-package limits:
 | plist/object graph depth | 64 |
 | dictionary or array elements | 16,384 |
 | total graph nodes per brush | 100,000 |
+| total collection references per brush | 100,000 |
+| total resolved keyed-archive UID references per brush | 100,000 |
 | string bytes | 64 KiB |
 | opaque data value bytes | 256 MiB |
 | settings per brush | 4,096 |
@@ -241,12 +244,31 @@ Foreign limits are separate from the smaller native-package limits:
 The decoder stops while producing output when a limit is crossed; it does not
 trust archive-declared expanded sizes. Encryption, unsupported flags, unsafe
 paths, symlinks, duplicate normalized paths, invalid CRCs, malformed ZIP64,
-cycles, invalid plist UIDs, non-finite numbers, and dangling resource
+cycles, invalid or dangling plist UIDs, non-finite numbers, and dangling resource
 references fail closed.
 
 The existing stored-entry `SafeArchive` behavior used by native packages stays
 unchanged. Foreign deflate support is isolated behind the converter boundary so
-it cannot silently broaden `.layabrush` decoding.
+it cannot silently broaden `.layabrush` decoding. Foreign ZIP parsing initially
+accepts stored and raw-deflate entries, the UTF-8 name flag, and deflate option
+flags only. It rejects data descriptors until an owned Procreate fixture proves
+they are required. Names without the UTF-8 flag must be ASCII, and normalized
+NFC paths are checked for duplicates before extraction.
+
+Property lists are parsed directly from bytes into a converter-owned immutable
+graph; neither `PropertyListSerialization` nor `NSKeyedUnarchiver` is a security
+boundary. Binary-property-list offsets, record extents, lengths, references,
+and all records (including unreachable records) are validated before semantic
+mapping. Traversal is iterative, collection and UID edges have independent
+budgets, acyclic sharing is allowed, and cycles fail closed.
+
+UIDs remain inert values. A separate bounded keyed-archive view recognizes only
+the explicitly supported `NSKeyedArchiver` envelope, resolves bounded in-range
+UID references without instantiating classes, and exposes whitelisted graph
+shapes to version-specific adapters. XML property lists use a plist-specific
+streaming parser. They accept only the exact standard Apple plist doctype
+without entity resolution and reject other doctypes, entity declarations,
+namespaces, CDATA, and non-plist markup.
 
 ### Procreate variants and evidence
 
@@ -383,15 +405,23 @@ Commit boundary: `feat(converter): map typed foreign brushes`
 
 Implement bounded ZIP structure probing and streaming stored/deflate reads
 inside `BrushConverter`. Reuse or factor native path/CRC/ZIP64 checks without
-changing the native codec's accepted compression policy.
+changing the native codec's accepted compression policy. Keep data descriptors
+disabled until fixture evidence requires them, enforce aggregate entry and
+expanded-byte budgets across nested containers, and verify actual streamed
+output length, compression ratio, end state, input consumption, and CRC.
 
-Parse XML and binary property lists into a bounded allowed-type graph. Do not
-use unrestricted `NSKeyedUnarchiver`.
+Parse XML and binary property lists directly from bytes into a bounded
+converter-owned allowed-type graph. Do not use `PropertyListSerialization` or
+`NSKeyedUnarchiver` in the untrusted-input path. Treat UIDs as inert references
+and expose them only through a bounded, cycle-checked keyed-archive view that
+never instantiates source classes.
 
 Add a byte-oriented defensive corpus for signatures, traversal, duplicate
 paths, symlinks, encryption, flags, CRC, ZIP64, compression bombs, nesting,
-plist cycles/UIDs/depth/counts, non-finite numbers, strings/data, and dangling
-assets.
+plist offsets/extents, hidden malformed records, cycles/UIDs/depth/counts,
+collection-reference budgets, external-entity attempts, non-finite numbers,
+strings/data, and dangling assets. Boundary tests use injectable small limits
+and run twice to prove deterministic outcomes.
 
 Commit boundary: `feat(converter): bound foreign brush parsing`
 

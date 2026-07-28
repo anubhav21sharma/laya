@@ -165,7 +165,7 @@ public enum SafeArchiveCodec {
             )
             let nameRange = (cursor + 46)..<(cursor + 46 + nameLength)
             let extraRange = (cursor + 46 + nameLength)..<(cursor + 46 + nameLength + extraLength)
-            try validateExtraFields(in: data, range: extraRange)
+            try validateZIPExtraFields(in: data, range: extraRange)
             guard let path = String(data: data.subdata(in: nameRange), encoding: .utf8) else {
                 throw SafeArchiveError.malformedArchive
             }
@@ -234,7 +234,7 @@ public enum SafeArchiveCodec {
             )
             let localNameRange = (local + 30)..<(local + 30 + localNameLength)
             let localExtraRange = (local + 30 + localNameLength)..<localHeaderEnd
-            try validateExtraFields(in: data, range: localExtraRange)
+            try validateZIPExtraFields(in: data, range: localExtraRange)
             guard data.subdata(in: localNameRange) == data.subdata(in: nameRange) else {
                 throw SafeArchiveError.malformedArchive
             }
@@ -287,7 +287,7 @@ private enum ZipExternalAttribute {
     static let dosDirectory: UInt32 = 0x10
 }
 
-private func hasStructurallyPlacedZIP64EndRecords(
+package func hasStructurallyPlacedZIP64EndRecords(
     in data: Data,
     centralEnd: Int,
     eocdOffset: Int
@@ -335,7 +335,10 @@ private func usesPOSIXExternalAttributes(host: UInt16) -> Bool {
     host == ZipHost.unix || host == ZipHost.macOS
 }
 
-private func validateExtraFields(in data: Data, range: Range<Int>) throws {
+package func validateZIPExtraFields(
+    in data: Data,
+    range: Range<Int>
+) throws {
     var cursor = range.lowerBound
     while cursor < range.upperBound {
         guard range.upperBound - cursor >= 4 else {
