@@ -521,6 +521,136 @@ struct ForeignBrushResourceTests {
             )
         }
     }
+
+    @Test
+    func diagnosticBoundsExactlyMatchPersistentReportContract() throws {
+        let boundary = try ForeignBrushDiagnostic(
+            severity: .information,
+            code: String(
+                repeating: "a",
+                count: ForeignBrushLimits.maximumDiagnosticCodeUTF8Bytes
+            ),
+            location: String(
+                repeating: "l",
+                count: ForeignBrushLimits.maximumLocationUTF8Bytes
+            ),
+            message: String(
+                repeating: "m",
+                count: ForeignBrushLimits.maximumDiagnosticMessageUTF8Bytes
+            )
+        )
+        #expect(
+            boundary.code.utf8.count
+                == ForeignBrushLimits.maximumDiagnosticCodeUTF8Bytes
+        )
+        #expect(
+            boundary.message.utf8.count
+                == ForeignBrushLimits.maximumDiagnosticMessageUTF8Bytes
+        )
+
+        #expect(
+            throws: ForeignBrushValidationError.invalidDiagnosticCode(
+                "bad code"
+            )
+        ) {
+            _ = try ForeignBrushDiagnostic(
+                severity: .error,
+                code: "bad code",
+                location: nil,
+                message: "Message"
+            )
+        }
+        #expect(
+            throws: ForeignBrushValidationError.stringTooLong(
+                field: "diagnostic.code",
+                maximumUTF8Bytes:
+                    ForeignBrushLimits.maximumDiagnosticCodeUTF8Bytes
+            )
+        ) {
+            _ = try ForeignBrushDiagnostic(
+                severity: .error,
+                code: String(
+                    repeating: "a",
+                    count:
+                        ForeignBrushLimits.maximumDiagnosticCodeUTF8Bytes + 1
+                ),
+                location: nil,
+                message: "Message"
+            )
+        }
+        #expect(
+            throws: ForeignBrushValidationError.stringTooLong(
+                field: "diagnostic.message",
+                maximumUTF8Bytes:
+                    ForeignBrushLimits.maximumDiagnosticMessageUTF8Bytes
+            )
+        ) {
+            _ = try ForeignBrushDiagnostic(
+                severity: .error,
+                code: "message-too-long",
+                location: nil,
+                message: String(
+                    repeating: "m",
+                    count:
+                        ForeignBrushLimits.maximumDiagnosticMessageUTF8Bytes
+                        + 1
+                )
+            )
+        }
+    }
+
+    @Test
+    func diagnosticDecoderRevalidatesPersistentCodeAndMessageBounds() throws {
+        let diagnostic = try ForeignBrushDiagnostic(
+            severity: .warning,
+            code: "valid-code",
+            location: "Metadata/warning",
+            message: "Valid message"
+        )
+        let encoded = try ForeignBrushCoding.encode(
+            fixtureIR(diagnostics: [diagnostic])
+        )
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: encoded)
+                as? [String: Any]
+        )
+        let diagnostics = try #require(
+            object["diagnostics"] as? [[String: Any]]
+        )
+
+        var invalidCode = object
+        var invalidCodeDiagnostics = diagnostics
+        invalidCodeDiagnostics[0]["code"] = "bad code"
+        invalidCode["diagnostics"] = invalidCodeDiagnostics
+        #expect(
+            throws: ForeignBrushValidationError.invalidDiagnosticCode(
+                "bad code"
+            )
+        ) {
+            _ = try ForeignBrushCoding.decodeIR(
+                JSONSerialization.data(withJSONObject: invalidCode)
+            )
+        }
+
+        var oversizedMessage = object
+        var oversizedMessageDiagnostics = diagnostics
+        oversizedMessageDiagnostics[0]["message"] = String(
+            repeating: "m",
+            count: ForeignBrushLimits.maximumDiagnosticMessageUTF8Bytes + 1
+        )
+        oversizedMessage["diagnostics"] = oversizedMessageDiagnostics
+        #expect(
+            throws: ForeignBrushValidationError.stringTooLong(
+                field: "diagnostic.message",
+                maximumUTF8Bytes:
+                    ForeignBrushLimits.maximumDiagnosticMessageUTF8Bytes
+            )
+        ) {
+            _ = try ForeignBrushCoding.decodeIR(
+                JSONSerialization.data(withJSONObject: oversizedMessage)
+            )
+        }
+    }
 }
 
 private func fixtureIR(

@@ -105,7 +105,7 @@ public struct ForeignBrushDiagnostic: Codable, Equatable, Sendable {
         location: String?,
         message: String
     ) throws {
-        try ForeignBrushValidator.string(code, field: "diagnostic.code")
+        try ForeignBrushValidator.diagnosticCode(code)
         if let location {
             try ForeignBrushValidator.location(
                 location,
@@ -114,7 +114,9 @@ public struct ForeignBrushDiagnostic: Codable, Equatable, Sendable {
         }
         try ForeignBrushValidator.string(
             message,
-            field: "diagnostic.message"
+            field: "diagnostic.message",
+            maximumUTF8Bytes:
+                ForeignBrushLimits.maximumDiagnosticMessageUTF8Bytes
         )
         self.severity = severity
         self.code = code

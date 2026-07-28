@@ -122,6 +122,14 @@ let package = Package(
             dependencies: ["BrushConverter"]
         ),
         .testTarget(
+            name: "BrushConverterIntegrationTests",
+            dependencies: [
+                "BrushConverter",
+                "BrushFormat",
+                "MetalRenderer",
+            ]
+        ),
+        .testTarget(
             name: "EditorSessionControllerTests",
             dependencies: [
                 "EditorCore",

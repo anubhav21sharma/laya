@@ -84,6 +84,59 @@ func legacyRecipeRoundTripsExactly(_ fixture: AnchorRecipeFixture) throws {
     }
 }
 
+@Test func reverseAdapterAllowsDryConversionProvenance() throws {
+    let fixture = AnchorRecipeFixtures.all[0]
+    let definition = try LegacyBrushRecipeAdapter.definition(
+        from: fixture.recipe,
+        displayName: fixture.displayName
+    )
+    let compatibility = BrushCompatibilityMetadata(
+        nativeFeatureVersion: 1,
+        sourceSettingKeys: [
+            "synthetic.v1.coverage.shape",
+            "synthetic.v1.placement.spacing",
+        ],
+        requiredSemanticKeys: []
+    )
+
+    #expect(
+        try LegacyBrushRecipeAdapter.recipe(
+            from: definition.replacing(compatibility: compatibility)
+        ) == fixture.recipe
+    )
+}
+
+@Test func reverseAdapterRejectsUnknownVersionAndRequiredSemantics() throws {
+    let definition = try LegacyBrushRecipeAdapter.definition(
+        from: AnchorRecipeFixtures.all[0].recipe,
+        displayName: "Technical Ink"
+    )
+    let unsupported = [
+        BrushCompatibilityMetadata(
+            nativeFeatureVersion: 2,
+            sourceSettingKeys: ["synthetic.v1.placement.spacing"],
+            requiredSemanticKeys: []
+        ),
+        BrushCompatibilityMetadata(
+            nativeFeatureVersion: 1,
+            sourceSettingKeys: ["synthetic.v1.material.wet"],
+            requiredSemanticKeys: ["synthetic.v1.material.wet"]
+        ),
+    ]
+
+    for compatibility in unsupported {
+        #expect(
+            throws: BrushDefinitionValidationError.semanticLoss(
+                "definition contains a native-only field"
+            )
+        ) {
+            try LegacyBrushRecipeAdapter.recipe(
+                from: definition.replacing(compatibility: compatibility)
+            )
+        }
+    }
+}
+
 @Test func definitionRejectsLegacyMappingDomainAndDeclaredLimitViolations() throws {
     let definition = try BrushDefinition.fixture()
     let invalidPositive = BrushMappingDefinition(input: .pressure, response: .linear, scale: 1, offset: 0, lowerClamp: 0, upperClamp: 1, inverted: false, jitter: 0, missingInputValue: 1)
@@ -337,7 +390,8 @@ private extension BrushDefinition {
         resources: [BrushResourceReference]? = nil,
         placement: BrushPlacementDefinition? = nil,
         limits: BrushDefinitionLimits? = nil,
-        taper: BrushTaperConfiguration? = nil
+        taper: BrushTaperConfiguration? = nil,
+        compatibility: BrushCompatibilityMetadata? = nil
     ) throws -> BrushDefinition {
         try BrushDefinition(
             id: id, schemaVersion: schemaVersion, metadata: metadata,
@@ -348,7 +402,8 @@ private extension BrushDefinition {
             stabilization: stabilization, taper: taper ?? self.taper,
             replayMode: replayMode, replayLimits: replayLimits,
             seedPolicy: seedPolicy, limits: limits ?? self.limits,
-            performanceIntent: performanceIntent, compatibility: compatibility
+            performanceIntent: performanceIntent,
+            compatibility: compatibility ?? self.compatibility
         )
     }
 }

@@ -9,6 +9,8 @@ public enum ForeignBrushLimits {
     public static let maximumVectorComponents = 16
     public static let maximumResourcesPerBrush = 64
     public static let maximumDiagnosticsPerBrush = 4_096
+    public static let maximumDiagnosticCodeUTF8Bytes = 256
+    public static let maximumDiagnosticMessageUTF8Bytes = 4_096
     public static let maximumSourceImageDimension = 16_384
     public static let maximumCumulativeDecodedPixelsPerBrush = 268_435_456
     public static let maximumEncodedResourceBytes = 256 * 1_024 * 1_024
@@ -22,6 +24,7 @@ public enum ForeignBrushValidationError: Error, Equatable, Sendable {
     case controlCharacter(String)
     case unsafeLocation(String)
     case invalidSemanticKey(String)
+    case invalidDiagnosticCode(String)
     case invalidMediaType(String)
     case invalidSHA256(String)
     case countOutOfRange(field: String, actual: Int, maximum: Int)
@@ -143,6 +146,26 @@ enum ForeignBrushValidator {
               versionIndex < components.index(before: components.endIndex)
         else {
             throw ForeignBrushValidationError.invalidSemanticKey(value)
+        }
+    }
+
+    static func diagnosticCode(_ value: String) throws {
+        try string(
+            value,
+            field: "diagnostic.code",
+            maximumUTF8Bytes:
+                ForeignBrushLimits.maximumDiagnosticCodeUTF8Bytes
+        )
+        let allowed = value.utf8.allSatisfy {
+            (48...57).contains($0)
+                || (65...90).contains($0)
+                || (97...122).contains($0)
+                || $0 == 46
+                || $0 == 45
+                || $0 == 95
+        }
+        guard allowed else {
+            throw ForeignBrushValidationError.invalidDiagnosticCode(value)
         }
     }
 

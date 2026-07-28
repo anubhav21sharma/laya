@@ -370,6 +370,13 @@ The mapper must:
   tests;
 - load but reject activation for the wet fixture.
 
+Compiler activation is the Stage 3 boundary for packages with custom converted
+shape or grain resources. Their native `BrushProgram` intentionally has no
+legacy `compatibilityRecipe`, because the legacy renderer only recognizes its
+fixed built-in asset IDs. Stage 4 wires compiled custom textures into
+deposition. A separate built-in-only synthetic fixture proves exact reverse
+adapter parity without weakening the legacy asset allowlist.
+
 Commit boundary: `feat(converter): map typed foreign brushes`
 
 ### Task 4 — Add the defensive foreign container and plist layer
