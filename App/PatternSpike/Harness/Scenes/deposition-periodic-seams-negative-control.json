@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-periodic-seams-negative-control",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "symmetryOrderEqual": true,
+    "tilingPeriodTranslationEqual": false
+  }
+}

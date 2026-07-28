@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-cache-pinning",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "activeCompiledBrushPinned": true,
+    "strokeCompilerCountersUnchanged": true
+  }
+}

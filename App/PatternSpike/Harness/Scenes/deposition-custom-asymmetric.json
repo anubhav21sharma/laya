@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-custom-asymmetric",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "customTexturesExact": true,
+    "strokeCompilerCountersUnchanged": true
+  }
+}

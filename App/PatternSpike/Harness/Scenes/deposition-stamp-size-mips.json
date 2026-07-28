@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-stamp-size-mips",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "strokeCompilerCountersUnchanged": true,
+    "textureMipSelectionCorrect": true
+  }
+}

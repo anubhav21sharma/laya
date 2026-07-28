@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-preview-commit",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "cancelPreservesCanonical": true,
+    "previewCommitMaximumDeltaWithinTolerance": true
+  }
+}

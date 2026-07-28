@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-dry",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "familyAndAccumulationCorrect": true,
+    "strokeCompilerCountersUnchanged": true
+  }
+}

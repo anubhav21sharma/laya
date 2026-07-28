@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-custom-asymmetric-negative-control",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "customTexturesExact": false,
+    "strokeCompilerCountersUnchanged": true
+  }
+}

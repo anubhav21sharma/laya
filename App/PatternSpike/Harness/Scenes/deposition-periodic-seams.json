@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-periodic-seams",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "symmetryOrderEqual": true,
+    "tilingPeriodTranslationEqual": true
+  }
+}

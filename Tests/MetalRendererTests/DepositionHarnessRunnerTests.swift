@@ -1,0 +1,276 @@
+import Foundation
+import Metal
+@testable import MetalRenderer
+import Testing
+
+@Suite("Native deposition harness runner", .serialized)
+struct DepositionHarnessRunnerTests {
+    @Test
+    func requiredSceneContractIsExactAndSorted() {
+        #expect(
+            DepositionEvidenceValidator.positiveSceneNames == [
+                "deposition-airbrush",
+                "deposition-cache-pinning",
+                "deposition-custom-asymmetric",
+                "deposition-dry",
+                "deposition-erase",
+                "deposition-failure-matrix",
+                "deposition-glaze",
+                "deposition-ink",
+                "deposition-kinematics",
+                "deposition-layer-matrix",
+                "deposition-marker",
+                "deposition-periodic-seams",
+                "deposition-prediction",
+                "deposition-preview-commit",
+                "deposition-radial-reflection",
+                "deposition-stamp-size-mips",
+            ]
+        )
+        #expect(
+            DepositionEvidenceValidator.negativeSceneNames
+                == DepositionEvidenceValidator.positiveSceneNames.map {
+                    "\($0)-negative-control"
+                }
+        )
+        #expect(
+            DepositionEvidenceValidator.sceneNames
+                == DepositionEvidenceValidator.sceneNames.sorted()
+        )
+        #expect(DepositionEvidenceValidator.sceneNames.count == 32)
+    }
+
+    @Test
+    func repositorySceneDirectoryMatchesTheExactContract() throws {
+        let scenes = try DepositionEvidenceValidator.loadScenes(
+            from: repositorySceneDirectory()
+        )
+
+        #expect(scenes.count == 32)
+        #expect(scenes.map(\.name) == DepositionEvidenceValidator.sceneNames)
+        #expect(scenes.allSatisfy { $0.schemaVersion == 6 })
+        try DepositionEvidenceValidator.validateSceneSet(scenes)
+    }
+
+    @Test
+    func schemaSixSceneCarriesOnlySortedAuthoritativeExpectations() throws {
+        let data = Data(
+            """
+            {
+              "schemaVersion": 6,
+              "name": "deposition-ink",
+              "width": 128,
+              "height": 128,
+              "depositionInvariantExpectations": {
+                "familyAndAccumulationCorrect": true,
+                "previewCommitMaximumDeltaWithinTolerance": true
+              }
+            }
+            """.utf8
+        )
+
+        let scene = try HarnessScene.decode(data)
+
+        #expect(
+            scene.depositionInvariantExpectations == [
+                "familyAndAccumulationCorrect": true,
+                "previewCommitMaximumDeltaWithinTolerance": true,
+            ]
+        )
+    }
+
+    @Test
+    @MainActor
+    func nativeInkRunCompilesActivatesRendersAndWritesEvidence()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try depositionHarnessTestLibrary(device: device)
+        let scene = try repositoryScene(
+            named: "deposition-ink"
+        )
+        let output = temporaryDirectory(
+            named: "native-ink"
+        )
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        let result = try await DepositionHarnessRunner(
+            device: device,
+            library: library
+        ).run(
+            scene: scene,
+            outputDirectory: output,
+            build: BenchmarkBuild(
+                configuration: "Testing",
+                gitCommit: String(repeating: "a", count: 40)
+            )
+        )
+        let evidenceURL = output.appendingPathComponent(
+            "deposition-ink.deposition-evidence.json"
+        )
+        let evidence = try DepositionSceneEvidence.decode(
+            Data(contentsOf: evidenceURL)
+        )
+
+        #expect(result.imageURL.lastPathComponent == "deposition-ink.live.png")
+        #expect(result.artifactURLs.count == 6)
+        #expect(evidence.scene == "deposition-ink")
+        #expect(evidence.definitionID == "builtin.native-ink")
+        #expect(evidence.abiVersion == DepositionABI.version)
+        #expect(evidence.logicalDabCount > 0)
+        #expect(evidence.projectedInstanceCount >= evidence.logicalDabCount)
+        #expect(evidence.canonicalSHA256 != String(repeating: "0", count: 64))
+        #expect(evidence.cpuReferenceSHA256 != nil)
+        #expect(evidence.maximumCPUGPUChannelDelta != nil)
+        #expect(evidence.invariantResults.values.allSatisfy { $0 })
+        #expect(
+            Set(result.artifactURLs.map(\.lastPathComponent)) == [
+                "deposition-ink.live.png",
+                "deposition-ink.committed.png",
+                "deposition-ink.canonical.png",
+                "deposition-ink.cpu-reference.png",
+                "deposition-ink.deposition-evidence.json",
+                "deposition-ink.benchmark.json",
+            ]
+        )
+    }
+
+    @Test
+    @MainActor
+    func pairedNegativeControlFailsItsSingleAuthoritativeExpectation()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try depositionHarnessTestLibrary(device: device)
+        let scene = try repositoryScene(
+            named: "deposition-ink-negative-control"
+        )
+        let output = temporaryDirectory(
+            named: "native-ink-negative"
+        )
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        await #expect(throws: DepositionEvidenceValidationError.self) {
+            _ = try await DepositionHarnessRunner(
+                device: device,
+                library: library
+            ).run(
+                scene: scene,
+                outputDirectory: output,
+                build: BenchmarkBuild(
+                    configuration: "Testing",
+                    gitCommit: String(repeating: "a", count: 40)
+                )
+            )
+        }
+    }
+
+    @Test(arguments: DepositionEvidenceValidator.positiveSceneNames)
+    @MainActor
+    func everyPositiveSceneProducesValidNativeEvidence(
+        _ name: String
+    ) async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let output = temporaryDirectory(named: name)
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        _ = try await DepositionHarnessRunner(
+            device: device,
+            library: depositionHarnessTestLibrary(device: device)
+        ).run(
+            scene: repositoryScene(named: name),
+            outputDirectory: output,
+            build: BenchmarkBuild(
+                configuration: "Testing",
+                gitCommit: String(repeating: "b", count: 40)
+            )
+        )
+        let evidence = try DepositionSceneEvidence.decode(
+            Data(
+                contentsOf: output.appendingPathComponent(
+                    "\(name).deposition-evidence.json"
+                )
+            )
+        )
+
+        try DepositionEvidenceValidator.validate(evidence)
+        #expect(evidence.invariantResults.values.allSatisfy { $0 })
+    }
+
+    @Test(arguments: DepositionEvidenceValidator.negativeSceneNames)
+    @MainActor
+    func everyPairedNegativeFailsItsSingleExpectation(
+        _ name: String
+    ) async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let output = temporaryDirectory(named: name)
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        await #expect(throws: DepositionEvidenceValidationError.self) {
+            _ = try await DepositionHarnessRunner(
+                device: device,
+                library: depositionHarnessTestLibrary(device: device)
+            ).run(
+                scene: repositoryScene(named: name),
+                outputDirectory: output,
+                build: BenchmarkBuild(
+                    configuration: "Testing",
+                    gitCommit: String(repeating: "b", count: 40)
+                )
+            )
+        }
+    }
+}
+
+private func repositorySceneDirectory() -> URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("App/PatternSpike/Harness/Scenes")
+}
+
+func repositoryScene(named name: String) throws -> HarnessScene {
+    try HarnessScene.decode(
+        Data(
+            contentsOf: repositorySceneDirectory()
+                .appendingPathComponent("\(name).json")
+        )
+    )
+}
+
+func temporaryDirectory(named name: String) -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent(
+        "laya-deposition-\(name)-\(UUID().uuidString)",
+        isDirectory: true
+    )
+}
+
+@MainActor
+func depositionHarnessTestLibrary(
+    device: any MTLDevice
+) throws -> any MTLLibrary {
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let shader = try String(
+        contentsOf: root.appendingPathComponent(
+            "Sources/MetalRenderer/Shaders.metal"
+        ),
+        encoding: .utf8
+    )
+    let header = try String(
+        contentsOf: root.appendingPathComponent(
+            "Sources/CShaderTypes/include/ShaderTypes.h"
+        ),
+        encoding: .utf8
+    )
+    return try device.makeLibrary(
+        source: shader.replacingOccurrences(
+            of: "#include \"ShaderTypes.h\"",
+            with: header
+        ),
+        options: nil
+    )
+}

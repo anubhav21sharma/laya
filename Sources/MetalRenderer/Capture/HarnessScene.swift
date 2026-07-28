@@ -585,6 +585,7 @@ public struct HarnessScene: Codable, Equatable, Sendable {
     public let attributedSamples: [HarnessAttributedSample]
     public let expectedMaterial: HarnessExpectedMaterial?
     public let replayMode: HarnessReplayMode?
+    public let depositionInvariantExpectations: [String: Bool]
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -605,6 +606,7 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         case attributedSamples
         case expectedMaterial
         case replayMode
+        case depositionInvariantExpectations
     }
 
     public init(from decoder: Decoder) throws {
@@ -709,6 +711,10 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             expectedMaterial = nil
             replayMode = nil
         }
+        depositionInvariantExpectations = try values.decodeIfPresent(
+            [String: Bool].self,
+            forKey: .depositionInvariantExpectations
+        ) ?? [:]
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -741,6 +747,12 @@ public struct HarnessScene: Codable, Equatable, Sendable {
             try values.encode(attributedSamples, forKey: .attributedSamples)
             try values.encode(expectedMaterial, forKey: .expectedMaterial)
             try values.encode(replayMode, forKey: .replayMode)
+        }
+        if schemaVersion == 6 {
+            try values.encode(
+                depositionInvariantExpectations,
+                forKey: .depositionInvariantExpectations
+            )
         }
     }
 
@@ -924,6 +936,28 @@ public struct HarnessScene: Codable, Equatable, Sendable {
                     "Schema 5 material and replay fields must be decoded before validation"
                 )
             }
+        case 6:
+            guard program == nil,
+                  checks.isEmpty,
+                  structuralChecks.isEmpty,
+                  negativeControls.isEmpty,
+                  tileWidth == nil,
+                  tileHeight == nil,
+                  tiling == nil,
+                  diagnosticMode == nil,
+                  periodicConfiguration == nil,
+                  recipeID == nil,
+                  seed == nil,
+                  attributedSamples.isEmpty,
+                  expectedMaterial == nil,
+                  replayMode == nil,
+                  !depositionInvariantExpectations.isEmpty,
+                  Set(depositionInvariantExpectations.keys).isSubset(
+                      of: DepositionEvidenceValidator.allowedInvariantNames
+                  )
+            else {
+                throw HarnessSceneError.invalidDepositionScene
+            }
         default:
             throw HarnessSceneError.unsupportedSchema(schemaVersion)
         }
@@ -979,7 +1013,10 @@ public struct HarnessScene: Codable, Equatable, Sendable {
         if schemaVersion == 1, checks.isEmpty {
             throw HarnessSceneError.missingPixelChecks
         }
-        if schemaVersion >= 2, checks.isEmpty, structuralChecks.isEmpty {
+        if (2...5).contains(schemaVersion),
+           checks.isEmpty,
+           structuralChecks.isEmpty
+        {
             throw HarnessSceneError.missingAssertions
         }
 
@@ -1105,6 +1142,7 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
         program: TilingHarnessProgram,
         diagnosticMode: HarnessDiagnosticMode
     )
+    case invalidDepositionScene
 
     public var errorDescription: String? {
         switch self {
@@ -1162,6 +1200,8 @@ public enum HarnessSceneError: Error, Equatable, LocalizedError {
             "Harness program \(program.rawValue) requires a different tiling than \(tiling)."
         case let .interactiveDiagnosticRequiresHardRound(program, mode):
             "Interactive harness program \(program.rawValue) cannot use diagnostic mode \(mode.rawValue)."
+        case .invalidDepositionScene:
+            "Schema 6 requires only nonempty native deposition expectations."
         }
     }
 }

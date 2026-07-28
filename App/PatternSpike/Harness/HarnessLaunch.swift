@@ -30,6 +30,23 @@ enum HarnessLaunch {
                 configuration: configuration,
                 gitCommit: gitCommit
             )
+            if scene.schemaVersion == 6 {
+                Task { @MainActor in
+                    do {
+                        let result = try await DepositionHarnessRunner(
+                            device: device
+                        ).run(
+                            scene: scene,
+                            outputDirectory: outputDirectory,
+                            build: build
+                        )
+                        pass(scene: scene, result: result)
+                    } catch {
+                        fail(error)
+                    }
+                }
+                return
+            }
             let result: HarnessRunResult
             if scene.schemaVersion == 5 {
                 let history = SliceThreeHarnessHistory(
@@ -70,15 +87,26 @@ enum HarnessLaunch {
                 )
             }
 
-            print(
-                "HARNESS PASS scene=\(scene.name) image=\(result.imageURL.path) benchmark=\(result.benchmarkURL.path)"
-            )
-            exit(EXIT_SUCCESS)
+            pass(scene: scene, result: result)
         } catch {
-            let message = "HARNESS FAIL \(error.localizedDescription)\n"
-            FileHandle.standardError.write(Data(message.utf8))
-            exit(EXIT_FAILURE)
+            fail(error)
         }
+    }
+
+    private static func pass(
+        scene: HarnessScene,
+        result: HarnessRunResult
+    ) -> Never {
+        print(
+            "HARNESS PASS scene=\(scene.name) image=\(result.imageURL.path) benchmark=\(result.benchmarkURL.path)"
+        )
+        exit(EXIT_SUCCESS)
+    }
+
+    private static func fail(_ error: Error) -> Never {
+        let message = "HARNESS FAIL \(error.localizedDescription)\n"
+        FileHandle.standardError.write(Data(message.utf8))
+        exit(EXIT_FAILURE)
     }
 
     private static func value(

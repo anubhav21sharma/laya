@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-layer-matrix",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "secondaryLayerPresent": true,
+    "strokeCompilerCountersUnchanged": true
+  }
+}

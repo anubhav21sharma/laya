@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-erase-negative-control",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "eraseColorIndependent": true,
+    "familyAndAccumulationCorrect": false
+  }
+}

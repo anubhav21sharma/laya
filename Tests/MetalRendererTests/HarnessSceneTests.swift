@@ -39,7 +39,7 @@ func harnessSceneRejectsAnUnknownSchema() {
     let data = Data(
         """
         {
-          "schemaVersion": 6,
+          "schemaVersion": 7,
           "name": "future-scene",
           "width": 64,
           "height": 64,
@@ -55,7 +55,7 @@ func harnessSceneRejectsAnUnknownSchema() {
         """.utf8
     )
 
-    #expect(throws: HarnessSceneError.unsupportedSchema(6)) {
+    #expect(throws: HarnessSceneError.unsupportedSchema(7)) {
         try HarnessScene.decode(data)
     }
 }

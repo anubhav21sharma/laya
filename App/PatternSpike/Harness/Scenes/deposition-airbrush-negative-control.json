@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-airbrush-negative-control",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "familyAndAccumulationCorrect": false,
+    "strokeCompilerCountersUnchanged": true
+  }
+}

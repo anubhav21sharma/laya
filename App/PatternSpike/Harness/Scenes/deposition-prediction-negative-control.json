@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-prediction-negative-control",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "predictionOnOffEqual": false,
+    "strokeCompilerCountersUnchanged": true
+  }
+}

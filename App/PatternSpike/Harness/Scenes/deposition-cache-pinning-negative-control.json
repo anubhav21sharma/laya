@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-cache-pinning-negative-control",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "activeCompiledBrushPinned": false,
+    "strokeCompilerCountersUnchanged": true
+  }
+}

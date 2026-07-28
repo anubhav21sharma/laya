@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-failure-matrix",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "failurePreservesCanonicalAndHistory": true,
+    "strokeCompilerCountersUnchanged": true
+  }
+}

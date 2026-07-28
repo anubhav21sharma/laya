@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 6,
+  "name": "deposition-layer-matrix-negative-control",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "secondaryLayerPresent": false,
+    "strokeCompilerCountersUnchanged": true
+  }
+}
