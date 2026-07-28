@@ -21,6 +21,10 @@ let package = Package(
             targets: ["LayabrushConvert"]
         ),
         .executable(
+            name: "brush-converter-fuzz",
+            targets: ["BrushConverterFuzz"]
+        ),
+        .executable(
             name: "SliceThreeEvidenceGate",
             targets: ["SliceThreeEvidenceGate"]
         ),
@@ -69,6 +73,15 @@ let package = Package(
         .executableTarget(
             name: "LayabrushConvert",
             dependencies: ["BrushConverter"]
+        ),
+        .target(
+            name: "BrushConverterFuzzSupport",
+            dependencies: ["BrushConverter"],
+            resources: [.copy("Corpus")]
+        ),
+        .executableTarget(
+            name: "BrushConverterFuzz",
+            dependencies: ["BrushConverterFuzzSupport"]
         ),
         .executableTarget(
             name: "SliceThreeEvidenceGate",
@@ -119,7 +132,10 @@ let package = Package(
         ),
         .testTarget(
             name: "BrushConverterTests",
-            dependencies: ["BrushConverter"],
+            dependencies: [
+                "BrushConverter",
+                "BrushConverterFuzzSupport",
+            ],
             resources: [.copy("Fixtures")]
         ),
         .testTarget(
@@ -133,6 +149,7 @@ let package = Package(
         .testTarget(
             name: "EditorSessionControllerTests",
             dependencies: [
+                "BrushConverter",
                 "EditorCore",
                 "BrushFormat",
                 "MetalRenderer",

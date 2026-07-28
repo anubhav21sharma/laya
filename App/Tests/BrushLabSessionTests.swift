@@ -1,4 +1,5 @@
 #if DEBUG
+import BrushConverter
 import BrushFormat
 import Foundation
 import Metal
@@ -60,6 +61,52 @@ struct BrushLabSessionTests {
         #expect(!encodedPixels.isEmpty)
         let compiler = try #require(object["compiler"] as? [String: Any])
         #expect((compiler["cacheBudgetBytes"] as? Int) ?? 0 > 0)
+    }
+
+    @Test
+    func loadsConvertedPackageAndReportFromDiskWithoutUI() async throws {
+        guard let runtime = try makeRuntime() else { return }
+        let source = try SyntheticV1DiagnosticFixture.source(
+            includeWet: false
+        )
+        let document = try #require(
+            SyntheticV1BrushParser().parse(source).first
+        )
+        let mapped = try SyntheticV1BrushMapper().map(document)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "laya-brush-lab-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false
+        )
+        let packageURL = directory.appendingPathComponent(
+            "converted.layabrush"
+        )
+        try BrushPackageIO.save(mapped.package, to: packageURL)
+
+        await runtime.session.loadPackage(at: packageURL)
+
+        #expect(runtime.session.errorMessage == nil)
+        #expect(runtime.session.sourceName == "converted.layabrush")
+        #expect(runtime.session.package?.manifest.schemaVersion == 2)
+        #expect(runtime.session.package?.conversionReport == mapped.report)
+        let evidence = try runtime.session.makeEvidenceData()
+        let object = try #require(
+            JSONSerialization.jsonObject(with: evidence)
+                as? [String: Any]
+        )
+        let conversion = try #require(
+            object["conversion"] as? [String: Any]
+        )
+        #expect(conversion["sourceFormat"] as? String == "synthetic")
+        #expect(
+            conversion["sourceContentHash"] as? String
+                == mapped.report.sourceContentHash
+        )
     }
 
     @Test
