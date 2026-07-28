@@ -718,7 +718,7 @@ private func decodePath(
     )
 }
 
-private func normalizeForeignZIPPath(
+func normalizeForeignZIPPath(
     _ raw: String,
     maximumUTF8Bytes: Int,
     permitsDirectory: Bool

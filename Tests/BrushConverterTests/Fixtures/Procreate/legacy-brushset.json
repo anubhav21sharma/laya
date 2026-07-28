@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "identifier": "project-owned-procreate-legacy-brushset",
+  "ownership": "project-owned",
+  "rawFixtureCommitted": false,
+  "containerVariant": "legacy-brushset",
+  "sourceApplicationVersion": "structural-analogue",
+  "observedStructure": [
+    "brushset.plist",
+    "<member>/Brush.archive",
+    "<member>/Shape.png",
+    "<member>/Grain.png",
+    "<member>/QuickLook/Thumbnail.png"
+  ],
+  "evidenceBackedSemanticKeys": [
+    "procreate.classic.v1.shape",
+    "procreate.classic.v1.grain"
+  ]
+}

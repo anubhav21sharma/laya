@@ -119,7 +119,8 @@ let package = Package(
         ),
         .testTarget(
             name: "BrushConverterTests",
-            dependencies: ["BrushConverter"]
+            dependencies: ["BrushConverter"],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "BrushConverterIntegrationTests",

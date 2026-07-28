@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "identifier": "project-owned-procreate-individual-export",
+  "ownership": "project-owned",
+  "rawFixtureCommitted": false,
+  "containerVariant": "individual-export",
+  "sourceApplicationVersion": "structural-analogue",
+  "observedStructure": [
+    "Brush.archive",
+    "Shape.png",
+    "Grain.png",
+    "QuickLook/Thumbnail.png"
+  ],
+  "evidenceBackedSemanticKeys": [
+    "procreate.classic.v1.shape",
+    "procreate.classic.v1.grain"
+  ]
+}

@@ -215,6 +215,41 @@ struct BoundedKeyedArchiveView: Equatable, Sendable {
         return objects[Int(value)]
     }
 
+    func topObject(
+        forKey key: String
+    ) throws -> ForeignPropertyListObjectID? {
+        let fields = try Self.dictionaryFields(
+            top,
+            graph: graph,
+            dictionary: graph.root.rawValue
+        )
+        guard let reference = fields[key] else { return nil }
+        return try object(referencedBy: reference)
+    }
+
+    func dictionaryFields(
+        at identifier: ForeignPropertyListObjectID
+    ) throws -> [String: ForeignPropertyListObjectID] {
+        guard case let .dictionary(entries) = try graph.node(at: identifier)
+        else {
+            throw ForeignPropertyListError.invalidKeyedArchive
+        }
+        return try Self.dictionaryFields(
+            entries,
+            graph: graph,
+            dictionary: identifier.rawValue
+        )
+    }
+
+    func resolvedNode(
+        at identifier: ForeignPropertyListObjectID
+    ) throws -> ForeignPropertyListNode {
+        if case .uid = try graph.node(at: identifier) {
+            return try graph.node(at: object(referencedBy: identifier))
+        }
+        return try graph.node(at: identifier)
+    }
+
     private static func dictionaryFields(
         _ entries: [ForeignPropertyListDictionaryEntry],
         graph: ForeignPropertyListGraph,
