@@ -29,6 +29,7 @@ final class EditorSessionController {
     private var diagnosticDrawProgram: BrushProgram?
     private var activeDrawBrush: CompiledBrush?
     private var activeEraserBrush: CompiledBrush?
+    private var selectionGeneration: UInt64 = 0
     private let compileDefinition:
         @MainActor @Sendable (BrushDefinition) async throws -> CompiledBrush
     private var diagnosticFixedStrokeSeed: UInt64?
@@ -419,6 +420,7 @@ final class EditorSessionController {
     }
 
     func selectBrush(_ id: BrushRecipeID) async {
+        let generation = nextSelectionGeneration()
         guard renderer.isIdle,
               transaction.state == .idle,
               transaction.pendingOperation == nil,
@@ -426,7 +428,8 @@ final class EditorSessionController {
         else { return }
         do {
             let compiled = try await compileDefinition(entry.definition)
-            guard renderer.isIdle,
+            guard generation == selectionGeneration,
+                  renderer.isIdle,
                   transaction.state == .idle,
                   transaction.pendingOperation == nil
             else { return }
@@ -435,23 +438,19 @@ final class EditorSessionController {
             diagnosticDrawProgram = compiled.program
             model.confirmRecipe(id)
         } catch let error as MetalRendererError {
-            report(error)
+            if generation == selectionGeneration {
+                report(error)
+            }
         } catch {
-            report(.commandFailed(error.localizedDescription))
+            if generation == selectionGeneration {
+                report(.commandFailed(error.localizedDescription))
+            }
         }
     }
 
-    @available(*, deprecated, message: "Use await selectBrush(_:).")
-    func handleRecipe(_ id: BrushRecipeID) {
-        model.confirmRecipe(id)
-    }
-
-    @available(*, deprecated, message: "Install a CompiledBrush instead.")
-    func installDiagnosticDrawProgram(_ program: BrushProgram?) throws {
-        guard renderer.isIdle else {
-            throw MetalRendererError.commitPendingInput
-        }
-        diagnosticDrawProgram = program
+    private func nextSelectionGeneration() -> UInt64 {
+        selectionGeneration &+= 1
+        return selectionGeneration
     }
 
     func installDiagnosticDrawBrush(_ brush: CompiledBrush) throws {

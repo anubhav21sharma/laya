@@ -135,6 +135,21 @@ public final class BrushCompiler {
         )
     }
 
+    public convenience init(
+        device: any MTLDevice,
+        commandQueue: any MTLCommandQueue,
+        profile: BrushDeviceProfile,
+        pipelineLibrary: DepositionPipelineLibrary
+    ) {
+        self.init(
+            device: device,
+            commandQueue: commandQueue,
+            profile: profile,
+            pipelinePreparing: pipelineLibrary,
+            testHooks: .none
+        )
+    }
+
     init(
         device: any MTLDevice,
         commandQueue: any MTLCommandQueue,
@@ -560,6 +575,40 @@ public final class BrushCompiler {
         activeBrush = compiled
         increment(.activation)
         return compiled
+    }
+
+    /// Produces deterministic inspection evidence for packages whose backend
+    /// is not executable by the deposition renderer. It intentionally does
+    /// not decode, upload, cache, or activate resources.
+    public func inspectionReport(
+        for package: BrushPackage
+    ) throws -> BrushCompilationReport {
+        let program = try BrushProgramCompiler.compile(package.definition)
+        let hash = try package.contentHash
+        let compatibility: [BrushCompatibilityEntry] = switch program.requestedBackend {
+        case .deposition:
+            []
+        case .canvasInteraction:
+            [BrushCompatibilityEntry(
+                semanticKey: "material.interaction",
+                level: .unsupported,
+                message: "Canvas interaction is not executable by deposition."
+            )]
+        }
+        return try BrushCompilationReport(
+            definitionID: package.definition.id.rawValue,
+            packageContentHash: hash,
+            backend: program.requestedBackend,
+            compatibility: compatibility,
+            performance: BrushPerformanceClassification(
+                tier: .realtime120,
+                basis: .estimated,
+                reason: "Inspection only; backend activation is unsupported."
+            ),
+            encodedResourceBytes: try checkedEncodedResourceBytes(package),
+            residentResourceBytes: 0,
+            deviceRegistryID: profile.registryID
+        )
     }
 
     private func validateDepositionSupport(

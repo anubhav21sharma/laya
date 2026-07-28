@@ -39,6 +39,17 @@ func editorModelConfirmsOnlyCatalogDrawRecipes() {
 
 @MainActor
 @Test
+func editorModelResetsStaleBoundedWashSelectionToNativeInk() {
+    let model = EditorModel()
+
+    model.confirmRecipe(BrushRecipeID("builtin.bounded-wash"))
+
+    #expect(model.selectedRecipeID == AnchorBrushCatalog.ink.id)
+    #expect(model.lastBrushSelectionDiagnostic == "staleBuiltinBoundedWash")
+}
+
+@MainActor
+@Test
 func editorModelChangesOnlyAfterTilingConfirmation() {
     let model = EditorModel(tiling: .halfDrop)
 

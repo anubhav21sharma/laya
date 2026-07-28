@@ -149,6 +149,25 @@ struct BrushLabSessionTests {
         )
     }
 
+    @Test
+    func wetPackageRemainsInspectableWithTypedUnsupportedAvailability()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+
+        await runtime.session.loadPackage(
+            try makePackage(wet: true),
+            sourceName: "wet.layabrush"
+        )
+
+        #expect(runtime.session.compilationReport?.backend == .canvasInteraction)
+        #expect(
+            runtime.session.drawingAvailability == .unsupportedInteraction(.wetMix)
+        )
+        #expect(runtime.session.compilationFailure == nil)
+        #expect(runtime.session.compiledBrush == nil)
+    }
+
     private func makeRuntime() throws -> (
         controller: EditorSessionController,
         session: BrushLabSession
@@ -180,7 +199,10 @@ struct BrushLabSessionTests {
         )
     }
 
-    private func makePackage(nativeOnly: Bool = false) throws
+    private func makePackage(
+        nativeOnly: Bool = false,
+        wet: Bool = false
+    ) throws
         -> BrushPackage
     {
         let base = try LegacyBrushRecipeAdapter.definition(
@@ -188,18 +210,35 @@ struct BrushLabSessionTests {
             displayName: "Brush Lab Fixture"
         )
         let definition: BrushDefinition
-        if nativeOnly {
+        if nativeOnly || wet {
+            let material = wet ? BrushMaterialDefinition(
+                accumulation: base.material.accumulation,
+                interaction: .wetMix,
+                edgeTreatment: base.material.edgeTreatment,
+                strength: base.material.strength,
+                wetness: base.material.wetness,
+                bleedRadius: base.material.bleedRadius,
+                softenPasses: base.material.softenPasses,
+                accumulationLimit: base.material.accumulationLimit,
+                interactionParameters: BrushInteractionDefinition(
+                    pickup: 0.2, pull: 0.4, dilution: 0.3, charge: 0.4,
+                    persistence: 0.5, dirtyHaloRadius: 2
+                )
+            ) : base.material
             definition = try BrushDefinition(
                 id: base.id,
                 schemaVersion: base.schemaVersion,
                 metadata: base.metadata,
-                capabilities: base.capabilities,
+                capabilities: wet ? [BrushCapabilityDeclaration(
+                    identifier: BrushCapability.wetMix.rawValue,
+                    required: true
+                )] : base.capabilities,
                 resources: base.resources,
                 coverage: base.coverage,
                 placement: base.placement,
                 dynamics: base.dynamics,
                 color: base.color,
-                material: base.material,
+                material: material,
                 stabilization: base.stabilization,
                 taper: base.taper,
                 replayMode: base.replayMode,
@@ -227,7 +266,7 @@ struct BrushLabSessionTests {
 }
 
 @MainActor
-private final class BrushLabTestPipelinePreparer:
+final class BrushLabTestPipelinePreparer:
     DepositionPipelinePreparing
 {
     private let state: any MTLRenderPipelineState
@@ -251,7 +290,7 @@ private final class BrushLabTestPipelinePreparer:
 }
 
 @MainActor
-private func makeBrushLabTestPipelineState(
+func makeBrushLabTestPipelineState(
     device: any MTLDevice
 ) throws -> any MTLRenderPipelineState {
     let source = """

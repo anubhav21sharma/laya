@@ -107,6 +107,30 @@ private func controllerMovedSample(
     )
 }
 
+@MainActor
+private func makeNativeCompiler(
+    renderer: GridRenderer
+) throws -> BrushCompiler {
+    guard let queue = renderer.device.makeCommandQueue() else {
+        throw MetalRendererError.commandQueueUnavailable
+    }
+    return try BrushCompiler(
+        device: renderer.device,
+        commandQueue: queue,
+        profile: BrushDeviceProfile(
+            registryID: renderer.device.registryID,
+            recommendedWorkingSetBytes: 1_024 * 1_024 * 1_024,
+            maximumWorkingTextureDimension: 4_096,
+            brushCacheBudgetBytes: 128 * 1_024 * 1_024,
+            targetFramesPerSecond: 120
+        ),
+        pipelinePreparing: try BrushLabTestPipelinePreparer(
+            device: renderer.device
+        ),
+        testHooks: .none
+    )
+}
+
 private let controllerRadialConfiguration = RadialSymmetryConfiguration(
     kind: .mandala,
     rayCount: 8,
@@ -933,7 +957,7 @@ func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
         strokeSeedSessionEntropy: sessionEntropy
     )
 
-    controller.handleRecipe(AnchorBrushCatalog.marker.id)
+    controller.model.confirmRecipe(AnchorBrushCatalog.marker.id)
     controller.handleStrokeSample(controllerSample(.began))
     let first = try #require(renderer.harnessActiveStrokeStyle)
     #expect(first.program.compatibilityRecipe != nil)
@@ -943,7 +967,7 @@ func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
     ))
     controller.handleStrokeSample(controllerSample(.cancelled))
 
-    controller.handleRecipe(AnchorBrushCatalog.glaze.id)
+    controller.model.confirmRecipe(AnchorBrushCatalog.glaze.id)
     controller.handleStrokeSample(controllerSample(.began))
     let second = try #require(renderer.harnessActiveStrokeStyle)
     #expect(second.program.compatibilityRecipe != nil)
@@ -969,16 +993,64 @@ func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
 
 @Test
 @MainActor
+func selectionConfirmsOnlyAfterCompiledRendererActivation() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let controller = EditorSessionController(
+        renderer: renderer,
+        compileDefinition: { definition in
+            try await compiler.compileAndActivate(definition: definition)
+        }
+    )
+    let ink = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.ink.definition
+    )
+    let eraser = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.eraser.definition
+    )
+    try controller.installBootstrapBrushes(draw: ink, eraser: eraser)
+
+    await controller.selectBrush(AnchorBrushCatalog.marker.id)
+
+    #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.marker.id)
+    #expect(
+        renderer.harnessPreparedDrawBrushIdentity?.definitionID
+            == AnchorBrushCatalog.marker.id
+    )
+
+    controller.handleTool(.erase)
+    #expect(
+        renderer.harnessPreparedEraserBrushIdentity?.definitionID
+            == AnchorBrushCatalog.eraser.id
+    )
+}
+
+@Test
+@MainActor
+func failedSelectionPreservesInstalledBrushAndModelSelection() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(
+        renderer: renderer,
+        compileDefinition: { _ in throw MetalRendererError.unsupportedBrushProgram }
+    )
+    let before = controller.model.selectedRecipeID
+
+    await controller.selectBrush(AnchorBrushCatalog.marker.id)
+
+    #expect(controller.model.selectedRecipeID == before)
+    #expect(renderer.harnessPreparedDrawBrushIdentity == nil)
+}
+
+@Test
+@MainActor
 func diagnosticProgramSeedAndNormalizedInputAreCapturedAtStrokeStart()
     throws
 {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
-    let program = AnchorBrushCatalog.marker.program
     var observed: [StrokeSample] = []
     controller.onNormalizedInput = { observed.append($0) }
 
-    try controller.installDiagnosticDrawProgram(program)
     try controller.setDiagnosticFixedStrokeSeed(0xCAFE)
     let began = controllerSample(.began, x: 20, y: 24, timestamp: 1)
     controller.handleStrokeSample(began)
@@ -989,7 +1061,7 @@ func diagnosticProgramSeedAndNormalizedInputAreCapturedAtStrokeStart()
     #expect(observed == [began])
 
     controller.handleStrokeSample(controllerSample(.cancelled, timestamp: 2))
-    controller.handleRecipe(AnchorBrushCatalog.defaultDraw.id)
+    controller.model.confirmRecipe(AnchorBrushCatalog.defaultDraw.id)
     controller.handleStrokeSample(controllerSample(.began, timestamp: 3))
     let builtIn = try #require(renderer.harnessActiveStrokeStyle)
     #expect(builtIn.program.compatibilityRecipe != nil)
@@ -1818,7 +1890,7 @@ func strokeSeedDerivationIsDeterministicNonzeroAndSessionScoped() {
 func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
-    controller.handleRecipe(AnchorBrushCatalog.marker.id)
+    controller.model.confirmRecipe(AnchorBrushCatalog.marker.id)
     controller.handleStrokeSample(controllerSample(.began, x: 16, y: 32))
 
     controller.handleStrokeSamples([

@@ -35,7 +35,7 @@ struct BrushLabResourcePreview: Equatable, Identifiable {
 enum BrushLabDrawingAvailability: Equatable {
     case unloaded
     case available
-    case compilerOnly(String)
+    case unsupportedInteraction(BrushInteractionMode)
     case compilationFailed(String)
 }
 
@@ -398,6 +398,14 @@ final class BrushLabSession {
         do {
             let contentHash = try package.contentHash
             packageContentHash = contentHash
+            if package.definition.material.interaction != .none {
+                compilationReport = try compiler.inspectionReport(for: package)
+                drawingAvailability = .unsupportedInteraction(
+                    package.definition.material.interaction
+                )
+                isLoading = false
+                return
+            }
             let compiled = try await compiler.compileAndActivate(
                 package: package
             )
@@ -410,12 +418,6 @@ final class BrushLabSession {
                 try controller.installDiagnosticDrawBrush(compiled)
                 activeDrawingPackageContentHash = contentHash
                 drawingAvailability = .available
-            } else {
-                drawingAvailability = .compilerOnly(
-                    "This package requires typed canvas interaction, which "
-                        + "the production deposition renderer does not support. "
-                        + "The previous drawing brush remains active."
-                )
             }
         } catch let failure as BrushCompilationFailure {
             compilationFailure = failure

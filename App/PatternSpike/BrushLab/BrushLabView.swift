@@ -394,8 +394,11 @@ struct BrushLabView: View {
             .foregroundStyle(.green)
             .font(.caption)
             .padding(6)
-        case let .compilerOnly(message):
-            Label(message, systemImage: "hammer.fill")
+        case let .unsupportedInteraction(interaction):
+            Label(
+                "\(interaction.rawValue) interaction is inspectable but unavailable in the production deposition renderer.",
+                systemImage: "hammer.fill"
+            )
                 .foregroundStyle(.orange)
                 .font(.caption)
                 .padding(6)

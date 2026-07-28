@@ -136,6 +136,10 @@ struct ContentView: View {
                 drawableSize: PatternSize(width: 1, height: 1),
                 configuration: configuration
             )
+            let pipelineLibrary = DepositionPipelineLibrary(
+                device: device,
+                library: library
+            )
             let compiler = BrushCompiler(
                 device: device,
                 commandQueue: queue,
@@ -148,7 +152,8 @@ struct ContentView: View {
                     maximumWorkingTextureDimension:
                         BrushDeviceProfile.maximumPortableTextureDimension,
                     targetFramesPerSecond: 120
-                )
+                ),
+                pipelineLibrary: pipelineLibrary
             )
             let controller = EditorSessionController(
                 renderer: renderer,
