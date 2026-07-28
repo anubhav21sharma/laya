@@ -232,6 +232,71 @@ func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
 }
 
 @Test
+func depositionInstanceHasFrozenWireLayout() {
+    #expect(MemoryLayout<PatternDepositionStampInstance>.size == 256)
+    #expect(MemoryLayout<PatternDepositionStampInstance>.stride == 256)
+    #expect(MemoryLayout<PatternDepositionStampInstance>.alignment == 16)
+
+    let expectedOffsets: [Int?] = [
+        0, 16, 32, 48, 64, 80, 96, 112,
+        128, 144, 160, 176, 192, 208, 224, 240,
+    ]
+    let swiftOffsets = [
+        MemoryLayout<PatternDepositionStampInstance>.offset(of: \.tipFrame0),
+        MemoryLayout<PatternDepositionStampInstance>.offset(of: \.tipFrame1),
+        MemoryLayout<PatternDepositionStampInstance>.offset(
+            of: \.primaryGrainFrame0
+        ),
+        MemoryLayout<PatternDepositionStampInstance>.offset(
+            of: \.primaryGrainFrame1
+        ),
+        MemoryLayout<PatternDepositionStampInstance>.offset(
+            of: \.secondaryGrainFrame0
+        ),
+        MemoryLayout<PatternDepositionStampInstance>.offset(
+            of: \.secondaryGrainFrame1
+        ),
+        MemoryLayout<PatternDepositionStampInstance>.offset(
+            of: \.premultipliedColor
+        ),
+        MemoryLayout<PatternDepositionStampInstance>.offset(
+            of: \.coverageInputs
+        ),
+        MemoryLayout<PatternDepositionStampInstance>.offset(of: \.clip0),
+        MemoryLayout<PatternDepositionStampInstance>.offset(of: \.clip1),
+        MemoryLayout<PatternDepositionStampInstance>.offset(of: \.clip2),
+        MemoryLayout<PatternDepositionStampInstance>.offset(of: \.clip3),
+        MemoryLayout<PatternDepositionStampInstance>.offset(of: \.identity),
+        MemoryLayout<PatternDepositionStampInstance>.offset(of: \.metadata),
+        MemoryLayout<PatternDepositionStampInstance>.offset(of: \.reserved0),
+        MemoryLayout<PatternDepositionStampInstance>.offset(of: \.reserved1),
+    ]
+    #expect(swiftOffsets == expectedOffsets)
+
+    let cOffsets = [
+        PatternDepositionStampInstanceOffsetTipFrame0(),
+        PatternDepositionStampInstanceOffsetTipFrame1(),
+        PatternDepositionStampInstanceOffsetPrimaryGrainFrame0(),
+        PatternDepositionStampInstanceOffsetPrimaryGrainFrame1(),
+        PatternDepositionStampInstanceOffsetSecondaryGrainFrame0(),
+        PatternDepositionStampInstanceOffsetSecondaryGrainFrame1(),
+        PatternDepositionStampInstanceOffsetPremultipliedColor(),
+        PatternDepositionStampInstanceOffsetCoverageInputs(),
+        PatternDepositionStampInstanceOffsetClip0(),
+        PatternDepositionStampInstanceOffsetClip1(),
+        PatternDepositionStampInstanceOffsetClip2(),
+        PatternDepositionStampInstanceOffsetClip3(),
+        PatternDepositionStampInstanceOffsetIdentity(),
+        PatternDepositionStampInstanceOffsetMetadata(),
+        PatternDepositionStampInstanceOffsetReserved0(),
+        PatternDepositionStampInstanceOffsetReserved1(),
+    ]
+    #expect(cOffsets == expectedOffsets.map { numericCast($0!) })
+    #expect(UInt32(DepositionABI.version) == PatternDepositionABIVersion)
+    #expect(ShaderABI.isValid)
+}
+
+@Test
 func radialUniformLayoutMatchesTheMetalContract() {
     #expect(MemoryLayout<PatternRadialFrameUniforms>.size == 64)
     #expect(MemoryLayout<PatternRadialFrameUniforms>.stride == 64)

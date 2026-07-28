@@ -23,6 +23,27 @@ fragment float4 patternBlankFragment(PatternVertexOut input [[stage_in]]) {
     return float4(242.0 / 255.0, 244.0 / 255.0, 241.0 / 255.0, 1.0);
 }
 
+kernel void patternDepositionABIRoundTrip(
+    const device PatternDepositionStampInstance* instances [[buffer(0)]],
+    device PatternUInt4* output [[buffer(1)]],
+    uint index [[thread_position_in_grid]]
+) {
+    const PatternDepositionStampInstance instance = instances[index];
+    const uint base = index * 7;
+    output[base] = as_type<uint4>(instance.tipFrame0);
+    output[base + 1] = as_type<uint4>(instance.tipFrame1);
+    output[base + 2] = as_type<uint4>(instance.coverageInputs);
+    output[base + 3] = instance.identity;
+    output[base + 4] = instance.metadata;
+    output[base + 5] = as_type<uint4>(instance.reserved0);
+    output[base + 6] = uint4(
+        instance.metadata.w == PatternDepositionABIVersion ? 1 : 0,
+        sizeof(PatternDepositionStampInstance),
+        0,
+        0
+    );
+}
+
 struct PatternFullscreenOut {
     float4 position [[position]];
     float2 screenPixel;

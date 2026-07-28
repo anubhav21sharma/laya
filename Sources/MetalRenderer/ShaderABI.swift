@@ -3,6 +3,8 @@ import CShaderTypes
 public enum ShaderABI {
     public static let projectedStampInstanceStride =
         MemoryLayout<PatternProjectedStampInstance>.stride
+    public static let depositionStampInstanceStride =
+        MemoryLayout<PatternDepositionStampInstance>.stride
 
     public static var isValid: Bool {
         MemoryLayout<PatternFrameUniforms>.size == 16
@@ -116,6 +118,7 @@ public enum ShaderABI {
             && MemoryLayout<PatternProjectedStampInstance>.offset(
                 of: \.brushAttributes
             ) == 112
+            && depositionStampInstanceIsValid
             && MemoryLayout<PatternBrushMaterialUniforms>.size == 48
             && MemoryLayout<PatternBrushMaterialUniforms>.stride == 48
             && MemoryLayout<PatternBrushMaterialUniforms>.alignment == 4
@@ -153,6 +156,77 @@ public enum ShaderABI {
             && MemoryLayout<PatternBrushMaterialUniforms>.offset(
                 of: \.padding1
             ) == 44
+    }
+
+    private static var depositionStampInstanceIsValid: Bool {
+        MemoryLayout<PatternDepositionStampInstance>.size == 256
+            && MemoryLayout<PatternDepositionStampInstance>.stride == 256
+            && MemoryLayout<PatternDepositionStampInstance>.alignment == 16
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.tipFrame0
+            ) == 0
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.tipFrame1
+            ) == 16
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.primaryGrainFrame0
+            ) == 32
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.primaryGrainFrame1
+            ) == 48
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.secondaryGrainFrame0
+            ) == 64
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.secondaryGrainFrame1
+            ) == 80
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.premultipliedColor
+            ) == 96
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.coverageInputs
+            ) == 112
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.clip0
+            ) == 128
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.clip1
+            ) == 144
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.clip2
+            ) == 160
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.clip3
+            ) == 176
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.identity
+            ) == 192
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.metadata
+            ) == 208
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.reserved0
+            ) == 224
+            && MemoryLayout<PatternDepositionStampInstance>.offset(
+                of: \.reserved1
+            ) == 240
+            && PatternDepositionStampInstanceOffsetTipFrame0() == 0
+            && PatternDepositionStampInstanceOffsetTipFrame1() == 16
+            && PatternDepositionStampInstanceOffsetPrimaryGrainFrame0() == 32
+            && PatternDepositionStampInstanceOffsetPrimaryGrainFrame1() == 48
+            && PatternDepositionStampInstanceOffsetSecondaryGrainFrame0() == 64
+            && PatternDepositionStampInstanceOffsetSecondaryGrainFrame1() == 80
+            && PatternDepositionStampInstanceOffsetPremultipliedColor() == 96
+            && PatternDepositionStampInstanceOffsetCoverageInputs() == 112
+            && PatternDepositionStampInstanceOffsetClip0() == 128
+            && PatternDepositionStampInstanceOffsetClip1() == 144
+            && PatternDepositionStampInstanceOffsetClip2() == 160
+            && PatternDepositionStampInstanceOffsetClip3() == 176
+            && PatternDepositionStampInstanceOffsetIdentity() == 192
+            && PatternDepositionStampInstanceOffsetMetadata() == 208
+            && PatternDepositionStampInstanceOffsetReserved0() == 224
+            && PatternDepositionStampInstanceOffsetReserved1() == 240
+            && PatternDepositionABIVersion == UInt32(DepositionABI.version)
     }
 
     public static func preconditionValid(

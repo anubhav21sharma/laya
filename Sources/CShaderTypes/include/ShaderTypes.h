@@ -8,14 +8,17 @@ typedef uint PatternUInt32;
 typedef int PatternInt32;
 typedef float2 PatternFloat2;
 typedef float4 PatternFloat4;
+typedef uint4 PatternUInt4;
 #define PATTERN_WIRE_CONSTANT constant
 #else
+#include <stddef.h>
 #include <stdint.h>
 #include <simd/simd.h>
 typedef uint32_t PatternUInt32;
 typedef int32_t PatternInt32;
 typedef vector_float2 PatternFloat2;
 typedef vector_float4 PatternFloat4;
+typedef vector_uint4 PatternUInt4;
 #define PATTERN_WIRE_CONSTANT static const
 #endif
 
@@ -85,6 +88,107 @@ typedef struct PatternProjectedStampInstance {
     PatternFloat4 brushAttributes;
 } PatternProjectedStampInstance;
 
+typedef struct PatternDepositionStampInstance {
+    PatternFloat4 tipFrame0;
+    PatternFloat4 tipFrame1;
+    PatternFloat4 primaryGrainFrame0;
+    PatternFloat4 primaryGrainFrame1;
+    PatternFloat4 secondaryGrainFrame0;
+    PatternFloat4 secondaryGrainFrame1;
+    PatternFloat4 premultipliedColor;
+    PatternFloat4 coverageInputs;
+    PatternClipHalfPlane clip0;
+    PatternClipHalfPlane clip1;
+    PatternClipHalfPlane clip2;
+    PatternClipHalfPlane clip3;
+    PatternUInt4 identity;
+    PatternUInt4 metadata;
+    PatternFloat4 reserved0;
+    PatternFloat4 reserved1;
+} PatternDepositionStampInstance;
+
+#ifndef __METAL_VERSION__
+static inline size_t
+PatternDepositionStampInstanceOffsetTipFrame0(void) {
+    return offsetof(PatternDepositionStampInstance, tipFrame0);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetTipFrame1(void) {
+    return offsetof(PatternDepositionStampInstance, tipFrame1);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetPrimaryGrainFrame0(void) {
+    return offsetof(PatternDepositionStampInstance, primaryGrainFrame0);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetPrimaryGrainFrame1(void) {
+    return offsetof(PatternDepositionStampInstance, primaryGrainFrame1);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetSecondaryGrainFrame0(void) {
+    return offsetof(PatternDepositionStampInstance, secondaryGrainFrame0);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetSecondaryGrainFrame1(void) {
+    return offsetof(PatternDepositionStampInstance, secondaryGrainFrame1);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetPremultipliedColor(void) {
+    return offsetof(PatternDepositionStampInstance, premultipliedColor);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetCoverageInputs(void) {
+    return offsetof(PatternDepositionStampInstance, coverageInputs);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetClip0(void) {
+    return offsetof(PatternDepositionStampInstance, clip0);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetClip1(void) {
+    return offsetof(PatternDepositionStampInstance, clip1);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetClip2(void) {
+    return offsetof(PatternDepositionStampInstance, clip2);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetClip3(void) {
+    return offsetof(PatternDepositionStampInstance, clip3);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetIdentity(void) {
+    return offsetof(PatternDepositionStampInstance, identity);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetMetadata(void) {
+    return offsetof(PatternDepositionStampInstance, metadata);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetReserved0(void) {
+    return offsetof(PatternDepositionStampInstance, reserved0);
+}
+
+static inline size_t
+PatternDepositionStampInstanceOffsetReserved1(void) {
+    return offsetof(PatternDepositionStampInstance, reserved1);
+}
+#endif
+
 typedef struct PatternBrushMaterialUniforms {
     PatternUInt32 materialFamily;
     PatternUInt32 grainCoordinateMode;
@@ -120,6 +224,8 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireInk = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireDry = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireGlaze = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireBoundedWash = 3;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionABIVersion = 1;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainCoordinateWireCanonical = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainCoordinateWireBrushLocal = 1;
