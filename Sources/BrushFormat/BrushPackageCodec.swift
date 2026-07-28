@@ -40,9 +40,13 @@ public enum BrushPackageCodec {
             from: manifestData,
             label: "manifest"
         )
-        let expectedPaths = Set(
-            ["manifest.json", manifest.definitionPath] + manifest.resources.map(\.path)
-        )
+        var expectedPathValues =
+            ["manifest.json", manifest.definitionPath]
+            + manifest.resources.map(\.path)
+        if let conversionReport = manifest.conversionReport {
+            expectedPathValues.append(conversionReport.path)
+        }
+        let expectedPaths = Set(expectedPathValues)
         let actualPaths = Set(archive.paths)
         guard expectedPaths == actualPaths else {
             if let extra = actualPaths.subtracting(expectedPaths).sorted().first {
@@ -73,10 +77,47 @@ public enum BrushPackageCodec {
         for resource in manifest.resources {
             resourceData[resource.id] = try archiveData(archive, path: resource.path)
         }
+        let conversionReport: BrushConversionReport?
+        let conversionReportData: Data?
+        if let descriptor = manifest.conversionReport {
+            let byteCount: Int
+            do {
+                byteCount = try archive.byteCount(for: descriptor.path)
+            } catch let error as SafeArchiveError {
+                throw BrushPackageError.archive(error)
+            }
+            guard byteCount <= BrushFormatLimits.maximumConversionReportBytes,
+                  byteCount == descriptor.encodedByteCount
+            else {
+                throw BrushPackageError.invalidConversionReport(
+                    .byteCountMismatch
+                )
+            }
+            let data = try archiveData(archive, path: descriptor.path)
+            guard BrushContentHash.sha256Hex(of: data) == descriptor.sha256
+            else {
+                throw BrushPackageError.invalidConversionReport(.hashMismatch)
+            }
+            do {
+                conversionReport = try BrushConversionReportCodec.decode(data)
+            } catch let error as BrushConversionReportValidationError {
+                throw BrushPackageError.invalidConversionReport(
+                    .validation(error)
+                )
+            } catch {
+                throw BrushPackageError.malformedJSON("conversion report")
+            }
+            conversionReportData = data
+        } else {
+            conversionReport = nil
+            conversionReportData = nil
+        }
         return try BrushPackage(
             manifest: manifest,
             definition: definition,
-            resourceData: resourceData
+            resourceData: resourceData,
+            conversionReport: conversionReport,
+            preservedConversionReportData: conversionReportData
         )
     }
 
@@ -99,6 +140,17 @@ public enum BrushPackageCodec {
                 )
             }
             entries[resource.path] = data
+        }
+        if let descriptor = package.manifest.conversionReport,
+           package.conversionReport != nil,
+           let data = package.conversionReportData
+        {
+            guard entries[descriptor.path] == nil else {
+                throw BrushPackageError.invalidConversionReport(
+                    .duplicatePath
+                )
+            }
+            entries[descriptor.path] = data
         }
         return entries
     }

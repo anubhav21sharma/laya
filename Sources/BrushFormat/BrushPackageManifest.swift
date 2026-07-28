@@ -9,6 +9,7 @@ public enum BrushFormatLimits {
     public static let maximumArchivePathBytes = 512
     public static let maximumResources = 16
     public static let maximumImageDimension = 8_192
+    public static let maximumConversionReportBytes = 2 * 1_024 * 1_024
 }
 
 public enum BrushPackageError: Error, Equatable, Sendable {
@@ -21,11 +22,25 @@ public enum BrushPackageError: Error, Equatable, Sendable {
     case missingResource(String)
     case unexpectedEntry(String)
     case malformedJSON(String)
+    case invalidConversionReport(BrushPackageConversionReportError)
     case contentIdentityMismatch
     case ioFailure
 }
 
 public typealias BrushFormatError = BrushPackageError
+
+public enum BrushPackageConversionReportError:
+    Error, Equatable, Sendable
+{
+    case missingManifestDescriptor
+    case missingDecodedReport
+    case byteCountMismatch
+    case hashMismatch
+    case encodingFailure
+    case decodedReportMismatch
+    case duplicatePath
+    case validation(BrushConversionReportValidationError)
+}
 
 public struct BrushPackageProvenance: Codable, Equatable, Sendable {
     public let buildTool: String?
@@ -40,6 +55,67 @@ public struct BrushPackageProvenance: Codable, Equatable, Sendable {
         self.buildTool = buildTool
         self.sourceApplication = sourceApplication
         self.sourceVersion = sourceVersion
+    }
+}
+
+public struct BrushPackageConversionReportDescriptor:
+    Codable, Equatable, Sendable
+{
+    public static let canonicalPath = "conversion-report.json"
+
+    public let path: String
+    public let sha256: String
+    public let encodedByteCount: Int
+
+    public init(
+        path: String = canonicalPath,
+        sha256: String,
+        encodedByteCount: Int
+    ) throws {
+        guard path == Self.canonicalPath else {
+            throw BrushFormatError.invalidManifest("conversion report path")
+        }
+        guard sha256.utf8.count == 64,
+              sha256.utf8.allSatisfy({
+                  (48...57).contains($0) || (97...102).contains($0)
+              })
+        else {
+            throw BrushFormatError.invalidManifest("conversion report hash")
+        }
+        guard encodedByteCount > 0,
+              encodedByteCount <= BrushFormatLimits.maximumConversionReportBytes
+        else {
+            throw BrushFormatError.invalidManifest(
+                "conversion report byte count"
+            )
+        }
+        self.path = path
+        self.sha256 = sha256
+        self.encodedByteCount = encodedByteCount
+    }
+
+    public init(report: BrushConversionReport) throws {
+        let data = try BrushConversionReportCodec.encode(report)
+        try self.init(
+            sha256: BrushContentHash.sha256Hex(of: data),
+            encodedByteCount: data.count
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case path, sha256, encodedByteCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            path: container.decode(String.self, forKey: .path),
+            sha256: container.decode(String.self, forKey: .sha256),
+            encodedByteCount: container.decode(
+                Int.self,
+                forKey: .encodedByteCount
+            )
+        )
     }
 }
 
@@ -171,21 +247,33 @@ public struct BrushPackageResource: Codable, Equatable, Sendable {
 }
 
 public struct BrushPackageManifest: Codable, Equatable, Sendable {
-    public static let currentVersion: UInt16 = 1
+    public static let minimumSupportedVersion: UInt16 = 1
+    public static let currentVersion: UInt16 = 2
 
     public let schemaVersion: UInt16
     public let definitionPath: String
     public let resources: [BrushPackageResource]
     public let provenance: BrushPackageProvenance?
+    public let conversionReport: BrushPackageConversionReportDescriptor?
 
     public init(
-        schemaVersion: UInt16 = currentVersion,
+        schemaVersion: UInt16? = nil,
         definitionPath: String = "definition.json",
         resources: [BrushPackageResource],
-        provenance: BrushPackageProvenance? = nil
+        provenance: BrushPackageProvenance? = nil,
+        conversionReport: BrushPackageConversionReportDescriptor? = nil
     ) throws {
-        guard schemaVersion == Self.currentVersion else {
+        let schemaVersion = schemaVersion
+            ?? (conversionReport == nil ? Self.minimumSupportedVersion : 2)
+        guard (Self.minimumSupportedVersion...Self.currentVersion)
+            .contains(schemaVersion)
+        else {
             throw BrushFormatError.unsupportedManifestSchema(schemaVersion)
+        }
+        guard schemaVersion >= 2 || conversionReport == nil else {
+            throw BrushFormatError.invalidManifest(
+                "schema v1 conversion report"
+            )
         }
         guard definitionPath == "definition.json" else {
             throw BrushFormatError.invalidManifest("definitionPath")
@@ -207,10 +295,15 @@ public struct BrushPackageManifest: Codable, Equatable, Sendable {
         self.definitionPath = definitionPath
         self.resources = sorted
         self.provenance = provenance
+        self.conversionReport = conversionReport
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, definitionPath, resources, provenance
+        case schemaVersion
+        case definitionPath
+        case resources
+        case provenance
+        case conversionReport
     }
 
     public init(from decoder: Decoder) throws {
@@ -219,7 +312,14 @@ public struct BrushPackageManifest: Codable, Equatable, Sendable {
             schemaVersion: container.decode(UInt16.self, forKey: .schemaVersion),
             definitionPath: container.decode(String.self, forKey: .definitionPath),
             resources: container.decode([BrushPackageResource].self, forKey: .resources),
-            provenance: container.decodeIfPresent(BrushPackageProvenance.self, forKey: .provenance)
+            provenance: container.decodeIfPresent(
+                BrushPackageProvenance.self,
+                forKey: .provenance
+            ),
+            conversionReport: container.decodeIfPresent(
+                BrushPackageConversionReportDescriptor.self,
+                forKey: .conversionReport
+            )
         )
     }
 }

@@ -593,10 +593,10 @@ import Testing
     entries = try BrushFormatTestSupport.archiveEntries(package)
     entries["manifest.json"] = Data(
         String(decoding: entries["manifest.json"]!, as: UTF8.self)
-            .replacingOccurrences(of: "\"schemaVersion\":1", with: "\"schemaVersion\":2")
+            .replacingOccurrences(of: "\"schemaVersion\":1", with: "\"schemaVersion\":3")
             .utf8
     )
-    #expect(throws: BrushPackageError.unsupportedManifestSchema(2)) {
+    #expect(throws: BrushPackageError.unsupportedManifestSchema(3)) {
         try BrushPackageCodec.decode(BrushFormatTestSupport.encodeArchive(entries))
     }
 

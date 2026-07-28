@@ -19,7 +19,12 @@ struct SafeArchiveCodecTests {
         #expect(first == second)
         let archive = try SafeArchiveCodec.open(first, limits: limits)
         #expect(archive.paths == ["a.bin", "b.bin"])
+        #expect(try archive.byteCount(for: "a.bin") == 1)
+        #expect(try archive.byteCount(for: "b.bin") == 1)
         #expect(try archive.data(for: "a.bin") == Data([1]))
+        #expect(throws: SafeArchiveError.missingEntry("missing")) {
+            try archive.byteCount(for: "missing")
+        }
     }
 
     @Test

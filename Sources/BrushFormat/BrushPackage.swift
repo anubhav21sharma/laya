@@ -5,15 +5,75 @@ public struct BrushPackage: Equatable, Sendable {
     public let manifest: BrushPackageManifest
     public let definition: BrushDefinition
     public let resourceData: [String: Data]
+    public let conversionReport: BrushConversionReport?
+    package let conversionReportData: Data?
 
     public init(
         manifest: BrushPackageManifest,
         definition: BrushDefinition,
-        resourceData: [String: Data]
+        resourceData: [String: Data],
+        conversionReport: BrushConversionReport? = nil
     ) throws {
+        try self.init(
+            manifest: manifest,
+            definition: definition,
+            resourceData: resourceData,
+            conversionReport: conversionReport,
+            preservedConversionReportData: nil
+        )
+    }
+
+    package init(
+        manifest: BrushPackageManifest,
+        definition: BrushDefinition,
+        resourceData: [String: Data],
+        conversionReport: BrushConversionReport?,
+        preservedConversionReportData: Data?
+    ) throws {
+        let conversionReportData: Data?
+        if let conversionReport {
+            if let preservedConversionReportData {
+                let decodedReport: BrushConversionReport
+                do {
+                    decodedReport = try BrushConversionReportCodec.decode(
+                        preservedConversionReportData
+                    )
+                } catch let error as BrushConversionReportValidationError {
+                    throw BrushFormatError.invalidConversionReport(
+                        .validation(error)
+                    )
+                } catch {
+                    throw BrushFormatError.malformedJSON("conversion report")
+                }
+                guard decodedReport == conversionReport else {
+                    throw BrushFormatError.invalidConversionReport(
+                        .decodedReportMismatch
+                    )
+                }
+                conversionReportData = preservedConversionReportData
+            } else {
+                do {
+                    conversionReportData = try BrushConversionReportCodec
+                        .encode(conversionReport)
+                } catch {
+                    throw BrushFormatError.invalidConversionReport(
+                        .encodingFailure
+                    )
+                }
+            }
+        } else {
+            guard preservedConversionReportData == nil else {
+                throw BrushFormatError.invalidConversionReport(
+                    .missingDecodedReport
+                )
+            }
+            conversionReportData = nil
+        }
         self.manifest = manifest
         self.definition = definition
         self.resourceData = resourceData
+        self.conversionReport = conversionReport
+        self.conversionReportData = conversionReportData
         try BrushPackageValidator.validate(self)
     }
 
@@ -50,7 +110,6 @@ enum BrushPackageValidator {
             }
             expandedBytes = next
         }
-
         let references = Dictionary(
             uniqueKeysWithValues: package.definition.resources.map { ($0.identifier, $0) }
         )
@@ -85,6 +144,63 @@ enum BrushPackageValidator {
                 throw BrushFormatError.invalidResource(
                     id: resource.id,
                     reason: "unreferenced manifest resource"
+                )
+            }
+        }
+
+        let reportBytes: Data?
+        switch (
+            package.manifest.conversionReport,
+            package.conversionReport,
+            package.conversionReportData
+        ) {
+        case (nil, nil, nil):
+            reportBytes = nil
+        case let (descriptor?, report?, data?):
+            let targetContentHash = BrushContentHash
+                .digestOfValidatedPackage(package)
+            do {
+                try report.validate(
+                    against: package.definition,
+                    resources: package.manifest.resources,
+                    targetPackageContentHash: targetContentHash
+                )
+            } catch let error as BrushConversionReportValidationError {
+                throw BrushFormatError.invalidConversionReport(
+                    .validation(error)
+                )
+            }
+            guard data.count == descriptor.encodedByteCount else {
+                throw BrushFormatError.invalidConversionReport(
+                    .byteCountMismatch
+                )
+            }
+            guard BrushContentHash.sha256Hex(of: data) == descriptor.sha256
+            else {
+                throw BrushFormatError.invalidConversionReport(.hashMismatch)
+            }
+            reportBytes = data
+        case (nil, _, _):
+            throw BrushFormatError.invalidConversionReport(
+                .missingManifestDescriptor
+            )
+        case (_, nil, _):
+            throw BrushFormatError.invalidConversionReport(
+                .missingDecodedReport
+            )
+        case (_, _, nil):
+            throw BrushFormatError.invalidConversionReport(.encodingFailure)
+        }
+
+        if let reportBytes {
+            let (next, overflow) = expandedBytes.addingReportingOverflow(
+                reportBytes.count
+            )
+            guard !overflow,
+                  next <= BrushFormatLimits.maximumExpandedPackageBytes
+            else {
+                throw BrushFormatError.invalidManifest(
+                    "expanded package size"
                 )
             }
         }

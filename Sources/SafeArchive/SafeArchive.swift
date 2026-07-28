@@ -78,6 +78,13 @@ public struct SafeArchive: Sendable {
         }
         return storage.subdata(in: record.dataRange)
     }
+
+    public func byteCount(for path: String) throws -> Int {
+        guard let record = records[path] else {
+            throw SafeArchiveError.missingEntry(path)
+        }
+        return record.dataRange.count
+    }
 }
 
 struct SafeArchiveEntryRecord: Sendable {

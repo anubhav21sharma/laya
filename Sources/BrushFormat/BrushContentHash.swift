@@ -16,6 +16,12 @@ public enum BrushContentHash {
 
     public static func digest(of package: BrushPackage) throws -> String {
         try BrushPackageValidator.validate(package)
+        return digestOfValidatedPackage(package)
+    }
+
+    package static func digestOfValidatedPackage(
+        _ package: BrushPackage
+    ) -> String {
         var writer = CanonicalBrushWriter()
         writer.string("laya.brush.semantic")
         writer.u16(schemaVersion)
