@@ -15,6 +15,11 @@ let package = Package(
         .library(name: "MetalRenderer", targets: ["MetalRenderer"]),
         .library(name: "SafeArchive", targets: ["SafeArchive"]),
         .library(name: "BrushFormat", targets: ["BrushFormat"]),
+        .library(name: "BrushConverter", targets: ["BrushConverter"]),
+        .executable(
+            name: "layabrush-convert",
+            targets: ["LayabrushConvert"]
+        ),
         .executable(
             name: "SliceThreeEvidenceGate",
             targets: ["SliceThreeEvidenceGate"]
@@ -56,6 +61,14 @@ let package = Package(
         .target(
             name: "BrushFormat",
             dependencies: ["PatternEngine", "SafeArchive"]
+        ),
+        .target(
+            name: "BrushConverter",
+            dependencies: ["PatternEngine", "BrushFormat", "SafeArchive"]
+        ),
+        .executableTarget(
+            name: "LayabrushConvert",
+            dependencies: ["BrushConverter"]
         ),
         .executableTarget(
             name: "SliceThreeEvidenceGate",
@@ -103,6 +116,10 @@ let package = Package(
             name: "BrushFormatTests",
             dependencies: ["BrushFormat", "PatternEngine", "SafeArchive"],
             resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "BrushConverterTests",
+            dependencies: ["BrushConverter"]
         ),
         .testTarget(
             name: "EditorSessionControllerTests",
