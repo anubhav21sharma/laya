@@ -1,6 +1,8 @@
 #if os(macOS)
 import AppKit
 import EditorCore
+import Metal
+@testable import MetalRenderer
 import PatternEngine
 import SwiftUI
 import Testing
@@ -217,6 +219,28 @@ func defaultContentViewInitializerDoesNotAllocateRenderer() throws {
 
     #expect(!source.contains("MTLCreateSystemDefaultDevice"))
     #expect(!source.contains("GridRenderer("))
+}
+
+@Test
+@MainActor
+func contentViewBootstrapReturnsOnlyAfterNativeBrushesAreInstalled()
+    async throws
+{
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let controller = try await makeBootstrapEditorSession(
+        device: device,
+        library: makeNativeTestLibrary(device: device)
+    )
+
+    #expect(
+        controller.renderer.harnessPreparedDrawBrushIdentity?.definitionID
+            == AnchorBrushCatalog.ink.id
+    )
+    #expect(
+        controller.renderer.harnessPreparedEraserBrushIdentity?.definitionID
+            == AnchorBrushCatalog.eraser.id
+    )
+    #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.ink.id)
 }
 
 @Test

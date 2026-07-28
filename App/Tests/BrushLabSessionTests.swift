@@ -94,6 +94,34 @@ struct BrushLabSessionTests {
         #expect(runtime.session.sourceName == "converted.layabrush")
         #expect(runtime.session.package?.manifest.schemaVersion == 2)
         #expect(runtime.session.package?.conversionReport == mapped.report)
+        #expect(runtime.session.drawingAvailability == .available)
+        let compiled = try #require(runtime.session.compiledBrush)
+        #expect(Set(compiled.textures.keys) == [
+            "grain.synthetic",
+            "shape.synthetic",
+        ])
+        runtime.controller.handleStrokeSample(
+            .mouse(
+                position: ScreenPoint(x: 24, y: 24),
+                timestamp: 1,
+                phase: .began
+            )
+        )
+        let activeStyle = try #require(
+            runtime.controller.renderer.harnessActiveStrokeStyle
+        )
+        #expect(activeStyle.renderIdentity == compiled.renderIdentity)
+        #expect(
+            activeStyle.renderIdentity.semanticHash
+                == runtime.session.packageContentHash
+        )
+        runtime.controller.handleStrokeSample(
+            .mouse(
+                position: ScreenPoint(x: 24, y: 24),
+                timestamp: 2,
+                phase: .cancelled
+            )
+        )
         let evidence = try runtime.session.makeEvidenceData()
         let object = try #require(
             JSONSerialization.jsonObject(with: evidence)
@@ -133,12 +161,24 @@ struct BrushLabSessionTests {
             runtime.session.compiledBrush?.renderIdentity.semanticHash
                 == runtime.session.packageContentHash
         )
+        let compiled = try #require(runtime.session.compiledBrush)
         runtime.controller.handleStrokeSample(
             .mouse(
                 position: ScreenPoint(x: 24, y: 24),
                 timestamp: 1,
                 phase: .began
             )
+        )
+        let activeStyle = try #require(
+            runtime.controller.renderer.harnessActiveStrokeStyle
+        )
+        #expect(
+            activeStyle.renderIdentity
+                == compiled.renderIdentity
+        )
+        #expect(
+            activeStyle.renderIdentity.semanticHash
+                == runtime.session.packageContentHash
         )
         runtime.controller.handleStrokeSample(
             .mouse(
@@ -188,10 +228,9 @@ struct BrushLabSessionTests {
                 brushCacheBudgetBytes: 128 * 1_024 * 1_024,
                 targetFramesPerSecond: 120
             ),
-            pipelinePreparing: try BrushLabTestPipelinePreparer(
+            pipelineLibrary: try makeNativeDepositionPipelineLibrary(
                 device: renderer.device
-            ),
-            testHooks: .none
+            )
         )
         return (
             controller,

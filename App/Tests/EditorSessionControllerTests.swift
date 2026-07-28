@@ -108,6 +108,46 @@ private func controllerMovedSample(
 }
 
 @MainActor
+func makeNativeTestLibrary(
+    device: any MTLDevice
+) throws -> any MTLLibrary {
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let shader = try String(
+        contentsOf: root.appendingPathComponent(
+            "Sources/MetalRenderer/Shaders.metal"
+        ),
+        encoding: .utf8
+    )
+    let header = try String(
+        contentsOf: root.appendingPathComponent(
+            "Sources/CShaderTypes/include/ShaderTypes.h"
+        ),
+        encoding: .utf8
+    )
+    let library = try device.makeLibrary(
+        source: shader.replacingOccurrences(
+            of: "#include \"ShaderTypes.h\"",
+            with: header
+        ),
+        options: nil
+    )
+    return library
+}
+
+@MainActor
+func makeNativeDepositionPipelineLibrary(
+    device: any MTLDevice
+) throws -> DepositionPipelineLibrary {
+    DepositionPipelineLibrary(
+        device: device,
+        library: try makeNativeTestLibrary(device: device)
+    )
+}
+
+@MainActor
 private func makeNativeCompiler(
     renderer: GridRenderer
 ) throws -> BrushCompiler {
@@ -124,11 +164,41 @@ private func makeNativeCompiler(
             brushCacheBudgetBytes: 128 * 1_024 * 1_024,
             targetFramesPerSecond: 120
         ),
-        pipelinePreparing: try BrushLabTestPipelinePreparer(
+        pipelineLibrary: try makeNativeDepositionPipelineLibrary(
             device: renderer.device
-        ),
-        testHooks: .none
+        )
     )
+}
+
+@MainActor
+private final class GatedSelectionCompiler {
+    private var pending:
+        [(BrushRecipeID, CheckedContinuation<CompiledBrush, Error>)] = []
+
+    var pendingIDs: [BrushRecipeID] {
+        pending.map(\.0)
+    }
+
+    func compile(_ definition: BrushDefinition) async throws -> CompiledBrush {
+        try await withCheckedThrowingContinuation { continuation in
+            pending.append((definition.id, continuation))
+        }
+    }
+
+    func complete(
+        _ id: BrushRecipeID,
+        with brush: CompiledBrush
+    ) throws {
+        guard let index = pending.firstIndex(where: { $0.0 == id }) else {
+            throw GatedSelectionCompilerError.missingPendingSelection(id)
+        }
+        let continuation = pending.remove(at: index).1
+        continuation.resume(returning: brush)
+    }
+}
+
+private enum GatedSelectionCompilerError: Error {
+    case missingPendingSelection(BrushRecipeID)
 }
 
 private let controllerRadialConfiguration = RadialSymmetryConfiguration(
@@ -426,7 +496,6 @@ func rasterSuccessRecordsTheCapturedEraseTool() throws {
             renderer.releaseRasterRevisions($0)
         }
     )
-
     controller.handleTool(.erase)
     try commitControllerStroke(controller, renderer: renderer)
 
@@ -1029,16 +1098,138 @@ func selectionConfirmsOnlyAfterCompiledRendererActivation() async throws {
 @MainActor
 func failedSelectionPreservesInstalledBrushAndModelSelection() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
     let controller = EditorSessionController(
         renderer: renderer,
         compileDefinition: { _ in throw MetalRendererError.unsupportedBrushProgram }
     )
-    let before = controller.model.selectedRecipeID
+    let ink = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.ink.definition
+    )
+    let eraser = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.eraser.definition
+    )
+    try controller.installBootstrapBrushes(draw: ink, eraser: eraser)
+    let beforeModel = controller.model.selectedRecipeID
+    let beforeDraw = renderer.harnessPreparedDrawBrushIdentity
 
     await controller.selectBrush(AnchorBrushCatalog.marker.id)
 
-    #expect(controller.model.selectedRecipeID == before)
-    #expect(renderer.harnessPreparedDrawBrushIdentity == nil)
+    #expect(controller.model.selectedRecipeID == beforeModel)
+    #expect(renderer.harnessPreparedDrawBrushIdentity == beforeDraw)
+    #expect(renderer.harnessPreparedDrawBrushIdentity == ink.renderIdentity)
+}
+
+@Test
+@MainActor
+func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let gate = GatedSelectionCompiler()
+    let controller = EditorSessionController(
+        renderer: renderer,
+        compileDefinition: { definition in
+            try await gate.compile(definition)
+        }
+    )
+    let ink = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.ink.definition
+    )
+    let eraser = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.eraser.definition
+    )
+    let marker = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.marker.definition
+    )
+    let airbrush = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.airbrush.definition
+    )
+    try controller.installBootstrapBrushes(draw: ink, eraser: eraser)
+
+    let staleSelection = Task { @MainActor in
+        await controller.selectBrush(AnchorBrushCatalog.marker.id)
+    }
+    for _ in 0..<32 where !gate.pendingIDs.contains(AnchorBrushCatalog.marker.id) {
+        await Task.yield()
+    }
+    #expect(gate.pendingIDs == [AnchorBrushCatalog.marker.id])
+
+    let currentSelection = Task { @MainActor in
+        await controller.selectBrush(AnchorBrushCatalog.airbrush.id)
+    }
+    for _ in 0..<32 where gate.pendingIDs.count < 2 {
+        await Task.yield()
+    }
+    #expect(Set(gate.pendingIDs) == [
+        AnchorBrushCatalog.marker.id,
+        AnchorBrushCatalog.airbrush.id,
+    ])
+
+    try gate.complete(AnchorBrushCatalog.airbrush.id, with: airbrush)
+    await currentSelection.value
+    #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.airbrush.id)
+    #expect(
+        renderer.harnessPreparedDrawBrushIdentity
+            == airbrush.renderIdentity
+    )
+
+    try gate.complete(AnchorBrushCatalog.marker.id, with: marker)
+    await staleSelection.value
+    #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.airbrush.id)
+    #expect(
+        renderer.harnessPreparedDrawBrushIdentity
+            == airbrush.renderIdentity
+    )
+}
+
+@Test
+@MainActor
+func selectionDuringStrokeLeavesCurrentIdentityUntilNextStroke()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let controller = EditorSessionController(
+        renderer: renderer,
+        compileDefinition: { definition in
+            try await compiler.compileAndActivate(definition: definition)
+        }
+    )
+    let ink = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.ink.definition
+    )
+    let eraser = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.eraser.definition
+    )
+    try controller.installBootstrapBrushes(draw: ink, eraser: eraser)
+
+    var reportedErrors: [MetalRendererError] = []
+    controller.onError = { reportedErrors.append($0) }
+    controller.handleStrokeSample(controllerSample(.began))
+    #expect(reportedErrors.isEmpty, "reported errors: \(reportedErrors)")
+    let activeIdentity = try #require(
+        renderer.harnessActiveStrokeStyle?.renderIdentity
+    )
+    #expect(activeIdentity == ink.renderIdentity)
+    await controller.selectBrush(AnchorBrushCatalog.marker.id)
+    #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.ink.id)
+    #expect(renderer.harnessActiveStrokeStyle?.renderIdentity == activeIdentity)
+    #expect(renderer.harnessPreparedDrawBrushIdentity == activeIdentity)
+
+    controller.handleStrokeSample(controllerSample(.cancelled))
+    await controller.selectBrush(AnchorBrushCatalog.marker.id)
+    #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.marker.id)
+
+    controller.handleStrokeSample(
+        controllerSample(.began, timestamp: 3)
+    )
+    #expect(
+        renderer.harnessActiveStrokeStyle?.renderIdentity
+            == renderer.harnessPreparedDrawBrushIdentity
+    )
+    controller.handleStrokeSample(controllerSample(.cancelled, timestamp: 4))
 }
 
 @Test

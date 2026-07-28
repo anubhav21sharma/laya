@@ -760,29 +760,28 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func compiledBrush(
         for style: StrokeRenderStyle
     ) throws -> CompiledBrush? {
-        if style.program.compatibilityRecipe != nil,
-           style.renderIdentity.semanticHash
-            == Self.uncompiledCompatibilitySemanticHash
-        {
-            return nil
-        }
         let brush: CompiledBrush? = switch style.compositeMode {
         case .draw:
             activeDrawBrush
         case .erase:
             activeEraserBrush
         }
-        guard let brush else {
-            throw MetalRendererError.compiledBrushUnavailable(
-                style.compositeMode
-            )
+        if let brush {
+            guard brush.renderIdentity == style.renderIdentity,
+                  brush.program == style.program
+            else {
+                throw MetalRendererError.compiledBrushIdentityMismatch
+            }
+            return brush
         }
-        guard brush.renderIdentity == style.renderIdentity,
-              brush.program == style.program
-        else {
-            throw MetalRendererError.compiledBrushIdentityMismatch
+
+        if style.program.compatibilityRecipe != nil,
+           style.renderIdentity.semanticHash
+            == Self.uncompiledCompatibilitySemanticHash
+        {
+            return nil
         }
-        return brush
+        throw MetalRendererError.compiledBrushUnavailable(style.compositeMode)
     }
 
     public func setPeriodicConfiguration(
@@ -2635,18 +2634,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard minimumAffineScale.isFinite, minimumAffineScale > 0 else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        guard let compatibilityRecipe =
-            activeStroke.style.program.compatibilityRecipe
-        else {
-            throw MetalRendererError.unsupportedBrushProgram
-        }
+        // Native definitions do not need a legacy recipe. Their coverage can
+        // be asymmetric, so use the conservative projection symmetry.
+        let coverageSymmetry = activeStroke.style.program.compatibilityRecipe?
+            .footprintCoverageSymmetry ?? .oriented
         let footprint = StampFootprint(
             brushToWorld: dab.brushToWorld,
             localBounds: AxisAlignedRect(
                 minimum: SIMD2(-1, -1),
                 maximum: SIMD2(1, 1)
             ),
-            coverageSymmetry: compatibilityRecipe.footprintCoverageSymmetry
+            coverageSymmetry: coverageSymmetry
         )
         let fragments = TilingProjection.fragments(
             for: footprint,

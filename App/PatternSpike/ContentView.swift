@@ -26,6 +26,59 @@ enum EditorFocusTarget: Hashable {
     case radialReferenceAngle
 }
 
+@MainActor
+func makeBootstrapEditorSession(
+    device: any MTLDevice,
+    library: any MTLLibrary
+) async throws -> EditorSessionController {
+    let configuration = try TilingCanvasConfiguration(
+        pixelSize: GridCanvasContract.defaultPixelSize,
+        tiling: .grid
+    )
+    guard let queue = device.makeCommandQueue() else {
+        throw MetalRendererError.commandQueueUnavailable
+    }
+    let renderer = try GridRenderer(
+        device: device,
+        library: library,
+        drawableSize: PatternSize(width: 1, height: 1),
+        configuration: configuration
+    )
+    let pipelineLibrary = DepositionPipelineLibrary(
+        device: device,
+        library: library
+    )
+    let compiler = BrushCompiler(
+        device: device,
+        commandQueue: queue,
+        profile: try BrushDeviceProfile(
+            registryID: device.registryID,
+            recommendedWorkingSetBytes: max(
+                device.recommendedMaxWorkingSetSize,
+                64 * 1_024 * 1_024
+            ),
+            maximumWorkingTextureDimension:
+                BrushDeviceProfile.maximumPortableTextureDimension,
+            targetFramesPerSecond: 120
+        ),
+        pipelineLibrary: pipelineLibrary
+    )
+    let controller = EditorSessionController(
+        renderer: renderer,
+        compileDefinition: { definition in
+            try await compiler.compileAndActivate(definition: definition)
+        }
+    )
+    let draw = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.defaultDraw.definition
+    )
+    let eraser = try await compiler.compileAndActivate(
+        definition: AnchorBrushCatalog.eraser.definition
+    )
+    try controller.installBootstrapBrushes(draw: draw, eraser: eraser)
+    return controller
+}
+
 struct EditorCanvasHost: View {
     let controller: EditorSessionController
     let brushDiameter: Float
@@ -121,56 +174,13 @@ struct ContentView: View {
         }
 
         do {
-            let configuration = try TilingCanvasConfiguration(
-                pixelSize: GridCanvasContract.defaultPixelSize,
-                tiling: .grid
-            )
-            guard let library = device.makeDefaultLibrary(),
-                  let queue = device.makeCommandQueue()
-            else {
+            guard let library = device.makeDefaultLibrary() else {
                 throw MetalRendererError.defaultLibraryUnavailable
             }
-            let renderer = try GridRenderer(
-                device: device,
-                library: library,
-                drawableSize: PatternSize(width: 1, height: 1),
-                configuration: configuration
-            )
-            let pipelineLibrary = DepositionPipelineLibrary(
+            state = .ready(try await makeBootstrapEditorSession(
                 device: device,
                 library: library
-            )
-            let compiler = BrushCompiler(
-                device: device,
-                commandQueue: queue,
-                profile: try BrushDeviceProfile(
-                    registryID: device.registryID,
-                    recommendedWorkingSetBytes: max(
-                        device.recommendedMaxWorkingSetSize,
-                        64 * 1_024 * 1_024
-                    ),
-                    maximumWorkingTextureDimension:
-                        BrushDeviceProfile.maximumPortableTextureDimension,
-                    targetFramesPerSecond: 120
-                ),
-                pipelineLibrary: pipelineLibrary
-            )
-            let controller = EditorSessionController(
-                renderer: renderer,
-                compileDefinition: { definition in
-                    try await compiler.compileAndActivate(definition: definition)
-                }
-            )
-            let draw = try await compiler.compileAndActivate(
-                definition: AnchorBrushCatalog.defaultDraw.definition
-            )
-            let eraser = try await compiler.compileAndActivate(
-                definition: AnchorBrushCatalog.eraser.definition
-            )
-            try controller.installBootstrapBrushes(draw: draw, eraser: eraser)
-            state = .ready(
-                controller
-            )
+            ))
         } catch {
             state = .unavailable(error.localizedDescription)
         }
