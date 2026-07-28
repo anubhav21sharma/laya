@@ -215,25 +215,34 @@ and inspected, but compilation cannot activate it until Stage 6.
 
 ### Foreign-input limits
 
-Foreign limits are separate from the smaller native-package limits:
+Foreign structural limits remain separate from native-package limits. The
+portable default byte ceilings intentionally reuse the native package's
+64 MiB per-entry and 192 MiB aggregate budgets so an untrusted import cannot
+materialize the former 256 MiB entry or 1 GiB aggregate on any supported
+platform. These are conservative safety ceilings, not an iPad memory
+acceptance result. Physical-device high-water measurements and an owned brush
+corpus may justify lowering them; raising them requires both fixture evidence
+and a measured device budget.
 
 | Limit | Value |
 |---|---:|
-| source file bytes | 512 MiB |
+| source file bytes | 192 MiB |
 | entries per container | 4,096 |
 | aggregate entries across nested containers | 4,096 |
 | nested container depth | 2 |
-| cumulative expanded bytes | 1 GiB |
-| expanded bytes per entry | 256 MiB |
+| cumulative expanded bytes | 192 MiB |
+| expanded bytes per entry | 64 MiB |
 | maximum compression ratio | 200:1 |
 | path bytes | 1,024 |
+| property-list input bytes | 64 MiB |
 | plist/object graph depth | 64 |
 | dictionary or array elements | 16,384 |
 | total graph nodes per brush | 100,000 |
 | total collection references per brush | 100,000 |
 | total resolved keyed-archive UID references per brush | 100,000 |
 | string bytes | 64 KiB |
-| opaque data value bytes | 256 MiB |
+| opaque data value bytes | 64 MiB |
+| cumulative XML text bytes | 64 MiB |
 | settings per brush | 4,096 |
 | curve points per setting | 1,024 |
 | brushes per set | 512 |

@@ -420,6 +420,8 @@ public enum LayabrushConvertCommandRunner {
 
     private static func readSource(_ path: String) throws -> Data {
         let url = URL(fileURLWithPath: path)
+        let maximumSourceBytes =
+            ForeignContainerLimits.standard.maximumSourceBytes
         let values: URLResourceValues
         do {
             values = try url.resourceValues(forKeys: [
@@ -433,13 +435,13 @@ public enum LayabrushConvertCommandRunner {
             throw InputReadError.missing
         }
         guard let fileSize = values.fileSize,
-              fileSize <= 512 * 1024 * 1024
+              fileSize <= maximumSourceBytes
         else {
             throw InputReadError.tooLarge
         }
         do {
             let data = try Data(contentsOf: url, options: [.mappedIfSafe])
-            guard data.count <= 512 * 1024 * 1024 else {
+            guard data.count <= maximumSourceBytes else {
                 throw InputReadError.tooLarge
             }
             return data

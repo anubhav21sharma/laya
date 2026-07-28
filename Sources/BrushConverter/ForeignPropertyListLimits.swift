@@ -1,3 +1,4 @@
+import BrushFormat
 import Foundation
 
 struct ForeignPropertyListLimits: Equatable, Sendable {
@@ -14,13 +15,16 @@ struct ForeignPropertyListLimits: Equatable, Sendable {
     let maximumTotalResolvedUIDReferences: Int
 
     init(
-        maximumInputBytes: Int = 512 * 1_024 * 1_024,
+        maximumInputBytes: Int =
+            BrushFormatLimits.maximumEncodedResourceBytes,
         maximumGraphDepth: Int = 64,
         maximumCollectionElements: Int = 16_384,
         maximumTotalNodes: Int = 100_000,
         maximumStringUTF8Bytes: Int = 64 * 1_024,
-        maximumOpaqueDataBytes: Int = 256 * 1_024 * 1_024,
-        maximumXMLTextUTF8Bytes: Int = 512 * 1_024 * 1_024,
+        maximumOpaqueDataBytes: Int =
+            BrushFormatLimits.maximumEncodedResourceBytes,
+        maximumXMLTextUTF8Bytes: Int =
+            BrushFormatLimits.maximumEncodedResourceBytes,
         maximumTotalCollectionReferences: Int = 100_000,
         maximumTotalResolvedUIDReferences: Int = 100_000
     ) {

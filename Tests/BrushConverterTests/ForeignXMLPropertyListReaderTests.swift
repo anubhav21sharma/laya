@@ -1,4 +1,5 @@
 @testable import BrushConverter
+import BrushFormat
 import Foundation
 import Testing
 
@@ -7,26 +8,40 @@ struct ForeignXMLPropertyListReaderTests {
     @Test
     func productionLimitsMatchTheApprovedPlan() {
         let container = ForeignContainerLimits.standard
-        #expect(container.maximumSourceBytes == 512 * 1_024 * 1_024)
+        #expect(
+            container.maximumSourceBytes
+                == BrushFormatLimits.maximumExpandedPackageBytes
+        )
         #expect(container.maximumEntriesPerContainer == 4_096)
         #expect(container.maximumNestedEntries == 4_096)
         #expect(container.maximumNestingDepth == 2)
-        #expect(container.maximumExpandedBytes == 1_024 * 1_024 * 1_024)
+        #expect(
+            container.maximumExpandedBytes
+                == BrushFormatLimits.maximumExpandedPackageBytes
+        )
         #expect(
             container.maximumExpandedBytesPerEntry
-                == 256 * 1_024 * 1_024
+                == BrushFormatLimits.maximumEncodedResourceBytes
         )
         #expect(container.maximumCompressionRatio == 200)
         #expect(container.maximumPathUTF8Bytes == 1_024)
 
         let propertyList = ForeignPropertyListLimits.standard
-        #expect(propertyList.maximumInputBytes == 512 * 1_024 * 1_024)
+        #expect(
+            propertyList.maximumInputBytes
+                == BrushFormatLimits.maximumEncodedResourceBytes
+        )
         #expect(propertyList.maximumGraphDepth == 64)
         #expect(propertyList.maximumCollectionElements == 16_384)
         #expect(propertyList.maximumTotalNodes == 100_000)
         #expect(propertyList.maximumStringUTF8Bytes == 64 * 1_024)
         #expect(
-            propertyList.maximumOpaqueDataBytes == 256 * 1_024 * 1_024
+            propertyList.maximumOpaqueDataBytes
+                == BrushFormatLimits.maximumEncodedResourceBytes
+        )
+        #expect(
+            propertyList.maximumXMLTextUTF8Bytes
+                == BrushFormatLimits.maximumEncodedResourceBytes
         )
         #expect(
             propertyList.maximumTotalCollectionReferences == 100_000

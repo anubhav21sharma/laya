@@ -100,6 +100,31 @@ struct LayabrushConvertSubprocessTests {
     }
 
     @Test
+    func sourceBeyondPortableBudgetIsRejectedBeforeReading() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let input = root.appendingPathComponent("oversized-source")
+        #expect(FileManager.default.createFile(
+            atPath: input.path,
+            contents: nil
+        ))
+        let handle = try FileHandle(forWritingTo: input)
+        try handle.truncate(
+            atOffset: UInt64(
+                BrushFormatLimits.maximumExpandedPackageBytes + 1
+            )
+        )
+        try handle.close()
+
+        let result = try runCLI(["inspect", "--json", input.path])
+
+        #expect(result.status == LayabrushConvertExitStatus.invalidInput)
+        #expect(result.standardError.contains("input-too-large"))
+        let report = try decodeReport(result.standardOutput)
+        #expect(report.results.first?.reasonCode == "input-too-large")
+    }
+
+    @Test
     func collisionPreservesExistingBytesUntilReplaceIsExplicit() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

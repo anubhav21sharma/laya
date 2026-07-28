@@ -1,4 +1,5 @@
 @testable import BrushConverter
+import BrushFormat
 import Foundation
 import Testing
 import zlib
@@ -55,6 +56,27 @@ struct ForeignZIPReaderTests {
                     maximumSourceBytes: archive.count - 1
                 )
             )
+        }
+    }
+
+    @Test
+    func defaultLimitsRejectEntriesBeyondPortableResourceBudget() throws {
+        let maximum = BrushFormatLimits.maximumEncodedResourceBytes
+        let archive = try zip([
+            ZIPTestEntry(
+                name: "oversized.bin",
+                bytes: Data([0]),
+                method: 8,
+                declaredExpandedSize: maximum + 1
+            ),
+        ])
+
+        #expect(throws: ForeignContainerError.entryTooLarge(
+            path: "oversized.bin",
+            actual: maximum + 1,
+            maximum: maximum
+        )) {
+            _ = try ForeignZIPReader(archive)
         }
     }
 

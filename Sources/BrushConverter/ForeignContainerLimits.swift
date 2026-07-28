@@ -1,3 +1,4 @@
+import BrushFormat
 import Foundation
 
 struct ForeignContainerLimits: Equatable, Sendable {
@@ -14,12 +15,15 @@ struct ForeignContainerLimits: Equatable, Sendable {
     let streamingChunkBytes: Int
 
     init(
-        maximumSourceBytes: Int = 512 * 1_024 * 1_024,
+        maximumSourceBytes: Int =
+            BrushFormatLimits.maximumExpandedPackageBytes,
         maximumEntriesPerContainer: Int = 4_096,
         maximumNestedEntries: Int = 4_096,
         maximumNestingDepth: Int = 2,
-        maximumExpandedBytes: Int = 1_024 * 1_024 * 1_024,
-        maximumExpandedBytesPerEntry: Int = 256 * 1_024 * 1_024,
+        maximumExpandedBytes: Int =
+            BrushFormatLimits.maximumExpandedPackageBytes,
+        maximumExpandedBytesPerEntry: Int =
+            BrushFormatLimits.maximumEncodedResourceBytes,
         maximumCompressionRatio: Int = 200,
         maximumPathUTF8Bytes: Int = 1_024,
         streamingChunkBytes: Int = 32 * 1_024
