@@ -114,6 +114,7 @@ public final class BrushCompiler {
     private let device: any MTLDevice
     private let commandQueue: any MTLCommandQueue
     private let profile: BrushDeviceProfile
+    private let pipelinePreparing: any DepositionPipelinePreparing
     private let testHooks: BrushCompilerTestHooks
     private var cache: BrushResourceCache
     private var counters: BrushCompilerCounters
@@ -129,6 +130,7 @@ public final class BrushCompiler {
             device: device,
             commandQueue: commandQueue,
             profile: profile,
+            pipelinePreparing: DepositionPipelineLibrary(device: device),
             testHooks: .none
         )
     }
@@ -137,16 +139,29 @@ public final class BrushCompiler {
         device: any MTLDevice,
         commandQueue: any MTLCommandQueue,
         profile: BrushDeviceProfile,
+        pipelinePreparing: any DepositionPipelinePreparing,
         testHooks: BrushCompilerTestHooks
     ) {
         self.device = device
         self.commandQueue = commandQueue
         self.profile = profile
+        self.pipelinePreparing = pipelinePreparing
         self.testHooks = testHooks
         cache = BrushResourceCache(byteBudget: profile.brushCacheBudgetBytes)
         counters = .zero
         requestGeneration = 0
         packageHashTask = nil
+    }
+
+    public func compileAndActivate(
+        definition: BrushDefinition
+    ) async throws -> CompiledBrush {
+        let package = try BrushPackage(
+            manifest: BrushPackageManifest(resources: []),
+            definition: definition,
+            resourceData: [:]
+        )
+        return try await compileAndActivate(package: package)
     }
 
     public func compileAndActivate(
@@ -464,6 +479,49 @@ public final class BrushCompiler {
             color: package.definition.color,
             material: package.definition.material
         )
+        let depositionMaterial: DepositionMaterialBinding
+        do {
+            depositionMaterial = try DepositionMaterialBinding(
+                uniformTemplate: uniformTemplate,
+                textures: textures
+            )
+        } catch let error as DepositionPreparationError {
+            throw try failure(
+                packageHash: packageHash,
+                backend: program.requestedBackend,
+                stage: .pipelineSelection,
+                resourceID: depositionResourceID(error),
+                requestedBytes: nil,
+                reason: depositionFailureReason(error),
+                definitionID: definitionID
+            )
+        }
+        let depositionKey = DepositionPipelineKey(
+            brush: pipelineKey,
+            abiVersion: DepositionABI.version,
+            colorPixelFormatRawValue:
+                GridPipelineLibrary.colorPixelFormat.rawValue,
+            sampleCount: GridPipelineLibrary.sampleCount
+        )
+        let depositionPipeline: DepositionPipelineBinding
+        do {
+            depositionPipeline = try await pipelinePreparing.prepare(
+                for: depositionKey
+            )
+            try ensureCurrent(generation)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw try failure(
+                packageHash: packageHash,
+                backend: program.requestedBackend,
+                stage: .pipelineSelection,
+                resourceID: nil,
+                requestedBytes: nil,
+                reason: "pipelinePreparationFailed",
+                definitionID: definitionID
+            )
+        }
         let report = try BrushCompilationReport(
             definitionID: definitionID,
             packageContentHash: packageHash,
@@ -487,6 +545,8 @@ public final class BrushCompiler {
             pipelineKey: pipelineKey,
             uniformTemplate: uniformTemplate,
             textures: textures,
+            depositionPipeline: depositionPipeline,
+            depositionMaterial: depositionMaterial,
             residentByteCount: residentBytes,
             report: report,
             diagnostics: diagnostics,
@@ -532,6 +592,19 @@ public final class BrushCompiler {
             "missingRequiredResource"
         case .pipelinePreparationFailed:
             "pipelinePreparationFailed"
+        }
+    }
+
+    private func depositionResourceID(
+        _ error: DepositionPreparationError
+    ) -> String? {
+        switch error {
+        case let .missingRequiredResource(resourceID):
+            resourceID
+        case .unsupportedInteraction,
+             .unsupportedEdgeTreatment,
+             .pipelinePreparationFailed:
+            nil
         }
     }
 

@@ -184,7 +184,11 @@ struct BrushLabSessionTests {
                 maximumWorkingTextureDimension: 4_096,
                 brushCacheBudgetBytes: 128 * 1_024 * 1_024,
                 targetFramesPerSecond: 120
-            )
+            ),
+            pipelinePreparing: try BrushLabTestPipelinePreparer(
+                device: renderer.device
+            ),
+            testHooks: .none
         )
         return (
             controller,
@@ -236,5 +240,58 @@ struct BrushLabSessionTests {
     ) -> BrushProgram? {
         controller.renderer.harnessActiveStrokeStyle?.program
     }
+}
+
+@MainActor
+private final class BrushLabTestPipelinePreparer:
+    DepositionPipelinePreparing
+{
+    private let state: any MTLRenderPipelineState
+    private var bindings:
+        [DepositionPipelineKey: DepositionPipelineBinding] = [:]
+
+    init(device: any MTLDevice) throws {
+        state = try makeBrushLabTestPipelineState(device: device)
+    }
+
+    func prepare(
+        for key: DepositionPipelineKey
+    ) async throws -> DepositionPipelineBinding {
+        if let binding = bindings[key] {
+            return binding
+        }
+        let binding = DepositionPipelineBinding(key: key, state: state)
+        bindings[key] = binding
+        return binding
+    }
+}
+
+@MainActor
+private func makeBrushLabTestPipelineState(
+    device: any MTLDevice
+) throws -> any MTLRenderPipelineState {
+    let source = """
+        #include <metal_stdlib>
+        using namespace metal;
+        vertex float4 brushLabCompilerVertex(uint id [[vertex_id]]) {
+            const float2 points[3] = {
+                float2(-1, -1), float2(3, -1), float2(-1, 3)
+            };
+            return float4(points[id], 0, 1);
+        }
+        fragment float4 brushLabCompilerFragment() {
+            return float4(0);
+        }
+        """
+    let library = try device.makeLibrary(source: source, options: nil)
+    let descriptor = MTLRenderPipelineDescriptor()
+    descriptor.vertexFunction = library.makeFunction(
+        name: "brushLabCompilerVertex"
+    )
+    descriptor.fragmentFunction = library.makeFunction(
+        name: "brushLabCompilerFragment"
+    )
+    descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+    return try device.makeRenderPipelineState(descriptor: descriptor)
 }
 #endif

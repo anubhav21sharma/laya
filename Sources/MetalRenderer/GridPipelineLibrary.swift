@@ -2,6 +2,9 @@ import Metal
 
 @MainActor
 public struct GridPipelineLibrary {
+    public static let colorPixelFormat: MTLPixelFormat = .bgra8Unorm
+    public static let sampleCount = 1
+
     public let stamp: any MTLRenderPipelineState
     public let display: any MTLRenderPipelineState
     public let triangularDisplay: any MTLRenderPipelineState
@@ -182,7 +185,7 @@ public struct GridPipelineLibrary {
         label: String,
         vertex: String,
         fragment: String,
-        pixelFormat: MTLPixelFormat = .bgra8Unorm,
+        pixelFormat: MTLPixelFormat = GridPipelineLibrary.colorPixelFormat,
         configure: (MTLRenderPipelineColorAttachmentDescriptor) -> Void
     ) throws -> any MTLRenderPipelineState {
         guard let vertexFunction = library.makeFunction(name: vertex) else {

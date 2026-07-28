@@ -124,6 +124,8 @@ public final class CompiledBrush {
     public let pipelineKey: BrushPipelineKey
     public let uniformTemplate: BrushUniformTemplate
     public let textures: [String: any MTLTexture]
+    public let depositionPipeline: DepositionPipelineBinding
+    public let depositionMaterial: DepositionMaterialBinding
     public let residentByteCount: Int
     public let report: BrushCompilationReport
     public let diagnostics: [BrushCompilationDiagnostic]
@@ -136,6 +138,8 @@ public final class CompiledBrush {
         pipelineKey: BrushPipelineKey,
         uniformTemplate: BrushUniformTemplate,
         textures: [String: any MTLTexture],
+        depositionPipeline: DepositionPipelineBinding,
+        depositionMaterial: DepositionMaterialBinding,
         residentByteCount: Int,
         report: BrushCompilationReport,
         diagnostics: [BrushCompilationDiagnostic],
@@ -146,6 +150,8 @@ public final class CompiledBrush {
         self.pipelineKey = pipelineKey
         self.uniformTemplate = uniformTemplate
         self.textures = textures
+        self.depositionPipeline = depositionPipeline
+        self.depositionMaterial = depositionMaterial
         self.residentByteCount = residentByteCount
         self.report = report
         self.diagnostics = diagnostics

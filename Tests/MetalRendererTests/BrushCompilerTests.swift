@@ -257,6 +257,22 @@ struct BrushCompilerTests {
         #expect(!compiled.pipelineKey.functionConstants.usesSecondaryShape)
         #expect(!compiled.pipelineKey.functionConstants.usesGrain)
         #expect(!compiled.pipelineKey.functionConstants.usesDestinationSampling)
+        #expect(compiled.depositionPipeline.key.brush == compiled.pipelineKey)
+        #expect(
+            compiled.depositionPipeline.key.abiVersion
+                == DepositionABI.version
+        )
+        #expect(
+            compiled.depositionMaterial.textures[.primaryShape]
+                === compiled.textures["shape.main"]
+        )
+        let rebuiltMaterial = try DepositionMaterialBinding(
+            compiledBrush: compiled
+        )
+        #expect(
+            rebuiltMaterial.uniforms.coverageParameters
+                == compiled.depositionMaterial.uniforms.coverageParameters
+        )
         #expect(compiled.uniformTemplate.placement == package.definition.placement)
         #expect(compiled.uniformTemplate.coverage == package.definition.coverage)
         #expect(compiled.uniformTemplate.color == package.definition.color)
@@ -284,6 +300,144 @@ struct BrushCompilerTests {
         )
         #expect(setup.compiler.cachedKeys.count == 1)
         #expect(setup.compiler.cachedKeys[0].hasPrefix("brush-r8-v1:"))
+    }
+
+    @Test
+    func pipelineFailurePreservesPriorActivationAndResourceTransaction()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let active = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.pipeline-active",
+                resourceID: nil
+            )
+        )
+        let cachedKeys = setup.compiler.cachedKeys
+        let residentBytes = setup.compiler.residentByteCount
+        let counters = setup.compiler.debugCounters
+        setup.pipelines.failure = .pipelineCreationFailed("injected")
+
+        let failure = try await compilationFailure {
+            _ = try await setup.compiler.compileAndActivate(
+                package: try compilerPackage(
+                    definitionID: "brush.pipeline-failure",
+                    edgeTreatment: .dryBreakup
+                )
+            )
+        }
+
+        #expect(failure.stage == .pipelineSelection)
+        #expect(failure.reason == "pipelinePreparationFailed")
+        #expect(setup.compiler.activeBrush === active)
+        #expect(setup.compiler.cachedKeys == cachedKeys)
+        #expect(setup.compiler.residentByteCount == residentBytes)
+        #expect(
+            setup.compiler.debugCounters.activationCount
+                == counters.activationCount
+        )
+    }
+
+    @Test
+    func resourceAndPipelineCacheHitsReuseThePreparedBinding() async throws {
+        guard let setup = try compilerSetup() else { return }
+        let package = try compilerPackage(
+            definitionID: "brush.pipeline-cache"
+        )
+        let first = try await setup.compiler.compileAndActivate(
+            package: package
+        )
+        let before = setup.compiler.debugCounters
+        let second = try await setup.compiler.compileAndActivate(
+            package: package
+        )
+
+        #expect(first.depositionPipeline === second.depositionPipeline)
+        #expect(setup.pipelines.stateCreationCount == 1)
+        #expect(
+            setup.compiler.debugCounters.imageDecodeCount
+                == before.imageDecodeCount
+        )
+        #expect(
+            setup.compiler.debugCounters.textureUploadCount
+                == before.textureUploadCount
+        )
+    }
+
+    @Test
+    func directDefinitionAndEquivalentPackageShareSemanticIdentity()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let package = try compilerPackage(
+            definitionID: "brush.definition-only",
+            resourceID: nil,
+            directShape: .hardRound
+        )
+
+        let direct = try await setup.compiler.compileAndActivate(
+            definition: package.definition
+        )
+        let packaged = try await setup.compiler.compileAndActivate(
+            package: package
+        )
+
+        #expect(direct.renderIdentity == packaged.renderIdentity)
+        #expect(direct.depositionPipeline === packaged.depositionPipeline)
+    }
+
+    @Test
+    func newerRequestWinsWhileOlderPipelinePreparationIsSuspended()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue()
+        else { return }
+        let gate = CompilerPhaseGate()
+        let pipelines = try makeCompilerPipelinePreparer(device: device)
+        let slow = try compilerPackage(
+            definitionID: "brush.slow-pipeline",
+            resourceID: nil
+        )
+        let slowProgram = try BrushProgramCompiler.compile(slow.definition)
+        pipelines.suspendedBrushKey = compilerPipelineKey(
+            program: slowProgram
+        )
+        pipelines.suspensionGate = gate
+        let compiler = BrushCompiler(
+            device: device,
+            commandQueue: queue,
+            profile: try compilerProfile(),
+            pipelinePreparing: pipelines,
+            testHooks: .none
+        )
+        let fast = try compilerPackage(
+            definitionID: "brush.fast-pipeline",
+            resourceID: nil,
+            edgeTreatment: .dryBreakup
+        )
+
+        let slowTask = Task { @MainActor in
+            _ = try await compiler.compileAndActivate(package: slow)
+        }
+        await gate.waitUntilSuspended()
+        let fastCompiled = try await compiler.compileAndActivate(
+            package: fast
+        )
+        await gate.release()
+        do {
+            try await slowTask.value
+            Issue.record("Superseded pipeline request should cancel")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        #expect(compiler.activeBrush === fastCompiled)
+        #expect(
+            compiler.activeBrush?.program.definition.id.rawValue
+                == "brush.fast-pipeline"
+        )
+        #expect(compiler.debugCounters.activationCount == 1)
     }
 
     @Test
@@ -336,6 +490,7 @@ struct BrushCompilerTests {
             setup.compiler.debugCounters.activationCount
                 == before.activationCount
         )
+        #expect(setup.pipelines.prepareCallCount == 0)
         #expect(setup.compiler.activeBrush == nil)
     }
 
@@ -371,6 +526,7 @@ struct BrushCompilerTests {
             setup.compiler.debugCounters.activationCount
                 == before.activationCount
         )
+        #expect(setup.pipelines.prepareCallCount == 0)
         #expect(setup.compiler.activeBrush == nil)
     }
 
@@ -778,6 +934,9 @@ struct BrushCompilerTests {
             device: device,
             commandQueue: queue,
             profile: profile,
+            pipelinePreparing: try makeCompilerPipelinePreparer(
+                device: device
+            ),
             testHooks: BrushCompilerTestHooks(
                 uploadFailureResourceID: "shape.b"
             )
@@ -804,6 +963,9 @@ struct BrushCompilerTests {
             device: device,
             commandQueue: queue,
             profile: profile,
+            pipelinePreparing: try makeCompilerPipelinePreparer(
+                device: device
+            ),
             testHooks: BrushCompilerTestHooks(
                 admissionFailureDefinitionID: "brush.new"
             )
@@ -842,6 +1004,9 @@ struct BrushCompilerTests {
             device: device,
             commandQueue: queue,
             profile: try compilerProfile(),
+            pipelinePreparing: try makeCompilerPipelinePreparer(
+                device: device
+            ),
             testHooks: hooks
         )
         let old = try await compiler.compileAndActivate(
@@ -887,6 +1052,9 @@ struct BrushCompilerTests {
             device: device,
             commandQueue: queue,
             profile: try compilerProfile(),
+            pipelinePreparing: try makeCompilerPipelinePreparer(
+                device: device
+            ),
             testHooks: hooks
         )
         let slow = try compilerPackage(
@@ -933,6 +1101,9 @@ struct BrushCompilerTests {
             device: device,
             commandQueue: queue,
             profile: try compilerProfile(),
+            pipelinePreparing: try makeCompilerPipelinePreparer(
+                device: device
+            ),
             testHooks: hooks
         )
         let slow = try compilerPackage(
@@ -980,6 +1151,9 @@ struct BrushCompilerTests {
             profile: try compilerProfile(
                 maximumWorkingTextureDimension: 4,
                 brushCacheBudgetBytes: 64
+            ),
+            pipelinePreparing: try makeCompilerPipelinePreparer(
+                device: device
             ),
             testHooks: hooks
         )
@@ -1190,11 +1364,13 @@ private func compilerSetup(
 ) throws -> (
     compiler: BrushCompiler,
     device: any MTLDevice,
-    queue: any MTLCommandQueue
+    queue: any MTLCommandQueue,
+    pipelines: CompilerPipelinePreparer
 )? {
     guard let device = MTLCreateSystemDefaultDevice(),
           let queue = device.makeCommandQueue()
     else { return nil }
+    let pipelines = try makeCompilerPipelinePreparer(device: device)
     return (
         BrushCompiler(
             device: device,
@@ -1204,10 +1380,13 @@ private func compilerSetup(
                     maximumWorkingTextureDimension,
                 brushCacheBudgetBytes: brushCacheBudgetBytes,
                 targetFramesPerSecond: targetFramesPerSecond
-            )
+            ),
+            pipelinePreparing: pipelines,
+            testHooks: .none
         ),
         device,
-        queue
+        queue,
+        pipelines
     )
 }
 
@@ -1562,6 +1741,93 @@ private func compilerWorldSample(
         source: .pencil,
         kind: .actual,
         capabilities: [.pressure]
+    )
+}
+
+@MainActor
+private final class CompilerPipelinePreparer:
+    DepositionPipelinePreparing
+{
+    var failure: DepositionPipelineLibraryError?
+    var suspendedBrushKey: BrushPipelineKey?
+    var suspensionGate: CompilerPhaseGate?
+    private(set) var prepareCallCount = 0
+    private(set) var stateCreationCount = 0
+
+    private let state: any MTLRenderPipelineState
+    private var bindings:
+        [DepositionPipelineKey: DepositionPipelineBinding] = [:]
+
+    init(state: any MTLRenderPipelineState) {
+        self.state = state
+    }
+
+    func prepare(
+        for key: DepositionPipelineKey
+    ) async throws -> DepositionPipelineBinding {
+        prepareCallCount += 1
+        if key.brush == suspendedBrushKey, let suspensionGate {
+            await suspensionGate.suspend()
+        }
+        if let failure {
+            throw failure
+        }
+        if let binding = bindings[key] {
+            return binding
+        }
+        let binding = DepositionPipelineBinding(key: key, state: state)
+        bindings[key] = binding
+        stateCreationCount += 1
+        return binding
+    }
+}
+
+@MainActor
+private func makeCompilerPipelinePreparer(
+    device: any MTLDevice
+) throws -> CompilerPipelinePreparer {
+    let source = """
+        #include <metal_stdlib>
+        using namespace metal;
+        vertex float4 compilerPipelineVertex(uint id [[vertex_id]]) {
+            const float2 points[3] = {
+                float2(-1, -1), float2(3, -1), float2(-1, 3)
+            };
+            return float4(points[id], 0, 1);
+        }
+        fragment float4 compilerPipelineFragment() {
+            return float4(0);
+        }
+        """
+    let library = try device.makeLibrary(source: source, options: nil)
+    let descriptor = MTLRenderPipelineDescriptor()
+    descriptor.vertexFunction = try #require(
+        library.makeFunction(name: "compilerPipelineVertex")
+    )
+    descriptor.fragmentFunction = try #require(
+        library.makeFunction(name: "compilerPipelineFragment")
+    )
+    descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+    return CompilerPipelinePreparer(
+        state: try device.makeRenderPipelineState(descriptor: descriptor)
+    )
+}
+
+private func compilerPipelineKey(
+    program: BrushProgram
+) -> BrushPipelineKey {
+    let coverage = program.definition.coverage
+    return BrushPipelineKey(
+        backend: program.requestedBackend,
+        accumulation: program.definition.material.accumulation,
+        edgeTreatment: program.definition.material.edgeTreatment,
+        functionConstants: BrushFunctionConstants(
+            usesSecondaryShape: coverage.shapes.count > 1,
+            usesGrain: !coverage.grains.isEmpty,
+            usesSecondaryGrain: coverage.grains.count > 1,
+            usesDestinationSampling:
+                program.requestedBackend == .canvasInteraction
+        )
     )
 }
 

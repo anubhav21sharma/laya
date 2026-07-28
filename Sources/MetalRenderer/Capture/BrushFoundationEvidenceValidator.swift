@@ -161,10 +161,23 @@ public enum BrushFoundationCompilerProbe {
                 BrushDeviceProfile.maximumPortableTextureDimension,
             targetFramesPerSecond: 120
         )
+        let pipelinePreparing: any DepositionPipelinePreparing
+        if let library = device.makeDefaultLibrary() {
+            pipelinePreparing = DepositionPipelineLibrary(
+                device: device,
+                library: library
+            )
+        } else {
+            pipelinePreparing = try BrushFoundationProbePipelinePreparer(
+                device: device
+            )
+        }
         let compiler = BrushCompiler(
             device: device,
             commandQueue: queue,
-            profile: profile
+            profile: profile,
+            pipelinePreparing: pipelinePreparing,
+            testHooks: .none
         )
         let package = try probePackage()
         let before = BrushCompilerCounterSnapshot(compiler.debugCounters)
@@ -238,6 +251,56 @@ public enum BrushFoundationCompilerProbe {
                 worldCenter: WorldPoint(x: 0, y: 0)
             )
         )
+    }
+}
+
+/// The SwiftPM evidence executable has no app-bundled default metallib. Its
+/// compiler counter probe does not render, so it uses one deterministic Metal
+/// state while the dedicated deposition suites validate real specialization.
+@MainActor
+private final class BrushFoundationProbePipelinePreparer:
+    DepositionPipelinePreparing
+{
+    private let state: any MTLRenderPipelineState
+    private var bindings:
+        [DepositionPipelineKey: DepositionPipelineBinding] = [:]
+
+    init(device: any MTLDevice) throws {
+        let source = """
+            #include <metal_stdlib>
+            using namespace metal;
+            vertex float4 foundationProbeVertex(uint id [[vertex_id]]) {
+                const float2 points[3] = {
+                    float2(-1, -1), float2(3, -1), float2(-1, 3)
+                };
+                return float4(points[id], 0, 1);
+            }
+            fragment float4 foundationProbeFragment() {
+                return float4(0);
+            }
+            """
+        let library = try device.makeLibrary(source: source, options: nil)
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = library.makeFunction(
+            name: "foundationProbeVertex"
+        )
+        descriptor.fragmentFunction = library.makeFunction(
+            name: "foundationProbeFragment"
+        )
+        descriptor.colorAttachments[0].pixelFormat =
+            GridPipelineLibrary.colorPixelFormat
+        state = try device.makeRenderPipelineState(descriptor: descriptor)
+    }
+
+    func prepare(
+        for key: DepositionPipelineKey
+    ) async throws -> DepositionPipelineBinding {
+        if let binding = bindings[key] {
+            return binding
+        }
+        let binding = DepositionPipelineBinding(key: key, state: state)
+        bindings[key] = binding
+        return binding
     }
 }
 
