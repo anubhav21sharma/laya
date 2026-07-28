@@ -3,6 +3,17 @@
 
 using namespace metal;
 
+constant bool patternDepositionHasSecondaryShape
+    [[function_constant(PatternDepositionFunctionConstantSecondaryShape)]];
+constant bool patternDepositionHasPrimaryGrain
+    [[function_constant(PatternDepositionFunctionConstantPrimaryGrain)]];
+constant bool patternDepositionHasSecondaryGrain
+    [[function_constant(PatternDepositionFunctionConstantSecondaryGrain)]];
+constant uint patternDepositionAccumulationMode
+    [[function_constant(PatternDepositionFunctionConstantAccumulation)]];
+constant uint patternDepositionEdgeTreatment
+    [[function_constant(PatternDepositionFunctionConstantEdgeTreatment)]];
+
 struct PatternVertexOut {
     float4 position [[position]];
 };
@@ -62,6 +73,484 @@ struct PatternProjectedStampOut {
     float4 clip3 [[flat]];
     float4 brushAttributes [[flat]];
 };
+
+struct PatternProjectedDepositionOut {
+    float4 position [[position]];
+    float2 canonical;
+    float2 tipLocal;
+    float2 primaryGrainCoordinate;
+    float2 secondaryGrainCoordinate;
+    float radius [[flat]];
+    float4 premultipliedColor [[flat]];
+    float4 coverageInputs [[flat]];
+    float4 clip0 [[flat]];
+    float4 clip1 [[flat]];
+    float4 clip2 [[flat]];
+    float4 clip3 [[flat]];
+    uint clipCount [[flat]];
+    uint abiVersion [[flat]];
+};
+
+static float2 patternDepositionFrameLocal(
+    float2 canonical,
+    float4 frame0,
+    float4 frame1
+) {
+    const float2 xAxis = frame0.xy;
+    const float2 yAxis = frame0.zw;
+    const float determinant =
+        xAxis.x * yAxis.y - xAxis.y * yAxis.x;
+    if (!isfinite(determinant) || abs(determinant) < FLT_EPSILON) {
+        return float2(0.0);
+    }
+    const float2 relative = canonical - frame1.xy;
+    return float2(
+        (relative.x * yAxis.y - relative.y * yAxis.x) / determinant,
+        (xAxis.x * relative.y - xAxis.y * relative.x) / determinant
+    );
+}
+
+vertex PatternProjectedDepositionOut patternProjectedDepositionVertex(
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    const device PatternDepositionStampInstance* instances
+        [[buffer(PatternBufferIndexDabInstances)]]
+) {
+    const float2 corners[6] = {
+        float2(-1, -1), float2(1, -1), float2(-1, 1),
+        float2(-1, 1), float2(1, -1), float2(1, 1)
+    };
+    const PatternDepositionStampInstance instance = instances[instanceID];
+    const float radius = max(instance.tipFrame1.z, FLT_EPSILON);
+    const float2 tipLocal = corners[vertexID] * (1.0 + 1.0 / radius);
+    const float2 canonical =
+        instance.tipFrame1.xy
+        + instance.tipFrame0.xy * tipLocal.x
+        + instance.tipFrame0.zw * tipLocal.y;
+
+    PatternProjectedDepositionOut output;
+    output.position = float4(
+        canonical.x / frame.tileSize.x * 2.0 - 1.0,
+        1.0 - canonical.y / frame.tileSize.y * 2.0,
+        0.0,
+        1.0
+    );
+    output.canonical = canonical;
+    output.tipLocal = tipLocal;
+    output.primaryGrainCoordinate = patternDepositionHasPrimaryGrain
+        ? patternDepositionFrameLocal(
+            canonical,
+            instance.primaryGrainFrame0,
+            instance.primaryGrainFrame1
+        )
+        : float2(0.0);
+    output.secondaryGrainCoordinate = patternDepositionHasSecondaryGrain
+        ? patternDepositionFrameLocal(
+            canonical,
+            instance.secondaryGrainFrame0,
+            instance.secondaryGrainFrame1
+        )
+        : float2(0.0);
+    output.radius = radius;
+    output.premultipliedColor = instance.premultipliedColor;
+    output.coverageInputs = instance.coverageInputs;
+    output.clip0 = float4(
+        instance.clip0.normal,
+        instance.clip0.offset,
+        0.0
+    );
+    output.clip1 = float4(
+        instance.clip1.normal,
+        instance.clip1.offset,
+        0.0
+    );
+    output.clip2 = float4(
+        instance.clip2.normal,
+        instance.clip2.offset,
+        0.0
+    );
+    output.clip3 = float4(
+        instance.clip3.normal,
+        instance.clip3.offset,
+        0.0
+    );
+    output.clipCount = instance.metadata.x;
+    output.abiVersion = instance.metadata.w;
+    return output;
+}
+
+static bool patternProjectedDepositionInsideClip(
+    PatternProjectedDepositionOut input
+) {
+    if (
+        input.clipCount > 0
+        && dot(input.clip0.xy, input.tipLocal) < input.clip0.z
+    ) {
+        return false;
+    }
+    if (
+        input.clipCount > 1
+        && dot(input.clip1.xy, input.tipLocal) < input.clip1.z
+    ) {
+        return false;
+    }
+    if (
+        input.clipCount > 2
+        && dot(input.clip2.xy, input.tipLocal) < input.clip2.z
+    ) {
+        return false;
+    }
+    if (
+        input.clipCount > 3
+        && dot(input.clip3.xy, input.tipLocal) < input.clip3.z
+    ) {
+        return false;
+    }
+    return true;
+}
+
+static float patternDepositionClamp01(float value) {
+    return clamp(value, 0.0, 1.0);
+}
+
+static float patternDepositionSmoothstep(
+    float edge0,
+    float edge1,
+    float value
+) {
+    if (edge1 <= edge0) {
+        return value >= edge1 ? 1.0 : 0.0;
+    }
+    const float fraction = patternDepositionClamp01(
+        (value - edge0) / (edge1 - edge0)
+    );
+    return fraction * fraction * (3.0 - 2.0 * fraction);
+}
+
+static float patternDepositionCombineShapes(
+    float primary,
+    float secondary,
+    uint mode
+) {
+    switch (mode) {
+    case PatternDepositionShapeCombinationReplace:
+        return secondary;
+    case PatternDepositionShapeCombinationMultiply:
+        return primary * secondary;
+    case PatternDepositionShapeCombinationMinimum:
+        return min(primary, secondary);
+    case PatternDepositionShapeCombinationMaximum:
+        return max(primary, secondary);
+    default:
+        return 0.0;
+    }
+}
+
+static float patternDepositionCoverage(
+    float primaryShape,
+    float secondaryShape,
+    float primaryGrain,
+    float secondaryGrain,
+    float signedTipEdgeDistance,
+    float4 coverageInputs,
+    PatternDepositionMaterialUniforms material,
+    bool hasSecondaryShape,
+    bool hasPrimaryGrain,
+    bool hasSecondaryGrain,
+    uint edgeTreatment
+) {
+    if (
+        !isfinite(primaryShape)
+        || !isfinite(secondaryShape)
+        || !isfinite(primaryGrain)
+        || !isfinite(secondaryGrain)
+        || !isfinite(signedTipEdgeDistance)
+        || any(!isfinite(coverageInputs))
+        || any(!isfinite(material.coverageParameters))
+        || any(!isfinite(material.edgeParameters))
+    ) {
+        return 0.0;
+    }
+
+    float shape = patternDepositionClamp01(primaryShape);
+    if (hasSecondaryShape) {
+        shape = patternDepositionCombineShapes(
+            shape,
+            patternDepositionClamp01(secondaryShape),
+            material.options.x
+        );
+    }
+
+    constexpr float antialiasWidth = 1.0 / 255.0;
+    const float hardness = patternDepositionClamp01(coverageInputs.z);
+    shape = patternDepositionClamp01(
+        (shape - (1.0 - hardness)) / max(hardness, antialiasWidth)
+    );
+    const float threshold = patternDepositionClamp01(
+        material.coverageParameters.z
+    );
+    if (threshold > 0.0) {
+        if (material.options.y != 0) {
+            shape *= patternDepositionSmoothstep(
+                threshold - antialiasWidth,
+                threshold + antialiasWidth,
+                shape
+            );
+        } else {
+            shape = shape >= threshold ? shape : 0.0;
+        }
+    }
+
+    float grain = 1.0;
+    if (hasPrimaryGrain) {
+        grain *= mix(
+            1.0,
+            patternDepositionClamp01(primaryGrain),
+            patternDepositionClamp01(material.coverageParameters.x)
+        );
+    }
+    if (hasSecondaryGrain) {
+        grain *= mix(
+            1.0,
+            patternDepositionClamp01(secondaryGrain),
+            patternDepositionClamp01(material.coverageParameters.y)
+        );
+    }
+
+    float evaluated = shape * patternDepositionClamp01(grain);
+    const float edgeBand = 1.0 - patternDepositionSmoothstep(
+        0.0,
+        1.0,
+        abs(signedTipEdgeDistance)
+    );
+    const float edgeStrength = patternDepositionClamp01(
+        material.edgeParameters.x
+    );
+    switch (edgeTreatment) {
+    case PatternDepositionEdgeNone:
+        break;
+    case PatternDepositionEdgeDryBreakup: {
+        const float rawGrain = patternDepositionClamp01(
+            (hasPrimaryGrain ? primaryGrain : 1.0)
+                * (hasSecondaryGrain ? secondaryGrain : 1.0)
+        );
+        const float breakupThreshold = patternDepositionClamp01(
+            (1.0 - hardness) * 0.35 + edgeBand * 0.35
+        );
+        const float dryMask = patternDepositionSmoothstep(
+            breakupThreshold,
+            min(1.0, breakupThreshold + 0.25),
+            rawGrain
+        );
+        evaluated *= mix(1.0, dryMask, edgeStrength);
+        break;
+    }
+    case PatternDepositionEdgeMarkerOverlap:
+        evaluated = patternDepositionClamp01(
+            evaluated * (1.0 + 0.25 * edgeStrength * edgeBand)
+        );
+        break;
+    case PatternDepositionEdgeWetConcentration:
+    default:
+        return 0.0;
+    }
+
+    const float base = evaluated
+        * patternDepositionClamp01(coverageInputs.x)
+        * patternDepositionClamp01(coverageInputs.w);
+    return patternDepositionClamp01(base);
+}
+
+static float patternDepositionAccumulatedAlpha(
+    float current,
+    float baseCoverage,
+    float flowCoverage,
+    uint mode,
+    float accumulationLimit
+) {
+    if (
+        !isfinite(current)
+        || !isfinite(baseCoverage)
+        || !isfinite(flowCoverage)
+        || !isfinite(accumulationLimit)
+    ) {
+        return 0.0;
+    }
+    const float limit = patternDepositionClamp01(accumulationLimit);
+    current = min(limit, patternDepositionClamp01(current));
+    const float base = patternDepositionClamp01(baseCoverage);
+    const float flow = patternDepositionClamp01(flowCoverage);
+    float next;
+    switch (mode) {
+    case PatternDepositionAccumulationOpaque:
+        next = current + (1.0 - current) * base;
+        break;
+    case PatternDepositionAccumulationFlow:
+    case PatternDepositionAccumulationDestinationOut:
+        next = current + (1.0 - current) * flow;
+        break;
+    case PatternDepositionAccumulationUniformGlaze:
+        next = max(current, flow);
+        break;
+    case PatternDepositionAccumulationIntenseGlaze: {
+        const float intense = 1.0 - (1.0 - flow) * (1.0 - flow);
+        next = current + (1.0 - current) * intense;
+        break;
+    }
+    default:
+        return 0.0;
+    }
+    return min(limit, patternDepositionClamp01(next));
+}
+
+static float2 patternDepositionSecondaryShapeLocal(
+    float2 tipLocal,
+    float4 transform
+) {
+    const float scale = max(transform.x, FLT_EPSILON);
+    const float cosine = cos(transform.y);
+    const float sine = sin(transform.y);
+    const float2 translated = tipLocal - transform.zw;
+    return float2(
+        cosine * translated.x + sine * translated.y,
+        -sine * translated.x + cosine * translated.y
+    ) / scale;
+}
+
+static float patternDepositionShapeSample(
+    float2 shapeLocal,
+    float radius,
+    uint kind,
+    texture2d<float> texture,
+    sampler shapeSampler
+) {
+    if (kind == PatternDepositionShapeKindHardRound) {
+        return patternDepositionClamp01(
+            radius + 0.5 - length(shapeLocal * radius)
+        );
+    }
+    return texture.sample(
+        shapeSampler,
+        shapeLocal * 0.5 + 0.5
+    ).r;
+}
+
+fragment float4 patternDepositionFragment(
+    PatternProjectedDepositionOut input [[stage_in]],
+    constant PatternDepositionMaterialUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    texture2d<float> primaryShapeTexture
+        [[texture(PatternTextureIndexDepositionPrimaryShape)]],
+    texture2d<float> secondaryShapeTexture
+        [[texture(PatternTextureIndexDepositionSecondaryShape)]],
+    texture2d<float> primaryGrainTexture
+        [[texture(PatternTextureIndexDepositionPrimaryGrain)]],
+    texture2d<float> secondaryGrainTexture
+        [[texture(PatternTextureIndexDepositionSecondaryGrain)]]
+) {
+    if (
+        input.abiVersion != PatternDepositionABIVersion
+        || !patternProjectedDepositionInsideClip(input)
+    ) {
+        discard_fragment();
+    }
+
+    constexpr sampler shapeSampler(
+        coord::normalized,
+        address::clamp_to_zero,
+        filter::linear,
+        mip_filter::linear
+    );
+    constexpr sampler grainSampler(
+        coord::normalized,
+        address::repeat,
+        filter::linear,
+        mip_filter::linear
+    );
+
+    const float primaryShape = patternDepositionShapeSample(
+        input.tipLocal,
+        input.radius,
+        material.options.z,
+        primaryShapeTexture,
+        shapeSampler
+    );
+    const float2 secondaryLocal = patternDepositionHasSecondaryShape
+        ? patternDepositionSecondaryShapeLocal(
+            input.tipLocal,
+            material.secondaryShapeTransform
+        )
+        : float2(0.0);
+    const float secondaryShape = patternDepositionHasSecondaryShape
+        ? patternDepositionShapeSample(
+            secondaryLocal,
+            input.radius,
+            material.options.w,
+            secondaryShapeTexture,
+            shapeSampler
+        )
+        : 1.0;
+    const float primaryGrain = patternDepositionHasPrimaryGrain
+        ? primaryGrainTexture.sample(
+            grainSampler,
+            input.primaryGrainCoordinate
+        ).r
+        : 1.0;
+    const float secondaryGrain = patternDepositionHasSecondaryGrain
+        ? secondaryGrainTexture.sample(
+            grainSampler,
+            input.secondaryGrainCoordinate
+        ).r
+        : 1.0;
+    const float signedTipEdgeDistance = input.radius * (
+        material.options.z == PatternDepositionShapeKindHardRound
+            ? 1.0 - length(input.tipLocal)
+            : 1.0 - max(abs(input.tipLocal.x), abs(input.tipLocal.y))
+    );
+    const float baseCoverage = patternDepositionCoverage(
+        primaryShape,
+        secondaryShape,
+        primaryGrain,
+        secondaryGrain,
+        signedTipEdgeDistance,
+        input.coverageInputs,
+        material,
+        patternDepositionHasSecondaryShape,
+        patternDepositionHasPrimaryGrain,
+        patternDepositionHasSecondaryGrain,
+        patternDepositionEdgeTreatment
+    );
+    const float flowCoverage = patternDepositionClamp01(
+        baseCoverage * patternDepositionClamp01(input.coverageInputs.y)
+    );
+    float depositedCoverage;
+    switch (patternDepositionAccumulationMode) {
+    case PatternDepositionAccumulationOpaque:
+        depositedCoverage = baseCoverage;
+        break;
+    case PatternDepositionAccumulationIntenseGlaze:
+        depositedCoverage =
+            1.0 - (1.0 - flowCoverage) * (1.0 - flowCoverage);
+        break;
+    default:
+        depositedCoverage = flowCoverage;
+        break;
+    }
+    depositedCoverage = min(
+        patternDepositionClamp01(material.coverageParameters.w),
+        patternDepositionClamp01(depositedCoverage)
+    );
+
+    if (
+        patternDepositionAccumulationMode
+            == PatternDepositionAccumulationDestinationOut
+    ) {
+        return float4(0.0, 0.0, 0.0, depositedCoverage);
+    }
+    return input.premultipliedColor * depositedCoverage;
+}
 
 vertex PatternFullscreenOut patternFullscreenVertex(
     uint vertexID [[vertex_id]],

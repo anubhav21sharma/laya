@@ -107,6 +107,20 @@ typedef struct PatternDepositionStampInstance {
     PatternFloat4 reserved1;
 } PatternDepositionStampInstance;
 
+typedef struct PatternDepositionMaterialUniforms {
+    // (primary grain strength, secondary grain strength, tip threshold,
+    // accumulation limit)
+    PatternFloat4 coverageParameters;
+    // (secondary scale, secondary rotation, secondary offset x,
+    // secondary offset y)
+    PatternFloat4 secondaryShapeTransform;
+    // (edge strength, reserved, reserved, reserved)
+    PatternFloat4 edgeParameters;
+    // (secondary shape combination, antialiasing, primary shape kind,
+    // secondary shape kind)
+    PatternUInt4 options;
+} PatternDepositionMaterialUniforms;
+
 #ifndef __METAL_VERSION__
 static inline size_t
 PatternDepositionStampInstanceOffsetTipFrame0(void) {
@@ -220,12 +234,59 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushGrain = 3;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexReplayLive = 4;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexRadialPageTable = 5;
 
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternTextureIndexDepositionPrimaryShape = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternTextureIndexDepositionSecondaryShape = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternTextureIndexDepositionPrimaryGrain = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternTextureIndexDepositionSecondaryGrain = 3;
+
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireInk = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireDry = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireGlaze = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternMaterialWireBoundedWash = 3;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionABIVersion = 1;
+
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionFunctionConstantSecondaryShape = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionFunctionConstantPrimaryGrain = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionFunctionConstantSecondaryGrain = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionFunctionConstantAccumulation = 3;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionFunctionConstantEdgeTreatment = 4;
+
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionShapeCombinationReplace = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionShapeCombinationMultiply = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionShapeCombinationMinimum = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionShapeCombinationMaximum = 3;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionShapeKindHardRound = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionShapeKindTexture = 1;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionAccumulationOpaque = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionAccumulationFlow = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionAccumulationUniformGlaze = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionAccumulationIntenseGlaze = 3;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionAccumulationDestinationOut = 4;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionEdgeNone = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionEdgeDryBreakup = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionEdgeMarkerOverlap = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDepositionEdgeWetConcentration = 3;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainCoordinateWireCanonical = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternGrainCoordinateWireBrushLocal = 1;
