@@ -23,8 +23,20 @@ struct FrameScheduler: Sendable {
         authoritativeQueue.count
     }
 
+    var authoritativeAvailableCapacity: Int {
+        authoritativeQueue.availableCapacity
+    }
+
     var predictedCount: Int {
         predictionQueue.count
+    }
+
+    var authoritativeRecords: [ProjectedDepositionRecord] {
+        authoritativeQueue.records
+    }
+
+    var predictedRecords: [ProjectedDepositionRecord] {
+        predictionQueue.records
     }
 
     private var authoritativeQueue: BoundedDepositionQueue
@@ -72,14 +84,17 @@ struct FrameScheduler: Sendable {
     }
 
     mutating func nextFrame(
-        budget: DepositionFrameBudget
+        budget: DepositionFrameBudget,
+        includePrediction: Bool = true
     ) -> ScheduledDepositionFrame {
         let authoritative = authoritativeQueue.take(
             maximumCount: budget.maximumAuthoritativeInstances
         )
-        let predicted = predictionQueue.take(
-            maximumCount: budget.maximumPredictedInstances
-        )
+        let predicted = includePrediction
+            ? predictionQueue.take(
+                maximumCount: budget.maximumPredictedInstances
+            )
+            : []
         return ScheduledDepositionFrame(
             authoritative: authoritative,
             predicted: predicted,
@@ -89,6 +104,19 @@ struct FrameScheduler: Sendable {
     }
 
     mutating func discardPrediction() {
+        predictionQueue.reset()
+    }
+
+    mutating func promotePredictionToAuthoritative() throws {
+        let records = predictionQueue.records
+        guard records.count <= authoritativeQueue.availableCapacity else {
+            throw FrameSchedulerError.authoritativeCapacityExceeded(
+                current: authoritativeQueue.count,
+                incoming: records.count,
+                maximum: authoritativeQueue.capacity
+            )
+        }
+        authoritativeQueue.append(records)
         predictionQueue.reset()
     }
 
@@ -108,6 +136,18 @@ private struct BoundedDepositionQueue: Sendable {
 
     var availableCapacity: Int {
         capacity - count
+    }
+
+    var records: [ProjectedDepositionRecord] {
+        guard count > 0 else { return [] }
+        return (0..<count).map { offset in
+            guard let record = storage[(head + offset) % capacity] else {
+                preconditionFailure(
+                    "Bounded deposition queue lost an occupied record"
+                )
+            }
+            return record
+        }
     }
 
     private(set) var count = 0

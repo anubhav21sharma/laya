@@ -1,4 +1,5 @@
 import Foundation
+import PatternEngine
 
 public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case commandQueueUnavailable
@@ -9,6 +10,7 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case boundedWashSurfaceAllocationFailed
     case sharedEventUnavailable
     case instanceBufferAllocationFailed
+    case depositionEncoderUnavailable
     case commandBufferUnavailable
     case renderEncoderUnavailable
     case commandFailed(String)
@@ -23,6 +25,11 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case tilingChangeRequiresIdle
     case invalidStrokeLifecycle
     case unsupportedBrushProgram
+    case compiledBrushUnavailable(StrokeCompositeMode)
+    case compiledBrushIdentityMismatch
+    case compiledBrushActivationRequiresIdle
+    case invalidCompiledBrush
+    case unsupportedCompiledBrush
     case invalidRendererOperationToken
     case commitPendingInput
     case committedSnapshotUnavailable
@@ -62,6 +69,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
             "Metal shared-event creation failed."
         case .instanceBufferAllocationFailed:
             "Metal instance-buffer allocation failed."
+        case .depositionEncoderUnavailable:
+            "The compiled brush deposition encoder is unavailable."
         case .commandBufferUnavailable:
             "Metal command buffer creation failed."
         case .renderEncoderUnavailable:
@@ -90,6 +99,16 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
             "The requested stroke transition is invalid."
         case .unsupportedBrushProgram:
             "The current renderer cannot render this brush program."
+        case let .compiledBrushUnavailable(mode):
+            "No prepared compiled brush is installed for \(mode)."
+        case .compiledBrushIdentityMismatch:
+            "The stroke style does not match the installed compiled brush."
+        case .compiledBrushActivationRequiresIdle:
+            "Compiled brushes can only be replaced while the renderer is idle."
+        case .invalidCompiledBrush:
+            "The prepared compiled brush has inconsistent render state."
+        case .unsupportedCompiledBrush:
+            "The prepared compiled brush requires an unsupported backend."
         case .invalidRendererOperationToken:
             "The renderer operation token does not match the active operation."
         case .commitPendingInput:

@@ -30,29 +30,47 @@ struct SliceFourReplayEpochAudit: Equatable, Sendable {
 @MainActor
 extension GridRenderer {
     public func flushPendingLiveForHarness(
-        forceFailure: Bool = false
+        forceFailure: Bool = false,
+        forceCommandBufferUnavailable: Bool = false
     ) throws -> HarnessLiveFlushResult {
         drainFrameOutcomes()
         drainCompletedUploadRanges()
-        try clearLiveForHarnessIfNeeded()
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+        let usesCompiledDeposition = activeStroke?.compiledBrush != nil
+        if !usesCompiledDeposition {
+            try clearLiveForHarnessIfNeeded()
+        }
+        guard !forceCommandBufferUnavailable,
+              let commandBuffer = commandQueue.makeCommandBuffer()
+        else {
             let error = MetalRendererError.commandBufferUnavailable
             failActiveOperationIfNeeded(error)
             throw error
         }
 
         var uploads: [FrameUpload] = []
+        var nativeEncoding: NativeDepositionFrameEncoding?
         var submissions: [DabBufferSubmissionIdentity] = []
         var didFinalize = false
         let start = CFAbsoluteTimeGetCurrent()
         do {
-            let liveEncoding = try encodePendingLiveDabs(commandBuffer)
-            uploads = liveEncoding.uploads
-            let encodedReplayClear = liveEncoding.encodedReplayClear
+            let encodedLiveClear: Bool
+            let encodedReplayClear: Bool
+            if usesCompiledDeposition {
+                let encoding = try encodeScheduledDeposition(commandBuffer)
+                nativeEncoding = encoding
+                encodedLiveClear = encoding.encodedLiveClear
+                encodedReplayClear = encoding.encodedReplayClear
+            } else {
+                let liveEncoding = try encodePendingLiveDabs(commandBuffer)
+                uploads = liveEncoding.uploads
+                encodedLiveClear = false
+                encodedReplayClear = liveEncoding.encodedReplayClear
+            }
             submissions = try finalizeFrameEncoding(
-                encodedClear: false,
+                encodedClear: encodedLiveClear,
                 encodedReplayClear: encodedReplayClear,
                 uploads: uploads,
+                nativeEncoding: nativeEncoding,
                 rasterCommit: nil,
                 commandBuffer: commandBuffer,
                 forceFailure: forceFailure
@@ -84,11 +102,19 @@ extension GridRenderer {
                     commandBuffer: commandBuffer,
                     cpuMilliseconds: cpuMilliseconds
                 ),
-                emittedHighWater: liveStroke.emittedHighWater,
+                emittedHighWater: usesCompiledDeposition
+                    ? UInt64(counters.totalInstancesThisStroke)
+                    : liveStroke.emittedHighWater,
                 encodedIdentityRanges: uploads.map(\.identityRange)
             )
         } catch {
             if !didFinalize {
+                if nativeEncoding != nil,
+                   commandBuffer.status == .notEnqueued
+                {
+                    commandBuffer.commit()
+                    commandBuffer.waitUntilCompleted()
+                }
                 abandon(uploads)
                 failActiveOperationIfNeeded(
                     (error as? MetalRendererError)
@@ -421,10 +447,35 @@ extension GridRenderer {
         )
     }
 
-    public func finishCommitForHarness() throws -> GPUFrameMetrics {
-        let metrics = try submitCommitForHarness()
-        try drainCompletedOperationsForHarness()
-        return metrics
+    public func finishCommitForHarness(
+        forceCommitFailure: Bool = false
+    ) throws -> GPUFrameMetrics {
+        do {
+            if activeStroke?.compiledBrush != nil {
+                for _ in 0..<64 {
+                    try prepareCompiledCommitIfReady()
+                    if activeStroke?.pendingRevisions != nil {
+                        break
+                    }
+                    _ = try flushPendingLiveForHarness()
+                }
+                try prepareCompiledCommitIfReady()
+            }
+            let metrics = try submitCommitForHarness(
+                forceFailure: forceCommitFailure
+            )
+            try drainCompletedOperationsForHarness()
+            return metrics
+        } catch let error as MetalRendererError {
+            failActiveOperationIfNeeded(error)
+            throw error
+        } catch {
+            let rendererError = MetalRendererError.commandFailed(
+                error.localizedDescription
+            )
+            failActiveOperationIfNeeded(rendererError)
+            throw rendererError
+        }
     }
 
     func requestRasterRestoreForHarness(
@@ -494,10 +545,18 @@ extension GridRenderer {
     ) throws -> GPUFrameMetrics {
         drainFrameOutcomes()
         drainCompletedUploadRanges()
+        try prepareCompiledCommitIfReady()
+        let nativeIsReady = activeStroke?.compiledBrush != nil
+            && activeStroke?.scheduler?.authoritativeIsDrained == true
+            && activeStroke?.scheduler?.predictedCount == 0
+            && !needsReplayClear
+        let legacyIsReady = activeStroke?.compiledBrush == nil
+            && liveStroke.bakedHighWater == liveStroke.emittedHighWater
+            && replayStroke.bakedHighWater == replayStroke.emittedHighWater
         guard activeStroke?.commitRequested == true,
               activeStroke?.pendingTokenBearingFrameCount == 0,
-              liveStroke.bakedHighWater == liveStroke.emittedHighWater,
-              replayStroke.bakedHighWater == replayStroke.emittedHighWater
+              activeStroke?.pendingRevisions != nil,
+              nativeIsReady || legacyIsReady
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -703,6 +762,41 @@ extension GridRenderer {
     }
     var harnessActiveStrokeStyle: StrokeRenderStyle? {
         activeStroke?.style
+    }
+    var harnessPreparedDrawBrushIdentity: BrushRenderIdentity? {
+        activeDrawBrush?.renderIdentity
+    }
+    var harnessPreparedEraserBrushIdentity: BrushRenderIdentity? {
+        activeEraserBrush?.renderIdentity
+    }
+    var harnessCapturedCompiledBrushIdentity: BrushRenderIdentity? {
+        activeStroke?.compiledBrush?.renderIdentity
+    }
+    var harnessScheduledAuthoritativeRecords:
+        [ProjectedDepositionRecord]
+    {
+        activeStroke?.scheduler?.authoritativeRecords ?? []
+    }
+    var harnessScheduledPredictedRecords: [ProjectedDepositionRecord] {
+        activeStroke?.scheduler?.predictedRecords ?? []
+    }
+    var harnessCompiledIsometryOrdinals: Set<UInt8> {
+        Set(tilingStrategy.compiledSymmetry.images.map(\.ordinal))
+    }
+    func removeDepositionEncoderForHarness() -> DepositionEncoder? {
+        defer { depositionEncoder = nil }
+        return depositionEncoder
+    }
+    func restoreDepositionEncoderForHarness(_ encoder: DepositionEncoder) {
+        depositionEncoder = encoder
+    }
+    @discardableResult
+    func replaceDepositionFrameBudgetForHarness(
+        _ budget: DepositionFrameBudget
+    ) -> DepositionFrameBudget {
+        let previous = depositionFrameBudget
+        depositionFrameBudget = budget
+        return previous
     }
     var harnessResolvedBrushTextureIdentities: (shape: String, grain: String) {
         (

@@ -72,6 +72,10 @@ public struct LiveStroke {
         return PixelRegionSet(dirtyRectangles, clippedTo: pixelSize)
     }
 
+    mutating func recordDirtyRegion(_ dirtyRect: PixelRect) {
+        accumulateDirtyRectangle(dirtyRect)
+    }
+
     private mutating func append(
         _ instance: PatternProjectedStampInstance,
         dirtyRect: PixelRect?,

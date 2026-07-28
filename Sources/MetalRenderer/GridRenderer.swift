@@ -91,6 +91,10 @@ struct HarnessTilingMutationSnapshot: Equatable {
 
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
+    private static let uncompiledCompatibilitySemanticHash =
+        "b29442ec35ff6345e89176318f449c4e"
+        + "57d31b68a007fbea32d8176383a55f9e"
+
     public let device: any MTLDevice
     public var pixelSize: PixelSize { resources.canvasPixelSize }
     var storagePixelSize: PixelSize { resources.pixelSize }
@@ -172,10 +176,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let encodedReplayClear: Bool
     }
 
+    struct NativeDepositionFrameEncoding {
+        let authoritativeCount: Int
+        let predictedCount: Int
+        let encodedLiveClear: Bool
+        let encodedReplayClear: Bool
+        let replayEpoch: UInt64
+
+        var instanceCount: Int {
+            authoritativeCount + predictedCount
+        }
+    }
+
     struct ActiveStrokeExecution {
         let token: RendererOperationToken
         let style: StrokeRenderStyle
+        let compiledBrush: CompiledBrush?
+        let renderIdentity: BrushRenderIdentity
+        var scheduler: FrameScheduler?
         var commitRequested: Bool
+        var commitRetainedByteLimit: Int?
         var pendingRevisions: PendingRasterRevisionPair?
         var pendingTokenBearingFrameCount: Int
         var isFinishedTransiently: Bool
@@ -192,7 +212,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     struct ProjectedDabRecord {
-        let instance: PatternProjectedStampInstance
+        let legacyInstance: PatternProjectedStampInstance?
+        let depositionRecord: ProjectedDepositionRecord?
         let dirtyRect: PixelRect
         let radialPage: RadialPageCoordinate?
     }
@@ -306,6 +327,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     let commandQueue: any MTLCommandQueue
     let library: any MTLLibrary
     private let pipelines: GridPipelineLibrary
+    var depositionFrameBudget: DepositionFrameBudget
+    private(set) var activeDrawBrush: CompiledBrush?
+    private(set) var activeEraserBrush: CompiledBrush?
     let brushTextureResolver: BrushTextureResolver
     private(set) var activeShapeResolution: BrushTextureResolution
     private(set) var activeGrainResolution: BrushTextureResolution
@@ -321,6 +345,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private(set) var boundedWashEncodedWork = BoundedWashEncodedWork()
     private var boundedWashHistory = BoundedWashHistoryAccumulator()
     let instancePool: DabInstanceBufferPool
+    var depositionEncoder: DepositionEncoder?
     let revisionStore: RasterRevisionStore
     let completionMailbox = GridRenderCompletionMailbox()
     private let rasterCompletionMailbox = RendererRasterCompletionMailbox()
@@ -414,6 +439,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         self.commandQueue = commandQueue
         self.library = library
         self.resources = resources
+        depositionFrameBudget = try DepositionFrameBudget(
+            cpuPreparationNanoseconds: 1_500_000,
+            maximumAuthoritativeInstances:
+                GridCanvasContract.instanceCapacity,
+            maximumPredictedInstances:
+                TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity,
+            maximumPendingAuthoritativeInstances:
+                GridCanvasContract.pendingCapacity,
+            maximumPendingPredictedInstances:
+                TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity,
+            inFlightUploadBufferCount:
+                GridCanvasContract.inFlightBufferCount
+        )
+        activeDrawBrush = nil
+        activeEraserBrush = nil
         self.brushTextureResolver = brushTextureResolver
         activeShapeResolution = defaultShape
         activeGrainResolution = defaultGrain
@@ -427,6 +469,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         pipelines = try GridPipelineLibrary(device: device, library: library)
         instancePool = try DabInstanceBufferPool(device: device)
+        depositionEncoder = nil
         revisionStore = RasterRevisionStore(device: device)
         viewport = ViewportTransform(
             drawableSize: drawableSize,
@@ -440,6 +483,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             GridCanvasContract.inFlightBufferCount
         )
         super.init()
+        depositionEncoder = DepositionEncoder(
+            instancePool: instancePool,
+            frameUniforms: frameUniforms(
+                drawableSize: tileSize,
+                showGridLines: false,
+                liveVisible: true
+            )
+        )
         try clearInitialTextures()
     }
 
@@ -611,6 +662,129 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try applyTiling(tiling)
     }
 
+    public func activateDrawBrush(_ brush: CompiledBrush) throws {
+        try installCompiledBrush(brush, for: .draw)
+    }
+
+    public func activateEraserBrush(_ brush: CompiledBrush) throws {
+        try installCompiledBrush(brush, for: .erase)
+    }
+
+    private func installCompiledBrush(
+        _ brush: CompiledBrush,
+        for mode: StrokeCompositeMode
+    ) throws {
+        guard isIdle else {
+            throw MetalRendererError.compiledBrushActivationRequiresIdle
+        }
+        try validateCompiledBrush(brush)
+        switch mode {
+        case .draw:
+            activeDrawBrush = brush
+        case .erase:
+            activeEraserBrush = brush
+        }
+    }
+
+    private func validateCompiledBrush(_ brush: CompiledBrush) throws {
+        let definition = brush.program.definition
+        let material = definition.material
+        guard brush.program.requestedBackend == .deposition,
+              brush.pipelineKey.backend == .deposition,
+              material.interaction == .none,
+              material.edgeTreatment != .wetConcentration
+        else {
+            throw MetalRendererError.unsupportedCompiledBrush
+        }
+        let expectedMaterial: DepositionMaterialBinding
+        do {
+            expectedMaterial = try DepositionMaterialBinding(
+                compiledBrush: brush
+            )
+        } catch {
+            throw MetalRendererError.invalidCompiledBrush
+        }
+        let pipelineKey = brush.depositionPipeline.key
+        guard brush.renderIdentity.definitionID == definition.id,
+              brush.report.definitionID == definition.id.rawValue,
+              brush.report.packageContentHash
+                == brush.renderIdentity.semanticHash,
+              brush.report.backend == brush.program.requestedBackend,
+              brush.pipelineKey == pipelineKey.brush,
+              pipelineKey.abiVersion == DepositionABI.version,
+              pipelineKey.colorPixelFormatRawValue
+                == GridPipelineLibrary.colorPixelFormat.rawValue,
+              pipelineKey.sampleCount == GridPipelineLibrary.sampleCount,
+              brush.uniformTemplate.placement == definition.placement,
+              brush.uniformTemplate.coverage == definition.coverage,
+              brush.uniformTemplate.color == definition.color,
+              brush.uniformTemplate.material == definition.material,
+              depositionMaterial(
+                brush.depositionMaterial,
+                matches: expectedMaterial
+              ),
+              brush.residentByteCount >= 0,
+              brush.report.residentResourceBytes
+                == brush.residentByteCount
+        else {
+            throw MetalRendererError.invalidCompiledBrush
+        }
+    }
+
+    private func depositionMaterial(
+        _ actual: DepositionMaterialBinding,
+        matches expected: DepositionMaterialBinding
+    ) -> Bool {
+        guard actual.uniforms.coverageParameters
+                == expected.uniforms.coverageParameters,
+              actual.uniforms.secondaryShapeTransform
+                == expected.uniforms.secondaryShapeTransform,
+              actual.uniforms.edgeParameters
+                == expected.uniforms.edgeParameters,
+              actual.uniforms.options == expected.uniforms.options,
+              actual.textures.boundSlots == expected.textures.boundSlots
+        else {
+            return false
+        }
+        return expected.textures.boundSlots.allSatisfy { slot in
+            guard let actualTexture = actual.textures[slot],
+                  let expectedTexture = expected.textures[slot]
+            else {
+                return false
+            }
+            return ObjectIdentifier(actualTexture as AnyObject)
+                == ObjectIdentifier(expectedTexture as AnyObject)
+        }
+    }
+
+    private func compiledBrush(
+        for style: StrokeRenderStyle
+    ) throws -> CompiledBrush? {
+        if style.program.compatibilityRecipe != nil,
+           style.renderIdentity.semanticHash
+            == Self.uncompiledCompatibilitySemanticHash
+        {
+            return nil
+        }
+        let brush: CompiledBrush? = switch style.compositeMode {
+        case .draw:
+            activeDrawBrush
+        case .erase:
+            activeEraserBrush
+        }
+        guard let brush else {
+            throw MetalRendererError.compiledBrushUnavailable(
+                style.compositeMode
+            )
+        }
+        guard brush.renderIdentity == style.renderIdentity,
+              brush.program == style.program
+        else {
+            throw MetalRendererError.compiledBrushIdentityMismatch
+        }
+        return brush
+    }
+
     public func setPeriodicConfiguration(
         _ configuration: PeriodicSymmetryConfiguration
     ) throws {
@@ -627,7 +801,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard sample.phase == .began, isIdle else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        guard let compatibilityRecipe = style.program.compatibilityRecipe else {
+        let compiledBrush = try compiledBrush(for: style)
+        let compatibilityRecipe = style.program.compatibilityRecipe
+        guard compiledBrush != nil || compatibilityRecipe != nil else {
             throw MetalRendererError.unsupportedBrushProgram
         }
 
@@ -635,12 +811,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         brushLabActualDabCount = 0
         brushLabPredictedDabCount = 0
         resetLiveState()
-        activeShapeResolution = try brushTextureResolver.resolve(
-            shape: compatibilityRecipe.shape
-        )
-        activeGrainResolution = try brushTextureResolver.resolve(
-            grain: compatibilityRecipe.grain
-        )
+        if let compatibilityRecipe, compiledBrush == nil {
+            activeShapeResolution = try brushTextureResolver.resolve(
+                shape: compatibilityRecipe.shape
+            )
+            activeGrainResolution = try brushTextureResolver.resolve(
+                grain: compatibilityRecipe.grain
+            )
+        }
         activeMaterialState = BrushMaterialState(program: style.program)
         if activeMaterialState.family == .boundedWash {
             do {
@@ -678,7 +856,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeStroke = ActiveStrokeExecution(
             token: token,
             style: style,
+            compiledBrush: compiledBrush,
+            renderIdentity: style.renderIdentity,
+            scheduler: compiledBrush.map { _ in
+                FrameScheduler(budget: depositionFrameBudget)
+            },
             commitRequested: false,
+            commitRetainedByteLimit: nil,
             pendingRevisions: nil,
             pendingTokenBearingFrameCount: 0,
             isFinishedTransiently: false
@@ -900,9 +1084,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try requireCollectingStroke(token: token)
         do {
             try finishStrokeTransient(token: token, sample: sample)
-            try prepareCurrentStrokeCommit(
-                maximumRetainedBytes: maximumRetainedBytes
-            )
+            if activeStroke?.compiledBrush != nil {
+                try requestCompiledStrokeCommit(
+                    maximumRetainedBytes: maximumRetainedBytes
+                )
+            } else {
+                try prepareCurrentStrokeCommit(
+                    maximumRetainedBytes: maximumRetainedBytes
+                )
+            }
         } catch {
             discardPendingRevisionsIfPossible()
             activeStroke = nil
@@ -956,9 +1146,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         do {
-            try prepareCurrentStrokeCommit(
-                maximumRetainedBytes: maximumRetainedBytes
-            )
+            if activeStroke?.compiledBrush != nil {
+                try requestCompiledStrokeCommit(
+                    maximumRetainedBytes: maximumRetainedBytes
+                )
+            } else {
+                try prepareCurrentStrokeCommit(
+                    maximumRetainedBytes: maximumRetainedBytes
+                )
+            }
         } catch {
             discardPendingRevisionsIfPossible()
             activeStroke = nil
@@ -1579,10 +1775,66 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        let pair = try allocateCurrentStrokeRevisions(
+            maximumRetainedBytes: maximumRetainedBytes
+        )
+        execution.commitRequested = true
+        execution.commitRetainedByteLimit = maximumRetainedBytes
+        execution.pendingRevisions = pair
+        activeStroke = execution
+    }
+
+    private func requestCompiledStrokeCommit(
+        maximumRetainedBytes: Int
+    ) throws {
         guard maximumRetainedBytes >= 0 else {
             throw MetalRendererError.rasterRevisionStorageLimitExceeded
         }
+        guard var execution = activeStroke,
+              execution.compiledBrush != nil,
+              var scheduler = execution.scheduler,
+              !execution.commitRequested,
+              execution.pendingRevisions == nil
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        do {
+            try scheduler.promotePredictionToAuthoritative()
+        } catch let error as FrameSchedulerError {
+            throw rendererError(for: error)
+        }
+        execution.scheduler = scheduler
+        execution.commitRequested = true
+        execution.commitRetainedByteLimit = maximumRetainedBytes
+        activeStroke = execution
+    }
 
+    func prepareCompiledCommitIfReady() throws {
+        guard var execution = activeStroke,
+              execution.compiledBrush != nil,
+              execution.commitRequested,
+              execution.pendingRevisions == nil,
+              execution.scheduler?.authoritativeIsDrained == true,
+              execution.scheduler?.predictedCount == 0,
+              execution.pendingTokenBearingFrameCount == 0,
+              !needsReplayClear,
+              let maximumRetainedBytes =
+                execution.commitRetainedByteLimit
+        else {
+            return
+        }
+        execution.pendingRevisions = try allocateCurrentStrokeRevisions(
+            maximumRetainedBytes: maximumRetainedBytes
+        )
+        activeStroke = execution
+    }
+
+    private func allocateCurrentStrokeRevisions(
+        maximumRetainedBytes: Int
+    ) throws -> PendingRasterRevisionPair {
+        guard maximumRetainedBytes >= 0 else {
+            throw MetalRendererError.rasterRevisionStorageLimitExceeded
+        }
         let settledRegions = liveStroke.dirtyRegions(
             clippedTo: storagePixelSize
         )
@@ -1594,9 +1846,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             clippedTo: storagePixelSize
         )
         if activeMaterialState.family == .boundedWash {
-            let washRegions = boundedWashHistoryRegions
             regions = PixelRegionSet(
-                regions.rectangles + washRegions.rectangles,
+                regions.rectangles
+                    + boundedWashHistoryRegions.rectangles,
                 clippedTo: storagePixelSize
             )
         }
@@ -1610,7 +1862,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard !overflow, pairBytes <= maximumRetainedBytes else {
             throw MetalRendererError.rasterRevisionStorageLimitExceeded
         }
-
         let pair = try revisionStore.allocatePair(
             beforePixelSize: storagePixelSize,
             beforeRegions: regions,
@@ -1621,9 +1872,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             pair.retainedBytes == pairBytes,
             "Raster revision preflight and allocation must agree."
         )
-        execution.commitRequested = true
-        execution.pendingRevisions = pair
-        activeStroke = execution
+        return pair
     }
 
     private func discardPendingRevisionsIfPossible() {
@@ -1667,7 +1916,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeStroke = ActiveStrokeExecution(
             token: token,
             style: style,
+            compiledBrush: nil,
+            renderIdentity: style.renderIdentity,
+            scheduler: nil,
             commitRequested: false,
+            commitRetainedByteLimit: nil,
             pendingRevisions: nil,
             pendingTokenBearingFrameCount: 0,
             isFinishedTransiently: false
@@ -1718,6 +1971,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard let drawable = view.currentDrawable else {
             return
         }
+        do {
+            try prepareCompiledCommitIfReady()
+        } catch let error as MetalRendererError {
+            failActiveOperationIfNeeded(error)
+            return
+        } catch {
+            failActiveOperationIfNeeded(
+                .commandFailed(error.localizedDescription)
+            )
+            return
+        }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             failActiveOperationIfNeeded(.commandBufferUnavailable)
             return
@@ -1727,16 +1991,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         #endif
 
         var uploads: [FrameUpload] = []
+        var nativeEncoding: NativeDepositionFrameEncoding?
         var rasterCommit: EncodedRasterCommit?
         do {
             let hasEarlierPendingUploads = !completedUploadRanges.isEmpty
-            let encodedLiveClear = needsLiveClear
-            if encodedLiveClear {
-                try encodeLiveClear(commandBuffer)
+            let encodedLiveClear: Bool
+            let encodedReplayClear: Bool
+            if activeStroke?.compiledBrush != nil {
+                let encoding = try encodeScheduledDeposition(commandBuffer)
+                nativeEncoding = encoding
+                encodedLiveClear = encoding.encodedLiveClear
+                encodedReplayClear = encoding.encodedReplayClear
+            } else {
+                encodedLiveClear = needsLiveClear
+                if encodedLiveClear {
+                    try encodeLiveClear(commandBuffer)
+                }
+                let liveEncoding = try encodePendingLiveDabs(commandBuffer)
+                uploads = liveEncoding.uploads
+                encodedReplayClear = liveEncoding.encodedReplayClear
             }
-            let liveEncoding = try encodePendingLiveDabs(commandBuffer)
-            uploads = liveEncoding.uploads
-            let encodedReplayClear = liveEncoding.encodedReplayClear
             let plannedSettledThrough = uploads.last {
                 $0.layer == .settled
             }?.throughExclusive ?? liveStroke.bakedHighWater
@@ -1744,15 +2018,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 $0.layer == .replay
             }?.throughExclusive ?? replayStroke.bakedHighWater
             let shouldEncodeCommit = activeStroke?.commitRequested == true
+                && activeStroke?.pendingRevisions != nil
                 && plannedSettledThrough == liveStroke.emittedHighWater
                 && plannedReplayThrough == replayStroke.emittedHighWater
                 && !hasEarlierPendingUploads
                 && activeStroke?.pendingTokenBearingFrameCount == 0
+            let hasCurrentNativeDeposition =
+                (nativeEncoding?.instanceCount ?? 0) > 0
             if shouldEncodeCommit {
                 rasterCommit = try encodeCommit(
                     commandBuffer,
                     liveVisible: liveTile.isVisible
                         || replayTile.isVisible || !uploads.isEmpty
+                        || hasCurrentNativeDeposition
                 )
             }
             try encodeDisplay(
@@ -1761,11 +2039,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 showGridLines: interactiveGridVisibility,
                 liveVisible: liveTile.isVisible
                     || replayTile.isVisible || !uploads.isEmpty
+                    || hasCurrentNativeDeposition
             )
             _ = try finalizeFrameEncoding(
                 encodedClear: encodedLiveClear,
                 encodedReplayClear: encodedReplayClear,
                 uploads: uploads,
+                nativeEncoding: nativeEncoding,
                 rasterCommit: rasterCommit,
                 commandBuffer: commandBuffer
             )
@@ -1818,10 +2098,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             commandBuffer.commit()
         } catch let error as MetalRendererError {
+            if nativeEncoding != nil,
+               commandBuffer.status == .notEnqueued
+            {
+                commandBuffer.commit()
+            }
             abandon(uploads)
             abandon(rasterCommit)
             failActiveOperationIfNeeded(error)
         } catch {
+            if nativeEncoding != nil,
+               commandBuffer.status == .notEnqueued
+            {
+                commandBuffer.commit()
+            }
             abandon(uploads)
             abandon(rasterCommit)
             failActiveOperationIfNeeded(
@@ -1996,10 +2286,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             projectedCount = nextCount
         }
-        guard projectedCount <= liveStroke.capacity - liveStroke.pending.count
-        else {
+        let availableCapacity: Int
+        if let scheduler = activeStroke?.scheduler {
+            availableCapacity = scheduler.authoritativeAvailableCapacity
+        } else {
+            availableCapacity = liveStroke.capacity - liveStroke.pending.count
+        }
+        guard projectedCount <= availableCapacity else {
             throw MetalRendererError.projectedInstanceCapacityExceeded(
-                liveStroke.capacity
+                activeStroke?.scheduler == nil
+                    ? liveStroke.capacity
+                    : depositionFrameBudget
+                        .maximumPendingAuthoritativeInstances
             )
         }
     }
@@ -2007,6 +2305,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func appendSettledRecords(
         _ records: [ProjectedDabRecord]
     ) throws {
+        if activeStroke?.compiledBrush != nil {
+            try enqueueCompiledAuthoritative(records)
+            return
+        }
         guard records.count <= liveStroke.capacity - liveStroke.pending.count
         else {
             throw MetalRendererError.projectedInstanceCapacityExceeded(
@@ -2032,6 +2334,35 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             accumulateBoundedWashHistory(plan.processingRegions)
         }
         try append(records, to: &liveStroke)
+    }
+
+    private func enqueueCompiledAuthoritative(
+        _ records: [ProjectedDabRecord]
+    ) throws {
+        guard var execution = activeStroke,
+              var scheduler = execution.scheduler
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let deposition = try records.map { record in
+            guard let deposition = record.depositionRecord,
+                  record.legacyInstance == nil
+            else {
+                throw MetalRendererError.invalidCompiledBrush
+            }
+            return deposition
+        }
+        do {
+            try scheduler.enqueueAuthoritative(deposition)
+        } catch let error as FrameSchedulerError {
+            throw rendererError(for: error)
+        }
+        for record in records {
+            liveStroke.recordDirtyRegion(record.dirtyRect)
+        }
+        counters.totalInstancesThisStroke += records.count
+        execution.scheduler = scheduler
+        activeStroke = execution
     }
 
     private func prepareGeneratedDabs(
@@ -2202,6 +2533,49 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         } else {
             lastBoundedWashWorkPlan = nil
         }
+        if activeStroke.compiledBrush != nil {
+            try replaceCompiledReplay(
+                replacementRecords,
+                priorRegions: priorRegions,
+                replacementRegions: replacementRegions
+            )
+        } else {
+            let epoch = takeReplayEpoch()
+            _ = replayTile.planReplacement(
+                epoch: epoch,
+                prior: priorRegions,
+                replacement: replacementRegions
+            )
+            replayStroke.beginReplacementEpoch(epoch)
+            try append(replacementRecords, to: &replayStroke)
+            needsReplayClear = true
+        }
+    }
+
+    private func replaceCompiledReplay(
+        _ records: [ProjectedDabRecord],
+        priorRegions: PixelRegionSet,
+        replacementRegions: PixelRegionSet
+    ) throws {
+        guard var execution = activeStroke,
+              var scheduler = execution.scheduler
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let deposition = try records.map { record in
+            guard let deposition = record.depositionRecord,
+                  record.legacyInstance == nil
+            else {
+                throw MetalRendererError.invalidCompiledBrush
+            }
+            return deposition
+        }
+        do {
+            try scheduler.replacePrediction(deposition)
+        } catch let error as FrameSchedulerError {
+            throw rendererError(for: error)
+        }
+
         let epoch = takeReplayEpoch()
         _ = replayTile.planReplacement(
             epoch: epoch,
@@ -2209,8 +2583,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             replacement: replacementRegions
         )
         replayStroke.beginReplacementEpoch(epoch)
-        try append(replacementRecords, to: &replayStroke)
+        for record in records {
+            replayStroke.recordDirtyRegion(record.dirtyRect)
+        }
+        counters.totalInstancesThisStroke += records.count
         needsReplayClear = true
+        execution.scheduler = scheduler
+        activeStroke = execution
+    }
+
+    private func rendererError(
+        for error: FrameSchedulerError
+    ) -> MetalRendererError {
+        switch error {
+        case let .authoritativeCapacityExceeded(_, _, maximum):
+            .projectedInstanceCapacityExceeded(maximum)
+        case let .predictedCapacityExceeded(_, maximum):
+            .projectedInstanceCapacityExceeded(maximum)
+        }
     }
 
     private func append(
@@ -2218,8 +2608,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         to stroke: inout LiveStroke
     ) throws {
         for record in records {
+            guard let instance = record.legacyInstance,
+                  record.depositionRecord == nil
+            else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
             try stroke.append(
-                record.instance,
+                instance,
                 dirtyRect: record.dirtyRect,
                 radialPage: record.radialPage
             )
@@ -2253,6 +2648,36 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             ),
             coverageSymmetry: compatibilityRecipe.footprintCoverageSymmetry
         )
+        let fragments = TilingProjection.fragments(
+            for: footprint,
+            using: tilingStrategy
+        )
+        if activeStroke.compiledBrush != nil {
+            return try fragments.map { fragment in
+                let isometryOrdinal = try compiledIsometryOrdinal(
+                    for: fragment
+                )
+                return ProjectedDabRecord(
+                    legacyInstance: nil,
+                    depositionRecord: ProjectedDepositionRecord(
+                        identity: dab.ordinal,
+                        instance: try PatternDepositionStampInstance(
+                            fragment: fragment,
+                            dab: dab,
+                            logicalOrdinal: dab.ordinal,
+                            isometryOrdinal: isometryOrdinal
+                        ),
+                        radialPage: radialPage(for: fragment)
+                    ),
+                    dirtyRect: TilingProjection.dirtyPixelRect(
+                        for: fragment,
+                        radius: dab.radius
+                    ),
+                    radialPage: radialPage(for: fragment)
+                )
+            }
+        }
+
         let color = InkColor(
             red: dab.color.red,
             green: dab.color.green,
@@ -2265,17 +2690,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             dab.grainOffset.x,
             dab.grainOffset.y
         )
-        return TilingProjection.fragments(
-            for: footprint,
-            using: tilingStrategy
-        ).map { fragment in
+        return fragments.map { fragment in
             ProjectedDabRecord(
-                instance: PatternProjectedStampInstance(
+                legacyInstance: PatternProjectedStampInstance(
                     fragment: fragment,
                     radius: minimumAffineScale,
                     color: color,
                     brushAttributes: brushAttributes
                 ),
+                depositionRecord: nil,
                 dirtyRect: TilingProjection.dirtyPixelRect(
                     for: fragment,
                     radius: minimumAffineScale
@@ -2283,6 +2706,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 radialPage: radialPage(for: fragment)
             )
         }
+    }
+
+    private func compiledIsometryOrdinal(
+        for fragment: CellFragment
+    ) throws -> UInt8 {
+        guard let isometry = tilingStrategy.compiledSymmetry.images.first(
+            where: {
+                $0.ordinal == fragment.imageOrdinal
+                    && $0.operation == fragment.operation
+            }
+        ) else {
+            throw MetalRendererError.invalidSymmetryConfiguration(
+                "Projected fragment has no compiled isometry."
+            )
+        }
+        return isometry.ordinal
     }
 
     private func radialPage(
@@ -3037,6 +3476,136 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         } catch {
             abandon(uploads)
             throw error
+        }
+    }
+
+    func encodeScheduledDeposition(
+        _ commandBuffer: any MTLCommandBuffer
+    ) throws -> NativeDepositionFrameEncoding {
+        guard var execution = activeStroke,
+              let brush = execution.compiledBrush,
+              let scheduler = execution.scheduler
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+
+        // Authoritative work owns the frame whenever it is present. This
+        // keeps a frame to one render target, so preflight and submission are
+        // one atomic encoder transaction and prediction replacement remains
+        // all-or-nothing.
+        let includePrediction = scheduler.authoritativeIsDrained
+        var candidate = scheduler
+        let frame = candidate.nextFrame(
+            budget: depositionFrameBudget,
+            includePrediction: includePrediction
+        )
+        precondition(
+            frame.authoritative.isEmpty || frame.predicted.isEmpty,
+            "A compiled deposition frame must target one live surface."
+        )
+        let records = frame.authoritative.isEmpty
+            ? frame.predicted
+            : frame.authoritative
+        let target = frame.authoritative.isEmpty
+            ? replayTile.texture
+            : liveTile.texture
+
+        guard var encoder = depositionEncoder else {
+            throw MetalRendererError.depositionEncoderUnavailable
+        }
+        encoder.updateFrameUniforms(
+            frameUniforms(
+                drawableSize: tileSize,
+                showGridLines: false,
+                liveVisible: true
+            )
+        )
+        let prepared: PreparedDepositionEncoding?
+        do {
+            prepared = records.isEmpty
+                ? nil
+                : try encoder.preflight(
+                    records: records,
+                    binding: brush.depositionPipeline,
+                    material: brush.depositionMaterial,
+                    target: target
+                )
+        } catch {
+            throw rendererError(forDepositionError: error)
+        }
+
+        let encodedLiveClear = needsLiveClear
+        let encodedReplayClear = needsReplayClear
+            && frame.authoritative.isEmpty
+        do {
+            if encodedLiveClear {
+                try encodeLiveClear(commandBuffer)
+            }
+            if encodedReplayClear {
+                try encodeReplayClear(commandBuffer)
+            }
+            if let prepared {
+                _ = try encoder.encode(
+                    prepared,
+                    into: target,
+                    commandBuffer: commandBuffer
+                )
+            }
+        } catch {
+            if let prepared {
+                encoder.abandon(prepared)
+            }
+            throw rendererError(forDepositionError: error)
+        }
+
+        depositionEncoder = encoder
+        execution.scheduler = candidate
+        activeStroke = execution
+        return NativeDepositionFrameEncoding(
+            authoritativeCount: frame.authoritative.count,
+            predictedCount: frame.predicted.count,
+            encodedLiveClear: encodedLiveClear,
+            encodedReplayClear: encodedReplayClear,
+            replayEpoch: encodedReplayClear || !frame.predicted.isEmpty
+                ? replayStroke.renderEpoch
+                : 0
+        )
+    }
+
+    private func rendererError(
+        forDepositionError error: Error
+    ) -> MetalRendererError {
+        if let rendererError = error as? MetalRendererError {
+            return rendererError
+        }
+        guard let encodingError = error as? DepositionEncodingError else {
+            return .commandFailed(error.localizedDescription)
+        }
+        switch encodingError {
+        case .commandBufferUnavailable:
+            return .commandBufferUnavailable
+        case .renderEncoderUnavailable:
+            return .renderEncoderUnavailable
+        case .uploadBuffersUnavailable:
+            return .instanceBufferAllocationFailed
+        case .unsupportedPipelineBackend,
+             .unsupportedPipelineABI,
+             .invalidPipelinePixelFormat,
+             .targetPixelFormatMismatch,
+             .targetSampleCountMismatch,
+             .targetIsNotRenderTarget,
+             .targetChangedAfterPreflight,
+             .missingTexture,
+             .invalidMaterialUniform,
+             .invalidInstance,
+             .foreignPreparation:
+            return .invalidCompiledBrush
+        case .integerOverflow,
+             .invalidCapacity,
+             .recordLimitExceeded,
+             .uploadLimitExceeded,
+             .preparationAlreadyFinalized:
+            return .commandFailed(String(describing: encodingError))
         }
     }
 
@@ -3803,6 +4372,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         encodedClear: Bool,
         encodedReplayClear: Bool = false,
         uploads: [FrameUpload],
+        nativeEncoding: NativeDepositionFrameEncoding? = nil,
         rasterCommit: EncodedRasterCommit?,
         commandBuffer: any MTLCommandBuffer,
         forceFailure: Bool = false
@@ -3825,7 +4395,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             needsLiveClear = false
         }
         if encodedReplayClear {
-            replayTile.markCleared(epoch: replayStroke.renderEpoch)
+            replayTile.markCleared(
+                epoch: nativeEncoding?.replayEpoch
+                    ?? replayStroke.renderEpoch
+            )
             needsReplayClear = false
         }
         var uploadSubmissions: [DabBufferSubmissionIdentity] = []
@@ -3858,9 +4431,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 }
             }
         }
-        counters.newInstancesThisFrame = uploads.reduce(0) {
-            $0 + $1.count
-        }
+        counters.newInstancesThisFrame = nativeEncoding?.instanceCount
+            ?? uploads.reduce(0) { $0 + $1.count }
         if uploads.contains(where: { $0.layer == .settled }) {
             liveTile.markStamped()
         }
@@ -3871,6 +4443,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         {
             replayTile.markVisible(epoch: epoch)
         }
+        if let nativeEncoding {
+            if nativeEncoding.authoritativeCount > 0 {
+                liveTile.markStamped()
+            }
+            if nativeEncoding.predictedCount > 0 {
+                replayTile.markVisible(epoch: nativeEncoding.replayEpoch)
+            }
+        }
 
         let submittedOperationToken: RendererOperationToken?
         if let rasterCommit {
@@ -3878,6 +4458,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         } else if let execution = activeStroke,
                   !execution.isCommitSubmitted,
                   encodedClear || encodedReplayClear || !uploads.isEmpty
+                    || (nativeEncoding?.instanceCount ?? 0) > 0
         {
             submittedOperationToken = execution.token
         } else {
