@@ -17,12 +17,27 @@ public struct BrushMaterialState: Equatable, Sendable {
     public let grain: BrushGrainDescriptor
 
     public init(program: BrushProgram) {
-        guard let recipe = program.compatibilityRecipe else {
-            preconditionFailure(
-                "Stage-2 material rendering requires a compatible program"
-            )
+        let definition = program.definition
+        let grainLayer = definition.coverage.grains.first
+        switch (
+            definition.material.accumulation,
+            definition.material.edgeTreatment
+        ) {
+        case (.flow, .dryBreakup): family = .dry
+        case (.uniformGlaze, _), (.intenseGlaze, _): family = .glaze
+        case (.flow, .wetConcentration): family = .boundedWash
+        default: family = .ink
         }
-        self.init(compatibilityRecipe: recipe)
+        grainCoordinateMode = grainLayer?.coordinateMode ?? .canonical
+        strokeOpacity = definition.placement.strokeOpacity
+        strength = definition.material.strength
+        wetness = definition.material.wetness
+        bleedRadius = definition.material.bleedRadius
+        softenPasses = UInt32(definition.material.softenPasses)
+        accumulationLimit = definition.material.accumulationLimit
+        grainRotation = grainLayer?.transform.rotation ?? 0
+        shape = definition.coverage.shapes[0].shape
+        grain = grainLayer?.grain ?? .opaque
     }
 
     @available(

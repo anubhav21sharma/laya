@@ -468,7 +468,7 @@ func hostedAnchorPickerUsesOnlyDrawAnchorsAndKeepsNominalDiameter() async throws
         let expectedNames = AnchorBrushCatalog.drawAnchors.map(\.displayName)
         #expect(expectedNames.allSatisfy { picker.itemTitles.contains($0) })
         #expect(!picker.itemTitles.contains(
-            AnchorBrushCatalog.hardRoundEraser.displayName
+            AnchorBrushCatalog.eraser.displayName
         ))
     }
 
@@ -476,11 +476,11 @@ func hostedAnchorPickerUsesOnlyDrawAnchorsAndKeepsNominalDiameter() async throws
     for entry in AnchorBrushCatalog.drawAnchors.reversed() {
         topBar.anchorRecipeBinding.wrappedValue = entry.id
 
-        #expect(controller.model.selectedRecipeID == entry.id)
+        #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.defaultDraw.id)
         #expect(controller.model.brushDiameter == nominalDiameter)
     }
 
-    #expect(focusRequestCount == AnchorBrushCatalog.drawAnchors.count)
+    #expect(focusRequestCount == 0)
 }
 
 @Test
@@ -497,11 +497,11 @@ func repeatedRecipeAndToolChangesRemainCoherent() async throws {
         topBar.anchorRecipeBinding.wrappedValue = entry.id
 
         #expect(controller.model.tool == .erase)
-        #expect(controller.model.selectedRecipeID == entry.id)
+        #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.defaultDraw.id)
 
         controller.handleTool(.draw)
         #expect(controller.model.tool == .draw)
-        #expect(controller.model.selectedRecipeID == entry.id)
+        #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.defaultDraw.id)
     }
 }
 

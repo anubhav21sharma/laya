@@ -30,20 +30,6 @@ public final class EditorModel {
             ?? AnchorBrushCatalog.defaultDraw.program
     }
 
-    @available(
-        *,
-        deprecated,
-        message: "Use selectedProgram; this is a Stage-2 compatibility view."
-    )
-    public var selectedRecipe: BrushRecipe {
-        guard let recipe = selectedProgram.compatibilityRecipe else {
-            preconditionFailure(
-                "Built-in editor selection must remain legacy-compatible"
-            )
-        }
-        return recipe
-    }
-
     public var tiling: TilingKind {
         switch finiteConfiguration {
         case nil:

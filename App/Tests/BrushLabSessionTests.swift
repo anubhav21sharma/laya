@@ -116,13 +116,6 @@ struct BrushLabSessionTests {
             try makePackage(),
             sourceName: "compatible.layabrush"
         )
-        let priorDrawingHash = try #require(
-            runtime.session.activeDrawingPackageContentHash
-        )
-        let priorDrawingProgram = try #require(
-            runtime.session.compiledBrush?.program
-        )
-
         try await runtime.session.loadPackage(
             makePackage(nativeOnly: true),
             sourceName: "native-only.layabrush"
@@ -130,20 +123,15 @@ struct BrushLabSessionTests {
 
         #expect(runtime.session.compilationReport != nil)
         #expect(
-            runtime.session.drawingAvailability
-                == .compilerOnly(
-                    "The current compatibility renderer cannot draw this "
-                        + "program exactly; activation is deferred to Stage 4. "
-                        + "The previous drawing brush remains active."
-                )
+            runtime.session.drawingAvailability == .available
         )
         #expect(
             runtime.session.activeDrawingPackageContentHash
-                == priorDrawingHash
+                == runtime.session.packageContentHash
         )
         #expect(
-            runtime.session.activeDrawingPackageContentHash
-                != runtime.session.packageContentHash
+            runtime.session.compiledBrush?.renderIdentity.semanticHash
+                == runtime.session.packageContentHash
         )
         runtime.controller.handleStrokeSample(
             .mouse(
@@ -151,10 +139,6 @@ struct BrushLabSessionTests {
                 timestamp: 1,
                 phase: .began
             )
-        )
-        #expect(
-            rendererProgram(runtime.controller)
-                == priorDrawingProgram
         )
         runtime.controller.handleStrokeSample(
             .mouse(

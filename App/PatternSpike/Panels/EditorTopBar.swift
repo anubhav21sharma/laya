@@ -141,8 +141,10 @@ struct EditorTopBar: View {
         Binding(
             get: { controller.model.selectedRecipeID },
             set: { recipeID in
-                controller.handleRecipe(recipeID)
-                requestEditorFocus()
+                Task { @MainActor in
+                    await controller.selectBrush(recipeID)
+                    requestEditorFocus()
+                }
             }
         )
     }

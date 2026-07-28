@@ -388,7 +388,7 @@ struct BrushLabView: View {
             .padding(6)
         case .available:
             Label(
-                "Compiled package is active in the compatibility renderer.",
+                "Compiled package is active in the production renderer.",
                 systemImage: "checkmark.circle.fill"
             )
             .foregroundStyle(.green)

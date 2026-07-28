@@ -27,6 +27,10 @@ final class EditorSessionController {
     private let strokeSeedSessionEntropy: UInt64
     private var nextStrokeSequence: UInt64 = 1
     private var diagnosticDrawProgram: BrushProgram?
+    private var activeDrawBrush: CompiledBrush?
+    private var activeEraserBrush: CompiledBrush?
+    private let compileDefinition:
+        @MainActor @Sendable (BrushDefinition) async throws -> CompiledBrush
     private var diagnosticFixedStrokeSeed: UInt64?
     private var pendingEstimatedProperties:
         [Int: StrokeEstimatedProperties] = [:]
@@ -105,6 +109,8 @@ final class EditorSessionController {
         requestStrokeCancellation: ((
             RendererOperationToken
         ) throws -> Void)? = nil,
+        compileDefinition: (@MainActor @Sendable
+            (BrushDefinition) async throws -> CompiledBrush)? = nil,
         historyMaximumBytes: Int = 200 * 1_024 * 1_024,
         strokeSeedSessionEntropy: UInt64 = EditorSessionController
             .makeStrokeSeedSessionEntropy()
@@ -135,6 +141,8 @@ final class EditorSessionController {
         self.requestStrokeCancellation = requestStrokeCancellation ?? {
             try renderer.cancelStroke(token: $0)
         }
+        self.compileDefinition = compileDefinition
+            ?? Self.unsupportedDefinitionCompilation
         model.confirmDocumentConfiguration(renderer.documentConfiguration)
         model.confirmPixelSize(renderer.pixelSize)
         model.confirmGeometryLocks(
@@ -150,6 +158,12 @@ final class EditorSessionController {
 
     var historyAvailabilityForTesting: (canUndo: Bool, canRedo: Bool) {
         (history.canUndo, history.canRedo)
+    }
+
+    private static func unsupportedDefinitionCompilation(
+        _: BrushDefinition
+    ) async throws -> CompiledBrush {
+        throw MetalRendererError.unsupportedBrushProgram
     }
 
     var transactionStateForTesting: EditorTransactionState {
@@ -198,14 +212,36 @@ final class EditorSessionController {
             else { return }
             resetEstimatedUpdatesForNewStroke()
             trackPendingEstimatedProperties(in: sample)
-            let program = tool == .draw
+            let compiledBrush = tool == .draw
+                ? activeDrawBrush
+                : activeEraserBrush
+            var program = compiledBrush?.program ?? (tool == .draw
                 ? diagnosticDrawProgram ?? model.selectedProgram
-                : AnchorBrushCatalog.hardRoundEraser.program
+                : AnchorBrushCatalog.eraser.program)
+            if compiledBrush == nil, program.compatibilityRecipe == nil {
+                // Test-only/unbootstrapped controllers retain the pre-Stage-4
+                // fallback. Production installs ink and eraser before ready.
+                program = StrokeRenderStyle(
+                    color: .black,
+                    diameter: 1,
+                    compositeMode: .draw,
+                    eraserStrength: 1
+                ).program
+            }
             let seed = takeStrokeSeed()
-            event = .pointerBegan(
-                sample,
-                tool: tool,
-                style: StrokeRenderStyle(
+            let style: StrokeRenderStyle
+            if let compiledBrush {
+                style = StrokeRenderStyle(
+                    color: model.inkColor,
+                    diameter: model.brushDiameter,
+                    compositeMode: tool == .draw ? .draw : .erase,
+                    eraserStrength: model.eraserStrength,
+                    program: program,
+                    renderIdentity: compiledBrush.renderIdentity,
+                    seed: seed
+                )
+            } else {
+                style = StrokeRenderStyle(
                     color: model.inkColor,
                     diameter: model.brushDiameter,
                     compositeMode: tool == .draw ? .draw : .erase,
@@ -213,6 +249,11 @@ final class EditorSessionController {
                     program: program,
                     seed: seed
                 )
+            }
+            event = .pointerBegan(
+                sample,
+                tool: tool,
+                style: style
             )
         case .moved:
             guard isCollectingStroke else { return }
@@ -377,19 +418,58 @@ final class EditorSessionController {
         apply(.colorIntent(color))
     }
 
-    func handleRecipe(_ recipeID: BrushRecipeID) {
-        diagnosticDrawProgram = nil
-        apply(.recipeIntent(recipeID))
+    func selectBrush(_ id: BrushRecipeID) async {
+        guard renderer.isIdle,
+              transaction.state == .idle,
+              transaction.pendingOperation == nil,
+              let entry = AnchorBrushCatalog.drawEntry(for: id)
+        else { return }
+        do {
+            let compiled = try await compileDefinition(entry.definition)
+            guard renderer.isIdle,
+                  transaction.state == .idle,
+                  transaction.pendingOperation == nil
+            else { return }
+            try renderer.activateDrawBrush(compiled)
+            activeDrawBrush = compiled
+            diagnosticDrawProgram = compiled.program
+            model.confirmRecipe(id)
+        } catch let error as MetalRendererError {
+            report(error)
+        } catch {
+            report(.commandFailed(error.localizedDescription))
+        }
     }
 
+    @available(*, deprecated, message: "Use await selectBrush(_:).")
+    func handleRecipe(_ id: BrushRecipeID) {
+        model.confirmRecipe(id)
+    }
+
+    @available(*, deprecated, message: "Install a CompiledBrush instead.")
     func installDiagnosticDrawProgram(_ program: BrushProgram?) throws {
         guard renderer.isIdle else {
             throw MetalRendererError.commitPendingInput
         }
-        if let program, program.compatibilityRecipe == nil {
-            throw MetalRendererError.unsupportedBrushProgram
-        }
         diagnosticDrawProgram = program
+    }
+
+    func installDiagnosticDrawBrush(_ brush: CompiledBrush) throws {
+        guard renderer.isIdle else {
+            throw MetalRendererError.commitPendingInput
+        }
+        try renderer.activateDrawBrush(brush)
+        activeDrawBrush = brush
+        diagnosticDrawProgram = brush.program
+    }
+
+    func installBootstrapBrushes(
+        draw: CompiledBrush,
+        eraser: CompiledBrush
+    ) throws {
+        try installDiagnosticDrawBrush(draw)
+        try renderer.activateEraserBrush(eraser)
+        activeEraserBrush = eraser
     }
 
     func setDiagnosticFixedStrokeSeed(_ seed: UInt64?) throws {

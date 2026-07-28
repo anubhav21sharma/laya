@@ -89,7 +89,7 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
-            initializeRendererIfNeeded()
+            await initializeRendererIfNeeded()
         }
         .fileImporter(
             isPresented: $importPresented,
@@ -111,7 +111,7 @@ struct ContentView: View {
         }
     }
 
-    private func initializeRendererIfNeeded() {
+    private func initializeRendererIfNeeded() async {
         guard case .loading = state else { return }
         guard let device = MTLCreateSystemDefaultDevice() else {
             state = .unavailable(
@@ -125,13 +125,46 @@ struct ContentView: View {
                 pixelSize: GridCanvasContract.defaultPixelSize,
                 tiling: .grid
             )
+            guard let library = device.makeDefaultLibrary(),
+                  let queue = device.makeCommandQueue()
+            else {
+                throw MetalRendererError.defaultLibraryUnavailable
+            }
             let renderer = try GridRenderer(
                 device: device,
+                library: library,
                 drawableSize: PatternSize(width: 1, height: 1),
                 configuration: configuration
             )
+            let compiler = BrushCompiler(
+                device: device,
+                commandQueue: queue,
+                profile: try BrushDeviceProfile(
+                    registryID: device.registryID,
+                    recommendedWorkingSetBytes: max(
+                        device.recommendedMaxWorkingSetSize,
+                        64 * 1_024 * 1_024
+                    ),
+                    maximumWorkingTextureDimension:
+                        BrushDeviceProfile.maximumPortableTextureDimension,
+                    targetFramesPerSecond: 120
+                )
+            )
+            let controller = EditorSessionController(
+                renderer: renderer,
+                compileDefinition: { definition in
+                    try await compiler.compileAndActivate(definition: definition)
+                }
+            )
+            let draw = try await compiler.compileAndActivate(
+                definition: AnchorBrushCatalog.defaultDraw.definition
+            )
+            let eraser = try await compiler.compileAndActivate(
+                definition: AnchorBrushCatalog.eraser.definition
+            )
+            try controller.installBootstrapBrushes(draw: draw, eraser: eraser)
             state = .ready(
-                EditorSessionController(renderer: renderer)
+                controller
             )
         } catch {
             state = .unavailable(error.localizedDescription)

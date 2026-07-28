@@ -26,15 +26,15 @@ func editorModelDefaultsToGrid() {
 func editorModelConfirmsOnlyCatalogDrawRecipes() {
     let model = EditorModel()
 
-    model.confirmRecipe(AnchorBrushCatalog.dryPencil.id)
-    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryPencil.id)
-    #expect(model.selectedProgram == AnchorBrushCatalog.dryPencil.program)
+    model.confirmRecipe(AnchorBrushCatalog.dryMedia.id)
+    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryMedia.id)
+    #expect(model.selectedProgram == AnchorBrushCatalog.dryMedia.program)
 
-    model.confirmRecipe(AnchorBrushCatalog.hardRoundEraser.id)
-    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryPencil.id)
+    model.confirmRecipe(AnchorBrushCatalog.eraser.id)
+    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryMedia.id)
 
     model.confirmRecipe(BrushRecipeID("missing.recipe"))
-    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryPencil.id)
+    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryMedia.id)
 }
 
 @MainActor

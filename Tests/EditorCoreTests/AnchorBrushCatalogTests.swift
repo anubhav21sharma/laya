@@ -2,44 +2,44 @@ import EditorCore
 import PatternEngine
 import Testing
 
-@Test func anchorCatalogPinsFiveStableBuiltInEntries() {
+@Test func anchorCatalogPinsSixNativeBuiltInEntries() {
     let entries = AnchorBrushCatalog.all
 
     #expect(entries.map(\.id.rawValue) == [
-        "builtin.technical-ink",
-        "builtin.dry-pencil",
-        "builtin.glaze-marker",
-        "builtin.bounded-wash",
-        "builtin.hard-round-eraser",
+        "builtin.native-ink",
+        "builtin.native-dry-media",
+        "builtin.native-glaze",
+        "builtin.native-marker",
+        "builtin.native-airbrush",
+        "builtin.native-eraser",
     ])
     #expect(entries.map(\.displayName) == [
-        "Technical Ink",
-        "Dry Pencil",
-        "Glaze Marker",
-        "Bounded Wash",
-        "Hard Round Eraser",
+        "Native Ink",
+        "Native Dry Media",
+        "Native Glaze",
+        "Native Marker",
+        "Native Airbrush",
+        "Native Eraser",
     ])
-    #expect(AnchorBrushCatalog.drawAnchors.count == 4)
+    #expect(AnchorBrushCatalog.drawAnchors.count == 5)
     #expect(AnchorBrushCatalog.drawAnchors.allSatisfy { $0.role == .draw })
-    #expect(AnchorBrushCatalog.hardRoundEraser.role == .erase)
+    #expect(AnchorBrushCatalog.eraser.role == .erase)
     #expect(Set(entries.map(\.id)).count == entries.count)
 }
 
 @Test
-func anchorProgramsArePrecompiledAndLegacyExact() throws {
+func anchorProgramsArePrecompiledNativeDefinitions() throws {
     for entry in AnchorBrushCatalog.all {
         #expect(entry.program.definition == entry.definition)
-        #expect(
-            try LegacyBrushRecipeAdapter.recipe(from: entry.definition)
-                == entry.compatibilityRecipe
-        )
-        #expect(entry.program.compatibilityRecipe == entry.compatibilityRecipe)
+        #expect(entry.program.compatibilityRecipe == nil)
+        #expect(entry.definition.material.interaction == .none)
+        #expect(entry.definition.performanceIntent == .realtime120)
     }
 }
 
 @Test
 func programRenderStylePreservesFieldsAndRecipeCompatibility() {
-    let entry = AnchorBrushCatalog.dryPencil
+    let entry = AnchorBrushCatalog.dryMedia
     let color = InkColor(
         red: 0.25,
         green: 0.5,
@@ -54,81 +54,33 @@ func programRenderStylePreservesFieldsAndRecipeCompatibility() {
         program: entry.program,
         seed: 91
     )
-    let compatibilityStyle = StrokeRenderStyle(
-        color: color,
-        diameter: 37,
-        compositeMode: .draw,
-        eraserStrength: 0.6,
-        recipe: entry.compatibilityRecipe,
-        seed: 91
-    )
-
     #expect(style.color == color)
     #expect(style.diameter == 37)
     #expect(style.compositeMode == .draw)
     #expect(style.eraserStrength == 0.6)
     #expect(style.program == entry.program)
     #expect(style.seed == 91)
-    #expect(
-        compatibilityStyle.program.compatibilityRecipe
-            == entry.compatibilityRecipe
-    )
-    #expect(compatibilityStyle.program.dynamics == entry.program.dynamics)
-    #expect(
-        compatibilityStyle.program.requestedBackend
-            == entry.program.requestedBackend
-    )
 }
 
-@Test func anchorCatalogRecipesAreDistinctValidatedFixtures() throws {
-    let technical = AnchorBrushCatalog.technicalInk.compatibilityRecipe
-    let pencil = AnchorBrushCatalog.dryPencil.compatibilityRecipe
-    let glaze = AnchorBrushCatalog.glazeMarker.compatibilityRecipe
-    let wash = AnchorBrushCatalog.boundedWash.compatibilityRecipe
-    let eraser = AnchorBrushCatalog.hardRoundEraser.compatibilityRecipe
-
-    #expect(technical.shape == .hardRound)
-    #expect(technical.material.family == .ink)
-    #expect(technical.baseScatterFraction == 0)
-
-    #expect(pencil.grain == .paper)
-    #expect(pencil.material.family == .dry)
-    #expect(pencil.baseScatterFraction > 0)
-
-    #expect(glaze.shape == .chisel)
-    #expect(glaze.material.family == .glaze)
-    #expect(glaze.baseFlow < 1)
-    #expect(glaze.strokeOpacity < 1)
-    #expect(glaze.aspectRatio >= 0.65)
-    #expect(
-        glaze.baseFlow
-            * glaze.material.strength
-            * glaze.strokeOpacity >= 0.2
-    )
-
-    #expect(wash.shape == .softRound)
-    #expect(wash.material.family == .boundedWash)
-    #expect(wash.material.bleedRadius <= 32)
-    #expect(wash.material.softenPasses <= 2)
-    #expect(wash.replayMode == .boundedWholeStroke)
-    #expect(wash.replayLimits != nil)
-    #expect(
-        wash.baseFlow
-            * wash.material.strength
-            * wash.strokeOpacity >= 0.65
-    )
-
-    #expect(eraser.shape == .hardRound)
-    #expect(eraser.grain == .opaque)
-    #expect(eraser.material.family == .ink)
-    #expect(eraser.baseScatterFraction == 0)
+@Test func anchorCatalogDefinesApprovedDepositionFamilies() throws {
+    #expect(AnchorBrushCatalog.ink.definition.material.accumulation == .flow)
+    #expect(AnchorBrushCatalog.ink.definition.material.edgeTreatment == .none)
+    #expect(AnchorBrushCatalog.dryMedia.definition.material.accumulation == .flow)
+    #expect(AnchorBrushCatalog.dryMedia.definition.material.edgeTreatment == .dryBreakup)
+    #expect(AnchorBrushCatalog.glaze.definition.material.accumulation == .uniformGlaze)
+    #expect(AnchorBrushCatalog.glaze.definition.material.edgeTreatment == .none)
+    #expect(AnchorBrushCatalog.marker.definition.material.accumulation == .uniformGlaze)
+    #expect(AnchorBrushCatalog.marker.definition.material.edgeTreatment == .markerOverlap)
+    #expect(AnchorBrushCatalog.airbrush.definition.material.accumulation == .flow)
+    #expect(AnchorBrushCatalog.airbrush.definition.material.edgeTreatment == .none)
+    #expect(AnchorBrushCatalog.eraser.definition.material.accumulation == .destinationOut)
+    #expect(AnchorBrushCatalog.eraser.definition.material.edgeTreatment == .none)
 
     for entry in AnchorBrushCatalog.all {
         #expect(AnchorBrushCatalog.entry(for: entry.id) == entry)
-        #expect(
-            AnchorBrushCatalog.compatibilityRecipe(for: entry.id)
-                == entry.compatibilityRecipe
-        )
+        #expect(!entry.id.rawValue.localizedCaseInsensitiveContains("wash"))
+        #expect(!entry.displayName.localizedCaseInsensitiveContains("wash"))
+        #expect(try BrushProgramCompiler.compile(entry.definition) == entry.program)
     }
     #expect(
         AnchorBrushCatalog.entry(for: BrushRecipeID("missing.recipe")) == nil
@@ -138,8 +90,8 @@ func programRenderStylePreservesFieldsAndRecipeCompatibility() {
 @Test func dedicatedEraserCannotBeSelectedAsADrawAnchor() {
     #expect(
         !AnchorBrushCatalog.drawAnchors.contains {
-            $0.id == AnchorBrushCatalog.hardRoundEraser.id
+            $0.id == AnchorBrushCatalog.eraser.id
         }
     )
-    #expect(AnchorBrushCatalog.defaultDraw == AnchorBrushCatalog.technicalInk)
+    #expect(AnchorBrushCatalog.defaultDraw == AnchorBrushCatalog.ink)
 }

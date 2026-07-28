@@ -406,14 +406,14 @@ final class BrushLabSession {
             compilationDiagnostics = compiled.diagnostics.map(
                 Self.diagnosticDescription
             )
-            if compiled.program.compatibilityRecipe != nil {
-                try controller.installDiagnosticDrawProgram(compiled.program)
+            if compiled.program.requestedBackend == .deposition {
+                try controller.installDiagnosticDrawBrush(compiled)
                 activeDrawingPackageContentHash = contentHash
                 drawingAvailability = .available
             } else {
                 drawingAvailability = .compilerOnly(
-                    "The current compatibility renderer cannot draw this "
-                        + "program exactly; activation is deferred to Stage 4. "
+                    "This package requires typed canvas interaction, which "
+                        + "the production deposition renderer does not support. "
                         + "The previous drawing brush remains active."
                 )
             }
