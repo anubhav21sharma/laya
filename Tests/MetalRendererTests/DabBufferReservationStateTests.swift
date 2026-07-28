@@ -101,3 +101,70 @@ func staleTerminalFailureCannotReleaseNewerInFlightSubmission() throws {
     #expect(!didReclaimStaleAgain)
     #expect(unavailable == nil)
 }
+
+@Test
+func bulkAcquireIsAllOrNoneAndPreservesExistingReservations() throws {
+    var state = DabBufferReservationState(slotCount: 3)
+    let heldCandidate = state.acquire(completedValue: 0)
+    let held = try #require(heldCandidate)
+
+    let unavailable = state.acquire(count: 3, completedValue: 0)
+    let remainingCandidate = state.acquire(count: 2, completedValue: 0)
+    let remaining = try #require(remainingCandidate)
+
+    #expect(unavailable == nil)
+    #expect(state.isReserved(held))
+    #expect(remaining.map(\.slot).count == 2)
+    #expect(Set([held.slot] + remaining.map(\.slot)) == Set(0..<3))
+}
+
+@Test
+func zeroBulkAcquireDoesNotConsumeReservationIdentity() throws {
+    var state = DabBufferReservationState(slotCount: 1)
+
+    let empty = state.acquire(count: 0, completedValue: 0)
+    let firstCandidate = state.acquire(completedValue: 0)
+    let first = try #require(firstCandidate)
+
+    #expect(empty == [])
+    #expect(first.token == 1)
+    #expect(first.signalValue == 1)
+}
+
+@Test
+func bulkAbandonReturnsEveryReservationExactlyOnce() throws {
+    var state = DabBufferReservationState(slotCount: 3)
+    let reservationsCandidate = state.acquire(count: 3, completedValue: 0)
+    let reservations = try #require(reservationsCandidate)
+
+    let didAbandon = state.abandon(reservations)
+    let didAbandonTwice = state.abandon(reservations)
+    let unavailableAfterAbandon = state.unavailableSlotCount
+    let replacements = state.acquire(count: 3, completedValue: 0)
+
+    #expect(didAbandon)
+    #expect(!didAbandonTwice)
+    #expect(unavailableAfterAbandon == 0)
+    #expect(replacements?.count == 3)
+}
+
+@Test
+func completedInFlightSlotsAreReportedAsAvailable() throws {
+    var state = DabBufferReservationState(slotCount: 1)
+    let candidate = state.acquire(completedValue: 0)
+    let reservation = try #require(candidate)
+    let submitted = state.markSubmitted(reservation)
+
+    #expect(submitted)
+    #expect(state.unavailableSlotCount == 1)
+    #expect(
+        state.unavailableSlotCount(
+            completedValue: reservation.signalValue - 1
+        ) == 1
+    )
+    #expect(
+        state.unavailableSlotCount(
+            completedValue: reservation.signalValue
+        ) == 0
+    )
+}

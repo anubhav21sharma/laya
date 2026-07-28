@@ -21,6 +21,7 @@ public final class DabInstanceBufferPool {
     }
 
     public let event: any MTLSharedEvent
+    public let capacity: Int
 
     private let entries: [Entry]
     private var reservationState: DabBufferReservationState
@@ -35,11 +36,16 @@ public final class DabInstanceBufferPool {
             throw MetalRendererError.sharedEventUnavailable
         }
         self.event = event
+        self.capacity = capacity
 
         var entries: [Entry] = []
         entries.reserveCapacity(GridCanvasContract.inFlightBufferCount)
-        let length = capacity
-            * MemoryLayout<PatternProjectedStampInstance>.stride
+        let (length, overflow) = capacity.multipliedReportingOverflow(
+            by: MemoryLayout<PatternDepositionStampInstance>.stride
+        )
+        guard !overflow, length > 0 else {
+            throw MetalRendererError.instanceBufferAllocationFailed
+        }
 
         for index in 0..<GridCanvasContract.inFlightBufferCount {
             guard let buffer = device.makeBuffer(
@@ -48,7 +54,7 @@ public final class DabInstanceBufferPool {
             ) else {
                 throw MetalRendererError.instanceBufferAllocationFailed
             }
-            buffer.label = "Projected Stamp Instances \(index)"
+            buffer.label = "Deposition Stamp Instances \(index)"
             entries.append(Entry(buffer: buffer))
         }
 
@@ -70,7 +76,7 @@ public final class DabInstanceBufferPool {
             slot: reservation.slot,
             buffer: buffer,
             capacity: buffer.length
-                / MemoryLayout<PatternProjectedStampInstance>.stride,
+                / MemoryLayout<PatternDepositionStampInstance>.stride,
             signalValue: reservation.signalValue,
             reservation: reservation
         )
@@ -86,24 +92,33 @@ public final class DabInstanceBufferPool {
         precondition(
             (0...GridCanvasContract.inFlightBufferCount).contains(count)
         )
-        guard count > 0 else { return [] }
-
-        var leases: [Lease] = []
-        leases.reserveCapacity(count)
-        for _ in 0..<count {
-            guard let lease = acquire() else {
-                for lease in leases {
-                    abandon(lease)
-                }
-                return nil
-            }
-            leases.append(lease)
+        guard let reservations = reservationState.acquire(
+            count: count,
+            completedValue: event.signaledValue
+        ) else {
+            return nil
         }
-        return leases
+        return reservations.map { reservation in
+            let buffer = entries[reservation.slot].buffer
+            return Lease(
+                slot: reservation.slot,
+                buffer: buffer,
+                capacity: buffer.length
+                    / MemoryLayout<PatternDepositionStampInstance>.stride,
+                signalValue: reservation.signalValue,
+                reservation: reservation
+            )
+        }
     }
 
     var unavailableSlotCount: Int {
-        reservationState.unavailableSlotCount
+        reservationState.unavailableSlotCount(
+            completedValue: event.signaledValue
+        )
+    }
+
+    var maximumLeaseCount: Int {
+        entries.count
     }
 
     public func write(
@@ -122,6 +137,25 @@ public final class DabInstanceBufferPool {
             )
         for (offset, dab) in instances.enumerated() {
             destination[offset] = dab.instance
+        }
+    }
+
+    func write(
+        _ records: ArraySlice<ProjectedDepositionRecord>,
+        into lease: Lease
+    ) {
+        guard reservationState.isReserved(lease.reservation) else {
+            fatalError("Dab buffer lease is no longer reserved")
+        }
+        precondition(records.count <= lease.capacity)
+
+        let destination = lease.buffer.contents()
+            .bindMemory(
+                to: PatternDepositionStampInstance.self,
+                capacity: lease.capacity
+            )
+        for (offset, record) in records.enumerated() {
+            destination[offset] = record.instance
         }
     }
 

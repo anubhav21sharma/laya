@@ -27,6 +27,21 @@ struct DabBufferReservationState {
         }
     }
 
+    func unavailableSlotCount(completedValue: UInt64) -> Int {
+        slots.reduce(into: 0) { count, state in
+            switch state {
+            case .available:
+                break
+            case .reserved:
+                count += 1
+            case let .inFlight(_, reusableAfterValue):
+                if completedValue < reusableAfterValue {
+                    count += 1
+                }
+            }
+        }
+    }
+
     init(slotCount: Int) {
         precondition(slotCount > 0)
         slots = Array(repeating: .available, count: slotCount)
@@ -61,6 +76,28 @@ struct DabBufferReservationState {
         return nil
     }
 
+    mutating func acquire(
+        count: Int,
+        completedValue: UInt64
+    ) -> [Reservation]? {
+        precondition((0...slots.count).contains(count))
+        guard count > 0 else { return [] }
+
+        var candidate = self
+        var reservations: [Reservation] = []
+        reservations.reserveCapacity(count)
+        for _ in 0..<count {
+            guard let reservation = candidate.acquire(
+                completedValue: completedValue
+            ) else {
+                return nil
+            }
+            reservations.append(reservation)
+        }
+        self = candidate
+        return reservations
+    }
+
     func isReserved(_ reservation: Reservation) -> Bool {
         guard slots.indices.contains(reservation.slot) else {
             return false
@@ -87,6 +124,18 @@ struct DabBufferReservationState {
             return false
         }
         slots[reservation.slot] = .available
+        return true
+    }
+
+    mutating func abandon(_ reservations: [Reservation]) -> Bool {
+        guard Set(reservations.map(\.slot)).count == reservations.count,
+              reservations.allSatisfy({ isReserved($0) })
+        else {
+            return false
+        }
+        for reservation in reservations {
+            slots[reservation.slot] = .available
+        }
         return true
     }
 
