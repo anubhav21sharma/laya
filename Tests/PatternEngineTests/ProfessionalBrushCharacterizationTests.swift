@@ -18,7 +18,7 @@ func professionalCharacterizerPinsTheCalibrationInputsAndIgnoresPrediction() thr
         trace: StrokeTraceFixture(
             name: "professional-direction-turn",
             samples: StrokeTraceFixtures.professionalDirectionTurn.samples.filter {
-                $0.kind != .predicted
+                $0.kind == .actual || $0.kind == .coalesced
             }
         ),
         program: program
@@ -38,6 +38,49 @@ func professionalCharacterizerPinsTheCalibrationInputsAndIgnoresPrediction() thr
     #expect(predicted.logicalDabCount > 0)
     #expect(predicted.minimumDiameter <= predicted.maximumDiameter)
     #expect(predicted.worldBounds.minimumX <= predicted.worldBounds.maximumX)
+}
+
+@Test
+func professionalCharacterizerIgnoresEstimatedUpdates() {
+    let program = nativeTestProgram()
+    let hash = String(repeating: "a", count: 64)
+    let authoritativeSamples = StrokeTraceFixtures
+        .professionalDirectionTurn.samples.filter {
+            $0.kind == .actual || $0.kind == .coalesced
+        }
+    let estimatedUpdate = StrokeSample(
+        position: ScreenPoint(x: 320, y: 64),
+        pressure: 0.7,
+        timestamp: 50.15,
+        phase: .moved,
+        source: .pencil,
+        kind: .estimatedUpdate,
+        capabilities: [.pressure],
+        estimationUpdateIndex: 1
+    )
+    let withEstimatedUpdate = StrokeTraceFixture(
+        name: "professional-direction-turn",
+        samples: authoritativeSamples.prefix(2)
+            + [estimatedUpdate]
+            + authoritativeSamples.dropFirst(2)
+    )
+    let authoritative = ProfessionalBrushCharacterizer.record(
+        family: "Calibration",
+        definitionSemanticHash: hash,
+        trace: StrokeTraceFixture(
+            name: "professional-direction-turn",
+            samples: authoritativeSamples
+        ),
+        program: program
+    )
+    let actual = ProfessionalBrushCharacterizer.record(
+        family: "Calibration",
+        definitionSemanticHash: hash,
+        trace: withEstimatedUpdate,
+        program: program
+    )
+
+    #expect(actual == authoritative)
 }
 
 @Test
@@ -82,6 +125,12 @@ func professionalBaselineRejectsInvalidRecordsAndEncodesDeterministically() thro
                 minimumX: 4, minimumY: 0, maximumX: 3, maximumY: 1
             )
         )
+    }
+    #expect(throws: ProfessionalBrushCharacterizationRecordError.invalidIdentity) {
+        _ = try professionalRecord(brushID: "brush\u{0}id")
+    }
+    #expect(throws: ProfessionalBrushCharacterizationRecordError.invalidIdentity) {
+        _ = try professionalRecord(traceName: "trace\u{0}name")
     }
 }
 

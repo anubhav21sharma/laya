@@ -1,3 +1,4 @@
+import Foundation
 import PatternEngine
 import Testing
 
@@ -28,70 +29,183 @@ func professionalTraceCorpusPinsItsOrderedLifecycleAndCapabilities() {
         })
     }
 
-    #expect(StrokeTraceFixtures.professionalTap.samples.map(\.phase) == [
-        .began, .ended,
-    ])
-    #expect(StrokeTraceFixtures.professionalSlowLine.samples.map(\.position) == [
-        ScreenPoint(x: 64, y: 128),
-        ScreenPoint(x: 256, y: 128),
-        ScreenPoint(x: 448, y: 128),
-    ])
-    #expect(StrokeTraceFixtures.professionalFastLine.samples.map(\.position)
-        == StrokeTraceFixtures.professionalSlowLine.samples.map(\.position))
-    #expect(StrokeTraceFixtures.professionalSlowLine.samples.last!.timestamp
-        - StrokeTraceFixtures.professionalSlowLine.samples.first!.timestamp == 2)
-    #expect(abs(
-        StrokeTraceFixtures.professionalFastLine.samples.last!.timestamp
-            - StrokeTraceFixtures.professionalFastLine.samples.first!.timestamp
-            - 0.04
-    ) < 0.000_001)
-    #expect(StrokeTraceFixtures.professionalPressureRamp.samples.map(\.pressure) == [
-        0.1, 0.4, 0.7, 1,
-    ])
-    #expect(StrokeTraceFixtures.professionalPressureRamp.samples[1].kind == .coalesced)
-    #expect(StrokeTraceFixtures.professionalPressureRamp.samples.allSatisfy {
-        $0.source == .pencil && $0.capabilities == [.pressure]
-    })
-    #expect(StrokeTraceFixtures.professionalTiltSweep.samples.map(\.altitude) == [
-        0.1, 0.6, 1.2,
-    ])
-    #expect(StrokeTraceFixtures.professionalTiltSweep.samples.map(\.azimuth) == [
-        0.25, 0.5, 0.75,
-    ])
-    #expect(StrokeTraceFixtures.professionalTiltSweep.samples.allSatisfy {
-        $0.capabilities.isSuperset(of: [.pressure, .altitude, .azimuth])
-    })
-    #expect(StrokeTraceFixtures.professionalDirectionTurn.samples.contains {
-        $0.kind == .predicted
-    })
-    #expect(StrokeTraceFixtures.professionalDirectionTurn.samples.contains {
-        $0.kind == .actual && $0.timestamp == 50.2 && $0.position == ScreenPoint(x: 256, y: 224)
-    })
-    #expect(StrokeTraceFixtures.professionalGridSeam.samples.contains {
-        $0.position.x < 256
-    })
-    #expect(StrokeTraceFixtures.professionalGridSeam.samples.contains {
-        $0.position.x > 256
-    })
-    #expect(StrokeTraceFixtures.professionalRadialSpoke.samples.first?.position
-        == ScreenPoint(x: 256, y: 256))
-    #expect(StrokeTraceFixtures.professionalRadialSpoke.samples.last?.position
-        == ScreenPoint(x: 448, y: 256))
-    #expect(StrokeTraceFixtures.professionalCorner.samples.map(\.position) == [
-        ScreenPoint(x: 64, y: 448),
-        ScreenPoint(x: 256, y: 448),
-        ScreenPoint(x: 256, y: 256),
-        ScreenPoint(x: 384, y: 256),
-    ])
-    #expect(StrokeTraceFixtures.professionalHatching.samples.map(\.position) == [
-        ScreenPoint(x: 64, y: 128),
-        ScreenPoint(x: 448, y: 128),
-        ScreenPoint(x: 448, y: 160),
-        ScreenPoint(x: 64, y: 160),
-        ScreenPoint(x: 64, y: 192),
-        ScreenPoint(x: 448, y: 192),
-    ])
-    #expect(StrokeTraceFixtures.professionalTap.samples.allSatisfy {
-        $0.source == .mouse && $0.capabilities.isEmpty
-    })
+    #expect(StrokeTraceFixtures.professional.map { $0.samples.map(sample) }
+        == expectedProfessionalCorpus)
 }
+
+private struct ExpectedProfessionalSample: Equatable {
+    let position: ScreenPoint
+    let pressure: Float
+    let timestamp: TimeInterval
+    let phase: StrokePhase
+    let source: StrokeSource
+    let kind: StrokeSampleKind
+    let capabilities: StrokeInputCapabilities
+    let altitude: Float?
+    let azimuth: Float?
+    let roll: Float?
+    let tangentialPressure: Float?
+    let deviceIdentifier: UInt64?
+    let estimationUpdateIndex: Int?
+    let estimatedProperties: StrokeEstimatedProperties
+    let estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties
+}
+
+private func sample(_ sample: StrokeSample) -> ExpectedProfessionalSample {
+    ExpectedProfessionalSample(
+        position: sample.position,
+        pressure: sample.pressure,
+        timestamp: sample.timestamp,
+        phase: sample.phase,
+        source: sample.source,
+        kind: sample.kind,
+        capabilities: sample.capabilities,
+        altitude: sample.altitude,
+        azimuth: sample.azimuth,
+        roll: sample.roll,
+        tangentialPressure: sample.tangentialPressure,
+        deviceIdentifier: sample.deviceIdentifier,
+        estimationUpdateIndex: sample.estimationUpdateIndex,
+        estimatedProperties: sample.estimatedProperties,
+        estimatedPropertiesExpectingUpdates:
+            sample.estimatedPropertiesExpectingUpdates
+    )
+}
+
+private func expected(
+    _ x: Float,
+    _ y: Float,
+    pressure: Float,
+    timestamp: TimeInterval,
+    phase: StrokePhase,
+    source: StrokeSource,
+    kind: StrokeSampleKind = .actual,
+    capabilities: StrokeInputCapabilities,
+    altitude: Float? = nil,
+    azimuth: Float? = nil,
+    roll: Float? = nil,
+    tangentialPressure: Float? = nil,
+    deviceIdentifier: UInt64? = nil,
+    estimationUpdateIndex: Int? = nil,
+    estimatedProperties: StrokeEstimatedProperties = [],
+    estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties = []
+) -> ExpectedProfessionalSample {
+    ExpectedProfessionalSample(
+        position: ScreenPoint(x: x, y: y),
+        pressure: pressure,
+        timestamp: timestamp,
+        phase: phase,
+        source: source,
+        kind: kind,
+        capabilities: capabilities,
+        altitude: altitude,
+        azimuth: azimuth,
+        roll: roll,
+        tangentialPressure: tangentialPressure,
+        deviceIdentifier: deviceIdentifier,
+        estimationUpdateIndex: estimationUpdateIndex,
+        estimatedProperties: estimatedProperties,
+        estimatedPropertiesExpectingUpdates: estimatedPropertiesExpectingUpdates
+    )
+}
+
+private let expectedProfessionalCorpus: [[ExpectedProfessionalSample]] = [
+    [
+        expected(256, 256, pressure: 0.5, timestamp: 1, phase: .began,
+                 source: .mouse, capabilities: []),
+        expected(256, 256, pressure: 0.5, timestamp: 1.01, phase: .ended,
+                 source: .mouse, capabilities: []),
+    ],
+    [
+        expected(64, 128, pressure: 0.5, timestamp: 10, phase: .began,
+                 source: .mouse, capabilities: []),
+        expected(256, 128, pressure: 0.5, timestamp: 11, phase: .moved,
+                 source: .mouse, capabilities: []),
+        expected(448, 128, pressure: 0.5, timestamp: 12, phase: .ended,
+                 source: .mouse, capabilities: []),
+    ],
+    [
+        expected(64, 128, pressure: 0.5, timestamp: 20, phase: .began,
+                 source: .mouse, capabilities: []),
+        expected(256, 128, pressure: 0.5, timestamp: 20.02, phase: .moved,
+                 source: .mouse, capabilities: []),
+        expected(448, 128, pressure: 0.5, timestamp: 20.04, phase: .ended,
+                 source: .mouse, capabilities: []),
+    ],
+    [
+        expected(64, 200, pressure: 0.1, timestamp: 30, phase: .began,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(192, 200, pressure: 0.4, timestamp: 30.1, phase: .moved,
+                 source: .pencil, kind: .coalesced, capabilities: [.pressure]),
+        expected(320, 200, pressure: 0.7, timestamp: 30.2, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(448, 200, pressure: 1, timestamp: 30.3, phase: .ended,
+                 source: .pencil, capabilities: [.pressure]),
+    ],
+    [
+        expected(80, 64, pressure: 0.3, timestamp: 40, phase: .began,
+                 source: .tablet,
+                 capabilities: [.pressure, .altitude, .azimuth], altitude: 0.1,
+                 azimuth: 0.25),
+        expected(80, 256, pressure: 0.6, timestamp: 40.1, phase: .moved,
+                 source: .tablet,
+                 capabilities: [.pressure, .altitude, .azimuth], altitude: 0.6,
+                 azimuth: 0.5),
+        expected(80, 448, pressure: 0.9, timestamp: 40.2, phase: .ended,
+                 source: .tablet,
+                 capabilities: [.pressure, .altitude, .azimuth], altitude: 1.2,
+                 azimuth: 0.75),
+    ],
+    [
+        expected(64, 64, pressure: 0.4, timestamp: 50, phase: .began,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(256, 64, pressure: 0.6, timestamp: 50.1, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(256, 256, pressure: 0.8, timestamp: 50.2, phase: .moved,
+                 source: .pencil, kind: .predicted, capabilities: [.pressure]),
+        expected(256, 224, pressure: 0.8, timestamp: 50.2, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(384, 224, pressure: 1, timestamp: 50.3, phase: .ended,
+                 source: .pencil, capabilities: [.pressure]),
+    ],
+    [
+        expected(64, 448, pressure: 0.5, timestamp: 60, phase: .began,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(256, 448, pressure: 0.5, timestamp: 60.1, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(256, 256, pressure: 0.5, timestamp: 60.2, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(384, 256, pressure: 0.5, timestamp: 60.3, phase: .ended,
+                 source: .pencil, capabilities: [.pressure]),
+    ],
+    [
+        expected(64, 128, pressure: 0.5, timestamp: 70, phase: .began,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(448, 128, pressure: 0.5, timestamp: 70.1, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(448, 160, pressure: 0.5, timestamp: 70.2, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(64, 160, pressure: 0.5, timestamp: 70.3, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(64, 192, pressure: 0.5, timestamp: 70.4, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(448, 192, pressure: 0.5, timestamp: 70.5, phase: .ended,
+                 source: .pencil, capabilities: [.pressure]),
+    ],
+    [
+        expected(224, 320, pressure: 0.5, timestamp: 80, phase: .began,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(256, 320, pressure: 0.5, timestamp: 80.1, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(288, 320, pressure: 0.5, timestamp: 80.2, phase: .ended,
+                 source: .pencil, capabilities: [.pressure]),
+    ],
+    [
+        expected(256, 256, pressure: 0.3, timestamp: 90, phase: .began,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(352, 256, pressure: 0.6, timestamp: 90.1, phase: .moved,
+                 source: .pencil, capabilities: [.pressure]),
+        expected(448, 256, pressure: 0.9, timestamp: 90.2, phase: .ended,
+                 source: .pencil, capabilities: [.pressure]),
+    ],
+]

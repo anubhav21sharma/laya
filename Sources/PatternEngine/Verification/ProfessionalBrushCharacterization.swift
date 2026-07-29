@@ -90,11 +90,13 @@ public struct ProfessionalBrushCharacterizationRecord:
         }
         guard !family.isEmpty,
               !brushID.isEmpty,
+              !brushID.unicodeScalars.contains(where: { $0.value == 0 }),
               definitionSemanticHash.utf8.count == 64,
               definitionSemanticHash.utf8.allSatisfy({
                   (48...57).contains($0) || (97...102).contains($0)
               }),
               !traceName.isEmpty,
+              !traceName.unicodeScalars.contains(where: { $0.value == 0 }),
               !logicalDabDigest.isEmpty
         else {
             throw ProfessionalBrushCharacterizationRecordError.invalidIdentity
@@ -315,7 +317,9 @@ public enum ProfessionalBrushCharacterizer {
         var dabs: [LogicalDab] = []
         var payloads: [BrushCharacterizationDigestPayload] = []
 
-        for sample in trace.samples where sample.kind != .predicted {
+        for sample in trace.samples where sample.kind == .actual
+            || sample.kind == .coalesced
+        {
             let worldSample = input.derive(sample, viewport: viewport)
             sampleCount += 1
             let emit: (LogicalDab) -> Void = { dab in
