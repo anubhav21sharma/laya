@@ -1770,22 +1770,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func prepareCurrentStrokeCommit(
         maximumRetainedBytes: Int
     ) throws {
-        guard var execution = activeStroke else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        guard
-            !execution.commitRequested,
-            execution.pendingRevisions == nil
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let pair = try allocateCurrentStrokeRevisions(
+        try requestCompiledStrokeCommit(
             maximumRetainedBytes: maximumRetainedBytes
         )
-        execution.commitRequested = true
-        execution.commitRetainedByteLimit = maximumRetainedBytes
-        execution.pendingRevisions = pair
-        activeStroke = execution
     }
 
     private func requestCompiledStrokeCommit(

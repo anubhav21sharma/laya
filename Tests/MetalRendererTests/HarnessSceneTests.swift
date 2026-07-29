@@ -3302,6 +3302,58 @@ func encodedIdentityRangeAuditAcceptsExactContiguousMultiRange() throws {
 }
 
 @Test
+func nativeHarnessIdentityRangeReproducesExactFiveHundredDabAudit() throws {
+    let ranges = GridRenderer.nativeEncodedIdentityRanges(
+        totalInstanceCount: 500,
+        newInstanceCount: 500
+    )
+    let audit = try HarnessRunner.auditEncodedInstanceIdentityRanges(
+        sceneName: "five-hundred-dabs",
+        previousEncodedHighWater: 0,
+        emittedHighWater: 500,
+        encodedIdentityRanges: ranges
+    )
+
+    #expect(ranges == [0..<500])
+    #expect(audit.newlyEncodedInstanceCount == 500)
+    #expect(audit.restampedInstanceCount == 0)
+    #expect(audit.encodedHighWater == 500)
+}
+
+@Test
+func nativeHarnessIdentityRangesStayMonotonicAcrossFramesAndResetPerStroke()
+    throws
+{
+    var highWater: UInt64 = 0
+    for (total, newlyEncoded) in [(7, 7), (10, 3), (10, 0)] {
+        let audit = try HarnessRunner.auditEncodedInstanceIdentityRanges(
+            sceneName: "multi-frame",
+            previousEncodedHighWater: highWater,
+            emittedHighWater: UInt64(total),
+            encodedIdentityRanges: GridRenderer.nativeEncodedIdentityRanges(
+                totalInstanceCount: total,
+                newInstanceCount: newlyEncoded
+            )
+        )
+        #expect(audit.newlyEncodedInstanceCount == newlyEncoded)
+        highWater = audit.encodedHighWater
+    }
+    #expect(highWater == 10)
+
+    let resetAudit = try HarnessRunner.auditEncodedInstanceIdentityRanges(
+        sceneName: "next-stroke",
+        previousEncodedHighWater: 0,
+        emittedHighWater: 4,
+        encodedIdentityRanges: GridRenderer.nativeEncodedIdentityRanges(
+            totalInstanceCount: 4,
+            newInstanceCount: 4
+        )
+    )
+    #expect(resetAudit.newlyEncodedInstanceCount == 4)
+    #expect(resetAudit.encodedHighWater == 4)
+}
+
+@Test
 func encodedIdentityRangeAuditRejectsDuplicateOldAndEqualCountSubstitution() {
     #expect(
         throws: HarnessRunError.counterInvariant(

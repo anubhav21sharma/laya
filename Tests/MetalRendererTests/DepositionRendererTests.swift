@@ -1225,6 +1225,62 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
+    func projectedLongStrokeHarnessKeepsNativeLifecycleAcrossFourHundredFrames()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(id: "brush.long-harness")
+        try setup.renderer.activateDrawBrush(brush)
+        let points = HarnessRunner.taskEightLongStrokePoints
+        #expect(points.count == BenchmarkLongStrokeMetrics.segmentCount + 1)
+
+        _ = try setup.renderer.beginFixedProjectedStrokeForHarness(
+            at: points[0]
+        )
+        var previousHighWater: UInt64 = 0
+        let initial = try setup.renderer.flushPendingLiveForHarness()
+        var audit = try HarnessRunner.auditEncodedInstanceIdentityRanges(
+            sceneName: "projected-long-stroke",
+            previousEncodedHighWater: previousHighWater,
+            emittedHighWater: initial.emittedHighWater,
+            encodedIdentityRanges: initial.encodedIdentityRanges
+        )
+        previousHighWater = audit.encodedHighWater
+
+        for point in points.dropFirst() {
+            _ = try setup.renderer.appendFixedProjectedSegmentForHarness(
+                to: point
+            )
+            let frame = try setup.renderer.flushPendingLiveForHarness()
+            audit = try HarnessRunner.auditEncodedInstanceIdentityRanges(
+                sceneName: "projected-long-stroke",
+                previousEncodedHighWater: previousHighWater,
+                emittedHighWater: frame.emittedHighWater,
+                encodedIdentityRanges: frame.encodedIdentityRanges
+            )
+            #expect(audit.newlyEncodedInstanceCount > 0)
+            previousHighWater = audit.encodedHighWater
+        }
+
+        try setup.renderer.endFixedProjectedStrokeForHarness()
+        #expect(setup.renderer.activeStroke != nil)
+        #expect(setup.renderer.activeStroke?.commitRequested == true)
+        #expect(setup.renderer.activeStroke?.pendingRevisions == nil)
+        #expect(
+            setup.renderer.activeStroke?.pendingTokenBearingFrameCount == 0
+        )
+        #expect(
+            setup.renderer.activeStroke?.scheduler?.authoritativeIsDrained
+                == true
+        )
+        #expect(setup.renderer.needsReplayClear)
+        _ = try setup.renderer.finishCommitForHarness()
+        #expect(setup.renderer.isIdle)
+        #expect(previousHighWater > 400)
+    }
+
+    @Test
+    @MainActor
     func nativePreviewMatchesCommittedPixelsWithinOneChannelValue()
         async throws
     {

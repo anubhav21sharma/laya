@@ -248,11 +248,31 @@ extension GridRenderer {
             forceCommandBufferUnavailable:
                 forceCommandBufferUnavailable
         )
+        let totalInstanceCount = counters.totalInstancesThisStroke
         return HarnessLiveFlushResult(
             metrics: frameMetrics,
-            emittedHighWater: UInt64(counters.totalInstancesThisStroke),
-            encodedIdentityRanges: []
+            emittedHighWater: UInt64(totalInstanceCount),
+            encodedIdentityRanges: Self.nativeEncodedIdentityRanges(
+                totalInstanceCount: totalInstanceCount,
+                newInstanceCount: counters.newInstancesThisFrame
+            )
         )
+    }
+
+    nonisolated static func nativeEncodedIdentityRanges(
+        totalInstanceCount: Int,
+        newInstanceCount: Int
+    ) -> [Range<UInt64>] {
+        guard
+            totalInstanceCount >= 0,
+            newInstanceCount > 0,
+            newInstanceCount <= totalInstanceCount
+        else {
+            return []
+        }
+        let upperBound = UInt64(totalInstanceCount)
+        let lowerBound = upperBound - UInt64(newInstanceCount)
+        return [lowerBound..<upperBound]
     }
 
     public func renderOffscreenDisplayForHarness(
