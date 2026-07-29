@@ -99,7 +99,7 @@ private enum BrushDefinitionValidator {
         try sortedUnique(compatibility.sourceSettingKeys, field: "compatibility.sourceSettingKeys")
         try sortedUnique(compatibility.requiredSemanticKeys, field: "compatibility.requiredSemanticKeys")
         try resourcesValidation(resources, coverage: coverage)
-        try coverageValidation(coverage)
+        try coverageValidation(coverage, capabilities: capabilities)
         try limitsValidation(limits)
         try placementValidation(placement, limits: limits)
         try dynamicsValidation(dynamics, limits: limits)
@@ -130,8 +130,35 @@ private enum BrushDefinitionValidator {
         for grain in coverage.grains { if case let .asset(identifier) = grain.grain { guard resources.contains(where: { $0.identifier == identifier && $0.kind == .grain }) else { throw BrushDefinitionValidationError.invalidResource(field: identifier) } } }
     }
     static func fallbackKind(_ identifier: String) -> BrushResourceKind? { identifier.hasPrefix("builtin.shape.") ? .shape : identifier.hasPrefix("builtin.grain.") ? .grain : nil }
-    static func coverageValidation(_ coverage: BrushCoverageDefinition) throws {
+    static func coverageValidation(
+        _ coverage: BrushCoverageDefinition,
+        capabilities: [BrushCapabilityDeclaration]
+    ) throws {
         guard (1...2).contains(coverage.shapes.count), coverage.grains.count <= 2, coverage.shapes[0].combination == .replace else { throw BrushDefinitionValidationError.invalidCoverage(field: "layers") }
+        let declaresDualLayerCapability = capabilities.contains(where: {
+            $0.identifier == BrushCapability.dualShape.rawValue
+                || $0.identifier == BrushCapability.dualGrain.rawValue
+        })
+        if declaresDualLayerCapability,
+           coverage.shapes.count == 2,
+           !capabilities.contains(where: {
+               $0.identifier == BrushCapability.dualShape.rawValue && $0.required
+           })
+        {
+            throw BrushDefinitionValidationError.missingCapability(
+                BrushCapability.dualShape.rawValue
+            )
+        }
+        if declaresDualLayerCapability,
+           coverage.grains.count == 2,
+           !capabilities.contains(where: {
+               $0.identifier == BrushCapability.dualGrain.rawValue && $0.required
+           })
+        {
+            throw BrushDefinitionValidationError.missingCapability(
+                BrushCapability.dualGrain.rawValue
+            )
+        }
         if coverage.shapes.count == 2, coverage.shapes[1].combination == .replace { throw BrushDefinitionValidationError.invalidCoverage(field: "shapes[1].combination") }
         for (index, shape) in coverage.shapes.enumerated() { for (field, value) in [("coverage.shapes[\(index)].scale", shape.scale), ("coverage.shapes[\(index)].rotation", shape.rotation), ("coverage.shapes[\(index)].offset.x", shape.offset.x), ("coverage.shapes[\(index)].offset.y", shape.offset.y)] { try finite(value, field) }; guard shape.scale > 0, shape.scale <= 1_024, abs(shape.rotation) <= 2 * .pi else { throw BrushDefinitionValidationError.outOfRange(field: "coverage.shapes[\(index)]") } }
         for (index, grain) in coverage.grains.enumerated() { for (field, value) in [("coverage.grains[\(index)].transform.scale", grain.transform.scale), ("coverage.grains[\(index)].transform.rotation", grain.transform.rotation), ("coverage.grains[\(index)].transform.offset.x", grain.transform.offset.x), ("coverage.grains[\(index)].transform.offset.y", grain.transform.offset.y)] { try finite(value, field) }; guard grain.transform.scale > 0, grain.transform.scale <= 1_024, abs(grain.transform.rotation) <= 2 * .pi else { throw BrushDefinitionValidationError.outOfRange(field: "coverage.grains[\(index)].transform") }; try range(grain.grainMovementFraction, "coverage.grains[\(index)].grainMovementFraction"); try range(grain.strength, "coverage.grains[\(index)].strength") }

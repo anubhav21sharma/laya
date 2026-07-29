@@ -346,8 +346,10 @@ Pure characterization must prove:
   rotates with travel direction;
 - Graphite Pencil pressure increases size, flow, and opacity; tilt changes
   hardness and grain scale; mouse fallback remains finite and useful;
-- Natural Charcoal produces a wider size/scatter/grain range than Graphite
-  Pencil and remains deterministically seeded;
+- Natural Charcoal produces wider size and scatter spans than Graphite Pencil,
+  plus a wider deterministic randomized grain-offset range; its §7.3
+  tilt/pressure grain-scale endpoints remain exact and it remains
+  deterministically seeded;
 - Chisel Marker rotates with travel direction, preserves its accumulation
   family, and keeps scatter zero;
 - no brush requests wet interaction;

@@ -284,9 +284,11 @@ macOS 14+, iPadOS 18+.
 - Bind the charcoal tip plus multiplied soft-round envelope and bind
   brush-local charcoal plus canonical paper grains; declare `dualShape` and
   `dualGrain` with stable sorted identifiers.
-- Characterization proves a broader size, scatter, and grain response than
-  Graphite Pencil, tilt broadening/softening, deterministic seeded variation,
-  dry breakup, finite mouse fallback, and no interaction.
+- Characterization proves broader size and scatter spans plus a broader
+  deterministic randomized grain-offset range than Graphite Pencil; §7.3
+  tilt/pressure grain-scale endpoints remain exact. It also proves tilt
+  broadening/softening, deterministic seeded variation, dry breakup, finite
+  mouse fallback, and no interaction.
 
 **Steps:**
 

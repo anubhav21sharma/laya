@@ -442,7 +442,7 @@ public enum ProfessionalBrushDefinitions {
                     )
                 ),
                 // §7.3 leaves material scalars open; ordinary dry flow uses
-                // neutral strength and an uncapped accumulation limit.
+                // neutral strength and the full normalized accumulation limit.
                 material: BrushMaterialDefinition(
                     accumulation: .flow,
                     interaction: .none,

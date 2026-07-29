@@ -1,4 +1,5 @@
 import EditorCore
+import Foundation
 import PatternEngine
 import Testing
 
@@ -119,9 +120,51 @@ func professionalCatalogResolvesNaturalCharcoalWithOrderedDualLayers() throws {
     #expect(compiled.definition.material.accumulation == .flow)
     #expect(compiled.definition.material.edgeTreatment == .dryBreakup)
     #expect(compiled.definition.material.interaction == .none)
+    #expect(compiled.definition.material.strength == 1)
+    #expect(compiled.definition.material.accumulationLimit == 1)
+    #expect(compiled.definition.performanceIntent == .realtime120)
     #expect(ProfessionalBrushCatalog.all.map(\.id) == [
         BrushRecipeID("builtin.professional-technical-ink"),
         BrushRecipeID("builtin.professional-graphite-pencil"),
         charcoalID,
     ])
+}
+
+@Test
+func naturalCharcoalValidationRejectsMissingOrOptionalDualLayerCapabilities() throws {
+    #expect(throws: BrushDefinitionValidationError.missingCapability("dualShape")) {
+        try decodeMutatedNaturalCharcoal(removing: "dualShape")
+    }
+    #expect(throws: BrushDefinitionValidationError.missingCapability("dualShape")) {
+        try decodeMutatedNaturalCharcoal(markingOptional: "dualShape")
+    }
+    #expect(throws: BrushDefinitionValidationError.missingCapability("dualGrain")) {
+        try decodeMutatedNaturalCharcoal(removing: "dualGrain")
+    }
+    #expect(throws: BrushDefinitionValidationError.missingCapability("dualGrain")) {
+        try decodeMutatedNaturalCharcoal(markingOptional: "dualGrain")
+    }
+}
+
+private func decodeMutatedNaturalCharcoal(
+    removing identifier: String? = nil,
+    markingOptional optionalIdentifier: String? = nil
+) throws -> BrushDefinition {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    let data = try encoder.encode(ProfessionalBrushCatalog.naturalCharcoal.definition)
+    var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    var capabilities = try #require(object["capabilities"] as? [[String: Any]])
+    if let identifier {
+        capabilities.removeAll { $0["identifier"] as? String == identifier }
+    }
+    if let optionalIdentifier {
+        let index = try #require(capabilities.firstIndex {
+            $0["identifier"] as? String == optionalIdentifier
+        })
+        capabilities[index]["required"] = false
+    }
+    object["capabilities"] = capabilities
+    let mutated = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    return try JSONDecoder().decode(BrushDefinition.self, from: mutated)
 }
