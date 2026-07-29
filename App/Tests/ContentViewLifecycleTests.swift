@@ -225,7 +225,7 @@ func defaultContentViewInitializerDoesNotAllocateRenderer() throws {
 
 @Test
 @MainActor
-func contentViewBootstrapReturnsOnlyAfterNativeBrushesAreInstalled()
+func contentViewBootstrapReturnsOnlyAfterProfessionalBrushesAreInstalled()
     async throws
 {
     guard let device = MTLCreateSystemDefaultDevice() else { return }
@@ -236,13 +236,13 @@ func contentViewBootstrapReturnsOnlyAfterNativeBrushesAreInstalled()
 
     #expect(
         controller.renderer.harnessPreparedDrawBrushIdentity?.definitionID
-            == AnchorBrushCatalog.ink.id
+            == EditorBrushCatalog.defaultDraw.id
     )
     #expect(
         controller.renderer.harnessPreparedEraserBrushIdentity?.definitionID
-            == AnchorBrushCatalog.eraser.id
+            == EditorBrushCatalog.eraser.id
     )
-    #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.ink.id)
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
 }
 
 @Test
@@ -527,7 +527,7 @@ func hostedInkColorWellUpdatesTheEditorController() async throws {
 
 @Test
 @MainActor
-func hostedAnchorPickerUsesOnlyDrawAnchorsAndKeepsNominalDiameter() async throws {
+func hostedBrushPickerUsesOnlyEditorDrawEntriesAndKeepsNominalDiameter() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     var focusRequestCount = 0
@@ -541,18 +541,18 @@ func hostedAnchorPickerUsesOnlyDrawAnchorsAndKeepsNominalDiameter() async throws
 
         await settle(host)
         let picker: NSPopUpButton = try #require(findSubview(in: host))
-        let expectedNames = AnchorBrushCatalog.drawAnchors.map(\.displayName)
-        #expect(expectedNames.allSatisfy { picker.itemTitles.contains($0) })
+        let expectedNames = EditorBrushCatalog.drawEntries.map(\.displayName)
+        #expect(picker.itemTitles == expectedNames)
         #expect(!picker.itemTitles.contains(
             AnchorBrushCatalog.eraser.displayName
         ))
     }
 
     let nominalDiameter = controller.model.brushDiameter
-    for entry in AnchorBrushCatalog.drawAnchors.reversed() {
-        topBar.anchorRecipeBinding.wrappedValue = entry.id
+    for entry in EditorBrushCatalog.drawEntries.reversed() {
+        topBar.editorRecipeBinding.wrappedValue = entry.id
 
-        #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.defaultDraw.id)
+        #expect(controller.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
         #expect(controller.model.brushDiameter == nominalDiameter)
     }
 
@@ -568,16 +568,16 @@ func repeatedRecipeAndToolChangesRemainCoherent() async throws {
         controller: controller,
         requestEditorFocus: {}
     )
-    for entry in AnchorBrushCatalog.drawAnchors {
+    for entry in EditorBrushCatalog.drawEntries {
         controller.handleTool(.erase)
-        topBar.anchorRecipeBinding.wrappedValue = entry.id
+        topBar.editorRecipeBinding.wrappedValue = entry.id
 
         #expect(controller.model.tool == .erase)
-        #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.defaultDraw.id)
+        #expect(controller.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
 
         controller.handleTool(.draw)
         #expect(controller.model.tool == .draw)
-        #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.defaultDraw.id)
+        #expect(controller.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
     }
 }
 

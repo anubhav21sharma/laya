@@ -1078,7 +1078,7 @@ func selectionConfirmsOnlyAfterCompiledRendererActivation() async throws {
         }
     )
     let ink = try await compiler.compileAndActivate(
-        definition: AnchorBrushCatalog.ink.definition
+        definition: EditorBrushCatalog.defaultDraw.definition
     )
     let eraser = try await compiler.compileAndActivate(
         definition: AnchorBrushCatalog.eraser.definition
@@ -1087,10 +1087,10 @@ func selectionConfirmsOnlyAfterCompiledRendererActivation() async throws {
 
     await controller.selectBrush(AnchorBrushCatalog.marker.id)
 
-    #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.marker.id)
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.chiselMarker.id)
     #expect(
         renderer.harnessPreparedDrawBrushIdentity?.definitionID
-            == AnchorBrushCatalog.marker.id
+            == EditorBrushCatalog.chiselMarker.id
     )
 
     controller.handleTool(.erase)
@@ -1110,7 +1110,7 @@ func failedSelectionPreservesInstalledBrushAndModelSelection() async throws {
         compileDefinition: { _ in throw MetalRendererError.unsupportedBrushProgram }
     )
     let ink = try await compiler.compileAndActivate(
-        definition: AnchorBrushCatalog.ink.definition
+        definition: EditorBrushCatalog.defaultDraw.definition
     )
     let eraser = try await compiler.compileAndActivate(
         definition: AnchorBrushCatalog.eraser.definition
@@ -1141,13 +1141,13 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
         }
     )
     let ink = try await compiler.compileAndActivate(
-        definition: AnchorBrushCatalog.ink.definition
+        definition: EditorBrushCatalog.defaultDraw.definition
     )
     let eraser = try await compiler.compileAndActivate(
         definition: AnchorBrushCatalog.eraser.definition
     )
     let marker = try await compiler.compileAndActivate(
-        definition: AnchorBrushCatalog.marker.definition
+        definition: EditorBrushCatalog.chiselMarker.definition
     )
     let airbrush = try await compiler.compileAndActivate(
         definition: AnchorBrushCatalog.airbrush.definition
@@ -1157,10 +1157,10 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
     let staleSelection = Task { @MainActor in
         await controller.selectBrush(AnchorBrushCatalog.marker.id)
     }
-    for _ in 0..<32 where !gate.pendingIDs.contains(AnchorBrushCatalog.marker.id) {
+    for _ in 0..<32 where !gate.pendingIDs.contains(EditorBrushCatalog.chiselMarker.id) {
         await Task.yield()
     }
-    #expect(gate.pendingIDs == [AnchorBrushCatalog.marker.id])
+    #expect(gate.pendingIDs == [EditorBrushCatalog.chiselMarker.id])
 
     let currentSelection = Task { @MainActor in
         await controller.selectBrush(AnchorBrushCatalog.airbrush.id)
@@ -1169,7 +1169,7 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
         await Task.yield()
     }
     #expect(Set(gate.pendingIDs) == [
-        AnchorBrushCatalog.marker.id,
+        EditorBrushCatalog.chiselMarker.id,
         AnchorBrushCatalog.airbrush.id,
     ])
 
@@ -1181,7 +1181,7 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
             == airbrush.renderIdentity
     )
 
-    try gate.complete(AnchorBrushCatalog.marker.id, with: marker)
+    try gate.complete(EditorBrushCatalog.chiselMarker.id, with: marker)
     await staleSelection.value
     #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.airbrush.id)
     #expect(
@@ -1204,7 +1204,7 @@ func selectionDuringStrokeLeavesCurrentIdentityUntilNextStroke()
         }
     )
     let ink = try await compiler.compileAndActivate(
-        definition: AnchorBrushCatalog.ink.definition
+        definition: EditorBrushCatalog.defaultDraw.definition
     )
     let eraser = try await compiler.compileAndActivate(
         definition: AnchorBrushCatalog.eraser.definition
@@ -1220,13 +1220,13 @@ func selectionDuringStrokeLeavesCurrentIdentityUntilNextStroke()
     )
     #expect(activeIdentity == ink.renderIdentity)
     await controller.selectBrush(AnchorBrushCatalog.marker.id)
-    #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.ink.id)
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
     #expect(renderer.harnessActiveStrokeStyle?.renderIdentity == activeIdentity)
     #expect(renderer.harnessPreparedDrawBrushIdentity == activeIdentity)
 
     controller.handleStrokeSample(controllerSample(.cancelled))
     await controller.selectBrush(AnchorBrushCatalog.marker.id)
-    #expect(controller.model.selectedRecipeID == AnchorBrushCatalog.marker.id)
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.chiselMarker.id)
 
     controller.handleStrokeSample(
         controllerSample(.began, timestamp: 3)
@@ -1301,7 +1301,7 @@ func pointerDownDoesNotCompileABrushProgram() throws {
 
 @Test
 @MainActor
-func anchorCatalogInitializesAllProgramsBeforePointerInputInFreshProcess()
+func editorCatalogInitializesAllProgramsBeforePointerInputInFreshProcess()
     throws
 {
     if ProcessInfo.processInfo.environment[
@@ -1314,10 +1314,10 @@ func anchorCatalogInitializesAllProgramsBeforePointerInputInFreshProcess()
             spy.record()
         }) {
             let model = EditorModel()
-            #expect(spy.count == 1)
-            #expect(model.selectedProgram == AnchorBrushCatalog.ink.program)
-            #expect(AnchorBrushCatalog.all.count == 6)
-            #expect(spy.count == 6)
+            #expect(spy.count == 2)
+            #expect(model.selectedProgram == EditorBrushCatalog.defaultDraw.program)
+            #expect(EditorBrushCatalog.drawEntries.count == 6)
+            #expect(spy.count == 12)
 
             let controller = EditorSessionController(
                 model: model,
@@ -1326,7 +1326,7 @@ func anchorCatalogInitializesAllProgramsBeforePointerInputInFreshProcess()
             controller.handleTool(.erase)
             controller.handleStrokeSample(controllerSample(.began))
             controller.handleStrokeSample(controllerSample(.cancelled))
-            #expect(spy.count == 6)
+            #expect(spy.count == 12)
         }
         return
     }
@@ -1349,7 +1349,7 @@ private func runFreshAnchorCatalogSubprocess()
     process.arguments = [
         "--test-bundle-path", testExecutablePath,
         "--filter",
-        "anchorCatalogInitializesAllProgramsBeforePointerInputInFreshProcess",
+        "editorCatalogInitializesAllProgramsBeforePointerInputInFreshProcess",
         testExecutablePath,
         "--testing-library", "swift-testing",
     ]

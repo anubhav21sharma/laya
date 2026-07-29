@@ -11,8 +11,8 @@ func editorModelDefaultsToGrid() {
     #expect(model.inkColor == .black)
     #expect(model.brushDiameter == 20)
     #expect(model.eraserStrength == 1)
-    #expect(model.selectedRecipeID == AnchorBrushCatalog.defaultDraw.id)
-    #expect(model.selectedProgram == AnchorBrushCatalog.defaultDraw.program)
+    #expect(model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
+    #expect(model.selectedProgram == EditorBrushCatalog.defaultDraw.program)
     #expect(model.showGrid == false)
     #expect(model.tiling == .grid)
     #expect(model.pixelSize == PixelSize(width: 256, height: 256))
@@ -27,14 +27,14 @@ func editorModelConfirmsOnlyCatalogDrawRecipes() {
     let model = EditorModel()
 
     model.confirmRecipe(AnchorBrushCatalog.dryMedia.id)
-    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryMedia.id)
-    #expect(model.selectedProgram == AnchorBrushCatalog.dryMedia.program)
+    #expect(model.selectedRecipeID == EditorBrushCatalog.graphitePencil.id)
+    #expect(model.selectedProgram == EditorBrushCatalog.graphitePencil.program)
 
     model.confirmRecipe(AnchorBrushCatalog.eraser.id)
-    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryMedia.id)
+    #expect(model.selectedRecipeID == EditorBrushCatalog.graphitePencil.id)
 
     model.confirmRecipe(BrushRecipeID("missing.recipe"))
-    #expect(model.selectedRecipeID == AnchorBrushCatalog.dryMedia.id)
+    #expect(model.selectedRecipeID == EditorBrushCatalog.graphitePencil.id)
 }
 
 @MainActor
@@ -44,7 +44,7 @@ func editorModelResetsStaleBoundedWashSelectionToNativeInk() {
 
     model.confirmRecipe(BrushRecipeID("builtin.bounded-wash"))
 
-    #expect(model.selectedRecipeID == AnchorBrushCatalog.ink.id)
+    #expect(model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
     #expect(model.lastBrushSelectionDiagnostic == "staleBuiltinBoundedWash")
 }
 

@@ -435,7 +435,8 @@ final class EditorSessionController {
         guard renderer.isIdle,
               transaction.state == .idle,
               transaction.pendingOperation == nil,
-              let entry = AnchorBrushCatalog.drawEntry(for: id)
+              let resolvedID = EditorBrushCatalog.resolveSelection(id),
+              let entry = EditorBrushCatalog.drawEntry(for: resolvedID)
         else { return }
         do {
             let compiled = try await compileDefinition(entry.definition)
@@ -446,7 +447,7 @@ final class EditorSessionController {
             else { return }
             try renderer.activateDrawBrush(compiled)
             activeDrawBrush = compiled
-            model.confirmRecipe(id)
+            model.confirmRecipe(resolvedID)
         } catch let error as MetalRendererError {
             if generation == selectionGeneration {
                 report(error)

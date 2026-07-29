@@ -12,6 +12,17 @@ enum BrushLabManualGesture:
     case curve
     case zigZag
     case directionReversal
+    case pressureRamp
+    case tiltSweep
+    case sharpCorner
+    case crossHatch
+    case repeatedBuildup
+    case periodicSeamCrossing
+    case radialRotation
+    case radialReflection
+    case eraserRetrace
+    case mouseFallback
+    case tabletInput
 }
 
 enum BrushLabManualBackground:
@@ -92,6 +103,16 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
         }.sorted { $0.cardID < $1.cardID }
     }()
 
+    /// Stage 5 professional review cards. The Stage 4 `fixedMatrix` above is
+    /// intentionally retained unchanged as diagnostic evidence.
+    static let professionalFixedMatrix: [BrushLabManualCard] = {
+        ProfessionalBrushCatalog.all.flatMap { entry in
+            professionalScenarios.map { scenario in
+                BrushLabManualCard(entry: entry, scenario: scenario)
+            }
+        }.sorted { $0.cardID < $1.cardID }
+    }()
+
     private init(anchor: AnchorBrushEntry, scenario: Scenario) {
         schemaVersion = Self.schemaVersion
         brushID = anchor.id.rawValue
@@ -108,6 +129,39 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
         substrate = anchor.role == .erase
             ? .recordedOpaqueStroke
             : .none
+        cardID = Self.makeID(
+            brushID: brushID,
+            gesture: gesture,
+            diameter: diameter,
+            pressureProfile: pressureProfile,
+            inputCapabilities: inputCapabilities,
+            documentConfiguration: documentConfiguration,
+            background: background,
+            predictionEnabled: predictionEnabled,
+            paintRGBAHex: paintRGBAHex,
+            customResourceFixture: customResourceFixture,
+            tool: tool,
+            substrate: substrate
+        )
+    }
+
+    private init(
+        entry: ProfessionalBrushEntry,
+        scenario: ProfessionalScenario
+    ) {
+        schemaVersion = Self.schemaVersion
+        brushID = entry.id.rawValue
+        gesture = scenario.gesture
+        diameter = scenario.diameter
+        pressureProfile = scenario.pressureProfile
+        inputCapabilities = scenario.inputCapabilities
+        documentConfiguration = scenario.documentConfiguration
+        background = scenario.background
+        predictionEnabled = scenario.predictionEnabled
+        paintRGBAHex = scenario.paintRGBAHex
+        customResourceFixture = nil
+        tool = .draw
+        substrate = .none
         cardID = Self.makeID(
             brushID: brushID,
             gesture: gesture,
@@ -359,6 +413,40 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
                 ScreenPoint(x: 128, y: 128),
                 ScreenPoint(x: 64, y: 128),
             ]
+        case .pressureRamp, .tiltSweep, .mouseFallback, .tabletInput:
+            [
+                ScreenPoint(x: 48, y: 128),
+                ScreenPoint(x: 88, y: 112),
+                ScreenPoint(x: 128, y: 128),
+                ScreenPoint(x: 168, y: 144),
+                ScreenPoint(x: 208, y: 128),
+            ]
+        case .sharpCorner:
+            [
+                ScreenPoint(x: 48, y: 192),
+                ScreenPoint(x: 128, y: 192),
+                ScreenPoint(x: 128, y: 64),
+                ScreenPoint(x: 208, y: 64),
+            ]
+        case .crossHatch, .repeatedBuildup, .eraserRetrace:
+            [
+                ScreenPoint(x: 56, y: 64),
+                ScreenPoint(x: 200, y: 192),
+                ScreenPoint(x: 56, y: 192),
+                ScreenPoint(x: 200, y: 64),
+            ]
+        case .periodicSeamCrossing:
+            [
+                ScreenPoint(x: 4, y: 128),
+                ScreenPoint(x: 128, y: 128),
+                ScreenPoint(x: 252, y: 128),
+            ]
+        case .radialRotation, .radialReflection:
+            [
+                ScreenPoint(x: 128, y: 24),
+                ScreenPoint(x: 196, y: 92),
+                ScreenPoint(x: 128, y: 232),
+            ]
         }
     }
 
@@ -462,6 +550,17 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
         let customResourceFixture: String?
     }
 
+    private struct ProfessionalScenario {
+        let gesture: BrushLabManualGesture
+        let diameter: Float
+        let pressureProfile: String
+        let inputCapabilities: [String]
+        let documentConfiguration: SymmetryDocumentConfiguration
+        let background: BrushLabManualBackground
+        let predictionEnabled: Bool
+        let paintRGBAHex: String
+    }
+
     private static let periodic = SymmetryDocumentConfiguration.periodic(
         PeriodicSymmetryConfiguration.defaultConfiguration(
             presetID: .grid,
@@ -478,6 +577,15 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
         .radial(
             RadialSymmetryConfiguration(
                 kind: .mirror,
+                rayCount: 8,
+                center: WorldPoint(x: 1_024, y: 1_024)
+            )
+        )
+    )
+    private static let radialRotation = SymmetryDocumentConfiguration.finite(
+        .radial(
+            RadialSymmetryConfiguration(
+                kind: .rotation,
                 rayCount: 8,
                 center: WorldPoint(x: 1_024, y: 1_024)
             )
@@ -548,13 +656,36 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
             }
         }
     }()
+
+    private static let professionalScenarios: [ProfessionalScenario] = [
+        .init(gesture: .tap, diameter: 2, pressureProfile: "low", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .transparent, predictionEnabled: false, paintRGBAHex: "#111111FF"),
+        .init(gesture: .tap, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .transparent, predictionEnabled: false, paintRGBAHex: "#111111FF"),
+        .init(gesture: .tap, diameter: 2_000, pressureProfile: "high", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .transparent, predictionEnabled: false, paintRGBAHex: "#111111FF"),
+        .init(gesture: .slowLine, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .opaque, predictionEnabled: false, paintRGBAHex: "#111111FF"),
+        .init(gesture: .fastLine, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .opaque, predictionEnabled: true, paintRGBAHex: "#111111FF"),
+        .init(gesture: .pressureRamp, diameter: 20, pressureProfile: "high", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .transparent, predictionEnabled: false, paintRGBAHex: "#111111FF"),
+        .init(gesture: .tiltSweep, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure", "altitude", "azimuth", "roll"], documentConfiguration: .finite(.plain), background: .transparent, predictionEnabled: true, paintRGBAHex: "#111111FF"),
+        .init(gesture: .curve, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .opaque, predictionEnabled: false, paintRGBAHex: "#C43A52FF"),
+        .init(gesture: .sharpCorner, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .opaque, predictionEnabled: false, paintRGBAHex: "#C43A52FF"),
+        .init(gesture: .crossHatch, diameter: 20, pressureProfile: "high", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .opaque, predictionEnabled: false, paintRGBAHex: "#245EC7FF"),
+        .init(gesture: .repeatedBuildup, diameter: 20, pressureProfile: "high", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .opaque, predictionEnabled: false, paintRGBAHex: "#245EC7FF"),
+        .init(gesture: .periodicSeamCrossing, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure"], documentConfiguration: periodic, background: .transparent, predictionEnabled: true, paintRGBAHex: "#111111FF"),
+        .init(gesture: .radialRotation, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure"], documentConfiguration: radialRotation, background: .transparent, predictionEnabled: true, paintRGBAHex: "#111111FF"),
+        .init(gesture: .radialReflection, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure"], documentConfiguration: radial, background: .transparent, predictionEnabled: true, paintRGBAHex: "#111111FF"),
+        .init(gesture: .eraserRetrace, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure"], documentConfiguration: .finite(.plain), background: .opaque, predictionEnabled: false, paintRGBAHex: "#111111FF"),
+        .init(gesture: .mouseFallback, diameter: 20, pressureProfile: "medium", inputCapabilities: [], documentConfiguration: .finite(.plain), background: .transparent, predictionEnabled: false, paintRGBAHex: "#111111FF"),
+        .init(gesture: .tabletInput, diameter: 20, pressureProfile: "medium", inputCapabilities: ["pressure", "altitude", "azimuth", "roll"], documentConfiguration: .finite(.plain), background: .transparent, predictionEnabled: true, paintRGBAHex: "#111111FF"),
+    ]
 }
 
 struct BrushLabManualAssessment: Codable, Equatable, Sendable {
     let cardID: String
     let responsiveness: String?
     let edgeQuality: String?
+    let taperTermination: String?
     let textureCohesion: String?
+    let pressureResponse: String?
+    let tiltDirectionResponse: String?
     let buildup: String?
     let symmetryBehavior: String?
     let eraserMatch: String?
@@ -564,7 +695,10 @@ struct BrushLabManualAssessment: Codable, Equatable, Sendable {
         cardID: String,
         responsiveness: String? = nil,
         edgeQuality: String? = nil,
+        taperTermination: String? = nil,
         textureCohesion: String? = nil,
+        pressureResponse: String? = nil,
+        tiltDirectionResponse: String? = nil,
         buildup: String? = nil,
         symmetryBehavior: String? = nil,
         eraserMatch: String? = nil,
@@ -573,7 +707,10 @@ struct BrushLabManualAssessment: Codable, Equatable, Sendable {
         self.cardID = cardID
         self.responsiveness = responsiveness
         self.edgeQuality = edgeQuality
+        self.taperTermination = taperTermination
         self.textureCohesion = textureCohesion
+        self.pressureResponse = pressureResponse
+        self.tiltDirectionResponse = tiltDirectionResponse
         self.buildup = buildup
         self.symmetryBehavior = symmetryBehavior
         self.eraserMatch = eraserMatch
@@ -584,7 +721,10 @@ struct BrushLabManualAssessment: Codable, Equatable, Sendable {
         case cardID
         case responsiveness
         case edgeQuality
+        case taperTermination
         case textureCohesion
+        case pressureResponse
+        case tiltDirectionResponse
         case buildup
         case symmetryBehavior
         case eraserMatch
@@ -596,7 +736,19 @@ struct BrushLabManualAssessment: Codable, Equatable, Sendable {
         try container.encode(cardID, forKey: .cardID)
         try container.encode(responsiveness, forKey: .responsiveness)
         try container.encode(edgeQuality, forKey: .edgeQuality)
+        try container.encodeIfPresent(
+            taperTermination,
+            forKey: .taperTermination
+        )
         try container.encode(textureCohesion, forKey: .textureCohesion)
+        try container.encodeIfPresent(
+            pressureResponse,
+            forKey: .pressureResponse
+        )
+        try container.encodeIfPresent(
+            tiltDirectionResponse,
+            forKey: .tiltDirectionResponse
+        )
         try container.encode(buildup, forKey: .buildup)
         try container.encode(
             symmetryBehavior,
@@ -627,6 +779,47 @@ struct BrushLabManualCatalog: Codable, Equatable, Sendable {
         cards: [BrushLabManualCard] = BrushLabManualCard.fixedMatrix
     ) -> BrushLabManualCatalog {
         BrushLabManualCatalog(
+            cards: cards,
+            assessments: cards.map {
+                BrushLabManualAssessment(cardID: $0.cardID)
+            }
+        )
+    }
+
+    func encoded() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [
+            .prettyPrinted,
+            .sortedKeys,
+            .withoutEscapingSlashes,
+        ]
+        return try encoder.encode(self)
+    }
+}
+
+/// Stage 5 professional evidence export. Its separate schema keeps the Stage
+/// 4 diagnostic catalog byte-stable and prevents old evidence being presented
+/// as professional review material.
+struct BrushLabProfessionalManualCatalog: Codable, Equatable, Sendable {
+    static let schemaVersion: UInt16 = 2
+
+    let schemaVersion: UInt16
+    let cards: [BrushLabManualCard]
+    let assessments: [BrushLabManualAssessment]
+
+    init(
+        cards: [BrushLabManualCard],
+        assessments: [BrushLabManualAssessment]
+    ) {
+        schemaVersion = Self.schemaVersion
+        self.cards = cards
+        self.assessments = assessments
+    }
+
+    static func pending(
+        cards: [BrushLabManualCard] = BrushLabManualCard.professionalFixedMatrix
+    ) -> BrushLabProfessionalManualCatalog {
+        BrushLabProfessionalManualCatalog(
             cards: cards,
             assessments: cards.map {
                 BrushLabManualAssessment(cardID: $0.cardID)

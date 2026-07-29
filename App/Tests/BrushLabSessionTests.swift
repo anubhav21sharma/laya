@@ -12,6 +12,95 @@ import Testing
 @MainActor
 struct BrushLabSessionTests {
     @Test
+    func professionalManualCardMatrixCoversEveryRequiredStageFiveReview() {
+        let cards = BrushLabManualCard.professionalFixedMatrix
+        let professionalIDs = Set(
+            ProfessionalBrushCatalog.all.map(\.id.rawValue)
+        )
+
+        #expect(cards.map(\.cardID) == cards.map(\.cardID).sorted())
+        #expect(Set(cards.map(\.brushID)) == professionalIDs)
+        #expect(cards.allSatisfy { $0.tool == .draw })
+
+        for brushID in professionalIDs {
+            let brushCards = cards.filter { $0.brushID == brushID }
+            let expectedGestures: Set<BrushLabManualGesture> = [
+                .tap,
+                .slowLine,
+                .fastLine,
+                .pressureRamp,
+                .tiltSweep,
+                .curve,
+                .sharpCorner,
+                .crossHatch,
+                .repeatedBuildup,
+                .periodicSeamCrossing,
+                .radialRotation,
+                .radialReflection,
+                .eraserRetrace,
+                .mouseFallback,
+                .tabletInput,
+            ]
+            #expect(expectedGestures.isSubset(of: Set(brushCards.map(\.gesture))))
+            let tapDiameters = Set(
+                brushCards.filter { $0.gesture == .tap }.map(\.diameter)
+            )
+            #expect(tapDiameters == [2, 20, 2_000])
+        }
+    }
+
+    @Test
+    func professionalManualAssessmentsStartUnsetAndRemainUserOwned() {
+        let assessment = BrushLabManualAssessment(
+            cardID: "builtin.professional-technical-ink.manual"
+        )
+
+        #expect(assessment.responsiveness == nil)
+        #expect(assessment.edgeQuality == nil)
+        #expect(assessment.taperTermination == nil)
+        #expect(assessment.textureCohesion == nil)
+        #expect(assessment.pressureResponse == nil)
+        #expect(assessment.tiltDirectionResponse == nil)
+        #expect(assessment.buildup == nil)
+        #expect(assessment.symmetryBehavior == nil)
+        #expect(assessment.eraserMatch == nil)
+        #expect(assessment.notes == nil)
+    }
+
+    @Test
+    func professionalManualExportIsSeparateFromStageFourDiagnosticEvidence()
+        throws
+    {
+        let stageFour = try BrushLabManualCatalog.pending().encoded()
+        let professional = try BrushLabProfessionalManualCatalog.pending()
+            .encoded()
+        let decoded = try JSONDecoder().decode(
+            BrushLabProfessionalManualCatalog.self,
+            from: professional
+        )
+
+        #expect(stageFour != professional)
+        #expect(decoded.schemaVersion == 2)
+        #expect(decoded.cards == BrushLabManualCard.professionalFixedMatrix)
+        #expect(decoded.assessments.allSatisfy {
+            $0.responsiveness == nil
+                && $0.edgeQuality == nil
+                && $0.taperTermination == nil
+                && $0.textureCohesion == nil
+                && $0.pressureResponse == nil
+                && $0.tiltDirectionResponse == nil
+                && $0.buildup == nil
+                && $0.symmetryBehavior == nil
+                && $0.eraserMatch == nil
+                && $0.notes == nil
+        })
+
+        guard let runtime = try makeRuntime() else { return }
+        #expect(try runtime.session.makeProfessionalManualCardsData()
+            == professional)
+    }
+
+    @Test
     func fixedManualCardMatrixCoversEveryAnchorAndRequiredDimension() {
         let cards = BrushLabManualCard.fixedMatrix
         let anchorIDs = Set(AnchorBrushCatalog.all.map(\.id.rawValue))
@@ -24,9 +113,14 @@ struct BrushLabSessionTests {
         for anchorID in anchorIDs {
             let anchorCards = cards.filter { $0.brushID == anchorID }
             #expect(anchorCards.count == 52)
-            #expect(Set(anchorCards.map(\.gesture)) == Set(
-                BrushLabManualGesture.allCases
-            ))
+            #expect(Set(anchorCards.map(\.gesture)) == [
+                .tap,
+                .slowLine,
+                .fastLine,
+                .curve,
+                .zigZag,
+                .directionReversal,
+            ])
             #expect(Set(anchorCards.map(\.diameter)) == [2, 20, 2_000])
             #expect(Set(anchorCards.map(\.pressureProfile)) == [
                 "high",

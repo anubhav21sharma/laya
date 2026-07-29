@@ -8,7 +8,7 @@ public final class EditorModel {
     public private(set) var inkColor: InkColor = .black
     public private(set) var brushDiameter: Float = 20
     public private(set) var eraserStrength: Float = 1
-    public private(set) var selectedRecipeID = AnchorBrushCatalog.defaultDraw.id
+    public private(set) var selectedRecipeID = EditorBrushCatalog.defaultDraw.id
     public private(set) var lastBrushSelectionDiagnostic: String?
     public private(set) var showGrid = false
     public private(set) var pixelSize =
@@ -27,8 +27,8 @@ public final class EditorModel {
     public private(set) var isBusy = false
 
     public var selectedProgram: BrushProgram {
-        AnchorBrushCatalog.drawEntry(for: selectedRecipeID)?.program
-            ?? AnchorBrushCatalog.defaultDraw.program
+        EditorBrushCatalog.drawEntry(for: selectedRecipeID)?.program
+            ?? EditorBrushCatalog.defaultDraw.program
     }
 
     public var tiling: TilingKind {
@@ -82,14 +82,14 @@ public final class EditorModel {
 
     public func confirmRecipe(_ recipeID: BrushRecipeID) {
         if recipeID.rawValue == "builtin.bounded-wash" {
-            selectedRecipeID = AnchorBrushCatalog.defaultDraw.id
+            selectedRecipeID = EditorBrushCatalog.defaultDraw.id
             lastBrushSelectionDiagnostic = "staleBuiltinBoundedWash"
             return
         }
-        guard AnchorBrushCatalog.drawEntry(for: recipeID) != nil else {
+        guard let resolved = EditorBrushCatalog.resolveSelection(recipeID) else {
             return
         }
-        selectedRecipeID = recipeID
+        selectedRecipeID = resolved
         lastBrushSelectionDiagnostic = nil
     }
 

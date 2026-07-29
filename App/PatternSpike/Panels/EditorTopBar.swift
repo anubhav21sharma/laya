@@ -49,8 +49,8 @@ struct EditorTopBar: View {
             Divider()
                 .frame(height: 20)
 
-            Picker("Brush", selection: anchorRecipeBinding) {
-                ForEach(AnchorBrushCatalog.drawAnchors, id: \.id) { entry in
+            Picker("Brush", selection: editorRecipeBinding) {
+                ForEach(EditorBrushCatalog.drawEntries, id: \.id) { entry in
                     Text(entry.displayName)
                         .tag(entry.id)
                 }
@@ -142,10 +142,13 @@ struct EditorTopBar: View {
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .center)
         .background(.bar)
+        // Selection compilation is deliberately not model-busy, so it never
+        // captures unrelated text input or shortcuts. Transaction busy state
+        // retains the existing history-safe control behavior.
         .disabled(controller.model.isBusy)
     }
 
-    var anchorRecipeBinding: Binding<BrushRecipeID> {
+    var editorRecipeBinding: Binding<BrushRecipeID> {
         Binding(
             get: { controller.model.selectedRecipeID },
             set: { recipeID in
@@ -156,6 +159,10 @@ struct EditorTopBar: View {
             }
         )
     }
+
+    // Kept for focused Stage 4 UI tests; production rendering uses the
+    // professional editor catalog through `editorRecipeBinding`.
+    var anchorRecipeBinding: Binding<BrushRecipeID> { editorRecipeBinding }
 
     private var inkColorBinding: Binding<Color> {
         Binding(

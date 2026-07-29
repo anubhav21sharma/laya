@@ -72,10 +72,10 @@ func makeBootstrapEditorSession(
         }
     )
     let draw = try await compiler.compileAndActivate(
-        definition: AnchorBrushCatalog.defaultDraw.definition
+        definition: EditorBrushCatalog.defaultDraw.definition
     )
     let eraser = try await compiler.compileAndActivate(
-        definition: AnchorBrushCatalog.eraser.definition
+        definition: EditorBrushCatalog.eraser.definition
     )
     try controller.installBootstrapBrushes(draw: draw, eraser: eraser)
     return controller

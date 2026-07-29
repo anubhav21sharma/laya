@@ -202,6 +202,8 @@ final class BrushLabSession {
     private(set) var deterministicSeed: UInt64 = 1
     private(set) var frameMetrics = BrushLabFrameMetrics()
     private(set) var manualCards = BrushLabManualCard.fixedMatrix
+    private(set) var professionalManualCards =
+        BrushLabManualCard.professionalFixedMatrix
     private(set) var selectedManualCardID: String?
     private(set) var completedReplay: BrushLabCompletedReplay?
     private(set) var manualAssessments: [String: BrushLabManualAssessment] =
@@ -209,6 +211,13 @@ final class BrushLabSession {
             uniqueKeysWithValues: BrushLabManualCard.fixedMatrix.map {
                 ($0.cardID, BrushLabManualAssessment(cardID: $0.cardID))
             }
+        )
+    private(set) var professionalManualAssessments:
+        [String: BrushLabManualAssessment] = Dictionary(
+            uniqueKeysWithValues:
+                BrushLabManualCard.professionalFixedMatrix.map {
+                    ($0.cardID, BrushLabManualAssessment(cardID: $0.cardID))
+                }
         )
     private(set) var depositionMetrics = DebugDepositionSnapshot()
     private(set) var isLoading = false
@@ -881,6 +890,16 @@ final class BrushLabSession {
             cards: manualCards,
             assessments: manualCards.compactMap {
                 manualAssessments[$0.cardID]
+            }
+        )
+        return try bundle.encoded()
+    }
+
+    func makeProfessionalManualCardsData() throws -> Data {
+        let bundle = BrushLabProfessionalManualCatalog(
+            cards: professionalManualCards,
+            assessments: professionalManualCards.compactMap {
+                professionalManualAssessments[$0.cardID]
             }
         )
         return try bundle.encoded()
