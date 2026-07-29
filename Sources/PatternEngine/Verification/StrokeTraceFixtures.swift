@@ -171,6 +171,154 @@ public enum StrokeTraceFixtures {
         long,
     ]
 
+    // These explicit normalized samples are the versioned Stage 5
+    // calibration corpus. Changing them changes characterization baselines.
+    public static let professionalTap = StrokeTraceFixture(
+        name: "professional-tap",
+        samples: [
+            professionalSample(256, 256, timestamp: 1, phase: .began),
+            professionalSample(256, 256, timestamp: 1.01, phase: .ended),
+        ]
+    )
+
+    public static let professionalSlowLine = StrokeTraceFixture(
+        name: "professional-slow-line",
+        samples: [
+            professionalSample(64, 128, timestamp: 10, phase: .began),
+            professionalSample(256, 128, timestamp: 11, phase: .moved),
+            professionalSample(448, 128, timestamp: 12, phase: .ended),
+        ]
+    )
+
+    public static let professionalFastLine = StrokeTraceFixture(
+        name: "professional-fast-line",
+        samples: [
+            professionalSample(64, 128, timestamp: 20, phase: .began),
+            professionalSample(256, 128, timestamp: 20.02, phase: .moved),
+            professionalSample(448, 128, timestamp: 20.04, phase: .ended),
+        ]
+    )
+
+    public static let professionalPressureRamp = StrokeTraceFixture(
+        name: "professional-pressure-ramp",
+        samples: [
+            professionalSample(64, 200, pressure: 0.1, timestamp: 30,
+                               phase: .began, source: .pencil),
+            professionalSample(192, 200, pressure: 0.4, timestamp: 30.1,
+                               phase: .moved, source: .pencil,
+                               kind: .coalesced),
+            professionalSample(320, 200, pressure: 0.7, timestamp: 30.2,
+                               phase: .moved, source: .pencil),
+            professionalSample(448, 200, pressure: 1, timestamp: 30.3,
+                               phase: .ended, source: .pencil),
+        ]
+    )
+
+    public static let professionalTiltSweep = StrokeTraceFixture(
+        name: "professional-tilt-sweep",
+        samples: [
+            professionalSample(80, 64, pressure: 0.3, timestamp: 40,
+                               phase: .began, source: .tablet, altitude: 0.1,
+                               azimuth: 0.25),
+            professionalSample(80, 256, pressure: 0.6, timestamp: 40.1,
+                               phase: .moved, source: .tablet, altitude: 0.6,
+                               azimuth: 0.5),
+            professionalSample(80, 448, pressure: 0.9, timestamp: 40.2,
+                               phase: .ended, source: .tablet, altitude: 1.2,
+                               azimuth: 0.75),
+        ]
+    )
+
+    /// Predicted input is replaced at the same timestamp by an authoritative
+    /// correction before the stroke continues along a new direction.
+    public static let professionalDirectionTurn = StrokeTraceFixture(
+        name: "professional-direction-turn",
+        samples: [
+            professionalSample(64, 64, pressure: 0.4, timestamp: 50,
+                               phase: .began, source: .pencil),
+            professionalSample(256, 64, pressure: 0.6, timestamp: 50.1,
+                               phase: .moved, source: .pencil),
+            professionalSample(256, 256, pressure: 0.8, timestamp: 50.2,
+                               phase: .moved, source: .pencil,
+                               kind: .predicted),
+            professionalSample(256, 224, pressure: 0.8, timestamp: 50.2,
+                               phase: .moved, source: .pencil),
+            professionalSample(384, 224, pressure: 1, timestamp: 50.3,
+                               phase: .ended, source: .pencil),
+        ]
+    )
+
+    public static let professionalCorner = StrokeTraceFixture(
+        name: "professional-corner",
+        samples: [
+            professionalSample(64, 448, pressure: 0.5, timestamp: 60,
+                               phase: .began, source: .pencil),
+            professionalSample(256, 448, pressure: 0.5, timestamp: 60.1,
+                               phase: .moved, source: .pencil),
+            professionalSample(256, 256, pressure: 0.5, timestamp: 60.2,
+                               phase: .moved, source: .pencil),
+            professionalSample(384, 256, pressure: 0.5, timestamp: 60.3,
+                               phase: .ended, source: .pencil),
+        ]
+    )
+
+    /// Connected vertical travel keeps the three horizontal hatch passes in
+    /// one legal stroke lifecycle.
+    public static let professionalHatching = StrokeTraceFixture(
+        name: "professional-hatching",
+        samples: [
+            professionalSample(64, 128, pressure: 0.5, timestamp: 70,
+                               phase: .began, source: .pencil),
+            professionalSample(448, 128, pressure: 0.5, timestamp: 70.1,
+                               phase: .moved, source: .pencil),
+            professionalSample(448, 160, pressure: 0.5, timestamp: 70.2,
+                               phase: .moved, source: .pencil),
+            professionalSample(64, 160, pressure: 0.5, timestamp: 70.3,
+                               phase: .moved, source: .pencil),
+            professionalSample(64, 192, pressure: 0.5, timestamp: 70.4,
+                               phase: .moved, source: .pencil),
+            professionalSample(448, 192, pressure: 0.5, timestamp: 70.5,
+                               phase: .ended, source: .pencil),
+        ]
+    )
+
+    public static let professionalGridSeam = StrokeTraceFixture(
+        name: "professional-grid-seam",
+        samples: [
+            professionalSample(224, 320, pressure: 0.5, timestamp: 80,
+                               phase: .began, source: .pencil),
+            professionalSample(256, 320, pressure: 0.5, timestamp: 80.1,
+                               phase: .moved, source: .pencil),
+            professionalSample(288, 320, pressure: 0.5, timestamp: 80.2,
+                               phase: .ended, source: .pencil),
+        ]
+    )
+
+    public static let professionalRadialSpoke = StrokeTraceFixture(
+        name: "professional-radial-spoke",
+        samples: [
+            professionalSample(256, 256, pressure: 0.3, timestamp: 90,
+                               phase: .began, source: .pencil),
+            professionalSample(352, 256, pressure: 0.6, timestamp: 90.1,
+                               phase: .moved, source: .pencil),
+            professionalSample(448, 256, pressure: 0.9, timestamp: 90.2,
+                               phase: .ended, source: .pencil),
+        ]
+    )
+
+    public static let professional: [StrokeTraceFixture] = [
+        professionalTap,
+        professionalSlowLine,
+        professionalFastLine,
+        professionalPressureRamp,
+        professionalTiltSweep,
+        professionalDirectionTurn,
+        professionalCorner,
+        professionalHatching,
+        professionalGridSeam,
+        professionalRadialSpoke,
+    ]
+
     private static func sample(
         _ x: Float,
         _ y: Float,
@@ -188,6 +336,35 @@ public enum StrokeTraceFixtures {
             source: source,
             kind: kind,
             capabilities: source == .mouse ? [] : [.pressure]
+        )
+    }
+
+    private static func professionalSample(
+        _ x: Float,
+        _ y: Float,
+        pressure: Float = 0.5,
+        timestamp: TimeInterval,
+        phase: StrokePhase,
+        source: StrokeSource = .mouse,
+        kind: StrokeSampleKind = .actual,
+        altitude: Float? = nil,
+        azimuth: Float? = nil
+    ) -> StrokeSample {
+        let capabilities: StrokeInputCapabilities = source == .mouse
+            ? []
+            : altitude == nil && azimuth == nil
+                ? [.pressure]
+                : [.pressure, .altitude, .azimuth]
+        return StrokeSample(
+            position: ScreenPoint(x: x, y: y),
+            pressure: pressure,
+            timestamp: timestamp,
+            phase: phase,
+            source: source,
+            kind: kind,
+            capabilities: capabilities,
+            altitude: altitude,
+            azimuth: azimuth
         )
     }
 
