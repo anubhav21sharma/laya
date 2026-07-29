@@ -71,8 +71,9 @@ struct DebugPerformanceLogRecord: Codable, Equatable, Sendable {
     let snapshot: DebugPerformanceSnapshot
 }
 
-actor DebugPerformanceLogger {
-    nonisolated let logURL: URL
+@MainActor
+final class DebugPerformanceLogger {
+    let logURL: URL
 
     private let sessionID = UUID()
     private var fileHandle: FileHandle?
@@ -151,7 +152,7 @@ actor DebugPerformanceLogger {
         return handle
     }
 
-    private nonisolated static func defaultDirectory() -> URL {
+    private static func defaultDirectory() -> URL {
         let manager = FileManager.default
         let library = manager.urls(
             for: .libraryDirectory,

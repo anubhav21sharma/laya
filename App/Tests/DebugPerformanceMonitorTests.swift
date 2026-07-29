@@ -166,7 +166,8 @@ func debugPerformanceMonitorUsesRendererOwnedDiagnostics() {
 }
 
 @Test
-func debugPerformanceLoggerWritesReviewableJSONLines() async throws {
+@MainActor
+func debugPerformanceLoggerWritesReviewableJSONLines() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -191,23 +192,23 @@ func debugPerformanceLoggerWritesReviewableJSONLines() async throws {
         gridVisible: true
     )
 
-    try await logger.record(
+    try logger.record(
         .sessionStarted,
         snapshot: snapshot,
         gpuName: "Test GPU"
     )
-    try await logger.record(
+    try logger.record(
         .sample,
         snapshot: snapshot,
         gpuName: "Test GPU",
         context: context
     )
-    try await logger.record(
+    try logger.record(
         .sessionEnded,
         snapshot: snapshot,
         gpuName: "Test GPU"
     )
-    try await logger.flush()
+    try logger.flush()
 
     let data = try Data(contentsOf: logger.logURL)
     let decoder = JSONDecoder()

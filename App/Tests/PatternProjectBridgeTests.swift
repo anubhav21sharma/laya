@@ -78,6 +78,71 @@ struct PatternProjectBridgeTests {
 
     @Test
     @MainActor
+    func importedRendererKeepsBrushRuntimeAndCanDraw() throws {
+        guard let (device, library) = try bridgeTestMetal() else {
+            return
+        }
+        let size = PixelSize(width: 64, height: 64)
+        let sourceRenderer = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 160, height: 120),
+            configuration: TilingCanvasConfiguration(
+                pixelSize: size,
+                tiling: .grid
+            )
+        )
+        try sourceRenderer.installNativeHarnessBrushes()
+        let source = EditorSessionController(renderer: sourceRenderer)
+        source.handleInkColor(
+            try #require(
+                InkColor(red: 0.2, green: 0.3, blue: 0.4, alpha: 1)
+            )
+        )
+        source.model.confirmBrushDiameter(32)
+        source.handleGridVisibility(true)
+
+        let importedRenderer = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 160, height: 120),
+            committedSnapshot:
+                sourceRenderer.captureCommittedDocument()
+        )
+        #expect(importedRenderer.preparedBrush(for: .draw) == nil)
+        #expect(importedRenderer.preparedBrush(for: .erase) == nil)
+
+        let imported = try source.replacementSession(
+            renderer: importedRenderer
+        )
+
+        #expect(importedRenderer.preparedBrush(for: .draw) != nil)
+        #expect(importedRenderer.preparedBrush(for: .erase) != nil)
+        #expect(imported.model.inkColor == source.model.inkColor)
+        #expect(imported.model.brushDiameter == 32)
+        #expect(imported.model.showGrid)
+
+        imported.handleStrokeSamples([
+            .mouse(
+                position: ScreenPoint(x: 16, y: 16),
+                timestamp: 1,
+                phase: .began
+            ),
+            .mouse(
+                position: ScreenPoint(x: 48, y: 48),
+                timestamp: 2,
+                phase: .ended
+            ),
+        ])
+        _ = try importedRenderer.completePendingInteractiveStroke()
+
+        #expect(importedRenderer.isIdle)
+        #expect(imported.model.canUndo)
+        #expect(importedRenderer.documentDomainLocked)
+    }
+
+    @Test
+    @MainActor
     func transparentButLogicallyEditedPeriodicProjectStaysLocked()
         throws
     {

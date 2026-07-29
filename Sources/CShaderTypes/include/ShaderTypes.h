@@ -44,7 +44,7 @@ typedef struct PatternGridFrameUniforms {
     PatternFloat2 latticeYAxis;
     PatternFloat2 latticeTranslation;
     PatternUInt32 guideKind;
-    PatternUInt32 padding2;
+    PatternUInt32 showCanvasBoundary;
 } PatternGridFrameUniforms;
 
 typedef struct PatternRadialFrameUniforms {

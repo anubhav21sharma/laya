@@ -115,8 +115,9 @@ func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
             == 88
     )
     #expect(
-        MemoryLayout<PatternGridFrameUniforms>.offset(of: \.padding2)
-            == 92
+        MemoryLayout<PatternGridFrameUniforms>.offset(
+            of: \.showCanvasBoundary
+        ) == 92
     )
 
     #expect(MemoryLayout<PatternClipHalfPlane>.size == 16)

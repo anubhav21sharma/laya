@@ -586,7 +586,7 @@ struct DepositionShaderSourceTests {
             latticeYAxis: SIMD2(0, 1),
             latticeTranslation: .zero,
             guideKind: 0,
-            padding2: 0
+            showCanvasBoundary: 0
         )
         let identityFrame0 = SIMD4<Float>(1, 0, 0, 1)
         let identityFrame1 = SIMD4<Float>(0, 0, 0, 0)

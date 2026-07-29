@@ -83,7 +83,8 @@ public extension GridRenderer {
             commandBuffer: commandBuffer,
             showGridLines: false,
             liveVisible: false,
-            transparentBackground: transparentBackground
+            transparentBackground: transparentBackground,
+            showCanvasBoundary: false
         )
         commandBuffer.commit()
         try waitForHarnessCommand(commandBuffer)

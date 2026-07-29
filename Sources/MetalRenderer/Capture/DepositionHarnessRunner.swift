@@ -2471,7 +2471,7 @@ private extension DepositionHarnessRunner {
             latticeYAxis: SIMD2(0, 1),
             latticeTranslation: .zero,
             guideKind: 0,
-            padding2: 0
+            showCanvasBoundary: 0
         )
     }
 }
@@ -2897,7 +2897,7 @@ private enum DepositionHarnessFixtures {
                 accumulation: .uniformGlaze,
                 edge: .none,
                 shape: .softRound,
-                flow: 0.42
+                flow: 0.55
             )
         case "deposition-marker":
             ExpectedPipeline(
@@ -2905,7 +2905,7 @@ private enum DepositionHarnessFixtures {
                 accumulation: .uniformGlaze,
                 edge: .markerOverlap,
                 shape: .chisel,
-                flow: 0.46
+                flow: 0.65
             )
         case "deposition-airbrush":
             ExpectedPipeline(
@@ -2913,7 +2913,7 @@ private enum DepositionHarnessFixtures {
                 accumulation: .flow,
                 edge: .none,
                 shape: .softRound,
-                flow: 0.14
+                flow: 0.3
             )
         case "deposition-erase":
             ExpectedPipeline(

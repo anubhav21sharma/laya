@@ -83,6 +83,33 @@ struct RadialShaderTests {
 
     @Test
     @MainActor
+    func finiteCanvasBoundaryRemainsVisibleWhenGridIsHidden() throws {
+        let configuration = RadialSymmetryConfiguration(
+            kind: .mandala,
+            rayCount: 8,
+            center: WorldPoint(x: 64, y: 64)
+        )
+        guard let renderer = try makeRadialRenderer(configuration) else {
+            return
+        }
+
+        let display = try renderer.renderOffscreenDisplayForHarness(
+            width: 128,
+            height: 128,
+            showGridLines: false
+        )
+        let bytes = radialTextureBytes(display.texture)
+        let edgeOffset = (64 * 128) * 4
+        let centerOffset = (64 * 128 + 64) * 4
+
+        #expect(
+            Array(bytes[edgeOffset..<(edgeOffset + 4)])
+                != Array(bytes[centerOffset..<(centerOffset + 4)])
+        )
+    }
+
+    @Test
+    @MainActor
     func radialGeometryLocksOnlyAfterSuccessfulCommit() throws {
         let initial = RadialSymmetryConfiguration(
             kind: .rotation,

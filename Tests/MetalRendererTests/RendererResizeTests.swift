@@ -122,6 +122,30 @@ func resizeGrowPreservesTopLeftAndTransparentFillsRightAndBottom() throws {
 
 @Test
 @MainActor
+func successfulResizeRecentersNewCanvasWithoutChangingZoom() throws {
+    let oldSize = PixelSize(width: 64, height: 72)
+    let newSize = PixelSize(width: 96, height: 80)
+    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else {
+        return
+    }
+    renderer.zoom(
+        by: 1.5,
+        anchor: ScreenPoint(x: 160, y: 120)
+    )
+
+    try renderer.requestResize(
+        token: RendererOperationToken(rawValue: 3),
+        to: newSize,
+        maximumRetainedBytes: 1_000_000
+    )
+    try renderer.finishRasterOperationForHarness()
+
+    #expect(renderer.viewport.worldCenter == WorldPoint(x: 48, y: 40))
+    #expect(renderer.viewport.zoom == 1.5)
+}
+
+@Test
+@MainActor
 func resizeUndoRedoRestoresExactDimensionsBytesAndMonotonicRevision() throws {
     let oldSize = PixelSize(width: 96, height: 80)
     let newSize = PixelSize(width: 64, height: 72)

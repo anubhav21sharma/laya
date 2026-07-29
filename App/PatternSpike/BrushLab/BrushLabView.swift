@@ -457,15 +457,31 @@ struct BrushLabView: View {
                     "Tiling",
                     selection: Binding(
                         get: { runtime.controller.model.tiling },
-                        set: { runtime.controller.handleTiling($0) }
+                        set: { tiling in
+                            guard tiling.isPeriodic else { return }
+                            if !runtime.controller.model.tiling.isPeriodic {
+                                runtime.controller.selectSeamlessPatternMode()
+                            }
+                            runtime.controller.handleTiling(tiling)
+                        }
                     )
                 ) {
+                    if !runtime.controller.model.tiling.isPeriodic {
+                        Text(String(
+                            describing: runtime.controller.model.tiling
+                        ))
+                        .tag(runtime.controller.model.tiling)
+                    }
                     ForEach(TilingKind.periodicCases, id: \.self) {
                         Text(String(describing: $0)).tag($0)
                     }
                 }
                 .pickerStyle(.menu)
                 .frame(maxWidth: 190)
+                .disabled(
+                    runtime.controller.model.documentDomainLocked
+                        && !runtime.controller.model.tiling.isPeriodic
+                )
 
                 Toggle(
                     "Symmetry overlay",

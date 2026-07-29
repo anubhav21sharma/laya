@@ -858,7 +858,7 @@ struct DepositionEncoderTests {
             latticeYAxis: SIMD2(0, 1),
             latticeTranslation: .zero,
             guideKind: 0,
-            padding2: 0
+            showCanvasBoundary: 0
         )
     }
 

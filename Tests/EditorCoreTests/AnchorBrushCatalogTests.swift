@@ -99,3 +99,31 @@ func programRenderStylePreservesNativeFields() throws {
     )
     #expect(AnchorBrushCatalog.defaultDraw == AnchorBrushCatalog.ink)
 }
+
+@Test func dedicatedEraserCanReachFullyTransparentCoverage() {
+    let definition = AnchorBrushCatalog.eraser.definition
+
+    #expect(definition.placement.baseFlow == 1)
+    #expect(definition.placement.strokeOpacity == 1)
+    #expect(definition.placement.baseScatterFraction == 0)
+    #expect(definition.placement.baseJitterFraction == 0)
+    #expect(definition.coverage.baseHardness == 1)
+    #expect(definition.material.strength == 1)
+    #expect(definition.material.accumulationLimit == 1)
+}
+
+@Test func nativeAnchorsUseNominalDiameterWithoutPressureInput() {
+    for entry in AnchorBrushCatalog.all {
+        #expect(entry.definition.dynamics.size.missingInputValue == 1)
+        #expect(entry.definition.dynamics.noPressureNeutral == 1)
+    }
+}
+
+@Test func softAndMarkerAnchorsRetainVisibleNominalFootprints() {
+    #expect(AnchorBrushCatalog.glaze.definition.coverage.baseHardness == 1)
+    #expect(AnchorBrushCatalog.glaze.definition.placement.baseFlow >= 0.5)
+    #expect(AnchorBrushCatalog.airbrush.definition.coverage.baseHardness == 1)
+    #expect(AnchorBrushCatalog.airbrush.definition.placement.baseFlow >= 0.25)
+    #expect(AnchorBrushCatalog.marker.definition.coverage.aspectRatio >= 0.8)
+    #expect(AnchorBrushCatalog.marker.definition.placement.baseFlow >= 0.6)
+}

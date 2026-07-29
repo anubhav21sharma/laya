@@ -2292,6 +2292,53 @@ func cancelShortcutCancelsStrokeWithoutCreatingHistory() throws {
 
 @Test
 @MainActor
+func finiteStrokeFullyOutsideCanvasIsIgnoredWithoutErrorOrHistory() throws {
+    guard let renderer = try makeControllerRenderer(
+        finiteConfiguration: .plain
+    ) else {
+        return
+    }
+    let controller = EditorSessionController(renderer: renderer)
+    var errors: [MetalRendererError] = []
+    controller.onError = { errors.append($0) }
+
+    controller.handleStrokeSamples([
+        controllerSample(.began, x: -100, y: -100, timestamp: 1),
+        controllerSample(.moved, x: -90, y: -90, timestamp: 2),
+        controllerSample(.ended, x: -80, y: -80, timestamp: 3),
+    ])
+
+    #expect(errors.isEmpty)
+    #expect(renderer.isIdle)
+    #expect(!renderer.hasActiveStroke)
+    #expect(!controller.model.canUndo)
+    #expect(controller.lastRecordedRasterCommandForTesting == nil)
+}
+
+@Test
+@MainActor
+func finiteStrokeWhoseBrushFootprintCrossesCanvasEdgeStillBegins() throws {
+    guard let renderer = try makeControllerRenderer(
+        finiteConfiguration: .plain
+    ) else {
+        return
+    }
+    let controller = EditorSessionController(renderer: renderer)
+    controller.model.confirmBrushDiameter(20)
+
+    controller.handleStrokeSample(
+        controllerSample(.began, x: -5, y: 32, timestamp: 1)
+    )
+
+    #expect(renderer.hasActiveStroke)
+    controller.handleStrokeSample(
+        controllerSample(.cancelled, x: -5, y: 32, timestamp: 2)
+    )
+    #expect(renderer.isIdle)
+}
+
+@Test
+@MainActor
 func focusLossPairsSpaceReleaseAndCancelsTheActivePointer() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)

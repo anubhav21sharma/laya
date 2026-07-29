@@ -2096,6 +2096,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         viewport = viewport.zoomed(by: factor, anchorScreen: anchor)
     }
 
+    public func strokeFootprintIntersectsDocument(
+        at screenPoint: ScreenPoint,
+        diameter: Float
+    ) -> Bool {
+        guard diameter.isFinite, diameter > 0 else { return false }
+        guard case .finite = tilingStrategy.documentConfiguration else {
+            return true
+        }
+        let world = viewport.screenToWorld(screenPoint)
+        let radius = diameter * 0.5
+        return world.x + radius > 0
+            && world.y + radius > 0
+            && world.x - radius < Float(pixelSize.width)
+            && world.y - radius < Float(pixelSize.height)
+    }
+
     public func restoreSavedViewport(
         worldCenter: WorldPoint,
         zoom: Float
@@ -2374,10 +2390,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             let hasEarlierPendingUploads = !completedUploadRanges.isEmpty
             let encodedLiveClear: Bool
             let encodedReplayClear: Bool
-            let encoding = try encodeScheduledDeposition(commandBuffer)
-            nativeEncoding = encoding
-            encodedLiveClear = encoding.encodedLiveClear
-            encodedReplayClear = encoding.encodedReplayClear
+            if activeStroke != nil {
+                let encoding = try encodeScheduledDeposition(commandBuffer)
+                nativeEncoding = encoding
+                encodedLiveClear = encoding.encodedLiveClear
+                encodedReplayClear = encoding.encodedReplayClear
+            } else {
+                nativeEncoding = nil
+                encodedLiveClear = false
+                encodedReplayClear = false
+            }
             let plannedSettledThrough = uploads.last {
                 $0.layer == .settled
             }?.throughExclusive ?? liveStroke.bakedHighWater
@@ -3454,7 +3476,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             guideKind:
                 tilingStrategy.compiledSymmetry.displayProgram.guideKind
                     .rawValue,
-            padding2: 0
+            showCanvasBoundary: 0
         )
     }
 
@@ -4595,6 +4617,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         canonicalTexture: (any MTLTexture)? = nil,
         documentPixelMapping: Bool = false,
         transparentBackground: Bool = false,
+        showCanvasBoundary: Bool = true,
         worldCenterOverride: SIMD2<Float>? = nil,
         zoomOverride: Float? = nil
     ) throws {
@@ -4651,6 +4674,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         if let zoomOverride {
             uniforms.zoom = zoomOverride
         }
+        uniforms.showCanvasBoundary = showCanvasBoundary ? 1 : 0
         encoder.setVertexBytes(
             &uniforms,
             length: MemoryLayout<PatternGridFrameUniforms>.stride,
@@ -5043,6 +5067,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func install(_ replacement: PreparedRasterReplacement) {
+        let canvasSizeChanged =
+            replacement.resources.canvasPixelSize != resources.canvasPixelSize
         replacement.resources.liveTile.markCleared()
         replacement.resources.replayTile.markCleared(epoch: 0)
         resources = replacement.resources
@@ -5050,6 +5076,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         radialPageTableTexture = replacement.radialPageTableTexture
         needsLiveClear = false
         needsReplayClear = false
+        if canvasSizeChanged {
+            viewport = ViewportTransform(
+                drawableSize: viewport.drawableSize,
+                worldCenter: WorldPoint(
+                    x: Float(resources.canvasPixelSize.width) * 0.5,
+                    y: Float(resources.canvasPixelSize.height) * 0.5
+                ),
+                zoom: viewport.zoom
+            )
+        }
     }
 
     private func finalizeRestoreToken(

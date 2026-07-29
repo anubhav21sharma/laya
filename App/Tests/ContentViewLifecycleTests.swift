@@ -319,6 +319,39 @@ func editorCanvasReplacesItsNativeViewForAnImportedSession() async throws {
 
 @Test
 @MainActor
+func hostedIdleCanvasPresentsWithoutStrokeLifecycleErrors() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    var errors: [MetalRendererError] = []
+    renderer.onError = { errors.append($0) }
+    let host = NSHostingView(
+        rootView: EditorCanvasHost(
+            controller: controller,
+            brushDiameter: controller.model.brushDiameter,
+            requestEditorFocus: {},
+            pointerCancellationGeneration: 0
+        )
+    )
+    let window = NSWindow(
+        contentRect: CGRect(x: 0, y: 0, width: 640, height: 480),
+        styleMask: [.titled],
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    defer { window.close() }
+
+    await settle(host)
+    try await Task.sleep(for: .milliseconds(100))
+    await settle(host)
+
+    #expect(!errors.contains(.invalidStrokeLifecycle))
+}
+
+@Test
+@MainActor
 func hostedTileFieldReceivesNumberKeyEventsWithoutEditorShortcuts() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
@@ -454,10 +487,27 @@ func hostedInkColorWellUpdatesTheEditorController() async throws {
         requestEditorFocus: { focusRequestCount += 1 }
     )
     let host = NSHostingView(rootView: topBar)
-    host.frame = CGRect(x: 0, y: 0, width: 600, height: 48)
+    let window = NSWindow(
+        contentRect: CGRect(x: 0, y: 0, width: 600, height: 48),
+        styleMask: [.titled],
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    defer {
+        NSColorPanel.shared.close()
+        window.close()
+    }
 
     await settle(host)
     let colorWell: NSColorWell = try #require(findSubview(in: host))
+    NSColorPanel.shared.close()
+    #expect(colorWell.accessibilityPerformPress())
+    await settle(host)
+    #expect(NSColorPanel.shared.isVisible)
+
     colorWell.color = NSColor(
         srgbRed: 0.25,
         green: 0.5,
@@ -472,7 +522,7 @@ func hostedInkColorWellUpdatesTheEditorController() async throws {
     #expect(abs(ink.green - 0.5) < 0.001)
     #expect(abs(ink.blue - 0.75) < 0.001)
     #expect(abs(ink.alpha - 0.8) < 0.001)
-    #expect(focusRequestCount == 1)
+    #expect(focusRequestCount == 0)
 }
 
 @Test

@@ -670,6 +670,57 @@ struct BrushLabSessionTests {
     }
 
     @Test
+    func loadedPackageCanEraseItsOwnRenderedStroke() async throws {
+        guard let runtime = try makeRuntime() else { return }
+        await runtime.session.loadPackage(
+            try makePackage(),
+            sourceName: "eraser-fixture.layabrush"
+        )
+        runtime.controller.selectPlainCanvasMode()
+        runtime.controller.model.confirmBrushDiameter(20)
+        let stroke: [StrokeSample] = [
+            .mouse(
+                position: ScreenPoint(x: 20, y: 32),
+                timestamp: 1,
+                phase: .began
+            ),
+            .mouse(
+                position: ScreenPoint(x: 44, y: 32),
+                timestamp: 2,
+                phase: .moved
+            ),
+            .mouse(
+                position: ScreenPoint(x: 44, y: 32),
+                timestamp: 3,
+                phase: .ended
+            ),
+        ]
+
+        runtime.controller.handleTool(.draw)
+        runtime.controller.handleStrokeSamples(stroke)
+        _ = try runtime.controller.renderer
+            .completePendingInteractiveStroke()
+        let painted = try #require(
+            singleRasterBytes(
+                runtime.controller.renderer.captureCommittedDocument()
+            )
+        )
+
+        runtime.controller.handleTool(.erase)
+        runtime.controller.handleStrokeSamples(stroke)
+        _ = try runtime.controller.renderer
+            .completePendingInteractiveStroke()
+        let erased = try #require(
+            singleRasterBytes(
+                runtime.controller.renderer.captureCommittedDocument()
+            )
+        )
+
+        #expect(alphaSum(painted) > 0)
+        #expect(alphaSum(erased) < alphaSum(painted))
+    }
+
+    @Test
     func loadsConvertedPackageAndReportFromDiskWithoutUI() async throws {
         guard let runtime = try makeRuntime() else { return }
         let source = try SyntheticV1DiagnosticFixture.source(
@@ -904,6 +955,21 @@ struct BrushLabSessionTests {
                 BrushLabManualCard.self,
                 from: mutated
             )
+        }
+    }
+
+    private func singleRasterBytes(
+        _ snapshot: CommittedDocumentSnapshot
+    ) -> [UInt8]? {
+        guard case let .singleRaster(bytes) = snapshot.storage else {
+            return nil
+        }
+        return bytes
+    }
+
+    private func alphaSum(_ pixels: [UInt8]) -> UInt64 {
+        stride(from: 3, to: pixels.count, by: 4).reduce(0) {
+            $0 + UInt64(pixels[$1])
         }
     }
 

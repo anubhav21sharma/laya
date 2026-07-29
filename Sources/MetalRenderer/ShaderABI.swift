@@ -36,8 +36,9 @@ public enum ShaderABI {
             ) == 80
             && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.guideKind)
                 == 88
-            && MemoryLayout<PatternGridFrameUniforms>.offset(of: \.padding2)
-                == 92
+            && MemoryLayout<PatternGridFrameUniforms>.offset(
+                of: \.showCanvasBoundary
+            ) == 92
             && MemoryLayout<PatternRadialFrameUniforms>.size == 64
             && MemoryLayout<PatternRadialFrameUniforms>.stride == 64
             && MemoryLayout<PatternRadialFrameUniforms>.alignment == 8

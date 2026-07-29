@@ -84,6 +84,13 @@ struct EditorTopBar: View {
             .frame(width: editorControlExtent, height: editorControlExtent)
             .accessibilityLabel("Increase Brush Size")
 
+            #if os(macOS)
+            EditorInkColorWell(selection: inkColorBinding)
+                .frame(
+                    width: editorControlExtent,
+                    height: editorControlExtent
+                )
+            #else
             ColorPicker(
                 "Ink Color",
                 selection: inkColorBinding,
@@ -91,6 +98,7 @@ struct EditorTopBar: View {
             )
             .labelsHidden()
             .frame(width: editorControlExtent, height: editorControlExtent)
+            #endif
 
             Divider()
                 .frame(height: 20)
@@ -162,7 +170,6 @@ struct EditorTopBar: View {
                 )
             },
             set: { color in
-                defer { requestEditorFocus() }
                 guard let inkColor = Self.sRGBInkColor(from: color) else {
                     return
                 }
@@ -204,3 +211,68 @@ struct EditorTopBar: View {
         #endif
     }
 }
+
+#if os(macOS)
+private struct EditorInkColorWell: NSViewRepresentable {
+    @Binding var selection: Color
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selection: $selection)
+    }
+
+    func makeNSView(context: Context) -> EditorNSColorWell {
+        let colorWell = EditorNSColorWell(frame: .zero)
+        colorWell.isBordered = true
+        colorWell.isContinuous = true
+        colorWell.target = context.coordinator
+        colorWell.action = #selector(Coordinator.colorChanged(_:))
+        colorWell.setAccessibilityLabel("Ink Color")
+        colorWell.setAccessibilityIdentifier("Ink Color")
+        return colorWell
+    }
+
+    func updateNSView(
+        _ colorWell: EditorNSColorWell,
+        context: Context
+    ) {
+        context.coordinator.selection = $selection
+        colorWell.color = NSColor(selection)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var selection: Binding<Color>
+
+        init(selection: Binding<Color>) {
+            self.selection = selection
+        }
+
+        @objc
+        func colorChanged(_ sender: NSColorWell) {
+            selection.wrappedValue = Color(sender.color)
+        }
+    }
+}
+
+@MainActor
+private final class EditorNSColorWell: NSColorWell {
+    override func mouseDown(with event: NSEvent) {
+        showColorPanel()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        showColorPanel()
+        return true
+    }
+
+    override func accessibilityPerformShowMenu() -> Bool {
+        showColorPanel()
+        return true
+    }
+
+    private func showColorPanel() {
+        activate(true)
+        NSColorPanel.shared.makeKeyAndOrderFront(nil)
+    }
+}
+#endif

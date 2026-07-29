@@ -63,6 +63,40 @@
 				</array>
 			</dict>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Laya Brush</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.anubhav.layabrush</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>layabrush</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>com.apple.package</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Brush Lab Evidence</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.anubhav.brush-lab-evidence</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>brushlabevidence</string>
+				</array>
+			</dict>
+		</dict>
 	</array>
 </dict>
 </plist>

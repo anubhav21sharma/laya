@@ -451,7 +451,10 @@ final class BrushLabSession {
                 Self.diagnosticDescription
             )
             if compiled.program.requestedBackend == .deposition {
-                try controller.installDiagnosticDrawBrush(compiled)
+                try controller.installBootstrapBrushes(
+                    draw: compiled,
+                    eraser: compiled
+                )
                 activeDrawingPackageContentHash = contentHash
                 drawingAvailability = .available
             }

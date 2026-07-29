@@ -224,6 +224,14 @@ final class EditorSessionController {
             apply(.finalizeAwaitingEstimates)
             return
         }
+        if sample.phase == .began,
+           !renderer.strokeFootprintIntersectsDocument(
+               at: sample.position,
+               diameter: model.brushDiameter
+           )
+        {
+            return
+        }
         onNormalizedInput?(sample)
         let event: EditorTransactionEvent
         switch sample.phase {
@@ -470,6 +478,35 @@ final class EditorSessionController {
         try installDiagnosticDrawBrush(draw)
         try renderer.activateEraserBrush(eraser)
         activeEraserBrush = eraser
+    }
+
+    func replacementSession(
+        renderer replacementRenderer: GridRenderer
+    ) throws -> EditorSessionController {
+        guard renderer.isIdle,
+              transaction.state == .idle,
+              transaction.pendingOperation == nil,
+              replacementRenderer.isIdle
+        else {
+            throw MetalRendererError.commitPendingInput
+        }
+        if let activeDrawBrush {
+            try replacementRenderer.activateDrawBrush(activeDrawBrush)
+        }
+        if let activeEraserBrush {
+            try replacementRenderer.activateEraserBrush(activeEraserBrush)
+        }
+
+        let replacement = EditorSessionController(
+            renderer: replacementRenderer,
+            compileDefinition: compileDefinition
+        )
+        replacement.model.confirmTool(model.tool)
+        replacement.model.confirmInkColor(model.inkColor)
+        replacement.model.confirmBrushDiameter(model.brushDiameter)
+        replacement.model.confirmRecipe(model.selectedRecipeID)
+        replacement.handleGridVisibility(model.showGrid)
+        return replacement
     }
 
     func setDiagnosticFixedStrokeSeed(_ seed: UInt64?) throws {

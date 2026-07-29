@@ -60,6 +60,20 @@ targets:
                 - patternproj
               public.mime-type:
                 - application/x-pattern-project
+          - UTTypeIdentifier: com.anubhav.layabrush
+            UTTypeDescription: Laya Brush
+            UTTypeConformsTo:
+              - public.zip-archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - layabrush
+          - UTTypeIdentifier: com.anubhav.brush-lab-evidence
+            UTTypeDescription: Brush Lab Evidence
+            UTTypeConformsTo:
+              - com.apple.package
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - brushlabevidence
         CFBundleDocumentTypes:
           - CFBundleTypeName: Pattern Project
             LSItemContentTypes:
@@ -117,6 +131,20 @@ targets:
                 - patternproj
               public.mime-type:
                 - application/x-pattern-project
+          - UTTypeIdentifier: com.anubhav.layabrush
+            UTTypeDescription: Laya Brush
+            UTTypeConformsTo:
+              - public.zip-archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - layabrush
+          - UTTypeIdentifier: com.anubhav.brush-lab-evidence
+            UTTypeDescription: Brush Lab Evidence
+            UTTypeConformsTo:
+              - com.apple.package
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - brushlabevidence
         CFBundleDocumentTypes:
           - CFBundleTypeName: Pattern Project
             LSItemContentTypes:

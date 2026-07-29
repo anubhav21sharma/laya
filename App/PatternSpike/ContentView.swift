@@ -7,6 +7,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 #if os(macOS)
+import AppKit
+
 let editorControlExtent: CGFloat = 32
 let editorInspectorWidth: CGFloat = 216
 #else
@@ -119,6 +121,7 @@ struct ContentView: View {
     @State private var debugPerformanceMonitor = DebugPerformanceMonitor()
     @State private var debugPerformanceLogger = DebugPerformanceLogger()
     @State private var debugPerformanceLoggingActive = false
+    @State private var debugPerformanceControllerID: ObjectIdentifier?
     #endif
 
     init(controller: EditorSessionController) {
@@ -292,6 +295,13 @@ struct ContentView: View {
         .onChange(of: debugHUDVisible) { _, visible in
             updateDebugPerformanceSampling(controller, visible: visible)
         }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSApplication.willTerminateNotification
+            )
+        ) { _ in
+            updateDebugPerformanceSampling(controller, visible: false)
+        }
         #endif
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
@@ -309,6 +319,7 @@ struct ContentView: View {
             commandActions(for: controller)
         )
         #endif
+        .id(ObjectIdentifier(controller))
     }
 
     private func requestEditorFocus() {
@@ -405,10 +416,28 @@ struct ContentView: View {
                         drawableSize:
                             current.renderer.viewport.drawableSize
                     )
-                    projectIdentity = identity
-                    state = .ready(
-                        EditorSessionController(renderer: renderer)
+                    let replacement = try current.replacementSession(
+                        renderer: renderer
                     )
+                    #if DEBUG && os(macOS)
+                    if debugHUDVisible {
+                        updateDebugPerformanceSampling(
+                            current,
+                            visible: false
+                        )
+                    }
+                    #endif
+                    projectIdentity = identity
+                    state = .ready(replacement)
+                    #if DEBUG && os(macOS)
+                    if debugHUDVisible {
+                        updateDebugPerformanceSampling(
+                            replacement,
+                            visible: true
+                        )
+                    }
+                    #endif
+                    requestEditorFocus()
                 } catch {
                     fileErrorMessage = error.localizedDescription
                 }
@@ -476,28 +505,33 @@ struct ContentView: View {
         let monitor = debugPerformanceMonitor
         let logger = debugPerformanceLogger
         let gpuName = controller.renderer.device.name
+        let controllerID = ObjectIdentifier(controller)
         guard visible else {
-            guard debugPerformanceLoggingActive else { return }
+            guard debugPerformanceControllerID == controllerID else {
+                return
+            }
+            debugPerformanceControllerID = nil
             debugPerformanceLoggingActive = false
             let snapshot = monitor.snapshot
             let context = debugPerformanceContext(controller)
-            Task {
-                try? await logger.record(
-                    .sessionEnded,
-                    snapshot: snapshot,
-                    gpuName: gpuName,
-                    context: context
-                )
-                try? await logger.flush()
-            }
+            try? logger.record(
+                .sessionEnded,
+                snapshot: snapshot,
+                gpuName: gpuName,
+                context: context
+            )
+            try? logger.flush()
             return
         }
+        let startsNewSession =
+            debugPerformanceControllerID != controllerID
+        debugPerformanceControllerID = controllerID
         debugPerformanceLoggingActive = true
-        monitor.reset()
-        print("DEBUG PERF LOG \(logger.logURL.path)")
-        let initialContext = debugPerformanceContext(controller)
-        Task {
-            try? await logger.record(
+        if startsNewSession {
+            monitor.reset()
+            print("DEBUG PERF LOG \(logger.logURL.path)")
+            let initialContext = debugPerformanceContext(controller)
+            try? logger.record(
                 .sessionStarted,
                 snapshot: monitor.snapshot,
                 gpuName: gpuName,
@@ -522,14 +556,12 @@ struct ContentView: View {
             }
             let snapshot = monitor.snapshot
             let context = debugPerformanceContext(controller)
-            Task {
-                try? await logger.record(
-                    .sample,
-                    snapshot: snapshot,
-                    gpuName: gpuName,
-                    context: context
-                )
-            }
+            try? logger.record(
+                .sample,
+                snapshot: snapshot,
+                gpuName: gpuName,
+                context: context
+            )
         }
     }
 

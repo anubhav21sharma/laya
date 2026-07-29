@@ -1713,6 +1713,27 @@ static float4 patternFiniteBilinearComposite(
     );
 }
 
+static float4 patternFiniteCanvasBoundaryOverlay(
+    float4 color,
+    float2 world,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternRadialFrameUniforms& radial
+) {
+    if (frame.showCanvasBoundary == 0) {
+        return color;
+    }
+    const float edgeDistance = min(
+        min(world.x, radial.canvasSize.x - world.x),
+        min(world.y, radial.canvasSize.y - world.y)
+    ) * frame.zoom;
+    const float coverage = 1.0 - smoothstep(0.5, 1.5, edgeDistance);
+    const float alpha = 0.36 * coverage;
+    return patternSourceOver(
+        float4(float3(0.16, 0.18, 0.17) * alpha, alpha),
+        color
+    );
+}
+
 fragment float4 patternRadialGridFragment(
     PatternFullscreenOut input [[stage_in]],
     constant PatternGridFrameUniforms& frame
@@ -1760,7 +1781,12 @@ fragment float4 patternRadialGridFragment(
             material
         );
     }
-    return patternRadialGuideOverlay(result, mapping, frame, radial);
+    return patternFiniteCanvasBoundaryOverlay(
+        patternRadialGuideOverlay(result, mapping, frame, radial),
+        world,
+        frame,
+        radial
+    );
 }
 
 fragment float4 patternCommitFragment(
