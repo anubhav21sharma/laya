@@ -7,7 +7,8 @@ struct DabBufferSubmissionIdentity: Equatable, Sendable {
 
 struct DabInstanceBufferPoolDiagnosticSnapshot: Equatable, Sendable {
     let currentLeaseCount: Int
-    let leaseHighWater: Int
+    let strokeLeaseHighWater: Int
+    let lifetimeLeaseHighWater: Int
 }
 
 @MainActor
@@ -30,13 +31,19 @@ public final class DabInstanceBufferPool {
 
     private let entries: [Entry]
     private var reservationState: DabBufferReservationState
-    private var leaseHighWater = 0
+    private var strokeLeaseHighWater = 0
+    private var lifetimeLeaseHighWater = 0
 
     var diagnosticSnapshot: DabInstanceBufferPoolDiagnosticSnapshot {
         DabInstanceBufferPoolDiagnosticSnapshot(
             currentLeaseCount: unavailableSlotCount,
-            leaseHighWater: leaseHighWater
+            strokeLeaseHighWater: strokeLeaseHighWater,
+            lifetimeLeaseHighWater: lifetimeLeaseHighWater
         )
+    }
+
+    func beginStrokeDiagnostics() {
+        strokeLeaseHighWater = unavailableSlotCount
     }
 
     public init(
@@ -201,7 +208,9 @@ public final class DabInstanceBufferPool {
     }
 
     private func recordLeaseHighWater() {
-        leaseHighWater = max(leaseHighWater, unavailableSlotCount)
+        let current = unavailableSlotCount
+        strokeLeaseHighWater = max(strokeLeaseHighWater, current)
+        lifetimeLeaseHighWater = max(lifetimeLeaseHighWater, current)
     }
 
     func reclaimTerminalFailure(

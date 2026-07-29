@@ -235,6 +235,7 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
             String.self,
             forKey: .customResourceFixture
         )
+        try Self.validateCustomResourceFixture(customResourceFixture)
         tool = try container.decode(
             BrushLabManualTool.self,
             forKey: .tool
@@ -378,9 +379,6 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
         let capability = inputCapabilities.isEmpty
             ? "none"
             : inputCapabilities.joined(separator: "-")
-        let custom = customResourceFixture == nil
-            ? "builtin"
-            : "custom"
         let paint = paintRGBAHex
             .lowercased()
             .filter(\.isHexDigit)
@@ -388,16 +386,55 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
             brushID,
             tool.rawValue,
             gesture.rawValue,
-            "d\(Int(diameter))",
+            "d\(floatIdentity(diameter))",
             pressureProfile,
             capability,
-            documentMode(documentConfiguration),
+            documentIdentity(documentConfiguration),
             background.rawValue,
             predictionEnabled ? "prediction-on" : "prediction-off",
             "c\(paint)",
             substrate.rawValue,
-            custom,
+            "f\(customResourceFixture ?? "builtin")",
         ].joined(separator: ".")
+    }
+
+    private static func documentIdentity(
+        _ configuration: SymmetryDocumentConfiguration
+    ) -> String {
+        switch configuration {
+        case let .periodic(periodic):
+            return [
+                "periodic",
+                "p\(periodic.presetID.rawValue)",
+                "w\(floatIdentity(periodic.repeatSize.width))",
+                "h\(floatIdentity(periodic.repeatSize.height))",
+                "o\(floatIdentity(periodic.orientationRadians))",
+            ].joined(separator: "-")
+        case .finite(.plain):
+            return "finite-plain"
+        case let .finite(.radial(radial)):
+            return [
+                "finite-radial",
+                "k\(radial.kind.rawValue)",
+                "r\(radial.rayCount)",
+                "x\(floatIdentity(radial.center.x))",
+                "y\(floatIdentity(radial.center.y))",
+                "a\(floatIdentity(radial.referenceAngleRadians))",
+            ].joined(separator: "-")
+        }
+    }
+
+    private static func floatIdentity(_ value: Float) -> String {
+        String(value.bitPattern, radix: 16)
+    }
+
+    private static func validateCustomResourceFixture(
+        _ fixture: String?
+    ) throws {
+        guard fixture == nil || fixture == customAsymmetricFixture else {
+            throw BrushLabManualCardCodingError
+                .unsupportedCustomResourceFixture(fixture!)
+        }
     }
 
     private static func documentMode(
@@ -463,9 +500,10 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
         ]
         let backgrounds = BrushLabManualBackground.allCases
         let paints = ["#111111FF", "#C43A52FF", "#245EC7FF"]
-        // Deterministic mixed-level covering array. Every pair of levels
-        // across gesture/diameter/pressure/capabilities/document/background/
-        // prediction/paint occurs at least once.
+        // Deterministic mixed-level covering array. Crossing each base row
+        // with both real fixture levels makes fixture identity independent
+        // from gesture/diameter/pressure/capabilities/document/background/
+        // prediction/paint.
         let coveringRows = [
             [0, 0, 0, 0, 0, 0, 0, 0],
             [0, 1, 1, 1, 1, 1, 1, 1],
@@ -494,20 +532,20 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
             [3, 0, 0, 3, 0, 0, 0, 0],
             [5, 0, 0, 2, 0, 0, 0, 0],
         ]
-        return coveringRows.enumerated().map { index, row in
-            Scenario(
-                gesture: BrushLabManualGesture.allCases[row[0]],
-                diameter: diameters[row[1]],
-                pressureProfile: pressures[row[2]],
-                inputCapabilities: capabilityProfiles[row[3]],
-                documentConfiguration: documents[row[4]],
-                background: backgrounds[row[5]],
-                predictionEnabled: row[6] == 1,
-                paintRGBAHex: paints[row[7]],
-                customResourceFixture: [0, 11].contains(index)
-                    ? customAsymmetricFixture
-                    : nil
-            )
+        return coveringRows.flatMap { row in
+            [nil, customAsymmetricFixture].map { fixture in
+                Scenario(
+                    gesture: BrushLabManualGesture.allCases[row[0]],
+                    diameter: diameters[row[1]],
+                    pressureProfile: pressures[row[2]],
+                    inputCapabilities: capabilityProfiles[row[3]],
+                    documentConfiguration: documents[row[4]],
+                    background: backgrounds[row[5]],
+                    predictionEnabled: row[6] == 1,
+                    paintRGBAHex: paints[row[7]],
+                    customResourceFixture: fixture
+                )
+            }
         }
     }()
 }
@@ -676,5 +714,6 @@ private struct DocumentConfigurationPayload: Codable {
 private enum BrushLabManualCardCodingError: Error {
     case invalidDocumentConfiguration
     case identityMismatch(expected: String, actual: String)
+    case unsupportedCustomResourceFixture(String)
 }
 #endif

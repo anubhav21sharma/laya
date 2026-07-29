@@ -57,6 +57,10 @@ final class EditorSessionController {
         RendererOperationToken,
         RasterRevisionReference
     ) throws -> Void
+    private let requestClearOperation: (
+        RendererOperationToken,
+        Int
+    ) throws -> Void
     private let requestResize: (
         RendererOperationToken,
         PixelSize,
@@ -71,6 +75,7 @@ final class EditorSessionController {
     ) throws -> Void
     private(set) var lastRecordedRasterCommandForTesting: RasterHistoryCommand?
     private(set) var lastRecordedResizeCommandForTesting: TileResizeHistoryCommand?
+    private var awaitedClear: AwaitedClear?
 
     private struct PendingRasterMutation {
         let token: EditorTransactionToken
@@ -89,6 +94,11 @@ final class EditorSessionController {
         let targetPixelSize: PixelSize?
     }
 
+    private struct AwaitedClear {
+        let token: EditorTransactionToken
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
     init(
         model: EditorModel = EditorModel(),
         renderer: GridRenderer,
@@ -96,6 +106,10 @@ final class EditorSessionController {
         requestRasterRestore: ((
             RendererOperationToken,
             RasterRevisionReference
+        ) throws -> Void)? = nil,
+        requestClear: ((
+            RendererOperationToken,
+            Int
         ) throws -> Void)? = nil,
         requestResize: ((
             RendererOperationToken,
@@ -129,6 +143,12 @@ final class EditorSessionController {
         }
         self.requestRasterRestore = requestRasterRestore ?? {
             try renderer.requestRasterRestore(token: $0, revision: $1)
+        }
+        requestClearOperation = requestClear ?? {
+            try renderer.requestClear(
+                token: $0,
+                maximumRetainedBytes: $1
+            )
         }
         self.requestResize = requestResize ?? {
             try renderer.requestResize(
@@ -509,6 +529,43 @@ final class EditorSessionController {
         apply(.command(.clear))
     }
 
+    func clearAndAwaitCompletion() async throws {
+        guard transaction.state == .idle,
+              transaction.pendingOperation == nil,
+              awaitedClear == nil
+        else {
+            throw MetalRendererError.commitPendingInput
+        }
+        let effects = transaction.apply(.command(.clear))
+        guard effects.count == 1,
+              case let .performCommand(token, .clear) = effects[0]
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        refreshDerivedModelState()
+
+        try await withCheckedThrowingContinuation { continuation in
+            awaitedClear = AwaitedClear(
+                token: token,
+                continuation: continuation
+            )
+            do {
+                try execute(effects[0])
+            } catch {
+                let rendererError = (error as? MetalRendererError)
+                    ?? .commandFailed(error.localizedDescription)
+                handleSynchronousFailure(
+                    of: effects[0],
+                    error: rendererError
+                )
+                finishAwaitedClear(
+                    token: token,
+                    result: .failure(rendererError)
+                )
+            }
+        }
+    }
+
     func undo() {
         apply(.command(.undo))
     }
@@ -807,9 +864,9 @@ final class EditorSessionController {
                 kind: .clear
             )
             do {
-                try renderer.requestClear(
-                    token: rendererToken(token),
-                    maximumRetainedBytes: history.maximumBytes
+                try requestClearOperation(
+                    rendererToken(token),
+                    history.maximumBytes
                 )
             } catch {
                 pendingRasterMutation = nil
@@ -1079,6 +1136,10 @@ final class EditorSessionController {
                     succeeded: true
                 )
             )
+            finishAwaitedClear(
+                token: completedToken,
+                result: .success(())
+            )
         case let .operationSuccess(token):
             let completedToken = editorToken(token)
             if pendingHistoryNavigation?.operationToken == completedToken,
@@ -1120,9 +1181,29 @@ final class EditorSessionController {
                     succeeded: false
                 )
             )
+            finishAwaitedClear(
+                token: completedToken,
+                result: .failure(error)
+            )
         }
         refreshDerivedModelState()
         resumeDeferredPointerIfIdle()
+    }
+
+    private func finishAwaitedClear(
+        token: EditorTransactionToken,
+        result: Result<Void, MetalRendererError>
+    ) {
+        guard let awaitedClear, awaitedClear.token == token else {
+            return
+        }
+        self.awaitedClear = nil
+        switch result {
+        case .success:
+            awaitedClear.continuation.resume()
+        case let .failure(error):
+            awaitedClear.continuation.resume(throwing: error)
+        }
     }
 
     private func resumeDeferredPointerIfIdle() {

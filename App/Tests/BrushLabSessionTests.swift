@@ -16,14 +16,14 @@ struct BrushLabSessionTests {
         let cards = BrushLabManualCard.fixedMatrix
         let anchorIDs = Set(AnchorBrushCatalog.all.map(\.id.rawValue))
 
-        #expect(cards.count == 156)
+        #expect(cards.count == 312)
         #expect(cards.map(\.cardID) == cards.map(\.cardID).sorted())
         #expect(Set(cards.map(\.cardID)).count == cards.count)
         #expect(Set(cards.map(\.brushID)) == anchorIDs)
 
         for anchorID in anchorIDs {
             let anchorCards = cards.filter { $0.brushID == anchorID }
-            #expect(anchorCards.count == 26)
+            #expect(anchorCards.count == 52)
             #expect(Set(anchorCards.map(\.gesture)) == Set(
                 BrushLabManualGesture.allCases
             ))
@@ -59,6 +59,9 @@ struct BrushLabSessionTests {
                 $0.customResourceFixture
                     == "custom-asymmetric-shape-grain-v1"
             })
+            #expect(anchorCards.contains {
+                $0.customResourceFixture == nil
+            })
         }
     }
 
@@ -78,9 +81,10 @@ struct BrushLabSessionTests {
                 card.background.rawValue,
                 card.predictionEnabled ? "on" : "off",
                 card.paintRGBAHex,
+                card.customResourceFixture ?? "builtin",
             ]
         }
-        let literalLevelCounts = [6, 3, 3, 4, 4, 2, 2, 3]
+        let literalLevelCounts = [6, 3, 3, 4, 4, 2, 2, 3, 2]
 
         for first in literalLevelCounts.indices {
             for second in literalLevelCounts.indices where second > first {
@@ -111,7 +115,7 @@ struct BrushLabSessionTests {
         #expect(firstData == secondData)
         #expect(
             BrushContentHash.sha256Hex(of: firstData)
-                == "8bf5697a355d42c1a05826d0b1d51eba4070666002c5bbd5021bfc4c72f7c65d"
+                == "6490bcf5d3d452e523b0eba7293b1bf8050ae8445a41941592bbb60c91bf7a32"
         )
     }
 
@@ -188,6 +192,48 @@ struct BrushLabSessionTests {
             == secondArchive.files["canvas.png"])
         #expect(first.input == second.input)
         #expect(first.logicalDabs == second.logicalDabs)
+        #expect(runtime.controller.renderer.isIdle)
+    }
+
+    @Test
+    func failedAwaitedClearPreservesPixelsProducesNoEvidenceAndRecovers()
+        async throws
+    {
+        var forceClearFailure = false
+        guard let runtime = try makeRuntime(
+            forceClearFailure: { forceClearFailure }
+        ) else {
+            return
+        }
+        let card = try #require(runtime.session.manualCards.first {
+            $0.brushID == AnchorBrushCatalog.ink.id.rawValue
+                && $0.documentMode == "plain"
+                && !$0.predictionEnabled
+                && $0.customResourceFixture == nil
+        })
+        try await runtime.session.selectManualCard(card.cardID)
+        let baseline = try await runtime.session.replaySelectedManualCard()
+        let baselineSnapshot = try runtime.controller.renderer
+            .captureCommittedDocument()
+
+        forceClearFailure = true
+        await #expect(throws: MetalRendererError.self) {
+            try await runtime.session.replaySelectedManualCard()
+        }
+        #expect(
+            try runtime.controller.renderer.captureCommittedDocument()
+                == baselineSnapshot
+        )
+        #expect(runtime.session.completedReplay == nil)
+        #expect(throws: BrushLabEvidenceError.completedReplayUnavailable) {
+            try runtime.session.makeManualEvidenceArchive()
+        }
+
+        forceClearFailure = false
+        let recovered =
+            try await runtime.session.replaySelectedManualCard()
+        #expect(recovered.canvasHash == baseline.canvasHash)
+        #expect(recovered.traceHash == baseline.traceHash)
         #expect(runtime.controller.renderer.isIdle)
     }
 
@@ -312,6 +358,78 @@ struct BrushLabSessionTests {
     }
 
     @Test
+    func decodedCardRejectsEverySymmetryMutationUnderAStaleStableID()
+        throws
+    {
+        let periodic = try #require(
+            BrushLabManualCard.fixedMatrix.first {
+                $0.documentMode == "periodic"
+            }
+        )
+        for mutation in [
+            ("mode", "plain" as Any),
+            ("presetID", SymmetryPresetID.halfDrop.rawValue as Any),
+            ("repeatWidth", 317.25 as Any),
+            ("repeatHeight", 193.5 as Any),
+            ("orientationRadians", 0.375 as Any),
+        ] {
+            try expectStaleDocumentMutationRejected(
+                periodic,
+                key: mutation.0,
+                value: mutation.1
+            )
+        }
+
+        let radial = try #require(
+            BrushLabManualCard.fixedMatrix.first {
+                $0.documentMode == "finite-radial"
+            }
+        )
+        for mutation in [
+            ("mode", "plain" as Any),
+            ("radialKind", RadialSymmetryKind.rotation.rawValue as Any),
+            ("rayCount", 11 as Any),
+            ("centerX", 997.25 as Any),
+            ("centerY", 1043.75 as Any),
+            ("referenceAngleRadians", 0.25 as Any),
+        ] {
+            try expectStaleDocumentMutationRejected(
+                radial,
+                key: mutation.0,
+                value: mutation.1
+            )
+        }
+    }
+
+    @Test
+    func decodedCardRejectsUnknownFixtureEvenWithMatchingFixtureIdentity()
+        throws
+    {
+        let card = try #require(BrushLabManualCard.fixedMatrix.first {
+            $0.customResourceFixture
+                == BrushLabManualCard.customAsymmetricFixture
+        })
+        let data = try JSONEncoder().encode(card)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let unknown = "custom-asymmetric-shape-grain-v2"
+        object["customResourceFixture"] = unknown
+        object["cardID"] = card.cardID.replacingOccurrences(
+            of: BrushLabManualCard.customAsymmetricFixture,
+            with: unknown
+        )
+        let mutated = try JSONSerialization.data(withJSONObject: object)
+
+        #expect(throws: (any Error).self) {
+            _ = try JSONDecoder().decode(
+                BrushLabManualCard.self,
+                from: mutated
+            )
+        }
+    }
+
+    @Test
     func manualEvidenceArchiveWritesJSONPNGsAndTelemetryAtomically()
         async throws
     {
@@ -351,6 +469,23 @@ struct BrushLabSessionTests {
         #expect(
             identity["semanticHash"] as? String
                 == runtime.session.packageContentHash
+        )
+        let telemetry = try #require(
+            archive.files["telemetry.json"]
+        )
+        let telemetryObject = try #require(
+            JSONSerialization.jsonObject(with: telemetry)
+                as? [String: Any]
+        )
+        let rendererDeposition = runtime.controller.renderer
+            .brushLabDiagnosticSnapshot.deposition
+        #expect(
+            telemetryObject["bufferHighWater"] as? Int
+                == rendererDeposition.strokeBufferLeaseHighWater
+        )
+        #expect(
+            telemetryObject["bufferLifetimeHighWater"] as? Int
+                == rendererDeposition.lifetimeBufferLeaseHighWater
         )
 
         let root = FileManager.default.temporaryDirectory
@@ -700,7 +835,9 @@ struct BrushLabSessionTests {
         #expect(runtime.session.compilationFailure == nil)
     }
 
-    private func makeRuntime() throws -> (
+    private func makeRuntime(
+        forceClearFailure: (() -> Bool)? = nil
+    ) throws -> (
         controller: EditorSessionController,
         session: BrushLabSession
     )? {
@@ -709,7 +846,21 @@ struct BrushLabSessionTests {
         else {
             return nil
         }
-        let controller = EditorSessionController(renderer: renderer)
+        let controller: EditorSessionController
+        if let forceClearFailure {
+            controller = EditorSessionController(
+                renderer: renderer,
+                requestClear: { token, maximumRetainedBytes in
+                    try renderer.requestClearForHarness(
+                        token: token,
+                        maximumRetainedBytes: maximumRetainedBytes,
+                        forceFailure: forceClearFailure()
+                    )
+                }
+            )
+        } else {
+            controller = EditorSessionController(renderer: renderer)
+        }
         let compiler = try BrushCompiler(
             device: renderer.device,
             commandQueue: queue,
@@ -728,6 +879,30 @@ struct BrushLabSessionTests {
             controller,
             BrushLabSession(controller: controller, compiler: compiler)
         )
+    }
+
+    private func expectStaleDocumentMutationRejected(
+        _ card: BrushLabManualCard,
+        key: String,
+        value: Any
+    ) throws {
+        let data = try JSONEncoder().encode(card)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        var document = try #require(
+            object["documentConfiguration"] as? [String: Any]
+        )
+        document[key] = value
+        object["documentConfiguration"] = document
+        let mutated = try JSONSerialization.data(withJSONObject: object)
+
+        #expect(throws: (any Error).self, "Accepted stale \(key)") {
+            _ = try JSONDecoder().decode(
+                BrushLabManualCard.self,
+                from: mutated
+            )
+        }
     }
 
     private func makePackage(

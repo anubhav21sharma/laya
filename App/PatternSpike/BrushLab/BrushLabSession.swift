@@ -508,6 +508,14 @@ final class BrushLabSession {
         ) else {
             throw BrushLabEvidenceError.manualBrushUnavailable(card.brushID)
         }
+        guard card.customResourceFixture == nil
+                || card.customResourceFixture
+                    == BrushLabManualCard.customAsymmetricFixture
+        else {
+            throw BrushLabEvidenceError.manualResourceFixtureUnavailable(
+                card.customResourceFixture!
+            )
+        }
         if controller.renderer.documentConfiguration
             != card.documentConfiguration
         {
@@ -570,10 +578,7 @@ final class BrushLabSession {
             throw BrushLabEvidenceError.manualCardNotSelected
         }
         completedReplay = nil
-        controller.clear()
-        if !controller.renderer.isIdle {
-            try controller.renderer.completePendingRasterOperation()
-        }
+        try await controller.clearAndAwaitCompletion()
         guard controller.renderer.isIdle else {
             throw BrushLabEvidenceError.rendererBusy
         }
@@ -1101,7 +1106,9 @@ final class BrushLabSession {
             gpuCompletion: .init(deposition.gpuCompletion),
             missedFrameCount: depositionMetrics.missedFrameCount,
             missedFramePercentage: frameMetrics.missedFramePercentage,
-            bufferHighWater: deposition.bufferLeaseHighWater,
+            bufferHighWater: deposition.strokeBufferLeaseHighWater,
+            bufferLifetimeHighWater:
+                deposition.lifetimeBufferLeaseHighWater,
             lastFailureStage: compilationFailure?.stage.rawValue
         )
     }
@@ -1321,6 +1328,7 @@ struct BrushLabDiagnostics: Codable, Equatable, Sendable {
     let missedFrameCount: UInt64
     let missedFramePercentage: Double
     let bufferHighWater: Int
+    let bufferLifetimeHighWater: Int
     let lastFailureStage: String?
 
     struct Texture: Codable, Equatable, Sendable {
@@ -1448,6 +1456,7 @@ enum BrushLabEvidenceError: Error, Equatable, LocalizedError {
     case completedReplayUnavailable
     case manualCardUnavailable(String)
     case manualBrushUnavailable(String)
+    case manualResourceFixtureUnavailable(String)
     case manualDiameterUnavailable(Float)
     case manualCardStateMismatch(String)
     case documentConfigurationUnavailable
@@ -1468,6 +1477,8 @@ enum BrushLabEvidenceError: Error, Equatable, LocalizedError {
             "Brush Lab manual card '\(cardID)' is unavailable."
         case let .manualBrushUnavailable(brushID):
             "Brush Lab brush '\(brushID)' is unavailable."
+        case let .manualResourceFixtureUnavailable(fixture):
+            "Brush Lab resource fixture '\(fixture)' is unavailable."
         case let .manualDiameterUnavailable(diameter):
             "Brush Lab diameter \(diameter) is unavailable."
         case let .manualCardStateMismatch(cardID):

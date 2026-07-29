@@ -30,10 +30,14 @@ extension DebugDurationPercentiles {
 struct DebugDepositionSnapshot: Equatable, Sendable {
     var authoritativeBacklog = 0
     var predictedBacklog = 0
+    var authoritativeHighWater = 0
+    var predictedHighWater = 0
     var backlogHighWater = 0
     var encodedDabCount: UInt64 = 0
     var encodedInstanceCount: UInt64 = 0
-    var bufferHighWater = 0
+    var currentBufferLeaseCount = 0
+    var strokeBufferLeaseHighWater = 0
+    var lifetimeBufferLeaseHighWater = 0
     var missedFrameCount: UInt64 = 0
     var cpuPreparation = DebugDurationPercentiles()
     var eventToSubmit = DebugDurationPercentiles()
@@ -109,9 +113,14 @@ final class DebugPerformanceMonitor {
     func recordDepositionSample(
         authoritativeBacklog: Int,
         predictedBacklog: Int,
+        authoritativeHighWater: Int,
+        predictedHighWater: Int,
+        backlogHighWater: Int,
         encodedDabs: UInt64,
         encodedInstances: UInt64,
-        bufferCount: Int,
+        currentBufferLeaseCount: Int,
+        strokeBufferLeaseHighWater: Int,
+        lifetimeBufferLeaseHighWater: Int,
         cpuPreparationNanoseconds: UInt64,
         eventToSubmitNanoseconds: UInt64,
         gpuCompletionNanoseconds: UInt64,
@@ -119,7 +128,12 @@ final class DebugPerformanceMonitor {
     ) {
         guard authoritativeBacklog >= 0,
               predictedBacklog >= 0,
-              bufferCount >= 0
+              authoritativeHighWater >= 0,
+              predictedHighWater >= 0,
+              backlogHighWater >= 0,
+              currentBufferLeaseCount >= 0,
+              strokeBufferLeaseHighWater >= 0,
+              lifetimeBufferLeaseHighWater >= 0
         else {
             return
         }
@@ -138,12 +152,9 @@ final class DebugPerformanceMonitor {
         var deposition = snapshot.deposition
         deposition.authoritativeBacklog = authoritativeBacklog
         deposition.predictedBacklog = predictedBacklog
-        let (backlog, overflow) = authoritativeBacklog
-            .addingReportingOverflow(predictedBacklog)
-        deposition.backlogHighWater = max(
-            deposition.backlogHighWater,
-            overflow ? .max : backlog
-        )
+        deposition.authoritativeHighWater = authoritativeHighWater
+        deposition.predictedHighWater = predictedHighWater
+        deposition.backlogHighWater = backlogHighWater
         deposition.encodedDabCount = saturatingAdd(
             deposition.encodedDabCount,
             encodedDabs
@@ -152,10 +163,11 @@ final class DebugPerformanceMonitor {
             deposition.encodedInstanceCount,
             encodedInstances
         )
-        deposition.bufferHighWater = max(
-            deposition.bufferHighWater,
-            bufferCount
-        )
+        deposition.currentBufferLeaseCount = currentBufferLeaseCount
+        deposition.strokeBufferLeaseHighWater =
+            strokeBufferLeaseHighWater
+        deposition.lifetimeBufferLeaseHighWater =
+            lifetimeBufferLeaseHighWater
         deposition.missedFrameCount = saturatingAdd(
             deposition.missedFrameCount,
             missedFrames

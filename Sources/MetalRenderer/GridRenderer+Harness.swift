@@ -243,89 +243,16 @@ extension GridRenderer {
         forceFailure: Bool = false,
         forceCommandBufferUnavailable: Bool = false
     ) throws -> HarnessLiveFlushResult {
-        drainFrameOutcomes()
-        drainCompletedUploadRanges()
-        guard !forceCommandBufferUnavailable,
-              let commandBuffer = commandQueue.makeCommandBuffer()
-        else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
-        }
-
-        let uploads: [FrameUpload] = []
-        var nativeEncoding: NativeDepositionFrameEncoding?
-        var submissions: [DabBufferSubmissionIdentity] = []
-        var didFinalize = false
-        let start = CFAbsoluteTimeGetCurrent()
-        do {
-            let encodedLiveClear: Bool
-            let encodedReplayClear: Bool
-            let encoding = try encodeScheduledDeposition(commandBuffer)
-            nativeEncoding = encoding
-            encodedLiveClear = encoding.encodedLiveClear
-            encodedReplayClear = encoding.encodedReplayClear
-            submissions = try finalizeFrameEncoding(
-                encodedClear: encodedLiveClear,
-                encodedReplayClear: encodedReplayClear,
-                uploads: uploads,
-                nativeEncoding: nativeEncoding,
-                rasterCommit: nil,
-                commandBuffer: commandBuffer,
-                forceFailure: forceFailure
-            )
-            didFinalize = true
-            if activeStroke != nil {
-                counters.renderedFramesThisStroke += 1
-            }
-            let submittedAtNanoseconds =
-                DispatchTime.now().uptimeNanoseconds
-            commandBuffer.commit()
-            let cpuMilliseconds = elapsedMilliseconds(since: start)
-            commandBuffer.waitUntilCompleted()
-            let completedAtNanoseconds =
-                DispatchTime.now().uptimeNanoseconds
-            let submittedError = drainFrameOutcomes()
-            drainCompletedUploadRanges()
-            if let submittedError {
-                throw submittedError
-            }
-            do {
-                try validateHarnessCommand(commandBuffer)
-            } catch let error as MetalRendererError {
-                instancePool.reclaimTerminalFailure(submissions)
-                report(error)
-                throw error
-            }
-            let frameMetrics = metrics(
-                    commandBuffer: commandBuffer,
-                    cpuMilliseconds: cpuMilliseconds,
-                    submittedAtNanoseconds: submittedAtNanoseconds,
-                    completedAtNanoseconds: completedAtNanoseconds,
-                    nativeEncoding: nativeEncoding
-                )
-            recordBrushLabCompletedFrame(frameMetrics)
-            return HarnessLiveFlushResult(
-                metrics: frameMetrics,
-                emittedHighWater: UInt64(counters.totalInstancesThisStroke),
-                encodedIdentityRanges: uploads.map(\.identityRange)
-            )
-        } catch {
-            if !didFinalize {
-                if nativeEncoding != nil,
-                   commandBuffer.status == .notEnqueued
-                {
-                    commandBuffer.commit()
-                    commandBuffer.waitUntilCompleted()
-                }
-                abandon(uploads)
-                failActiveOperationIfNeeded(
-                    (error as? MetalRendererError)
-                        ?? .commandFailed(error.localizedDescription)
-                )
-            }
-            throw error
-        }
+        let frameMetrics = try completeNextPendingInteractiveFrame(
+            forceFailure: forceFailure,
+            forceCommandBufferUnavailable:
+                forceCommandBufferUnavailable
+        )
+        return HarnessLiveFlushResult(
+            metrics: frameMetrics,
+            emittedHighWater: UInt64(counters.totalInstancesThisStroke),
+            encodedIdentityRanges: []
+        )
     }
 
     public func renderOffscreenDisplayForHarness(
@@ -566,77 +493,12 @@ extension GridRenderer {
         )
     }
 
-    public func completePendingInteractiveStroke() throws
-        -> GPUFrameMetrics
-    {
-        try completePendingInteractiveStroke(forceCommitFailure: false)
-    }
-
     public func finishCommitForHarness(
         forceCommitFailure: Bool = false
     ) throws -> GPUFrameMetrics {
         try completePendingInteractiveStroke(
             forceCommitFailure: forceCommitFailure
         )
-    }
-
-    private func completePendingInteractiveStroke(
-        forceCommitFailure: Bool
-    ) throws -> GPUFrameMetrics {
-        do {
-            var frames: [GPUFrameMetrics] = []
-            for _ in 0..<64 {
-                try prepareCompiledCommitIfReady()
-                if activeStroke?.pendingRevisions != nil {
-                    break
-                }
-                frames.append(
-                    try flushPendingLiveForHarness().metrics
-                )
-            }
-            try prepareCompiledCommitIfReady()
-            frames.append(
-                try submitCommitForHarness(
-                    forceFailure: forceCommitFailure
-                )
-            )
-            try drainCompletedOperationsForHarness()
-            return GPUFrameMetrics(
-                cpuEncodeMilliseconds: frames.reduce(0) {
-                    $0 + $1.cpuEncodeMilliseconds
-                },
-                gpuMilliseconds: frames.reduce(0) {
-                    $0 + $1.gpuMilliseconds
-                },
-                eventToSubmitNanoseconds: frames.map(
-                    \.eventToSubmitNanoseconds
-                ).max() ?? 0,
-                gpuCompletionNanoseconds: frames.reduce(0) {
-                    Self.saturatingAdd(
-                        $0,
-                        $1.gpuCompletionNanoseconds
-                    )
-                },
-                encodedDabCount: frames.reduce(0) {
-                    $0 + $1.encodedDabCount
-                },
-                encodedInstanceCount: frames.reduce(0) {
-                    $0 + $1.encodedInstanceCount
-                },
-                bufferLeaseCount: frames.map(
-                    \.bufferLeaseCount
-                ).max() ?? 0
-            )
-        } catch let error as MetalRendererError {
-            failActiveOperationIfNeeded(error)
-            throw error
-        } catch {
-            let rendererError = MetalRendererError.commandFailed(
-                error.localizedDescription
-            )
-            failActiveOperationIfNeeded(rendererError)
-            throw rendererError
-        }
     }
 
     func requestRasterRestoreForHarness(
@@ -691,16 +553,6 @@ extension GridRenderer {
         )
     }
 
-    public func completePendingRasterOperation() throws {
-        guard let operation = pendingRasterOperation else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        operation.commandBuffer.waitUntilCompleted()
-        if let error = drainRasterOperationOutcomes() {
-            throw error
-        }
-    }
-
     public func finishRasterOperationForHarness() throws {
         try completePendingRasterOperation()
     }
@@ -708,63 +560,11 @@ extension GridRenderer {
     func submitCommitForHarness(
         forceFailure: Bool = false
     ) throws -> GPUFrameMetrics {
-        drainFrameOutcomes()
-        drainCompletedUploadRanges()
-        try prepareCompiledCommitIfReady()
-        let nativeIsReady =
-            activeStroke?.scheduler?.authoritativeIsDrained == true
-            && activeStroke?.scheduler?.predictedCount == 0
-            && !needsReplayClear
-        guard activeStroke?.commitRequested == true,
-              activeStroke?.pendingTokenBearingFrameCount == 0,
-              activeStroke?.pendingRevisions != nil,
-              nativeIsReady
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
-        }
-
-        let start = CFAbsoluteTimeGetCurrent()
-        let rasterCommit = try encodeCommit(
-            commandBuffer,
-            liveVisible: liveTile.isVisible || replayTile.isVisible
-        )
-        _ = try finalizeFrameEncoding(
-            encodedClear: false,
-            uploads: [],
-            rasterCommit: rasterCommit,
-            commandBuffer: commandBuffer,
-            forceFailure: forceFailure
-        )
-        counters.renderedFramesThisStroke += 1
-        let cpuMilliseconds = elapsedMilliseconds(since: start)
-        let submittedAtNanoseconds =
-            DispatchTime.now().uptimeNanoseconds
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        let completedAtNanoseconds =
-            DispatchTime.now().uptimeNanoseconds
-        try validateHarnessCommand(commandBuffer)
-        let frameMetrics = metrics(
-            commandBuffer: commandBuffer,
-            cpuMilliseconds: cpuMilliseconds,
-            submittedAtNanoseconds: submittedAtNanoseconds,
-            completedAtNanoseconds: completedAtNanoseconds
-        )
-        recordBrushLabCompletedFrame(frameMetrics)
-        return frameMetrics
+        try submitPendingInteractiveCommit(forceFailure: forceFailure)
     }
 
     func drainCompletedOperationsForHarness() throws {
-        let submittedError = drainFrameOutcomes()
-        drainCompletedUploadRanges()
-        if let submittedError {
-            throw submittedError
-        }
+        try drainCompletedInteractiveOperations()
     }
 
     func submitDisplayOnlyForHarness(

@@ -1,4 +1,5 @@
 import BrushFormat
+import Foundation
 import Metal
 @testable import MetalRenderer
 import PatternEngine
@@ -6,6 +7,58 @@ import Testing
 
 @Suite("Compiled deposition renderer")
 struct DepositionRendererTests {
+    @Test
+    func productionCompletionLivesOutsideHarnessAndCallsNoHarnessAPI()
+        throws
+    {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let production = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MetalRenderer/GridRenderer.swift"
+            ),
+            encoding: .utf8
+        )
+        let harness = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MetalRenderer/GridRenderer+Harness.swift"
+            ),
+            encoding: .utf8
+        )
+        let declaration =
+            "public func completePendingInteractiveStroke() throws"
+        #expect(production.contains(declaration))
+        #expect(!harness.contains(declaration))
+
+        for signature in [
+            declaration,
+            "func completePendingInteractiveStroke(\n        forceCommitFailure:",
+            "func completeNextPendingInteractiveFrame(",
+            "func submitPendingInteractiveCommit(",
+            "func drainCompletedInteractiveOperations() throws",
+            "public func completePendingRasterOperation() throws",
+        ] {
+            let method = try productionMethod(
+                signature,
+                in: production
+            )
+            #expect(
+                !method.contains("ForHarness"),
+                "\(signature) calls a harness API"
+            )
+        }
+        #expect(
+            harness.contains(
+                "try completePendingInteractiveStroke(\n"
+                    + "            forceCommitFailure:"
+            )
+        )
+        #expect(harness.contains("try submitPendingInteractiveCommit("))
+        #expect(harness.contains("try drainCompletedInteractiveOperations()"))
+    }
+
     @Test
     @MainActor
     func diagnosticsComeFromActualSchedulerEncodingPoolAndTimestamps()
@@ -53,6 +106,43 @@ struct DepositionRendererTests {
         #expect(diagnostics.eventToSubmit.p50 > 0)
         #expect(diagnostics.gpuCompletion.p50 > 0)
         #expect(setup.renderer.isIdle)
+    }
+
+    @Test
+    @MainActor
+    func laterSmallStrokeResetsPoolHighWaterButLifetimeStaysMonotonic()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(id: "brush.pool-scopes")
+        try setup.renderer.activateDrawBrush(brush)
+        let held = try #require(
+            setup.renderer.instancePool.acquire(count: 2)
+        )
+
+        try commitNativeStroke(
+            renderer: setup.renderer,
+            brush: brush,
+            token: RendererOperationToken(rawValue: 9_101)
+        )
+        let large =
+            setup.renderer.brushLabDiagnosticSnapshot.deposition
+        #expect(large.strokeBufferLeaseHighWater == 3)
+        #expect(large.lifetimeBufferLeaseHighWater == 3)
+        for lease in held {
+            setup.renderer.instancePool.abandon(lease)
+        }
+
+        try commitNativeStroke(
+            renderer: setup.renderer,
+            brush: brush,
+            token: RendererOperationToken(rawValue: 9_102)
+        )
+        let small =
+            setup.renderer.brushLabDiagnosticSnapshot.deposition
+        #expect(small.strokeBufferLeaseHighWater == 1)
+        #expect(small.lifetimeBufferLeaseHighWater == 3)
+        #expect(small.currentBufferLeaseCount == 0)
     }
 
     @Test
@@ -1330,6 +1420,37 @@ private func depositionTextureBytes(
         mipmapLevel: 0
     )
     return bytes
+}
+
+private func productionMethod(
+    _ signature: String,
+    in source: String
+) throws -> Substring {
+    let signatureRange = try #require(source.range(of: signature))
+    let openingBrace = try #require(
+        source[signatureRange.upperBound...].firstIndex(of: "{")
+    )
+    var depth = 0
+    var cursor = openingBrace
+    while cursor < source.endIndex {
+        switch source[cursor] {
+        case "{":
+            depth += 1
+        case "}":
+            depth -= 1
+            if depth == 0 {
+                return source[signatureRange.lowerBound...cursor]
+            }
+        default:
+            break
+        }
+        cursor = source.index(after: cursor)
+    }
+    throw ProductionSourceBoundaryError.unclosedMethod(signature)
+}
+
+private enum ProductionSourceBoundaryError: Error {
+    case unclosedMethod(String)
 }
 
 private func maximumChannelDelta(

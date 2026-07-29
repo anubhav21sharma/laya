@@ -280,10 +280,21 @@ struct BrushLabView: View {
                         renderer.deposition.authoritativePending,
                     predictedBacklog:
                         renderer.deposition.predictedPending,
+                    authoritativeHighWater:
+                        renderer.deposition.authoritativeHighWater,
+                    predictedHighWater:
+                        renderer.deposition.predictedHighWater,
+                    backlogHighWater:
+                        renderer.deposition.backlogHighWater,
                     encodedDabs: UInt64($0.encodedDabCount),
                     encodedInstances:
                         UInt64($0.encodedInstanceCount),
-                    bufferCount: $0.bufferLeaseCount,
+                    currentBufferLeaseCount:
+                        renderer.deposition.currentBufferLeaseCount,
+                    strokeBufferLeaseHighWater:
+                        renderer.deposition.strokeBufferLeaseHighWater,
+                    lifetimeBufferLeaseHighWater:
+                        renderer.deposition.lifetimeBufferLeaseHighWater,
                     cpuPreparationNanoseconds: cpuNanoseconds,
                     eventToSubmitNanoseconds:
                         $0.eventToSubmitNanoseconds,
@@ -736,9 +747,16 @@ struct BrushLabView: View {
                     + "\(session.depositionMetrics.predictedBacklog)"
             )
             keyValue(
-                "Backlog / buffer high",
-                "\(session.depositionMetrics.backlogHighWater) / "
-                    + "\(session.depositionMetrics.bufferHighWater)"
+                "Backlog high A / P",
+                "\(session.depositionMetrics.authoritativeHighWater) / "
+                    + "\(session.depositionMetrics.predictedHighWater)"
+            )
+            keyValue(
+                "Buffer current / stroke / life",
+                "\(session.depositionMetrics.currentBufferLeaseCount) / "
+                    + "\(session.depositionMetrics.strokeBufferLeaseHighWater)"
+                    + " / "
+                    + "\(session.depositionMetrics.lifetimeBufferLeaseHighWater)"
             )
             keyValue(
                 "Encoded dabs / instances",

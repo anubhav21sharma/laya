@@ -63,9 +63,14 @@ func debugPerformanceMonitorPublishesActualDepositionDiagnostics() {
     monitor.recordDepositionSample(
         authoritativeBacklog: 9,
         predictedBacklog: 3,
+        authoritativeHighWater: 19,
+        predictedHighWater: 13,
+        backlogHighWater: 32,
         encodedDabs: 7,
         encodedInstances: 11,
-        bufferCount: 2,
+        currentBufferLeaseCount: 2,
+        strokeBufferLeaseHighWater: 2,
+        lifetimeBufferLeaseHighWater: 3,
         cpuPreparationNanoseconds: 1_000_000,
         eventToSubmitNanoseconds: 2_000_000,
         gpuCompletionNanoseconds: 3_000_000,
@@ -74,9 +79,14 @@ func debugPerformanceMonitorPublishesActualDepositionDiagnostics() {
     monitor.recordDepositionSample(
         authoritativeBacklog: 4,
         predictedBacklog: 0,
+        authoritativeHighWater: 17,
+        predictedHighWater: 5,
+        backlogHighWater: 22,
         encodedDabs: 5,
         encodedInstances: 13,
-        bufferCount: 3,
+        currentBufferLeaseCount: 0,
+        strokeBufferLeaseHighWater: 1,
+        lifetimeBufferLeaseHighWater: 3,
         cpuPreparationNanoseconds: 2_000_000,
         eventToSubmitNanoseconds: 4_000_000,
         gpuCompletionNanoseconds: 6_000_000,
@@ -86,10 +96,14 @@ func debugPerformanceMonitorPublishesActualDepositionDiagnostics() {
     let diagnostics = monitor.snapshot.deposition
     #expect(diagnostics.authoritativeBacklog == 4)
     #expect(diagnostics.predictedBacklog == 0)
-    #expect(diagnostics.backlogHighWater == 12)
+    #expect(diagnostics.authoritativeHighWater == 17)
+    #expect(diagnostics.predictedHighWater == 5)
+    #expect(diagnostics.backlogHighWater == 22)
     #expect(diagnostics.encodedDabCount == 12)
     #expect(diagnostics.encodedInstanceCount == 24)
-    #expect(diagnostics.bufferHighWater == 3)
+    #expect(diagnostics.currentBufferLeaseCount == 0)
+    #expect(diagnostics.strokeBufferLeaseHighWater == 1)
+    #expect(diagnostics.lifetimeBufferLeaseHighWater == 3)
     #expect(diagnostics.missedFrameCount == 3)
     #expect(diagnostics.cpuPreparation.p50 == 1_000_000)
     #expect(diagnostics.cpuPreparation.p95 == 2_000_000)

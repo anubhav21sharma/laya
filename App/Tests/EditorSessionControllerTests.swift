@@ -2241,6 +2241,42 @@ func clearCompletesWithoutAViewFrameAndControlsAcceptTheNextIntent() async throw
 
 @Test
 @MainActor
+func awaitedClearPropagatesSynchronousRequestFailureAndRecovers()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    var shouldFail = true
+    let controller = EditorSessionController(
+        renderer: renderer,
+        requestClear: { token, maximumRetainedBytes in
+            if shouldFail {
+                throw MetalRendererError.commandBufferUnavailable
+            }
+            try renderer.requestClear(
+                token: token,
+                maximumRetainedBytes: maximumRetainedBytes
+            )
+        }
+    )
+
+    await #expect(throws: MetalRendererError.commandBufferUnavailable) {
+        try await controller.clearAndAwaitCompletion()
+    }
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(renderer.isIdle)
+    #expect(controller.lastRecordedRasterCommandForTesting == nil)
+
+    shouldFail = false
+    try await controller.clearAndAwaitCompletion()
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(renderer.isIdle)
+    #expect(
+        controller.lastRecordedRasterCommandForTesting?.kind == .clear
+    )
+}
+
+@Test
+@MainActor
 func cancelShortcutCancelsStrokeWithoutCreatingHistory() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)

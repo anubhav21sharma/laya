@@ -67,10 +67,15 @@ public struct BrushLabRendererDepositionDiagnosticSnapshot:
     public let strokeEncodedDabCount: UInt64
     public let strokeEncodedInstanceCount: UInt64
     public let currentBufferLeaseCount: Int
-    public let bufferLeaseHighWater: Int
+    public let strokeBufferLeaseHighWater: Int
+    public let lifetimeBufferLeaseHighWater: Int
     public let eventToSubmit: DepositionDurationPercentiles
     public let cpuPreparation: DepositionDurationPercentiles
     public let gpuCompletion: DepositionDurationPercentiles
+
+    public var bufferLeaseHighWater: Int {
+        strokeBufferLeaseHighWater
+    }
 }
 
 struct HarnessDiagnosticRenderedFrame {
@@ -182,10 +187,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 strokeEncodedInstanceCount:
                     telemetry.encodedInstanceCount,
                 currentBufferLeaseCount: pool.currentLeaseCount,
-                bufferLeaseHighWater: max(
-                    pool.leaseHighWater,
-                    telemetry.bufferHighWater
-                ),
+                strokeBufferLeaseHighWater:
+                    pool.strokeLeaseHighWater,
+                lifetimeBufferLeaseHighWater:
+                    pool.lifetimeLeaseHighWater,
                 eventToSubmit: timings.eventToSubmit,
                 cpuPreparation: timings.cpuPreparation,
                 gpuCompletion: timings.gpuCompletion
@@ -836,6 +841,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let compiledBrush = try compiledBrush(for: style)
+        instancePool.beginStrokeDiagnostics()
         resetBrushLabDepositionDiagnostics()
         markBrushLabInputReceipt()
         counters = GridStructuralCounters()
@@ -1942,6 +1948,224 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     public func setInteractiveGridVisibility(_ visible: Bool) {
         interactiveGridVisibility = visible
+    }
+
+    public func completePendingInteractiveStroke() throws
+        -> GPUFrameMetrics
+    {
+        try completePendingInteractiveStroke(forceCommitFailure: false)
+    }
+
+    func completePendingInteractiveStroke(
+        forceCommitFailure: Bool
+    ) throws -> GPUFrameMetrics {
+        do {
+            var frames: [GPUFrameMetrics] = []
+            for _ in 0..<64 {
+                try prepareCompiledCommitIfReady()
+                if activeStroke?.pendingRevisions != nil {
+                    break
+                }
+                frames.append(
+                    try completeNextPendingInteractiveFrame()
+                )
+            }
+            try prepareCompiledCommitIfReady()
+            frames.append(
+                try submitPendingInteractiveCommit(
+                    forceFailure: forceCommitFailure
+                )
+            )
+            try drainCompletedInteractiveOperations()
+            return GPUFrameMetrics(
+                cpuEncodeMilliseconds: frames.reduce(0) {
+                    $0 + $1.cpuEncodeMilliseconds
+                },
+                gpuMilliseconds: frames.reduce(0) {
+                    $0 + $1.gpuMilliseconds
+                },
+                eventToSubmitNanoseconds: frames.map(
+                    \.eventToSubmitNanoseconds
+                ).max() ?? 0,
+                gpuCompletionNanoseconds: frames.reduce(0) {
+                    Self.saturatingAdd(
+                        $0,
+                        $1.gpuCompletionNanoseconds
+                    )
+                },
+                encodedDabCount: frames.reduce(0) {
+                    $0 + $1.encodedDabCount
+                },
+                encodedInstanceCount: frames.reduce(0) {
+                    $0 + $1.encodedInstanceCount
+                },
+                bufferLeaseCount: frames.map(
+                    \.bufferLeaseCount
+                ).max() ?? 0
+            )
+        } catch let error as MetalRendererError {
+            failActiveOperationIfNeeded(error)
+            throw error
+        } catch {
+            let rendererError = MetalRendererError.commandFailed(
+                error.localizedDescription
+            )
+            failActiveOperationIfNeeded(rendererError)
+            throw rendererError
+        }
+    }
+
+    func completeNextPendingInteractiveFrame(
+        forceFailure: Bool = false,
+        forceCommandBufferUnavailable: Bool = false
+    ) throws -> GPUFrameMetrics {
+        drainFrameOutcomes()
+        drainCompletedUploadRanges()
+        guard !forceCommandBufferUnavailable,
+              let commandBuffer = commandQueue.makeCommandBuffer()
+        else {
+            let error = MetalRendererError.commandBufferUnavailable
+            failActiveOperationIfNeeded(error)
+            throw error
+        }
+
+        let uploads: [FrameUpload] = []
+        var nativeEncoding: NativeDepositionFrameEncoding?
+        var submissions: [DabBufferSubmissionIdentity] = []
+        var didFinalize = false
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            let encoding = try encodeScheduledDeposition(commandBuffer)
+            nativeEncoding = encoding
+            submissions = try finalizeFrameEncoding(
+                encodedClear: encoding.encodedLiveClear,
+                encodedReplayClear: encoding.encodedReplayClear,
+                uploads: uploads,
+                nativeEncoding: encoding,
+                rasterCommit: nil,
+                commandBuffer: commandBuffer,
+                forceFailure: forceFailure
+            )
+            didFinalize = true
+            if activeStroke != nil {
+                counters.renderedFramesThisStroke += 1
+            }
+            let submittedAtNanoseconds =
+                DispatchTime.now().uptimeNanoseconds
+            commandBuffer.commit()
+            let cpuMilliseconds = elapsedMilliseconds(since: start)
+            commandBuffer.waitUntilCompleted()
+            let completedAtNanoseconds =
+                DispatchTime.now().uptimeNanoseconds
+            let submittedError = drainFrameOutcomes()
+            drainCompletedUploadRanges()
+            if let submittedError {
+                throw submittedError
+            }
+            do {
+                try validateCompletedCommand(commandBuffer)
+            } catch let error as MetalRendererError {
+                instancePool.reclaimTerminalFailure(submissions)
+                report(error)
+                throw error
+            }
+            let frameMetrics = metrics(
+                commandBuffer: commandBuffer,
+                cpuMilliseconds: cpuMilliseconds,
+                submittedAtNanoseconds: submittedAtNanoseconds,
+                completedAtNanoseconds: completedAtNanoseconds,
+                nativeEncoding: nativeEncoding
+            )
+            recordBrushLabCompletedFrame(frameMetrics)
+            return frameMetrics
+        } catch {
+            if !didFinalize {
+                if nativeEncoding != nil,
+                   commandBuffer.status == .notEnqueued
+                {
+                    commandBuffer.commit()
+                    commandBuffer.waitUntilCompleted()
+                }
+                abandon(uploads)
+                failActiveOperationIfNeeded(
+                    (error as? MetalRendererError)
+                        ?? .commandFailed(error.localizedDescription)
+                )
+            }
+            throw error
+        }
+    }
+
+    func submitPendingInteractiveCommit(
+        forceFailure: Bool = false
+    ) throws -> GPUFrameMetrics {
+        drainFrameOutcomes()
+        drainCompletedUploadRanges()
+        try prepareCompiledCommitIfReady()
+        let nativeIsReady =
+            activeStroke?.scheduler?.authoritativeIsDrained == true
+            && activeStroke?.scheduler?.predictedCount == 0
+            && !needsReplayClear
+        guard activeStroke?.commitRequested == true,
+              activeStroke?.pendingTokenBearingFrameCount == 0,
+              activeStroke?.pendingRevisions != nil,
+              nativeIsReady
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            let error = MetalRendererError.commandBufferUnavailable
+            failActiveOperationIfNeeded(error)
+            throw error
+        }
+
+        let start = CFAbsoluteTimeGetCurrent()
+        let rasterCommit = try encodeCommit(
+            commandBuffer,
+            liveVisible: liveTile.isVisible || replayTile.isVisible
+        )
+        _ = try finalizeFrameEncoding(
+            encodedClear: false,
+            uploads: [],
+            rasterCommit: rasterCommit,
+            commandBuffer: commandBuffer,
+            forceFailure: forceFailure
+        )
+        counters.renderedFramesThisStroke += 1
+        let cpuMilliseconds = elapsedMilliseconds(since: start)
+        let submittedAtNanoseconds =
+            DispatchTime.now().uptimeNanoseconds
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        let completedAtNanoseconds =
+            DispatchTime.now().uptimeNanoseconds
+        try validateCompletedCommand(commandBuffer)
+        let frameMetrics = metrics(
+            commandBuffer: commandBuffer,
+            cpuMilliseconds: cpuMilliseconds,
+            submittedAtNanoseconds: submittedAtNanoseconds,
+            completedAtNanoseconds: completedAtNanoseconds
+        )
+        recordBrushLabCompletedFrame(frameMetrics)
+        return frameMetrics
+    }
+
+    func drainCompletedInteractiveOperations() throws {
+        let submittedError = drainFrameOutcomes()
+        drainCompletedUploadRanges()
+        if let submittedError {
+            throw submittedError
+        }
+    }
+
+    public func completePendingRasterOperation() throws {
+        guard let operation = pendingRasterOperation else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        operation.commandBuffer.waitUntilCompleted()
+        if let error = drainRasterOperationOutcomes() {
+            throw error
+        }
     }
 
     public func draw(in view: MTKView) {
@@ -4582,7 +4806,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try validateHarnessCommand(commandBuffer)
     }
 
-    func validateHarnessCommand(
+    func validateCompletedCommand(
         _ commandBuffer: any MTLCommandBuffer
     ) throws {
         guard commandBuffer.status == .completed else {
@@ -4591,6 +4815,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     ?? "unknown command-buffer error"
             )
         }
+    }
+
+    func validateHarnessCommand(
+        _ commandBuffer: any MTLCommandBuffer
+    ) throws {
+        try validateCompletedCommand(commandBuffer)
     }
 
     private func resetBrushLabDepositionDiagnostics() {

@@ -13,19 +13,53 @@ struct DabInstanceBufferPoolTests {
 
         let first = try #require(pool.acquire(count: 2))
         #expect(pool.diagnosticSnapshot.currentLeaseCount == 2)
-        #expect(pool.diagnosticSnapshot.leaseHighWater == 2)
+        #expect(pool.diagnosticSnapshot.strokeLeaseHighWater == 2)
+        #expect(pool.diagnosticSnapshot.lifetimeLeaseHighWater == 2)
         for lease in first {
             pool.abandon(lease)
         }
         #expect(pool.diagnosticSnapshot.currentLeaseCount == 0)
-        #expect(pool.diagnosticSnapshot.leaseHighWater == 2)
+        #expect(pool.diagnosticSnapshot.strokeLeaseHighWater == 2)
+        #expect(pool.diagnosticSnapshot.lifetimeLeaseHighWater == 2)
 
         let second = try #require(pool.acquire(count: 3))
         #expect(pool.diagnosticSnapshot.currentLeaseCount == 3)
-        #expect(pool.diagnosticSnapshot.leaseHighWater == 3)
+        #expect(pool.diagnosticSnapshot.strokeLeaseHighWater == 3)
+        #expect(pool.diagnosticSnapshot.lifetimeLeaseHighWater == 3)
         for lease in second {
             pool.abandon(lease)
         }
+    }
+
+    @Test
+    func strokeLeaseHighWaterResetsWithoutCorruptingLifetimeOrLeases()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let pool = try DabInstanceBufferPool(device: device, capacity: 1)
+
+        pool.beginStrokeDiagnostics()
+        let large = try #require(pool.acquire(count: 3))
+        #expect(pool.diagnosticSnapshot.currentLeaseCount == 3)
+        #expect(pool.diagnosticSnapshot.strokeLeaseHighWater == 3)
+        #expect(pool.diagnosticSnapshot.lifetimeLeaseHighWater == 3)
+        for lease in large {
+            pool.abandon(lease)
+        }
+
+        pool.beginStrokeDiagnostics()
+        #expect(pool.diagnosticSnapshot.currentLeaseCount == 0)
+        #expect(pool.diagnosticSnapshot.strokeLeaseHighWater == 0)
+        #expect(pool.diagnosticSnapshot.lifetimeLeaseHighWater == 3)
+        let small = try #require(pool.acquire())
+        #expect(pool.diagnosticSnapshot.strokeLeaseHighWater == 1)
+        #expect(pool.diagnosticSnapshot.lifetimeLeaseHighWater == 3)
+
+        pool.beginStrokeDiagnostics()
+        #expect(pool.diagnosticSnapshot.currentLeaseCount == 1)
+        #expect(pool.diagnosticSnapshot.strokeLeaseHighWater == 1)
+        #expect(pool.diagnosticSnapshot.lifetimeLeaseHighWater == 3)
+        pool.abandon(small)
     }
 
     @Test
