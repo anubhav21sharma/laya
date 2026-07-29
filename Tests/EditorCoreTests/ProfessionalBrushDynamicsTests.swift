@@ -253,6 +253,176 @@ func graphiteMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
     #expect(retapered.map(\.ordinal) == emitted.map(\.ordinal))
 }
 
+@Test
+func naturalCharcoalPressureAndTiltProduceBroaderSofterDabsThanGraphite() {
+    let lightPressure = naturalCharcoalDab(pressure: 0.2, capabilities: [.pressure])
+    let heavyPressure = naturalCharcoalDab(pressure: 1, capabilities: [.pressure])
+    let upright = naturalCharcoalDab(
+        altitude: .pi / 2,
+        capabilities: [.pressure, .altitude]
+    )
+    let tilted = naturalCharcoalDab(
+        altitude: 0,
+        capabilities: [.pressure, .altitude]
+    )
+    let graphiteUpright = graphitePencilDab(
+        altitude: .pi / 2,
+        capabilities: [.pressure, .altitude]
+    )
+    let graphiteTilted = graphitePencilDab(
+        altitude: 0,
+        capabilities: [.pressure, .altitude]
+    )
+
+    #expect(abs(lightPressure.flow - 0.0672) < 0.000_01)
+    #expect(abs(lightPressure.strokeOpacity - 0.368) < 0.000_01)
+    #expect(heavyPressure.flow == 0.24)
+    #expect(heavyPressure.strokeOpacity == 0.92)
+    #expect(abs(lightPressure.grainScale - 1.28) < 0.000_01)
+    #expect(abs(heavyPressure.grainScale - 0.8) < 0.000_01)
+    #expect(upright.diameter == 18)
+    #expect(tilted.diameter == 68)
+    #expect(abs(upright.hardness - 0.4756) < 0.000_01)
+    #expect(abs(tilted.hardness - 0.1276) < 0.000_01)
+    #expect((tilted.diameter - upright.diameter) > (graphiteTilted.diameter - graphiteUpright.diameter))
+    #expect(tilted.hardness < upright.hardness)
+}
+
+@Test
+func naturalCharcoalCompiledDabsMapSpeedScatterAndDirectionEndpoints() {
+    let slow = naturalCharcoalDab(direction: -.pi, velocity: 0)
+    let middle = naturalCharcoalDab(direction: 0, velocity: 50_000)
+    let fast = naturalCharcoalDab(direction: .pi / 2, velocity: 100_000)
+    let random: Float = 0.999_999
+    let slowScatter = naturalCharcoalDab(
+        velocity: 0,
+        random: BrushRandomValues(
+            spacing: 0.5, scatterX: random, scatterY: random, rotation: 0.5,
+            grainX: 0.5, grainY: 0.5, materialVariation: 0.5
+        )
+    )
+    let fastScatter = naturalCharcoalDab(
+        velocity: 100_000,
+        random: BrushRandomValues(
+            spacing: 0.5, scatterX: random, scatterY: random, rotation: 0.5,
+            grainX: 0.5, grainY: 0.5, materialVariation: 0.5
+        )
+    )
+
+    #expect(abs(slow.spacing - 1.215) < 0.000_01)
+    #expect(abs(middle.spacing - 1.62) < 0.000_01)
+    #expect(abs(fast.spacing - 2.025) < 0.000_01)
+    #expect(abs(slowScatter.scatter.x - 0.4032) < 0.000_01)
+    #expect(abs(slowScatter.scatter.y - 0.4032) < 0.000_01)
+    #expect(abs(fastScatter.scatter.x - 0.864) < 0.000_01)
+    #expect(abs(fastScatter.scatter.y - 0.864) < 0.000_01)
+    #expect(abs(slow.rotation - 0) < 0.000_01)
+    #expect(abs(middle.rotation - .pi) < 0.000_01)
+    #expect(abs(fast.rotation - 1.5 * .pi) < 0.000_01)
+}
+
+@Test
+func naturalCharcoalUsesTwoShapeAndGrainFramesInAuthoredOrder() throws {
+    let dab = naturalCharcoalDab(direction: .pi / 2)
+    let primary = try #require(dab.primaryGrainToWorld)
+    let secondary = try #require(dab.secondaryGrainToWorld)
+
+    #expect(primary.translation == dab.position.simd)
+    #expect(abs(secondary.translation.x - dab.position.simd.x * 0.12) < 0.000_01)
+    #expect(abs(secondary.translation.y - dab.position.simd.y * 0.12) < 0.000_01)
+    #expect(abs(primary.xAxis.x) < 0.000_01)
+    #expect(abs(abs(primary.xAxis.y) - 0.8) < 0.000_01)
+    #expect(secondary.xAxis == SIMD2(0.8, 0))
+}
+
+@Test
+func naturalCharcoalSeededVariationIsBoundedBroaderThanGraphiteAndDry() {
+    let viewport = ViewportTransform(
+        drawableSize: PatternSize(width: 128, height: 128),
+        worldCenter: WorldPoint(x: 64, y: 64)
+    )
+    let first = naturalCharcoalLogicalDabs(seed: 91, viewport: viewport)
+    let repeated = naturalCharcoalLogicalDabs(seed: 91, viewport: viewport)
+    let otherSeed = naturalCharcoalLogicalDabs(seed: 92, viewport: viewport)
+    let low = naturalCharcoalDab(random: BrushRandomValues(
+        spacing: 0, scatterX: 0, scatterY: 0, rotation: 0,
+        grainX: 0, grainY: 0, materialVariation: 0
+    ))
+    let highRandom: Float = 0.999_999
+    let high = naturalCharcoalDab(random: BrushRandomValues(
+        spacing: highRandom, scatterX: highRandom, scatterY: highRandom,
+        rotation: highRandom, grainX: highRandom, grainY: highRandom,
+        materialVariation: highRandom
+    ))
+    let graphiteLow = graphitePencilDab(random: BrushRandomValues(
+        spacing: 0.5, scatterX: highRandom, scatterY: highRandom, rotation: 0.5,
+        grainX: highRandom, grainY: highRandom, materialVariation: 0.5
+    ))
+
+    #expect(!first.isEmpty)
+    #expect(first == repeated)
+    #expect(first != otherSeed)
+    #expect(abs(low.spacing - 1.4904) < 0.000_01)
+    #expect(abs(high.spacing - 1.7496) < 0.000_01)
+    #expect(abs(low.scatter.x + 0.6336) < 0.000_01)
+    #expect(abs(low.scatter.y + 0.6336) < 0.000_01)
+    #expect(abs(high.scatter.x - 0.6336) < 0.000_01)
+    #expect(abs(high.scatter.y - 0.6336) < 0.000_01)
+    #expect(abs(low.rotation - (.pi - 0.18)) < 0.000_01)
+    #expect(abs(high.rotation - (.pi + 0.18)) < 0.000_01)
+    #expect(low.grainOffset == SIMD2(-0.16, -0.16))
+    #expect(abs(high.grainOffset.x - 0.16) < 0.000_01)
+    #expect(abs(high.grainOffset.y - 0.16) < 0.000_01)
+    #expect(abs(low.materialContribution - 0.88) < 0.000_01)
+    #expect(high.materialContribution == 1)
+    #expect(abs(high.scatter.x) > abs(graphiteLow.scatter.x))
+    #expect(abs(high.grainOffset.x) > abs(graphiteLow.grainOffset.x))
+    #expect(low.materialFamily == .dry)
+    #expect(naturalCharcoalProgram().requestedBackend == .deposition)
+}
+
+@Test
+func naturalCharcoalMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
+    let mouse = naturalCharcoalDab(pressure: 0, capabilities: [])
+    var input = BrushInputDeriver()
+    var generator = BrushStrokeGenerator(
+        program: naturalCharcoalProgram(), nominalDiameter: 40, color: .black, seed: 91
+    )
+    let viewport = ViewportTransform(
+        drawableSize: PatternSize(width: 2, height: 2),
+        worldCenter: WorldPoint(x: 0, y: 0)
+    )
+    let leading = try generator.beginBatch(input.derive(
+        naturalCharcoalStrokeSample(x: 0, timestamp: 0, phase: .began), viewport: viewport
+    ))
+    let tail = try generator.finishBatch(input.derive(
+        naturalCharcoalStrokeSample(x: 20, timestamp: 1, phase: .ended), viewport: viewport
+    ))
+    let emitted = leading.dabs + tail.dabs
+    let totalDistance = try #require(emitted.last?.sourceDistance)
+    let retapered = emitted.map {
+        BrushDynamicsEngine().applyingKnownTotalDistance(
+            $0, totalDistance: totalDistance, nominalDiameter: 40,
+            definition: naturalCharcoalProgram().definition
+        )
+    }
+
+    #expect(mouse.diameter == 68)
+    #expect(mouse.flow == 0.24)
+    #expect(mouse.strokeOpacity == 0.92)
+    #expect(abs(mouse.hardness - 0.1276) < 0.000_01)
+    #expect(abs(mouse.grainScale - 0.8) < 0.000_01)
+    #expect([mouse.diameter, mouse.flow, mouse.spacing, mouse.hardness,
+             mouse.grainScale].allSatisfy { $0.isFinite })
+    #expect(naturalCharcoalProgram().replayContract.mode == .replayTail)
+    #expect(naturalCharcoalProgram().replayContract.limits == BrushRecipePolicy.replayTailLimits)
+    #expect(retapered.last!.diameter < emitted.last!.diameter)
+    #expect(abs(retapered.first!.diameter - 23.8) < 0.000_01)
+    #expect(abs(retapered.last!.diameter - 23.8) < 0.000_01)
+    #expect(retapered.map(\.ordinal) == emitted.map(\.ordinal))
+    #expect(retapered.map(\.randomValues) == emitted.map(\.randomValues))
+}
+
 private func technicalInkDab(
     pressure: Float = 1,
     capabilities: StrokeInputCapabilities = [.pressure],
@@ -305,6 +475,15 @@ private func graphitePencilProgram() -> BrushProgram {
     return entry.program
 }
 
+private func naturalCharcoalProgram() -> BrushProgram {
+    guard let entry = ProfessionalBrushCatalog.entry(
+        for: BrushRecipeID("builtin.professional-natural-charcoal")
+    ) else {
+        fatalError("Natural Charcoal must be registered before its dynamics run")
+    }
+    return entry.program
+}
+
 private func graphitePencilDab(
     pressure: Float = 1,
     altitude: Float? = .pi / 2,
@@ -327,6 +506,31 @@ private func graphitePencilDab(
             strokeAge: 1, traveledDistance: 100, ordinal: 4, isPredicted: false
         ),
         program: graphitePencilProgram(), random: random, strokeSeed: 91
+    )
+}
+
+private func naturalCharcoalDab(
+    pressure: Float = 1,
+    altitude: Float? = .pi / 2,
+    capabilities: StrokeInputCapabilities = [.pressure, .altitude],
+    direction: Float = 0,
+    velocity: Float = 50_000,
+    random: BrushRandomValues = .centered
+) -> LogicalDab {
+    let sample = InterpolatedStrokeSample(
+        position: WorldPoint(x: 10, y: 20), pressure: pressure, timestamp: 0,
+        altitude: altitude, azimuth: nil, roll: nil, velocity: velocity,
+        phase: .moved,
+        source: capabilities.contains(.pressure) ? .tablet : .mouse,
+        kind: .actual, capabilities: capabilities
+    )
+    return BrushDynamicsEngine().evaluate(
+        sample: sample,
+        context: BrushStrokeContext(
+            nominalDiameter: 40, color: .black, direction: direction,
+            strokeAge: 1, traveledDistance: 100, ordinal: 4, isPredicted: false
+        ),
+        program: naturalCharcoalProgram(), random: random, strokeSeed: 91
     )
 }
 
@@ -355,7 +559,43 @@ private func graphiteLogicalDabs(
     return dabs
 }
 
+private func naturalCharcoalLogicalDabs(
+    seed: UInt64,
+    viewport: ViewportTransform
+) -> [LogicalDab] {
+    var input = BrushInputDeriver()
+    var generator = BrushStrokeGenerator(
+        program: naturalCharcoalProgram(), nominalDiameter: 40, color: .black, seed: seed
+    )
+    var dabs: [LogicalDab] = []
+    for sample in StrokeTraceFixtures.professionalPressureRamp.samples where sample.kind != .predicted {
+        let world = input.derive(sample, viewport: viewport)
+        switch world.phase {
+        case .began:
+            dabs += generator.beginBatches(world).flatMap(\.dabs)
+        case .moved:
+            dabs += generator.appendBatches(world).flatMap(\.dabs)
+        case .ended:
+            dabs += generator.finishBatches(world).flatMap(\.dabs)
+        case .cancelled:
+            generator.cancel()
+        }
+    }
+    return dabs
+}
+
 private func graphiteStrokeSample(
+    x: Float,
+    timestamp: TimeInterval,
+    phase: StrokePhase
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x + 1, y: 1), pressure: 1, timestamp: timestamp,
+        phase: phase, source: .pencil, capabilities: [.pressure]
+    )
+}
+
+private func naturalCharcoalStrokeSample(
     x: Float,
     timestamp: TimeInterval,
     phase: StrokePhase

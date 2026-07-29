@@ -6,6 +6,7 @@ import simd
 public enum ProfessionalBrushDefinitions {
     public static let technicalInk = makeTechnicalInk()
     public static let graphitePencil = makeGraphitePencil()
+    public static let naturalCharcoal = makeNaturalCharcoal()
 
     private static let limits = BrushDefinitionLimits(
         minimumDiameter: 0.01,
@@ -310,6 +311,170 @@ public enum ProfessionalBrushDefinitions {
             )
         } catch {
             preconditionFailure("Invalid professional Graphite Pencil definition: \(error)")
+        }
+    }
+
+    private static func makeNaturalCharcoal() -> BrushDefinition {
+        do {
+            let zero = constant(0)
+            return try BrushDefinition(
+                id: BrushRecipeID("builtin.professional-natural-charcoal"),
+                metadata: BrushMetadata(displayName: "Natural Charcoal"),
+                capabilities: [
+                    BrushCapabilityDeclaration(identifier: "dualGrain", required: true),
+                    BrushCapabilityDeclaration(identifier: "dualShape", required: true),
+                ],
+                resources: [
+                    BrushResourceReference(
+                        identifier: "builtin.grain.charcoal",
+                        kind: .grain,
+                        required: false,
+                        fallback: .builtIn(identifier: "builtin.grain.charcoal")
+                    ),
+                    BrushResourceReference(
+                        identifier: "builtin.grain.paper",
+                        kind: .grain,
+                        required: false,
+                        fallback: .builtIn(identifier: "builtin.grain.paper")
+                    ),
+                    BrushResourceReference(
+                        identifier: "builtin.shape.charcoal-tip",
+                        kind: .shape,
+                        required: false,
+                        fallback: .builtIn(identifier: "builtin.shape.charcoal-tip")
+                    ),
+                ],
+                coverage: BrushCoverageDefinition(
+                    shapes: [
+                        BrushShapeLayerDefinition(
+                            shape: .asset("builtin.shape.charcoal-tip"),
+                            combination: .replace,
+                            scale: 1,
+                            rotation: 0,
+                            offset: .zero
+                        ),
+                        BrushShapeLayerDefinition(
+                            shape: .softRound,
+                            combination: .multiply,
+                            scale: 1,
+                            rotation: 0,
+                            offset: .zero
+                        ),
+                    ],
+                    grains: [
+                        BrushGrainLayerDefinition(
+                            grain: .asset("builtin.grain.charcoal"),
+                            coordinateMode: .brushLocal,
+                            transform: .identity,
+                            grainMovementFraction: 0.12,
+                            grainFollowsBrushRotation: true,
+                            strength: 1
+                        ),
+                        BrushGrainLayerDefinition(
+                            grain: .asset("builtin.grain.paper"),
+                            coordinateMode: .canonical,
+                            transform: .identity,
+                            grainMovementFraction: 0.12,
+                            grainFollowsBrushRotation: false,
+                            strength: 1
+                        ),
+                    ],
+                    baseHardness: 0.58,
+                    aspectRatio: 0.55,
+                    tipThreshold: 0.01,
+                    antialiasing: true
+                ),
+                placement: BrushPlacementDefinition(
+                    baseSpacingFraction: 0.09,
+                    maximumSpacingFraction: 0.22,
+                    baseFlow: 0.24,
+                    strokeOpacity: 0.92,
+                    baseScatterFraction: 0.08,
+                    baseRotation: 0,
+                    baseJitterFraction: 0.035,
+                    baseOffset: .zero
+                ),
+                dynamics: BrushDynamicsDefinition(
+                    size: linear(.tilt, output: 0.45...1.70),
+                    flow: linear(.pressure, output: 0.10...1),
+                    opacity: linear(.pressure, output: 0.25...1),
+                    spacing: linear(.speed, output: 0.75...1.25),
+                    rotation: linear(.direction, output: 0...(2 * .pi)),
+                    scatter: linear(.speed, output: 0.70...1.50),
+                    hardness: linear(
+                        .tilt,
+                        output: 0.22...0.82,
+                        inverted: true
+                    ),
+                    grain: linear(
+                        .pressure,
+                        output: 0.80...1.40,
+                        inverted: true
+                    ),
+                    offsetX: zero,
+                    offsetY: zero,
+                    hue: zero,
+                    saturation: zero,
+                    brightness: zero,
+                    secondaryColorMix: zero,
+                    noPressureNeutral: 1,
+                    randomization: BrushRandomization(
+                        spacing: 0.08,
+                        scatter: 0.18,
+                        rotation: 0.18,
+                        grain: 0.16,
+                        material: 0.12
+                    )
+                ),
+                color: BrushColorBehaviorDefinition(
+                    baseAdjustment: .identity,
+                    perStampJitter: BrushColorJitter(
+                        hue: 0,
+                        saturation: 0,
+                        brightness: 0,
+                        secondaryColorMix: 0
+                    ),
+                    perStrokeJitter: BrushColorJitter(
+                        hue: 0,
+                        saturation: 0,
+                        brightness: 0,
+                        secondaryColorMix: 0
+                    )
+                ),
+                // §7.3 leaves material scalars open; ordinary dry flow uses
+                // neutral strength and an uncapped accumulation limit.
+                material: BrushMaterialDefinition(
+                    accumulation: .flow,
+                    interaction: .none,
+                    edgeTreatment: .dryBreakup,
+                    strength: 1,
+                    wetness: 0,
+                    bleedRadius: 0,
+                    softenPasses: 0,
+                    accumulationLimit: 1,
+                    interactionParameters: nil
+                ),
+                stabilization: 0.05,
+                taper: BrushTaperConfiguration(
+                    start: .diameterMultiples(0.5),
+                    end: .diameterMultiples(0.5),
+                    minimumSize: 0.35,
+                    minimumFlow: 0.30,
+                    effects: [.size, .flow]
+                ),
+                replayMode: .replayTail,
+                replayLimits: BrushRecipePolicy.replayTailLimits,
+                seedPolicy: .perStroke,
+                limits: limits,
+                performanceIntent: .realtime120,
+                compatibility: BrushCompatibilityMetadata(
+                    nativeFeatureVersion: 1,
+                    sourceSettingKeys: [],
+                    requiredSemanticKeys: []
+                )
+            )
+        } catch {
+            preconditionFailure("Invalid professional Natural Charcoal definition: \(error)")
         }
     }
 }

@@ -57,5 +57,71 @@ func professionalCatalogResolvesGraphitePencilWithItsStableIdentity() throws {
     #expect(ProfessionalBrushCatalog.all.map(\.id) == [
         BrushRecipeID("builtin.professional-technical-ink"),
         graphiteID,
+        BrushRecipeID("builtin.professional-natural-charcoal"),
+    ])
+}
+
+@Test
+func professionalCatalogResolvesNaturalCharcoalWithOrderedDualLayers() throws {
+    let charcoalID = BrushRecipeID("builtin.professional-natural-charcoal")
+    let entry = try #require(ProfessionalBrushCatalog.entry(for: charcoalID))
+    let compiled = try BrushProgramCompiler.compile(entry.definition)
+
+    #expect(entry.id == charcoalID)
+    #expect(entry.displayName == "Natural Charcoal")
+    #expect(entry.program == compiled)
+    #expect(compiled.definition.capabilities == [
+        BrushCapabilityDeclaration(identifier: "dualGrain", required: true),
+        BrushCapabilityDeclaration(identifier: "dualShape", required: true),
+    ])
+    #expect(compiled.requiredCapabilities == [.dualGrain, .dualShape])
+    #expect(compiled.definition.resources == [
+        BrushResourceReference(
+            identifier: "builtin.grain.charcoal",
+            kind: .grain,
+            required: false,
+            fallback: .builtIn(identifier: "builtin.grain.charcoal")
+        ),
+        BrushResourceReference(
+            identifier: "builtin.grain.paper",
+            kind: .grain,
+            required: false,
+            fallback: .builtIn(identifier: "builtin.grain.paper")
+        ),
+        BrushResourceReference(
+            identifier: "builtin.shape.charcoal-tip",
+            kind: .shape,
+            required: false,
+            fallback: .builtIn(identifier: "builtin.shape.charcoal-tip")
+        ),
+    ])
+    #expect(compiled.definition.coverage.shapes.map(\.shape) == [
+        .asset("builtin.shape.charcoal-tip"),
+        .softRound,
+    ])
+    #expect(compiled.definition.coverage.shapes.map(\.combination) == [
+        .replace,
+        .multiply,
+    ])
+    #expect(compiled.definition.coverage.grains.map(\.grain) == [
+        .asset("builtin.grain.charcoal"),
+        .asset("builtin.grain.paper"),
+    ])
+    #expect(compiled.definition.coverage.grains.map(\.coordinateMode) == [
+        .brushLocal,
+        .canonical,
+    ])
+    #expect(compiled.definition.coverage.grains.map(\.grainFollowsBrushRotation) == [
+        true,
+        false,
+    ])
+    #expect(compiled.definition.coverage.grains.map(\.grainMovementFraction) == [0.12, 0.12])
+    #expect(compiled.definition.material.accumulation == .flow)
+    #expect(compiled.definition.material.edgeTreatment == .dryBreakup)
+    #expect(compiled.definition.material.interaction == .none)
+    #expect(ProfessionalBrushCatalog.all.map(\.id) == [
+        BrushRecipeID("builtin.professional-technical-ink"),
+        BrushRecipeID("builtin.professional-graphite-pencil"),
+        charcoalID,
     ])
 }
