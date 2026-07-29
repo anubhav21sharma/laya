@@ -1376,14 +1376,65 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
-    func nativeInputPathStorageDoesNotGrowAfterWarmupAcrossLongStroke()
+    func nativeHarnessAuditAllowsBacklogThenRequiresExactFinalDrain()
         async throws
     {
         guard let setup = try makeDepositionRendererSetup() else { return }
         let brush = try await setup.compileBrush(
-            id: "brush.input-path-storage"
+            id: "brush.backlog-integration"
         )
         try setup.renderer.activateDrawBrush(brush)
+
+        _ = try setup.renderer.beginFixedProjectedStrokeForHarness(
+            at: WorldPoint(x: 32, y: 32)
+        )
+        for _ in 1..<5_000 {
+            _ = try setup.renderer.appendFixedProjectedSegmentForHarness(
+                to: WorldPoint(x: 32, y: 32)
+            )
+        }
+
+        let first = try setup.renderer.flushPendingLiveForHarness()
+        let firstAudit = try HarnessRunner.auditLiveFlushIdentity(
+            sceneName: "backlog-integration",
+            previousEncodedHighWater: 0,
+            flushResult: first
+        )
+        #expect(first.emittedHighWater == 5_000)
+        #expect(first.authoritativeBacklogRemaining == 904)
+        #expect(firstAudit.newlyEncodedInstanceCount == 4_096)
+        #expect(firstAudit.encodedHighWater == 4_096)
+
+        let final = try setup.renderer.flushPendingLiveForHarness()
+        let finalAudit = try HarnessRunner.auditLiveFlushIdentity(
+            sceneName: "backlog-integration",
+            previousEncodedHighWater: firstAudit.encodedHighWater,
+            flushResult: final
+        )
+        #expect(final.emittedHighWater == 5_000)
+        #expect(final.authoritativeBacklogRemaining == 0)
+        #expect(finalAudit.newlyEncodedInstanceCount == 904)
+        #expect(finalAudit.encodedHighWater == 5_000)
+        try setup.renderer.cancelStroke(
+            token: setup.renderer.activeStroke!.token
+        )
+    }
+
+    @Test
+    @MainActor
+    func nativeInputAndReplayPathsAllocateNothingAfterWarmup()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            recipe: BrushRecipe(
+                id: BrushRecipeID("brush.input-path-storage"),
+                replayMode: .replayTail,
+                replayLimits: BrushRecipePolicy.replayTailLimits
+            )
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        try setup.renderer.applyTiling(.squareRotation)
         let token = RendererOperationToken(rawValue: 39)
         try setup.renderer.beginStroke(
             token: token,
@@ -1396,10 +1447,12 @@ struct DepositionRendererTests {
                 token: token,
                 sample: depositionSample(
                     .moved,
-                    x: Float(index) * 0.5
+                    x: Float(index % 96) * 0.5
                 )
             )
-            if !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty {
+            while !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty
+                || setup.renderer.activeStroke?.scheduler?.predictedCount != 0
+            {
                 _ = try setup.renderer.flushPendingLiveForHarness()
             }
         }
@@ -1410,17 +1463,27 @@ struct DepositionRendererTests {
                 token: token,
                 sample: depositionSample(
                     .moved,
-                    x: Float(index) * 0.5
+                    x: Float(index % 96) * 0.5
                 )
             )
-            if !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty {
+            if index.isMultiple(of: 16) {
+                try setup.renderer.appendStroke(
+                    token: token,
+                    sample: depositionPredictedSample(
+                        x: Float((index + 1) % 96) * 0.5
+                    )
+                )
+            }
+            while !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty
+                || setup.renderer.activeStroke?.scheduler?.predictedCount != 0
+            {
                 _ = try setup.renderer.flushPendingLiveForHarness()
             }
         }
 
         let storage = setup.renderer.inputPathStorageDiagnosticSnapshot
         #expect(storage.isArmed)
-        #expect(storage.growthCountAfterWarmup == 0)
+        #expect(storage.allocationEventCountAfterWarmup == 0)
         #expect(storage.generatedDabCapacityHighWater > 0)
         #expect(storage.tilingImageCapacityHighWater > 0)
         #expect(storage.tilingCandidateCapacityHighWater > 0)
@@ -1429,6 +1492,18 @@ struct DepositionRendererTests {
         #expect(storage.replayRecordCapacityHighWater > 0)
         #expect(storage.auditedEventCount >= 512)
         try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test
+    func inputPathAuditCountsRepeatedEqualSizedStorageAllocations() {
+        var audit = InputPathStorageAudit()
+        audit.recordCollectionStorageAllocation(capacity: 64)
+        audit.armAfterWarmup()
+
+        audit.recordCollectionStorageAllocation(capacity: 64)
+        audit.recordCollectionStorageAllocation(capacity: 64)
+
+        #expect(audit.snapshot.allocationEventCountAfterWarmup == 2)
     }
 
     @Test

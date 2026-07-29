@@ -521,6 +521,63 @@ func estimatedUpdatePlansAuthoritativeSuffixAndPreservesIdentity() throws {
 }
 
 @Test
+func borrowedEstimatedReplacementUsesCallerOwnedReplayAndSettlementStorage()
+    throws
+{
+    var buffer = transientBuffer(mode: .replayTail)
+    _ = buffer.appendActual(
+        estimatedTransientChunk(
+            0,
+            estimationUpdateIndex: 71,
+            estimatedProperties: [.pressure],
+            expecting: [.pressure],
+            pressure: 0.2
+        )
+    )
+    _ = buffer.appendActual(transientChunk(1))
+    var replaySamples: [WorldStrokeSample] = []
+    replaySamples.reserveCapacity(
+        TransientStrokeBufferContract.wholeStrokeSampleCapacity
+    )
+    let replayCapacity = replaySamples.capacity
+    let plan = try buffer.planEstimatedUpdate(
+        transientSample(
+            9,
+            kind: .estimatedUpdate,
+            estimationUpdateIndex: 71,
+            pressure: 0.85
+        ),
+        replacementSamplesInto: &replaySamples
+    )
+    var rebuilt: [TransientStrokeChunk] = []
+    rebuilt.reserveCapacity(
+        TransientStrokeBufferContract.wholeStrokeSampleCapacity
+    )
+    for sample in replaySamples {
+        rebuilt.append(TransientStrokeChunk(sample: sample, dabs: []))
+    }
+    var settled: [TransientStrokeChunk] = []
+    settled.reserveCapacity(
+        TransientStrokeBufferContract.wholeStrokeSampleCapacity
+    )
+    let settlementCapacity = settled.capacity
+
+    let mutation = try buffer.replaceEstimatedSuffix(
+        using: plan,
+        expectedSamples: replaySamples,
+        with: rebuilt,
+        settledInto: &settled
+    )
+
+    #expect(replaySamples.capacity == replayCapacity)
+    #expect(settled.capacity == settlementCapacity)
+    #expect(settled.isEmpty)
+    #expect(mutation.requiresReplayReplacement)
+    #expect(buffer.actualSamples == replaySamples)
+    #expect(buffer.actualSamples.first?.pressure == 0.85)
+}
+
+@Test
 func estimatedSuffixReplacementIsTransactionalAndInvalidatesOldPlans() throws {
     var buffer = transientBuffer(mode: .replayTail)
     _ = buffer.appendActual(

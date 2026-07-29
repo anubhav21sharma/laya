@@ -162,6 +162,177 @@ public enum StageFourEvidenceValidator {
                 ),
             ],
         ]
+    private static let physicalProfileRequirements:
+        [String: PhysicalProfileRequirement] = [
+            "a14Floor60Hz": .init(
+                platform: "iPadOS",
+                hardwareModelPrefix: "iPad",
+                processorClasses: ["A14Class"],
+                gpuNameFragment: "A14",
+                minimumRefreshHertz: 60,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "touch",
+                inputVendor: "Apple",
+                inputModelFragment: "Multi-Touch",
+                inputTelemetryProvenance: "UITouch.timestamp",
+                minimumSampleCount: 300,
+                minimumDurationNanoseconds: 5_000_000_000,
+                requiredEventCounts: [
+                    "displayFrame": 300,
+                    "inputSample": 300,
+                ],
+                orderedEventKinds: ["inputSample", "displayFrame"]
+            ),
+            "inputToPhoton": .init(
+                platform: "iPadOS",
+                hardwareModelPrefix: "iPad",
+                processorClasses: ["A14Class", "MSeries"],
+                gpuNameFragment: "Apple",
+                minimumRefreshHertz: 60,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "applePencil",
+                inputVendor: "Apple",
+                inputModelFragment: "Apple Pencil",
+                inputTelemetryProvenance:
+                    "UIEvent.coalescedTouches+predictedTouches",
+                minimumSampleCount: 120,
+                minimumDurationNanoseconds: 5_000_000_000,
+                requiredEventCounts: [
+                    "inputEvent": 120,
+                    "photonObserved": 120,
+                ],
+                orderedEventKinds: ["inputEvent", "photonObserved"]
+            ),
+            "memoryWarning": .init(
+                platform: "iPadOS",
+                hardwareModelPrefix: "iPad",
+                processorClasses: ["A14Class", "MSeries"],
+                gpuNameFragment: "Apple",
+                minimumRefreshHertz: 60,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "touch",
+                inputVendor: "Apple",
+                inputModelFragment: "Multi-Touch",
+                inputTelemetryProvenance: "UITouch.timestamp",
+                minimumSampleCount: 5,
+                minimumDurationNanoseconds: 5_000_000_000,
+                requiredEventCounts: [
+                    "memoryWarning": 5,
+                    "rendererRecovered": 5,
+                ],
+                orderedEventKinds: ["memoryWarning", "rendererRecovered"]
+            ),
+            "pencil": .init(
+                platform: "iPadOS",
+                hardwareModelPrefix: "iPad",
+                processorClasses: ["A14Class", "MSeries"],
+                gpuNameFragment: "Apple",
+                minimumRefreshHertz: 60,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "applePencil",
+                inputVendor: "Apple",
+                inputModelFragment: "Apple Pencil",
+                inputTelemetryProvenance:
+                    "UIEvent.coalescedTouches+predictedTouches",
+                minimumSampleCount: 240,
+                minimumDurationNanoseconds: 1_000_000_000,
+                requiredEventCounts: [
+                    "inputSample": 240,
+                    "renderedSample": 240,
+                ],
+                orderedEventKinds: ["inputSample", "renderedSample"]
+            ),
+            "referenceMSeriesProMotion120Hz": .init(
+                platform: "iPadOS",
+                hardwareModelPrefix: "iPad",
+                processorClasses: ["MSeries"],
+                gpuNameFragment: "Apple M",
+                minimumRefreshHertz: 120,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "touch",
+                inputVendor: "Apple",
+                inputModelFragment: "Multi-Touch",
+                inputTelemetryProvenance: "UITouch.timestamp",
+                minimumSampleCount: 600,
+                minimumDurationNanoseconds: 5_000_000_000,
+                requiredEventCounts: [
+                    "displayFrame": 600,
+                    "inputSample": 600,
+                ],
+                orderedEventKinds: ["inputSample", "displayFrame"]
+            ),
+            "suspendResume": .init(
+                platform: "iPadOS",
+                hardwareModelPrefix: "iPad",
+                processorClasses: ["A14Class", "MSeries"],
+                gpuNameFragment: "Apple",
+                minimumRefreshHertz: 60,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "touch",
+                inputVendor: "Apple",
+                inputModelFragment: "Multi-Touch",
+                inputTelemetryProvenance: "UITouch.timestamp",
+                minimumSampleCount: 5,
+                minimumDurationNanoseconds: 5_000_000_000,
+                requiredEventCounts: [
+                    "applicationResumed": 5,
+                    "applicationSuspended": 5,
+                    "rendererRecovered": 5,
+                ],
+                orderedEventKinds: [
+                    "applicationSuspended", "applicationResumed",
+                    "rendererRecovered",
+                ]
+            ),
+            "sustainedThermal": .init(
+                platform: "iPadOS",
+                hardwareModelPrefix: "iPad",
+                processorClasses: ["A14Class", "MSeries"],
+                gpuNameFragment: "Apple",
+                minimumRefreshHertz: 60,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "touch",
+                inputVendor: "Apple",
+                inputModelFragment: "Multi-Touch",
+                inputTelemetryProvenance: "UITouch.timestamp",
+                minimumSampleCount: 600,
+                minimumDurationNanoseconds: 600_000_000_000,
+                requiredEventCounts: [
+                    "displayFrame": 600,
+                    "thermalStateSample": 600,
+                ],
+                orderedEventKinds: [
+                    "thermalStateSample", "displayFrame",
+                ]
+            ),
+            "wacom": .init(
+                platform: "macOS",
+                hardwareModelPrefix: "Mac",
+                processorClasses: ["MSeries"],
+                gpuNameFragment: "Apple M",
+                minimumRefreshHertz: 60,
+                displayProvenance:
+                    "CGDisplayMode.refreshRate+frameTimestampTrace",
+                inputKind: "wacomStylus",
+                inputVendor: "Wacom",
+                inputModelFragment: "Wacom",
+                inputTelemetryProvenance: "NSEvent.tabletPoint",
+                minimumSampleCount: 120,
+                minimumDurationNanoseconds: 1_000_000_000,
+                requiredEventCounts: [
+                    "inputSample": 120,
+                    "renderedSample": 120,
+                ],
+                orderedEventKinds: ["inputSample", "renderedSample"]
+            ),
+        ]
 
     private static let rootEntries: Set<String> = [
         "artifact-sha256.txt",
@@ -887,7 +1058,7 @@ public enum StageFourEvidenceValidator {
                     "device", "measurements", "profileID", "schemaVersion",
                     "source", "toolchain", "traces",
                 ],
-                integer(evidence["schemaVersion"]) == 1,
+                integer(evidence["schemaVersion"]) == 2,
                 evidence["profileID"] as? String == profileID,
                 let source = evidence["source"] as? [String: Any],
                 Set(source.keys) == ["commit", "sourceTreeSHA256"],
@@ -895,15 +1066,12 @@ public enum StageFourEvidenceValidator {
                 source["sourceTreeSHA256"] as? String
                     == provenance.sourceTreeSHA256,
                 let device = evidence["device"] as? [String: Any],
-                Set(device.keys) == [
-                    "gpuName", "gpuRegistryID", "hardwareModel",
-                    "operatingSystem",
-                ],
-                let gpuName = device["gpuName"] as? String,
-                gpuClassification(gpuName) == "physical",
-                nonempty(device["gpuRegistryID"] as? String ?? ""),
-                nonempty(device["hardwareModel"] as? String ?? ""),
-                nonempty(device["operatingSystem"] as? String ?? ""),
+                let profileRequirement =
+                    physicalProfileRequirements[profileID],
+                validPhysicalDevice(
+                    device,
+                    requirement: profileRequirement
+                ),
                 let toolchain = evidence["toolchain"] as? [String: Any],
                 Set(toolchain.keys) == [
                     "swiftVersion", "xcodeVersion", "xcodegenVersion",
@@ -930,10 +1098,11 @@ public enum StageFourEvidenceValidator {
                 profileID: profileID,
                 rawRoot: directory.appendingPathComponent("raw"),
                 expectedSource: source.compactMapValues { $0 as? String },
-                expectedDevice: device.compactMapValues { $0 as? String },
+                expectedDevice: device,
                 expectedToolchain:
                     toolchain.compactMapValues { $0 as? String },
-                expectedMetricIDs: Set(requirements.keys)
+                expectedMetricIDs: Set(requirements.keys),
+                requirement: profileRequirement
             )
             for metricID in requirements.keys.sorted() {
                 guard let requirement = requirements[metricID],
@@ -1001,9 +1170,10 @@ public enum StageFourEvidenceValidator {
         profileID: String,
         rawRoot: URL,
         expectedSource: [String: String],
-        expectedDevice: [String: String],
+        expectedDevice: [String: Any],
         expectedToolchain: [String: String],
-        expectedMetricIDs: Set<String>
+        expectedMetricIDs: Set<String>,
+        requirement: PhysicalProfileRequirement
     ) throws -> [String: [Double]] {
         guard Set(trace.keys) == ["id", "path", "sampleCount", "sha256"],
               trace["id"] as? String == "\(profileID).trace",
@@ -1014,7 +1184,7 @@ public enum StageFourEvidenceValidator {
               let digest = trace["sha256"] as? String,
               isSHA256(digest),
               let sampleCount = integer(trace["sampleCount"]),
-              sampleCount > 0
+              sampleCount >= requirement.minimumSampleCount
         else {
             throw invalid("\(profileID): physical trace declaration is invalid")
         }
@@ -1033,16 +1203,37 @@ public enum StageFourEvidenceValidator {
                   label: "\(profileID) physical trace"
               ),
               Set(raw.keys) == [
-                  "device", "profileID", "samples", "schemaVersion",
-                  "source", "toolchain",
+                  "device", "events", "profileID", "sampleTimestampsNanoseconds",
+                  "samples", "schemaVersion", "source", "toolchain",
               ],
-              integer(raw["schemaVersion"]) == 1,
+              integer(raw["schemaVersion"]) == 2,
               raw["profileID"] as? String == profileID,
               stringDictionary(raw["source"]) == expectedSource,
-              stringDictionary(raw["device"]) == expectedDevice,
+              let rawDevice = raw["device"] as? [String: Any],
+              NSDictionary(dictionary: rawDevice).isEqual(
+                  to: expectedDevice
+              ),
               stringDictionary(raw["toolchain"]) == expectedToolchain,
               let sampleObjects = raw["samples"] as? [String: Any],
-              Set(sampleObjects.keys) == expectedMetricIDs
+              Set(sampleObjects.keys) == expectedMetricIDs,
+              let timestamps = integerArray(
+                  raw["sampleTimestampsNanoseconds"]
+              ),
+              validPhysicalTimestamps(
+                  timestamps,
+                  sampleCount: sampleCount,
+                  minimumDurationNanoseconds:
+                      requirement.minimumDurationNanoseconds
+              ),
+              let events = raw["events"] as? [[String: Any]],
+              validPhysicalEvents(
+                  events,
+                  requiredCounts: requirement.requiredEventCounts,
+                  orderedKinds: requirement.orderedEventKinds,
+                  sampleCount: sampleCount,
+                  firstTimestamp: timestamps[0],
+                  lastTimestamp: timestamps[timestamps.count - 1]
+              )
         else {
             throw invalid("\(profileID): physical trace digest is invalid")
         }
@@ -1437,6 +1628,136 @@ public enum StageFourEvidenceValidator {
         }
     }
 
+    private static func validPhysicalDevice(
+        _ device: [String: Any],
+        requirement: PhysicalProfileRequirement
+    ) -> Bool {
+        guard Set(device.keys) == [
+            "display", "gpuName", "gpuRegistryID", "hardwareModel",
+            "inputDevice", "operatingSystem", "platform",
+            "processorClass",
+        ],
+            let gpuName = device["gpuName"] as? String,
+            gpuClassification(gpuName) == "physical",
+            gpuName.localizedCaseInsensitiveContains(
+                requirement.gpuNameFragment
+            ),
+            nonempty(device["gpuRegistryID"] as? String ?? ""),
+            let hardwareModel = device["hardwareModel"] as? String,
+            hardwareModel.hasPrefix(requirement.hardwareModelPrefix),
+            let operatingSystem = device["operatingSystem"] as? String,
+            operatingSystem.hasPrefix(requirement.platform),
+            device["platform"] as? String == requirement.platform,
+            let processorClass = device["processorClass"] as? String,
+            requirement.processorClasses.contains(processorClass),
+            let display = device["display"] as? [String: Any],
+            Set(display.keys) == [
+                "measuredRefreshHertz", "measurementProvenance",
+                "nominalRefreshHertz",
+            ],
+            let nominalRefresh = (
+                display["nominalRefreshHertz"] as? NSNumber
+            )?.doubleValue,
+            let measuredRefresh = (
+                display["measuredRefreshHertz"] as? NSNumber
+            )?.doubleValue,
+            nominalRefresh.isFinite,
+            measuredRefresh.isFinite,
+            nominalRefresh >= requirement.minimumRefreshHertz,
+            measuredRefresh >= requirement.minimumRefreshHertz,
+            display["measurementProvenance"] as? String
+                == requirement.displayProvenance,
+            let input = device["inputDevice"] as? [String: Any],
+            Set(input.keys) == [
+                "kind", "model", "samplingHertz", "telemetryProvenance",
+                "transport", "vendor",
+            ],
+            input["kind"] as? String == requirement.inputKind,
+            input["vendor"] as? String == requirement.inputVendor,
+            let inputModel = input["model"] as? String,
+            inputModel.localizedCaseInsensitiveContains(
+                requirement.inputModelFragment
+            ),
+            nonempty(input["transport"] as? String ?? ""),
+            input["telemetryProvenance"] as? String
+                == requirement.inputTelemetryProvenance,
+            let samplingHertz =
+                (input["samplingHertz"] as? NSNumber)?.doubleValue,
+            samplingHertz.isFinite,
+            samplingHertz > 0
+        else {
+            return false
+        }
+        return true
+    }
+
+    private static func validPhysicalTimestamps(
+        _ timestamps: [Int],
+        sampleCount: Int,
+        minimumDurationNanoseconds: Int
+    ) -> Bool {
+        guard timestamps.count == sampleCount,
+              timestamps.first ?? -1 >= 0,
+              let first = timestamps.first,
+              let last = timestamps.last,
+              last - first >= minimumDurationNanoseconds
+        else {
+            return false
+        }
+        return zip(timestamps, timestamps.dropFirst()).allSatisfy(<)
+    }
+
+    private static func validPhysicalEvents(
+        _ events: [[String: Any]],
+        requiredCounts: [String: Int],
+        orderedKinds: [String],
+        sampleCount: Int,
+        firstTimestamp: Int,
+        lastTimestamp: Int
+    ) -> Bool {
+        var counts: [String: Int] = [:]
+        var timestampsByKindAndSample: [String: [Int: Int]] = [:]
+        var previousTimestamp: Int?
+        for event in events {
+            guard Set(event.keys) == [
+                "kind", "sampleIndex", "timestampNanoseconds",
+            ],
+                  let kind = event["kind"] as? String,
+                  requiredCounts[kind] != nil,
+                  let sampleIndex = integer(event["sampleIndex"]),
+                  (0 ..< sampleCount).contains(sampleIndex),
+                  let timestamp = integer(event["timestampNanoseconds"]),
+                  (firstTimestamp ... lastTimestamp).contains(timestamp),
+                  previousTimestamp.map({ $0 <= timestamp }) ?? true,
+                  timestampsByKindAndSample[kind]?[sampleIndex] == nil
+            else {
+                return false
+            }
+            counts[kind, default: 0] += 1
+            timestampsByKindAndSample[kind, default: [:]][sampleIndex] =
+                timestamp
+            previousTimestamp = timestamp
+        }
+        guard requiredCounts.allSatisfy({
+            counts[$0.key, default: 0] >= $0.value
+        }) else {
+            return false
+        }
+        for sampleIndex in 0 ..< sampleCount {
+            var precedingTimestamp: Int?
+            for kind in orderedKinds {
+                guard let timestamp =
+                    timestampsByKindAndSample[kind]?[sampleIndex],
+                    precedingTimestamp.map({ $0 < timestamp }) ?? true
+                else {
+                    return false
+                }
+                precedingTimestamp = timestamp
+            }
+        }
+        return true
+    }
+
     private static func percentile95(_ values: [Double]) -> Double {
         let sorted = values.sorted()
         let index = max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1)
@@ -1542,6 +1863,23 @@ private struct PhysicalMetricRequirement {
     let aggregation: String
     let relation: String
     let threshold: Double
+}
+
+private struct PhysicalProfileRequirement {
+    let platform: String
+    let hardwareModelPrefix: String
+    let processorClasses: Set<String>
+    let gpuNameFragment: String
+    let minimumRefreshHertz: Double
+    let displayProvenance: String
+    let inputKind: String
+    let inputVendor: String
+    let inputModelFragment: String
+    let inputTelemetryProvenance: String
+    let minimumSampleCount: Int
+    let minimumDurationNanoseconds: Int
+    let requiredEventCounts: [String: Int]
+    let orderedEventKinds: [String]
 }
 
 private struct Raster {

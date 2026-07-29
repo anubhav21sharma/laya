@@ -244,6 +244,32 @@ struct DepositionEvidenceGateTests {
     }
 
     @Test
+    func sharedM3MacFixtureCannotSatisfyDeviceSpecificPhysicalProfiles()
+        throws
+    {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeLegacySharedM3PhysicalProfiles()
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
+    func oneSamplePhysicalTracesCannotSatisfyAcceptanceProfiles() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeUndersampledPhysicalProfiles()
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
     func physicalTraceDigestIsRecomputedInsideOuterManifest() throws {
         let fixture = try StageFourArtifactFixture()
         defer { fixture.remove() }
@@ -360,6 +386,24 @@ private struct FixturePhysicalMetric {
         self.threshold = threshold
         self.passingSample = passingSample
     }
+}
+
+private struct FixturePhysicalProfile {
+    let platform: String
+    let hardwareModel: String
+    let processorClass: String
+    let gpuName: String
+    let refreshHertz: Double
+    let displayProvenance: String
+    let inputKind: String
+    let inputVendor: String
+    let inputModel: String
+    let inputTransport: String
+    let inputSamplingHertz: Double
+    let inputTelemetryProvenance: String
+    let sampleCount: Int
+    let durationNanoseconds: Int
+    let eventKinds: [String]
 }
 
 private struct StageFourArtifactFixture {
@@ -484,6 +528,14 @@ private struct StageFourArtifactFixture {
     }
 
     func writeValidPhysicalProfiles() throws {
+        try writeProfileSpecificPhysicalProfiles()
+    }
+
+    func writeUndersampledPhysicalProfiles() throws {
+        try writeProfileSpecificPhysicalProfiles(sampleCountOverride: 1)
+    }
+
+    func writeLegacySharedM3PhysicalProfiles() throws {
         try makePhysicalHardware()
         let profiles = root.appendingPathComponent("physical-profiles")
         for profileID in
@@ -565,6 +617,162 @@ private struct StageFourArtifactFixture {
             ]).write(
                 to: directory.appendingPathComponent("evidence.json")
             )
+        }
+    }
+
+    private func writeProfileSpecificPhysicalProfiles(
+        sampleCountOverride: Int? = nil
+    ) throws {
+        try makePhysicalHardware()
+        let profiles = root.appendingPathComponent("physical-profiles")
+        for profileID in
+            StageFourEvidenceValidator.requiredPhysicalProfiles
+        {
+            let profile = try #require(
+                Self.physicalProfiles[profileID]
+            )
+            let directory = profiles.appendingPathComponent(profileID)
+            let raw = directory.appendingPathComponent("raw")
+            try FileManager.default.createDirectory(
+                at: raw,
+                withIntermediateDirectories: true
+            )
+            let metrics = try #require(
+                Self.physicalMetrics[profileID]
+            )
+            let source: [String: Any] = [
+                "commit": commit,
+                "sourceTreeSHA256": sourceTreeSHA256,
+            ]
+            let device: [String: Any] = [
+                "gpuName": profile.gpuName,
+                "gpuRegistryID": "fixture-registry-\(profileID)",
+                "hardwareModel": profile.hardwareModel,
+                "operatingSystem": "\(profile.platform) Fixture",
+                "platform": profile.platform,
+                "processorClass": profile.processorClass,
+                "display": [
+                    "nominalRefreshHertz": profile.refreshHertz,
+                    "measuredRefreshHertz": profile.refreshHertz,
+                    "measurementProvenance":
+                        profile.displayProvenance,
+                ],
+                "inputDevice": [
+                    "kind": profile.inputKind,
+                    "vendor": profile.inputVendor,
+                    "model": profile.inputModel,
+                    "transport": profile.inputTransport,
+                    "samplingHertz": profile.inputSamplingHertz,
+                    "telemetryProvenance":
+                        profile.inputTelemetryProvenance,
+                ],
+            ]
+            let toolchain: [String: Any] = [
+                "swiftVersion": "Fixture Swift",
+                "xcodeVersion": "Fixture Xcode",
+                "xcodegenVersion": "Fixture XcodeGen",
+            ]
+            let sampleCount =
+                sampleCountOverride ?? profile.sampleCount
+            let timestamps = Self.physicalTimestamps(
+                sampleCount: sampleCount,
+                durationNanoseconds:
+                    sampleCountOverride == nil
+                        ? profile.durationNanoseconds : 0
+            )
+            let rawSamples = Dictionary(
+                uniqueKeysWithValues: metrics.map {
+                    (
+                        $0.key,
+                        [Double](
+                            repeating: $0.value.passingSample,
+                            count: sampleCount
+                        )
+                    )
+                }
+            )
+            let events = Self.physicalEvents(
+                kinds: profile.eventKinds,
+                timestamps: timestamps
+            )
+            let trace = try Self.json([
+                "schemaVersion": 2,
+                "profileID": profileID,
+                "source": source,
+                "device": device,
+                "toolchain": toolchain,
+                "sampleTimestampsNanoseconds": timestamps,
+                "events": events,
+                "samples": rawSamples,
+            ])
+            try trace.write(
+                to: raw.appendingPathComponent("trace.json")
+            )
+            let measurements = Dictionary(
+                uniqueKeysWithValues: metrics.map {
+                    metricID,
+                    metric in
+                    (
+                        metricID,
+                        [
+                            "unit": metric.unit,
+                            "aggregation": metric.aggregation,
+                            "samples": [Double](
+                                repeating: metric.passingSample,
+                                count: sampleCount
+                            ),
+                            "threshold": [
+                                "relation": metric.relation,
+                                "value": metric.threshold,
+                            ],
+                        ] as [String: Any]
+                    )
+                }
+            )
+            try Self.json([
+                "schemaVersion": 2,
+                "profileID": profileID,
+                "source": source,
+                "device": device,
+                "toolchain": toolchain,
+                "measurements": measurements,
+                "traces": [
+                    [
+                        "id": "\(profileID).trace",
+                        "path": "raw/trace.json",
+                        "sampleCount": sampleCount,
+                        "sha256": Self.sha256(trace),
+                    ],
+                ],
+            ]).write(
+                to: directory.appendingPathComponent("evidence.json")
+            )
+        }
+    }
+
+    private static func physicalTimestamps(
+        sampleCount: Int,
+        durationNanoseconds: Int
+    ) -> [Int] {
+        guard sampleCount > 1 else { return [0] }
+        return (0 ..< sampleCount).map {
+            durationNanoseconds * $0 / (sampleCount - 1)
+        }
+    }
+
+    private static func physicalEvents(
+        kinds: [String],
+        timestamps: [Int]
+    ) -> [[String: Any]] {
+        timestamps.enumerated().flatMap { sampleIndex, timestamp in
+            let eventStart = max(0, timestamp - (kinds.count - 1))
+            return kinds.enumerated().map { offset, kind in
+                [
+                    "kind": kind,
+                    "sampleIndex": sampleIndex,
+                    "timestampNanoseconds": eventStart + offset,
+                ] as [String: Any]
+            }
         }
     }
 
@@ -1002,6 +1210,158 @@ private struct StageFourArtifactFixture {
                 "pressureMonotonicityFailureCount":
                     .init("count", "sum", "equal", 0, 0),
             ],
+        ]
+    private static let physicalProfiles:
+        [String: FixturePhysicalProfile] = [
+            "a14Floor60Hz": .init(
+                platform: "iPadOS",
+                hardwareModel: "iPad13,2",
+                processorClass: "A14Class",
+                gpuName: "Apple A14 GPU",
+                refreshHertz: 60,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "touch",
+                inputVendor: "Apple",
+                inputModel: "Integrated Multi-Touch",
+                inputTransport: "integrated",
+                inputSamplingHertz: 120,
+                inputTelemetryProvenance: "UITouch.timestamp",
+                sampleCount: 300,
+                durationNanoseconds: 5_000_000_000,
+                eventKinds: ["inputSample", "displayFrame"]
+            ),
+            "inputToPhoton": .init(
+                platform: "iPadOS",
+                hardwareModel: "iPad14,6",
+                processorClass: "MSeries",
+                gpuName: "Apple M2 GPU",
+                refreshHertz: 120,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "applePencil",
+                inputVendor: "Apple",
+                inputModel: "Apple Pencil 2",
+                inputTransport: "integrated",
+                inputSamplingHertz: 240,
+                inputTelemetryProvenance:
+                    "UIEvent.coalescedTouches+predictedTouches",
+                sampleCount: 120,
+                durationNanoseconds: 5_000_000_000,
+                eventKinds: ["inputEvent", "photonObserved"]
+            ),
+            "memoryWarning": .init(
+                platform: "iPadOS",
+                hardwareModel: "iPad13,2",
+                processorClass: "A14Class",
+                gpuName: "Apple A14 GPU",
+                refreshHertz: 60,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "touch",
+                inputVendor: "Apple",
+                inputModel: "Integrated Multi-Touch",
+                inputTransport: "integrated",
+                inputSamplingHertz: 120,
+                inputTelemetryProvenance: "UITouch.timestamp",
+                sampleCount: 5,
+                durationNanoseconds: 5_000_000_000,
+                eventKinds: ["memoryWarning", "rendererRecovered"]
+            ),
+            "pencil": .init(
+                platform: "iPadOS",
+                hardwareModel: "iPad14,6",
+                processorClass: "MSeries",
+                gpuName: "Apple M2 GPU",
+                refreshHertz: 120,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "applePencil",
+                inputVendor: "Apple",
+                inputModel: "Apple Pencil Pro",
+                inputTransport: "integrated",
+                inputSamplingHertz: 240,
+                inputTelemetryProvenance:
+                    "UIEvent.coalescedTouches+predictedTouches",
+                sampleCount: 240,
+                durationNanoseconds: 1_000_000_000,
+                eventKinds: ["inputSample", "renderedSample"]
+            ),
+            "referenceMSeriesProMotion120Hz": .init(
+                platform: "iPadOS",
+                hardwareModel: "iPad14,6",
+                processorClass: "MSeries",
+                gpuName: "Apple M2 GPU",
+                refreshHertz: 120,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "touch",
+                inputVendor: "Apple",
+                inputModel: "Integrated Multi-Touch",
+                inputTransport: "integrated",
+                inputSamplingHertz: 120,
+                inputTelemetryProvenance: "UITouch.timestamp",
+                sampleCount: 600,
+                durationNanoseconds: 5_000_000_000,
+                eventKinds: ["inputSample", "displayFrame"]
+            ),
+            "suspendResume": .init(
+                platform: "iPadOS",
+                hardwareModel: "iPad14,6",
+                processorClass: "MSeries",
+                gpuName: "Apple M2 GPU",
+                refreshHertz: 120,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "touch",
+                inputVendor: "Apple",
+                inputModel: "Integrated Multi-Touch",
+                inputTransport: "integrated",
+                inputSamplingHertz: 120,
+                inputTelemetryProvenance: "UITouch.timestamp",
+                sampleCount: 5,
+                durationNanoseconds: 5_000_000_000,
+                eventKinds: [
+                    "applicationSuspended", "applicationResumed",
+                    "rendererRecovered",
+                ]
+            ),
+            "sustainedThermal": .init(
+                platform: "iPadOS",
+                hardwareModel: "iPad14,6",
+                processorClass: "MSeries",
+                gpuName: "Apple M2 GPU",
+                refreshHertz: 120,
+                displayProvenance:
+                    "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+                inputKind: "touch",
+                inputVendor: "Apple",
+                inputModel: "Integrated Multi-Touch",
+                inputTransport: "integrated",
+                inputSamplingHertz: 120,
+                inputTelemetryProvenance: "UITouch.timestamp",
+                sampleCount: 600,
+                durationNanoseconds: 600_000_000_000,
+                eventKinds: ["thermalStateSample", "displayFrame"]
+            ),
+            "wacom": .init(
+                platform: "macOS",
+                hardwareModel: "Mac15,9",
+                processorClass: "MSeries",
+                gpuName: "Apple M3 Max",
+                refreshHertz: 60,
+                displayProvenance:
+                    "CGDisplayMode.refreshRate+frameTimestampTrace",
+                inputKind: "wacomStylus",
+                inputVendor: "Wacom",
+                inputModel: "Wacom Intuos Pro",
+                inputTransport: "USB",
+                inputSamplingHertz: 200,
+                inputTelemetryProvenance: "NSEvent.tabletPoint",
+                sampleCount: 120,
+                durationNanoseconds: 1_000_000_000,
+                eventKinds: ["inputSample", "renderedSample"]
+            ),
         ]
 
     private static func truth(_ scene: String) -> FixtureSceneTruth {

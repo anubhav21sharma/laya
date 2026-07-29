@@ -80,12 +80,67 @@ public struct HalfPlane2D: Equatable, Sendable {
     }
 }
 
+public struct HalfPlaneCollection:
+    RandomAccessCollection, Equatable, Sendable
+{
+    public typealias Index = Int
+    public typealias Element = HalfPlane2D
+
+    public let count: Int
+    private let plane0: HalfPlane2D?
+    private let plane1: HalfPlane2D?
+    private let plane2: HalfPlane2D?
+    private let plane3: HalfPlane2D?
+
+    public var startIndex: Int { 0 }
+    public var endIndex: Int { count }
+
+    public init(_ halfPlanes: [HalfPlane2D]) {
+        self.init(count: halfPlanes.count) { halfPlanes[$0] }
+    }
+
+    init(
+        count: Int,
+        elementAt: (Int) -> HalfPlane2D
+    ) {
+        precondition(
+            (0 ... 4).contains(count),
+            "ConvexClip supports at most four half-planes"
+        )
+        self.count = count
+        plane0 = count > 0 ? elementAt(0) : nil
+        plane1 = count > 1 ? elementAt(1) : nil
+        plane2 = count > 2 ? elementAt(2) : nil
+        plane3 = count > 3 ? elementAt(3) : nil
+    }
+
+    public subscript(position: Int) -> HalfPlane2D {
+        precondition(indices.contains(position))
+        return switch position {
+        case 0: plane0!
+        case 1: plane1!
+        case 2: plane2!
+        case 3: plane3!
+        default: preconditionFailure("Half-plane index is out of range")
+        }
+    }
+}
+
 public struct ConvexClip: Equatable, Sendable {
-    public let halfPlanes: [HalfPlane2D]
+    public let halfPlanes: HalfPlaneCollection
 
     public init(halfPlanes: [HalfPlane2D]) {
-        precondition(halfPlanes.count <= 4, "ConvexClip supports at most four half-planes")
-        self.halfPlanes = halfPlanes
+        self.halfPlanes = HalfPlaneCollection(halfPlanes)
+    }
+
+    init(
+        halfPlaneCount: Int,
+        elementAt: (Int) -> HalfPlane2D
+    ) {
+        halfPlanes = HalfPlaneCollection(
+            count: halfPlaneCount,
+            elementAt: elementAt
+        )
     }
 
     public func contains(_ point: SIMD2<Float>, tolerance: Float) -> Bool {

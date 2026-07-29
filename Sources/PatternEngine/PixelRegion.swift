@@ -43,30 +43,53 @@ public struct PixelRegionSet: Equatable, Sendable {
     public let rectangles: [PixelRect]
 
     public init(_ candidates: [PixelRect], clippedTo size: PixelSize) {
-        var pending = candidates.compactMap { $0.clipped(to: size) }
-        pending.sort(by: PixelRegionSet.precedes)
-        var merged: [PixelRect] = []
+        var canonical = candidates
+        Self.canonicalizeInPlace(&canonical, clippedTo: size)
+        rectangles = canonical
+    }
 
-        while let first = pending.first {
-            pending.removeFirst()
-            var current = first
-            var didMerge = true
-            while didMerge {
-                didMerge = false
-                for index in pending.indices.reversed()
-                where current.touchesOrOverlaps(pending[index]) {
-                    current = current.union(pending.remove(at: index))
-                    didMerge = true
+    public static func canonicalizeInPlace(
+        _ candidates: inout [PixelRect],
+        clippedTo size: PixelSize
+    ) {
+        var writeIndex = 0
+        for readIndex in candidates.indices {
+            guard let clipped = candidates[readIndex].clipped(to: size)
+            else {
+                continue
+            }
+            candidates[writeIndex] = clipped
+            writeIndex += 1
+        }
+        if writeIndex < candidates.count {
+            candidates.removeLast(candidates.count - writeIndex)
+        }
+        candidates.sort(by: PixelRegionSet.precedes)
+        var index = 0
+        while index < candidates.count {
+            var current = candidates[index]
+            var scan = 0
+            while scan < candidates.count {
+                if scan == index {
+                    scan += 1
+                    continue
                 }
-                for index in merged.indices.reversed()
-                where current.touchesOrOverlaps(merged[index]) {
-                    current = current.union(merged.remove(at: index))
-                    didMerge = true
+                if current.touchesOrOverlaps(candidates[scan]) {
+                    current = current.union(
+                        candidates.remove(at: scan)
+                    )
+                    if scan < index {
+                        index -= 1
+                    }
+                    candidates[index] = current
+                    scan = 0
+                } else {
+                    scan += 1
                 }
             }
-            merged.append(current)
+            index += 1
         }
-        rectangles = merged.sorted(by: PixelRegionSet.precedes)
+        candidates.sort(by: PixelRegionSet.precedes)
     }
 
     private static func precedes(_ lhs: PixelRect, _ rhs: PixelRect) -> Bool {

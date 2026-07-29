@@ -658,6 +658,40 @@ public final class HarnessRunner {
         )
     }
 
+    nonisolated static func auditLiveFlushIdentity(
+        sceneName: String,
+        previousEncodedHighWater: UInt64,
+        flushResult: HarnessLiveFlushResult
+    ) throws -> HarnessInstanceIdentityAudit {
+        guard flushResult.authoritativeBacklogRemaining >= 0,
+              let backlog = UInt64(
+                  exactly: flushResult.authoritativeBacklogRemaining
+              )
+        else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: sceneName,
+                message: "authoritative backlog was negative or unrepresentable"
+            )
+        }
+        let audit = try auditEncodedInstanceIdentityRanges(
+            sceneName: sceneName,
+            previousEncodedHighWater: previousEncodedHighWater,
+            emittedHighWater: flushResult.emittedHighWater,
+            encodedIdentityRanges: flushResult.encodedIdentityRanges,
+            requireEncodedThroughEmittedHighWater: backlog == 0
+        )
+        guard audit.encodedHighWater <= flushResult.emittedHighWater,
+              flushResult.emittedHighWater - audit.encodedHighWater
+                  == backlog
+        else {
+            throw HarnessRunError.counterInvariant(
+                sceneName: sceneName,
+                message: "authoritative backlog \(backlog) did not equal emitted-minus-encoded identity high-water"
+            )
+        }
+        return audit
+    }
+
     nonisolated static func performLongStrokeProductionThenAudit<
         Value,
         Measurement

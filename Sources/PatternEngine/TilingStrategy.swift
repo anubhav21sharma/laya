@@ -47,24 +47,32 @@ public struct TilingImage: Equatable, Sendable {
         self.cell = cell
         self.ordinal = ordinal
         self.worldBounds = worldBounds
-        self.worldClip = worldClip ?? ConvexClip(halfPlanes: [
-            HalfPlane2D(
-                normal: SIMD2(1, 0),
-                offset: worldBounds.minimum.x
-            ),
-            HalfPlane2D(
-                normal: SIMD2(-1, 0),
-                offset: -worldBounds.maximum.x
-            ),
-            HalfPlane2D(
-                normal: SIMD2(0, 1),
-                offset: worldBounds.minimum.y
-            ),
-            HalfPlane2D(
-                normal: SIMD2(0, -1),
-                offset: -worldBounds.maximum.y
-            ),
-        ])
+        self.worldClip = worldClip ?? ConvexClip(
+            halfPlaneCount: 4
+        ) { index in
+            switch index {
+            case 0:
+                HalfPlane2D(
+                    normal: SIMD2(1, 0),
+                    offset: worldBounds.minimum.x
+                )
+            case 1:
+                HalfPlane2D(
+                    normal: SIMD2(-1, 0),
+                    offset: -worldBounds.maximum.x
+                )
+            case 2:
+                HalfPlane2D(
+                    normal: SIMD2(0, 1),
+                    offset: worldBounds.minimum.y
+                )
+            default:
+                HalfPlane2D(
+                    normal: SIMD2(0, -1),
+                    offset: -worldBounds.maximum.y
+                )
+            }
+        }
         self.worldToCanonical = worldToCanonical
         self.operation = operation
     }
@@ -263,6 +271,52 @@ public struct TilingStrategy: Equatable, Sendable {
             return RadialSymmetryKernel(
                 compiled: compiledSymmetry
             ).images(intersecting: worldBounds)
+        }
+    }
+
+    func populateImages(
+        intersecting worldBounds: AxisAlignedRect,
+        scratch: TilingProjectionScratch
+    ) {
+        precondition(
+            worldBounds.minimum.x.isFinite
+                && worldBounds.minimum.y.isFinite
+                && worldBounds.maximum.x.isFinite
+                && worldBounds.maximum.y.isFinite,
+            "TilingStrategy bounds must be finite"
+        )
+        scratch.images.removeAll(keepingCapacity: true)
+        guard
+            worldBounds.maximum.x > worldBounds.minimum.x,
+            worldBounds.maximum.y > worldBounds.minimum.y
+        else {
+            return
+        }
+        switch compiledSymmetry.family {
+        case .rectangular:
+            RectangularSymmetryKernel(
+                compiled: compiledSymmetry
+            ).populateImages(
+                intersecting: worldBounds,
+                cells: &scratch.cells,
+                result: &scratch.images
+            )
+        case .triangular:
+            TriangularSymmetryKernel(
+                compiled: compiledSymmetry
+            ).populateImages(
+                intersecting: worldBounds,
+                result: &scratch.images
+            )
+        case .radial:
+            RadialSymmetryKernel(
+                compiled: compiledSymmetry
+            ).populateImages(
+                intersecting: worldBounds,
+                polygonA: &scratch.polygonA,
+                polygonB: &scratch.polygonB,
+                result: &scratch.images
+            )
         }
     }
 

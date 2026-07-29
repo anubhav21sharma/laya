@@ -23,7 +23,7 @@ enum FrameSchedulerError: Error, Equatable, Sendable {
     case predictedCapacityExceeded(actual: Int, maximum: Int)
 }
 
-struct FrameScheduler: Sendable {
+final class FrameScheduler: @unchecked Sendable {
     var diagnosticSnapshot: FrameSchedulerDiagnosticSnapshot {
         FrameSchedulerDiagnosticSnapshot(
             authoritativePending: authoritativeQueue.count,
@@ -79,7 +79,7 @@ struct FrameScheduler: Sendable {
         )
     }
 
-    mutating func enqueueAuthoritative(
+    func enqueueAuthoritative(
         _ records: [ProjectedDepositionRecord]
     ) throws {
         guard records.count <= authoritativeQueue.availableCapacity else {
@@ -96,7 +96,7 @@ struct FrameScheduler: Sendable {
         )
     }
 
-    mutating func replacePrediction(
+    func replacePrediction(
         _ records: [ProjectedDepositionRecord]
     ) throws {
         guard records.count <= predictionQueue.capacity else {
@@ -115,40 +115,88 @@ struct FrameScheduler: Sendable {
         )
     }
 
-    mutating func nextFrame(
+    func nextFrame(
+        budget: DepositionFrameBudget,
+        includePrediction: Bool = true,
+        authoritativeScratch: inout [ProjectedDepositionRecord],
+        predictedScratch: inout [ProjectedDepositionRecord]
+    ) -> ScheduledDepositionFrame {
+        let frame = preparedFrame(
+            budget: budget,
+            includePrediction: includePrediction,
+            authoritativeScratch: &authoritativeScratch,
+            predictedScratch: &predictedScratch
+        )
+        consume(frame)
+        return frame
+    }
+
+    func preparedFrame(
+        budget: DepositionFrameBudget,
+        includePrediction: Bool = true,
+        authoritativeScratch: inout [ProjectedDepositionRecord],
+        predictedScratch: inout [ProjectedDepositionRecord]
+    ) -> ScheduledDepositionFrame {
+        authoritativeQueue.copyPrefix(
+            maximumCount: budget.maximumAuthoritativeInstances,
+            into: &authoritativeScratch
+        )
+        if includePrediction {
+            predictionQueue.copyPrefix(
+                maximumCount: budget.maximumPredictedInstances,
+                into: &predictedScratch
+            )
+        } else {
+            predictedScratch.removeAll(keepingCapacity: true)
+        }
+        return ScheduledDepositionFrame(
+            authoritative: authoritativeScratch,
+            predicted: predictedScratch,
+            authoritativeRemaining:
+                authoritativeQueue.count - authoritativeScratch.count,
+            predictedRemaining:
+                predictionQueue.count - predictedScratch.count
+        )
+    }
+
+    func consume(_ frame: ScheduledDepositionFrame) {
+        authoritativeQueue.removeFirst(frame.authoritative.count)
+        predictionQueue.removeFirst(frame.predicted.count)
+    }
+
+    func nextFrame(
         budget: DepositionFrameBudget,
         includePrediction: Bool = true
     ) -> ScheduledDepositionFrame {
-        let authoritative = authoritativeQueue.take(
-            maximumCount: budget.maximumAuthoritativeInstances
+        var authoritative: [ProjectedDepositionRecord] = []
+        var predicted: [ProjectedDepositionRecord] = []
+        authoritative.reserveCapacity(
+            budget.maximumAuthoritativeInstances
         )
-        let predicted = includePrediction
-            ? predictionQueue.take(
-                maximumCount: budget.maximumPredictedInstances
-            )
-            : []
-        return ScheduledDepositionFrame(
-            authoritative: authoritative,
-            predicted: predicted,
-            authoritativeRemaining: authoritativeQueue.count,
-            predictedRemaining: predictionQueue.count
+        predicted.reserveCapacity(budget.maximumPredictedInstances)
+        return nextFrame(
+            budget: budget,
+            includePrediction: includePrediction,
+            authoritativeScratch: &authoritative,
+            predictedScratch: &predicted
         )
     }
 
-    mutating func discardPrediction() {
+    func discardPrediction() {
         predictionQueue.reset()
     }
 
-    mutating func promotePredictionToAuthoritative() throws {
-        let records = predictionQueue.records
-        guard records.count <= authoritativeQueue.availableCapacity else {
+    func promotePredictionToAuthoritative() throws {
+        guard predictionQueue.count
+            <= authoritativeQueue.availableCapacity
+        else {
             throw FrameSchedulerError.authoritativeCapacityExceeded(
                 current: authoritativeQueue.count,
-                incoming: records.count,
+                incoming: predictionQueue.count,
                 maximum: authoritativeQueue.capacity
             )
         }
-        authoritativeQueue.append(records)
+        authoritativeQueue.append(contentsOf: predictionQueue)
         authoritativeHighWater = max(
             authoritativeHighWater,
             authoritativeQueue.count
@@ -156,7 +204,7 @@ struct FrameScheduler: Sendable {
         predictionQueue.reset()
     }
 
-    mutating func reset() {
+    func reset() {
         authoritativeQueue.reset()
         predictionQueue.reset()
         predictionCandidate.reset()
@@ -211,31 +259,56 @@ private struct BoundedDepositionQueue: Sendable {
         }
     }
 
-    mutating func take(
-        maximumCount: Int
-    ) -> [ProjectedDepositionRecord] {
-        precondition(maximumCount > 0)
-        let takenCount = min(count, maximumCount)
-        guard takenCount > 0 else { return [] }
+    mutating func append(contentsOf source: BoundedDepositionQueue) {
+        precondition(source.count <= availableCapacity)
+        for offset in 0..<source.count {
+            guard
+                let record =
+                    source.storage[(source.head + offset) % source.capacity]
+            else {
+                preconditionFailure(
+                    "Bounded deposition queue lost an occupied record"
+                )
+            }
+            let index = (head + count) % capacity
+            storage[index] = record
+            count += 1
+        }
+    }
 
-        var records: [ProjectedDepositionRecord] = []
-        records.reserveCapacity(takenCount)
-        for offset in 0..<takenCount {
-            let index = (head + offset) % capacity
-            guard let record = storage[index] else {
+    func copyPrefix(
+        maximumCount: Int,
+        into records: inout [ProjectedDepositionRecord]
+    ) {
+        precondition(maximumCount > 0)
+        let copiedCount = min(count, maximumCount)
+        records.removeAll(keepingCapacity: true)
+        guard copiedCount > 0 else { return }
+        precondition(
+            records.capacity >= copiedCount,
+            "Frame scratch must be reserved before interactive input."
+        )
+        for offset in 0..<copiedCount {
+            guard let record = storage[(head + offset) % capacity] else {
                 preconditionFailure(
                     "Bounded deposition queue lost an occupied record"
                 )
             }
             records.append(record)
-            storage[index] = nil
         }
-        head = (head + takenCount) % capacity
-        count -= takenCount
+    }
+
+    mutating func removeFirst(_ removedCount: Int) {
+        precondition((0...count).contains(removedCount))
+        guard removedCount > 0 else { return }
+        for offset in 0..<removedCount {
+            storage[(head + offset) % capacity] = nil
+        }
+        head = (head + removedCount) % capacity
+        count -= removedCount
         if count == 0 {
             head = 0
         }
-        return records
     }
 
     mutating func reset() {

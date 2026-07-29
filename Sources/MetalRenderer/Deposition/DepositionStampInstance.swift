@@ -198,7 +198,7 @@ extension PatternDepositionStampInstance {
     }
 
     private static func packClips(
-        _ halfPlanes: [HalfPlane2D]
+        _ halfPlanes: HalfPlaneCollection
     ) -> PackedClipPlanes {
         let zero = PatternClipHalfPlane(
             normal: .zero,

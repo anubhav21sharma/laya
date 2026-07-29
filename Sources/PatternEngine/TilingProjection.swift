@@ -73,6 +73,45 @@ public struct TilingProjectionResult: Equatable, Sendable {
     }
 }
 
+/// Reusable projection output owned by a renderer. Its backing storage is
+/// acquired before interactive input and retained across projection calls.
+public final class TilingProjectionScratch: @unchecked Sendable {
+    public internal(set) var fragments: [CellFragment] = []
+    public private(set) var storageAllocationCount: UInt64 = 0
+    var images: [TilingImage] = []
+    var cells: [CellIndex] = []
+    var polygonA: [SIMD2<Float>] = []
+    var polygonB: [SIMD2<Float>] = []
+
+    public init(
+        maximumFragmentCount: Int = 4_096
+    ) {
+        precondition(maximumFragmentCount > 0)
+        fragments.reserveCapacity(maximumFragmentCount)
+        images.reserveCapacity(maximumFragmentCount)
+        cells.reserveCapacity(maximumFragmentCount)
+        polygonA.reserveCapacity(16)
+        polygonB.reserveCapacity(16)
+    }
+
+    fileprivate func replace(
+        with projected: [CellFragment]
+    ) {
+        let capacityBefore = fragments.capacity
+        fragments.removeAll(keepingCapacity: true)
+        fragments.append(contentsOf: projected)
+        if fragments.capacity > capacityBefore {
+            storageAllocationCount = storageAllocationCount == .max
+                ? .max : storageAllocationCount + 1
+        }
+    }
+
+    fileprivate func recordStorageAllocation() {
+        storageAllocationCount = storageAllocationCount == .max
+            ? .max : storageAllocationCount + 1
+    }
+}
+
 public enum TilingProjection {
     public static func dirtyPixelRect(
         for fragment: CellFragment,
@@ -80,17 +119,31 @@ public enum TilingProjection {
     ) -> PixelRect {
         precondition(radius.isFinite && radius > 0)
         let expansion = 1 + 1 / radius
-        let corners = [
-            SIMD2(-expansion, -expansion),
-            SIMD2(expansion, -expansion),
-            SIMD2(-expansion, expansion),
-            SIMD2(expansion, expansion),
-        ].map(fragment.canonicalFromBrush.applying)
+        let corner0 = fragment.canonicalFromBrush.applying(
+            to: SIMD2(-expansion, -expansion)
+        )
+        let corner1 = fragment.canonicalFromBrush.applying(
+            to: SIMD2(expansion, -expansion)
+        )
+        let corner2 = fragment.canonicalFromBrush.applying(
+            to: SIMD2(-expansion, expansion)
+        )
+        let corner3 = fragment.canonicalFromBrush.applying(
+            to: SIMD2(expansion, expansion)
+        )
         return PixelRect(
-            minX: Int(floor(corners.map(\.x).min()!)),
-            minY: Int(floor(corners.map(\.y).min()!)),
-            maxX: Int(ceil(corners.map(\.x).max()!)),
-            maxY: Int(ceil(corners.map(\.y).max()!))
+            minX: Int(floor(min(
+                corner0.x, corner1.x, corner2.x, corner3.x
+            ))),
+            minY: Int(floor(min(
+                corner0.y, corner1.y, corner2.y, corner3.y
+            ))),
+            maxX: Int(ceil(max(
+                corner0.x, corner1.x, corner2.x, corner3.x
+            ))),
+            maxY: Int(ceil(max(
+                corner0.y, corner1.y, corner2.y, corner3.y
+            )))
         )!
     }
 
@@ -125,6 +178,125 @@ public enum TilingProjection {
         using strategy: TilingStrategy
     ) -> TilingProjectionResult {
         projection(for: footprint, using: strategy)
+    }
+
+    @discardableResult
+    public static func project(
+        _ footprint: StampFootprint,
+        using strategy: TilingStrategy,
+        into scratch: TilingProjectionScratch
+    ) -> TilingProjectionStorageDiagnostics {
+        precondition(
+            footprint.coverageSymmetry == .oriented,
+            "Reusable projection scratch is the oriented renderer path."
+        )
+        validateBrushToWorld(footprint.brushToWorld)
+        let capacitiesBefore = (
+            scratch.images.capacity,
+            scratch.cells.capacity,
+            scratch.polygonA.capacity,
+            scratch.polygonB.capacity,
+            scratch.fragments.capacity
+        )
+        let localMinimum = footprint.localBounds.minimum
+        let localMaximum = footprint.localBounds.maximum
+        let world0 = footprint.brushToWorld.applying(to: localMinimum)
+        let world1 = footprint.brushToWorld.applying(
+            to: SIMD2(localMaximum.x, localMinimum.y)
+        )
+        let world2 = footprint.brushToWorld.applying(to: localMaximum)
+        let world3 = footprint.brushToWorld.applying(
+            to: SIMD2(localMinimum.x, localMaximum.y)
+        )
+        let worldBounds = AxisAlignedRect(
+            minimum: SIMD2(
+                min(world0.x, world1.x, world2.x, world3.x),
+                min(world0.y, world1.y, world2.y, world3.y)
+            ),
+            maximum: SIMD2(
+                max(world0.x, world1.x, world2.x, world3.x),
+                max(world0.y, world1.y, world2.y, world3.y)
+            )
+        )
+        scratch.fragments.removeAll(keepingCapacity: true)
+        guard
+            worldBounds.maximum.x > worldBounds.minimum.x,
+            worldBounds.maximum.y > worldBounds.minimum.y
+        else {
+            recordProjectionScratchGrowth(
+                scratch,
+                capacitiesBefore: capacitiesBefore
+            )
+            return TilingProjectionStorageDiagnostics(
+                imageCapacity: scratch.images.capacity,
+                candidateCapacity: scratch.fragments.capacity,
+                maximumClippedPolygonCapacity:
+                    max(scratch.polygonA.capacity, scratch.polygonB.capacity),
+                fragmentCapacity: scratch.fragments.capacity
+            )
+        }
+
+        strategy.populateImages(
+            intersecting: worldBounds,
+            scratch: scratch
+        )
+        for image in scratch.images
+        where image.worldBounds.intersects(worldBounds) {
+            let localClip = ConvexClip(
+                halfPlaneCount: image.worldClip.halfPlanes.count
+            ) { index in
+                let plane = image.worldClip.halfPlanes[index]
+                return brushLocalPlane(
+                    worldNormal: plane.normal,
+                    worldOffset: plane.offset,
+                    brushToWorld: footprint.brushToWorld
+                )
+            }
+            setProjectionRectangle(
+                footprint.localBounds,
+                into: &scratch.polygonA
+            )
+            for plane in localClip.halfPlanes {
+                clipProjectionPolygonInPlace(
+                    &scratch.polygonA,
+                    scratch: &scratch.polygonB,
+                    to: plane
+                )
+            }
+            guard scratch.polygonA.count >= 3,
+                  abs(signedTransformedArea(
+                      of: scratch.polygonA,
+                      transform: footprint.brushToWorld
+                  )) > 0.0001
+            else {
+                continue
+            }
+            let fragment = CellFragment(
+                cell: image.cell,
+                imageOrdinal: image.ordinal,
+                canonicalFromBrush:
+                    footprint.brushToWorld.concatenating(
+                        image.worldToCanonical
+                    ),
+                brushClip: localClip,
+                operation: image.operation
+            )
+            if !scratch.fragments.contains(fragment) {
+                scratch.fragments.append(fragment)
+            }
+        }
+        scratch.fragments.sort(by: fragmentPrecedes)
+        recordProjectionScratchGrowth(
+            scratch,
+            capacitiesBefore: capacitiesBefore
+        )
+        return TilingProjectionStorageDiagnostics(
+            imageCapacity: scratch.images.capacity,
+            candidateCapacity: scratch.fragments.capacity,
+            maximumClippedPolygonCapacity:
+                max(scratch.polygonA.capacity, scratch.polygonB.capacity),
+            fragmentCapacity: scratch.fragments.capacity
+        )
     }
 
     private static func projection(
@@ -267,6 +439,96 @@ public enum TilingProjection {
 
         return best!.flatMap { [$0.x.bitPattern, $0.y.bitPattern] }
     }
+}
+
+private func recordProjectionScratchGrowth(
+    _ scratch: TilingProjectionScratch,
+    capacitiesBefore: (Int, Int, Int, Int, Int)
+) {
+    if scratch.images.capacity > capacitiesBefore.0 {
+        scratch.recordStorageAllocation()
+    }
+    if scratch.cells.capacity > capacitiesBefore.1 {
+        scratch.recordStorageAllocation()
+    }
+    if scratch.polygonA.capacity > capacitiesBefore.2 {
+        scratch.recordStorageAllocation()
+    }
+    if scratch.polygonB.capacity > capacitiesBefore.3 {
+        scratch.recordStorageAllocation()
+    }
+    if scratch.fragments.capacity > capacitiesBefore.4 {
+        scratch.recordStorageAllocation()
+    }
+}
+
+private func setProjectionRectangle(
+    _ bounds: AxisAlignedRect,
+    into polygon: inout [SIMD2<Float>]
+) {
+    polygon.removeAll(keepingCapacity: true)
+    polygon.append(bounds.minimum)
+    polygon.append(SIMD2(bounds.maximum.x, bounds.minimum.y))
+    polygon.append(bounds.maximum)
+    polygon.append(SIMD2(bounds.minimum.x, bounds.maximum.y))
+}
+
+private func clipProjectionPolygonInPlace(
+    _ polygon: inout [SIMD2<Float>],
+    scratch: inout [SIMD2<Float>],
+    to plane: HalfPlane2D
+) {
+    scratch.removeAll(keepingCapacity: true)
+    guard let last = polygon.last else { return }
+    var start = last
+    var startDistance = signedDistance(from: start, to: plane)
+    var startInside = startDistance >= 0
+    for end in polygon {
+        let endDistance = signedDistance(from: end, to: plane)
+        let endInside = endDistance >= 0
+        if endInside {
+            if !startInside {
+                scratch.append(
+                    intersection(
+                        from: start,
+                        to: end,
+                        startDistance: startDistance,
+                        endDistance: endDistance
+                    )
+                )
+            }
+            scratch.append(end)
+        } else if startInside {
+            scratch.append(
+                intersection(
+                    from: start,
+                    to: end,
+                    startDistance: startDistance,
+                    endDistance: endDistance
+                )
+            )
+        }
+        start = end
+        startDistance = endDistance
+        startInside = endInside
+    }
+    swap(&polygon, &scratch)
+}
+
+private func signedTransformedArea(
+    of polygon: [SIMD2<Float>],
+    transform: Affine2D
+) -> Float {
+    guard polygon.count >= 3 else { return 0 }
+    let origin = transform.applying(to: polygon[0])
+    var twiceArea: Float = 0
+    for index in 1 ..< (polygon.count - 1) {
+        let first = transform.applying(to: polygon[index]) - origin
+        let second =
+            transform.applying(to: polygon[index + 1]) - origin
+        twiceArea += first.x * second.y - first.y * second.x
+    }
+    return twiceArea * 0.5
 }
 
 private func validateBrushToWorld(_ affine: Affine2D) {
@@ -927,16 +1189,60 @@ private func fragmentPrecedes(
         return lhs.imageOrdinal < rhs.imageOrdinal
     }
 
-    let lhsScalars = affineScalars(lhs.canonicalFromBrush)
-        + clipScalars(lhs.brushClip)
-    let rhsScalars = affineScalars(rhs.canonicalFromBrush)
-        + clipScalars(rhs.brushClip)
-    for (left, right) in zip(lhsScalars, rhsScalars) {
+    for index in 0 ..< 6 {
+        let left = affineScalar(lhs.canonicalFromBrush, at: index)
+        let right = affineScalar(rhs.canonicalFromBrush, at: index)
         if left != right || left.bitPattern != right.bitPattern {
             return floatPrecedes(left, right)
         }
     }
-    return lhsScalars.count < rhsScalars.count
+    if lhs.brushClip.halfPlanes.count
+        != rhs.brushClip.halfPlanes.count
+    {
+        return lhs.brushClip.halfPlanes.count
+            < rhs.brushClip.halfPlanes.count
+    }
+    for index in lhs.brushClip.halfPlanes.indices {
+        let left = lhs.brushClip.halfPlanes[index]
+        let right = rhs.brushClip.halfPlanes[index]
+        for scalarIndex in 0 ..< 3 {
+            let leftScalar = halfPlaneScalar(left, at: scalarIndex)
+            let rightScalar = halfPlaneScalar(right, at: scalarIndex)
+            if leftScalar != rightScalar
+                || leftScalar.bitPattern != rightScalar.bitPattern
+            {
+                return floatPrecedes(leftScalar, rightScalar)
+            }
+        }
+    }
+    return false
+}
+
+private func affineScalar(
+    _ affine: Affine2D,
+    at index: Int
+) -> Float {
+    switch index {
+    case 0: affine.xAxis.x
+    case 1: affine.xAxis.y
+    case 2: affine.yAxis.x
+    case 3: affine.yAxis.y
+    case 4: affine.translation.x
+    case 5: affine.translation.y
+    default: preconditionFailure("Affine scalar index is out of range")
+    }
+}
+
+private func halfPlaneScalar(
+    _ plane: HalfPlane2D,
+    at index: Int
+) -> Float {
+    switch index {
+    case 0: plane.normal.x
+    case 1: plane.normal.y
+    case 2: plane.offset
+    default: preconditionFailure("Half-plane scalar index is out of range")
+    }
 }
 
 private func affineScalars(_ affine: Affine2D) -> [Float] {

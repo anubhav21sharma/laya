@@ -1658,12 +1658,11 @@ extension HarnessRunner {
                     metrics.cpuEncodeMilliseconds
             )
         let counters = renderer.harnessCounters
-        let identityAudit = try Self.auditEncodedInstanceIdentityRanges(
+        let identityAudit = try Self.auditLiveFlushIdentity(
             sceneName: scene.name,
             previousEncodedHighWater:
                 measurements.encodedInstanceHighWater,
-            emittedHighWater: flushResult.emittedHighWater,
-            encodedIdentityRanges: flushResult.encodedIdentityRanges
+            flushResult: flushResult
         )
 
         guard counters.newInstancesThisFrame <=

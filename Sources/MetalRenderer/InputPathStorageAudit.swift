@@ -4,7 +4,7 @@ public struct InputPathStorageDiagnosticSnapshot:
     Equatable, Sendable
 {
     public let isArmed: Bool
-    public let growthCountAfterWarmup: UInt64
+    public let allocationEventCountAfterWarmup: UInt64
     public let auditedEventCount: UInt64
     public let generatedDabCapacityHighWater: Int
     public let tilingImageCapacityHighWater: Int
@@ -17,7 +17,7 @@ public struct InputPathStorageDiagnosticSnapshot:
 
 struct InputPathStorageAudit {
     private(set) var isArmed = false
-    private(set) var growthCountAfterWarmup: UInt64 = 0
+    private(set) var allocationEventCountAfterWarmup: UInt64 = 0
     private(set) var auditedEventCount: UInt64 = 0
     private(set) var generatedDabCapacityHighWater = 0
     private(set) var tilingImageCapacityHighWater = 0
@@ -30,7 +30,8 @@ struct InputPathStorageAudit {
     var snapshot: InputPathStorageDiagnosticSnapshot {
         InputPathStorageDiagnosticSnapshot(
             isArmed: isArmed,
-            growthCountAfterWarmup: growthCountAfterWarmup,
+            allocationEventCountAfterWarmup:
+                allocationEventCountAfterWarmup,
             auditedEventCount: auditedEventCount,
             generatedDabCapacityHighWater:
                 generatedDabCapacityHighWater,
@@ -55,8 +56,16 @@ struct InputPathStorageAudit {
 
     mutating func armAfterWarmup() {
         isArmed = true
-        growthCountAfterWarmup = 0
+        allocationEventCountAfterWarmup = 0
         auditedEventCount = 0
+    }
+
+    mutating func recordCollectionStorageAllocation(capacity: Int) {
+        precondition(capacity >= 0)
+        guard isArmed else { return }
+        allocationEventCountAfterWarmup = Self.saturatingIncrement(
+            allocationEventCountAfterWarmup
+        )
     }
 
     mutating func recordGeneratedDabs(_ count: Int) {
@@ -113,13 +122,7 @@ struct InputPathStorageAudit {
         _ requiredCapacity: Int,
         highWater: Int
     ) -> Int {
-        guard requiredCapacity > highWater else { return highWater }
-        if isArmed {
-            growthCountAfterWarmup = Self.saturatingIncrement(
-                growthCountAfterWarmup
-            )
-        }
-        return requiredCapacity
+        max(requiredCapacity, highWater)
     }
 
     private static func saturatingIncrement(_ value: UInt64) -> UInt64 {

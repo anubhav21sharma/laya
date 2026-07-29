@@ -256,7 +256,9 @@ extension GridRenderer {
             metrics: frameMetrics,
             emittedHighWater: scheduledAuthoritativeIdentityHighWater,
             encodedIdentityRanges:
-                lastEncodedAuthoritativeIdentityRange.map { [$0] } ?? []
+                lastEncodedAuthoritativeIdentityRange.map { [$0] } ?? [],
+            authoritativeBacklogRemaining:
+                activeStroke?.scheduler?.authoritativeCount ?? 0
         )
     }
 

@@ -72,6 +72,28 @@ public struct LiveStroke {
         return PixelRegionSet(dirtyRectangles, clippedTo: pixelSize)
     }
 
+    func appendDirtyRegions(
+        clippedTo pixelSize: PixelSize,
+        into result: inout [PixelRect]
+    ) {
+        if usesFullTileDirtyRegion {
+            result.append(
+                PixelRect(
+                    minX: 0,
+                    minY: 0,
+                    maxX: pixelSize.width,
+                    maxY: pixelSize.height
+                )!
+            )
+            return
+        }
+        for rectangle in dirtyRectangles {
+            if let clipped = rectangle.clipped(to: pixelSize) {
+                result.append(clipped)
+            }
+        }
+    }
+
     mutating func recordDirtyRegion(_ dirtyRect: PixelRect) {
         accumulateDirtyRectangle(dirtyRect)
     }

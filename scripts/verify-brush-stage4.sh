@@ -359,7 +359,7 @@ run_logged full-tests \
 run_logged input-path-storage-runtime \
   swift test --scratch-path "$scratch" --no-parallel \
     --filter \
-    nativeInputPathStorageDoesNotGrowAfterWarmupAcrossLongStroke
+    nativeInputAndReplayPathsAllocateNothingAfterWarmup
 run_logged brush-lab-headless-contract \
   swift test --scratch-path "$scratch" --no-parallel \
     --filter \
@@ -417,6 +417,26 @@ else
     || fail "hot-path source audit failed with exit $code"
 fi
 
+if rg -n \
+  'Set\([[:space:]]*records\.map|preparedChunkRanges\.flatMap|dabs\.map\(\\\.attributes\)|var updatedBuffer = transientStrokeBuffer|guard var buffer = transientStrokeBuffer|candidate\.nextFrame\(' \
+  Sources/MetalRenderer/GridRenderer.swift \
+  >"$logs/hot-path-owning-wrapper.stdout.log" \
+  2>"$logs/hot-path-owning-wrapper.stderr.log"; then
+  fail "renderer hot path references an allocating compatibility wrapper or COW buffer copy"
+else
+  code=$?
+  [[ "$code" -eq 1 ]] \
+    || fail "renderer hot-path ownership boundary audit failed with exit $code"
+fi
+
+if sed -n \
+  '/private func prepareGeneratedDabs(/,/func appendProjectedFragments(/p' \
+  Sources/MetalRenderer/GridRenderer.swift \
+  | rg -n \
+    'TilingProjection\.(fragments|fragmentsWithStorageDiagnostics|projection)\('; then
+  fail "interactive projection path references an allocating compatibility wrapper"
+fi
+
 input_path_instrumentation_log="$logs/input-path-instrumentation.stdout.log"
 : >"$input_path_instrumentation_log"
 while IFS='|' read -r marker source; do
@@ -428,8 +448,16 @@ done <<'INSTRUMENTATION'
 recordGeneratedDabs|Sources/MetalRenderer/GridRenderer.swift
 recordTiling|Sources/MetalRenderer/GridRenderer.swift
 recordRecordStorage|Sources/MetalRenderer/GridRenderer.swift
+DepositionInputScratch|Sources/MetalRenderer/GridRenderer.swift
+TilingProjectionScratch|Sources/PatternEngine/TilingProjection.swift
+authoritativeScratch|Sources/MetalRenderer/Deposition/FrameScheduler.swift
+preparedFrame|Sources/MetalRenderer/Deposition/FrameScheduler.swift
+consume(_ frame|Sources/MetalRenderer/Deposition/FrameScheduler.swift
 storageDiagnostics|Sources/PatternEngine/TilingProjection.swift
-growthCountAfterWarmup|Sources/MetalRenderer/InputPathStorageAudit.swift
+allocationEventCountAfterWarmup|Sources/MetalRenderer/InputPathStorageAudit.swift
+recordCollectionStorageAllocation|Sources/MetalRenderer/InputPathStorageAudit.swift
+authoritativeBacklogRemaining|Sources/MetalRenderer/GridRenderer.swift
+auditLiveFlushIdentity|Sources/MetalRenderer/Capture/HarnessRunner.swift
 INSTRUMENTATION
 
 run_logged validator-linked-libraries otool -L "$validator"

@@ -26,6 +26,54 @@ private func packageRoot() -> URL {
 }
 
 @Test
+func reusableProjectionMatchesCompatibilityPathWithoutStorageAcquisition() {
+    let footprint = StampFootprint(
+        brushToWorld: Affine2D(
+            xAxis: SIMD2(18, 7),
+            yAxis: SIMD2(-5, 15),
+            translation: SIMD2(252, 251)
+        ),
+        localBounds: normalizedBrushBounds,
+        coverageSymmetry: .oriented
+    )
+    let scratch = TilingProjectionScratch()
+
+    for tiling in TilingKind.periodicCases {
+        let strategy = TilingStrategy(
+            kind: tiling,
+            tileSize: projectionTileSize
+        )
+        let expected = TilingProjection.fragments(
+            for: footprint,
+            using: strategy
+        )
+        _ = TilingProjection.project(
+            footprint,
+            using: strategy,
+            into: scratch
+        )
+        #expect(
+            scratch.fragments == expected,
+            "Reusable projection diverged for \(tiling)."
+        )
+    }
+
+    let stressStrategy = TilingStrategy(
+        kind: .squareRotation,
+        tileSize: projectionTileSize
+    )
+    let allocationCountBefore = scratch.storageAllocationCount
+    for _ in 0..<512 {
+        _ = TilingProjection.project(
+            footprint,
+            using: stressStrategy,
+            into: scratch
+        )
+    }
+    #expect(scratch.storageAllocationCount == allocationCountBefore)
+}
+
+@Test
 func dirtyPixelRectIncludesShaderExpansionAtCanonicalEdge() {
     let fragment = CellFragment(
         cell: CellIndex(column: 0, row: 0),

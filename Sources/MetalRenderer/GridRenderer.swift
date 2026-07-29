@@ -93,6 +93,7 @@ public struct HarnessLiveFlushResult {
     public let metrics: GPUFrameMetrics
     public let emittedHighWater: UInt64
     public let encodedIdentityRanges: [Range<UInt64>]
+    public let authoritativeBacklogRemaining: Int
 }
 
 struct HarnessTilingMutationSnapshot: Equatable {
@@ -282,12 +283,81 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     private struct PreparedGeneratedDab {
         let attributes: DabAttributes
-        let projected: [ProjectedDabRecord]
+        let projectedRange: Range<Int>
 
         var transient: TransientStrokeDab {
             TransientStrokeDab(
                 attributes: attributes,
-                projectedInstanceCount: projected.count
+                projectedInstanceCount: projectedRange.count
+            )
+        }
+    }
+
+    /// Renderer-owned collection storage used by the synchronous input and
+    /// frame-drain paths. Every buffer is reserved before a stroke can arm the
+    /// allocation audit; hot-path reuse clears logical contents while keeping
+    /// the backing storage.
+    private final class DepositionInputScratch {
+        var preparedDabs: [PreparedGeneratedDab] = []
+        var preparedChunkRanges: [Range<Int>] = []
+        var transientChunks: [TransientStrokeChunk] = []
+        var settledChunks: [TransientStrokeChunk] = []
+        var worldSamples: [WorldStrokeSample] = []
+        var projectedArena: [ProjectedDabRecord] = []
+        var flattenedProjected: [ProjectedDabRecord] = []
+        var depositionRecords: [ProjectedDepositionRecord] = []
+        var replayRecords: [ProjectedDabRecord] = []
+        var replayDirtyRegions: [PixelRect] = []
+        var authoritativeFrame: [ProjectedDepositionRecord] = []
+        var predictedFrame: [ProjectedDepositionRecord] = []
+        var encodedLogicalIdentities: [UInt64] = []
+
+        init() {
+            preparedDabs.reserveCapacity(
+                TransientStrokeBufferContract.wholeStrokeDabCapacity
+            )
+            preparedChunkRanges.reserveCapacity(
+                TransientStrokeBufferContract.wholeStrokeSampleCapacity
+            )
+            transientChunks.reserveCapacity(
+                TransientStrokeBufferContract.wholeStrokeSampleCapacity
+            )
+            settledChunks.reserveCapacity(
+                TransientStrokeBufferContract.wholeStrokeSampleCapacity
+            )
+            worldSamples.reserveCapacity(
+                TransientStrokeBufferContract.wholeStrokeSampleCapacity
+            )
+            projectedArena.reserveCapacity(
+                TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity
+            )
+            flattenedProjected.reserveCapacity(
+                TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity
+            )
+            depositionRecords.reserveCapacity(
+                GridCanvasContract.pendingCapacity
+            )
+            replayRecords.reserveCapacity(
+                TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity
+            )
+            replayDirtyRegions.reserveCapacity(
+                TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity
+                + LiveStroke.maximumRetainedDirtyRectangleCount
+            )
+            authoritativeFrame.reserveCapacity(
+                GridCanvasContract.instanceCapacity
+            )
+            predictedFrame.reserveCapacity(
+                TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity
+            )
+            encodedLogicalIdentities.reserveCapacity(
+                TransientStrokeBufferContract
+                    .visibleEpochProjectedInstanceCapacity
             )
         }
     }
@@ -402,6 +472,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var brushLabStrokeEncodedDabCount: UInt64 = 0
     private var brushLabPendingInputReceiptNanoseconds: UInt64?
     private var inputPathStorageAudit = InputPathStorageAudit()
+    private let depositionInputScratch = DepositionInputScratch()
+    private let transientDabArena = TransientStrokeDabArena()
+    private let tilingProjectionScratch = TilingProjectionScratch(
+        maximumFragmentCount:
+            TransientStrokeBufferContract
+                .visibleEpochProjectedInstanceCapacity
+    )
     var scheduledAuthoritativeIdentityHighWater: UInt64 = 0
     private var encodedAuthoritativeIdentityHighWater: UInt64 = 0
     var lastEncodedAuthoritativeIdentityRange: Range<UInt64>?
@@ -980,11 +1057,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         try requireCollectingStroke(token: token)
         guard let authoritativeGenerator = strokeGenerator,
-              var updatedBuffer = transientStrokeBuffer
+              transientStrokeBuffer != nil
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let limits = updatedBuffer.activeReplayLimits
+        let limits = transientStrokeBuffer!.activeReplayLimits
         guard samples.count <= limits.maximumSamples else {
             throw MetalRendererError.strokeSampleCapacityExceeded(
                 limits.maximumSamples
@@ -993,12 +1070,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
         var previewDeriver = brushInputDeriver
         var previewGenerator = authoritativeGenerator
-        var preparedChunks: [TransientStrokeChunk] = []
-        var preparedDabsByChunk: [[PreparedGeneratedDab]] = []
         var generatedDabCount = 0
         var projectedInstanceCount = 0
-        preparedChunks.reserveCapacity(samples.count)
-        preparedDabsByChunk.reserveCapacity(samples.count)
+        depositionInputScratch.transientChunks.removeAll(
+            keepingCapacity: true
+        )
+        depositionInputScratch.preparedDabs.removeAll(
+            keepingCapacity: true
+        )
+        depositionInputScratch.preparedChunkRanges.removeAll(
+            keepingCapacity: true
+        )
+        depositionInputScratch.projectedArena.removeAll(
+            keepingCapacity: true
+        )
+        transientDabArena.beginPredictionReplacement()
 
         for sample in samples {
             let inputBefore = previewDeriver
@@ -1008,7 +1094,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 viewport: viewport
             )
             let prepared = try prepareGeneratedDabs(
-                generator: &previewGenerator
+                generator: &previewGenerator,
+                resetScratch: false
             ) { generator, emit in
                 try generator.append(worldSample, emit: emit)
             }
@@ -1020,7 +1107,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 )
             }
             let chunkProjectedCount = prepared.reduce(0) {
-                $0 + $1.projected.count
+                $0 + depositionInputScratch.preparedDabs[$1]
+                    .projectedRange.count
             }
             let (nextProjectedCount, projectedOverflow) = projectedInstanceCount
                 .addingReportingOverflow(chunkProjectedCount)
@@ -1033,34 +1121,42 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             generatedDabCount = nextCount
             projectedInstanceCount = nextProjectedCount
-            preparedChunks.append(
+            depositionInputScratch.transientChunks.append(
                 TransientStrokeChunk(
                     sample: worldSample,
-                    dabs: prepared.map(\.transient),
+                    dabs: transientDabSlice(
+                        for: prepared,
+                        predicted: true
+                    ),
                     generatorSnapshotBeforeSample: generatorBefore,
                     generatorSnapshotAfterSample: previewGenerator,
                     inputDeriverSnapshotBeforeSample: inputBefore
                 )
             )
-            preparedDabsByChunk.append(prepared)
+            depositionInputScratch.preparedChunkRanges.append(
+                prepared
+            )
         }
 
-        let update = try updatedBuffer.replacePredicted(
-            with: preparedChunks
+        _ = try transientStrokeBuffer!.replacePredicted(
+            with: depositionInputScratch.transientChunks,
+            settledInto: &depositionInputScratch.settledChunks
         )
-        try preflightSettledAppend(update.settledPrefix)
+        try preflightSettledAppend(
+            depositionInputScratch.settledChunks
+        )
 
-        transientStrokeBuffer = updatedBuffer
-        try appendSettled(update.settledPrefix)
+        try appendSettled(depositionInputScratch.settledChunks)
         try rebuildReplayLayer(
-            preparedPredictedSuffix: preparedDabsByChunk
+            preparedPredictedSuffixCount:
+                depositionInputScratch.preparedChunkRanges.count
         )
         predictedInputDeriver = previewDeriver
         predictedStrokeGenerator = previewGenerator
         counters.newDabsThisEvent = generatedDabCount
         counters.totalDabsThisStroke += generatedDabCount
-        publishLogicalDabs(
-            preparedDabsByChunk.flatMap { $0.map(\.attributes) }
+        publishPreparedLogicalDabs(
+            depositionInputScratch.preparedChunkRanges
         )
     }
 
@@ -1187,14 +1283,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         try requireEditableStroke(token: token)
-        guard var buffer = transientStrokeBuffer else {
+        guard transientStrokeBuffer != nil else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         var updateDeriver = brushInputDeriver
         let update = updateDeriver.derive(sample, viewport: viewport)
-        let plan: EstimatedStrokeUpdatePlan
+        let plan: BorrowedEstimatedStrokeUpdatePlan
         do {
-            plan = try buffer.planEstimatedUpdate(update)
+            plan = try transientStrokeBuffer!.planEstimatedUpdate(
+                update,
+                replacementSamplesInto:
+                    &depositionInputScratch.worldSamples
+            )
         } catch let error as TransientStrokeBufferError {
             switch error {
             case .unknownEstimatedUpdateIndex,
@@ -1214,13 +1314,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             ?? (plan.target == .predicted
                 ? brushInputDeriver
                 : BrushInputDeriver())
-        let sourceSamples = [plan.mergedSample] + plan.samplesToReplay
-        var rebuilt: [TransientStrokeChunk] = []
-        var preparedByChunk: [[PreparedGeneratedDab]] = []
-        rebuilt.reserveCapacity(sourceSamples.count)
-        preparedByChunk.reserveCapacity(sourceSamples.count)
+        depositionInputScratch.transientChunks.removeAll(
+            keepingCapacity: true
+        )
+        depositionInputScratch.preparedDabs.removeAll(
+            keepingCapacity: true
+        )
+        depositionInputScratch.preparedChunkRanges.removeAll(
+            keepingCapacity: true
+        )
+        depositionInputScratch.projectedArena.removeAll(
+            keepingCapacity: true
+        )
+        if plan.target == .predicted {
+            transientDabArena.beginPredictionReplacement()
+        }
 
-        for plannedSample in sourceSamples {
+        for plannedSample in depositionInputScratch.worldSamples {
             let inputBefore = deriver
             let replayedSample = deriver.rederive(plannedSample)
             precondition(
@@ -1228,7 +1338,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 "Estimated update plan and replay derivation diverged."
             )
             let generatorBefore = generator
-            let prepared = try prepareGeneratedDabs(generator: &generator) {
+            let prepared = try prepareGeneratedDabs(
+                generator: &generator,
+                resetScratch: false
+            ) {
                 generator, emit in
                 switch replayedSample.phase {
                 case .began:
@@ -1241,24 +1354,32 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     throw MetalRendererError.invalidStrokeLifecycle
                 }
             }
-            rebuilt.append(
+            depositionInputScratch.transientChunks.append(
                 TransientStrokeChunk(
                     sample: replayedSample,
-                    dabs: prepared.map(\.transient),
+                    dabs: transientDabSlice(
+                        for: prepared,
+                        predicted: plan.target == .predicted
+                    ),
                     generatorSnapshotBeforeSample: generatorBefore,
                     generatorSnapshotAfterSample: generator,
                     inputDeriverSnapshotBeforeSample: inputBefore
                 )
             )
-            preparedByChunk.append(prepared)
+            depositionInputScratch.preparedChunkRanges.append(
+                prepared
+            )
         }
-        let bufferUpdate = try buffer.replaceEstimatedSuffix(
+        _ = try transientStrokeBuffer!.replaceEstimatedSuffix(
             using: plan,
-            with: rebuilt
+            expectedSamples: depositionInputScratch.worldSamples,
+            with: depositionInputScratch.transientChunks,
+            settledInto: &depositionInputScratch.settledChunks
         )
-        try preflightSettledAppend(bufferUpdate.settledPrefix)
-        transientStrokeBuffer = buffer
-        try appendSettled(bufferUpdate.settledPrefix)
+        try preflightSettledAppend(
+            depositionInputScratch.settledChunks
+        )
+        try appendSettled(depositionInputScratch.settledChunks)
         switch plan.target {
         case .authoritative:
             strokeGenerator = generator
@@ -1266,28 +1387,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             predictedStrokeGenerator = nil
             predictedInputDeriver = nil
             try rebuildReplayLayer(
-                preparedActualSuffix: Array(
-                    preparedByChunk.suffix(
-                        min(
-                            preparedByChunk.count,
-                            buffer.actualChunks.count
-                        )
-                    )
+                preparedActualSuffixCount: min(
+                    depositionInputScratch.preparedChunkRanges.count,
+                    transientStrokeBuffer!.actualChunks.count
                 )
             )
         case .predicted:
             predictedStrokeGenerator = generator
             predictedInputDeriver = deriver
             try rebuildReplayLayer(
-                preparedPredictedSuffix: preparedByChunk
+                preparedPredictedSuffixCount:
+                    depositionInputScratch.preparedChunkRanges.count
             )
         }
-        counters.newDabsThisEvent = rebuilt.reduce(0) {
+        counters.newDabsThisEvent =
+            depositionInputScratch.transientChunks.reduce(0) {
             $0 + $1.dabs.count
         }
         counters.totalDabsThisStroke += counters.newDabsThisEvent
-        publishLogicalDabs(
-            preparedByChunk.flatMap { $0.map(\.attributes) }
+        publishPreparedLogicalDabs(
+            depositionInputScratch.preparedChunkRanges
         )
     }
 
@@ -1795,7 +1914,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.rasterRevisionStorageLimitExceeded
         }
         guard var execution = activeStroke,
-              var scheduler = execution.scheduler,
+              let scheduler = execution.scheduler,
               !execution.commitRequested,
               execution.pendingRevisions == nil
         else {
@@ -1817,7 +1936,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         scheduledAuthoritativeIdentityHighWater = scheduledHighWater
-        execution.scheduler = scheduler
         recordBrushLabScheduler(scheduler)
         execution.commitRequested = true
         execution.commitRetainedByteLimit = maximumRetainedBytes
@@ -2381,18 +2499,25 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     private func ingestGeneratedSample(
         _ sample: WorldStrokeSample,
-        dabs: [PreparedGeneratedDab],
+        dabs dabRange: Range<Int>,
         generatorBeforeSample: BrushStrokeGenerator?,
         generatorSnapshot: BrushStrokeGenerator,
         inputDeriverBeforeSample: BrushInputDeriver,
         isFinishing: Bool
     ) throws {
-        guard var buffer = transientStrokeBuffer else {
+        guard transientStrokeBuffer != nil else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        let dabs = depositionInputScratch.preparedDabs[dabRange]
         counters.newDabsThisEvent += dabs.count
         counters.totalDabsThisStroke += dabs.count
-        let transientDabs = dabs.map(\.transient)
+        if sample.kind == .predicted {
+            transientDabArena.beginPredictionReplacement()
+        }
+        let transientDabs = transientDabSlice(
+            for: dabRange,
+            predicted: sample.kind == .predicted
+        )
         let chunk = TransientStrokeChunk(
             sample: sample,
             dabs: transientDabs,
@@ -2402,23 +2527,31 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
 
         if sample.kind == .predicted {
-            let predicted = buffer.predictedChunks + [chunk]
-            _ = try buffer.replacePredicted(with: predicted)
-            transientStrokeBuffer = buffer
-            try rebuildReplayLayer(
-                preparedPredictedSuffix: [dabs]
+            _ = try transientStrokeBuffer!.replacePredicted(
+                with: CollectionOfOne(chunk),
+                settledInto: &depositionInputScratch.settledChunks
             )
-            publishLogicalDabs(dabs.map(\.attributes))
+            try preflightSettledAppend(
+                depositionInputScratch.settledChunks
+            )
+            try appendSettled(depositionInputScratch.settledChunks)
+            try rebuildReplayLayer(
+                preparedPredictedSingle: dabRange
+            )
+            publishLogicalDabs(dabs.lazy.map(\.attributes))
             return
         }
 
-        let update = buffer.appendActual(chunk)
+        let update = transientStrokeBuffer!.appendActual(
+            chunk,
+            settledInto: &depositionInputScratch.settledChunks
+        )
         if case let .unresolvedSuffixExceedsCapacity(
             sampleCount,
             dabCount,
             projectedInstanceCount
         ) = update.rejection {
-            let limits = buffer.activeReplayLimits
+            let limits = transientStrokeBuffer!.activeReplayLimits
             if sampleCount > limits.maximumSamples {
                 throw MetalRendererError.strokeSampleCapacityExceeded(
                     limits.maximumSamples
@@ -2442,21 +2575,44 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             update.rejection == nil,
             "Renderer must handle every transient buffer rejection"
         )
-        transientStrokeBuffer = buffer
+        let buffer = transientStrokeBuffer!
         if buffer.mode == .appendOnly,
-           update.settledPrefix.count == 1,
-           update.settledPrefix[0].dabs == transientDabs
+           depositionInputScratch.settledChunks.count == 1,
+           depositionInputScratch.settledChunks[0].dabs
+               == transientDabs
         {
-            var projected: [ProjectedDabRecord] = []
-            projected.reserveCapacity(
-                dabs.reduce(0) { $0 + $1.projected.count }
+            let capacityBefore =
+                depositionInputScratch.flattenedProjected.capacity
+            depositionInputScratch.flattenedProjected.removeAll(
+                keepingCapacity: true
+            )
+            precondition(
+                depositionInputScratch.flattenedProjected.capacity
+                    >= dabs.reduce(0) {
+                        $0 + $1.projectedRange.count
+                    },
+                "Projection scratch must be reserved before interactive input."
             )
             for dab in dabs {
-                projected.append(contentsOf: dab.projected)
+                depositionInputScratch.flattenedProjected.append(
+                    contentsOf:
+                        depositionInputScratch.projectedArena[
+                            dab.projectedRange
+                        ]
+                )
             }
-            try appendSettledRecords(projected)
+            recordScratchAllocationIfNeeded(
+                capacityBefore: capacityBefore,
+                capacityAfter:
+                    depositionInputScratch.flattenedProjected.capacity
+            )
+            try appendSettledRecords(
+                depositionInputScratch.flattenedProjected
+            )
         } else {
-            try appendSettled(update.settledPrefix)
+            try appendSettled(
+                depositionInputScratch.settledChunks
+            )
         }
 
         if isFinishing {
@@ -2470,36 +2626,95 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             || update.requiresReplayReplacement
             || !buffer.predictedChunks.isEmpty
         {
-            try rebuildReplayLayer(
-                preparedActualSuffix:
-                    buffer.mode == .appendOnly || isFinishing
-                        ? []
-                        : [dabs]
-            )
+            if buffer.mode == .appendOnly || isFinishing {
+                try rebuildReplayLayer()
+            } else {
+                try rebuildReplayLayer(
+                    preparedActualSingle: dabRange
+                )
+            }
         }
-        publishLogicalDabs(dabs.map(\.attributes))
+        publishLogicalDabs(dabs.lazy.map(\.attributes))
     }
 
-    private func publishLogicalDabs(_ dabs: [LogicalDab]) {
+    private func publishLogicalDabs<Dabs: Collection>(
+        _ dabs: Dabs
+    ) where Dabs.Element == LogicalDab {
         guard !dabs.isEmpty else { return }
-        brushLabActualDabCount += dabs.lazy.filter { !$0.isPredicted }.count
-        brushLabPredictedDabCount += dabs.lazy.filter(\.isPredicted).count
-        onLogicalDabsGenerated?(dabs)
+        for dab in dabs {
+            if dab.isPredicted {
+                brushLabPredictedDabCount += 1
+            } else {
+                brushLabActualDabCount += 1
+            }
+        }
+        guard let onLogicalDabsGenerated else { return }
+        // The legacy observer owns an Array and may retain it. That ownership
+        // necessarily allocates a snapshot, so an armed audit reports it
+        // instead of silently calling this path "allocation-free."
+        inputPathStorageAudit.recordCollectionStorageAllocation(
+            capacity: dabs.count
+        )
+        onLogicalDabsGenerated(Array(dabs))
+    }
+
+    private func publishPreparedLogicalDabs<Ranges: Collection>(
+        _ ranges: Ranges
+    ) where Ranges.Element == Range<Int> {
+        var count = 0
+        for range in ranges {
+            for index in range {
+                let dab =
+                    depositionInputScratch.preparedDabs[index].attributes
+                if dab.isPredicted {
+                    brushLabPredictedDabCount += 1
+                } else {
+                    brushLabActualDabCount += 1
+                }
+                count += 1
+            }
+        }
+        guard count > 0, let onLogicalDabsGenerated else { return }
+        inputPathStorageAudit.recordCollectionStorageAllocation(
+            capacity: count
+        )
+        var snapshot: [LogicalDab] = []
+        snapshot.reserveCapacity(count)
+        for range in ranges {
+            for index in range {
+                snapshot.append(
+                    depositionInputScratch.preparedDabs[index].attributes
+                )
+            }
+        }
+        onLogicalDabsGenerated(snapshot)
     }
 
     private func appendSettled(
         _ chunks: [TransientStrokeChunk]
     ) throws {
         try preflightSettledAppend(chunks)
-        var records: [ProjectedDabRecord] = []
+        let capacityBefore =
+            depositionInputScratch.flattenedProjected.capacity
+        depositionInputScratch.flattenedProjected.removeAll(
+            keepingCapacity: true
+        )
         for chunk in chunks {
             for dab in chunk.dabs {
-                records.append(
-                    contentsOf: try projectedRecords(for: dab.attributes)
+                try appendProjectedRecords(
+                    for: dab.attributes,
+                    to: &depositionInputScratch.flattenedProjected
                 )
             }
         }
-        try appendSettledRecords(records)
+        recordScratchAllocationIfNeeded(
+            capacityBefore: capacityBefore,
+            capacityAfter:
+                depositionInputScratch.flattenedProjected.capacity
+        )
+        try appendSettledRecords(
+            depositionInputScratch.flattenedProjected
+        )
     }
 
     private func preflightSettledAppend(
@@ -2537,14 +2752,34 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func enqueueCompiledAuthoritative(
         _ records: [ProjectedDabRecord]
     ) throws {
-        guard var execution = activeStroke,
-              var scheduler = execution.scheduler
+        guard let scheduler = activeStroke?.scheduler
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let deposition = records.map(\.depositionRecord)
+        let capacityBefore =
+            depositionInputScratch.depositionRecords.capacity
+        depositionInputScratch.depositionRecords.removeAll(
+            keepingCapacity: true
+        )
+        precondition(
+            depositionInputScratch.depositionRecords.capacity
+                >= records.count,
+            "Deposition scratch must be reserved before interactive input."
+        )
+        for record in records {
+            depositionInputScratch.depositionRecords.append(
+                record.depositionRecord
+            )
+        }
+        recordScratchAllocationIfNeeded(
+            capacityBefore: capacityBefore,
+            capacityAfter:
+                depositionInputScratch.depositionRecords.capacity
+        )
         do {
-            try scheduler.enqueueAuthoritative(deposition)
+            try scheduler.enqueueAuthoritative(
+                depositionInputScratch.depositionRecords
+            )
         } catch let error as FrameSchedulerError {
             throw rendererError(for: error)
         }
@@ -2562,18 +2797,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         counters.totalInstancesThisStroke += records.count
         scheduledAuthoritativeIdentityHighWater = scheduledHighWater
-        execution.scheduler = scheduler
         recordBrushLabScheduler(scheduler)
-        activeStroke = execution
     }
 
     private func prepareGeneratedDabs(
         generator: inout BrushStrokeGenerator,
+        resetScratch: Bool = true,
         generate: (
             inout BrushStrokeGenerator,
             (DabAttributes) throws -> Void
         ) throws -> Void
-    ) throws -> [PreparedGeneratedDab] {
+    ) throws -> Range<Int> {
         let globalMaximumDabs = TransientStrokeBufferContract
             .wholeStrokeDabCapacity
         let globalMaximumProjected = TransientStrokeBufferContract
@@ -2593,18 +2827,47 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     ?? globalMaximumProjected
             )
             : globalMaximumProjected
-        var prepared: [PreparedGeneratedDab] = []
-        prepared.reserveCapacity(min(64, maximumDabs))
+        let capacityBefore =
+            depositionInputScratch.preparedDabs.capacity
+        let projectedCapacityBefore =
+            depositionInputScratch.projectedArena.capacity
+        if resetScratch {
+            depositionInputScratch.preparedDabs.removeAll(
+                keepingCapacity: true
+            )
+            depositionInputScratch.preparedChunkRanges.removeAll(
+                keepingCapacity: true
+            )
+            depositionInputScratch.projectedArena.removeAll(
+                keepingCapacity: true
+            )
+        }
+        let preparedStart =
+            depositionInputScratch.preparedDabs.count
+        precondition(
+            depositionInputScratch.preparedDabs.capacity
+                >= maximumDabs,
+            "Generated-dab scratch must be reserved before interactive input."
+        )
         var projectedCount = 0
         try generate(&generator) { dab in
-            guard prepared.count < maximumDabs else {
+            guard depositionInputScratch.preparedDabs.count
+                < maximumDabs
+            else {
                 throw MetalRendererError.generatedDabCapacityExceeded(
                     maximumDabs
                 )
             }
-            let projected = try projectedRecords(for: dab)
+            let projectedStart =
+                depositionInputScratch.projectedArena.count
+            try appendProjectedRecords(
+                for: dab,
+                to: &depositionInputScratch.projectedArena
+            )
+            let projectedRange = projectedStart
+                ..< depositionInputScratch.projectedArena.count
             let (nextCount, overflow) = projectedCount.addingReportingOverflow(
-                projected.count
+                projectedRange.count
             )
             guard !overflow, nextCount <= maximumProjected else {
                 throw MetalRendererError.projectedInstanceCapacityExceeded(
@@ -2612,20 +2875,35 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 )
             }
             projectedCount = nextCount
-            prepared.append(
+            depositionInputScratch.preparedDabs.append(
                 PreparedGeneratedDab(
                     attributes: dab,
-                    projected: projected
+                    projectedRange: projectedRange
                 )
             )
         }
-        inputPathStorageAudit.recordGeneratedDabs(prepared.capacity)
-        return prepared
+        recordScratchAllocationIfNeeded(
+            capacityBefore: capacityBefore,
+            capacityAfter:
+                depositionInputScratch.preparedDabs.capacity
+        )
+        recordScratchAllocationIfNeeded(
+            capacityBefore: projectedCapacityBefore,
+            capacityAfter:
+                depositionInputScratch.projectedArena.capacity
+        )
+        inputPathStorageAudit.recordGeneratedDabs(
+            depositionInputScratch.preparedDabs.capacity
+        )
+        return preparedStart
+            ..< depositionInputScratch.preparedDabs.count
     }
 
     private func rebuildReplayLayer(
-        preparedActualSuffix: [[PreparedGeneratedDab]] = [],
-        preparedPredictedSuffix: [[PreparedGeneratedDab]] = []
+        preparedActualSuffixCount: Int = 0,
+        preparedPredictedSuffixCount: Int = 0,
+        preparedActualSingle: Range<Int>? = nil,
+        preparedPredictedSingle: Range<Int>? = nil
     ) throws {
         guard let buffer = transientStrokeBuffer,
               let activeStroke
@@ -2637,35 +2915,76 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 ?? buffer.predictedChunks.first { !$0.dabs.isEmpty }?
                     .dabs.first
         )?.attributes.sourceDistance
-        let priorRegions = replayStroke.dirtyRegions(
-            clippedTo: storagePixelSize
+        let regionCapacityBefore =
+            depositionInputScratch.replayDirtyRegions.capacity
+        depositionInputScratch.replayDirtyRegions.removeAll(
+            keepingCapacity: true
         )
-        var replacementRecords: [ProjectedDabRecord] = []
-        replacementRecords.reserveCapacity(
-            min(
-                buffer.visibleProjectedInstanceCount,
-                TransientStrokeBufferContract
-                    .visibleEpochProjectedInstanceCapacity
-            )
+        replayStroke.appendDirtyRegions(
+            clippedTo: storagePixelSize,
+            into: &depositionInputScratch.replayDirtyRegions
+        )
+        let replacementCapacityBefore =
+            depositionInputScratch.replayRecords.capacity
+        depositionInputScratch.replayRecords.removeAll(
+            keepingCapacity: true
+        )
+        precondition(
+            depositionInputScratch.replayRecords.capacity
+                >= min(
+                    buffer.visibleProjectedInstanceCount,
+                    TransientStrokeBufferContract
+                        .visibleEpochProjectedInstanceCapacity
+                ),
+            "Replay scratch must be reserved before interactive input."
         )
         func appendReplayChunks(
             _ chunks: [TransientStrokeChunk],
-            preparedSuffix: [[PreparedGeneratedDab]] = []
+            preparedSuffixCount: Int = 0,
+            preparedSingle: Range<Int>? = nil
         ) throws {
-            let preparedStart = chunks.count - preparedSuffix.count
+            precondition(
+                preparedSingle == nil || preparedSuffixCount == 0
+            )
+            let preparedCount = preparedSingle == nil
+                ? preparedSuffixCount
+                : 1
+            precondition(
+                preparedCount <= depositionInputScratch
+                    .preparedChunkRanges.count
+                    || preparedSingle != nil
+            )
+            let preparedStart = chunks.count - preparedCount
             precondition(preparedStart >= 0)
             for (index, chunk) in chunks.enumerated() {
                 if knownStrokeTotalDistance == nil,
                    index >= preparedStart
                 {
-                    let prepared = preparedSuffix[index - preparedStart]
+                    let preparedRange =
+                        preparedSingle
+                        ?? depositionInputScratch.preparedChunkRanges[
+                            depositionInputScratch
+                                .preparedChunkRanges.count
+                                - preparedSuffixCount
+                                + index - preparedStart
+                        ]
+                    let prepared =
+                        depositionInputScratch.preparedDabs[
+                            preparedRange
+                        ]
                     precondition(
-                        prepared.map(\.transient) == chunk.dabs,
+                        prepared.count == chunk.dabs.count
+                            && zip(prepared, chunk.dabs).allSatisfy {
+                                $0.transient == $1
+                            },
                         "Prepared replay projection diverged from its chunk."
                     )
                     for dab in prepared {
-                        replacementRecords.append(
-                            contentsOf: dab.projected
+                        depositionInputScratch.replayRecords.append(
+                            contentsOf:
+                                depositionInputScratch.projectedArena[
+                                    dab.projectedRange
+                                ]
                         )
                     }
                     continue
@@ -2686,21 +3005,28 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     } else {
                         attributes = transientDab.attributes
                     }
-                    replacementRecords.append(
-                        contentsOf: try projectedRecords(for: attributes)
+                    try appendProjectedRecords(
+                        for: attributes,
+                        to: &depositionInputScratch.replayRecords
                     )
                 }
             }
         }
         try appendReplayChunks(
             buffer.actualChunks,
-            preparedSuffix: preparedActualSuffix
+            preparedSuffixCount: preparedActualSuffixCount,
+            preparedSingle: preparedActualSingle
         )
         try appendReplayChunks(
             buffer.predictedChunks,
-            preparedSuffix: preparedPredictedSuffix
+            preparedSuffixCount: preparedPredictedSuffixCount,
+            preparedSingle: preparedPredictedSingle
         )
-        guard replacementRecords.count
+        recordScratchAllocationIfNeeded(
+            capacityBefore: replacementCapacityBefore,
+            capacityAfter: depositionInputScratch.replayRecords.capacity
+        )
+        guard depositionInputScratch.replayRecords.count
             <= TransientStrokeBufferContract
                 .visibleEpochProjectedInstanceCapacity
         else {
@@ -2709,39 +3035,67 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     .visibleEpochProjectedInstanceCapacity
             )
         }
-        let replacementRegions = PixelRegionSet(
-            replacementRecords.map(\.dirtyRect),
+        for record in depositionInputScratch.replayRecords {
+            depositionInputScratch.replayDirtyRegions.append(
+                record.dirtyRect
+            )
+        }
+        PixelRegionSet.canonicalizeInPlace(
+            &depositionInputScratch.replayDirtyRegions,
             clippedTo: storagePixelSize
         )
+        recordScratchAllocationIfNeeded(
+            capacityBefore: regionCapacityBefore,
+            capacityAfter:
+                depositionInputScratch.replayDirtyRegions.capacity
+        )
         try replaceCompiledReplay(
-            replacementRecords,
-            priorRegions: priorRegions,
-            replacementRegions: replacementRegions
+            depositionInputScratch.replayRecords,
+            clearRegions:
+                depositionInputScratch.replayDirtyRegions
         )
     }
 
     private func replaceCompiledReplay(
         _ records: [ProjectedDabRecord],
-        priorRegions: PixelRegionSet,
-        replacementRegions: PixelRegionSet
+        clearRegions: [PixelRect]
     ) throws {
-        guard var execution = activeStroke,
-              var scheduler = execution.scheduler
+        guard let scheduler = activeStroke?.scheduler
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let deposition = records.map(\.depositionRecord)
+        let capacityBefore =
+            depositionInputScratch.depositionRecords.capacity
+        depositionInputScratch.depositionRecords.removeAll(
+            keepingCapacity: true
+        )
+        precondition(
+            depositionInputScratch.depositionRecords.capacity
+                >= records.count,
+            "Deposition scratch must be reserved before interactive input."
+        )
+        for record in records {
+            depositionInputScratch.depositionRecords.append(
+                record.depositionRecord
+            )
+        }
+        recordScratchAllocationIfNeeded(
+            capacityBefore: capacityBefore,
+            capacityAfter:
+                depositionInputScratch.depositionRecords.capacity
+        )
         do {
-            try scheduler.replacePrediction(deposition)
+            try scheduler.replacePrediction(
+                depositionInputScratch.depositionRecords
+            )
         } catch let error as FrameSchedulerError {
             throw rendererError(for: error)
         }
 
         let epoch = takeReplayEpoch()
-        _ = replayTile.planReplacement(
+        replayTile.planReplacementInPlace(
             epoch: epoch,
-            prior: priorRegions,
-            replacement: replacementRegions
+            canonicalRegions: clearRegions
         )
         replayStroke.beginReplacementEpoch(epoch)
         for record in records {
@@ -2749,9 +3103,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         counters.totalInstancesThisStroke += records.count
         needsReplayClear = true
-        execution.scheduler = scheduler
         recordBrushLabScheduler(scheduler)
-        activeStroke = execution
     }
 
     private func rendererError(
@@ -2765,9 +3117,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func projectedRecords(
-        for dab: DabAttributes
-    ) throws -> [ProjectedDabRecord] {
+    private func appendProjectedRecords(
+        for dab: DabAttributes,
+        to records: inout [ProjectedDabRecord]
+    ) throws {
         guard activeStroke != nil else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -2779,20 +3132,28 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             ),
             coverageSymmetry: .oriented
         )
-        let projection =
-            TilingProjection.fragmentsWithStorageDiagnostics(
-                for: footprint,
-                using: tilingStrategy
-            )
-        inputPathStorageAudit.recordTiling(
-            projection.storageDiagnostics
+        let allocationCountBefore =
+            tilingProjectionScratch.storageAllocationCount
+        let storageDiagnostics = TilingProjection.project(
+            footprint,
+            using: tilingStrategy,
+            into: tilingProjectionScratch
         )
-        let fragments = projection.fragments
-        return try fragments.map { fragment in
+        if tilingProjectionScratch.storageAllocationCount
+            > allocationCountBefore
+        {
+            inputPathStorageAudit.recordCollectionStorageAllocation(
+                capacity: tilingProjectionScratch.fragments.capacity
+            )
+        }
+        inputPathStorageAudit.recordTiling(
+            storageDiagnostics
+        )
+        for fragment in tilingProjectionScratch.fragments {
             let isometryOrdinal = try compiledIsometryOrdinal(
                 for: fragment
             )
-            return ProjectedDabRecord(
+            records.append(ProjectedDabRecord(
                 depositionRecord: ProjectedDepositionRecord(
                     identity: dab.ordinal,
                     instance: try PatternDepositionStampInstance(
@@ -2808,7 +3169,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     radius: dab.radius
                 ),
                 radialPage: radialPage(for: fragment)
-            )
+            ))
         }
     }
 
@@ -3493,14 +3854,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func encodeReplayClear(
         _ commandBuffer: any MTLCommandBuffer
     ) throws {
-        let plan = replayTile.lastClearPlan
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = replayTile.texture
         pass.colorAttachments[0].storeAction = .store
-        switch plan {
-        case .regional:
+        if replayTile.hasRegionalClearPlan {
             pass.colorAttachments[0].loadAction = .load
-        case .fullTile, nil:
+        } else {
             pass.colorAttachments[0].loadAction = .clear
             pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
         }
@@ -3510,7 +3869,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.renderEncoderUnavailable
         }
         encoder.label = "Clear Replay Live Stroke"
-        if case let .regional(regions) = plan {
+        if replayTile.hasRegionalClearPlan {
             encoder.setRenderPipelineState(pipelines.replayClear)
             var uniforms = frameUniforms(
                 drawableSize: tileSize,
@@ -3522,7 +3881,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 length: MemoryLayout<PatternGridFrameUniforms>.stride,
                 index: Int(PatternBufferIndexGridFrameUniforms)
             )
-            for rectangle in regions.rectangles {
+            for rectangle in replayTile.regionalClearRectangles {
                 encoder.setScissorRect(
                     MTLScissorRect(
                         x: rectangle.minX,
@@ -3606,7 +3965,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func encodeScheduledDeposition(
         _ commandBuffer: any MTLCommandBuffer
     ) throws -> NativeDepositionFrameEncoding {
-        guard var execution = activeStroke,
+        guard let execution = activeStroke,
               let scheduler = execution.scheduler
         else {
             throw MetalRendererError.invalidStrokeLifecycle
@@ -3619,10 +3978,25 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         // one atomic encoder transaction and prediction replacement remains
         // all-or-nothing.
         let includePrediction = scheduler.authoritativeIsDrained
-        var candidate = scheduler
-        let frame = candidate.nextFrame(
+        let authoritativeCapacityBefore =
+            depositionInputScratch.authoritativeFrame.capacity
+        let predictedCapacityBefore =
+            depositionInputScratch.predictedFrame.capacity
+        let frame = scheduler.preparedFrame(
             budget: depositionFrameBudget,
-            includePrediction: includePrediction
+            includePrediction: includePrediction,
+            authoritativeScratch:
+                &depositionInputScratch.authoritativeFrame,
+            predictedScratch: &depositionInputScratch.predictedFrame
+        )
+        recordScratchAllocationIfNeeded(
+            capacityBefore: authoritativeCapacityBefore,
+            capacityAfter:
+                depositionInputScratch.authoritativeFrame.capacity
+        )
+        recordScratchAllocationIfNeeded(
+            capacityBefore: predictedCapacityBefore,
+            capacityAfter: depositionInputScratch.predictedFrame.capacity
         )
         precondition(
             frame.authoritative.isEmpty || frame.predicted.isEmpty,
@@ -3698,11 +4072,28 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
 
         depositionEncoder = encoder
-        execution.scheduler = candidate
-        recordBrushLabScheduler(candidate)
-        brushLabLastFrameEncodedDabCount = Set(
-            records.map(\.identity)
-        ).count
+        scheduler.consume(frame)
+        recordBrushLabScheduler(scheduler)
+        let identityCapacityBefore =
+            depositionInputScratch.encodedLogicalIdentities.capacity
+        depositionInputScratch.encodedLogicalIdentities.removeAll(
+            keepingCapacity: true
+        )
+        for record in records
+        where !depositionInputScratch.encodedLogicalIdentities.contains(
+            record.identity
+        ) {
+            depositionInputScratch.encodedLogicalIdentities.append(
+                record.identity
+            )
+        }
+        recordScratchAllocationIfNeeded(
+            capacityBefore: identityCapacityBefore,
+            capacityAfter:
+                depositionInputScratch.encodedLogicalIdentities.capacity
+        )
+        brushLabLastFrameEncodedDabCount =
+            depositionInputScratch.encodedLogicalIdentities.count
         brushLabLastFrameEncodedInstanceCount = records.count
         brushLabStrokeEncodedDabCount = Self.saturatingAdd(
             brushLabStrokeEncodedDabCount,
@@ -3732,7 +4123,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         lastEncodedAuthoritativeIdentityRange =
             encodedAuthoritativeIdentityRange
-        activeStroke = execution
         return NativeDepositionFrameEncoding(
             authoritativeCount: frame.authoritative.count,
             predictedCount: frame.predicted.count,
@@ -4905,6 +5295,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         brushLabStrokeEncodedDabCount = 0
         brushLabPendingInputReceiptNanoseconds = nil
         inputPathStorageAudit.reset()
+        transientDabArena.reset()
         scheduledAuthoritativeIdentityHighWater = 0
         encodedAuthoritativeIdentityHighWater = 0
         lastEncodedAuthoritativeIdentityRange = nil
@@ -4912,6 +5303,35 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     func armInputPathStorageAuditAfterWarmup() {
         inputPathStorageAudit.armAfterWarmup()
+    }
+
+    private func recordScratchAllocationIfNeeded(
+        capacityBefore: Int,
+        capacityAfter: Int
+    ) {
+        guard capacityAfter > capacityBefore else { return }
+        inputPathStorageAudit.recordCollectionStorageAllocation(
+            capacity: capacityAfter
+        )
+    }
+
+    private func transientDabSlice(
+        for preparedRange: Range<Int>,
+        predicted: Bool
+    ) -> TransientStrokeDabSlice {
+        let prepared = depositionInputScratch.preparedDabs
+        let elementAt: (Int) -> TransientStrokeDab = { offset in
+            prepared[preparedRange.lowerBound + offset].transient
+        }
+        return predicted
+            ? transientDabArena.storePredicted(
+                count: preparedRange.count,
+                elementAt: elementAt
+            )
+            : transientDabArena.storeActual(
+                count: preparedRange.count,
+                elementAt: elementAt
+            )
     }
 
     private func markBrushLabInputReceipt() {

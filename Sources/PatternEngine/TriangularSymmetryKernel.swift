@@ -40,15 +40,39 @@ struct TriangularSymmetryKernel: Equatable, Sendable {
         intersecting worldBounds: AxisAlignedRect
     ) -> [TilingImage] {
         var result: [TilingImage] = []
+        populateImages(intersecting: worldBounds, result: &result)
+        return result
+    }
+
+    func populateImages(
+        intersecting worldBounds: AxisAlignedRect,
+        result: inout [TilingImage]
+    ) {
+        result.removeAll(keepingCapacity: true)
         for image in compiled.images {
             let worldToTransformedRaster =
                 compiled.rasterMetric.worldToRaster
                     .concatenating(image.localToCanonical)
-            let transformedCorners = worldBounds.corners.map(
-                worldToTransformedRaster.applying
+            let transformed0 = worldToTransformedRaster.applying(
+                to: worldBounds.minimum
+            )
+            let transformed1 = worldToTransformedRaster.applying(
+                to: SIMD2(
+                    worldBounds.maximum.x,
+                    worldBounds.minimum.y
+                )
+            )
+            let transformed2 = worldToTransformedRaster.applying(
+                to: worldBounds.maximum
+            )
+            let transformed3 = worldToTransformedRaster.applying(
+                to: SIMD2(
+                    worldBounds.minimum.x,
+                    worldBounds.maximum.y
+                )
             )
             let transformedBounds = triangularBounds(
-                enclosing: transformedCorners
+                transformed0, transformed1, transformed2, transformed3
             )
             guard
                 let columns = triangularIntersectingIndices(
@@ -75,17 +99,28 @@ struct TriangularSymmetryKernel: Equatable, Sendable {
                         Float(column) * periodic.tileSize.width,
                         Float(row) * periodic.tileSize.height
                     )
-                    var preimageVertices = [
-                        targetOrigin,
-                        targetOrigin + SIMD2(periodic.tileSize.width, 0),
-                        targetOrigin + periodic.tileSize.simd,
-                        targetOrigin + SIMD2(0, periodic.tileSize.height),
-                    ].map(transformedRasterToWorld.applying)
-                    if triangularSignedArea(preimageVertices) < 0 {
-                        preimageVertices.reverse()
+                    var preimage0 = transformedRasterToWorld.applying(
+                        to: targetOrigin
+                    )
+                    var preimage1 = transformedRasterToWorld.applying(
+                        to: targetOrigin
+                            + SIMD2(periodic.tileSize.width, 0)
+                    )
+                    var preimage2 = transformedRasterToWorld.applying(
+                        to: targetOrigin + periodic.tileSize.simd
+                    )
+                    var preimage3 = transformedRasterToWorld.applying(
+                        to: targetOrigin
+                            + SIMD2(0, periodic.tileSize.height)
+                    )
+                    if triangularSignedArea(
+                        preimage0, preimage1, preimage2, preimage3
+                    ) < 0 {
+                        swap(&preimage0, &preimage3)
+                        swap(&preimage1, &preimage2)
                     }
                     let preimageBounds = triangularBounds(
-                        enclosing: preimageVertices
+                        preimage0, preimage1, preimage2, preimage3
                     )
                     guard preimageBounds.intersects(worldBounds) else {
                         continue
@@ -104,7 +139,10 @@ struct TriangularSymmetryKernel: Equatable, Sendable {
                             ordinal: image.ordinal,
                             worldBounds: preimageBounds,
                             worldClip: triangularConvexClip(
-                                counterclockwise: preimageVertices
+                                preimage0,
+                                preimage1,
+                                preimage2,
+                                preimage3
                             ),
                             worldToCanonical: worldToTransformedRaster.concatenating(
                                 canonicalTranslation
@@ -116,7 +154,6 @@ struct TriangularSymmetryKernel: Equatable, Sendable {
             }
         }
         result.sort(by: triangularImagePrecedes)
-        return result
     }
 }
 
@@ -192,6 +229,74 @@ private func triangularBounds(
             points.map(\.y).max()!
         )
     )
+}
+
+private func triangularBounds(
+    _ point0: SIMD2<Float>,
+    _ point1: SIMD2<Float>,
+    _ point2: SIMD2<Float>,
+    _ point3: SIMD2<Float>
+) -> AxisAlignedRect {
+    AxisAlignedRect(
+        minimum: SIMD2(
+            min(point0.x, point1.x, point2.x, point3.x),
+            min(point0.y, point1.y, point2.y, point3.y)
+        ),
+        maximum: SIMD2(
+            max(point0.x, point1.x, point2.x, point3.x),
+            max(point0.y, point1.y, point2.y, point3.y)
+        )
+    )
+}
+
+private func triangularPoint(
+    _ points: (
+        SIMD2<Float>, SIMD2<Float>, SIMD2<Float>, SIMD2<Float>
+    ),
+    at index: Int
+) -> SIMD2<Float> {
+    switch index {
+    case 0: points.0
+    case 1: points.1
+    case 2: points.2
+    case 3: points.3
+    default: preconditionFailure("Quadrilateral index is out of range")
+    }
+}
+
+private func triangularConvexClip(
+    _ point0: SIMD2<Float>,
+    _ point1: SIMD2<Float>,
+    _ point2: SIMD2<Float>,
+    _ point3: SIMD2<Float>
+) -> ConvexClip {
+    let points = (point0, point1, point2, point3)
+    return ConvexClip(halfPlaneCount: 4) { index in
+        let start = triangularPoint(points, at: index)
+        let end = triangularPoint(points, at: (index + 1) % 4)
+        let edge = end - start
+        let inward = simd_normalize(SIMD2(-edge.y, edge.x))
+        return HalfPlane2D(
+            normal: inward,
+            offset: simd_dot(inward, start)
+        )
+    }
+}
+
+private func triangularSignedArea(
+    _ point0: SIMD2<Float>,
+    _ point1: SIMD2<Float>,
+    _ point2: SIMD2<Float>,
+    _ point3: SIMD2<Float>
+) -> Float {
+    let points = (point0, point1, point2, point3)
+    var twiceArea: Float = 0
+    for index in 0 ..< 4 {
+        let first = triangularPoint(points, at: index)
+        let second = triangularPoint(points, at: (index + 1) % 4)
+        twiceArea += first.x * second.y - first.y * second.x
+    }
+    return twiceArea * 0.5
 }
 
 private func triangularConvexClip(

@@ -47,6 +47,25 @@ struct RadialSymmetryKernel: Equatable, Sendable {
     func images(
         intersecting worldBounds: AxisAlignedRect
     ) -> [TilingImage] {
+        var polygonA: [SIMD2<Float>] = []
+        var polygonB: [SIMD2<Float>] = []
+        var result: [TilingImage] = []
+        populateImages(
+            intersecting: worldBounds,
+            polygonA: &polygonA,
+            polygonB: &polygonB,
+            result: &result
+        )
+        return result
+    }
+
+    func populateImages(
+        intersecting worldBounds: AxisAlignedRect,
+        polygonA: inout [SIMD2<Float>],
+        polygonB: inout [SIMD2<Float>],
+        result: inout [TilingImage]
+    ) {
+        result.removeAll(keepingCapacity: true)
         let canvasBounds = AxisAlignedRect(
             minimum: .zero,
             maximum: SIMD2(
@@ -54,65 +73,75 @@ struct RadialSymmetryKernel: Equatable, Sendable {
                 Float(radial.canvasSize.height)
             )
         )
-        guard canvasBounds.intersects(worldBounds) else { return [] }
+        guard canvasBounds.intersects(worldBounds) else { return }
 
         guard let layout = radial.layout else {
-            let clipped = radialClipPolygon(
-                canvasBounds.corners,
+            radialSetRectangle(canvasBounds, into: &polygonA)
+            radialClipInPlace(
+                &polygonA,
+                scratch: &polygonB,
                 to: worldBounds
             )
-            return radialTriangulatedImages(
-                polygon: clipped,
+            radialAppendTriangulatedImages(
+                polygon: &polygonA,
                 cell: CellIndex(column: 0, row: 0),
                 ordinal: 0,
                 worldToCanonical: .identity,
-                operation: .identity
+                operation: .identity,
+                result: &result
             )
+            return
         }
 
-        var result: [TilingImage] = []
         for image in compiled.images {
             let logicalToWorld = image.localToCanonical.inverted()
             for page in layout.residentPages {
-                var logicalPolygon = layout.logicalPageBounds(page).corners
-                logicalPolygon = radialClipToCanonicalSector(
-                    logicalPolygon,
+                radialSetRectangle(
+                    layout.logicalPageBounds(page),
+                    into: &polygonA
+                )
+                radialClipToCanonicalSectorInPlace(
+                    &polygonA,
+                    scratch: &polygonB,
                     angle: radial.sectorAngleRadians
                 )
-                guard logicalPolygon.count >= 3 else { continue }
+                guard polygonA.count >= 3 else { continue }
 
-                var worldPolygon = logicalPolygon.map(
-                    logicalToWorld.applying
-                )
-                let preliminaryBounds = radialBounds(worldPolygon)
+                for index in polygonA.indices {
+                    polygonA[index] = logicalToWorld.applying(
+                        to: polygonA[index]
+                    )
+                }
+                let preliminaryBounds = radialBounds(polygonA)
                 guard preliminaryBounds.intersects(worldBounds),
                       preliminaryBounds.intersects(canvasBounds)
                 else {
                     continue
                 }
-                worldPolygon = radialClipPolygon(
-                    worldPolygon,
+                radialClipInPlace(
+                    &polygonA,
+                    scratch: &polygonB,
                     to: canvasBounds
                 )
-                guard worldPolygon.count >= 3 else { continue }
+                guard polygonA.count >= 3 else { continue }
 
                 let worldToAtlas = image.localToCanonical.concatenating(
                     layout.logicalToAtlas(for: page)
                 )
-                result.append(contentsOf: radialTriangulatedImages(
-                    polygon: worldPolygon,
+                radialAppendTriangulatedImages(
+                    polygon: &polygonA,
                     cell: CellIndex(
                         column: page.coordinate.x,
                         row: page.coordinate.y
                     ),
                     ordinal: image.ordinal,
                     worldToCanonical: worldToAtlas,
-                    operation: image.operation
-                ))
+                    operation: image.operation,
+                    result: &result
+                )
             }
         }
         result.sort(by: radialImagePrecedes)
-        return result
     }
 
     private func foldedLogicalPoint(
@@ -159,6 +188,203 @@ private func radialCanvasContains(
         && point.x >= 0 && point.y >= 0
         && point.x < Float(size.width)
         && point.y < Float(size.height)
+}
+
+private func radialSetRectangle(
+    _ bounds: AxisAlignedRect,
+    into polygon: inout [SIMD2<Float>]
+) {
+    polygon.removeAll(keepingCapacity: true)
+    polygon.append(bounds.minimum)
+    polygon.append(SIMD2(bounds.maximum.x, bounds.minimum.y))
+    polygon.append(bounds.maximum)
+    polygon.append(SIMD2(bounds.minimum.x, bounds.maximum.y))
+}
+
+private func radialClipToCanonicalSectorInPlace(
+    _ polygon: inout [SIMD2<Float>],
+    scratch: inout [SIMD2<Float>],
+    angle: Float
+) {
+    radialClipInPlace(
+        &polygon,
+        scratch: &scratch,
+        to: HalfPlane2D(normal: SIMD2(0, 1), offset: 0)
+    )
+    let direction = SIMD2(cos(angle), sin(angle))
+    radialClipInPlace(
+        &polygon,
+        scratch: &scratch,
+        to: HalfPlane2D(
+            normal: SIMD2(direction.y, -direction.x),
+            offset: 0
+        )
+    )
+}
+
+private func radialClipInPlace(
+    _ polygon: inout [SIMD2<Float>],
+    scratch: inout [SIMD2<Float>],
+    to bounds: AxisAlignedRect
+) {
+    radialClipInPlace(
+        &polygon,
+        scratch: &scratch,
+        to: HalfPlane2D(
+            normal: SIMD2(1, 0),
+            offset: bounds.minimum.x
+        )
+    )
+    radialClipInPlace(
+        &polygon,
+        scratch: &scratch,
+        to: HalfPlane2D(
+            normal: SIMD2(-1, 0),
+            offset: -bounds.maximum.x
+        )
+    )
+    radialClipInPlace(
+        &polygon,
+        scratch: &scratch,
+        to: HalfPlane2D(
+            normal: SIMD2(0, 1),
+            offset: bounds.minimum.y
+        )
+    )
+    radialClipInPlace(
+        &polygon,
+        scratch: &scratch,
+        to: HalfPlane2D(
+            normal: SIMD2(0, -1),
+            offset: -bounds.maximum.y
+        )
+    )
+}
+
+private func radialClipInPlace(
+    _ polygon: inout [SIMD2<Float>],
+    scratch: inout [SIMD2<Float>],
+    to plane: HalfPlane2D
+) {
+    scratch.removeAll(keepingCapacity: true)
+    guard let last = polygon.last else { return }
+    var start = last
+    var startDistance = simd_dot(plane.normal, start) - plane.offset
+    for end in polygon {
+        let endDistance = simd_dot(plane.normal, end) - plane.offset
+        let startInside = startDistance >= 0
+        let endInside = endDistance >= 0
+        if startInside != endInside {
+            let parameter =
+                startDistance / (startDistance - endDistance)
+            let intersection = start + (end - start) * parameter
+            if scratch.last != intersection {
+                scratch.append(intersection)
+            }
+        }
+        if endInside, scratch.last != end {
+            scratch.append(end)
+        }
+        start = end
+        startDistance = endDistance
+    }
+    if scratch.count > 1, scratch.first == scratch.last {
+        scratch.removeLast()
+    }
+    swap(&polygon, &scratch)
+}
+
+private func radialAppendTriangulatedImages(
+    polygon: inout [SIMD2<Float>],
+    cell: CellIndex,
+    ordinal: UInt8,
+    worldToCanonical: Affine2D,
+    operation: CompiledGroupOperation,
+    result: inout [TilingImage]
+) {
+    guard polygon.count >= 3 else { return }
+    if radialSignedArea(polygon) < 0 {
+        polygon.reverse()
+    }
+    let origin = polygon[0]
+    for index in 1 ..< (polygon.count - 1) {
+        let point1 = polygon[index]
+        let point2 = polygon[index + 1]
+        let twiceArea =
+            (point1.x - origin.x) * (point2.y - origin.y)
+                - (point1.y - origin.y) * (point2.x - origin.x)
+        guard abs(twiceArea * 0.5) > 0.0001 else { continue }
+        result.append(
+            TilingImage(
+                cell: cell,
+                ordinal: ordinal,
+                worldBounds: radialTriangleBounds(
+                    origin,
+                    point1,
+                    point2
+                ),
+                worldClip: radialTriangleClip(
+                    origin,
+                    point1,
+                    point2
+                ),
+                worldToCanonical: worldToCanonical,
+                operation: operation
+            )
+        )
+    }
+}
+
+private func radialTriangleBounds(
+    _ point0: SIMD2<Float>,
+    _ point1: SIMD2<Float>,
+    _ point2: SIMD2<Float>
+) -> AxisAlignedRect {
+    AxisAlignedRect(
+        minimum: SIMD2(
+            min(point0.x, point1.x, point2.x),
+            min(point0.y, point1.y, point2.y)
+        ),
+        maximum: SIMD2(
+            max(point0.x, point1.x, point2.x),
+            max(point0.y, point1.y, point2.y)
+        )
+    )
+}
+
+private func radialTrianglePoint(
+    _ point0: SIMD2<Float>,
+    _ point1: SIMD2<Float>,
+    _ point2: SIMD2<Float>,
+    at index: Int
+) -> SIMD2<Float> {
+    switch index {
+    case 0: point0
+    case 1: point1
+    case 2: point2
+    default: preconditionFailure("Triangle index is out of range")
+    }
+}
+
+private func radialTriangleClip(
+    _ point0: SIMD2<Float>,
+    _ point1: SIMD2<Float>,
+    _ point2: SIMD2<Float>
+) -> ConvexClip {
+    ConvexClip(halfPlaneCount: 3) { index in
+        let start = radialTrianglePoint(
+            point0, point1, point2, at: index
+        )
+        let end = radialTrianglePoint(
+            point0, point1, point2, at: (index + 1) % 3
+        )
+        let edge = end - start
+        let inward = simd_normalize(SIMD2(-edge.y, edge.x))
+        return HalfPlane2D(
+            normal: inward,
+            offset: simd_dot(inward, start)
+        )
+    }
 }
 
 private func radialClipToCanonicalSector(

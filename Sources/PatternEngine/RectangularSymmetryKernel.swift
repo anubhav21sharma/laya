@@ -91,6 +91,22 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
         intersecting worldBounds: AxisAlignedRect
     ) -> [TilingImage] {
         var cells: [CellIndex] = []
+        var result: [TilingImage] = []
+        populateImages(
+            intersecting: worldBounds,
+            cells: &cells,
+            result: &result
+        )
+        return result
+    }
+
+    func populateImages(
+        intersecting worldBounds: AxisAlignedRect,
+        cells: inout [CellIndex],
+        result: inout [TilingImage]
+    ) {
+        cells.removeAll(keepingCapacity: true)
+        result.removeAll(keepingCapacity: true)
         if let program = periodic.phase {
             switch program.indexAxis {
             case .x:
@@ -101,7 +117,7 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
                     phase: 0,
                     axis: .x
                 ) else {
-                    return []
+                    return
                 }
                 for column in columns {
                     let phase = phaseOffset(for: column, program: program)
@@ -128,7 +144,7 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
                     phase: 0,
                     axis: .y
                 ) else {
-                    return []
+                    return
                 }
                 for row in rows {
                     let phase = phaseOffset(for: row, program: program)
@@ -165,7 +181,7 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
                     axis: .y
                 )
             else {
-                return []
+                return
             }
             for row in rows {
                 for column in columns {
@@ -173,14 +189,31 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
                 }
             }
         } else {
-            let latticeCorners = worldBounds.corners.map {
-                periodic.worldToLattice.applying(to: $0)
-            }
+            let lattice0 = periodic.worldToLattice.applying(
+                to: worldBounds.minimum
+            )
+            let lattice1 = periodic.worldToLattice.applying(
+                to: SIMD2(worldBounds.maximum.x, worldBounds.minimum.y)
+            )
+            let lattice2 = periodic.worldToLattice.applying(
+                to: worldBounds.maximum
+            )
+            let lattice3 = periodic.worldToLattice.applying(
+                to: SIMD2(worldBounds.minimum.x, worldBounds.maximum.y)
+            )
+            let minimumX = min(
+                lattice0.x, lattice1.x, lattice2.x, lattice3.x
+            )
+            let maximumX = max(
+                lattice0.x, lattice1.x, lattice2.x, lattice3.x
+            )
+            let minimumY = min(
+                lattice0.y, lattice1.y, lattice2.y, lattice3.y
+            )
+            let maximumY = max(
+                lattice0.y, lattice1.y, lattice2.y, lattice3.y
+            )
             guard
-                let minimumX = latticeCorners.map(\.x).min(),
-                let maximumX = latticeCorners.map(\.x).max(),
-                let minimumY = latticeCorners.map(\.y).min(),
-                let maximumY = latticeCorners.map(\.y).max(),
                 let columns = intersectingIndices(
                     minimum: minimumX,
                     maximum: maximumX,
@@ -196,7 +229,7 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
                     axis: .y
                 )
             else {
-                return []
+                return
             }
             for row in rows {
                 for column in columns {
@@ -215,16 +248,13 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
             return $0.column < $1.column
         }
 
-        var result: [TilingImage] = []
         for cell in cells {
-            for image in images(for: cell)
-            where image.worldBounds.intersects(worldBounds)
-                && !result.contains(image)
-            {
-                result.append(image)
-            }
+            appendImages(
+                for: cell,
+                intersecting: worldBounds,
+                to: &result
+            )
         }
-        return result
     }
 
     func displayFold(_ point: WorldPoint) -> CanonicalPoint {
@@ -287,13 +317,22 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
         )
     }
 
-    private func images(for cell: CellIndex) -> [TilingImage] {
+    private func appendImages(
+        for cell: CellIndex,
+        intersecting worldBounds: AxisAlignedRect,
+        to result: inout [TilingImage]
+    ) {
         let origin = cellOrigin(for: cell)
-        let vertices = cellVertices(origin: origin)
-        let bounds = bounds(enclosing: vertices)
+        let vertices = cellQuad(origin: origin)
+        let bounds = rectangularBounds(
+            vertices.0, vertices.1, vertices.2, vertices.3
+        )
+        guard bounds.intersects(worldBounds) else { return }
         let worldClip = periodic.phase != nil || isAxisAligned
             ? axisAlignedClip(bounds)
-            : convexClip(forCounterclockwisePolygon: vertices)
+            : rectangularConvexClip(
+                vertices.0, vertices.1, vertices.2, vertices.3
+            )
         let reflectsX = periodic.alternatingReflections.contains(.x)
             && !cell.column.isMultiple(of: 2)
         let reflectsY = periodic.alternatingReflections.contains(.y)
@@ -311,8 +350,8 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
             )
         )
 
-        return compiled.images.map { compiledImage in
-            TilingImage(
+        for compiledImage in compiled.images {
+            let candidate = TilingImage(
                 cell: cell,
                 ordinal: compiledImage.ordinal,
                 worldBounds: bounds,
@@ -322,6 +361,9 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
                     .concatenating(compiledImage.localToCanonical),
                 operation: compiledImage.operation
             )
+            if !result.contains(candidate) {
+                result.append(candidate)
+            }
         }
     }
 
@@ -423,42 +465,67 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
         ))
     }
 
-    private func cellVertices(origin: SIMD2<Float>) -> [SIMD2<Float>] {
+    private func cellQuad(
+        origin: SIMD2<Float>
+    ) -> (
+        SIMD2<Float>, SIMD2<Float>, SIMD2<Float>, SIMD2<Float>
+    ) {
         if periodic.phase != nil || isAxisAligned {
-            return [
+            return (
                 origin,
                 origin + SIMD2(repeatSize.width, 0),
                 origin + repeatSize.simd,
-                origin + SIMD2(0, repeatSize.height),
-            ]
+                origin + SIMD2(0, repeatSize.height)
+            )
         }
         let u = periodic.translationBasis.u
         let v = periodic.translationBasis.v
-        return [origin, origin + u, origin + u + v, origin + v]
+        return (origin, origin + u, origin + u + v, origin + v)
     }
 
     private func cellIntersects(
         _ cell: CellIndex,
         worldBounds: AxisAlignedRect
     ) -> Bool {
-        let vertices = cellVertices(origin: cellOrigin(for: cell))
-        if vertices.contains(where: { pointInRect($0, worldBounds) }) {
+        let vertices = cellQuad(origin: cellOrigin(for: cell))
+        if pointInRect(vertices.0, worldBounds)
+            || pointInRect(vertices.1, worldBounds)
+            || pointInRect(vertices.2, worldBounds)
+            || pointInRect(vertices.3, worldBounds)
+        {
             return true
         }
-        let clip = convexClip(forCounterclockwisePolygon: vertices)
-        if worldBounds.corners.contains(where: {
-            clip.contains($0, tolerance: 0)
-        }) {
+        let clip = rectangularConvexClip(
+            vertices.0, vertices.1, vertices.2, vertices.3
+        )
+        if clip.contains(worldBounds.minimum, tolerance: 0)
+            || clip.contains(
+                SIMD2(worldBounds.maximum.x, worldBounds.minimum.y),
+                tolerance: 0
+            )
+            || clip.contains(worldBounds.maximum, tolerance: 0)
+            || clip.contains(
+                SIMD2(worldBounds.minimum.x, worldBounds.maximum.y),
+                tolerance: 0
+            )
+        {
             return true
         }
-        for cellIndex in vertices.indices {
-            let cellStart = vertices[cellIndex]
-            let cellEnd = vertices[(cellIndex + 1) % vertices.count]
-            for rectIndex in worldBounds.corners.indices {
-                let rectStart = worldBounds.corners[rectIndex]
-                let rectEnd = worldBounds.corners[
-                    (rectIndex + 1) % worldBounds.corners.count
-                ]
+        for cellIndex in 0 ..< 4 {
+            let cellStart = rectangularPoint(vertices, at: cellIndex)
+            let cellEnd = rectangularPoint(
+                vertices,
+                at: (cellIndex + 1) % 4
+            )
+            for rectIndex in 0 ..< 4 {
+                let rectStart = rectangularRectCorner(
+                    worldBounds,
+                    at: rectIndex
+                )
+                let rectEnd = rectangularRectCorner(
+                    worldBounds,
+                    at: (rectIndex + 1) % 4
+                )
                 if segmentsIntersect(
                     cellStart,
                     cellEnd,
@@ -488,6 +555,71 @@ private func bounds(
     )
 }
 
+private func rectangularBounds(
+    _ point0: SIMD2<Float>,
+    _ point1: SIMD2<Float>,
+    _ point2: SIMD2<Float>,
+    _ point3: SIMD2<Float>
+) -> AxisAlignedRect {
+    AxisAlignedRect(
+        minimum: SIMD2(
+            min(point0.x, point1.x, point2.x, point3.x),
+            min(point0.y, point1.y, point2.y, point3.y)
+        ),
+        maximum: SIMD2(
+            max(point0.x, point1.x, point2.x, point3.x),
+            max(point0.y, point1.y, point2.y, point3.y)
+        )
+    )
+}
+
+private func rectangularPoint(
+    _ points: (
+        SIMD2<Float>, SIMD2<Float>, SIMD2<Float>, SIMD2<Float>
+    ),
+    at index: Int
+) -> SIMD2<Float> {
+    switch index {
+    case 0: points.0
+    case 1: points.1
+    case 2: points.2
+    case 3: points.3
+    default: preconditionFailure("Quadrilateral index is out of range")
+    }
+}
+
+private func rectangularRectCorner(
+    _ bounds: AxisAlignedRect,
+    at index: Int
+) -> SIMD2<Float> {
+    switch index {
+    case 0: bounds.minimum
+    case 1: SIMD2(bounds.maximum.x, bounds.minimum.y)
+    case 2: bounds.maximum
+    case 3: SIMD2(bounds.minimum.x, bounds.maximum.y)
+    default: preconditionFailure("Rectangle corner index is out of range")
+    }
+}
+
+private func rectangularConvexClip(
+    _ point0: SIMD2<Float>,
+    _ point1: SIMD2<Float>,
+    _ point2: SIMD2<Float>,
+    _ point3: SIMD2<Float>
+) -> ConvexClip {
+    let points = (point0, point1, point2, point3)
+    return ConvexClip(halfPlaneCount: 4) { index in
+        let start = rectangularPoint(points, at: index)
+        let end = rectangularPoint(points, at: (index + 1) % 4)
+        let edge = end - start
+        let inward = simd_normalize(SIMD2(-edge.y, edge.x))
+        return HalfPlane2D(
+            normal: inward,
+            offset: simd_dot(inward, start)
+        )
+    }
+}
+
 private func convexClip(
     forCounterclockwisePolygon vertices: [SIMD2<Float>]
 ) -> ConvexClip {
@@ -504,24 +636,30 @@ private func convexClip(
 }
 
 private func axisAlignedClip(_ bounds: AxisAlignedRect) -> ConvexClip {
-    ConvexClip(halfPlanes: [
-        HalfPlane2D(
-            normal: SIMD2(1, 0),
-            offset: bounds.minimum.x
-        ),
-        HalfPlane2D(
-            normal: SIMD2(-1, 0),
-            offset: -bounds.maximum.x
-        ),
-        HalfPlane2D(
-            normal: SIMD2(0, 1),
-            offset: bounds.minimum.y
-        ),
-        HalfPlane2D(
-            normal: SIMD2(0, -1),
-            offset: -bounds.maximum.y
-        ),
-    ])
+    ConvexClip(halfPlaneCount: 4) { index in
+        switch index {
+        case 0:
+            HalfPlane2D(
+                normal: SIMD2(1, 0),
+                offset: bounds.minimum.x
+            )
+        case 1:
+            HalfPlane2D(
+                normal: SIMD2(-1, 0),
+                offset: -bounds.maximum.x
+            )
+        case 2:
+            HalfPlane2D(
+                normal: SIMD2(0, 1),
+                offset: bounds.minimum.y
+            )
+        default:
+            HalfPlane2D(
+                normal: SIMD2(0, -1),
+                offset: -bounds.maximum.y
+            )
+        }
+    }
 }
 
 private func pointInRect(

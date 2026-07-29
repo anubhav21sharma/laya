@@ -11,23 +11,16 @@ airbrush, and erase.
 
 ## Commit Binding
 
-- Stage 4 evidence gate:
-  `cdbf0af7c2eed46a51b7604791a8784897c571db`
-  (`test(brush): add Stage 4 evidence gate`).
-- Gate-discovered native harness prerequisite:
-  `87a5f4de34586d8f46f903ece8dccc8084920f46`
-  (`fix(harness): restore native workload evidence`).
-- Post-review software fixes:
-  `86a814bbc463d08d42933d806014c6806df1e9a9`
-  (`fix(brush): close deposition review gaps`).
-- Optional physical-evidence gate correction:
-  `052fa20cde1c395429862dd402e39c227914a90c`
-  (`fix(gate): preserve optional evidence status`).
-- Evidence record and final source tree: the commit containing this milestone.
-  Its exact full identity is written by the final clean run to
-  `.build/brush-deposition-artifacts/provenance.json` and repeated in every
-  renderer-backed benchmark. The provenance file is authoritative because a
-  Git commit cannot embed its own eventual object identity.
+- The authoritative commit and source-tree identity are written by each final
+  clean run to `.build/brush-deposition-artifacts/provenance.json` and repeated
+  in every renderer-backed benchmark.
+- The authoritative bundle digest set is written to
+  `.build/brush-deposition-artifacts/artifact-sha256.txt`.
+- This milestone intentionally does not copy the final commit, source-tree
+  digest, artifact-manifest digest, or measured timings. A commit cannot embed
+  its own eventual object identity, and copied run values become stale after
+  any reviewed correction. The generated evidence files are the single
+  source of truth.
 
 The harness prerequisite does not restore `ProjectedStampInstance` or any
 legacy deposition route. It exposes native encoded-count identity ranges to
@@ -55,8 +48,9 @@ stable-device performance failure.
 
 ### Tests And Contracts
 
-- `swift test --no-parallel`: 1,161 tests in 68 suites passed.
-- Focused post-warmup input-path storage-capacity contract: one test passed
+- `swift test --no-parallel`: the complete serialized suite passed; exact
+  test and suite counts are recorded in the final run log.
+- Focused post-warmup input-path allocation contract: one test passed
   after 128 warmup events and 512 audited events.
 - Focused Brush Lab headless contract: four tests in one suite passed.
 - Positive native deposition scenes: 16 of 16 passed in isolated processes.
@@ -112,16 +106,12 @@ artifact file; the final clean run verifies every recorded digest before
 reporting pending or pass.
 
 The Brush Lab catalog contains 312 sorted unique cards and 312 explicitly
-unset assessments. Its committed SHA-256 is
-`6490bcf5d3d452e523b0eba7293b1bf8050ae8445a41941592bbb60c91bf7a32`.
+unset assessments. Its generated digest is bound through the final run's
+provenance and artifact manifest rather than copied into this milestone.
 
-The clean reviewed run bound the artifact bundle to:
-
-- commit `052fa20cde1c395429862dd402e39c227914a90c`;
-- source-tree SHA-256
-  `d8c79e5fe06274c48483308e636aa2b241b9d039babbc20dffed10cfd4e545bc`;
-- artifact-manifest SHA-256
-  `736863281310db352d8e3aee811fd54b44956f56548e8e5621fb3d95b617ff78`.
+The clean reviewed run's exact commit, source-tree SHA-256, and complete
+artifact digest set live only in `provenance.json` and
+`artifact-sha256.txt`, following the non-self-referential convention above.
 
 ### Software Performance Policy
 
@@ -131,17 +121,14 @@ The clean reviewed run bound the artifact bundle to:
 - Completed-stroke length independence: required and validated from the raw
   401-frame projected-long-stroke series.
 - Input hot path: no decode, upload, pipeline creation, file I/O, or
-  synchronous wait; compiler/resource counters remain zero. Runtime capacity
-  instrumentation covers dab generation, tiling images/candidates/clipped
-  polygons/fragments, and scheduler/replay record stores, and observed no
-  post-warmup capacity growth across 512 audited events.
+  synchronous wait; compiler/resource counters remain zero. Renderer-owned
+  reusable scratch covers dab generation, tiling projection, scheduler frame
+  drains, and replay record stores. Runtime allocation-event instrumentation
+  observed no post-warmup scratch acquisition across 512 audited events.
 
 The final run records the measured CPU and GPU values even when physical
 acceptance is pending. Measurements from `Apple Paravirtual device` are
 diagnostic and do not establish a 120 Hz or 60 Hz product claim.
-The reviewed run measured CPU preparation p95 `0.9119510650634766 ms` and a
-500-dab GPU frame `0.8622499881312251 ms`; both remain diagnostic because the
-GPU is paravirtual.
 
 ## Physical Hardware Acceptance
 
@@ -163,10 +150,13 @@ claim `realtime120` or 60 Hz physical acceptance.
 
 Raw caller-supplied `passed`, `pending`, or `failed` strings are rejected.
 Each supplied profile must contain the exact structured evidence schema,
-commit/source-tree and toolchain provenance, physical device identity,
-threshold declarations, and a structured raw trace. The validator recomputes
-the raw trace digest and metric aggregates and requires reported samples to
-match the raw samples before a physical profile can pass.
+commit/source-tree and toolchain provenance, profile-specific platform,
+hardware model, GPU class, measured refresh provenance, input-device identity
+and telemetry source, threshold declarations, and a structured raw trace.
+The validator recomputes the raw trace digest and metric aggregates, enforces
+minimum sample/event counts and trace duration with ordered timestamps, and
+requires reported samples to match the raw samples before a physical profile
+can pass.
 
 ## Manual Brush Lab Acceptance
 
@@ -199,7 +189,7 @@ state may remain explicit until the eight physical profiles are supplied.
 
 - [x] Software-complete on committed source: the clean Stage 4 gate passed all
       correctness, test, build, analysis, scene, binary, source, schema,
-      provenance, digest, allocation-capacity, and negative-control checks,
+      provenance, digest, allocation-event, and negative-control checks,
       then returned the designed exit `2` on the paravirtual GPU.
 - [x] Close all seven post-review software findings with failing-first
       regressions, including the six restored native regression cases.
