@@ -240,7 +240,7 @@ copy_physical_profile_evidence() {
 
   [[ -z "${BRUSH_STAGE4_PHYSICAL_PROFILES:-}" ]] \
     || fail "raw BRUSH_STAGE4_PHYSICAL_PROFILES status strings are unsupported"
-  [[ -n "$input" ]] || return
+  [[ -n "$input" ]] || return 0
   [[ "$input" = /* && -d "$input" && ! -L "$input" ]] \
     || fail "BRUSH_STAGE4_PHYSICAL_EVIDENCE must name an absolute regular directory"
 
