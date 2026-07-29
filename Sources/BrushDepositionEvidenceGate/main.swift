@@ -44,6 +44,11 @@ public enum StageFourEvidenceValidator {
     public static let negativeSceneNames = positiveSceneNames.map {
         "\($0)-negative-control"
     }
+    public static func expectedSemanticHash(
+        forPositiveScene scene: String
+    ) -> String? {
+        sceneTruth[scene]?.semanticHash
+    }
 
     public static let requiredMetamorphicInvariants = [
         "batchPartitionsEqual",
@@ -388,7 +393,7 @@ public enum StageFourEvidenceValidator {
         "deposition-airbrush": SceneTruth(
             definitionID: "builtin.native-airbrush",
             semanticHash:
-            "620be0f2e576b5b86342761778ce83efec8dbe29510eba71f9af86eff0ea9d62",
+            "3639712d81bf00edeeb356dd83a85ef1042668e1e6e6cfec2399b9dd7af5c5f5",
             pipelineKey:
             "deposition:flow:none:s0:g0:h0:d0:abi1:format80:samples1",
             resourceBytes: 5461,
@@ -418,7 +423,7 @@ public enum StageFourEvidenceValidator {
         "deposition-dry": SceneTruth(
             definitionID: "builtin.native-dry-media",
             semanticHash:
-            "16c1b49a98cd4096552f46e035d761179922942609b42bfda82bfbf4a7471fe2",
+            "53c0ad644685aee750fc80c1b7b2fdc1153c22ca0bd32840a30707fccfe0068c",
             pipelineKey:
             "deposition:flow:dryBreakup:s0:g1:h0:d0:abi1:format80:samples1",
             resourceBytes: 10922,
@@ -430,7 +435,7 @@ public enum StageFourEvidenceValidator {
         "deposition-erase": SceneTruth(
             definitionID: "builtin.native-eraser",
             semanticHash:
-            "374ab6373f1bf8eb088cc4b8659c832e0a4045eee799d073fd5207053e17a7a5",
+            "d66277d4325c5f6666b44aeb7c9be832d055e42b296a3f1acc5ce67aa571a485",
             pipelineKey:
             "deposition:destinationOut:none:s0:g0:h0:d0:abi1:format80:samples1",
             resourceBytes: 5461,
@@ -448,7 +453,7 @@ public enum StageFourEvidenceValidator {
         "deposition-glaze": SceneTruth(
             definitionID: "builtin.native-glaze",
             semanticHash:
-            "d4b8b8b63391c62ad8e8da29f2300ac901633dadf0f1005c0393e4534b5812cc",
+            "7c88c98d6dea03dc523aa9da1d6b1c4f96208792eed86dc12715c0106eea1fcd",
             pipelineKey:
             "deposition:uniformGlaze:none:s0:g0:h0:d0:abi1:format80:samples1",
             resourceBytes: 5461,
@@ -457,7 +462,7 @@ public enum StageFourEvidenceValidator {
         "deposition-ink": SceneTruth(
             definitionID: "builtin.native-ink",
             semanticHash:
-            "0d2ff2678740c26839f49df27278b00f012f8263b85f31909ef666ee98667e8a",
+            "308b4e92cf13f559b43f1b8f429d568b6e521198a891324e1da7a512b3ee2753",
             pipelineKey:
             "deposition:flow:none:s0:g0:h0:d0:abi1:format80:samples1",
             resourceBytes: 5461,
@@ -489,7 +494,7 @@ public enum StageFourEvidenceValidator {
         "deposition-marker": SceneTruth(
             definitionID: "builtin.native-marker",
             semanticHash:
-            "8923051495b72cb68351f2e1285923e6e96377ad15c157a2db87b46aba2027ee",
+            "4d9a55a7584f382a2fa90c5d5177d78f38b0387085295e7c90f5622fae3117ff",
             pipelineKey:
             "deposition:uniformGlaze:markerOverlap:s0:g0:h0:d0:abi1:format80:samples1",
             resourceBytes: 5461,

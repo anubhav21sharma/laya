@@ -1,4 +1,5 @@
 import BrushFormat
+import BrushDepositionEvidenceGate
 import EditorCore
 import Foundation
 import Metal
@@ -306,6 +307,11 @@ struct DepositionHarnessRunnerTests {
 
             #expect(evidence.definitionID == anchor.id.rawValue)
             #expect(evidence.semanticHash == expectedSemanticHash)
+            #expect(
+                StageFourEvidenceValidator.expectedSemanticHash(
+                    forPositiveScene: sceneName
+                ) == expectedSemanticHash
+            )
             #expect(
                 evidence.invariantResults[
                     "productionAnchorIdentityExact"

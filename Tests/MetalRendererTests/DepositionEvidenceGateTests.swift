@@ -1659,7 +1659,7 @@ private struct StageFourArtifactFixture {
         let identities: [String: (String, String)] = [
             "deposition-airbrush": (
                 "builtin.native-airbrush",
-                "620be0f2e576b5b86342761778ce83efec8dbe29510eba71f9af86eff0ea9d62"
+                "3639712d81bf00edeeb356dd83a85ef1042668e1e6e6cfec2399b9dd7af5c5f5"
             ),
             "deposition-cache-pinning": (
                 "deposition-cache-pinning.brush",
@@ -1671,11 +1671,11 @@ private struct StageFourArtifactFixture {
             ),
             "deposition-dry": (
                 "builtin.native-dry-media",
-                "16c1b49a98cd4096552f46e035d761179922942609b42bfda82bfbf4a7471fe2"
+                "53c0ad644685aee750fc80c1b7b2fdc1153c22ca0bd32840a30707fccfe0068c"
             ),
             "deposition-erase": (
                 "builtin.native-eraser",
-                "374ab6373f1bf8eb088cc4b8659c832e0a4045eee799d073fd5207053e17a7a5"
+                "d66277d4325c5f6666b44aeb7c9be832d055e42b296a3f1acc5ce67aa571a485"
             ),
             "deposition-failure-matrix": (
                 "deposition-failure-matrix.brush",
@@ -1683,11 +1683,11 @@ private struct StageFourArtifactFixture {
             ),
             "deposition-glaze": (
                 "builtin.native-glaze",
-                "d4b8b8b63391c62ad8e8da29f2300ac901633dadf0f1005c0393e4534b5812cc"
+                "7c88c98d6dea03dc523aa9da1d6b1c4f96208792eed86dc12715c0106eea1fcd"
             ),
             "deposition-ink": (
                 "builtin.native-ink",
-                "0d2ff2678740c26839f49df27278b00f012f8263b85f31909ef666ee98667e8a"
+                "308b4e92cf13f559b43f1b8f429d568b6e521198a891324e1da7a512b3ee2753"
             ),
             "deposition-kinematics": (
                 "deposition-kinematics.brush",
@@ -1699,7 +1699,7 @@ private struct StageFourArtifactFixture {
             ),
             "deposition-marker": (
                 "builtin.native-marker",
-                "8923051495b72cb68351f2e1285923e6e96377ad15c157a2db87b46aba2027ee"
+                "4d9a55a7584f382a2fa90c5d5177d78f38b0387085295e7c90f5622fae3117ff"
             ),
             "deposition-periodic-seams": (
                 "deposition-periodic-seams.brush",
