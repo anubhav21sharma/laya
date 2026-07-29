@@ -8,6 +8,27 @@ struct DebugPerformanceSnapshot: Equatable, Sendable {
     var missedFramePercentage = 0.0
     var targetFramesPerSecond = 0
     var sampleCount = 0
+    var missedFrameCount: UInt64 = 0
+    var deposition = DebugDepositionSnapshot()
+}
+
+struct DebugDurationPercentiles: Codable, Equatable, Sendable {
+    var p50: UInt64 = 0
+    var p95: UInt64 = 0
+    var p99: UInt64 = 0
+}
+
+struct DebugDepositionSnapshot: Equatable, Sendable {
+    var authoritativeBacklog = 0
+    var predictedBacklog = 0
+    var backlogHighWater = 0
+    var encodedDabCount: UInt64 = 0
+    var encodedInstanceCount: UInt64 = 0
+    var bufferHighWater = 0
+    var missedFrameCount: UInt64 = 0
+    var cpuPreparation = DebugDurationPercentiles()
+    var eventToSubmit = DebugDurationPercentiles()
+    var gpuCompletion = DebugDurationPercentiles()
 }
 
 @MainActor
@@ -22,6 +43,9 @@ final class DebugPerformanceMonitor {
     private var lastFrameTimestamp: TimeInterval?
     private var lastPublicationTimestamp: TimeInterval?
     private var currentTargetFramesPerSecond = 0
+    private var cpuPreparationNanoseconds: [UInt64] = []
+    private var eventToSubmitNanoseconds: [UInt64] = []
+    private var gpuCompletionNanoseconds: [UInt64] = []
 
     func recordPresentedFrame(
         at timestamp: TimeInterval,
@@ -68,6 +92,75 @@ final class DebugPerformanceMonitor {
         lastFrameTimestamp = nil
         lastPublicationTimestamp = nil
         currentTargetFramesPerSecond = 0
+        cpuPreparationNanoseconds.removeAll(keepingCapacity: true)
+        eventToSubmitNanoseconds.removeAll(keepingCapacity: true)
+        gpuCompletionNanoseconds.removeAll(keepingCapacity: true)
+    }
+
+    func recordDepositionSample(
+        authoritativeBacklog: Int,
+        predictedBacklog: Int,
+        encodedDabs: UInt64,
+        encodedInstances: UInt64,
+        bufferCount: Int,
+        cpuPreparationNanoseconds: UInt64,
+        eventToSubmitNanoseconds: UInt64,
+        gpuCompletionNanoseconds: UInt64,
+        missedFrames: UInt64
+    ) {
+        guard authoritativeBacklog >= 0,
+              predictedBacklog >= 0,
+              bufferCount >= 0
+        else {
+            return
+        }
+        appendBounded(
+            cpuPreparationNanoseconds,
+            to: &self.cpuPreparationNanoseconds
+        )
+        appendBounded(
+            eventToSubmitNanoseconds,
+            to: &self.eventToSubmitNanoseconds
+        )
+        appendBounded(
+            gpuCompletionNanoseconds,
+            to: &self.gpuCompletionNanoseconds
+        )
+        var deposition = snapshot.deposition
+        deposition.authoritativeBacklog = authoritativeBacklog
+        deposition.predictedBacklog = predictedBacklog
+        let (backlog, overflow) = authoritativeBacklog
+            .addingReportingOverflow(predictedBacklog)
+        deposition.backlogHighWater = max(
+            deposition.backlogHighWater,
+            overflow ? .max : backlog
+        )
+        deposition.encodedDabCount = saturatingAdd(
+            deposition.encodedDabCount,
+            encodedDabs
+        )
+        deposition.encodedInstanceCount = saturatingAdd(
+            deposition.encodedInstanceCount,
+            encodedInstances
+        )
+        deposition.bufferHighWater = max(
+            deposition.bufferHighWater,
+            bufferCount
+        )
+        deposition.missedFrameCount = saturatingAdd(
+            deposition.missedFrameCount,
+            missedFrames
+        )
+        deposition.cpuPreparation = percentiles(
+            self.cpuPreparationNanoseconds
+        )
+        deposition.eventToSubmit = percentiles(
+            self.eventToSubmitNanoseconds
+        )
+        deposition.gpuCompletion = percentiles(
+            self.gpuCompletionNanoseconds
+        )
+        snapshot.deposition = deposition
     }
 
     private func resetSamples(targetFramesPerSecond: Int) {
@@ -76,7 +169,8 @@ final class DebugPerformanceMonitor {
         lastPublicationTimestamp = nil
         currentTargetFramesPerSecond = targetFramesPerSecond
         snapshot = DebugPerformanceSnapshot(
-            targetFramesPerSecond: targetFramesPerSecond
+            targetFramesPerSecond: targetFramesPerSecond,
+            deposition: snapshot.deposition
         )
     }
 
@@ -111,8 +205,44 @@ final class DebugPerformanceMonitor {
                 ? 0
                 : Double(missedFrames) / Double(expectedFrames) * 100,
             targetFramesPerSecond: currentTargetFramesPerSecond,
-            sampleCount: intervalsMilliseconds.count
+            sampleCount: intervalsMilliseconds.count,
+            missedFrameCount: UInt64(missedFrames),
+            deposition: snapshot.deposition
         )
+    }
+
+    private func appendBounded(
+        _ value: UInt64,
+        to samples: inout [UInt64]
+    ) {
+        if samples.count == Self.maximumSampleCount {
+            samples.removeFirst()
+        }
+        samples.append(value)
+    }
+
+    private func percentiles(
+        _ samples: [UInt64]
+    ) -> DebugDurationPercentiles {
+        guard !samples.isEmpty else { return DebugDurationPercentiles() }
+        let sorted = samples.sorted()
+        func nearestRank(_ percentile: Double) -> UInt64 {
+            let rank = Int(ceil(Double(sorted.count) * percentile))
+            return sorted[max(0, min(rank - 1, sorted.count - 1))]
+        }
+        return DebugDurationPercentiles(
+            p50: nearestRank(0.50),
+            p95: nearestRank(0.95),
+            p99: nearestRank(0.99)
+        )
+    }
+
+    private func saturatingAdd(
+        _ lhs: UInt64,
+        _ rhs: UInt64
+    ) -> UInt64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : sum
     }
 }
 #endif

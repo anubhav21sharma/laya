@@ -1,9 +1,12 @@
 #if DEBUG
 import BrushFormat
+import EditorCore
 import Foundation
+import Metal
 import MetalRenderer
 import Observation
 import PatternEngine
+import PatternFile
 
 struct BrushLabSettingItem: Equatable, Identifiable {
     let name: String
@@ -175,6 +178,15 @@ final class BrushLabSession {
     private(set) var droppedDabRecordCount = 0
     private(set) var deterministicSeed: UInt64 = 1
     private(set) var frameMetrics = BrushLabFrameMetrics()
+    private(set) var manualCards = BrushLabManualCard.fixedMatrix
+    private(set) var selectedManualCardID: String?
+    private(set) var manualAssessments: [String: BrushLabManualAssessment] =
+        Dictionary(
+            uniqueKeysWithValues: BrushLabManualCard.fixedMatrix.map {
+                ($0.cardID, BrushLabManualAssessment(cardID: $0.cardID))
+            }
+        )
+    private(set) var depositionMetrics = DebugDepositionSnapshot()
     private(set) var isLoading = false
     private(set) var errorMessage: String?
     private var cpuEncodeSamples: [Double] = []
@@ -449,6 +461,95 @@ final class BrushLabSession {
         droppedDabRecordCount = 0
     }
 
+    func selectManualCard(_ cardID: String) async throws {
+        guard controller.renderer.isIdle else {
+            throw BrushLabEvidenceError.rendererBusy
+        }
+        guard let card = manualCards.first(where: {
+            $0.cardID == cardID
+        }) else {
+            throw BrushLabEvidenceError.manualCardUnavailable(cardID)
+        }
+        guard let anchor = AnchorBrushCatalog.entry(
+            for: BrushRecipeID(card.brushID)
+        ) else {
+            throw BrushLabEvidenceError.manualBrushUnavailable(card.brushID)
+        }
+        if controller.renderer.documentConfiguration
+            != card.documentConfiguration
+        {
+            switch card.documentConfiguration {
+            case let .periodic(configuration):
+                controller.handlePeriodicConfiguration(configuration)
+            case let .finite(configuration):
+                controller.handleFiniteConfiguration(configuration)
+            }
+        }
+        guard controller.renderer.documentConfiguration
+                == card.documentConfiguration
+        else {
+            throw BrushLabEvidenceError.documentConfigurationUnavailable
+        }
+        let package = try Self.manualPackage(
+            anchor: anchor,
+            customAsymmetric:
+                card.customResourceFixture
+                    == BrushLabManualCard.customAsymmetricFixture
+        )
+        await loadPackage(
+            package,
+            sourceName: "\(card.cardID).layabrush"
+        )
+        guard let compiledBrush,
+              drawingAvailability == .available
+        else {
+            if let compilationFailure {
+                throw compilationFailure
+            }
+            throw BrushLabEvidenceError.manualBrushUnavailable(card.brushID)
+        }
+        if anchor.role == .erase {
+            try controller.installBootstrapBrushes(
+                draw: compiledBrush,
+                eraser: compiledBrush
+            )
+            controller.handleTool(.erase)
+        } else {
+            controller.handleTool(.draw)
+        }
+        controller.handleInkColor(card.paintColor)
+        controller.model.confirmBrushDiameter(card.diameter)
+        guard controller.model.brushDiameter == card.diameter else {
+            throw BrushLabEvidenceError.manualDiameterUnavailable(
+                card.diameter
+            )
+        }
+        selectedManualCardID = cardID
+        clearTrace()
+    }
+
+    func replaySelectedManualCard() throws {
+        guard controller.renderer.isIdle else {
+            throw BrushLabEvidenceError.rendererBusy
+        }
+        guard let selectedManualCard else {
+            throw BrushLabEvidenceError.manualCardNotSelected
+        }
+        clearTrace()
+        controller.handleStrokeSamples(selectedManualCard.traceSamples())
+    }
+
+    func clearManualCard() {
+        guard controller.renderer.isIdle else { return }
+        controller.clear()
+        clearTrace()
+    }
+
+    var selectedManualCard: BrushLabManualCard? {
+        guard let selectedManualCardID else { return nil }
+        return manualCards.first { $0.cardID == selectedManualCardID }
+    }
+
     func clearError() {
         errorMessage = nil
     }
@@ -480,6 +581,10 @@ final class BrushLabSession {
         )
         frameMetrics.p95GPUMilliseconds = Self.percentile95(gpuSamples)
         frameMetrics.rendererSampleCount = cpuEncodeSamples.count
+    }
+
+    func updateDepositionMetrics(_ metrics: DebugDepositionSnapshot) {
+        depositionMetrics = metrics
     }
 
     func makeEvidenceData() throws -> Data {
@@ -602,6 +707,89 @@ final class BrushLabSession {
         return try encoder.encode(bundle)
     }
 
+    func makeManualCardsData() throws -> Data {
+        let bundle = BrushLabManualCatalog(
+            cards: manualCards,
+            assessments: manualCards.compactMap {
+                manualAssessments[$0.cardID]
+            }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [
+            .prettyPrinted,
+            .sortedKeys,
+            .withoutEscapingSlashes,
+        ]
+        return try encoder.encode(bundle)
+    }
+
+    func makeManualEvidenceArchive() throws
+        -> BrushLabManualEvidenceArchive
+    {
+        guard let card = selectedManualCard,
+              let assessment = manualAssessments[card.cardID],
+              let packageContentHash,
+              let compiledBrush
+        else {
+            throw BrushLabEvidenceError.manualCardNotSelected
+        }
+        guard controller.renderer.isIdle else {
+            throw BrushLabEvidenceError.rendererBusy
+        }
+        let snapshot = try controller.renderer.captureCommittedDocument()
+        var imageFiles: [String: Data] = [:]
+        switch snapshot.storage {
+        case let .singleRaster(bytes):
+            imageFiles["canvas.png"] = try Self.evidencePNG(
+                PatternRasterImage(
+                    pixelSize: snapshot.canvasSize,
+                    bgra8PremultipliedBytes: bytes
+                ),
+                background: card.background
+            )
+        case let .radialPages(pages):
+            for page in pages.sorted(by: {
+                $0.coordinate < $1.coordinate
+            }) {
+                let name = "radial-\(page.coordinate.x)-"
+                    + "\(page.coordinate.y).png"
+                imageFiles[name] = try Self.evidencePNG(
+                    PatternRasterImage(
+                        pixelSize: PixelSize(
+                            width: RadialSectorLayout.pageSide,
+                            height: RadialSectorLayout.pageSide
+                        ),
+                        bgra8PremultipliedBytes:
+                            page.bgra8PremultipliedBytes
+                    ),
+                    background: card.background
+                )
+            }
+        }
+        let diagnostics = makeDiagnostics()
+        let identity = BrushLabManualEvidence.RenderIdentity(
+            definitionID: compiledBrush.renderIdentity.definitionID.rawValue,
+            semanticHash: compiledBrush.renderIdentity.semanticHash,
+            packageHash: packageContentHash,
+            pipelineKey: Self.pipelineKey(compiledBrush),
+            abiVersion: compiledBrush.depositionPipeline.key.abiVersion
+        )
+        let evidence = BrushLabManualEvidence(
+            cardID: card.cardID,
+            card: card,
+            assessment: assessment,
+            renderIdentity: identity,
+            input: inputRecords,
+            logicalDabs: dabRecords,
+            imageFiles: imageFiles.keys.sorted(),
+            diagnostics: diagnostics
+        )
+        var files = imageFiles
+        files["evidence.json"] = try Self.encodeSorted(evidence)
+        files["telemetry.json"] = try Self.encodeSorted(diagnostics)
+        return BrushLabManualEvidenceArchive(files: files)
+    }
+
     private func prepareInspectionState() {
         package = nil
         sourceName = nil
@@ -711,11 +899,347 @@ final class BrushLabSession {
         }
         return BrushContentHash.sha256Hex(of: bytes)
     }
+
+    private func makeDiagnostics() -> BrushLabDiagnostics {
+        let renderer = controller.renderer.brushLabDiagnosticSnapshot
+        let textures = compiledBrush?.textures.map {
+            BrushLabDiagnostics.Texture(
+                id: $0.key,
+                mipmapLevels: $0.value.mipmapLevelCount,
+                residentBytes: $0.value.allocatedSize
+            )
+        }.sorted { $0.id < $1.id } ?? []
+        return BrushLabDiagnostics(
+            schemaVersion: 1,
+            definitionHash: compiledBrush?.renderIdentity.semanticHash,
+            packageHash: packageContentHash,
+            pipelineKey: compiledBrush.map(Self.pipelineKey),
+            abiVersion: compiledBrush?.depositionPipeline.key.abiVersion,
+            textures: textures,
+            residentResourceBytes:
+                compiledBrush?.report.residentResourceBytes ?? 0,
+            authoritativeBacklog:
+                depositionMetrics.authoritativeBacklog,
+            predictedBacklog: depositionMetrics.predictedBacklog,
+            backlogHighWater: depositionMetrics.backlogHighWater,
+            encodedDabCount: depositionMetrics.encodedDabCount,
+            encodedInstanceCount:
+                depositionMetrics.encodedInstanceCount,
+            rendererLogicalDabCount: renderer.totalDabsThisStroke,
+            rendererProjectedInstanceCount:
+                renderer.totalInstancesThisStroke,
+            cpuPreparation: depositionMetrics.cpuPreparation,
+            eventToSubmit: depositionMetrics.eventToSubmit,
+            gpuCompletion: depositionMetrics.gpuCompletion,
+            missedFrameCount: depositionMetrics.missedFrameCount,
+            missedFramePercentage: frameMetrics.missedFramePercentage,
+            bufferHighWater: depositionMetrics.bufferHighWater,
+            lastFailureStage: compilationFailure?.stage.rawValue
+        )
+    }
+
+    private static func pipelineKey(_ brush: CompiledBrush) -> String {
+        let key = brush.depositionPipeline.key
+        let constants = key.brush.functionConstants
+        return [
+            key.brush.backend.rawValue,
+            key.brush.accumulation.rawValue,
+            key.brush.edgeTreatment.rawValue,
+            "shape2=\(constants.usesSecondaryShape)",
+            "grain=\(constants.usesGrain)",
+            "grain2=\(constants.usesSecondaryGrain)",
+            "destination=\(constants.usesDestinationSampling)",
+            "abi=\(key.abiVersion)",
+            "format=\(key.colorPixelFormatRawValue)",
+            "samples=\(key.sampleCount)",
+        ].joined(separator: "|")
+    }
+
+    private static func encodeSorted<T: Encodable>(
+        _ value: T
+    ) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [
+            .prettyPrinted,
+            .sortedKeys,
+            .withoutEscapingSlashes,
+        ]
+        return try encoder.encode(value)
+    }
+
+    private static func manualPackage(
+        anchor: AnchorBrushEntry,
+        customAsymmetric: Bool
+    ) throws -> BrushPackage {
+        guard customAsymmetric else {
+            return try BrushPackage(
+                manifest: BrushPackageManifest(resources: []),
+                definition: anchor.definition,
+                resourceData: [:]
+            )
+        }
+        let grainID = "brush-lab.custom-asymmetric.grain"
+        let shapeID = "brush-lab.custom-asymmetric.shape"
+        let grainData = try asymmetricResourcePNG(seed: 173)
+        let shapeData = try asymmetricResourcePNG(seed: 41)
+        let resources = try [
+            BrushPackageResource(
+                id: grainID,
+                kind: .grain,
+                mediaType: "image/png",
+                data: grainData,
+                pixelWidth: 64,
+                pixelHeight: 64
+            ),
+            BrushPackageResource(
+                id: shapeID,
+                kind: .shape,
+                mediaType: "image/png",
+                data: shapeData,
+                pixelWidth: 64,
+                pixelHeight: 64
+            ),
+        ]
+        let references = [
+            BrushResourceReference(
+                identifier: grainID,
+                kind: .grain,
+                required: true,
+                fallback: nil
+            ),
+            BrushResourceReference(
+                identifier: shapeID,
+                kind: .shape,
+                required: true,
+                fallback: nil
+            ),
+        ]
+        let base = anchor.definition
+        let definition = try BrushDefinition(
+            id: base.id,
+            schemaVersion: base.schemaVersion,
+            metadata: base.metadata,
+            capabilities: base.capabilities,
+            resources: references,
+            coverage: BrushCoverageDefinition(
+                shapes: [
+                    BrushShapeLayerDefinition(
+                        shape: .asset(shapeID),
+                        combination: .replace,
+                        scale: 1,
+                        rotation: 0.31,
+                        offset: SIMD2(0.08, -0.06)
+                    ),
+                ],
+                grains: [
+                    BrushGrainLayerDefinition(
+                        grain: .asset(grainID),
+                        coordinateMode: .canonical,
+                        transform: BrushGrainTransform(
+                            scale: 0.12,
+                            rotation: 0.23,
+                            offset: SIMD2(0.11, -0.07)
+                        ),
+                        grainMovementFraction: 0.12,
+                        grainFollowsBrushRotation: true,
+                        strength: 0.68
+                    ),
+                ],
+                baseHardness: base.coverage.baseHardness,
+                aspectRatio: 0.63,
+                tipThreshold: base.coverage.tipThreshold,
+                antialiasing: base.coverage.antialiasing
+            ),
+            placement: base.placement,
+            dynamics: base.dynamics,
+            color: base.color,
+            material: base.material,
+            stabilization: base.stabilization,
+            taper: base.taper,
+            replayMode: base.replayMode,
+            replayLimits: base.replayLimits,
+            seedPolicy: base.seedPolicy,
+            limits: base.limits,
+            performanceIntent: base.performanceIntent,
+            compatibility: base.compatibility
+        )
+        return try BrushPackage(
+            manifest: BrushPackageManifest(resources: resources),
+            definition: definition,
+            resourceData: [
+                grainID: grainData,
+                shapeID: shapeData,
+            ]
+        )
+    }
+
+    private static func asymmetricResourcePNG(seed: UInt8) throws -> Data {
+        let side = 64
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(side * side * 4)
+        for y in 0..<side {
+            for x in 0..<side {
+                let diagonal = x > y / 2 && x < 52 && y < 58
+                let notch = x > 35 && y > 30
+                let stripe = ((x * 3 + y * 5 + Int(seed)) % 17) < 8
+                let value: UInt8 =
+                    diagonal && !notch && stripe ? 255 : 18
+                bytes.append(contentsOf: [value, value, value, 255])
+            }
+        }
+        return try PatternRasterPNGCodec.encode(
+            PatternRasterImage(
+                pixelSize: PixelSize(width: side, height: side),
+                bgra8PremultipliedBytes: bytes
+            )
+        )
+    }
+
+    private static func evidencePNG(
+        _ image: PatternRasterImage,
+        background: BrushLabManualBackground
+    ) throws -> Data {
+        guard background == .opaque else {
+            return try PatternRasterPNGCodec.encode(image)
+        }
+        var bytes = image.bgra8PremultipliedBytes
+        for offset in stride(from: 0, to: bytes.count, by: 4) {
+            let inverseAlpha = UInt16(255 - bytes[offset + 3])
+            for channel in 0..<3 {
+                let value = UInt16(bytes[offset + channel])
+                    + (255 * inverseAlpha + 127) / 255
+                bytes[offset + channel] = UInt8(min(255, value))
+            }
+            bytes[offset + 3] = 255
+        }
+        return try PatternRasterPNGCodec.encode(
+            PatternRasterImage(
+                pixelSize: image.pixelSize,
+                bgra8PremultipliedBytes: bytes
+            )
+        )
+    }
+}
+
+private struct BrushLabManualCatalog: Encodable {
+    let schemaVersion: UInt16 = 1
+    let cards: [BrushLabManualCard]
+    let assessments: [BrushLabManualAssessment]
+}
+
+struct BrushLabDiagnostics: Codable, Equatable, Sendable {
+    let schemaVersion: UInt16
+    let definitionHash: String?
+    let packageHash: String?
+    let pipelineKey: String?
+    let abiVersion: UInt16?
+    let textures: [Texture]
+    let residentResourceBytes: Int
+    let authoritativeBacklog: Int
+    let predictedBacklog: Int
+    let backlogHighWater: Int
+    let encodedDabCount: UInt64
+    let encodedInstanceCount: UInt64
+    let rendererLogicalDabCount: Int
+    let rendererProjectedInstanceCount: Int
+    let cpuPreparation: DebugDurationPercentiles
+    let eventToSubmit: DebugDurationPercentiles
+    let gpuCompletion: DebugDurationPercentiles
+    let missedFrameCount: UInt64
+    let missedFramePercentage: Double
+    let bufferHighWater: Int
+    let lastFailureStage: String?
+
+    struct Texture: Codable, Equatable, Sendable {
+        let id: String
+        let mipmapLevels: Int
+        let residentBytes: Int
+    }
+}
+
+private struct BrushLabManualEvidence: Encodable {
+    let schemaVersion: UInt16 = 1
+    let cardID: String
+    let card: BrushLabManualCard
+    let assessment: BrushLabManualAssessment
+    let renderIdentity: RenderIdentity
+    let input: [BrushLabInputRecord]
+    let logicalDabs: [BrushLabDabRecord]
+    let imageFiles: [String]
+    let diagnostics: BrushLabDiagnostics
+
+    struct RenderIdentity: Encodable {
+        let definitionID: String
+        let semanticHash: String
+        let packageHash: String
+        let pipelineKey: String
+        let abiVersion: UInt16
+    }
+}
+
+struct BrushLabManualEvidenceArchive {
+    let files: [String: Data]
+
+    func writeAtomically(to destination: URL) throws {
+        let manager = FileManager.default
+        let parent = destination.deletingLastPathComponent()
+        var isDirectory: ObjCBool = false
+        guard manager.fileExists(
+            atPath: parent.path,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            throw BrushLabEvidenceError.archiveParentUnavailable
+        }
+        guard files.keys.allSatisfy({
+            !$0.isEmpty
+                && !$0.contains("/")
+                && $0 != "."
+                && $0 != ".."
+        }) else {
+            throw BrushLabEvidenceError.invalidArchivePath
+        }
+        let temporary = parent.appendingPathComponent(
+            ".\(destination.lastPathComponent).tmp-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try manager.createDirectory(
+            at: temporary,
+            withIntermediateDirectories: false
+        )
+        var moved = false
+        defer {
+            if !moved {
+                try? manager.removeItem(at: temporary)
+            }
+        }
+        for name in files.keys.sorted() {
+            try files[name]!.write(
+                to: temporary.appendingPathComponent(name),
+                options: .atomic
+            )
+        }
+        if manager.fileExists(atPath: destination.path) {
+            _ = try manager.replaceItemAt(
+                destination,
+                withItemAt: temporary
+            )
+        } else {
+            try manager.moveItem(at: temporary, to: destination)
+        }
+        moved = true
+    }
 }
 
 enum BrushLabEvidenceError: Error, Equatable, LocalizedError {
     case packageUnavailable
     case rendererBusy
+    case manualCardNotSelected
+    case manualCardUnavailable(String)
+    case manualBrushUnavailable(String)
+    case manualDiameterUnavailable(Float)
+    case documentConfigurationUnavailable
+    case archiveParentUnavailable
+    case invalidArchivePath
 
     var errorDescription: String? {
         switch self {
@@ -723,6 +1247,20 @@ enum BrushLabEvidenceError: Error, Equatable, LocalizedError {
             "Load a native .layabrush package before exporting evidence."
         case .rendererBusy:
             "Finish or cancel the active canvas operation first."
+        case .manualCardNotSelected:
+            "Select a Brush Lab manual card first."
+        case let .manualCardUnavailable(cardID):
+            "Brush Lab manual card '\(cardID)' is unavailable."
+        case let .manualBrushUnavailable(brushID):
+            "Brush Lab brush '\(brushID)' is unavailable."
+        case let .manualDiameterUnavailable(diameter):
+            "Brush Lab diameter \(diameter) is unavailable."
+        case .documentConfigurationUnavailable:
+            "Clear the document before changing the manual-card projection."
+        case .archiveParentUnavailable:
+            "The Brush Lab evidence destination parent is unavailable."
+        case .invalidArchivePath:
+            "Brush Lab evidence contains an invalid archive path."
         }
     }
 }

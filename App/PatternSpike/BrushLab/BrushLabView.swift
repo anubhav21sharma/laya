@@ -20,30 +20,59 @@ extension UTType {
     )
     static let brushLabEvidence = UTType(
         exportedAs: "com.anubhav.brush-lab-evidence",
-        conformingTo: .json
+        conformingTo: .package
     )
 }
 
 struct BrushLabEvidenceDocument: FileDocument {
     static let readableContentTypes: [UTType] = [.brushLabEvidence]
 
-    let data: Data
+    private enum Storage: Sendable {
+        case regular(Data)
+        case directory([String: Data])
+    }
+
+    private let storage: Storage
 
     init(data: Data) {
-        self.data = data
+        storage = .regular(data)
+    }
+
+    init(archive: BrushLabManualEvidenceArchive) {
+        storage = .directory(archive.files)
     }
 
     init(configuration: ReadConfiguration) throws {
-        guard let data = configuration.file.regularFileContents else {
+        if let data = configuration.file.regularFileContents {
+            storage = .regular(data)
+            return
+        }
+        guard let wrappers = configuration.file.fileWrappers else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        self.data = data
+        var files: [String: Data] = [:]
+        for (name, wrapper) in wrappers {
+            guard let data = wrapper.regularFileContents else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            files[name] = data
+        }
+        storage = .directory(files)
     }
 
     func fileWrapper(
         configuration _: WriteConfiguration
     ) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: data)
+        switch storage {
+        case let .regular(data):
+            FileWrapper(regularFileWithContents: data)
+        case let .directory(files):
+            FileWrapper(
+                directoryWithFileWrappers: files.mapValues {
+                    FileWrapper(regularFileWithContents: $0)
+                }
+            )
+        }
     }
 }
 
@@ -113,6 +142,9 @@ struct BrushLabView: View {
     @State private var showActualDabs = true
     @State private var showPredictedDabs = true
     @State private var performanceMonitor = DebugPerformanceMonitor()
+    @State private var lastRendererDabCount = 0
+    @State private var lastRendererInstanceCount = 0
+    @State private var lastDisplayMissedFrameCount: UInt64 = 0
 
     var body: some View {
         Group {
@@ -233,6 +265,51 @@ struct BrushLabView: View {
             }
             runtime.controller.renderer.onInteractiveFrameMetrics = {
                 runtime.session.recordRendererFrameMetrics($0)
+                let renderer = runtime.controller.renderer
+                    .brushLabDiagnosticSnapshot
+                let encodedDabs = UInt64(
+                    renderer.totalDabsThisStroke >= lastRendererDabCount
+                        ? renderer.totalDabsThisStroke
+                            - lastRendererDabCount
+                        : renderer.totalDabsThisStroke
+                )
+                let encodedInstances = UInt64(
+                    renderer.totalInstancesThisStroke
+                        >= lastRendererInstanceCount
+                        ? renderer.totalInstancesThisStroke
+                            - lastRendererInstanceCount
+                        : renderer.totalInstancesThisStroke
+                )
+                lastRendererDabCount = renderer.totalDabsThisStroke
+                lastRendererInstanceCount =
+                    renderer.totalInstancesThisStroke
+                let cpuNanoseconds = UInt64(
+                    max(0, $0.cpuEncodeMilliseconds) * 1_000_000
+                )
+                let gpuNanoseconds = UInt64(
+                    max(0, $0.gpuMilliseconds) * 1_000_000
+                )
+                let displayMissedFrames =
+                    performanceMonitor.snapshot.missedFrameCount
+                let newMissedFrames = displayMissedFrames
+                    >= lastDisplayMissedFrameCount
+                    ? displayMissedFrames - lastDisplayMissedFrameCount
+                    : 0
+                lastDisplayMissedFrameCount = displayMissedFrames
+                performanceMonitor.recordDepositionSample(
+                    authoritativeBacklog: renderer.actualDabCount,
+                    predictedBacklog: renderer.predictedDabCount,
+                    encodedDabs: encodedDabs,
+                    encodedInstances: encodedInstances,
+                    bufferCount: encodedInstances == 0 ? 0 : 1,
+                    cpuPreparationNanoseconds: cpuNanoseconds,
+                    eventToSubmitNanoseconds: cpuNanoseconds,
+                    gpuCompletionNanoseconds: gpuNanoseconds,
+                    missedFrames: newMissedFrames
+                )
+                runtime.session.updateDepositionMetrics(
+                    performanceMonitor.snapshot.deposition
+                )
             }
         }
         .onDisappear {
@@ -254,10 +331,13 @@ struct BrushLabView: View {
             Button {
                 exportEvidence(runtime)
             } label: {
-                Label("Export Evidence", systemImage: "square.and.arrow.up")
+                Label(
+                    "Export Card Evidence",
+                    systemImage: "square.and.arrow.up"
+                )
             }
             .disabled(
-                runtime.session.package == nil
+                runtime.session.selectedManualCard == nil
                     || !runtime.controller.renderer.isIdle
             )
 
@@ -280,6 +360,50 @@ struct BrushLabView: View {
             Button("Clear Trace") {
                 runtime.session.clearTrace()
             }
+
+            Menu {
+                ForEach(runtime.session.manualCards, id: \.cardID) { card in
+                    Button(card.cardID) {
+                        Task {
+                            do {
+                                try await runtime.session.selectManualCard(
+                                    card.cardID
+                                )
+                                resetDiagnosticsTracking()
+                                exportError = nil
+                            } catch {
+                                exportError = error.localizedDescription
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label(
+                    runtime.session.selectedManualCard.map {
+                        "\($0.gesture.rawValue) · \($0.brushID)"
+                    } ?? "Select Card",
+                    systemImage: "rectangle.stack"
+                )
+            }
+
+            Button("Replay Card") {
+                do {
+                    try runtime.session.replaySelectedManualCard()
+                    exportError = nil
+                } catch {
+                    exportError = error.localizedDescription
+                }
+            }
+            .disabled(
+                runtime.session.selectedManualCard == nil
+                    || !runtime.controller.renderer.isIdle
+            )
+
+            Button("Clear Card") {
+                runtime.session.clearManualCard()
+                resetDiagnosticsTracking()
+            }
+            .disabled(!runtime.controller.renderer.isIdle)
 
             Spacer()
             if runtime.session.isLoading {
@@ -413,6 +537,7 @@ struct BrushLabView: View {
     private func inspector(_ runtime: BrushLabRuntime) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
+                manualCardSection(runtime.session)
                 resourcesSection(runtime.session)
                 conversionSection(runtime.session)
                 compilationSection(runtime.session)
@@ -423,6 +548,42 @@ struct BrushLabView: View {
             .padding(10)
         }
         .background(.bar)
+    }
+
+    @ViewBuilder
+    private func manualCardSection(_ session: BrushLabSession) -> some View {
+        inspectorHeader("Manual Card")
+        if let card = session.selectedManualCard {
+            keyValue("ID", card.cardID)
+            keyValue("Gesture", card.gesture.rawValue)
+            keyValue(
+                "Size / pressure",
+                "\(card.diameter) / \(card.pressureProfile)"
+            )
+            keyValue("Projection", card.documentMode)
+            keyValue(
+                "Background / prediction",
+                "\(card.background.rawValue) / "
+                    + (card.predictionEnabled ? "on" : "off")
+            )
+            keyValue(
+                "Capabilities",
+                card.inputCapabilities.isEmpty
+                    ? "none"
+                    : card.inputCapabilities.joined(separator: ", ")
+            )
+            keyValue(
+                "Custom fixture",
+                card.customResourceFixture ?? "none"
+            )
+            Text("Assessment pending user input")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.orange)
+        } else {
+            Text("Select one of \(session.manualCards.count) fixed cards")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder
@@ -502,7 +663,28 @@ struct BrushLabView: View {
                         + $0.pipelineKey.edgeTreatment.rawValue
                 } ?? "—"
             )
+            keyValue(
+                "ABI",
+                compiled.map {
+                    "\($0.depositionPipeline.key.abiVersion)"
+                } ?? "—"
+            )
             keyValue("Textures", "\(compiled?.textures.count ?? 0)")
+            ForEach(
+                compiled?.textures.keys.sorted() ?? [],
+                id: \.self
+            ) { id in
+                if let texture = compiled?.textures[id] {
+                    keyValue(
+                        id,
+                        "\(texture.mipmapLevelCount) levels · "
+                            + ByteCountFormatter.string(
+                                fromByteCount: Int64(texture.allocatedSize),
+                                countStyle: .memory
+                            )
+                    )
+                }
+            }
             keyValue("Tier", report.performance.tier.rawValue)
             keyValue(
                 "Resident",
@@ -562,6 +744,21 @@ struct BrushLabView: View {
             keyValue("Dirty regions", "\(renderer.dirtyRegionCount)")
             keyValue("Replay count", "\(renderer.replayCount)")
             keyValue(
+                "Backlog A / P",
+                "\(session.depositionMetrics.authoritativeBacklog) / "
+                    + "\(session.depositionMetrics.predictedBacklog)"
+            )
+            keyValue(
+                "Backlog / buffer high",
+                "\(session.depositionMetrics.backlogHighWater) / "
+                    + "\(session.depositionMetrics.bufferHighWater)"
+            )
+            keyValue(
+                "Encoded dabs / instances",
+                "\(session.depositionMetrics.encodedDabCount) / "
+                    + "\(session.depositionMetrics.encodedInstanceCount)"
+            )
+            keyValue(
                 "Revision residency",
                 ByteCountFormatter.string(
                     fromByteCount:
@@ -608,6 +805,29 @@ struct BrushLabView: View {
                         session.frameMetrics.p95CPUEncodeMilliseconds,
                         session.frameMetrics.p95GPUMilliseconds
                     )
+            )
+            keyValue(
+                "Prep / submit / complete p95",
+                String(
+                    format: "%.2f / %.2f / %.2f ms",
+                    Double(
+                        session.depositionMetrics.cpuPreparation.p95
+                    ) / 1_000_000,
+                    Double(
+                        session.depositionMetrics.eventToSubmit.p95
+                    ) / 1_000_000,
+                    Double(
+                        session.depositionMetrics.gpuCompletion.p95
+                    ) / 1_000_000
+                )
+            )
+            keyValue(
+                "Missed frames",
+                "\(session.depositionMetrics.missedFrameCount)"
+            )
+            keyValue(
+                "Last failure stage",
+                session.compilationFailure?.stage.rawValue ?? "none"
             )
             keyValue(
                 "FPS / p95",
@@ -713,10 +933,17 @@ struct BrushLabView: View {
         }
     }
 
+    private func resetDiagnosticsTracking() {
+        performanceMonitor.reset()
+        lastRendererDabCount = 0
+        lastRendererInstanceCount = 0
+        lastDisplayMissedFrameCount = 0
+    }
+
     private func exportEvidence(_ runtime: BrushLabRuntime) {
         do {
             exportDocument = try BrushLabEvidenceDocument(
-                data: runtime.session.makeEvidenceData()
+                archive: runtime.session.makeManualEvidenceArchive()
             )
             exportPresented = true
             exportError = nil
@@ -727,12 +954,12 @@ struct BrushLabView: View {
 
     private var evidenceFilename: String {
         guard let sourceName = runtime?.session.sourceName else {
-            return "brush-lab-evidence.json"
+            return "brush-lab-card.brushlabevidence"
         }
         let base = URL(fileURLWithPath: sourceName)
             .deletingPathExtension()
             .lastPathComponent
-        return "\(base)-evidence.json"
+        return "\(base)-card.brushlabevidence"
     }
 }
 

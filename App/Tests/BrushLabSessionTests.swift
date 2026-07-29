@@ -1,6 +1,7 @@
 #if DEBUG
 import BrushConverter
 import BrushFormat
+import EditorCore
 import Foundation
 import Metal
 @testable import MetalRenderer
@@ -10,6 +11,227 @@ import Testing
 @Suite("Brush Lab session", .serialized)
 @MainActor
 struct BrushLabSessionTests {
+    @Test
+    func fixedManualCardMatrixCoversEveryAnchorAndRequiredDimension() {
+        let cards = BrushLabManualCard.fixedMatrix
+        let anchorIDs = Set(AnchorBrushCatalog.all.map(\.id.rawValue))
+
+        #expect(cards.count == 72)
+        #expect(cards.map(\.cardID) == cards.map(\.cardID).sorted())
+        #expect(Set(cards.map(\.cardID)).count == cards.count)
+        #expect(Set(cards.map(\.brushID)) == anchorIDs)
+
+        for anchorID in anchorIDs {
+            let anchorCards = cards.filter { $0.brushID == anchorID }
+            #expect(anchorCards.count == 12)
+            #expect(Set(anchorCards.map(\.gesture)) == Set(
+                BrushLabManualGesture.allCases
+            ))
+            #expect(Set(anchorCards.map(\.diameter)) == [2, 20, 2_000])
+            #expect(Set(anchorCards.map(\.pressureProfile)) == [
+                "high",
+                "low",
+                "medium",
+            ])
+            #expect(Set(anchorCards.map(\.documentMode)) == [
+                "finite-radial",
+                "periodic",
+                "plain",
+                "reflected",
+            ])
+            #expect(Set(anchorCards.map(\.background)) == [
+                .opaque,
+                .transparent,
+            ])
+            #expect(Set(anchorCards.map(\.predictionEnabled)) == [
+                false,
+                true,
+            ])
+            #expect(anchorCards.contains {
+                $0.inputCapabilities == [
+                    "pressure",
+                    "altitude",
+                    "azimuth",
+                    "roll",
+                ]
+            })
+            #expect(anchorCards.contains {
+                $0.customResourceFixture
+                    == "custom-asymmetric-shape-grain-v1"
+            })
+        }
+    }
+
+    @Test
+    func freshSessionsProduceByteIdenticalManualCardJSON() throws {
+        guard let first = try makeRuntime(),
+              let second = try makeRuntime()
+        else {
+            return
+        }
+
+        let firstData = try first.session.makeManualCardsData()
+        let secondData = try second.session.makeManualCardsData()
+
+        #expect(firstData == secondData)
+        #expect(
+            BrushContentHash.sha256Hex(of: firstData)
+                == "cabfd2d0fb1f6007fef745ca7e1480e9906f45f6f2361a2f8568874b2432d3e2"
+        )
+    }
+
+    @Test
+    func manualAssessmentsStartUnsetAndNeverSelfApprove() {
+        let assessment = BrushLabManualAssessment(
+            cardID: "builtin.native-ink.tap.minimum.low"
+        )
+
+        #expect(assessment.responsiveness == nil)
+        #expect(assessment.edgeQuality == nil)
+        #expect(assessment.textureCohesion == nil)
+        #expect(assessment.buildup == nil)
+        #expect(assessment.symmetryBehavior == nil)
+        #expect(assessment.eraserMatch == nil)
+        #expect(assessment.notes == nil)
+    }
+
+    @Test
+    func selectsAndReplaysManualCardThroughProductionController()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let card = try #require(runtime.session.manualCards.first {
+            $0.brushID == AnchorBrushCatalog.ink.id.rawValue
+                && $0.gesture == .tap
+                && $0.documentMode == "periodic"
+                && $0.predictionEnabled
+                && $0.customResourceFixture == nil
+        })
+
+        try await runtime.session.selectManualCard(card.cardID)
+        try runtime.session.replaySelectedManualCard()
+        _ = try runtime.controller.renderer.finishCommitForHarness()
+
+        #expect(runtime.session.selectedManualCardID == card.cardID)
+        #expect(runtime.session.package?.definition.id.rawValue == card.brushID)
+        #expect(runtime.controller.model.brushDiameter == card.diameter)
+        #expect(runtime.controller.model.inkColor == card.paintColor)
+        #expect(runtime.session.inputRecords == card.traceSamples().enumerated()
+            .map { BrushLabInputRecord(sequence: $0.offset, sample: $0.element) })
+        #expect(runtime.session.inputRecords.contains {
+            $0.kind == "predicted"
+        })
+        #expect(!runtime.session.dabRecords.isEmpty)
+        #expect(runtime.controller.renderer.isIdle)
+        #expect(
+            runtime.session.compiledBrush?.renderIdentity.semanticHash
+                == runtime.session.packageContentHash
+        )
+    }
+
+    @Test
+    func manualEvidenceArchiveWritesJSONPNGsAndTelemetryAtomically()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let card = try #require(runtime.session.manualCards.first {
+            $0.brushID == AnchorBrushCatalog.ink.id.rawValue
+                && $0.gesture == .fastLine
+                && $0.documentMode == "plain"
+                && !$0.predictionEnabled
+        })
+        try await runtime.session.selectManualCard(card.cardID)
+        try runtime.session.replaySelectedManualCard()
+        _ = try runtime.controller.renderer.finishCommitForHarness()
+
+        let archive = try runtime.session.makeManualEvidenceArchive()
+        #expect(Set(archive.files.keys) == [
+            "canvas.png",
+            "evidence.json",
+            "telemetry.json",
+        ])
+        #expect(archive.files["canvas.png"]?.prefix(8) == Data([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        ]))
+
+        let evidence = try #require(archive.files["evidence.json"])
+        let object = try #require(
+            JSONSerialization.jsonObject(with: evidence)
+                as? [String: Any]
+        )
+        #expect(object["cardID"] as? String == card.cardID)
+        let assessment = try #require(
+            object["assessment"] as? [String: Any]
+        )
+        #expect(assessment["responsiveness"] is NSNull)
+        #expect(assessment["edgeQuality"] is NSNull)
+        let identity = try #require(
+            object["renderIdentity"] as? [String: Any]
+        )
+        #expect(
+            identity["semanticHash"] as? String
+                == runtime.session.packageContentHash
+        )
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "laya-brush-lab-archive-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false
+        )
+        let destination = root.appendingPathComponent(
+            "card.brushlabevidence",
+            isDirectory: true
+        )
+        try archive.writeAtomically(to: destination)
+        #expect(
+            Set(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: destination.path
+                )
+            ) == Set(archive.files.keys)
+        )
+        #expect(
+            try FileManager.default.contentsOfDirectory(
+                atPath: root.path
+            ).allSatisfy { !$0.hasPrefix(".card.brushlabevidence.tmp-") }
+        )
+    }
+
+    @Test
+    func customAsymmetricCardCompilesRealShapeAndGrainResources()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let card = try #require(runtime.session.manualCards.first {
+            $0.brushID == AnchorBrushCatalog.ink.id.rawValue
+                && $0.customResourceFixture
+                    == BrushLabManualCard.customAsymmetricFixture
+                && $0.documentMode == "plain"
+        })
+
+        try await runtime.session.selectManualCard(card.cardID)
+
+        #expect(
+            Set(runtime.session.compiledBrush.map {
+                Array($0.textures.keys)
+            } ?? []) == [
+                "brush-lab.custom-asymmetric.grain",
+                "brush-lab.custom-asymmetric.shape",
+            ]
+        )
+        #expect(runtime.session.package?.manifest.resources.count == 2)
+        #expect(runtime.session.compilationReport?.residentResourceBytes ?? 0 > 0)
+        #expect(
+            runtime.session.compiledBrush?.renderIdentity.semanticHash
+                == runtime.session.packageContentHash
+        )
+    }
+
     @Test
     func loadsCompilesTracesAndExportsWithoutUIInteraction() async throws {
         guard let runtime = try makeRuntime() else { return }

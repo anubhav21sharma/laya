@@ -54,4 +54,46 @@ func debugPerformanceMonitorResetsAcrossDisplayChanges() {
     #expect(monitor.snapshot.sampleCount == 0)
     #expect(monitor.snapshot.targetFramesPerSecond == 120)
 }
+
+@MainActor
+@Test
+func debugPerformanceMonitorPublishesActualDepositionDiagnostics() {
+    let monitor = DebugPerformanceMonitor()
+
+    monitor.recordDepositionSample(
+        authoritativeBacklog: 9,
+        predictedBacklog: 3,
+        encodedDabs: 7,
+        encodedInstances: 11,
+        bufferCount: 2,
+        cpuPreparationNanoseconds: 1_000_000,
+        eventToSubmitNanoseconds: 2_000_000,
+        gpuCompletionNanoseconds: 3_000_000,
+        missedFrames: 1
+    )
+    monitor.recordDepositionSample(
+        authoritativeBacklog: 4,
+        predictedBacklog: 0,
+        encodedDabs: 5,
+        encodedInstances: 13,
+        bufferCount: 3,
+        cpuPreparationNanoseconds: 2_000_000,
+        eventToSubmitNanoseconds: 4_000_000,
+        gpuCompletionNanoseconds: 6_000_000,
+        missedFrames: 2
+    )
+
+    let diagnostics = monitor.snapshot.deposition
+    #expect(diagnostics.authoritativeBacklog == 4)
+    #expect(diagnostics.predictedBacklog == 0)
+    #expect(diagnostics.backlogHighWater == 12)
+    #expect(diagnostics.encodedDabCount == 12)
+    #expect(diagnostics.encodedInstanceCount == 24)
+    #expect(diagnostics.bufferHighWater == 3)
+    #expect(diagnostics.missedFrameCount == 3)
+    #expect(diagnostics.cpuPreparation.p50 == 1_000_000)
+    #expect(diagnostics.cpuPreparation.p95 == 2_000_000)
+    #expect(diagnostics.eventToSubmit.p95 == 4_000_000)
+    #expect(diagnostics.gpuCompletion.p99 == 6_000_000)
+}
 #endif

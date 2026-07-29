@@ -163,6 +163,7 @@ let package = Package(
             ],
             sources: [
                 "PatternSpike/EditorSessionController.swift",
+                "PatternSpike/BrushLab/BrushLabManualCard.swift",
                 "PatternSpike/BrushLab/BrushLabSession.swift",
                 "PatternSpike/Input/BrushInputAdapter.swift",
                 "PatternSpike/Canvas/InteractiveMetalView.swift",
