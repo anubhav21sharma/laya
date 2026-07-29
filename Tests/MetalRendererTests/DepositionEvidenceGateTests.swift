@@ -328,6 +328,190 @@ struct DepositionEvidenceGateTests {
     }
 
     @Test
+    func promotionClaimMustMatchObservedDisplayFrameIntervals() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        try fixture.mutatePhysicalProfile(
+            "referenceMSeriesProMotion120Hz"
+        ) { _, trace in
+            let sampleCount =
+                (trace["sampleTimestampsNanoseconds"] as! [NSNumber]).count
+            let timestamps = (0 ..< sampleCount).map {
+                1_000_000_000 + $0 * 16_666_667
+            }
+            trace["sampleTimestampsNanoseconds"] = timestamps
+            trace["events"] = StageFourArtifactFixture.physicalEvents(
+                kinds: ["inputSample", "displayFrame"],
+                timestamps: timestamps
+            )
+        }
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
+    func missedFrameSamplesMustMatchIntermediateDisplayFrameGaps() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        try fixture.mutatePhysicalProfile(
+            "referenceMSeriesProMotion120Hz"
+        ) { _, trace in
+            var timestamps =
+                (trace["sampleTimestampsNanoseconds"] as! [NSNumber])
+                    .map(\.intValue)
+            let index = 100
+            let interval = timestamps[index] - timestamps[index - 1]
+            let shift = interval * 3 / 4
+            timestamps[index] += shift
+            trace["sampleTimestampsNanoseconds"] = timestamps
+            var events = trace["events"] as! [[String: Any]]
+            for eventIndex in events.indices
+            where (events[eventIndex]["sampleIndex"] as! NSNumber)
+                .intValue == index
+            {
+                events[eventIndex]["timestampNanoseconds"] =
+                    (events[eventIndex]["timestampNanoseconds"] as! NSNumber)
+                        .intValue + shift
+            }
+            trace["events"] = events
+        }
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
+    func passingLatencySamplesMustMatchFailingObservedEventDeltas() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        try fixture.mutatePhysicalProfile("inputToPhoton") { _, trace in
+            var events = trace["events"] as! [[String: Any]]
+            for index in events.indices
+            where events[index]["kind"] as? String == "inputEvent"
+                && (events[index]["sampleIndex"] as! NSNumber).intValue > 0
+            {
+                let sampleIndex =
+                    (events[index]["sampleIndex"] as! NSNumber).intValue
+                let photon = events.first {
+                    $0["kind"] as? String == "photonObserved"
+                        && ($0["sampleIndex"] as! NSNumber).intValue
+                            == sampleIndex
+                }!
+                events[index]["timestampNanoseconds"] =
+                    (photon["timestampNanoseconds"] as! NSNumber).intValue
+                        - 20_000_000
+            }
+            events.sort {
+                ($0["timestampNanoseconds"] as! NSNumber).intValue
+                    < ($1["timestampNanoseconds"] as! NSNumber).intValue
+            }
+            trace["events"] = events
+        }
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
+    func eventGroupsMustBeBoundToTheirDeclaredSampleTimestamps() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        try fixture.mutatePhysicalProfile("pencil") { _, trace in
+            var events = trace["events"] as! [[String: Any]]
+            for index in events.indices
+            where (events[index]["sampleIndex"] as! NSNumber).intValue == 1
+            {
+                events[index]["timestampNanoseconds"] =
+                    (events[index]["timestampNanoseconds"] as! NSNumber)
+                        .intValue + 1_000
+            }
+            events.sort {
+                ($0["timestampNanoseconds"] as! NSNumber).intValue
+                    < ($1["timestampNanoseconds"] as! NSNumber).intValue
+            }
+            trace["events"] = events
+        }
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
+    func processorClassMustBeDerivedFromValidatedHardwareModel() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        try fixture.mutatePhysicalProfile(
+            "referenceMSeriesProMotion120Hz"
+        ) { evidence, trace in
+            var evidenceDevice = evidence["device"] as! [String: Any]
+            evidenceDevice["hardwareModel"] = "iPad13,2"
+            evidence["device"] = evidenceDevice
+            var traceDevice = trace["device"] as! [String: Any]
+            traceDevice["hardwareModel"] = "iPad13,2"
+            trace["device"] = traceDevice
+        }
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
+    func intelMacHardwareModelCannotClaimMSeriesProcessorClass() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        try fixture.mutatePhysicalProfile("wacom") { evidence, trace in
+            var evidenceDevice = evidence["device"] as! [String: Any]
+            evidenceDevice["hardwareModel"] = "MacBookPro16,1"
+            evidence["device"] = evidenceDevice
+            var traceDevice = trace["device"] as! [String: Any]
+            traceDevice["hardwareModel"] = "MacBookPro16,1"
+            trace["device"] = traceDevice
+        }
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
+    func unknownMacHardwareModelCannotClaimMSeriesProcessorClass() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        try fixture.mutatePhysicalProfile("wacom") { evidence, trace in
+            var evidenceDevice = evidence["device"] as! [String: Any]
+            evidenceDevice["hardwareModel"] = "Mac99,1"
+            evidence["device"] = evidenceDevice
+            var traceDevice = trace["device"] as! [String: Any]
+            traceDevice["hardwareModel"] = "Mac99,1"
+            trace["device"] = traceDevice
+        }
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
     func incompatibleHeadlessCatalogCannotSelfAttestItsDigest() throws {
         let fixture = try StageFourArtifactFixture()
         defer { fixture.remove() }
@@ -680,7 +864,7 @@ private struct StageFourArtifactFixture {
                     sampleCountOverride == nil
                         ? profile.durationNanoseconds : 0
             )
-            let rawSamples = Dictionary(
+            var rawSamples = Dictionary(
                 uniqueKeysWithValues: metrics.map {
                     (
                         $0.key,
@@ -691,9 +875,42 @@ private struct StageFourArtifactFixture {
                     )
                 }
             )
+            let eventSpanNanoseconds: Int
+            switch profileID {
+            case "memoryWarning":
+                eventSpanNanoseconds = 100_000_000
+            case "inputToPhoton":
+                eventSpanNanoseconds = 10_000_000
+            case "suspendResume":
+                eventSpanNanoseconds = 200_000_000
+            default:
+                eventSpanNanoseconds = profile.eventKinds.count - 1
+            }
+            if profileID == "inputToPhoton" {
+                rawSamples["inputToPhotonP95Milliseconds"] =
+                    [Double](repeating: 10, count: sampleCount)
+            } else if profileID == "memoryWarning" {
+                rawSamples["memoryWarningRecoveryMilliseconds"] =
+                    [Double](repeating: 100, count: sampleCount)
+            } else if profileID == "suspendResume" {
+                rawSamples["suspendResumeRecoveryMilliseconds"] =
+                    [Double](repeating: 100, count: sampleCount)
+            } else if profileID == "sustainedThermal" {
+                var durations = [Double](
+                    repeating: 0,
+                    count: sampleCount
+                )
+                for index in 1 ..< sampleCount {
+                    durations[index] = Double(
+                        timestamps[index] - timestamps[index - 1]
+                    ) / 1_000_000_000
+                }
+                rawSamples["thermalDurationSeconds"] = durations
+            }
             let events = Self.physicalEvents(
                 kinds: profile.eventKinds,
-                timestamps: timestamps
+                timestamps: timestamps,
+                eventSpanNanoseconds: eventSpanNanoseconds
             )
             let trace = try Self.json([
                 "schemaVersion": 2,
@@ -717,10 +934,7 @@ private struct StageFourArtifactFixture {
                         [
                             "unit": metric.unit,
                             "aggregation": metric.aggregation,
-                            "samples": [Double](
-                                repeating: metric.passingSample,
-                                count: sampleCount
-                            ),
+                            "samples": rawSamples[metricID]!,
                             "threshold": [
                                 "relation": metric.relation,
                                 "value": metric.threshold,
@@ -754,26 +968,58 @@ private struct StageFourArtifactFixture {
         sampleCount: Int,
         durationNanoseconds: Int
     ) -> [Int] {
-        guard sampleCount > 1 else { return [0] }
+        let start = 1_000_000_000
+        guard sampleCount > 1 else { return [start] }
         return (0 ..< sampleCount).map {
-            durationNanoseconds * $0 / (sampleCount - 1)
+            start + durationNanoseconds * $0 / (sampleCount - 1)
         }
     }
 
-    private static func physicalEvents(
+    fileprivate static func physicalEvents(
         kinds: [String],
-        timestamps: [Int]
+        timestamps: [Int],
+        eventSpanNanoseconds: Int? = nil
     ) -> [[String: Any]] {
-        timestamps.enumerated().flatMap { sampleIndex, timestamp in
-            let eventStart = max(0, timestamp - (kinds.count - 1))
+        let span = eventSpanNanoseconds ?? kinds.count - 1
+        return timestamps.enumerated().flatMap { sampleIndex, timestamp in
+            let eventStart = timestamp - span
             return kinds.enumerated().map { offset, kind in
                 [
                     "kind": kind,
                     "sampleIndex": sampleIndex,
-                    "timestampNanoseconds": eventStart + offset,
+                    "timestampNanoseconds": eventStart
+                        + (kinds.count == 1
+                            ? 0
+                            : span * offset / (kinds.count - 1)),
                 ] as [String: Any]
             }
         }
+    }
+
+    func mutatePhysicalProfile(
+        _ profileID: String,
+        _ mutation: (
+            inout [String: Any],
+            inout [String: Any]
+        ) throws -> Void
+    ) throws {
+        let directory = root.appendingPathComponent("physical-profiles")
+            .appendingPathComponent(profileID)
+        let evidenceURL = directory.appendingPathComponent("evidence.json")
+        let traceURL = directory.appendingPathComponent("raw/trace.json")
+        var evidence = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: evidenceURL)
+        ) as! [String: Any]
+        var trace = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: traceURL)
+        ) as! [String: Any]
+        try mutation(&evidence, &trace)
+        let traceData = try Self.json(trace)
+        try traceData.write(to: traceURL)
+        var traces = evidence["traces"] as! [[String: Any]]
+        traces[0]["sha256"] = Self.sha256(traceData)
+        evidence["traces"] = traces
+        try Self.json(evidence).write(to: evidenceURL)
     }
 
     private func makePhysicalHardware() throws {

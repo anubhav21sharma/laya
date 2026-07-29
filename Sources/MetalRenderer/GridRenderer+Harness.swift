@@ -779,6 +779,11 @@ extension GridRenderer {
     var harnessScheduledPredictedRecords: [ProjectedDepositionRecord] {
         activeStroke?.scheduler?.predictedRecords ?? []
     }
+    var harnessTransientDabArenaSnapshot:
+        TransientStrokeDabArena.DiagnosticSnapshot
+    {
+        transientDabArena.diagnosticSnapshot
+    }
     var harnessCompiledIsometryOrdinals: Set<UInt8> {
         Set(tilingStrategy.compiledSymmetry.images.map(\.ordinal))
     }
@@ -796,6 +801,21 @@ extension GridRenderer {
         let previous = depositionFrameBudget
         depositionFrameBudget = budget
         return previous
+    }
+    @discardableResult
+    func replaceActiveStrokeSchedulerForHarness(
+        _ budget: DepositionFrameBudget
+    ) -> FrameScheduler? {
+        guard let previous = activeStroke?.scheduler else {
+            return nil
+        }
+        activeStroke?.scheduler = FrameScheduler(budget: budget)
+        return previous
+    }
+    func restoreActiveStrokeSchedulerForHarness(
+        _ scheduler: FrameScheduler
+    ) {
+        activeStroke?.scheduler = scheduler
     }
     var harnessPendingInstanceColors: [SIMD4<Float>] {
         activeStroke?.scheduler?.authoritativeRecords.map(

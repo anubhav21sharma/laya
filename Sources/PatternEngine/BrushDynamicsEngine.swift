@@ -153,7 +153,7 @@ public struct LogicalDab: Equatable, Sendable {
             secondaryGrainToWorld: secondaryGrainToWorld,
             materialInputs: materialInputs,
             randomValues: randomValues,
-            evaluatedShapeFrames: [brushToWorld]
+            secondaryShapeToWorld: nil
         )
     }
 
@@ -183,12 +183,8 @@ public struct LogicalDab: Equatable, Sendable {
         secondaryGrainToWorld: Affine2D?,
         materialInputs: BrushMaterialInputs,
         randomValues: BrushLogicalRandomValues,
-        evaluatedShapeFrames: [Affine2D]
+        secondaryShapeToWorld: Affine2D?
     ) {
-        precondition(
-            !evaluatedShapeFrames.isEmpty,
-            "A logical dab requires at least one evaluated shape frame"
-        )
         self.position = position
         self.brushToWorld = brushToWorld
         self.radius = radius
@@ -215,7 +211,8 @@ public struct LogicalDab: Equatable, Sendable {
         self.materialInputs = materialInputs
         self.randomValues = randomValues
         worldBounds = Self.conservativeWorldBounds(
-            shapeFrames: evaluatedShapeFrames,
+            primaryShapeToWorld: brushToWorld,
+            secondaryShapeToWorld: secondaryShapeToWorld,
             haloRadius: materialInputs.conservativeHaloRadius
         )
     }
@@ -224,38 +221,36 @@ public struct LogicalDab: Equatable, Sendable {
     public var strokeOpacityContribution: Float { strokeOpacity }
 
     var hasFiniteBatchValues: Bool {
-        [
-            position.x,
-            position.y,
-            radius,
-            diameter,
-            spacing,
-            flow,
-            strokeOpacity,
-            rotation,
-            scatter.x,
-            scatter.y,
-            hardness,
-            grainOffset.x,
-            grainOffset.y,
-            grainScale,
-            grainRotation,
-            color.red,
-            color.green,
-            color.blue,
-            color.alpha,
-            colorAdjustment.redMultiplier,
-            colorAdjustment.greenMultiplier,
-            colorAdjustment.blueMultiplier,
-            colorAdjustment.alphaMultiplier,
-            secondaryColorMix,
-            materialContribution,
-            sourceDistance,
-            worldBounds.minimum.x,
-            worldBounds.minimum.y,
-            worldBounds.maximum.x,
-            worldBounds.maximum.y,
-        ].allSatisfy(\.isFinite)
+        position.x.isFinite
+            && position.y.isFinite
+            && radius.isFinite
+            && diameter.isFinite
+            && spacing.isFinite
+            && flow.isFinite
+            && strokeOpacity.isFinite
+            && rotation.isFinite
+            && scatter.x.isFinite
+            && scatter.y.isFinite
+            && hardness.isFinite
+            && grainOffset.x.isFinite
+            && grainOffset.y.isFinite
+            && grainScale.isFinite
+            && grainRotation.isFinite
+            && color.red.isFinite
+            && color.green.isFinite
+            && color.blue.isFinite
+            && color.alpha.isFinite
+            && colorAdjustment.redMultiplier.isFinite
+            && colorAdjustment.greenMultiplier.isFinite
+            && colorAdjustment.blueMultiplier.isFinite
+            && colorAdjustment.alphaMultiplier.isFinite
+            && secondaryColorMix.isFinite
+            && materialContribution.isFinite
+            && sourceDistance.isFinite
+            && worldBounds.minimum.x.isFinite
+            && worldBounds.minimum.y.isFinite
+            && worldBounds.maximum.x.isFinite
+            && worldBounds.maximum.y.isFinite
             && Self.affineHasFiniteValues(brushToWorld)
             && primaryGrainToWorld.map(Self.affineHasFiniteValues) != false
             && secondaryGrainToWorld.map(Self.affineHasFiniteValues) != false
@@ -264,38 +259,48 @@ public struct LogicalDab: Equatable, Sendable {
     }
 
     private static func conservativeWorldBounds(
-        shapeFrames: [Affine2D],
+        primaryShapeToWorld: Affine2D,
+        secondaryShapeToWorld: Affine2D?,
         haloRadius: Float
     ) -> AxisAlignedRect {
-        let unitCorners = [
-            SIMD2<Float>(-1, -1),
-            SIMD2<Float>(1, -1),
-            SIMD2<Float>(1, 1),
-            SIMD2<Float>(-1, 1),
-        ]
-        let corners = shapeFrames.flatMap { frame in
-            unitCorners.map(frame.applying(to:))
+        let primaryExtent = SIMD2(
+            abs(primaryShapeToWorld.xAxis.x)
+                + abs(primaryShapeToWorld.yAxis.x),
+            abs(primaryShapeToWorld.xAxis.y)
+                + abs(primaryShapeToWorld.yAxis.y)
+        )
+        var minimum = primaryShapeToWorld.translation - primaryExtent
+        var maximum = primaryShapeToWorld.translation + primaryExtent
+        if let secondaryShapeToWorld {
+            let secondaryExtent = SIMD2(
+                abs(secondaryShapeToWorld.xAxis.x)
+                    + abs(secondaryShapeToWorld.yAxis.x),
+                abs(secondaryShapeToWorld.xAxis.y)
+                    + abs(secondaryShapeToWorld.yAxis.y)
+            )
+            minimum = min(
+                minimum,
+                secondaryShapeToWorld.translation - secondaryExtent
+            )
+            maximum = max(
+                maximum,
+                secondaryShapeToWorld.translation + secondaryExtent
+            )
         }
-        let minimum = SIMD2(
-            corners.map(\.x).min()! - haloRadius,
-            corners.map(\.y).min()! - haloRadius
+        let halo = SIMD2<Float>(repeating: haloRadius)
+        return AxisAlignedRect(
+            minimum: minimum - halo,
+            maximum: maximum + halo
         )
-        let maximum = SIMD2(
-            corners.map(\.x).max()! + haloRadius,
-            corners.map(\.y).max()! + haloRadius
-        )
-        return AxisAlignedRect(minimum: minimum, maximum: maximum)
     }
 
     private static func affineHasFiniteValues(_ affine: Affine2D) -> Bool {
-        [
-            affine.xAxis.x,
-            affine.xAxis.y,
-            affine.yAxis.x,
-            affine.yAxis.y,
-            affine.translation.x,
-            affine.translation.y,
-        ].allSatisfy(\.isFinite)
+        affine.xAxis.x.isFinite
+            && affine.xAxis.y.isFinite
+            && affine.yAxis.x.isFinite
+            && affine.yAxis.y.isFinite
+            && affine.translation.x.isFinite
+            && affine.translation.y.isFinite
     }
 }
 
@@ -405,7 +410,9 @@ public struct BrushDynamicsEngine: Sendable {
             yAxis: SIMD2(-sine, cosine) * radius * definition.coverage.aspectRatio,
             translation: position.simd
         )
-        let evaluatedShapeFrames = definition.coverage.shapes.map { shape in
+        func evaluatedShapeFrame(
+            _ shape: BrushShapeLayerDefinition
+        ) -> Affine2D {
             let shapeCosine = cos(shape.rotation) * shape.scale
             let shapeSine = sin(shape.rotation) * shape.scale
             return Affine2D(
@@ -414,7 +421,13 @@ public struct BrushDynamicsEngine: Sendable {
                 translation: shape.offset
             ).concatenating(tipToWorld)
         }
-        let brushToWorld = evaluatedShapeFrames[0]
+        let brushToWorld = evaluatedShapeFrame(
+            definition.coverage.shapes[0]
+        )
+        let secondaryShapeToWorld =
+            definition.coverage.shapes.count == 2
+                ? evaluatedShapeFrame(definition.coverage.shapes[1])
+                : nil
         let hardness = clamp01(definition.coverage.baseHardness * evaluate(
             dynamics.hardness, inputs: inputs, strokeSeed: strokeSeed,
             ordinal: context.ordinal, channel: .hardness
@@ -523,7 +536,7 @@ public struct BrushDynamicsEngine: Sendable {
                 strokeSeed: strokeSeed,
                 ordinal: context.ordinal
             ),
-            evaluatedShapeFrames: evaluatedShapeFrames
+            secondaryShapeToWorld: secondaryShapeToWorld
         )
     }
 

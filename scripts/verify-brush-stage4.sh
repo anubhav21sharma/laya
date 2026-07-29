@@ -418,7 +418,7 @@ else
 fi
 
 if rg -n \
-  'Set\([[:space:]]*records\.map|preparedChunkRanges\.flatMap|dabs\.map\(\\\.attributes\)|var updatedBuffer = transientStrokeBuffer|guard var buffer = transientStrokeBuffer|candidate\.nextFrame\(' \
+  'Set\([[:space:]]*records\.map|preparedChunkRanges\.flatMap|dabs\.map\(\\\.attributes\)|let suffix = \[sample\]|Array\(dabs\)|var snapshot: \[LogicalDab\]|var updatedBuffer = transientStrokeBuffer|guard var buffer = transientStrokeBuffer|candidate\.nextFrame\(' \
   Sources/MetalRenderer/GridRenderer.swift \
   >"$logs/hot-path-owning-wrapper.stdout.log" \
   2>"$logs/hot-path-owning-wrapper.stderr.log"; then
@@ -428,6 +428,34 @@ else
   [[ "$code" -eq 1 ]] \
     || fail "renderer hot-path ownership boundary audit failed with exit $code"
 fi
+
+if rg -n \
+  'definition\.coverage\.shapes\.map|shapeFrames\.flatMap|unitCorners\.map|corners\.map' \
+  Sources/PatternEngine/BrushDynamicsEngine.swift \
+  >"$logs/hot-path-dynamics-ownership.stdout.log" \
+  2>"$logs/hot-path-dynamics-ownership.stderr.log"; then
+  fail "brush dynamics hot path constructs an owning per-dab temporary"
+else
+  code=$?
+  [[ "$code" -eq 1 ]] \
+    || fail "brush dynamics ownership boundary audit failed with exit $code"
+fi
+
+if rg -n \
+  'final class ReservationTransaction' \
+  Sources/PatternEngine/TransientStrokeBuffer.swift \
+  >"$logs/hot-path-arena-transaction.stdout.log" \
+  2>"$logs/hot-path-arena-transaction.stderr.log"; then
+  fail "transient dab arena transaction allocates a heap object"
+else
+  code=$?
+  [[ "$code" -eq 1 ]] \
+    || fail "arena transaction ownership boundary audit failed with exit $code"
+fi
+rg -q \
+  'public struct ReservationTransaction' \
+  Sources/PatternEngine/TransientStrokeBuffer.swift \
+  || fail "transient dab arena lacks its value transaction API boundary"
 
 if sed -n \
   '/private func prepareGeneratedDabs(/,/func appendProjectedFragments(/p' \

@@ -30,88 +30,387 @@ public struct TransientStrokeDab: Equatable, Sendable {
 /// Fixed renderer-owned storage for transient dabs. The backing array is
 /// allocated once; slices are lightweight ranges and never own collections.
 public final class TransientStrokeDabArena: @unchecked Sendable {
+    public enum ReservationError: Error, Equatable, Sendable {
+        case transactionAlreadyActive
+        case capacityExceeded(Int)
+        case inactiveTransaction
+    }
+
     public static let retainedCapacity =
         TransientStrokeBufferContract.wholeStrokeDabCapacity
     private static let actualCapacity = retainedCapacity * 2
     private static let predictionBankCapacity = retainedCapacity
+    private static let predictionCapacity = predictionBankCapacity * 2
 
     private var storage: [TransientStrokeDab?]
-    private var actualCursor = 0
-    private var predictionBank = 0
-    private var predictionCursor = 0
+    private var slotGeneration: [UInt64]
+    private var slotTransaction: [UInt64]
+    private var retainedMarker: [UInt64]
+    private var actualSearchCursor = 0
+    private var predictionSearchCursor = 0
+    private var nextTransaction: UInt64 = 1
+    private var nextGeneration: UInt64 = 1
+    private var nextRetainedMarker: UInt64 = 1
+    private var activeTransaction: UInt64?
 
-    public init() {
-        storage = [TransientStrokeDab?](
-            repeating: nil,
-            count: Self.actualCapacity
-                + 2 * Self.predictionBankCapacity
+    public struct DiagnosticSnapshot: Equatable, Sendable {
+        public struct OccupiedSlot: Equatable, Sendable {
+            public let index: Int
+            public let dab: TransientStrokeDab
+            public let generation: UInt64
+            public let retainedMarker: UInt64
+        }
+
+        public let occupiedSlotCount: Int
+        public let actualSearchCursor: Int
+        public let predictionSearchCursor: Int
+        public let committedGenerationChecksum: UInt64
+        public let occupiedSlots: [OccupiedSlot]
+    }
+
+    public var diagnosticSnapshot: DiagnosticSnapshot {
+        var occupiedSlotCount = 0
+        var committedGenerationChecksum: UInt64 = 0
+        var occupiedSlots: [DiagnosticSnapshot.OccupiedSlot] = []
+        occupiedSlots.reserveCapacity(Self.retainedCapacity * 2)
+        for slot in storage.indices where slotGeneration[slot] != 0 {
+            occupiedSlotCount += 1
+            committedGenerationChecksum &+= slotGeneration[slot]
+            occupiedSlots.append(
+                DiagnosticSnapshot.OccupiedSlot(
+                    index: slot,
+                    dab: storage[slot]!,
+                    generation: slotGeneration[slot],
+                    retainedMarker: retainedMarker[slot]
+                )
+            )
+        }
+        return DiagnosticSnapshot(
+            occupiedSlotCount: occupiedSlotCount,
+            actualSearchCursor: actualSearchCursor,
+            predictionSearchCursor: predictionSearchCursor,
+            committedGenerationChecksum: committedGenerationChecksum,
+            occupiedSlots: occupiedSlots
         )
     }
 
-    public func reset() {
-        actualCursor = 0
-        predictionBank = 0
-        predictionCursor = 0
+    public init() {
+        let capacity = Self.actualCapacity
+            + 2 * Self.predictionBankCapacity
+        storage = [TransientStrokeDab?](repeating: nil, count: capacity)
+        slotGeneration = [UInt64](repeating: 0, count: capacity)
+        slotTransaction = [UInt64](repeating: 0, count: capacity)
+        retainedMarker = [UInt64](repeating: 0, count: capacity)
     }
 
-    public func storeActual(
+    public func reset() {
+        storage.indices.forEach {
+            storage[$0] = nil
+            slotGeneration[$0] = 0
+            slotTransaction[$0] = 0
+            retainedMarker[$0] = 0
+        }
+        actualSearchCursor = 0
+        predictionSearchCursor = 0
+        activeTransaction = nil
+    }
+
+    public func beginTransaction(
+        replacingPrediction: Bool
+    ) throws -> ReservationTransaction {
+        guard activeTransaction == nil else {
+            throw ReservationError.transactionAlreadyActive
+        }
+        let identifier = nextTransaction
+        nextTransaction &+= 1
+        precondition(nextTransaction != 0)
+        activeTransaction = identifier
+        return ReservationTransaction(
+            arena: self,
+            identifier: identifier,
+            allowsPrediction: replacingPrediction,
+            actualCursorBefore: actualSearchCursor,
+            predictionCursorBefore: predictionSearchCursor
+        )
+    }
+
+    /// Value token for one arena reservation transaction. The arena owns all
+    /// transaction state, so creating a token does not allocate. Callers must
+    /// use `defer { token.rollback() }`; rollback is a no-op after commit.
+    public struct ReservationTransaction: @unchecked Sendable {
+        private let arena: TransientStrokeDabArena
+        fileprivate let identifier: UInt64
+        fileprivate let allowsPrediction: Bool
+        private let actualCursorBefore: Int
+        private let predictionCursorBefore: Int
+
+        fileprivate init(
+            arena: TransientStrokeDabArena,
+            identifier: UInt64,
+            allowsPrediction: Bool,
+            actualCursorBefore: Int,
+            predictionCursorBefore: Int
+        ) {
+            self.arena = arena
+            self.identifier = identifier
+            self.allowsPrediction = allowsPrediction
+            self.actualCursorBefore = actualCursorBefore
+            self.predictionCursorBefore = predictionCursorBefore
+        }
+
+        public func storeActual(
+            count: Int,
+            elementAt: (Int) -> TransientStrokeDab
+        ) throws -> TransientStrokeDabSlice {
+            return try arena.storeActual(
+                transaction: identifier,
+                count: count,
+                elementAt: elementAt
+            )
+        }
+
+        public func storePredicted(
+            count: Int,
+            elementAt: (Int) -> TransientStrokeDab
+        ) throws -> TransientStrokeDabSlice {
+            guard allowsPrediction else {
+                throw ReservationError.inactiveTransaction
+            }
+            return try arena.storePredicted(
+                transaction: identifier,
+                count: count,
+                elementAt: elementAt
+            )
+        }
+
+        public func commit<
+            ActualChunks: Collection,
+            PredictedChunks: Collection
+        >(
+            retainingActual actualChunks: ActualChunks,
+            retainingPredicted predictedChunks: PredictedChunks
+        ) throws
+        where
+            ActualChunks.Element == TransientStrokeChunk,
+            PredictedChunks.Element == TransientStrokeChunk
+        {
+            try arena.commit(
+                identifier,
+                retainingActual: actualChunks,
+                retainingPredicted: predictedChunks
+            )
+        }
+
+        public func rollback() {
+            arena.rollback(
+                identifier,
+                actualCursorBefore: actualCursorBefore,
+                predictionCursorBefore: predictionCursorBefore
+            )
+        }
+    }
+
+    private func storeActual(
+        transaction: UInt64,
         count: Int,
         elementAt: (Int) -> TransientStrokeDab
-    ) -> TransientStrokeDabSlice {
-        precondition((0 ... Self.retainedCapacity).contains(count))
-        let start = actualCursor
-        for offset in 0 ..< count {
-            storage[(start + offset) % Self.actualCapacity] =
-                elementAt(offset)
+    ) throws -> TransientStrokeDabSlice {
+        guard activeTransaction == transaction else {
+            throw ReservationError.inactiveTransaction
         }
-        actualCursor = (actualCursor + count) % Self.actualCapacity
+        guard (0 ... Self.retainedCapacity).contains(count) else {
+            throw ReservationError.capacityExceeded(
+                Self.retainedCapacity
+            )
+        }
+        let start = try freeActualStart(count: count)
+        let generation = reserveGeneration()
+        for offset in 0 ..< count {
+            let slot = (start + offset) % Self.actualCapacity
+            storage[slot] = elementAt(offset)
+            slotGeneration[slot] = generation
+            slotTransaction[slot] = transaction
+        }
+        actualSearchCursor = (start + count) % Self.actualCapacity
         return TransientStrokeDabSlice(
             arena: self,
             regionStart: 0,
             regionCapacity: Self.actualCapacity,
             start: start,
-            count: count
+            count: count,
+            generation: generation
         )
     }
 
-    public func beginPredictionReplacement() {
-        predictionBank = 1 - predictionBank
-        predictionCursor = 0
-    }
-
-    public func storePredicted(
+    private func storePredicted(
+        transaction: UInt64,
         count: Int,
         elementAt: (Int) -> TransientStrokeDab
-    ) -> TransientStrokeDabSlice {
-        precondition(count >= 0)
-        precondition(
-            predictionCursor + count <= Self.predictionBankCapacity
-        )
-        let regionStart = Self.actualCapacity
-            + predictionBank * Self.predictionBankCapacity
-        let start = predictionCursor
-        for offset in 0 ..< count {
-            storage[regionStart + start + offset] = elementAt(offset)
+    ) throws -> TransientStrokeDabSlice {
+        guard activeTransaction == transaction else {
+            throw ReservationError.inactiveTransaction
         }
-        predictionCursor += count
+        guard (0 ... Self.retainedCapacity).contains(count)
+        else {
+            throw ReservationError.capacityExceeded(
+                Self.retainedCapacity
+            )
+        }
+        let regionStart = Self.actualCapacity
+        let start = try freePredictionStart(count: count)
+        let generation = reserveGeneration()
+        for offset in 0 ..< count {
+            let slot = regionStart
+                + (start + offset) % Self.predictionCapacity
+            storage[slot] = elementAt(offset)
+            slotGeneration[slot] = generation
+            slotTransaction[slot] = transaction
+        }
+        predictionSearchCursor =
+            (start + count) % Self.predictionCapacity
         return TransientStrokeDabSlice(
             arena: self,
             regionStart: regionStart,
-            regionCapacity: Self.predictionBankCapacity,
+            regionCapacity: Self.predictionCapacity,
             start: start,
-            count: count
+            count: count,
+            generation: generation
         )
+    }
+
+    private func freeActualStart(count: Int) throws -> Int {
+        guard count > 0 else { return actualSearchCursor }
+        for distance in 0 ..< Self.actualCapacity {
+            let candidate =
+                (actualSearchCursor + distance) % Self.actualCapacity
+            var isFree = true
+            for offset in 0 ..< count
+            where slotGeneration[
+                (candidate + offset) % Self.actualCapacity
+            ] != 0
+            {
+                isFree = false
+                break
+            }
+            if isFree { return candidate }
+        }
+        throw ReservationError.capacityExceeded(Self.actualCapacity)
+    }
+
+    private func freePredictionStart(count: Int) throws -> Int {
+        guard count > 0 else { return predictionSearchCursor }
+        let regionStart = Self.actualCapacity
+        for distance in 0 ..< Self.predictionCapacity {
+            let candidate =
+                (predictionSearchCursor + distance)
+                    % Self.predictionCapacity
+            var isFree = true
+            for offset in 0 ..< count
+            where slotGeneration[
+                regionStart
+                    + (candidate + offset) % Self.predictionCapacity
+            ] != 0
+            {
+                isFree = false
+                break
+            }
+            if isFree { return candidate }
+        }
+        throw ReservationError.capacityExceeded(
+            Self.predictionCapacity
+        )
+    }
+
+    private func reserveGeneration() -> UInt64 {
+        let generation = nextGeneration
+        nextGeneration &+= 1
+        precondition(nextGeneration != 0)
+        return generation
+    }
+
+    private func commit<
+        ActualChunks: Collection,
+        PredictedChunks: Collection
+    >(
+        _ transaction: UInt64,
+        retainingActual actualChunks: ActualChunks,
+        retainingPredicted predictedChunks: PredictedChunks
+    ) throws
+    where
+        ActualChunks.Element == TransientStrokeChunk,
+        PredictedChunks.Element == TransientStrokeChunk
+    {
+        guard activeTransaction == transaction else {
+            throw ReservationError.inactiveTransaction
+        }
+        let marker = nextRetainedMarker
+        nextRetainedMarker &+= 1
+        precondition(nextRetainedMarker != 0)
+        for chunk in actualChunks {
+            chunk.dabs.markRetained(in: self, marker: marker)
+        }
+        for chunk in predictedChunks {
+            chunk.dabs.markRetained(in: self, marker: marker)
+        }
+        for slot in storage.indices {
+            if slotGeneration[slot] != 0,
+               retainedMarker[slot] != marker
+            {
+                storage[slot] = nil
+                slotGeneration[slot] = 0
+            }
+            slotTransaction[slot] = 0
+        }
+        activeTransaction = nil
+    }
+
+    private func rollback(
+        _ transaction: UInt64,
+        actualCursorBefore: Int,
+        predictionCursorBefore: Int
+    ) {
+        guard activeTransaction == transaction else { return }
+        for slot in storage.indices
+        where slotTransaction[slot] == transaction
+        {
+            storage[slot] = nil
+            slotGeneration[slot] = 0
+            slotTransaction[slot] = 0
+        }
+        actualSearchCursor = actualCursorBefore
+        predictionSearchCursor = predictionCursorBefore
+        activeTransaction = nil
+    }
+
+    fileprivate func markRetained(
+        regionStart: Int,
+        regionCapacity: Int,
+        start: Int,
+        count: Int,
+        generation: UInt64,
+        marker: UInt64
+    ) {
+        for offset in 0 ..< count {
+            let slot = regionStart
+                + (start + offset) % regionCapacity
+            precondition(slotGeneration[slot] == generation)
+            retainedMarker[slot] = marker
+        }
     }
 
     fileprivate func dab(
         regionStart: Int,
         regionCapacity: Int,
         start: Int,
-        offset: Int
+        offset: Int,
+        generation: UInt64
     ) -> TransientStrokeDab {
-        storage[
-            regionStart + (start + offset) % regionCapacity
-        ]!
+        let slot = regionStart + (start + offset) % regionCapacity
+        precondition(
+            slotGeneration[slot] == generation,
+            "Transient dab slice no longer owns its arena storage"
+        )
+        return storage[slot]!
     }
 }
 
@@ -128,7 +427,8 @@ public struct TransientStrokeDabSlice:
             regionStart: Int,
             regionCapacity: Int,
             start: Int,
-            count: Int
+            count: Int,
+            generation: UInt64
         )
 
         static func == (lhs: Storage, rhs: Storage) -> Bool {
@@ -156,14 +456,16 @@ public struct TransientStrokeDabSlice:
         regionStart: Int,
         regionCapacity: Int,
         start: Int,
-        count: Int
+        count: Int,
+        generation: UInt64
     ) {
         storage = .arena(
             arena,
             regionStart: regionStart,
             regionCapacity: regionCapacity,
             start: start,
-            count: count
+            count: count,
+            generation: generation
         )
         self.count = count
     }
@@ -178,15 +480,42 @@ public struct TransientStrokeDabSlice:
             regionStart,
             regionCapacity,
             start,
-            _
+            _,
+            generation
         ):
             arena.dab(
                 regionStart: regionStart,
                 regionCapacity: regionCapacity,
                 start: start,
-                offset: position
+                offset: position,
+                generation: generation
             )
         }
+    }
+
+    fileprivate func markRetained(
+        in arena: TransientStrokeDabArena,
+        marker: UInt64
+    ) {
+        guard case let .arena(
+            owner,
+            regionStart,
+            regionCapacity,
+            start,
+            count,
+            generation
+        ) = storage else {
+            return
+        }
+        precondition(owner === arena)
+        arena.markRetained(
+            regionStart: regionStart,
+            regionCapacity: regionCapacity,
+            start: start,
+            count: count,
+            generation: generation,
+            marker: marker
+        )
     }
 
     public static func == (
@@ -686,6 +1015,130 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         )
     }
 
+    /// Renderer hot-path append. The caller preflights the exact settled
+    /// prefix and proposed replay footprint before any buffer mutation.
+    @discardableResult
+    public mutating func appendActual(
+        _ chunk: TransientStrokeChunk,
+        settledInto settled: inout [TransientStrokeChunk],
+        preflightSettled: (
+            [TransientStrokeChunk],
+            Int
+        ) throws -> Void
+    ) throws -> TransientStrokeBufferMutation {
+        settled.removeAll(keepingCapacity: true)
+        precondition(
+            chunk.sample.kind != .predicted,
+            "Authoritative append cannot contain a predicted sample"
+        )
+        let retainsAppendOnlySuffix = mode == .appendOnly
+            && (
+                !actualChunks.isEmpty
+                    || !chunk.sample
+                        .estimatedPropertiesExpectingUpdates.isEmpty
+            )
+        if retainsAppendOnlySuffix,
+           unresolvedAppendOnlyOverflow(adding: chunk) != nil
+        {
+            return appendActual(chunk, settledInto: &settled)
+        }
+        let replayProjectedInstanceCount = previewActualAppend(
+            chunk,
+            settledInto: &settled
+        )
+        try preflightSettled(
+            settled,
+            replayProjectedInstanceCount
+        )
+        return appendActual(chunk, settledInto: &settled)
+    }
+
+    private func previewActualAppend(
+        _ chunk: TransientStrokeChunk,
+        settledInto settled: inout [TransientStrokeChunk]
+    ) -> Int {
+        if mode == .appendOnly {
+            var reachedUnresolved = false
+            var replayProjectedInstanceCount = 0
+            func preview(_ candidate: TransientStrokeChunk) {
+                if !reachedUnresolved,
+                   !candidate.sample
+                    .estimatedPropertiesExpectingUpdates.isEmpty
+                {
+                    reachedUnresolved = true
+                }
+                if reachedUnresolved {
+                    replayProjectedInstanceCount = Self.saturatingAdd(
+                        replayProjectedInstanceCount,
+                        candidate.projectedInstanceCount
+                    )
+                } else {
+                    settled.append(candidate)
+                }
+            }
+            for candidate in actualChunks {
+                preview(candidate)
+            }
+            preview(chunk)
+            return replayProjectedInstanceCount
+        }
+
+        var retainedSamples = Self.saturatingAdd(
+            actualSampleCount,
+            1
+        )
+        var retainedDabs = Self.saturatingAdd(
+            actualDabCountStorage,
+            chunk.dabs.count
+        )
+        var retainedProjected = Self.saturatingAdd(
+            actualProjectedInstanceCountStorage,
+            chunk.projectedInstanceCount
+        )
+        let wholeLimits = replayContract.limits
+            ?? BrushRecipePolicy.wholeStrokeLimits
+        let degradesToReplayTail = mode == .boundedWholeStroke
+            && (
+                retainedSamples > wholeLimits.maximumSamples
+                    || retainedDabs > wholeLimits.maximumDabs
+                    || retainedProjected
+                        > wholeLimits.maximumProjectedInstances
+            )
+        let limits = degradesToReplayTail
+            ? Self.minimumLimits(
+                replayContract.limits
+                    ?? BrushRecipePolicy.replayTailLimits,
+                BrushRecipePolicy.replayTailLimits
+            )
+            : capacitiesForCurrentMode()
+        var promotionBlocked = false
+        func preview(_ candidate: TransientStrokeChunk) {
+            guard !promotionBlocked,
+                  retainedSamples > limits.maximumSamples
+                    || retainedDabs > limits.maximumDabs
+                    || retainedProjected
+                        > limits.maximumProjectedInstances
+            else {
+                return
+            }
+            guard candidate.sample
+                .estimatedPropertiesExpectingUpdates.isEmpty
+            else {
+                promotionBlocked = true
+                return
+            }
+            settled.append(candidate)
+            retainedSamples -= 1
+            retainedDabs -= candidate.dabs.count
+            retainedProjected -= candidate.projectedInstanceCount
+        }
+        for candidate in actualChunks {
+            preview(candidate)
+        }
+        preview(chunk)
+        return retainedProjected
+    }
+
     /// Atomically replaces the predicted suffix. Actual chunks and their
     /// generator snapshot are never changed by prediction.
     @discardableResult
@@ -715,7 +1168,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
     @discardableResult
     public mutating func replacePredicted<Chunks: Collection>(
         with chunks: Chunks,
-        settledInto settled: inout [TransientStrokeChunk]
+        settledInto settled: inout [TransientStrokeChunk],
+        preflightSettled:
+            (([TransientStrokeChunk], Int) throws -> Void)? = nil
     ) throws -> TransientStrokeBufferMutation
     where Chunks.Element == TransientStrokeChunk {
         settled.removeAll(keepingCapacity: true)
@@ -729,6 +1184,16 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         else {
             return noChangeMutation()
         }
+        let replayProjectedInstanceCount =
+            try previewPredictedReplacement(
+                with: chunks,
+                settledInto: &settled
+            )
+        try preflightSettled?(
+            settled,
+            replayProjectedInstanceCount
+        )
+        settled.removeAll(keepingCapacity: true)
 
         var predictedProjectedCount = 0
         var lastGeneratorSnapshot: BrushStrokeGenerator?
@@ -804,6 +1269,100 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             clearedPredictedSuffix: clearedPrediction,
             replayEpoch: replayEpoch
         )
+    }
+
+    private func previewPredictedReplacement<Chunks: Collection>(
+        with chunks: Chunks,
+        settledInto settled: inout [TransientStrokeChunk]
+    ) throws -> Int
+    where Chunks.Element == TransientStrokeChunk {
+        var predictedDabCount = 0
+        var predictedProjectedCount = 0
+        for chunk in chunks {
+            predictedDabCount = Self.saturatingAdd(
+                predictedDabCount,
+                chunk.dabs.count
+            )
+            predictedProjectedCount = Self.saturatingAdd(
+                predictedProjectedCount,
+                chunk.projectedInstanceCount
+            )
+        }
+        let currentLimits = capacitiesForCurrentMode()
+        guard
+            chunks.count <= currentLimits.maximumSamples,
+            predictedDabCount <= currentLimits.maximumDabs,
+            predictedProjectedCount
+                <= currentLimits.maximumProjectedInstances
+        else {
+            throw TransientStrokeBufferError
+                .predictedSuffixExceedsCapacity(
+                    sampleCount: chunks.count,
+                    dabCount: predictedDabCount,
+                    projectedInstanceCount: predictedProjectedCount
+                )
+        }
+        let combinedSamples = Self.saturatingAdd(
+            actualSampleCount,
+            chunks.count
+        )
+        let combinedDabs = Self.saturatingAdd(
+            actualDabCount,
+            predictedDabCount
+        )
+        let combinedProjected = Self.saturatingAdd(
+            actualProjectedInstanceCountStorage,
+            predictedProjectedCount
+        )
+        let wholeLimits = replayContract.limits
+            ?? BrushRecipePolicy.wholeStrokeLimits
+        let degradesToReplayTail = mode == .boundedWholeStroke
+            && (
+                combinedSamples > wholeLimits.maximumSamples
+                    || combinedDabs > wholeLimits.maximumDabs
+                    || combinedProjected
+                        > wholeLimits.maximumProjectedInstances
+            )
+        let limits = degradesToReplayTail
+            ? Self.minimumLimits(
+                replayContract.limits
+                    ?? BrushRecipePolicy.replayTailLimits,
+                BrushRecipePolicy.replayTailLimits
+            )
+            : currentLimits
+        var retainedSamples = combinedSamples
+        var retainedDabs = combinedDabs
+        var retainedProjected = combinedProjected
+        for chunk in actualChunks {
+            guard retainedSamples > limits.maximumSamples
+                    || retainedDabs > limits.maximumDabs
+                    || retainedProjected
+                        > limits.maximumProjectedInstances
+            else {
+                break
+            }
+            guard chunk.sample.estimatedPropertiesExpectingUpdates.isEmpty
+            else {
+                break
+            }
+            settled.append(chunk)
+            retainedSamples -= 1
+            retainedDabs -= chunk.dabs.count
+            retainedProjected -= chunk.projectedInstanceCount
+        }
+        guard
+            retainedSamples <= limits.maximumSamples,
+            retainedDabs <= limits.maximumDabs,
+            retainedProjected <= limits.maximumProjectedInstances
+        else {
+            throw TransientStrokeBufferError
+                .predictedSuffixExceedsCapacity(
+                    sampleCount: chunks.count,
+                    dabCount: predictedDabCount,
+                    projectedInstanceCount: predictedProjectedCount
+                )
+        }
+        return retainedProjected
     }
 
     @discardableResult
@@ -1232,7 +1791,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         using plan: BorrowedEstimatedStrokeUpdatePlan,
         expectedSamples: Samples,
         with rebuiltChunks: Chunks,
-        settledInto settled: inout [TransientStrokeChunk]
+        settledInto settled: inout [TransientStrokeChunk],
+        preflightSettled:
+            (([TransientStrokeChunk], Int) throws -> Void)? = nil
     ) throws -> TransientStrokeBufferMutation
     where
         Samples.Element == WorldStrokeSample,
@@ -1315,6 +1876,36 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
                         retainedProjectedAfterReplacement
                 )
         }
+
+        if mode == .appendOnly {
+            var reachedUnresolved = false
+            func collectResolved(_ chunk: TransientStrokeChunk) {
+                guard !reachedUnresolved else { return }
+                if chunk.sample.estimatedPropertiesExpectingUpdates.isEmpty {
+                    settled.append(chunk)
+                } else {
+                    reachedUnresolved = true
+                }
+            }
+            switch plan.target {
+            case .authoritative:
+                for chunk in actualChunks[..<plan.replacedChunkIndex] {
+                    collectResolved(chunk)
+                }
+                for chunk in rebuiltChunks {
+                    collectResolved(chunk)
+                }
+            case .predicted:
+                for chunk in actualChunks {
+                    collectResolved(chunk)
+                }
+            }
+        }
+        try preflightSettled?(
+            settled,
+            retainedProjectedAfterReplacement
+        )
+        settled.removeAll(keepingCapacity: true)
 
         let clearedPrediction: Bool
         switch plan.target {

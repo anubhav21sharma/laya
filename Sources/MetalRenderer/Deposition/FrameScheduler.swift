@@ -53,6 +53,10 @@ final class FrameScheduler: @unchecked Sendable {
         predictionQueue.count
     }
 
+    var predictedCapacity: Int {
+        predictionQueue.capacity
+    }
+
     var authoritativeRecords: [ProjectedDepositionRecord] {
         authoritativeQueue.records
     }

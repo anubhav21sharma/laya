@@ -1226,13 +1226,11 @@ public enum StageFourEvidenceValidator {
                       requirement.minimumDurationNanoseconds
               ),
               let events = raw["events"] as? [[String: Any]],
-              validPhysicalEvents(
+              let eventTimestamps = physicalEventTimestamps(
                   events,
                   requiredCounts: requirement.requiredEventCounts,
                   orderedKinds: requirement.orderedEventKinds,
-                  sampleCount: sampleCount,
-                  firstTimestamp: timestamps[0],
-                  lastTimestamp: timestamps[timestamps.count - 1]
+                  sampleTimestamps: timestamps
               )
         else {
             throw invalid("\(profileID): physical trace digest is invalid")
@@ -1248,6 +1246,37 @@ public enum StageFourEvidenceValidator {
                 )
             }
             samples[metricID] = series
+        }
+        guard let derivedMissedFrameSamples =
+            derivedMissedFrameSamplesIfRefreshClaimMatchesEvents(
+            profileID: profileID,
+            device: rawDevice,
+            eventTimestamps: eventTimestamps
+        ) else {
+            throw invalid(
+                "\(profileID): display refresh claim does not match observed frame timestamps"
+            )
+        }
+        var derivedSamples = derivedPhysicalSamples(
+            profileID: profileID,
+            sampleTimestamps: timestamps,
+            eventTimestamps: eventTimestamps
+        )
+        if !derivedMissedFrameSamples.isEmpty {
+            derivedSamples["missedFrameFraction"] =
+                derivedMissedFrameSamples
+        }
+        for (metricID, derived) in derivedSamples {
+            guard let claimed = samples[metricID],
+                  claimed.count == derived.count,
+                  zip(claimed, derived).allSatisfy({
+                      close($0.0, $0.1)
+                  })
+            else {
+                throw invalid(
+                    "\(profileID): physical trace samples do not match observed event timestamps for \(metricID)"
+                )
+            }
         }
         return samples
     }
@@ -1648,8 +1677,13 @@ public enum StageFourEvidenceValidator {
             let operatingSystem = device["operatingSystem"] as? String,
             operatingSystem.hasPrefix(requirement.platform),
             device["platform"] as? String == requirement.platform,
-            let processorClass = device["processorClass"] as? String,
-            requirement.processorClasses.contains(processorClass),
+            let claimedProcessorClass =
+                device["processorClass"] as? String,
+            let derivedProcessorClass = processorClass(
+                forHardwareModel: hardwareModel
+            ),
+            claimedProcessorClass == derivedProcessorClass,
+            requirement.processorClasses.contains(derivedProcessorClass),
             let display = device["display"] as? [String: Any],
             Set(display.keys) == [
                 "measuredRefreshHertz", "measurementProvenance",
@@ -1707,14 +1741,18 @@ public enum StageFourEvidenceValidator {
         return zip(timestamps, timestamps.dropFirst()).allSatisfy(<)
     }
 
-    private static func validPhysicalEvents(
+    private static func physicalEventTimestamps(
         _ events: [[String: Any]],
         requiredCounts: [String: Int],
         orderedKinds: [String],
-        sampleCount: Int,
-        firstTimestamp: Int,
-        lastTimestamp: Int
-    ) -> Bool {
+        sampleTimestamps: [Int]
+    ) -> [String: [Int]]? {
+        let sampleCount = sampleTimestamps.count
+        guard sampleTimestamps.first != nil,
+              let lastTimestamp = sampleTimestamps.last
+        else {
+            return nil
+        }
         var counts: [String: Int] = [:]
         var timestampsByKindAndSample: [String: [Int: Int]] = [:]
         var previousTimestamp: Int?
@@ -1727,11 +1765,11 @@ public enum StageFourEvidenceValidator {
                   let sampleIndex = integer(event["sampleIndex"]),
                   (0 ..< sampleCount).contains(sampleIndex),
                   let timestamp = integer(event["timestampNanoseconds"]),
-                  (firstTimestamp ... lastTimestamp).contains(timestamp),
+                  (0 ... lastTimestamp).contains(timestamp),
                   previousTimestamp.map({ $0 <= timestamp }) ?? true,
                   timestampsByKindAndSample[kind]?[sampleIndex] == nil
             else {
-                return false
+                return nil
             }
             counts[kind, default: 0] += 1
             timestampsByKindAndSample[kind, default: [:]][sampleIndex] =
@@ -1741,21 +1779,185 @@ public enum StageFourEvidenceValidator {
         guard requiredCounts.allSatisfy({
             counts[$0.key, default: 0] >= $0.value
         }) else {
-            return false
+            return nil
         }
+        var orderedTimestamps = Dictionary(
+            uniqueKeysWithValues: orderedKinds.map {
+                ($0, [Int](repeating: 0, count: sampleCount))
+            }
+        )
         for sampleIndex in 0 ..< sampleCount {
-            var precedingTimestamp: Int?
+            var precedingTimestamp = sampleIndex == 0
+                ? nil
+                : sampleTimestamps[sampleIndex - 1]
             for kind in orderedKinds {
                 guard let timestamp =
                     timestampsByKindAndSample[kind]?[sampleIndex],
                     precedingTimestamp.map({ $0 < timestamp }) ?? true
                 else {
-                    return false
+                    return nil
                 }
+                orderedTimestamps[kind]![sampleIndex] = timestamp
                 precedingTimestamp = timestamp
             }
+            guard precedingTimestamp == sampleTimestamps[sampleIndex] else {
+                return nil
+            }
         }
-        return true
+        return orderedTimestamps
+    }
+
+    private static func derivedMissedFrameSamplesIfRefreshClaimMatchesEvents(
+        profileID: String,
+        device: [String: Any],
+        eventTimestamps: [String: [Int]]
+    ) -> [Double]? {
+        guard profileID == "a14Floor60Hz"
+                || profileID == "referenceMSeriesProMotion120Hz"
+        else {
+            return []
+        }
+        guard let frames = eventTimestamps["displayFrame"],
+              frames.count > 1,
+              let first = frames.first,
+              let last = frames.last,
+              last > first,
+              let display = device["display"] as? [String: Any],
+              let measured = (
+                  display["measuredRefreshHertz"] as? NSNumber
+              )?.doubleValue
+        else {
+            return nil
+        }
+        let observed = Double(frames.count - 1) * 1_000_000_000
+            / Double(last - first)
+        guard observed.isFinite,
+              abs(observed - measured)
+                <= max(0.5, measured * 0.005)
+        else {
+            return nil
+        }
+        let expectedFrameNanoseconds = 1_000_000_000 / measured
+        var missedFrameFractions = [Double](
+            repeating: 0,
+            count: frames.count
+        )
+        for index in 1 ..< frames.count {
+            let interval = Double(frames[index] - frames[index - 1])
+            let elapsedFrameCount = max(
+                1,
+                Int((interval / expectedFrameNanoseconds).rounded())
+            )
+            missedFrameFractions[index] =
+                Double(elapsedFrameCount - 1)
+                    / Double(elapsedFrameCount)
+        }
+        return missedFrameFractions
+    }
+
+    private static func derivedPhysicalSamples(
+        profileID: String,
+        sampleTimestamps: [Int],
+        eventTimestamps: [String: [Int]]
+    ) -> [String: [Double]] {
+        func elapsedMilliseconds(
+            from firstKind: String,
+            to lastKind: String
+        ) -> [Double] {
+            guard let first = eventTimestamps[firstKind],
+                  let last = eventTimestamps[lastKind],
+                  first.count == last.count
+            else {
+                return []
+            }
+            return zip(first, last).map {
+                Double($0.1 - $0.0) / 1_000_000
+            }
+        }
+        switch profileID {
+        case "inputToPhoton":
+            return [
+                "inputToPhotonP95Milliseconds": elapsedMilliseconds(
+                    from: "inputEvent",
+                    to: "photonObserved"
+                ),
+            ]
+        case "memoryWarning":
+            return [
+                "memoryWarningRecoveryMilliseconds": elapsedMilliseconds(
+                    from: "memoryWarning",
+                    to: "rendererRecovered"
+                ),
+                "recoveryFailureCount": [Double](
+                    repeating: 0,
+                    count: sampleTimestamps.count
+                ),
+            ]
+        case "suspendResume":
+            return [
+                "suspendResumeRecoveryMilliseconds": elapsedMilliseconds(
+                    from: "applicationResumed",
+                    to: "rendererRecovered"
+                ),
+                "recoveryFailureCount": [Double](
+                    repeating: 0,
+                    count: sampleTimestamps.count
+                ),
+            ]
+        case "sustainedThermal":
+            var durations = [Double](
+                repeating: 0,
+                count: sampleTimestamps.count
+            )
+            for index in 1 ..< sampleTimestamps.count {
+                durations[index] = Double(
+                    sampleTimestamps[index] - sampleTimestamps[index - 1]
+                ) / 1_000_000_000
+            }
+            return ["thermalDurationSeconds": durations]
+        default:
+            return [:]
+        }
+    }
+
+    private static func processorClass(
+        forHardwareModel hardwareModel: String
+    ) -> String? {
+        let a14Models: Set<String> = ["iPad13,1", "iPad13,2"]
+        if a14Models.contains(hardwareModel) {
+            return "A14Class"
+        }
+        let mSeriesModels: Set<String> = [
+            "iPad13,4", "iPad13,5", "iPad13,6", "iPad13,7",
+            "iPad13,8", "iPad13,9", "iPad13,10", "iPad13,11",
+            "iPad13,16", "iPad13,17", "iPad13,18", "iPad13,19",
+            "iPad14,3", "iPad14,4", "iPad14,5", "iPad14,6",
+            "iPad16,3", "iPad16,4", "iPad16,5", "iPad16,6",
+        ]
+        if mSeriesModels.contains(hardwareModel) {
+            return "MSeries"
+        }
+        let appleSiliconMacModels: Set<String> = [
+            "MacBookAir10,1",
+            "MacBookPro17,1",
+            "MacBookPro18,1", "MacBookPro18,2",
+            "MacBookPro18,3", "MacBookPro18,4",
+            "Macmini9,1",
+            "iMac21,1", "iMac21,2",
+            "Mac13,1", "Mac13,2",
+            "Mac14,2", "Mac14,3", "Mac14,5", "Mac14,6",
+            "Mac14,7", "Mac14,8", "Mac14,9", "Mac14,10",
+            "Mac14,12", "Mac14,13", "Mac14,14", "Mac14,15",
+            "Mac15,3", "Mac15,4", "Mac15,5", "Mac15,6",
+            "Mac15,7", "Mac15,8", "Mac15,9", "Mac15,10",
+            "Mac15,11", "Mac15,12", "Mac15,13", "Mac15,14",
+            "Mac16,1", "Mac16,2", "Mac16,3", "Mac16,5",
+            "Mac16,6", "Mac16,7", "Mac16,8", "Mac16,9",
+            "Mac16,10", "Mac16,11", "Mac16,12", "Mac16,13",
+        ]
+        return appleSiliconMacModels.contains(hardwareModel)
+            ? "MSeries"
+            : nil
     }
 
     private static func percentile95(_ values: [Double]) -> Double {

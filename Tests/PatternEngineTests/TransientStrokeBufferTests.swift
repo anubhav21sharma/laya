@@ -1195,4 +1195,97 @@ func cancelRestoresRequestedModeAndClearsAllRuntimeState() {
     requireSendable(buffer)
 }
 
+@Test
+func actualArenaNeverOverwritesAStillRetainedSliceAtWraparound() throws {
+    let arena = TransientStrokeDabArena()
+    let capacity = TransientStrokeDabArena.retainedCapacity
+    let firstTransaction = try arena.beginTransaction(
+        replacingPrediction: false
+    )
+    let retained = try firstTransaction.storeActual(count: capacity) {
+        transientDab($0)
+    }
+    let firstChunk = TransientStrokeChunk(
+        sample: transientSample(0),
+        dabs: retained
+    )
+    try firstTransaction.commit(
+        retainingActual: [firstChunk],
+        retainingPredicted: [TransientStrokeChunk]()
+    )
+
+    let secondTransaction = try arena.beginTransaction(
+        replacingPrediction: false
+    )
+    let second = try secondTransaction.storeActual(count: capacity) {
+        transientDab(capacity + $0)
+    }
+    let secondChunk = TransientStrokeChunk(
+        sample: transientSample(1),
+        dabs: second
+    )
+    try secondTransaction.commit(
+        retainingActual: [firstChunk, secondChunk],
+        retainingPredicted: [TransientStrokeChunk]()
+    )
+
+    let refused = try arena.beginTransaction(
+        replacingPrediction: false
+    )
+    #expect(
+        throws: TransientStrokeDabArena.ReservationError
+            .capacityExceeded(capacity * 2)
+    ) {
+        _ = try refused.storeActual(count: 1) {
+            transientDab(capacity * 2 + $0)
+        }
+    }
+    refused.rollback()
+
+    #expect(retained[0] == transientDab(0))
+    #expect(retained[capacity - 1] == transientDab(capacity - 1))
+}
+
+@Test
+func failedPredictionReplacementRetryPreservesPriorPredictionStorage()
+    throws
+{
+    let arena = TransientStrokeDabArena()
+    let firstTransaction = try arena.beginTransaction(
+        replacingPrediction: true
+    )
+    let prior = try firstTransaction.storePredicted(count: 1) {
+        transientDab(10 + $0, predicted: true)
+    }
+    let priorChunk = TransientStrokeChunk(
+        sample: transientSample(10, kind: .predicted),
+        dabs: prior
+    )
+    try firstTransaction.commit(
+        retainingActual: [TransientStrokeChunk](),
+        retainingPredicted: [priorChunk]
+    )
+
+    let failed = try arena.beginTransaction(replacingPrediction: true)
+    _ = try failed.storePredicted(count: 1) {
+        transientDab(20 + $0, predicted: true)
+    }
+    failed.rollback()
+
+    let retry = try arena.beginTransaction(replacingPrediction: true)
+    let replacement = try retry.storePredicted(count: 1) {
+        transientDab(30 + $0, predicted: true)
+    }
+
+    #expect(prior[0] == transientDab(10, predicted: true))
+    let replacementChunk = TransientStrokeChunk(
+        sample: transientSample(30, kind: .predicted),
+        dabs: replacement
+    )
+    try retry.commit(
+        retainingActual: [TransientStrokeChunk](),
+        retainingPredicted: [replacementChunk]
+    )
+}
+
 private func requireSendable<T: Sendable>(_: T) {}

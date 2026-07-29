@@ -8,6 +8,58 @@ import Testing
 @Suite("Compiled deposition renderer")
 struct DepositionRendererTests {
     @Test
+    func interactiveInputRouteContainsNoOwningSingleSampleOrDabTemporaries()
+        throws
+    {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let renderer = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MetalRenderer/GridRenderer.swift"
+            ),
+            encoding: .utf8
+        )
+        let dynamics = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/PatternEngine/BrushDynamicsEngine.swift"
+            ),
+            encoding: .utf8
+        )
+        let transientBuffer = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/PatternEngine/TransientStrokeBuffer.swift"
+            ),
+            encoding: .utf8
+        )
+
+        #expect(!renderer.contains("let suffix = [sample]"))
+        #expect(renderer.contains("samples: CollectionOfOne(sample)"))
+        #expect(
+            renderer.contains(
+                "onLogicalDabsGenerated: ((LogicalDab) -> Void)?"
+            )
+        )
+        #expect(!dynamics.contains("definition.coverage.shapes.map"))
+        #expect(!dynamics.contains("shapeFrames.flatMap"))
+        #expect(!dynamics.contains("unitCorners.map"))
+        #expect(!dynamics.contains("corners.map"))
+        #expect(!renderer.contains("Array(dabs)"))
+        #expect(!renderer.contains("var snapshot: [LogicalDab]"))
+        #expect(
+            transientBuffer.contains(
+                "public struct ReservationTransaction"
+            )
+        )
+        #expect(
+            !transientBuffer.contains(
+                "final class ReservationTransaction"
+            )
+        )
+    }
+
+    @Test
     func productionCompletionLivesOutsideHarnessAndCallsNoHarnessAPI()
         throws
     {
@@ -499,6 +551,481 @@ struct DepositionRendererTests {
         #expect(!firstPrediction.isEmpty)
         #expect(!replacement.isEmpty)
         #expect(replacement != firstPrediction)
+        try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test
+    @MainActor
+    func predictionSettlementPreflightFailureIsAtomicAndRetrySucceeds()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let recipe = try BrushRecipe(
+            id: BrushRecipeID("brush.prediction-preflight-atomic"),
+            replayMode: .replayTail,
+            replayLimits: BrushReplayLimits(
+                maximumSamples: 1,
+                maximumDabs: 16,
+                maximumProjectedInstances: 16
+            )
+        )
+        let brush = try await setup.compileBrush(recipe: recipe)
+        try setup.renderer.activateDrawBrush(brush)
+        try setup.renderer.applyTiling(.squareRotation)
+        let token = RendererOperationToken(rawValue: 8_001)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 12),
+            style: depositionStyle(brush, compositeMode: .draw)
+        )
+        let bufferBefore = try #require(
+            setup.renderer.transientStrokeBuffer
+        )
+        let arenaBefore =
+            setup.renderer.harnessTransientDabArenaSnapshot
+        let constrainedBudget = try depositionFrameBudget(
+            maximumAuthoritativeInstances: 1,
+            maximumPendingAuthoritativeInstances: 1
+        )
+        let previousBudget = setup.renderer
+            .replaceDepositionFrameBudgetForHarness(constrainedBudget)
+        let previousScheduler = try #require(
+            setup.renderer.replaceActiveStrokeSchedulerForHarness(
+                constrainedBudget
+            )
+        )
+        let authoritativeBefore =
+            setup.renderer.harnessScheduledAuthoritativeRecords
+        let predictedBefore =
+            setup.renderer.harnessScheduledPredictedRecords
+
+        #expect(
+            throws: MetalRendererError
+                .projectedInstanceCapacityExceeded(1)
+        ) {
+            try setup.renderer.appendStroke(
+                token: token,
+                sample: depositionPredictedSample(x: 16)
+            )
+        }
+
+        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
+        #expect(
+            setup.renderer.harnessTransientDabArenaSnapshot
+                == arenaBefore
+        )
+        #expect(
+            setup.renderer.harnessScheduledAuthoritativeRecords
+                == authoritativeBefore
+        )
+        #expect(
+            setup.renderer.harnessScheduledPredictedRecords
+                == predictedBefore
+        )
+
+        setup.renderer.replaceDepositionFrameBudgetForHarness(
+            previousBudget
+        )
+        setup.renderer.restoreActiveStrokeSchedulerForHarness(
+            previousScheduler
+        )
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionPredictedSample(x: 16)
+        )
+        #expect(
+            setup.renderer.transientStrokeBuffer?.predictedSampleCount == 1
+        )
+        #expect(
+            !setup.renderer.harnessScheduledPredictedRecords.isEmpty
+        )
+        try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test
+    @MainActor
+    func estimatedSettlementPreflightFailureIsAtomicAndRetrySucceeds()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let recipe = try BrushRecipe(
+            id: BrushRecipeID("brush.estimated-preflight-atomic"),
+            replayMode: .appendOnly
+        )
+        let brush = try await setup.compileBrush(recipe: recipe)
+        try setup.renderer.activateDrawBrush(brush)
+        try setup.renderer.applyTiling(.squareRotation)
+        let token = RendererOperationToken(rawValue: 8_002)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionEstimatedSample(
+                .began,
+                x: 12,
+                index: 61,
+                expecting: [.pressure]
+            ),
+            style: depositionStyle(brush, compositeMode: .draw)
+        )
+        let bufferBefore = try #require(
+            setup.renderer.transientStrokeBuffer
+        )
+        let arenaBefore =
+            setup.renderer.harnessTransientDabArenaSnapshot
+        let update = depositionEstimatedUpdateSample(
+            x: 13,
+            index: 61
+        )
+        let constrainedBudget = try depositionFrameBudget(
+            maximumAuthoritativeInstances: 1,
+            maximumPendingAuthoritativeInstances: 1
+        )
+        let previousBudget = setup.renderer
+            .replaceDepositionFrameBudgetForHarness(constrainedBudget)
+        let previousScheduler = try #require(
+            setup.renderer.replaceActiveStrokeSchedulerForHarness(
+                constrainedBudget
+            )
+        )
+        let authoritativeBefore =
+            setup.renderer.harnessScheduledAuthoritativeRecords
+        let predictedBefore =
+            setup.renderer.harnessScheduledPredictedRecords
+
+        #expect(
+            throws: MetalRendererError
+                .projectedInstanceCapacityExceeded(1)
+        ) {
+            try setup.renderer.applyEstimatedStrokeUpdate(
+                token: token,
+                sample: update
+            )
+        }
+
+        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
+        #expect(
+            setup.renderer.harnessTransientDabArenaSnapshot
+                == arenaBefore
+        )
+        #expect(
+            setup.renderer.harnessScheduledAuthoritativeRecords
+                == authoritativeBefore
+        )
+        #expect(
+            setup.renderer.harnessScheduledPredictedRecords
+                == predictedBefore
+        )
+
+        setup.renderer.replaceDepositionFrameBudgetForHarness(
+            previousBudget
+        )
+        setup.renderer.restoreActiveStrokeSchedulerForHarness(
+            previousScheduler
+        )
+        try setup.renderer.applyEstimatedStrokeUpdate(
+            token: token,
+            sample: update
+        )
+        #expect(
+            setup.renderer.transientStrokeBuffer?.actualSampleCount == 0
+        )
+        #expect(
+            !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty
+        )
+        try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test
+    @MainActor
+    func predictionReplayPreflightFailureIsAtomicAndRetrySucceeds()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let recipe = try BrushRecipe(
+            id: BrushRecipeID("brush.prediction-replay-atomic"),
+            replayMode: .replayTail,
+            replayLimits: BrushReplayLimits(
+                maximumSamples: 16,
+                maximumDabs: 64,
+                maximumProjectedInstances: 64
+            )
+        )
+        let brush = try await setup.compileBrush(recipe: recipe)
+        try setup.renderer.activateDrawBrush(brush)
+        try setup.renderer.applyTiling(.squareRotation)
+        let token = RendererOperationToken(rawValue: 8_003)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 12),
+            style: depositionStyle(brush, compositeMode: .draw)
+        )
+        let bufferBefore = try #require(
+            setup.renderer.transientStrokeBuffer
+        )
+        let arenaBefore =
+            setup.renderer.harnessTransientDabArenaSnapshot
+        let constrainedBudget = try depositionFrameBudget(
+            maximumAuthoritativeInstances: 1,
+            maximumPredictedInstances: 1,
+            maximumPendingAuthoritativeInstances: 1,
+            maximumPendingPredictedInstances: 1
+        )
+        let previousScheduler = try #require(
+            setup.renderer.replaceActiveStrokeSchedulerForHarness(
+                constrainedBudget
+            )
+        )
+        let authoritativeBefore =
+            setup.renderer.harnessScheduledAuthoritativeRecords
+        let predictedBefore =
+            setup.renderer.harnessScheduledPredictedRecords
+
+        #expect(
+            throws: MetalRendererError
+                .projectedInstanceCapacityExceeded(1)
+        ) {
+            try setup.renderer.appendStroke(
+                token: token,
+                sample: depositionPredictedSample(x: 16)
+            )
+        }
+        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
+        #expect(
+            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
+        )
+        #expect(
+            setup.renderer.harnessScheduledAuthoritativeRecords
+                == authoritativeBefore
+        )
+        #expect(
+            setup.renderer.harnessScheduledPredictedRecords
+                == predictedBefore
+        )
+
+        setup.renderer.restoreActiveStrokeSchedulerForHarness(
+            previousScheduler
+        )
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionPredictedSample(x: 16)
+        )
+        #expect(
+            setup.renderer.transientStrokeBuffer?.predictedSampleCount == 1
+        )
+        try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test
+    @MainActor
+    func estimatedReplayPreflightFailureIsAtomicAndRetrySucceeds()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let recipe = try BrushRecipe(
+            id: BrushRecipeID("brush.estimated-replay-atomic"),
+            replayMode: .replayTail,
+            replayLimits: BrushReplayLimits(
+                maximumSamples: 16,
+                maximumDabs: 64,
+                maximumProjectedInstances: 64
+            )
+        )
+        let brush = try await setup.compileBrush(recipe: recipe)
+        try setup.renderer.activateDrawBrush(brush)
+        try setup.renderer.applyTiling(.squareRotation)
+        let token = RendererOperationToken(rawValue: 8_004)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionEstimatedSample(
+                .began,
+                x: 12,
+                index: 62,
+                expecting: [.pressure]
+            ),
+            style: depositionStyle(brush, compositeMode: .draw)
+        )
+        let bufferBefore = try #require(
+            setup.renderer.transientStrokeBuffer
+        )
+        let arenaBefore =
+            setup.renderer.harnessTransientDabArenaSnapshot
+        let constrainedBudget = try depositionFrameBudget(
+            maximumAuthoritativeInstances: 1,
+            maximumPredictedInstances: 1,
+            maximumPendingAuthoritativeInstances: 1,
+            maximumPendingPredictedInstances: 1
+        )
+        let previousScheduler = try #require(
+            setup.renderer.replaceActiveStrokeSchedulerForHarness(
+                constrainedBudget
+            )
+        )
+
+        #expect(
+            throws: MetalRendererError
+                .projectedInstanceCapacityExceeded(1)
+        ) {
+            try setup.renderer.applyEstimatedStrokeUpdate(
+                token: token,
+                sample: depositionEstimatedUpdateSample(
+                    x: 13,
+                    index: 62
+                )
+            )
+        }
+        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
+        #expect(
+            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
+        )
+
+        setup.renderer.restoreActiveStrokeSchedulerForHarness(
+            previousScheduler
+        )
+        try setup.renderer.applyEstimatedStrokeUpdate(
+            token: token,
+            sample: depositionEstimatedUpdateSample(
+                x: 13,
+                index: 62
+            )
+        )
+        #expect(
+            setup.renderer.transientStrokeBuffer?.actualSampleCount == 1
+        )
+        try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test
+    @MainActor
+    func authoritativeReplayPreflightFailureIsAtomicAndRetrySucceeds()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let recipe = try BrushRecipe(
+            id: BrushRecipeID("brush.actual-replay-atomic"),
+            replayMode: .replayTail,
+            replayLimits: BrushReplayLimits(
+                maximumSamples: 16,
+                maximumDabs: 64,
+                maximumProjectedInstances: 64
+            )
+        )
+        let brush = try await setup.compileBrush(recipe: recipe)
+        try setup.renderer.activateDrawBrush(brush)
+        try setup.renderer.applyTiling(.squareRotation)
+        let token = RendererOperationToken(rawValue: 8_005)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 12),
+            style: depositionStyle(brush, compositeMode: .draw)
+        )
+        let bufferBefore = try #require(
+            setup.renderer.transientStrokeBuffer
+        )
+        let arenaBefore =
+            setup.renderer.harnessTransientDabArenaSnapshot
+        let constrainedBudget = try depositionFrameBudget(
+            maximumAuthoritativeInstances: 1,
+            maximumPredictedInstances: 1,
+            maximumPendingAuthoritativeInstances: 1,
+            maximumPendingPredictedInstances: 1
+        )
+        let previousScheduler = try #require(
+            setup.renderer.replaceActiveStrokeSchedulerForHarness(
+                constrainedBudget
+            )
+        )
+
+        #expect(
+            throws: MetalRendererError
+                .projectedInstanceCapacityExceeded(1)
+        ) {
+            try setup.renderer.appendStroke(
+                token: token,
+                sample: depositionSample(.moved, x: 16)
+            )
+        }
+        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
+        #expect(
+            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
+        )
+
+        setup.renderer.restoreActiveStrokeSchedulerForHarness(
+            previousScheduler
+        )
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionSample(.moved, x: 16)
+        )
+        #expect(
+            setup.renderer.transientStrokeBuffer?.actualSampleCount == 2
+        )
+        try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test
+    @MainActor
+    func finishReplayPreflightFailureIsAtomicAndRetrySucceeds()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let recipe = try BrushRecipe(
+            id: BrushRecipeID("brush.finish-replay-atomic"),
+            replayMode: .replayTail,
+            replayLimits: BrushReplayLimits(
+                maximumSamples: 16,
+                maximumDabs: 64,
+                maximumProjectedInstances: 64
+            )
+        )
+        let brush = try await setup.compileBrush(recipe: recipe)
+        try setup.renderer.activateDrawBrush(brush)
+        try setup.renderer.applyTiling(.squareRotation)
+        let token = RendererOperationToken(rawValue: 8_006)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 12),
+            style: depositionStyle(brush, compositeMode: .draw)
+        )
+        let bufferBefore = try #require(
+            setup.renderer.transientStrokeBuffer
+        )
+        let arenaBefore =
+            setup.renderer.harnessTransientDabArenaSnapshot
+        let constrainedBudget = try depositionFrameBudget(
+            maximumAuthoritativeInstances: 1,
+            maximumPredictedInstances: 1,
+            maximumPendingAuthoritativeInstances: 1,
+            maximumPendingPredictedInstances: 1
+        )
+        let previousScheduler = try #require(
+            setup.renderer.replaceActiveStrokeSchedulerForHarness(
+                constrainedBudget
+            )
+        )
+
+        #expect(
+            throws: MetalRendererError
+                .projectedInstanceCapacityExceeded(1)
+        ) {
+            try setup.renderer.finishStrokeTransient(
+                token: token,
+                sample: depositionSample(.ended, x: 16)
+            )
+        }
+        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
+        #expect(
+            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
+        )
+
+        setup.renderer.restoreActiveStrokeSchedulerForHarness(
+            previousScheduler
+        )
+        try setup.renderer.finishStrokeTransient(
+            token: token,
+            sample: depositionSample(.ended, x: 16)
+        )
+        #expect(
+            setup.renderer.transientStrokeBuffer?.actualSampleCount == 2
+        )
         try setup.renderer.cancelStroke(token: token)
     }
 
@@ -1214,10 +1741,14 @@ struct DepositionRendererTests {
         var baselineDabs: [LogicalDab] = []
         var predictedDabs: [LogicalDab] = []
         baseline.renderer.onLogicalDabsGenerated = {
-            baselineDabs.append(contentsOf: $0.filter { !$0.isPredicted })
+            if !$0.isPredicted {
+                baselineDabs.append($0)
+            }
         }
         predicted.renderer.onLogicalDabsGenerated = {
-            predictedDabs.append(contentsOf: $0.filter { !$0.isPredicted })
+            if !$0.isPredicted {
+                predictedDabs.append($0)
+            }
         }
         let baselineToken = RendererOperationToken(rawValue: 28)
         let predictedToken = RendererOperationToken(rawValue: 29)
@@ -2073,6 +2604,24 @@ private func depositionEstimatedSample(
         estimationUpdateIndex: index,
         estimatedProperties: expecting,
         estimatedPropertiesExpectingUpdates: expecting
+    )
+}
+
+private func depositionEstimatedUpdateSample(
+    x: Float,
+    index: Int
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x, y: 32),
+        pressure: 0.8,
+        timestamp: TimeInterval(x),
+        phase: .moved,
+        source: .pencil,
+        kind: .estimatedUpdate,
+        capabilities: [.pressure],
+        estimationUpdateIndex: index,
+        estimatedProperties: [.pressure],
+        estimatedPropertiesExpectingUpdates: []
     )
 }
 

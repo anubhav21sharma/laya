@@ -223,8 +223,8 @@ final class BrushLabSession {
         controller.onNormalizedInput = { [weak self] sample in
             self?.record(sample)
         }
-        controller.renderer.onLogicalDabsGenerated = { [weak self] dabs in
-            self?.record(dabs)
+        controller.renderer.onLogicalDabsGenerated = { [weak self] dab in
+            self?.record(dab)
         }
     }
 
@@ -985,19 +985,17 @@ final class BrushLabSession {
         )
     }
 
-    private func record(_ dabs: [LogicalDab]) {
-        for dab in dabs {
-            guard dabRecords.count < Self.maximumDabRecords else {
-                droppedDabRecordCount += 1
-                continue
-            }
-            dabRecords.append(
-                BrushLabDabRecord(
-                    sequence: dabRecords.count + droppedDabRecordCount,
-                    dab: dab
-                )
-            )
+    private func record(_ dab: LogicalDab) {
+        guard dabRecords.count < Self.maximumDabRecords else {
+            droppedDabRecordCount += 1
+            return
         }
+        dabRecords.append(
+            BrushLabDabRecord(
+                sequence: dabRecords.count + droppedDabRecordCount,
+                dab: dab
+            )
+        )
     }
 
     private static func number(_ value: Float) -> String {
