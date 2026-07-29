@@ -6,7 +6,7 @@ import Testing
 func professionalCatalogExposesTechnicalInkAsACompiledNativeBrush() throws {
     let entry = ProfessionalBrushCatalog.technicalInk
 
-    #expect(ProfessionalBrushCatalog.all == [entry])
+    #expect(ProfessionalBrushCatalog.all.first == entry)
     #expect(entry.id.rawValue == "builtin.professional-technical-ink")
     #expect(entry.displayName == "Technical Ink")
     #expect(ProfessionalBrushCatalog.entry(for: entry.id) == entry)
@@ -20,5 +20,20 @@ func professionalCatalogExposesTechnicalInkAsACompiledNativeBrush() throws {
             required: false,
             fallback: .builtIn(identifier: "builtin.shape.technical-nib")
         ),
+    ])
+}
+
+@Test
+func professionalCatalogResolvesGraphitePencilWithItsStableIdentity() throws {
+    let graphiteID = BrushRecipeID("builtin.professional-graphite-pencil")
+    let entry = try #require(ProfessionalBrushCatalog.entry(for: graphiteID))
+    let compiled = try BrushProgramCompiler.compile(entry.definition)
+
+    #expect(entry.id == graphiteID)
+    #expect(entry.displayName == "Graphite Pencil")
+    #expect(entry.program == compiled)
+    #expect(ProfessionalBrushCatalog.all.map(\.id) == [
+        BrushRecipeID("builtin.professional-technical-ink"),
+        graphiteID,
     ])
 }

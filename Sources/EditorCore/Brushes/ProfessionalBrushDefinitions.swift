@@ -5,6 +5,7 @@ import simd
 /// from the immutable Stage 4 diagnostic anchors.
 public enum ProfessionalBrushDefinitions {
     public static let technicalInk = makeTechnicalInk()
+    public static let graphitePencil = makeGraphitePencil()
 
     private static let limits = BrushDefinitionLimits(
         minimumDiameter: 0.01,
@@ -32,6 +33,7 @@ public enum ProfessionalBrushDefinitions {
     private static func linear(
         _ input: BrushDynamicsInput,
         output: ClosedRange<Float>,
+        inverted: Bool = false,
         missingInputValue: Float = 1
     ) -> BrushMappingDefinition {
         BrushMappingDefinition(
@@ -41,7 +43,7 @@ public enum ProfessionalBrushDefinitions {
             offset: output.lowerBound,
             lowerClamp: output.lowerBound,
             upperClamp: output.upperBound,
-            inverted: false,
+            inverted: inverted,
             jitter: 0,
             missingInputValue: missingInputValue
         )
@@ -155,6 +157,159 @@ public enum ProfessionalBrushDefinitions {
             )
         } catch {
             preconditionFailure("Invalid professional Technical Ink definition: \(error)")
+        }
+    }
+
+    private static func makeGraphitePencil() -> BrushDefinition {
+        do {
+            let one = constant(1)
+            let zero = constant(0)
+            return try BrushDefinition(
+                id: BrushRecipeID("builtin.professional-graphite-pencil"),
+                metadata: BrushMetadata(displayName: "Graphite Pencil"),
+                capabilities: [
+                    BrushCapabilityDeclaration(identifier: "dualGrain", required: true),
+                ],
+                resources: [
+                    BrushResourceReference(
+                        identifier: "builtin.grain.graphite",
+                        kind: .grain,
+                        required: false,
+                        fallback: .builtIn(identifier: "builtin.grain.graphite")
+                    ),
+                    BrushResourceReference(
+                        identifier: "builtin.grain.paper",
+                        kind: .grain,
+                        required: false,
+                        fallback: .builtIn(identifier: "builtin.grain.paper")
+                    ),
+                    BrushResourceReference(
+                        identifier: "builtin.shape.graphite-tip",
+                        kind: .shape,
+                        required: false,
+                        fallback: .builtIn(identifier: "builtin.shape.graphite-tip")
+                    ),
+                ],
+                coverage: BrushCoverageDefinition(
+                    shapes: [
+                        BrushShapeLayerDefinition(
+                            shape: .asset("builtin.shape.graphite-tip"),
+                            combination: .replace,
+                            scale: 1,
+                            rotation: 0,
+                            offset: .zero
+                        ),
+                    ],
+                    grains: [
+                        BrushGrainLayerDefinition(
+                            grain: .asset("builtin.grain.graphite"),
+                            coordinateMode: .brushLocal,
+                            transform: .identity,
+                            grainMovementFraction: 0.12,
+                            grainFollowsBrushRotation: true,
+                            strength: 1
+                        ),
+                        BrushGrainLayerDefinition(
+                            grain: .asset("builtin.grain.paper"),
+                            coordinateMode: .canonical,
+                            transform: .identity,
+                            grainMovementFraction: 0.12,
+                            grainFollowsBrushRotation: false,
+                            strength: 1
+                        ),
+                    ],
+                    baseHardness: 0.72,
+                    aspectRatio: 0.34,
+                    tipThreshold: 0.01,
+                    antialiasing: true
+                ),
+                placement: BrushPlacementDefinition(
+                    baseSpacingFraction: 0.055,
+                    maximumSpacingFraction: 0.15,
+                    baseFlow: 0.28,
+                    strokeOpacity: 0.88,
+                    baseScatterFraction: 0.015,
+                    baseRotation: 0,
+                    baseJitterFraction: 0.01,
+                    baseOffset: .zero
+                ),
+                dynamics: BrushDynamicsDefinition(
+                    size: linear(.pressure, output: 0.25...1),
+                    flow: linear(.pressure, output: 0.10...1),
+                    opacity: linear(.pressure, output: 0.20...1),
+                    spacing: linear(.speed, output: 0.85...1.15),
+                    rotation: linear(.direction, output: 0...(2 * .pi)),
+                    scatter: one,
+                    hardness: linear(
+                        .tilt,
+                        output: 0.35...0.90,
+                        inverted: true
+                    ),
+                    grain: linear(.tilt, output: 0.75...1.40),
+                    offsetX: zero,
+                    offsetY: zero,
+                    hue: zero,
+                    saturation: zero,
+                    brightness: zero,
+                    secondaryColorMix: zero,
+                    noPressureNeutral: 1,
+                    randomization: BrushRandomization(
+                        spacing: 0.04,
+                        scatter: 0.08,
+                        rotation: 0.08,
+                        grain: 0.08,
+                        material: 0.05
+                    )
+                ),
+                color: BrushColorBehaviorDefinition(
+                    baseAdjustment: .identity,
+                    perStampJitter: BrushColorJitter(
+                        hue: 0,
+                        saturation: 0,
+                        brightness: 0,
+                        secondaryColorMix: 0
+                    ),
+                    perStrokeJitter: BrushColorJitter(
+                        hue: 0,
+                        saturation: 0,
+                        brightness: 0,
+                        secondaryColorMix: 0
+                    )
+                ),
+                // §7.2 leaves material scalars open; use ordinary flow's
+                // neutral strength and uncapped accumulation defaults.
+                material: BrushMaterialDefinition(
+                    accumulation: .flow,
+                    interaction: .none,
+                    edgeTreatment: .dryBreakup,
+                    strength: 1,
+                    wetness: 0,
+                    bleedRadius: 0,
+                    softenPasses: 0,
+                    accumulationLimit: 1,
+                    interactionParameters: nil
+                ),
+                stabilization: 0.12,
+                taper: BrushTaperConfiguration(
+                    start: .diameterMultiples(0.75),
+                    end: .diameterMultiples(1),
+                    minimumSize: 0.20,
+                    minimumFlow: 0.25,
+                    effects: [.size, .flow]
+                ),
+                replayMode: .replayTail,
+                replayLimits: BrushRecipePolicy.replayTailLimits,
+                seedPolicy: .perStroke,
+                limits: limits,
+                performanceIntent: .realtime120,
+                compatibility: BrushCompatibilityMetadata(
+                    nativeFeatureVersion: 1,
+                    sourceSettingKeys: [],
+                    requiredSemanticKeys: []
+                )
+            )
+        } catch {
+            preconditionFailure("Invalid professional Graphite Pencil definition: \(error)")
         }
     }
 }
