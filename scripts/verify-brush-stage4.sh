@@ -201,42 +201,26 @@ PACKAGE
   cat >"$card_package/Sources/CardExporter/main.swift" <<'SWIFT'
 import Foundation
 
-private struct Catalog: Encodable {
-    let cards: [BrushLabManualCard]
-    let assessments: [BrushLabManualAssessment]
-}
-
 guard CommandLine.arguments.count == 2 else {
     fatalError("usage: CardExporter OUTPUT")
 }
-let cards = BrushLabManualCard.fixedMatrix
-private let catalog = Catalog(
-    cards: cards,
-    assessments: cards.map {
-        BrushLabManualAssessment(cardID: $0.cardID)
-    }
-)
-let encoder = JSONEncoder()
-encoder.outputFormatting = [
-    .prettyPrinted, .sortedKeys, .withoutEscapingSlashes,
-]
 let output = URL(fileURLWithPath: CommandLine.arguments[1])
 try FileManager.default.createDirectory(
     at: output.deletingLastPathComponent(),
     withIntermediateDirectories: true
 )
-try encoder.encode(catalog).write(to: output, options: .atomic)
+try BrushLabManualCatalog.pending().encoded().write(
+    to: output,
+    options: .atomic
+)
 SWIFT
 }
 
 write_performance_status() {
-  local profile
-  local profile_status
-  local profile_input="${BRUSH_STAGE4_PHYSICAL_PROFILES:-}"
   local output="$artifacts/performance-status.txt"
 
   plutil -create xml1 "$output"
-  plutil -insert schemaVersion -integer 1 "$output"
+  plutil -insert schemaVersion -integer 2 "$output"
   plutil -insert correctnessPassed -bool true "$output"
   plutil -insert gpuName -string "$gpu_name" "$output"
   plutil -insert gpuClassification -string "$gpu_classification" "$output"
@@ -247,29 +231,41 @@ write_performance_status() {
   plutil -insert gpu500DabBudgetMilliseconds -float 3 "$output"
   plutil -insert completedStrokeLengthIndependent -bool true "$output"
   plutil -insert hotPathCompilerResourceCountersZero -bool true "$output"
-  plutil -insert physicalProfiles -dictionary "$output"
-
-  if [[ -n "$profile_input" ]]; then
-    [[ "$profile_input" = /* && -f "$profile_input" ]] \
-      || fail "BRUSH_STAGE4_PHYSICAL_PROFILES must name an absolute regular file"
-    plutil -lint "$profile_input" >/dev/null \
-      || fail "physical profile input is not valid JSON/plist"
-  fi
-  for profile in "${physical_profiles[@]}"; do
-    profile_status="pending"
-    if [[ -n "$profile_input" ]]; then
-      profile_status="$(
-        plutil -extract "$profile" raw -o - "$profile_input"
-      )" || fail "physical profile input is missing $profile"
-    fi
-    case "$profile_status" in
-      passed|pending|failed) ;;
-      *) fail "invalid physical profile status for $profile" ;;
-    esac
-    plutil -insert "physicalProfiles.$profile" \
-      -string "$profile_status" "$output"
-  done
   plutil -convert json "$output"
+}
+
+copy_physical_profile_evidence() {
+  local input="${BRUSH_STAGE4_PHYSICAL_EVIDENCE:-}"
+  local profile
+
+  [[ -z "${BRUSH_STAGE4_PHYSICAL_PROFILES:-}" ]] \
+    || fail "raw BRUSH_STAGE4_PHYSICAL_PROFILES status strings are unsupported"
+  [[ -n "$input" ]] || return
+  [[ "$input" = /* && -d "$input" && ! -L "$input" ]] \
+    || fail "BRUSH_STAGE4_PHYSICAL_EVIDENCE must name an absolute regular directory"
+
+  local candidate candidate_name known
+  for candidate in "$input"/*; do
+    [[ -e "$candidate" ]] || continue
+    candidate_name="${candidate##*/}"
+    known=0
+    for profile in "${physical_profiles[@]}"; do
+      if [[ "$candidate_name" == "$profile" ]]; then
+        known=1
+        break
+      fi
+    done
+    [[ "$known" -eq 1 ]] \
+      || fail "physical evidence contains an unknown profile: $candidate_name"
+  done
+
+  for profile in "${physical_profiles[@]}"; do
+    if [[ -e "$input/$profile" ]]; then
+      [[ -d "$input/$profile" && ! -L "$input/$profile" ]] \
+        || fail "physical evidence profile is not a regular directory: $profile"
+      cp -R "$input/$profile" "$artifacts/physical-profiles/$profile"
+    fi
+  done
 }
 
 write_provenance() {
@@ -316,6 +312,7 @@ mkdir -p \
   "$artifacts/positive" \
   "$artifacts/negative-control" \
   "$artifacts/brush-lab-cards" \
+  "$artifacts/physical-profiles" \
   "$logs" \
   "$work"
 
@@ -359,6 +356,10 @@ validator="$scratch/debug/BrushDepositionEvidenceGate"
 
 run_logged full-tests \
   swift test --scratch-path "$scratch" --no-parallel
+run_logged input-path-storage-runtime \
+  swift test --scratch-path "$scratch" --no-parallel \
+    --filter \
+    nativeInputPathStorageDoesNotGrowAfterWarmupAcrossLongStroke
 run_logged brush-lab-headless-contract \
   swift test --scratch-path "$scratch" --no-parallel \
     --filter \
@@ -403,6 +404,10 @@ if rg -n \
   Sources/MetalRenderer/Deposition/DepositionEncoder.swift \
   Sources/MetalRenderer/Deposition/FrameScheduler.swift \
   Sources/MetalRenderer/LiveStroke.swift \
+  Sources/PatternEngine/BrushDynamicsEngine.swift \
+  Sources/PatternEngine/CentripetalCatmullRomStrokeInterpolator.swift \
+  Sources/PatternEngine/TilingProjection.swift \
+  Sources/PatternEngine/TilingStrategy.swift \
   >"$logs/hot-path-source.stdout.log" \
   2>"$logs/hot-path-source.stderr.log"; then
   fail "hot-path source references compiler, resource, file, allocation, pipeline, or wait APIs"
@@ -411,6 +416,21 @@ else
   [[ "$code" -eq 1 ]] \
     || fail "hot-path source audit failed with exit $code"
 fi
+
+input_path_instrumentation_log="$logs/input-path-instrumentation.stdout.log"
+: >"$input_path_instrumentation_log"
+while IFS='|' read -r marker source; do
+  if ! rg -n -F "$marker" "$source" \
+    >>"$input_path_instrumentation_log"; then
+    fail "input-path storage instrumentation is missing: $marker"
+  fi
+done <<'INSTRUMENTATION'
+recordGeneratedDabs|Sources/MetalRenderer/GridRenderer.swift
+recordTiling|Sources/MetalRenderer/GridRenderer.swift
+recordRecordStorage|Sources/MetalRenderer/GridRenderer.swift
+storageDiagnostics|Sources/PatternEngine/TilingProjection.swift
+growthCountAfterWarmup|Sources/MetalRenderer/InputPathStorageAudit.swift
+INSTRUMENTATION
 
 run_logged validator-linked-libraries otool -L "$validator"
 run_logged validator-undefined-symbols nm -u "$validator"
@@ -440,7 +460,8 @@ printf '%s\n' "$app_symbol_binary" \
 run_logged app-symbols \
   bash -c 'nm "$1" | xcrun swift-demangle' _ "$app_symbol_binary"
 run_logged app-native-deposition-symbols \
-  rg -n 'DepositionEncoder|FrameScheduler' \
+  rg -n \
+    'DepositionEncoder|FrameScheduler|InputPathStorageAudit|TilingProjectionStorageDiagnostics' \
     "$logs/app-symbols.stdout.log"
 if rg -n 'BoundedWashSurface|ProjectedStampInstance' \
   "$logs/app-symbols.stdout.log" \
@@ -494,7 +515,7 @@ card_catalog_hash="$(
     | awk '{print $1}'
 )"
 [[ "$card_catalog_hash" \
-    == "2e943ffdaf3da1ef3dc4dacbac916229c2815c86c1d04a256567a7a64a938331" ]] \
+    == "6490bcf5d3d452e523b0eba7293b1bf8050ae8445a41941592bbb60c91bf7a32" ]] \
   || fail "headless Brush Lab catalog is not the committed 312-card contract"
 
 gpu_name="$(
@@ -569,6 +590,7 @@ physical_profiles=(
   sustainedThermal
   wacom
 )
+copy_physical_profile_evidence
 write_performance_status
 write_provenance
 run_logged git-diff-check git diff --check

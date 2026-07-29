@@ -16,20 +16,22 @@ struct FrameSchedulerTests {
 
         try scheduler.enqueueAuthoritative(records(0..<5))
         try scheduler.replacePrediction(records(100..<103))
-        #expect(scheduler.diagnosticSnapshot == FrameSchedulerDiagnosticSnapshot(
-            authoritativePending: 5,
-            predictedPending: 3,
-            authoritativeHighWater: 5,
-            predictedHighWater: 3
-        ))
+        var diagnostics = scheduler.diagnosticSnapshot
+        #expect(diagnostics.authoritativePending == 5)
+        #expect(diagnostics.predictedPending == 3)
+        #expect(diagnostics.authoritativeHighWater == 5)
+        #expect(diagnostics.predictedHighWater == 3)
+        #expect(diagnostics.authoritativeStorageCapacity >= 8)
+        #expect(diagnostics.predictedStorageCapacity >= 4)
 
         _ = scheduler.nextFrame(budget: budget)
-        #expect(scheduler.diagnosticSnapshot == FrameSchedulerDiagnosticSnapshot(
-            authoritativePending: 3,
-            predictedPending: 2,
-            authoritativeHighWater: 5,
-            predictedHighWater: 3
-        ))
+        diagnostics = scheduler.diagnosticSnapshot
+        #expect(diagnostics.authoritativePending == 3)
+        #expect(diagnostics.predictedPending == 2)
+        #expect(diagnostics.authoritativeHighWater == 5)
+        #expect(diagnostics.predictedHighWater == 3)
+        #expect(diagnostics.authoritativeStorageCapacity >= 8)
+        #expect(diagnostics.predictedStorageCapacity >= 4)
 
         try scheduler.enqueueAuthoritative(records(10..<15))
         #expect(

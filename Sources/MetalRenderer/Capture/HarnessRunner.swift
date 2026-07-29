@@ -612,7 +612,8 @@ public final class HarnessRunner {
         sceneName: String,
         previousEncodedHighWater: UInt64,
         emittedHighWater: UInt64,
-        encodedIdentityRanges: [Range<UInt64>]
+        encodedIdentityRanges: [Range<UInt64>],
+        requireEncodedThroughEmittedHighWater: Bool = true
     ) throws -> HarnessInstanceIdentityAudit {
         guard emittedHighWater >= previousEncodedHighWater else {
             throw HarnessRunError.counterInvariant(
@@ -641,7 +642,10 @@ public final class HarnessRunner {
             newlyEncodedInstanceCount += range.count
             encodedHighWater = range.upperBound
         }
-        guard encodedHighWater == emittedHighWater else {
+        guard
+            !requireEncodedThroughEmittedHighWater
+                || encodedHighWater == emittedHighWater
+        else {
             throw HarnessRunError.counterInvariant(
                 sceneName: sceneName,
                 message: "encoded projected high-water \(encodedHighWater) did not reach emitted high-water \(emittedHighWater)"

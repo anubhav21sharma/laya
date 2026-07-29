@@ -3304,7 +3304,8 @@ func encodedIdentityRangeAuditAcceptsExactContiguousMultiRange() throws {
 @Test
 func nativeHarnessIdentityRangeReproducesExactFiveHundredDabAudit() throws {
     let ranges = GridRenderer.nativeEncodedIdentityRanges(
-        totalInstanceCount: 500,
+        previousEncodedHighWater: 0,
+        emittedHighWater: 500,
         newInstanceCount: 500
     )
     let audit = try HarnessRunner.auditEncodedInstanceIdentityRanges(
@@ -3321,6 +3322,40 @@ func nativeHarnessIdentityRangeReproducesExactFiveHundredDabAudit() throws {
 }
 
 @Test
+func nativeHarnessIdentityRangeReportsTheEncodedBacklogPrefix() throws {
+    let first = GridRenderer.nativeEncodedIdentityRanges(
+        previousEncodedHighWater: 0,
+        emittedHighWater: 5_000,
+        newInstanceCount: 4_096
+    )
+    let firstAudit = try HarnessRunner.auditEncodedInstanceIdentityRanges(
+        sceneName: "backlogged-native-frame-1",
+        previousEncodedHighWater: 0,
+        emittedHighWater: 5_000,
+        encodedIdentityRanges: first,
+        requireEncodedThroughEmittedHighWater: false
+    )
+
+    #expect(first == [0..<4_096])
+    #expect(firstAudit.encodedHighWater == 4_096)
+
+    let second = GridRenderer.nativeEncodedIdentityRanges(
+        previousEncodedHighWater: firstAudit.encodedHighWater,
+        emittedHighWater: 5_000,
+        newInstanceCount: 904
+    )
+    let secondAudit = try HarnessRunner.auditEncodedInstanceIdentityRanges(
+        sceneName: "backlogged-native-frame-2",
+        previousEncodedHighWater: firstAudit.encodedHighWater,
+        emittedHighWater: 5_000,
+        encodedIdentityRanges: second
+    )
+
+    #expect(second == [4_096..<5_000])
+    #expect(secondAudit.encodedHighWater == 5_000)
+}
+
+@Test
 func nativeHarnessIdentityRangesStayMonotonicAcrossFramesAndResetPerStroke()
     throws
 {
@@ -3331,7 +3366,8 @@ func nativeHarnessIdentityRangesStayMonotonicAcrossFramesAndResetPerStroke()
             previousEncodedHighWater: highWater,
             emittedHighWater: UInt64(total),
             encodedIdentityRanges: GridRenderer.nativeEncodedIdentityRanges(
-                totalInstanceCount: total,
+                previousEncodedHighWater: highWater,
+                emittedHighWater: UInt64(total),
                 newInstanceCount: newlyEncoded
             )
         )
@@ -3345,7 +3381,8 @@ func nativeHarnessIdentityRangesStayMonotonicAcrossFramesAndResetPerStroke()
         previousEncodedHighWater: 0,
         emittedHighWater: 4,
         encodedIdentityRanges: GridRenderer.nativeEncodedIdentityRanges(
-            totalInstanceCount: 4,
+            previousEncodedHighWater: 0,
+            emittedHighWater: 4,
             newInstanceCount: 4
         )
     )

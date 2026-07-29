@@ -83,6 +83,42 @@ struct DepositionHarnessRunnerTests {
     }
 
     @Test
+    func fabricatedTelemetryCannotClaimACompletedNativeRun() throws {
+        let evidence = DepositionSceneEvidence(
+            schemaVersion: DepositionSceneEvidence.currentSchemaVersion,
+            scene: "deposition-ink",
+            definitionID: "builtin.native-ink",
+            semanticHash: String(repeating: "a", count: 64),
+            pipelineKey:
+                "deposition:flow:none:s0:g0:h0:d0:abi1:format80:samples1",
+            abiVersion: DepositionABI.version,
+            resourceBytes: 5_461,
+            textureLevels: ["builtin.shape.hard-round": 7],
+            logicalDabCount: 4,
+            projectedInstanceCount: 4,
+            canonicalSHA256: String(repeating: "b", count: 64),
+            cpuReferenceSHA256: nil,
+            maximumCPUGPUChannelDelta: nil,
+            previewCommitMaximumChannelDelta: 0,
+            telemetry: DepositionTelemetryEvidence(
+                authoritativeBacklog: 1,
+                predictedBacklog: 0,
+                backlogHighWater: 1,
+                encodedInstanceCount: 3,
+                bufferHighWater: 0,
+                missedFrameCount: 9
+            ),
+            invariantResults: [
+                "previewCommitMaximumDeltaWithinTolerance": true,
+            ]
+        )
+
+        #expect(throws: DepositionEvidenceValidationError.self) {
+            try DepositionEvidenceValidator.validate(evidence)
+        }
+    }
+
+    @Test
     @MainActor
     func nativeInkRunCompilesActivatesRendersAndWritesEvidence()
         async throws

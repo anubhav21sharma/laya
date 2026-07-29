@@ -880,13 +880,7 @@ final class BrushLabSession {
                 manualAssessments[$0.cardID]
             }
         )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [
-            .prettyPrinted,
-            .sortedKeys,
-            .withoutEscapingSlashes,
-        ]
-        return try encoder.encode(bundle)
+        return try bundle.encoded()
     }
 
     func makeManualEvidenceArchive() throws
@@ -1294,12 +1288,6 @@ final class BrushLabSession {
             )
         )
     }
-}
-
-private struct BrushLabManualCatalog: Encodable {
-    let schemaVersion: UInt16 = 1
-    let cards: [BrushLabManualCard]
-    let assessments: [BrushLabManualAssessment]
 }
 
 private struct BrushLabTraceIdentity: Encodable {

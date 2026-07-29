@@ -111,8 +111,10 @@ struct BrushLabSessionTests {
 
         let firstData = try first.session.makeManualCardsData()
         let secondData = try second.session.makeManualCardsData()
+        let headlessData = try BrushLabManualCatalog.pending().encoded()
 
         #expect(firstData == secondData)
+        #expect(firstData == headlessData)
         #expect(
             BrushContentHash.sha256Hex(of: firstData)
                 == "6490bcf5d3d452e523b0eba7293b1bf8050ae8445a41941592bbb60c91bf7a32"

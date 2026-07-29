@@ -10,6 +10,8 @@ struct FrameSchedulerDiagnosticSnapshot: Equatable, Sendable {
     let predictedPending: Int
     let authoritativeHighWater: Int
     let predictedHighWater: Int
+    let authoritativeStorageCapacity: Int
+    let predictedStorageCapacity: Int
 }
 
 enum FrameSchedulerError: Error, Equatable, Sendable {
@@ -27,7 +29,11 @@ struct FrameScheduler: Sendable {
             authoritativePending: authoritativeQueue.count,
             predictedPending: predictionQueue.count,
             authoritativeHighWater: authoritativeHighWater,
-            predictedHighWater: predictedHighWater
+            predictedHighWater: predictedHighWater,
+            authoritativeStorageCapacity:
+                authoritativeQueue.storageCapacity,
+            predictedStorageCapacity:
+                predictionQueue.storageCapacity
         )
     }
 
@@ -168,6 +174,10 @@ private struct BoundedDepositionQueue: Sendable {
 
     var availableCapacity: Int {
         capacity - count
+    }
+
+    var storageCapacity: Int {
+        storage.capacity
     }
 
     var records: [ProjectedDepositionRecord] {

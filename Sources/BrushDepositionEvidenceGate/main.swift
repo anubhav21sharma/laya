@@ -65,6 +65,103 @@ public enum StageFourEvidenceValidator {
         "sustainedThermal",
         "wacom",
     ]
+    public static let brushLabCatalogSHA256 =
+        "6490bcf5d3d452e523b0eba7293b1bf8050ae8445a41941592bbb60c91bf7a32"
+    private static let physicalMetricRequirements:
+        [String: [String: PhysicalMetricRequirement]] = [
+            "a14Floor60Hz": [
+                "cpuPreparationP95Milliseconds": .init(
+                    unit: "milliseconds", aggregation: "p95",
+                    relation: "lessThan", threshold: 2
+                ),
+                "gpu500DabMilliseconds": .init(
+                    unit: "milliseconds", aggregation: "maximum",
+                    relation: "lessThan", threshold: 3
+                ),
+                "missedFrameFraction": .init(
+                    unit: "fraction", aggregation: "maximum",
+                    relation: "lessThan", threshold: 0.01
+                ),
+            ],
+            "inputToPhoton": [
+                "inputToPhotonP95Milliseconds": .init(
+                    unit: "milliseconds", aggregation: "p95",
+                    relation: "lessThan", threshold: 16.667
+                ),
+            ],
+            "memoryWarning": [
+                "memoryWarningRecoveryMilliseconds": .init(
+                    unit: "milliseconds", aggregation: "maximum",
+                    relation: "lessThan", threshold: 1_000
+                ),
+                "recoveryFailureCount": .init(
+                    unit: "count", aggregation: "sum",
+                    relation: "equal", threshold: 0
+                ),
+            ],
+            "pencil": [
+                "inputContinuityFailureCount": .init(
+                    unit: "count", aggregation: "sum",
+                    relation: "equal", threshold: 0
+                ),
+                "predictionTransitionFailureCount": .init(
+                    unit: "count", aggregation: "sum",
+                    relation: "equal", threshold: 0
+                ),
+            ],
+            "referenceMSeriesProMotion120Hz": [
+                "cpuPreparationP95Milliseconds": .init(
+                    unit: "milliseconds", aggregation: "p95",
+                    relation: "lessThan", threshold: 2
+                ),
+                "gpu500DabMilliseconds": .init(
+                    unit: "milliseconds", aggregation: "maximum",
+                    relation: "lessThan", threshold: 3
+                ),
+                "missedFrameFraction": .init(
+                    unit: "fraction", aggregation: "maximum",
+                    relation: "lessThan", threshold: 0.01
+                ),
+            ],
+            "suspendResume": [
+                "recoveryFailureCount": .init(
+                    unit: "count", aggregation: "sum",
+                    relation: "equal", threshold: 0
+                ),
+                "suspendResumeRecoveryMilliseconds": .init(
+                    unit: "milliseconds", aggregation: "maximum",
+                    relation: "lessThan", threshold: 1_000
+                ),
+            ],
+            "sustainedThermal": [
+                "cpuPreparationP95Milliseconds": .init(
+                    unit: "milliseconds", aggregation: "p95",
+                    relation: "lessThan", threshold: 2
+                ),
+                "gpu500DabMilliseconds": .init(
+                    unit: "milliseconds", aggregation: "maximum",
+                    relation: "lessThan", threshold: 3
+                ),
+                "missedFrameFraction": .init(
+                    unit: "fraction", aggregation: "maximum",
+                    relation: "lessThan", threshold: 0.01
+                ),
+                "thermalDurationSeconds": .init(
+                    unit: "seconds", aggregation: "sum",
+                    relation: "greaterThanOrEqual", threshold: 600
+                ),
+            ],
+            "wacom": [
+                "inputContinuityFailureCount": .init(
+                    unit: "count", aggregation: "sum",
+                    relation: "equal", threshold: 0
+                ),
+                "pressureMonotonicityFailureCount": .init(
+                    unit: "count", aggregation: "sum",
+                    relation: "equal", threshold: 0
+                ),
+            ],
+        ]
 
     private static let rootEntries: Set<String> = [
         "artifact-sha256.txt",
@@ -72,6 +169,7 @@ public enum StageFourEvidenceValidator {
         "logs",
         "negative-control",
         "performance-status.txt",
+        "physical-profiles",
         "positive",
         "provenance.json",
         "scene-matrix.json",
@@ -106,7 +204,6 @@ public enum StageFourEvidenceValidator {
         "gpuClassification",
         "gpuName",
         "hotPathCompilerResourceCountersZero",
-        "physicalProfiles",
         "schemaVersion",
     ]
     private static let cardAssessmentKeys: Set<String> = [
@@ -285,6 +382,20 @@ public enum StageFourEvidenceValidator {
         expectedCommit: String,
         expectedSourceTreeSHA256: String
     ) throws -> StageFourEvidenceValidationStatus {
+        try validate(
+            artifactRoot: artifactRoot,
+            expectedCommit: expectedCommit,
+            expectedSourceTreeSHA256: expectedSourceTreeSHA256,
+            requiredBrushLabCatalogSHA256: brushLabCatalogSHA256
+        )
+    }
+
+    static func validate(
+        artifactRoot: URL,
+        expectedCommit: String,
+        expectedSourceTreeSHA256: String,
+        requiredBrushLabCatalogSHA256: String
+    ) throws -> StageFourEvidenceValidationStatus {
         guard artifactRoot.path.hasPrefix("/"),
               artifactRoot.standardizedFileURL.path == artifactRoot.path
         else {
@@ -323,7 +434,12 @@ public enum StageFourEvidenceValidator {
         )
         try validateBrushLabCatalog(
             root: artifactRoot.appendingPathComponent("brush-lab-cards"),
-            expectedSHA256: provenance.brushLabCatalogSHA256
+            expectedSHA256: provenance.brushLabCatalogSHA256,
+            requiredSHA256: requiredBrushLabCatalogSHA256
+        )
+        let physicalProfiles = try validatePhysicalProfiles(
+            root: artifactRoot.appendingPathComponent("physical-profiles"),
+            provenance: provenance
         )
         let performanceEvidence = try validatePerformanceBenchmarks(
             root: artifactRoot.appendingPathComponent("logs"),
@@ -336,7 +452,8 @@ public enum StageFourEvidenceValidator {
             artifactRoot.appendingPathComponent("performance-status.txt"),
             provenance: provenance,
             sceneCPUP95Milliseconds: measurements.maximumCPUP95Milliseconds,
-            benchmarkEvidence: performanceEvidence
+            benchmarkEvidence: performanceEvidence,
+            validatedPhysicalProfiles: physicalProfiles
         )
     }
 
@@ -576,12 +693,14 @@ public enum StageFourEvidenceValidator {
             )
         }
         let telemetry = evidence.telemetry
-        guard telemetry.authoritativeBacklog >= 0,
-              telemetry.predictedBacklog >= 0,
-              telemetry.backlogHighWater >= 0,
+        guard telemetry.authoritativeBacklog == 0,
+              telemetry.predictedBacklog == 0,
+              telemetry.backlogHighWater > 0,
+              telemetry.backlogHighWater
+                <= evidence.projectedInstanceCount,
               telemetry.encodedInstanceCount
               == evidence.projectedInstanceCount,
-              telemetry.bufferHighWater > 0
+              (1...3).contains(telemetry.bufferHighWater)
         else {
             throw invalid("\(scene): telemetry evidence is invalid")
         }
@@ -674,7 +793,8 @@ public enum StageFourEvidenceValidator {
 
     private static func validateBrushLabCatalog(
         root: URL,
-        expectedSHA256: String
+        expectedSHA256: String,
+        requiredSHA256: String
     ) throws {
         guard try entryNames(root) == ["catalog.json"] else {
             throw invalid("Brush Lab card artifact set is not exact")
@@ -684,8 +804,10 @@ public enum StageFourEvidenceValidator {
             label: "Brush Lab catalog"
         )
         guard sha256(data) == expectedSHA256,
+              expectedSHA256 == requiredSHA256,
               let object = try jsonObject(data, label: "Brush Lab catalog"),
-              Set(object.keys) == ["assessments", "cards"],
+              Set(object.keys) == ["assessments", "cards", "schemaVersion"],
+              integer(object["schemaVersion"]) == 1,
               let cards = object["cards"] as? [[String: Any]],
               let assessments = object["assessments"] as? [[String: Any]],
               cards.count == 312,
@@ -737,6 +859,206 @@ public enum StageFourEvidenceValidator {
         guard assessmentIDs == cardIDs else {
             throw invalid("Brush Lab assessments are not bound to every card")
         }
+    }
+
+    private static func validatePhysicalProfiles(
+        root: URL,
+        provenance: Provenance
+    ) throws -> Set<String> {
+        let names = try entryNames(root)
+        guard names.isSubset(of: Set(requiredPhysicalProfiles)) else {
+            throw invalid("physical profile artifact set contains an unknown profile")
+        }
+        var validated: Set<String> = []
+        for profileID in names.sorted() {
+            let directory = root.appendingPathComponent(profileID)
+            guard try entryNames(directory) == ["evidence.json", "raw"] else {
+                throw invalid("\(profileID): physical evidence file set is not exact")
+            }
+            let evidenceData = try regularFileData(
+                directory.appendingPathComponent("evidence.json"),
+                label: "\(profileID) physical evidence"
+            )
+            guard let evidence = try jsonObject(
+                evidenceData,
+                label: "\(profileID) physical evidence"
+            ),
+                Set(evidence.keys) == [
+                    "device", "measurements", "profileID", "schemaVersion",
+                    "source", "toolchain", "traces",
+                ],
+                integer(evidence["schemaVersion"]) == 1,
+                evidence["profileID"] as? String == profileID,
+                let source = evidence["source"] as? [String: Any],
+                Set(source.keys) == ["commit", "sourceTreeSHA256"],
+                source["commit"] as? String == provenance.commit,
+                source["sourceTreeSHA256"] as? String
+                    == provenance.sourceTreeSHA256,
+                let device = evidence["device"] as? [String: Any],
+                Set(device.keys) == [
+                    "gpuName", "gpuRegistryID", "hardwareModel",
+                    "operatingSystem",
+                ],
+                let gpuName = device["gpuName"] as? String,
+                gpuClassification(gpuName) == "physical",
+                nonempty(device["gpuRegistryID"] as? String ?? ""),
+                nonempty(device["hardwareModel"] as? String ?? ""),
+                nonempty(device["operatingSystem"] as? String ?? ""),
+                let toolchain = evidence["toolchain"] as? [String: Any],
+                Set(toolchain.keys) == [
+                    "swiftVersion", "xcodeVersion", "xcodegenVersion",
+                ],
+                toolchain["swiftVersion"] as? String
+                    == provenance.swiftVersion,
+                toolchain["xcodeVersion"] as? String
+                    == provenance.xcodeVersion,
+                toolchain["xcodegenVersion"] as? String
+                    == provenance.xcodegenVersion,
+                let measurements =
+                    evidence["measurements"] as? [String: Any],
+                let requirements = physicalMetricRequirements[profileID],
+                Set(measurements.keys) == Set(requirements.keys),
+                let traces = evidence["traces"] as? [[String: Any]],
+                traces.count == 1
+            else {
+                throw invalid(
+                    "\(profileID): physical evidence identity or provenance is invalid"
+                )
+            }
+            let rawSamples = try validatePhysicalTrace(
+                traces[0],
+                profileID: profileID,
+                rawRoot: directory.appendingPathComponent("raw"),
+                expectedSource: source.compactMapValues { $0 as? String },
+                expectedDevice: device.compactMapValues { $0 as? String },
+                expectedToolchain:
+                    toolchain.compactMapValues { $0 as? String },
+                expectedMetricIDs: Set(requirements.keys)
+            )
+            for metricID in requirements.keys.sorted() {
+                guard let requirement = requirements[metricID],
+                      let measurement =
+                        measurements[metricID] as? [String: Any],
+                      let rawMetricSamples = rawSamples[metricID]
+                else {
+                    throw invalid(
+                        "\(profileID): physical measurement \(metricID) is missing"
+                    )
+                }
+                try validatePhysicalMeasurement(
+                    measurement,
+                    profileID: profileID,
+                    metricID: metricID,
+                    requirement: requirement,
+                    rawSamples: rawMetricSamples
+                )
+            }
+            validated.insert(profileID)
+        }
+        return validated
+    }
+
+    private static func validatePhysicalMeasurement(
+        _ measurement: [String: Any],
+        profileID: String,
+        metricID: String,
+        requirement: PhysicalMetricRequirement,
+        rawSamples: [Double]
+    ) throws {
+        guard Set(measurement.keys) == [
+            "aggregation", "samples", "threshold", "unit",
+        ],
+            measurement["unit"] as? String == requirement.unit,
+            measurement["aggregation"] as? String
+                == requirement.aggregation,
+            let samples = doubleArray(measurement["samples"]),
+            !samples.isEmpty,
+            validDurations(samples),
+            samples == rawSamples,
+            let threshold = measurement["threshold"] as? [String: Any],
+            Set(threshold.keys) == ["relation", "value"],
+            threshold["relation"] as? String == requirement.relation,
+            let thresholdValue = (threshold["value"] as? NSNumber)?.doubleValue,
+            close(thresholdValue, requirement.threshold),
+            let aggregate = aggregate(
+                samples,
+                kind: requirement.aggregation
+            ),
+            thresholdSatisfied(
+                aggregate,
+                relation: requirement.relation,
+                threshold: requirement.threshold
+            )
+        else {
+            throw invalid(
+                "\(profileID): physical measurement \(metricID) is malformed or failed its committed threshold"
+            )
+        }
+    }
+
+    private static func validatePhysicalTrace(
+        _ trace: [String: Any],
+        profileID: String,
+        rawRoot: URL,
+        expectedSource: [String: String],
+        expectedDevice: [String: String],
+        expectedToolchain: [String: String],
+        expectedMetricIDs: Set<String>
+    ) throws -> [String: [Double]] {
+        guard Set(trace.keys) == ["id", "path", "sampleCount", "sha256"],
+              trace["id"] as? String == "\(profileID).trace",
+              let path = trace["path"] as? String,
+              path.hasPrefix("raw/"),
+              !path.dropFirst(4).isEmpty,
+              !path.dropFirst(4).contains("/"),
+              let digest = trace["sha256"] as? String,
+              isSHA256(digest),
+              let sampleCount = integer(trace["sampleCount"]),
+              sampleCount > 0
+        else {
+            throw invalid("\(profileID): physical trace declaration is invalid")
+        }
+        let filename = String(path.dropFirst(4))
+        guard try entryNames(rawRoot) == [filename] else {
+            throw invalid("\(profileID): physical trace artifact set is not exact")
+        }
+        let data = try regularFileData(
+            rawRoot.appendingPathComponent(filename),
+            label: "\(profileID) physical trace"
+        )
+        guard !data.isEmpty,
+              sha256(data) == digest,
+              let raw = try jsonObject(
+                  data,
+                  label: "\(profileID) physical trace"
+              ),
+              Set(raw.keys) == [
+                  "device", "profileID", "samples", "schemaVersion",
+                  "source", "toolchain",
+              ],
+              integer(raw["schemaVersion"]) == 1,
+              raw["profileID"] as? String == profileID,
+              stringDictionary(raw["source"]) == expectedSource,
+              stringDictionary(raw["device"]) == expectedDevice,
+              stringDictionary(raw["toolchain"]) == expectedToolchain,
+              let sampleObjects = raw["samples"] as? [String: Any],
+              Set(sampleObjects.keys) == expectedMetricIDs
+        else {
+            throw invalid("\(profileID): physical trace digest is invalid")
+        }
+        var samples: [String: [Double]] = [:]
+        for metricID in expectedMetricIDs.sorted() {
+            guard let series = doubleArray(sampleObjects[metricID]),
+                  series.count == sampleCount,
+                  validDurations(series)
+            else {
+                throw invalid(
+                    "\(profileID): physical trace samples are malformed"
+                )
+            }
+            samples[metricID] = series
+        }
+        return samples
     }
 
     private static func validatePerformanceBenchmarks(
@@ -857,7 +1179,8 @@ public enum StageFourEvidenceValidator {
         _ url: URL,
         provenance: Provenance,
         sceneCPUP95Milliseconds: Double,
-        benchmarkEvidence: PerformanceBenchmarks
+        benchmarkEvidence: PerformanceBenchmarks,
+        validatedPhysicalProfiles: Set<String>
     ) throws -> StageFourEvidenceValidationStatus {
         let data = try regularFileData(url, label: "performance status")
         try requireExactKeys(
@@ -869,7 +1192,7 @@ public enum StageFourEvidenceValidator {
             data,
             label: "performance status"
         )
-        guard value.schemaVersion == 1,
+        guard value.schemaVersion == 2,
               value.correctnessPassed,
               value.gpuName == provenance.gpuName,
               value.gpuClassification == provenance.gpuClassification,
@@ -887,13 +1210,7 @@ public enum StageFourEvidenceValidator {
               ),
               value.gpu500DabMilliseconds > 0,
               value.completedStrokeLengthIndependent,
-              value.hotPathCompilerResourceCountersZero,
-              Set(value.physicalProfiles.keys)
-              == Set(requiredPhysicalProfiles),
-              value.physicalProfiles.values.allSatisfy({
-                  ["passed", "pending", "failed"].contains($0)
-              }),
-              !value.physicalProfiles.values.contains("failed")
+              value.hotPathCompilerResourceCountersZero
         else {
             throw invalid(
                 "software performance, correctness, measurement, or hardware-profile policy failed"
@@ -901,16 +1218,9 @@ public enum StageFourEvidenceValidator {
         }
 
         if value.gpuClassification != "physical" {
-            guard value.physicalProfiles.values.allSatisfy({
-                $0 == "pending"
-            }) else {
-                throw invalid(
-                    "virtual/paravirtual evidence cannot claim physical realtime or input profiles"
-                )
-            }
             return .performancePending(gpuName: value.gpuName)
         }
-        if value.physicalProfiles.values.contains("pending") {
+        if validatedPhysicalProfiles != Set(requiredPhysicalProfiles) {
             return .performancePending(gpuName: value.gpuName)
         }
         guard value.gpu500DabMilliseconds < 3 else {
@@ -919,6 +1229,36 @@ public enum StageFourEvidenceValidator {
             )
         }
         return .passed
+    }
+
+    private static func aggregate(
+        _ samples: [Double],
+        kind: String
+    ) -> Double? {
+        switch kind {
+        case "maximum":
+            samples.max()
+        case "p95":
+            percentile95(samples)
+        case "sum":
+            samples.reduce(0, +)
+        default:
+            nil
+        }
+    }
+
+    private static func thresholdSatisfied(
+        _ value: Double,
+        relation: String,
+        threshold: Double
+    ) -> Bool {
+        switch relation {
+        case "lessThan": value < threshold
+        case "lessThanOrEqual": value <= threshold
+        case "equal": close(value, threshold)
+        case "greaterThanOrEqual": value >= threshold
+        default: false
+        }
     }
 
     private static func requireExactKeys(
@@ -1130,6 +1470,14 @@ public enum StageFourEvidenceValidator {
         return values.map(\.doubleValue)
     }
 
+    private static func stringDictionary(
+        _ value: Any?
+    ) -> [String: String]? {
+        guard let object = value as? [String: Any] else { return nil }
+        let strings = object.compactMapValues { $0 as? String }
+        return strings.count == object.count ? strings : nil
+    }
+
     private static func isCommit(_ value: String) -> Bool {
         value.utf8.count == 40 && value.utf8.allSatisfy(isLowerHex)
     }
@@ -1187,6 +1535,13 @@ private struct SceneTruth {
     let pipelineKey: String
     let resourceBytes: Int
     let textureLevels: [String: Int]
+}
+
+private struct PhysicalMetricRequirement {
+    let unit: String
+    let aggregation: String
+    let relation: String
+    let threshold: Double
 }
 
 private struct Raster {
@@ -1299,7 +1654,6 @@ private struct PerformanceStatus: Decodable {
     let gpu500DabBudgetMilliseconds: Double
     let completedStrokeLengthIndependent: Bool
     let hotPathCompilerResourceCountersZero: Bool
-    let physicalProfiles: [String: String]
 }
 
 @main

@@ -182,14 +182,18 @@ public final class DepositionHarnessRunner {
             previewCommitMaximumChannelDelta:
                 capture.previewCommitMaximumChannelDelta,
             telemetry: DepositionTelemetryEvidence(
-                authoritativeBacklog: 0,
-                predictedBacklog: 0,
-                backlogHighWater: capture.scheduledRecords.count,
+                authoritativeBacklog:
+                    capture.telemetry.authoritativePending,
+                predictedBacklog:
+                    capture.telemetry.predictedPending,
+                backlogHighWater:
+                    capture.telemetry.backlogHighWater,
                 encodedInstanceCount:
-                    UInt64(capture.projectedInstanceCount),
+                    capture.telemetry.strokeEncodedInstanceCount,
                 bufferHighWater:
-                    capture.projectedInstanceCount > 0 ? 1 : 0,
-                missedFrameCount: 0
+                    capture.telemetry.strokeBufferLeaseHighWater,
+                missedFrameCount:
+                    capture.telemetry.missedFrameCount
             ),
             invariantResults: invariants
         )
@@ -288,6 +292,7 @@ private extension DepositionHarnessRunner {
         let commitMetrics: GPUFrameMetrics
         let displayMetrics: [GPUFrameMetrics]
         let pipelinePreparationUnchanged: Bool
+        let telemetry: BrushLabRendererDepositionDiagnosticSnapshot
     }
 
     struct SeededFailureContext {
@@ -541,6 +546,7 @@ private extension DepositionHarnessRunner {
             Self.textureBytes(liveFrame.texture),
             Self.textureBytes(committedFrame.texture)
         )
+        let telemetry = renderer.brushLabDiagnosticSnapshot.deposition
         return StrokeCapture(
             live: liveFrame.texture,
             committed: committedFrame.texture,
@@ -556,7 +562,8 @@ private extension DepositionHarnessRunner {
                 + [liveFrame.metrics, committedFrame.metrics],
             pipelinePreparationUnchanged:
                 pipelinePrepareCallsBefore
-                == context.pipelineLibrary.debugPrepareCallCount
+                == context.pipelineLibrary.debugPrepareCallCount,
+            telemetry: telemetry
         )
     }
 

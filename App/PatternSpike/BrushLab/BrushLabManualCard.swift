@@ -607,6 +607,44 @@ struct BrushLabManualAssessment: Codable, Equatable, Sendable {
     }
 }
 
+struct BrushLabManualCatalog: Codable, Equatable, Sendable {
+    static let schemaVersion: UInt16 = 1
+
+    let schemaVersion: UInt16
+    let cards: [BrushLabManualCard]
+    let assessments: [BrushLabManualAssessment]
+
+    init(
+        cards: [BrushLabManualCard],
+        assessments: [BrushLabManualAssessment]
+    ) {
+        schemaVersion = Self.schemaVersion
+        self.cards = cards
+        self.assessments = assessments
+    }
+
+    static func pending(
+        cards: [BrushLabManualCard] = BrushLabManualCard.fixedMatrix
+    ) -> BrushLabManualCatalog {
+        BrushLabManualCatalog(
+            cards: cards,
+            assessments: cards.map {
+                BrushLabManualAssessment(cardID: $0.cardID)
+            }
+        )
+    }
+
+    func encoded() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [
+            .prettyPrinted,
+            .sortedKeys,
+            .withoutEscapingSlashes,
+        ]
+        return try encoder.encode(self)
+    }
+}
+
 private struct DocumentConfigurationPayload: Codable {
     let mode: String
     let presetID: UInt32?

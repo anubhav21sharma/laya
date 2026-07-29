@@ -38,6 +38,41 @@ public struct CellFragment: Equatable, Sendable {
     }
 }
 
+public struct TilingProjectionStorageDiagnostics:
+    Equatable, Sendable
+{
+    public let imageCapacity: Int
+    public let candidateCapacity: Int
+    public let maximumClippedPolygonCapacity: Int
+    public let fragmentCapacity: Int
+
+    public init(
+        imageCapacity: Int,
+        candidateCapacity: Int,
+        maximumClippedPolygonCapacity: Int,
+        fragmentCapacity: Int
+    ) {
+        self.imageCapacity = imageCapacity
+        self.candidateCapacity = candidateCapacity
+        self.maximumClippedPolygonCapacity =
+            maximumClippedPolygonCapacity
+        self.fragmentCapacity = fragmentCapacity
+    }
+}
+
+public struct TilingProjectionResult: Equatable, Sendable {
+    public let fragments: [CellFragment]
+    public let storageDiagnostics: TilingProjectionStorageDiagnostics
+
+    public init(
+        fragments: [CellFragment],
+        storageDiagnostics: TilingProjectionStorageDiagnostics
+    ) {
+        self.fragments = fragments
+        self.storageDiagnostics = storageDiagnostics
+    }
+}
+
 public enum TilingProjection {
     public static func dirtyPixelRect(
         for fragment: CellFragment,
@@ -82,6 +117,20 @@ public enum TilingProjection {
         for footprint: StampFootprint,
         using strategy: TilingStrategy
     ) -> [CellFragment] {
+        projection(for: footprint, using: strategy).fragments
+    }
+
+    public static func fragmentsWithStorageDiagnostics(
+        for footprint: StampFootprint,
+        using strategy: TilingStrategy
+    ) -> TilingProjectionResult {
+        projection(for: footprint, using: strategy)
+    }
+
+    private static func projection(
+        for footprint: StampFootprint,
+        using strategy: TilingStrategy
+    ) -> TilingProjectionResult {
         validateBrushToWorld(footprint.brushToWorld)
         let worldCorners = footprint.localBounds.corners.map {
             footprint.brushToWorld.applying(to: $0)
@@ -91,12 +140,21 @@ public enum TilingProjection {
             worldBounds.maximum.x > worldBounds.minimum.x,
             worldBounds.maximum.y > worldBounds.minimum.y
         else {
-            return []
+            return TilingProjectionResult(
+                fragments: [],
+                storageDiagnostics: TilingProjectionStorageDiagnostics(
+                    imageCapacity: 0,
+                    candidateCapacity: 0,
+                    maximumClippedPolygonCapacity: 0,
+                    fragmentCapacity: 0
+                )
+            )
         }
 
         let images = strategy.images(intersecting: worldBounds)
         var candidates: [FragmentCandidate] = []
         candidates.reserveCapacity(images.count)
+        var maximumClippedPolygonCapacity = 0
 
         for image in images
         where image.worldBounds.intersects(worldBounds) {
@@ -109,6 +167,10 @@ public enum TilingProjection {
             ) { polygon, plane in
                 clipPolygon(polygon, to: plane)
             }
+            maximumClippedPolygonCapacity = max(
+                maximumClippedPolygonCapacity,
+                localPolygon.capacity
+            )
             guard localPolygon.count >= 3 else {
                 continue
             }
@@ -137,7 +199,12 @@ public enum TilingProjection {
             )
         }
 
+        var maximumCandidateCapacity = candidates.capacity
         candidates = removingByteEqualCandidates(candidates)
+        maximumCandidateCapacity = max(
+            maximumCandidateCapacity,
+            candidates.capacity
+        )
         let policy: CoincidentImagePolicy
         switch strategy.compiledSymmetry.domain {
         case let .periodic(periodic):
@@ -155,7 +222,17 @@ public enum TilingProjection {
         candidates.sort {
             fragmentPrecedes($0.fragment, $1.fragment)
         }
-        return candidates.map(\.fragment)
+        let fragments = candidates.map(\.fragment)
+        return TilingProjectionResult(
+            fragments: fragments,
+            storageDiagnostics: TilingProjectionStorageDiagnostics(
+                imageCapacity: images.capacity,
+                candidateCapacity: maximumCandidateCapacity,
+                maximumClippedPolygonCapacity:
+                    maximumClippedPolygonCapacity,
+                fragmentCapacity: fragments.capacity
+            )
+        )
     }
 
     static func clipPolygon(

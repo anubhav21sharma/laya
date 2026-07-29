@@ -124,12 +124,18 @@ public enum DepositionEvidenceValidator {
             throw invalid("CPU reference digest and delta must appear together")
         }
         let telemetry = evidence.telemetry
-        guard telemetry.authoritativeBacklog >= 0,
-              telemetry.predictedBacklog >= 0,
-              telemetry.backlogHighWater >= 0,
-              telemetry.bufferHighWater >= 0
+        guard telemetry.authoritativeBacklog == 0,
+              telemetry.predictedBacklog == 0,
+              telemetry.backlogHighWater > 0,
+              telemetry.backlogHighWater
+                <= evidence.projectedInstanceCount,
+              telemetry.encodedInstanceCount
+                == UInt64(evidence.projectedInstanceCount),
+              (1...3).contains(telemetry.bufferHighWater)
         else {
-            throw invalid("telemetry counts must be nonnegative")
+            throw invalid(
+                "telemetry must be an internally consistent completed renderer snapshot"
+            )
         }
         guard !evidence.invariantResults.isEmpty,
               Set(evidence.invariantResults.keys).isSubset(

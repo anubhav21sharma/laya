@@ -5,6 +5,10 @@ import PatternEngine
 
 @MainActor
 extension GridRenderer {
+    public func armInputPathStorageAuditForHarness() {
+        armInputPathStorageAuditAfterWarmup()
+    }
+
     public func installNativeHarnessBrushes() throws {
         try activateDrawBrush(
             makeNativeHarnessBrush(mode: .draw)
@@ -248,31 +252,31 @@ extension GridRenderer {
             forceCommandBufferUnavailable:
                 forceCommandBufferUnavailable
         )
-        let totalInstanceCount = counters.totalInstancesThisStroke
         return HarnessLiveFlushResult(
             metrics: frameMetrics,
-            emittedHighWater: UInt64(totalInstanceCount),
-            encodedIdentityRanges: Self.nativeEncodedIdentityRanges(
-                totalInstanceCount: totalInstanceCount,
-                newInstanceCount: counters.newInstancesThisFrame
-            )
+            emittedHighWater: scheduledAuthoritativeIdentityHighWater,
+            encodedIdentityRanges:
+                lastEncodedAuthoritativeIdentityRange.map { [$0] } ?? []
         )
     }
 
     nonisolated static func nativeEncodedIdentityRanges(
-        totalInstanceCount: Int,
+        previousEncodedHighWater: UInt64,
+        emittedHighWater: UInt64,
         newInstanceCount: Int
     ) -> [Range<UInt64>] {
         guard
-            totalInstanceCount >= 0,
             newInstanceCount > 0,
-            newInstanceCount <= totalInstanceCount
+            let count = UInt64(exactly: newInstanceCount),
+            previousEncodedHighWater <= emittedHighWater,
+            count <= emittedHighWater - previousEncodedHighWater
         else {
             return []
         }
-        let upperBound = UInt64(totalInstanceCount)
-        let lowerBound = upperBound - UInt64(newInstanceCount)
-        return [lowerBound..<upperBound]
+        return [
+            previousEncodedHighWater
+                ..< previousEncodedHighWater + count,
+        ]
     }
 
     public func renderOffscreenDisplayForHarness(

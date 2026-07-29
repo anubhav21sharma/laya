@@ -69,6 +69,7 @@ public struct BrushLabRendererDepositionDiagnosticSnapshot:
     public let currentBufferLeaseCount: Int
     public let strokeBufferLeaseHighWater: Int
     public let lifetimeBufferLeaseHighWater: Int
+    public let missedFrameCount: UInt64
     public let eventToSubmit: DepositionDurationPercentiles
     public let cpuPreparation: DepositionDurationPercentiles
     public let gpuCompletion: DepositionDurationPercentiles
@@ -191,11 +192,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     pool.strokeLeaseHighWater,
                 lifetimeBufferLeaseHighWater:
                     pool.lifetimeLeaseHighWater,
+                missedFrameCount: telemetry.missedFrameCount,
                 eventToSubmit: timings.eventToSubmit,
                 cpuPreparation: timings.cpuPreparation,
                 gpuCompletion: timings.gpuCompletion
             )
         )
+    }
+    public var inputPathStorageDiagnosticSnapshot:
+        InputPathStorageDiagnosticSnapshot
+    {
+        inputPathStorageAudit.snapshot
     }
 
     public var periodicConfiguration: PeriodicSymmetryConfiguration {
@@ -237,6 +244,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let encodedLiveClear: Bool
         let encodedReplayClear: Bool
         let replayEpoch: UInt64
+        let encodedAuthoritativeIdentityRange: Range<UInt64>?
 
         var instanceCount: Int {
             authoritativeCount + predictedCount
@@ -393,6 +401,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var brushLabLastFrameEncodedInstanceCount = 0
     private var brushLabStrokeEncodedDabCount: UInt64 = 0
     private var brushLabPendingInputReceiptNanoseconds: UInt64?
+    private var inputPathStorageAudit = InputPathStorageAudit()
+    var scheduledAuthoritativeIdentityHighWater: UInt64 = 0
+    private var encodedAuthoritativeIdentityHighWater: UInt64 = 0
+    var lastEncodedAuthoritativeIdentityRange: Range<UInt64>?
     let revisionStore: RasterRevisionStore
     let completionMailbox = GridRenderCompletionMailbox()
     private let rasterCompletionMailbox = RendererRasterCompletionMailbox()
@@ -851,7 +863,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let generatorColor: InkColor
         switch style.compositeMode {
         case .draw:
-            generatorColor = style.color
+            generatorColor = Self.opaqueStrokeColor(style.color)
         case .erase:
             generatorColor = InkColor(
                 red: 0,
@@ -1789,11 +1801,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        let promotedPredictionCount = scheduler.predictedCount
         do {
             try scheduler.promotePredictionToAuthoritative()
         } catch let error as FrameSchedulerError {
             throw rendererError(for: error)
         }
+        let (scheduledHighWater, overflow) =
+            scheduledAuthoritativeIdentityHighWater.addingReportingOverflow(
+                UInt64(promotedPredictionCount)
+            )
+        guard !overflow else {
+            throw MetalRendererError.projectedInstanceCapacityExceeded(
+                depositionFrameBudget.maximumPendingAuthoritativeInstances
+            )
+        }
+        scheduledAuthoritativeIdentityHighWater = scheduledHighWater
         execution.scheduler = scheduler
         recordBrushLabScheduler(scheduler)
         execution.commitRequested = true
@@ -1887,6 +1910,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             seed: token.rawValue
         )
         resetLiveState()
+        resetBrushLabDepositionDiagnostics()
         activeStroke = ActiveStrokeExecution(
             token: token,
             style: style,
@@ -2524,10 +2548,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         } catch let error as FrameSchedulerError {
             throw rendererError(for: error)
         }
+        let (scheduledHighWater, overflow) =
+            scheduledAuthoritativeIdentityHighWater.addingReportingOverflow(
+                UInt64(records.count)
+            )
+        guard !overflow else {
+            throw MetalRendererError.projectedInstanceCapacityExceeded(
+                depositionFrameBudget.maximumPendingAuthoritativeInstances
+            )
+        }
         for record in records {
             liveStroke.recordDirtyRegion(record.dirtyRect)
         }
         counters.totalInstancesThisStroke += records.count
+        scheduledAuthoritativeIdentityHighWater = scheduledHighWater
         execution.scheduler = scheduler
         recordBrushLabScheduler(scheduler)
         activeStroke = execution
@@ -2585,6 +2619,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 )
             )
         }
+        inputPathStorageAudit.recordGeneratedDabs(prepared.capacity)
         return prepared
     }
 
@@ -2744,10 +2779,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             ),
             coverageSymmetry: .oriented
         )
-        let fragments = TilingProjection.fragments(
-            for: footprint,
-            using: tilingStrategy
+        let projection =
+            TilingProjection.fragmentsWithStorageDiagnostics(
+                for: footprint,
+                using: tilingStrategy
+            )
+        inputPathStorageAudit.recordTiling(
+            projection.storageDiagnostics
         )
+        let fragments = projection.fragments
         return try fragments.map { fragment in
             let isometryOrdinal = try compiledIsometryOrdinal(
                 for: fragment
@@ -2890,7 +2930,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func color(for style: StrokeRenderStyle) -> InkColor {
         switch style.compositeMode {
         case .draw:
-            style.color
+            Self.opaqueStrokeColor(style.color)
         case .erase:
             InkColor(
                 red: 0,
@@ -2899,6 +2939,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 alpha: 1
             )!
         }
+    }
+
+    private nonisolated static func opaqueStrokeColor(
+        _ color: InkColor
+    ) -> InkColor {
+        InkColor(
+            red: color.red,
+            green: color.green,
+            blue: color.blue,
+            alpha: 1
+        )!
     }
 
     func frameUniforms(
@@ -3604,6 +3655,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     material: material,
                     target: target
                 )
+        } catch DepositionEncodingError.uploadBuffersUnavailable
+            where !frame.predicted.isEmpty
+        {
+            lastEncodedAuthoritativeIdentityRange = nil
+            return NativeDepositionFrameEncoding(
+                authoritativeCount: 0,
+                predictedCount: 0,
+                logicalDabCount: 0,
+                uploadBufferCount: 0,
+                encodedLiveClear: false,
+                encodedReplayClear: false,
+                replayEpoch: 0,
+                encodedAuthoritativeIdentityRange: nil
+            )
         } catch {
             throw rendererError(forDepositionError: error)
         }
@@ -3648,6 +3713,25 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             bufferCount:
                 instancePool.diagnosticSnapshot.currentLeaseCount
         )
+        let encodedAuthoritativeIdentityRange: Range<UInt64>?
+        if frame.authoritative.isEmpty {
+            encodedAuthoritativeIdentityRange = nil
+        } else {
+            let lowerBound = encodedAuthoritativeIdentityHighWater
+            let (upperBound, overflow) =
+                lowerBound.addingReportingOverflow(
+                    UInt64(frame.authoritative.count)
+                )
+            precondition(
+                !overflow
+                    && upperBound <= scheduledAuthoritativeIdentityHighWater,
+                "Encoded authoritative identity exceeded scheduled high-water."
+            )
+            encodedAuthoritativeIdentityRange = lowerBound..<upperBound
+            encodedAuthoritativeIdentityHighWater = upperBound
+        }
+        lastEncodedAuthoritativeIdentityRange =
+            encodedAuthoritativeIdentityRange
         activeStroke = execution
         return NativeDepositionFrameEncoding(
             authoritativeCount: frame.authoritative.count,
@@ -3658,7 +3742,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             encodedReplayClear: encodedReplayClear,
             replayEpoch: encodedReplayClear || !frame.predicted.isEmpty
                 ? replayStroke.renderEpoch
-                : 0
+                : 0,
+            encodedAuthoritativeIdentityRange:
+                encodedAuthoritativeIdentityRange
         )
     }
 
@@ -4818,6 +4904,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         brushLabLastFrameEncodedInstanceCount = 0
         brushLabStrokeEncodedDabCount = 0
         brushLabPendingInputReceiptNanoseconds = nil
+        inputPathStorageAudit.reset()
+        scheduledAuthoritativeIdentityHighWater = 0
+        encodedAuthoritativeIdentityHighWater = 0
+        lastEncodedAuthoritativeIdentityRange = nil
+    }
+
+    func armInputPathStorageAuditAfterWarmup() {
+        inputPathStorageAudit.armAfterWarmup()
     }
 
     private func markBrushLabInputReceipt() {
@@ -4840,6 +4934,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         brushLabDepositionTelemetry.recordBacklog(
             authoritative: snapshot.authoritativePending,
             predicted: snapshot.predictedPending
+        )
+        inputPathStorageAudit.recordRecordStorage(
+            schedulerCapacity:
+                snapshot.authoritativeStorageCapacity
+                + snapshot.predictedStorageCapacity,
+            replayCapacity:
+                liveStroke.pending.capacity + replayStroke.pending.capacity
         )
     }
 
@@ -4865,6 +4966,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             ),
             gpuCompletionNanoseconds: metrics.gpuCompletionNanoseconds
         )
+        let conservativeFrameIntervalNanoseconds: UInt64 = 16_666_667
+        if metrics.eventToSubmitNanoseconds
+            >= conservativeFrameIntervalNanoseconds
+        {
+            brushLabDepositionTelemetry.recordMissedFrames(
+                metrics.eventToSubmitNanoseconds
+                    / conservativeFrameIntervalNanoseconds
+            )
+        }
     }
 
     static func saturatingAdd(

@@ -1,4 +1,4 @@
-import BrushDepositionEvidenceGate
+@testable import BrushDepositionEvidenceGate
 import CryptoKit
 import Foundation
 @testable import MetalRenderer
@@ -13,11 +13,8 @@ struct DepositionEvidenceGateTests {
         defer { fixture.remove() }
 
         #expect(
-            try StageFourEvidenceValidator.validate(
-                artifactRoot: fixture.root,
-                expectedCommit: fixture.commit,
-                expectedSourceTreeSHA256: fixture.sourceTreeSHA256
-            ) == .performancePending(gpuName: fixture.gpuName)
+            try fixture.validate()
+                == .performancePending(gpuName: fixture.gpuName)
         )
     }
 
@@ -210,15 +207,109 @@ struct DepositionEvidenceGateTests {
         let fixture = try StageFourArtifactFixture()
         defer { fixture.remove() }
         try fixture.mutatePerformance { object in
-            var profiles = object["physicalProfiles"] as! [String: String]
-            profiles["referenceMSeriesProMotion120Hz"] = "passed"
-            profiles["a14Floor60Hz"] = "passed"
-            object["physicalProfiles"] = profiles
+            object["physicalProfiles"] = Dictionary(
+                uniqueKeysWithValues:
+                StageFourEvidenceValidator.requiredPhysicalProfiles.map {
+                    ($0, "passed")
+                }
+            )
         }
         try fixture.rewriteManifest()
 
         #expect(throws: StageFourEvidenceValidationError.self) {
             try fixture.validate()
+        }
+    }
+
+    @Test
+    func physicalLookingSelfAttestationCannotProducePass() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.makePhysicalLookingSelfAttestation()
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
+    func metricDerivedStructuredPhysicalEvidenceCanProducePass() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        try fixture.rewriteManifest()
+
+        #expect(try fixture.validate() == .passed)
+    }
+
+    @Test
+    func physicalTraceDigestIsRecomputedInsideOuterManifest() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        let profile =
+            StageFourEvidenceValidator.requiredPhysicalProfiles[0]
+        try Data("tampered physical trace\n".utf8).write(
+            to: fixture.root.appendingPathComponent("physical-profiles")
+                .appendingPathComponent(profile)
+                .appendingPathComponent("raw")
+                .appendingPathComponent("trace.json")
+        )
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
+    func physicalMeasurementsMustMatchRawTraceSamplesWhenDigestsAreRewritten()
+        throws
+    {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        let profile =
+            StageFourEvidenceValidator.requiredPhysicalProfiles[0]
+        let directory = fixture.root
+            .appendingPathComponent("physical-profiles")
+            .appendingPathComponent(profile)
+        let traceURL = directory.appendingPathComponent("raw/trace.json")
+        var raw = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: traceURL)
+        ) as! [String: Any]
+        var samples = raw["samples"] as! [String: Any]
+        let metricID = try #require(samples.keys.sorted().first)
+        samples[metricID] = [0.25]
+        raw["samples"] = samples
+        let rawData = try StageFourArtifactFixture.json(raw)
+        try rawData.write(to: traceURL)
+
+        let evidenceURL = directory.appendingPathComponent("evidence.json")
+        var evidence = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: evidenceURL)
+        ) as! [String: Any]
+        var traces = evidence["traces"] as! [[String: Any]]
+        traces[0]["sha256"] = StageFourArtifactFixture.sha256(rawData)
+        evidence["traces"] = traces
+        try StageFourArtifactFixture.json(evidence).write(to: evidenceURL)
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test
+    func incompatibleHeadlessCatalogCannotSelfAttestItsDigest() throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.rewriteProvenanceCatalogDigest()
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validateProductionContract()
         }
     }
 
@@ -246,6 +337,28 @@ enum EvidenceIdentityDefect: CaseIterable, CustomTestStringConvertible {
 
     var testDescription: String {
         String(describing: self)
+    }
+}
+
+private struct FixturePhysicalMetric {
+    let unit: String
+    let aggregation: String
+    let relation: String
+    let threshold: Double
+    let passingSample: Double
+
+    init(
+        _ unit: String,
+        _ aggregation: String,
+        _ relation: String,
+        _ threshold: Double,
+        _ passingSample: Double
+    ) {
+        self.unit = unit
+        self.aggregation = aggregation
+        self.relation = relation
+        self.threshold = threshold
+        self.passingSample = passingSample
     }
 }
 
@@ -289,6 +402,7 @@ private struct StageFourArtifactFixture {
         )
         for name in [
             "positive", "negative-control", "brush-lab-cards", "logs",
+            "physical-profiles",
         ] {
             try FileManager.default.createDirectory(
                 at: root.appendingPathComponent(name),
@@ -311,6 +425,20 @@ private struct StageFourArtifactFixture {
     }
 
     func validate() throws -> StageFourEvidenceValidationStatus {
+        let catalog = root.appendingPathComponent("brush-lab-cards")
+            .appendingPathComponent("catalog.json")
+        return try StageFourEvidenceValidator.validate(
+            artifactRoot: root,
+            expectedCommit: commit,
+            expectedSourceTreeSHA256: sourceTreeSHA256,
+            requiredBrushLabCatalogSHA256:
+                Self.sha256(Data(contentsOf: catalog))
+        )
+    }
+
+    func validateProductionContract() throws
+        -> StageFourEvidenceValidationStatus
+    {
         try StageFourEvidenceValidator.validate(
             artifactRoot: root,
             expectedCommit: commit,
@@ -340,6 +468,163 @@ private struct StageFourArtifactFixture {
             with: Data(contentsOf: url)
         ) as! [String: Any]
         mutation(&object)
+        try Self.json(object).write(to: url)
+    }
+
+    func makePhysicalLookingSelfAttestation() throws {
+        try makePhysicalHardware()
+        try mutatePerformance { object in
+            object["physicalProfiles"] = Dictionary(
+                uniqueKeysWithValues:
+                StageFourEvidenceValidator.requiredPhysicalProfiles.map {
+                    ($0, "passed")
+                }
+            )
+        }
+    }
+
+    func writeValidPhysicalProfiles() throws {
+        try makePhysicalHardware()
+        let profiles = root.appendingPathComponent("physical-profiles")
+        for profileID in
+            StageFourEvidenceValidator.requiredPhysicalProfiles
+        {
+            let directory = profiles.appendingPathComponent(profileID)
+            let raw = directory.appendingPathComponent("raw")
+            try FileManager.default.createDirectory(
+                at: raw,
+                withIntermediateDirectories: true
+            )
+            let requirements = try #require(
+                Self.physicalMetrics[profileID]
+            )
+            let source: [String: Any] = [
+                "commit": commit,
+                "sourceTreeSHA256": sourceTreeSHA256,
+            ]
+            let device: [String: Any] = [
+                "gpuName": "Apple M3 Max",
+                "gpuRegistryID": "fixture-registry-\(profileID)",
+                "hardwareModel": "Mac15,9",
+                "operatingSystem": "Fixture OS",
+            ]
+            let toolchain: [String: Any] = [
+                "swiftVersion": "Fixture Swift",
+                "xcodeVersion": "Fixture Xcode",
+                "xcodegenVersion": "Fixture XcodeGen",
+            ]
+            let rawSamples = Dictionary(
+                uniqueKeysWithValues: requirements.map {
+                    ($0.key, [$0.value.passingSample])
+                }
+            )
+            let trace = try Self.json([
+                "schemaVersion": 1,
+                "profileID": profileID,
+                "source": source,
+                "device": device,
+                "toolchain": toolchain,
+                "samples": rawSamples,
+            ])
+            try trace.write(
+                to: raw.appendingPathComponent("trace.json")
+            )
+            let measurements = Dictionary(
+                uniqueKeysWithValues: requirements.map {
+                    metricID,
+                    metric in
+                    (
+                        metricID,
+                        [
+                            "unit": metric.unit,
+                            "aggregation": metric.aggregation,
+                            "samples": [metric.passingSample],
+                            "threshold": [
+                                "relation": metric.relation,
+                                "value": metric.threshold,
+                            ],
+                        ] as [String: Any]
+                    )
+                }
+            )
+            try Self.json([
+                "schemaVersion": 1,
+                "profileID": profileID,
+                "source": source,
+                "device": device,
+                "toolchain": toolchain,
+                "measurements": measurements,
+                "traces": [
+                    [
+                        "id": "\(profileID).trace",
+                        "path": "raw/trace.json",
+                        "sampleCount": 1,
+                        "sha256": Self.sha256(trace),
+                    ],
+                ],
+            ]).write(
+                to: directory.appendingPathComponent("evidence.json")
+            )
+        }
+    }
+
+    private func makePhysicalHardware() throws {
+        let physicalGPU = "Apple M3 Max"
+        try mutatePerformance { object in
+            object["gpuName"] = physicalGPU
+            object["gpuClassification"] = "physical"
+            object["gpu500DabMilliseconds"] = 2.5
+        }
+        try mutateJSON(
+            at: root.appendingPathComponent("provenance.json")
+        ) { object in
+            object["gpuName"] = physicalGPU
+            object["gpuClassification"] = "physical"
+            object["hardwareModel"] = "Mac15,9"
+        }
+        for scene in StageFourEvidenceValidator.positiveSceneNames {
+            try mutateJSON(
+                at: root.appendingPathComponent("positive")
+                    .appendingPathComponent(scene)
+                    .appendingPathComponent("benchmark.json")
+            ) { object in
+                var hardware = object["hardware"] as! [String: Any]
+                hardware["gpuName"] = physicalGPU
+                object["hardware"] = hardware
+            }
+        }
+        try mutateJSON(
+            at: root.appendingPathComponent("logs")
+                .appendingPathComponent(
+                    "five-hundred-dabs.benchmark.json"
+                )
+        ) { object in
+            var hardware = object["hardware"] as! [String: Any]
+            hardware["gpuName"] = physicalGPU
+            object["hardware"] = hardware
+            object["dabGPUMilliseconds"] = [2.5]
+        }
+    }
+
+    func rewriteProvenanceCatalogDigest() throws {
+        let catalog = root.appendingPathComponent("brush-lab-cards")
+            .appendingPathComponent("catalog.json")
+        try mutateJSON(
+            at: root.appendingPathComponent("provenance.json")
+        ) { object in
+            object["brushLabCatalogSHA256"] =
+                Self.sha256(try Data(contentsOf: catalog))
+        }
+    }
+
+    private func mutateJSON(
+        at url: URL,
+        _ mutation: (inout [String: Any]) throws -> Void
+    ) throws {
+        var object = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: url)
+        ) as! [String: Any]
+        try mutation(&object)
         try Self.json(object).write(to: url)
     }
 
@@ -554,6 +839,7 @@ private struct StageFourArtifactFixture {
             ] as [String: Any]
         }
         try Self.json([
+            "schemaVersion": 1,
             "cards": cards,
             "assessments": assessments,
         ]).write(
@@ -563,14 +849,8 @@ private struct StageFourArtifactFixture {
     }
 
     private func writePerformance() throws {
-        let profiles = Dictionary(
-            uniqueKeysWithValues:
-            StageFourEvidenceValidator.requiredPhysicalProfiles.map {
-                ($0, "pending")
-            }
-        )
         try Self.json([
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "correctnessPassed": true,
             "gpuName": gpuName,
             "gpuClassification": "paravirtual",
@@ -580,7 +860,6 @@ private struct StageFourArtifactFixture {
             "gpu500DabBudgetMilliseconds": 3.0,
             "completedStrokeLengthIndependent": true,
             "hotPathCompilerResourceCountersZero": true,
-            "physicalProfiles": profiles,
         ]).write(
             to: root.appendingPathComponent("performance-status.txt")
         )
@@ -646,18 +925,84 @@ private struct StageFourArtifactFixture {
         )
     }
 
-    private static func json(_ object: Any) throws -> Data {
+    fileprivate static func json(_ object: Any) throws -> Data {
         try JSONSerialization.data(
             withJSONObject: object,
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         )
     }
 
-    private static func sha256(_ data: Data) -> String {
+    fileprivate static func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map {
             String(format: "%02x", $0)
         }.joined()
     }
+
+    private static let physicalMetrics:
+        [String: [String: FixturePhysicalMetric]] = [
+            "a14Floor60Hz": [
+                "cpuPreparationP95Milliseconds":
+                    .init("milliseconds", "p95", "lessThan", 2, 0.5),
+                "gpu500DabMilliseconds":
+                    .init("milliseconds", "maximum", "lessThan", 3, 2.5),
+                "missedFrameFraction":
+                    .init("fraction", "maximum", "lessThan", 0.01, 0),
+            ],
+            "inputToPhoton": [
+                "inputToPhotonP95Milliseconds":
+                    .init(
+                        "milliseconds", "p95", "lessThan", 16.667, 10
+                    ),
+            ],
+            "memoryWarning": [
+                "memoryWarningRecoveryMilliseconds":
+                    .init(
+                        "milliseconds", "maximum", "lessThan", 1_000, 100
+                    ),
+                "recoveryFailureCount":
+                    .init("count", "sum", "equal", 0, 0),
+            ],
+            "pencil": [
+                "inputContinuityFailureCount":
+                    .init("count", "sum", "equal", 0, 0),
+                "predictionTransitionFailureCount":
+                    .init("count", "sum", "equal", 0, 0),
+            ],
+            "referenceMSeriesProMotion120Hz": [
+                "cpuPreparationP95Milliseconds":
+                    .init("milliseconds", "p95", "lessThan", 2, 0.5),
+                "gpu500DabMilliseconds":
+                    .init("milliseconds", "maximum", "lessThan", 3, 2.5),
+                "missedFrameFraction":
+                    .init("fraction", "maximum", "lessThan", 0.01, 0),
+            ],
+            "suspendResume": [
+                "recoveryFailureCount":
+                    .init("count", "sum", "equal", 0, 0),
+                "suspendResumeRecoveryMilliseconds":
+                    .init(
+                        "milliseconds", "maximum", "lessThan", 1_000, 100
+                    ),
+            ],
+            "sustainedThermal": [
+                "cpuPreparationP95Milliseconds":
+                    .init("milliseconds", "p95", "lessThan", 2, 0.5),
+                "gpu500DabMilliseconds":
+                    .init("milliseconds", "maximum", "lessThan", 3, 2.5),
+                "missedFrameFraction":
+                    .init("fraction", "maximum", "lessThan", 0.01, 0),
+                "thermalDurationSeconds":
+                    .init(
+                        "seconds", "sum", "greaterThanOrEqual", 600, 600
+                    ),
+            ],
+            "wacom": [
+                "inputContinuityFailureCount":
+                    .init("count", "sum", "equal", 0, 0),
+                "pressureMonotonicityFailureCount":
+                    .init("count", "sum", "equal", 0, 0),
+            ],
+        ]
 
     private static func truth(_ scene: String) -> FixtureSceneTruth {
         let identities: [String: (String, String)] = [

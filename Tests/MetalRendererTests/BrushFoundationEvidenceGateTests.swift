@@ -249,7 +249,14 @@ private struct FoundationFixture {
             cpuReferenceSHA256: nil,
             maximumCPUGPUChannelDelta: nil,
             previewCommitMaximumChannelDelta: 0,
-            telemetry: .zero,
+            telemetry: DepositionTelemetryEvidence(
+                authoritativeBacklog: 0,
+                predictedBacklog: 0,
+                backlogHighWater: 1,
+                encodedInstanceCount: 1,
+                bufferHighWater: 1,
+                missedFrameCount: 0
+            ),
             invariantResults: invariantResults
         )
         try evidence.encoded().write(
