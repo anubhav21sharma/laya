@@ -55,11 +55,6 @@ func professionalCatalogResolvesGraphitePencilWithItsStableIdentity() throws {
     ])
     #expect(compiled.definition.material.accumulation == .flow)
     #expect(compiled.definition.material.accumulationLimit == 1)
-    #expect(ProfessionalBrushCatalog.all.map(\.id) == [
-        BrushRecipeID("builtin.professional-technical-ink"),
-        graphiteID,
-        BrushRecipeID("builtin.professional-natural-charcoal"),
-    ])
 }
 
 @Test
@@ -123,10 +118,44 @@ func professionalCatalogResolvesNaturalCharcoalWithOrderedDualLayers() throws {
     #expect(compiled.definition.material.strength == 1)
     #expect(compiled.definition.material.accumulationLimit == 1)
     #expect(compiled.definition.performanceIntent == .realtime120)
+}
+
+@Test
+func professionalCatalogResolvesChiselMarkerWithItsExactFallbackAndMaterial() throws {
+    let markerID = BrushRecipeID("builtin.professional-chisel-marker")
+    let entry = try #require(ProfessionalBrushCatalog.entry(for: markerID))
+    let compiled = try BrushProgramCompiler.compile(entry.definition)
+
+    #expect(entry.id == markerID)
+    #expect(entry.displayName == "Chisel Marker")
+    #expect(entry.program == compiled)
+    #expect(compiled.definition.resources == [
+        BrushResourceReference(
+            identifier: "builtin.shape.marker-chisel",
+            kind: .shape,
+            required: false,
+            fallback: .builtIn(identifier: "builtin.shape.marker-chisel")
+        ),
+    ])
+    #expect(compiled.definition.coverage.shapes.map(\.shape) == [
+        .asset("builtin.shape.marker-chisel"),
+    ])
+    #expect(compiled.definition.coverage.grains.isEmpty)
+    #expect(compiled.definition.material.accumulation == .uniformGlaze)
+    #expect(compiled.definition.material.edgeTreatment == .markerOverlap)
+    #expect(compiled.definition.material.interaction == .none)
+    #expect(compiled.definition.material.strength == 0.95)
+    #expect(compiled.definition.material.accumulationLimit == 0.82)
+    #expect(compiled.definition.performanceIntent == .realtime120)
+    #expect(compiled.definition.taper.start == .diameterMultiples(0.35))
+    #expect(compiled.definition.taper.end == .diameterMultiples(0.35))
+    #expect(compiled.definition.taper.minimumSize == 0.85)
+    #expect(compiled.definition.taper.minimumFlow == 0.85)
     #expect(ProfessionalBrushCatalog.all.map(\.id) == [
         BrushRecipeID("builtin.professional-technical-ink"),
         BrushRecipeID("builtin.professional-graphite-pencil"),
-        charcoalID,
+        BrushRecipeID("builtin.professional-natural-charcoal"),
+        markerID,
     ])
 }
 

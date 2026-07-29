@@ -1,3 +1,4 @@
+import CryptoKit
 import EditorCore
 import Foundation
 import PatternEngine
@@ -46,6 +47,115 @@ func allNativeAnchorTraceBatchesAreDeterministicAndNonempty() {
     }
 
     #expect(characterizationCount == AnchorBrushCatalog.all.count * 3)
+}
+
+@Test
+func professionalCatalogCompilesToDistinctNoninteractingSemanticRecordsForEveryTrace() throws {
+    let entries = ProfessionalBrushCatalog.all
+    let compiled = try entries.map { try BrushProgramCompiler.compile($0.definition) }
+    let hashes = try entries.map { try professionalDefinitionSemanticHash($0.definition) }
+    let records = entries.indices.flatMap { index in
+        let entry = entries[index]
+        let program = compiled[index]
+        let hash = hashes[index]
+        return StrokeTraceFixtures.professional.map { trace in
+            ProfessionalBrushCharacterizer.record(
+                family: entry.displayName,
+                definitionSemanticHash: hash,
+                trace: trace,
+                program: program
+            )
+        }
+    }.sorted {
+        ($0.brushID, $0.traceName) < ($1.brushID, $1.traceName)
+    }
+    let repeated = entries.indices.flatMap { index in
+        let entry = entries[index]
+        let program = compiled[index]
+        let hash = hashes[index]
+        return StrokeTraceFixtures.professional.map { trace in
+            ProfessionalBrushCharacterizer.record(
+                family: entry.displayName,
+                definitionSemanticHash: hash,
+                trace: trace,
+                program: program
+            )
+        }
+    }.sorted {
+        ($0.brushID, $0.traceName) < ($1.brushID, $1.traceName)
+    }
+    let predictionFreeTrace = StrokeTraceFixture(
+        name: StrokeTraceFixtures.professionalDirectionTurn.name,
+        samples: StrokeTraceFixtures.professionalDirectionTurn.samples.filter {
+            $0.kind == .actual || $0.kind == .coalesced
+        }
+    )
+    let directionRecords = records.filter {
+        $0.traceName == StrokeTraceFixtures.professionalDirectionTurn.name
+    }
+    let predictionFreeRecords = entries.indices.map { index in
+        let entry = entries[index]
+        let program = compiled[index]
+        return ProfessionalBrushCharacterizer.record(
+            family: entry.displayName,
+            definitionSemanticHash: hashes[index],
+            trace: predictionFreeTrace,
+            program: program
+        )
+    }.sorted {
+        ($0.brushID, $0.traceName) < ($1.brushID, $1.traceName)
+    }
+    let baseline = try ProfessionalBrushLogicalBaseline(
+        validatingSchemaVersion: ProfessionalBrushLogicalBaseline.schemaVersion,
+        records: records
+    )
+
+    #expect(entries.count == 4)
+    #expect(compiled == entries.map(\.program))
+    #expect(Set(hashes).count == 4)
+    #expect(entries.allSatisfy {
+        $0.definition.material.interaction == .none
+            && $0.definition.material.wetness == 0
+            && $0.definition.material.bleedRadius == 0
+            && $0.definition.material.softenPasses == 0
+            && $0.definition.material.interactionParameters == nil
+    })
+    #expect(records.count == 40)
+    #expect(records == repeated)
+    #expect(records == records.sorted {
+        ($0.brushID, $0.traceName) < ($1.brushID, $1.traceName)
+    })
+    #expect(directionRecords == predictionFreeRecords)
+    #expect(try baseline.encoded() == baseline.encoded())
+    #expect(throws: BrushDefinitionValidationError.missingCapability("wetMix")) {
+        try decodingMarkerWithWetInteraction()
+    }
+}
+
+private func professionalDefinitionSemanticHash(_ definition: BrushDefinition) throws -> String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    return SHA256.hash(data: try encoder.encode(definition))
+        .map { String(format: "%02x", $0) }
+        .joined()
+}
+
+private func decodingMarkerWithWetInteraction() throws -> BrushDefinition {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    let data = try encoder.encode(ProfessionalBrushCatalog.chiselMarker.definition)
+    let jsonObject = try JSONSerialization.jsonObject(with: data)
+    guard var object = jsonObject as? [String: Any],
+          var material = object["material"] as? [String: Any]
+    else {
+        preconditionFailure("The real Chisel Marker definition must encode as an object")
+    }
+    material["interaction"] = "wetMix"
+    object["material"] = material
+    return try JSONDecoder().decode(
+        BrushDefinition.self,
+        from: JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    )
 }
 
 private func logicalBatches(

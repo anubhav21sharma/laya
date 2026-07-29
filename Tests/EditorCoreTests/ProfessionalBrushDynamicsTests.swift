@@ -423,6 +423,107 @@ func naturalCharcoalMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
     #expect(retapered.map(\.randomValues) == emitted.map(\.randomValues))
 }
 
+@Test
+func chiselMarkerCompiledDabsFollowDirectionWithoutScatterAndKeepConstantSpacing() {
+    let horizontal = chiselMarkerDab(direction: 0, velocity: 0)
+    let vertical = chiselMarkerDab(direction: .pi / 2, velocity: 50_000)
+    let reverse = chiselMarkerDab(direction: .pi, velocity: 100_000)
+    let lightPressure = chiselMarkerDab(
+        pressure: 0.2,
+        capabilities: [.pressure],
+        velocity: 0
+    )
+    let maximumRandom = chiselMarkerDab(
+        velocity: 100_000,
+        random: BrushRandomValues(
+            spacing: 0.999_999,
+            scatterX: 0.999_999,
+            scatterY: 0.999_999,
+            rotation: 0.999_999,
+            grainX: 0.999_999,
+            grainY: 0.999_999,
+            materialVariation: 0.999_999
+        )
+    )
+
+    #expect(abs((vertical.rotation - horizontal.rotation) - .pi / 2) < 0.000_01)
+    #expect(abs((reverse.rotation - vertical.rotation) - .pi / 2) < 0.000_01)
+    #expect([horizontal, vertical, reverse, maximumRandom].allSatisfy { $0.scatter == .zero })
+    #expect(horizontal.position == WorldPoint(x: 10, y: 20))
+    #expect(vertical.position == WorldPoint(x: 10, y: 20))
+    #expect(reverse.position == WorldPoint(x: 10, y: 20))
+    #expect(maximumRandom.position == WorldPoint(x: 10, y: 20))
+    #expect(abs(lightPressure.diameter - 30.4) < 0.000_01)
+    #expect(horizontal.diameter == 40)
+    #expect(horizontal.flow == 0.56)
+    #expect(abs(vertical.flow - 0.49) < 0.000_01)
+    #expect(abs(reverse.flow - 0.42) < 0.000_01)
+    #expect(horizontal.spacing == 1.4)
+    #expect(vertical.spacing == 1.4)
+    #expect(reverse.spacing == 1.4)
+    #expect(maximumRandom.spacing == 1.4)
+}
+
+@Test
+func chiselMarkerReplayIsDeterministicTapersAndHasFiniteMouseFallback() throws {
+    let program = chiselMarkerProgram()
+    let viewport = ViewportTransform(
+        drawableSize: PatternSize(width: 128, height: 128),
+        worldCenter: WorldPoint(x: 64, y: 64)
+    )
+    let first = chiselMarkerLogicalDabs(seed: 91, viewport: viewport)
+    let repeated = chiselMarkerLogicalDabs(seed: 91, viewport: viewport)
+    let mouse = chiselMarkerDab(pressure: 0, capabilities: [], velocity: 0)
+    var input = BrushInputDeriver()
+    var generator = BrushStrokeGenerator(
+        program: program, nominalDiameter: 40, color: .black, seed: 91
+    )
+    let shortViewport = ViewportTransform(
+        drawableSize: PatternSize(width: 2, height: 2),
+        worldCenter: WorldPoint(x: 0, y: 0)
+    )
+    let leading = try generator.beginBatch(input.derive(
+        chiselMarkerStrokeSample(x: 0, timestamp: 0, phase: .began),
+        viewport: shortViewport
+    ))
+    let tail = try generator.finishBatch(input.derive(
+        chiselMarkerStrokeSample(x: 20, timestamp: 1, phase: .ended),
+        viewport: shortViewport
+    ))
+    let emitted = leading.dabs + tail.dabs
+    let totalDistance = try #require(emitted.last?.sourceDistance)
+    let retapered = emitted.map {
+        BrushDynamicsEngine().applyingKnownTotalDistance(
+            $0, totalDistance: totalDistance, nominalDiameter: 40,
+            definition: program.definition
+        )
+    }
+    let lastOriginal = try #require(emitted.last)
+    let lastRetapered = try #require(retapered.last)
+
+    #expect(!first.isEmpty)
+    #expect(first == repeated)
+    #expect(program.replayContract.mode == .replayTail)
+    #expect(program.replayContract.limits == BrushRecipePolicy.replayTailLimits)
+    #expect(abs(lastRetapered.diameter / lastOriginal.diameter - 0.85) < 0.000_01)
+    #expect(abs(lastRetapered.flow / lastOriginal.flow - 0.85) < 0.000_01)
+    #expect(retapered.map(\.ordinal) == emitted.map(\.ordinal))
+    #expect(retapered.map(\.randomValues) == emitted.map(\.randomValues))
+    #expect(mouse.diameter == 40)
+    #expect(mouse.flow == 0.56)
+    #expect([mouse.diameter, mouse.flow, mouse.spacing, mouse.rotation].allSatisfy {
+        $0.isFinite
+    })
+    #expect(mouse.materialFamily == .glaze)
+    #expect(mouse.materialContribution == 0.95)
+    #expect(mouse.materialInputs.accumulation == .uniformGlaze)
+    #expect(mouse.materialInputs.edgeTreatment == .markerOverlap)
+    #expect(mouse.materialInputs.interaction == .none)
+    #expect(mouse.materialInputs.strength == 0.95)
+    #expect(mouse.materialInputs.accumulationLimit == 0.82)
+    #expect(program.requestedBackend == .deposition)
+}
+
 private func technicalInkDab(
     pressure: Float = 1,
     capabilities: StrokeInputCapabilities = [.pressure],
@@ -484,6 +585,15 @@ private func naturalCharcoalProgram() -> BrushProgram {
     return entry.program
 }
 
+private func chiselMarkerProgram() -> BrushProgram {
+    guard let entry = ProfessionalBrushCatalog.entry(
+        for: BrushRecipeID("builtin.professional-chisel-marker")
+    ) else {
+        fatalError("Chisel Marker must be registered before its dynamics run")
+    }
+    return entry.program
+}
+
 private func graphitePencilDab(
     pressure: Float = 1,
     altitude: Float? = .pi / 2,
@@ -531,6 +641,30 @@ private func naturalCharcoalDab(
             strokeAge: 1, traveledDistance: 100, ordinal: 4, isPredicted: false
         ),
         program: naturalCharcoalProgram(), random: random, strokeSeed: 91
+    )
+}
+
+private func chiselMarkerDab(
+    pressure: Float = 1,
+    capabilities: StrokeInputCapabilities = [.pressure],
+    direction: Float = 0,
+    velocity: Float = 50_000,
+    random: BrushRandomValues = .centered
+) -> LogicalDab {
+    let sample = InterpolatedStrokeSample(
+        position: WorldPoint(x: 10, y: 20), pressure: pressure, timestamp: 0,
+        altitude: nil, azimuth: nil, roll: nil, velocity: velocity,
+        phase: .moved,
+        source: capabilities.contains(.pressure) ? .tablet : .mouse,
+        kind: .actual, capabilities: capabilities
+    )
+    return BrushDynamicsEngine().evaluate(
+        sample: sample,
+        context: BrushStrokeContext(
+            nominalDiameter: 40, color: .black, direction: direction,
+            strokeAge: 1, traveledDistance: 100, ordinal: 4, isPredicted: false
+        ),
+        program: chiselMarkerProgram(), random: random, strokeSeed: 91
     )
 }
 
@@ -584,6 +718,31 @@ private func naturalCharcoalLogicalDabs(
     return dabs
 }
 
+private func chiselMarkerLogicalDabs(
+    seed: UInt64,
+    viewport: ViewportTransform
+) -> [LogicalDab] {
+    var input = BrushInputDeriver()
+    var generator = BrushStrokeGenerator(
+        program: chiselMarkerProgram(), nominalDiameter: 40, color: .black, seed: seed
+    )
+    var dabs: [LogicalDab] = []
+    for sample in StrokeTraceFixtures.professionalPressureRamp.samples where sample.kind != .predicted {
+        let world = input.derive(sample, viewport: viewport)
+        switch world.phase {
+        case .began:
+            dabs += generator.beginBatches(world).flatMap(\.dabs)
+        case .moved:
+            dabs += generator.appendBatches(world).flatMap(\.dabs)
+        case .ended:
+            dabs += generator.finishBatches(world).flatMap(\.dabs)
+        case .cancelled:
+            generator.cancel()
+        }
+    }
+    return dabs
+}
+
 private func graphiteStrokeSample(
     x: Float,
     timestamp: TimeInterval,
@@ -596,6 +755,17 @@ private func graphiteStrokeSample(
 }
 
 private func naturalCharcoalStrokeSample(
+    x: Float,
+    timestamp: TimeInterval,
+    phase: StrokePhase
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x + 1, y: 1), pressure: 1, timestamp: timestamp,
+        phase: phase, source: .pencil, capabilities: [.pressure]
+    )
+}
+
+private func chiselMarkerStrokeSample(
     x: Float,
     timestamp: TimeInterval,
     phase: StrokePhase

@@ -7,6 +7,7 @@ public enum ProfessionalBrushDefinitions {
     public static let technicalInk = makeTechnicalInk()
     public static let graphitePencil = makeGraphitePencil()
     public static let naturalCharcoal = makeNaturalCharcoal()
+    public static let chiselMarker = makeChiselMarker()
 
     private static let limits = BrushDefinitionLimits(
         minimumDiameter: 0.01,
@@ -475,6 +476,116 @@ public enum ProfessionalBrushDefinitions {
             )
         } catch {
             preconditionFailure("Invalid professional Natural Charcoal definition: \(error)")
+        }
+    }
+
+    private static func makeChiselMarker() -> BrushDefinition {
+        do {
+            let one = constant(1)
+            let zero = constant(0)
+            return try BrushDefinition(
+                id: BrushRecipeID("builtin.professional-chisel-marker"),
+                metadata: BrushMetadata(displayName: "Chisel Marker"),
+                capabilities: [],
+                resources: [
+                    BrushResourceReference(
+                        identifier: "builtin.shape.marker-chisel",
+                        kind: .shape,
+                        required: false,
+                        fallback: .builtIn(identifier: "builtin.shape.marker-chisel")
+                    ),
+                ],
+                coverage: BrushCoverageDefinition(
+                    shapes: [
+                        BrushShapeLayerDefinition(
+                            shape: .asset("builtin.shape.marker-chisel"),
+                            combination: .replace,
+                            scale: 1,
+                            rotation: 0,
+                            offset: .zero
+                        ),
+                    ],
+                    grains: [],
+                    baseHardness: 0.96,
+                    aspectRatio: 0.22,
+                    tipThreshold: 0.01,
+                    antialiasing: true
+                ),
+                placement: BrushPlacementDefinition(
+                    baseSpacingFraction: 0.035,
+                    maximumSpacingFraction: 0.10,
+                    baseFlow: 0.56,
+                    strokeOpacity: 0.82,
+                    baseScatterFraction: 0,
+                    baseRotation: 0,
+                    baseJitterFraction: 0,
+                    baseOffset: .zero
+                ),
+                dynamics: BrushDynamicsDefinition(
+                    size: linear(.pressure, output: 0.70...1),
+                    flow: linear(.speed, output: 0.75...1, inverted: true),
+                    opacity: one,
+                    spacing: one,
+                    rotation: linear(.direction, output: 0...(2 * .pi)),
+                    scatter: one,
+                    hardness: one,
+                    grain: one,
+                    offsetX: zero,
+                    offsetY: zero,
+                    hue: zero,
+                    saturation: zero,
+                    brightness: zero,
+                    secondaryColorMix: zero,
+                    noPressureNeutral: 1,
+                    randomization: .none
+                ),
+                color: BrushColorBehaviorDefinition(
+                    baseAdjustment: .identity,
+                    perStampJitter: BrushColorJitter(
+                        hue: 0,
+                        saturation: 0,
+                        brightness: 0,
+                        secondaryColorMix: 0
+                    ),
+                    perStrokeJitter: BrushColorJitter(
+                        hue: 0,
+                        saturation: 0,
+                        brightness: 0,
+                        secondaryColorMix: 0
+                    )
+                ),
+                material: BrushMaterialDefinition(
+                    accumulation: .uniformGlaze,
+                    interaction: .none,
+                    edgeTreatment: .markerOverlap,
+                    strength: 0.95,
+                    wetness: 0,
+                    bleedRadius: 0,
+                    softenPasses: 0,
+                    accumulationLimit: 0.82,
+                    interactionParameters: nil
+                ),
+                stabilization: 0.12,
+                taper: BrushTaperConfiguration(
+                    start: .diameterMultiples(0.35),
+                    end: .diameterMultiples(0.35),
+                    minimumSize: 0.85,
+                    minimumFlow: 0.85,
+                    effects: [.size, .flow]
+                ),
+                replayMode: .replayTail,
+                replayLimits: BrushRecipePolicy.replayTailLimits,
+                seedPolicy: .perStroke,
+                limits: limits,
+                performanceIntent: .realtime120,
+                compatibility: BrushCompatibilityMetadata(
+                    nativeFeatureVersion: 1,
+                    sourceSettingKeys: [],
+                    requiredSemanticKeys: []
+                )
+            )
+        } catch {
+            preconditionFailure("Invalid professional Chisel Marker definition: \(error)")
         }
     }
 }

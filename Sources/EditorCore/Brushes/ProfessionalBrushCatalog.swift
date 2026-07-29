@@ -36,7 +36,12 @@ public enum ProfessionalBrushCatalog {
         definition: ProfessionalBrushDefinitions.naturalCharcoal
     )
 
-    public static let all = [technicalInk, graphitePencil, naturalCharcoal]
+    public static let chiselMarker = ProfessionalBrushEntry(
+        displayName: "Chisel Marker",
+        definition: ProfessionalBrushDefinitions.chiselMarker
+    )
+
+    public static let all = [technicalInk, graphitePencil, naturalCharcoal, chiselMarker]
 
     public static func entry(for id: BrushRecipeID) -> ProfessionalBrushEntry? {
         all.first { $0.id == id }
