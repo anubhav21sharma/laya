@@ -230,7 +230,7 @@ SWIFT
 
 copy_physical_profiles() {
   local input="${PROFESSIONAL_BRUSH_PHYSICAL_EVIDENCE_DIR:-}"
-  [[ -n "$input" ]] || return
+  [[ -n "$input" ]] || return 0
   [[ -d "$input" && ! -L "$input" ]] \
     || fail "physical evidence input must be a regular directory"
   local profile

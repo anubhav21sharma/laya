@@ -181,6 +181,53 @@ struct ProfessionalBrushEvidenceValidatorTests {
             }
         }
     }
+
+    @Test
+    func absentOptionalPhysicalEvidenceContinuesAsPending() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let script = repositoryRoot.appendingPathComponent(
+            "scripts/verify-brush-stage5.sh"
+        )
+        let process = Process()
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [
+            "-c",
+            """
+            set -eEuo pipefail
+            artifacts="$(mktemp -d)"
+            trap 'rm -rf "$artifacts"' EXIT
+            function_source="$(
+              sed -n \
+                '/^copy_physical_profiles()/,/^write_json_status_and_provenance()/p' \
+                "$1" \
+                | sed '$d'
+            )"
+            eval "$function_source"
+            unset PROFESSIONAL_BRUSH_PHYSICAL_EVIDENCE_DIR
+            copy_physical_profiles
+            printf 'continued-as-pending\\n'
+            """,
+            "professional-physical-regression",
+            script.path,
+        ]
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+        try process.run()
+        process.waitUntilExit()
+
+        let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
+        let error = standardError.fileHandleForReading.readDataToEndOfFile()
+        #expect(
+            process.terminationStatus == 0,
+            "stderr: \(String(decoding: error, as: UTF8.self))"
+        )
+        #expect(output == Data("continued-as-pending\n".utf8))
+    }
 }
 
 private func artifactManifestFixture() throws -> URL {
