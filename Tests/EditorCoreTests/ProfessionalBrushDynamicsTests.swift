@@ -1,4 +1,5 @@
 import EditorCore
+import Foundation
 import PatternEngine
 import Testing
 
@@ -60,6 +61,60 @@ func technicalInkReplayIsDeterministicAndDoesNotRequestInteraction() {
     #expect(program.requestedBackend == .deposition)
 }
 
+@Test
+func technicalInkReplayTailRetroactivelyTapersCompletedShortStroke() throws {
+    let program = ProfessionalBrushCatalog.technicalInk.program
+    var input = BrushInputDeriver()
+    var generator = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 40,
+        color: .black,
+        seed: 91
+    )
+    let viewport = ViewportTransform(
+        drawableSize: PatternSize(width: 2, height: 2),
+        worldCenter: WorldPoint(x: 0, y: 0)
+    )
+    let began = input.derive(
+        technicalInkStrokeSample(x: 0, timestamp: 0, phase: .began),
+        viewport: viewport
+    )
+    let ended = input.derive(
+        technicalInkStrokeSample(x: 20, timestamp: 1, phase: .ended),
+        viewport: viewport
+    )
+    let leading = try generator.beginBatch(began)
+    let authoritativeTail = try generator.finishBatch(ended)
+    let emitted = leading.dabs + authoritativeTail.dabs
+    let totalDistance = try #require(emitted.last?.sourceDistance)
+    let retapered: [LogicalDab] = emitted.map { dab in
+        BrushDynamicsEngine().applyingKnownTotalDistance(
+            dab,
+            totalDistance: totalDistance,
+            nominalDiameter: 40,
+            definition: program.definition
+        )
+    }
+    let originalLast = try #require(emitted.last)
+    let firstRetapered = try #require(retapered.first)
+    let lastRetapered = try #require(retapered.last)
+    let maximumDiameter = try #require(retapered.map(\.diameter).max())
+    let maximumFlow = try #require(retapered.map(\.flow).max())
+
+    #expect(program.replayContract.mode == .replayTail)
+    #expect(program.replayContract.limits == BrushRecipePolicy.replayTailLimits)
+    #expect(authoritativeTail.dabs.last?.sourceDistance == totalDistance)
+    #expect(originalLast.diameter > lastRetapered.diameter)
+    #expect(abs(firstRetapered.diameter - 3.2) < 0.000_01)
+    #expect(abs(lastRetapered.diameter - 3.2) < 0.000_01)
+    #expect(abs(firstRetapered.flow - 0.225) < 0.000_01)
+    #expect(abs(lastRetapered.flow - 0.225) < 0.000_01)
+    #expect(abs(maximumDiameter - 8.352) < 0.000_01)
+    #expect(abs(maximumFlow - 0.3195) < 0.000_01)
+    #expect(retapered.map(\.ordinal) == emitted.map(\.ordinal))
+    #expect(retapered.map(\.randomValues) == emitted.map(\.randomValues))
+}
+
 private func technicalInkDab(
     pressure: Float = 1,
     capabilities: StrokeInputCapabilities = [.pressure],
@@ -100,5 +155,20 @@ private func technicalInkDab(
             materialVariation: 0.9
         ),
         strokeSeed: 91
+    )
+}
+
+private func technicalInkStrokeSample(
+    x: Float,
+    timestamp: TimeInterval,
+    phase: StrokePhase
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x + 1, y: 1),
+        pressure: 1,
+        timestamp: timestamp,
+        phase: phase,
+        source: .pencil,
+        capabilities: [.pressure]
     )
 }
