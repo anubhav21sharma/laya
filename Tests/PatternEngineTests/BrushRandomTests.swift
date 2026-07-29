@@ -72,14 +72,16 @@ func splitMix64PinsWordsAndUpper24BitFloats(
     _ = engine.evaluate(
         sample: sample,
         context: context,
-        recipe: .legacyEquivalent,
-        random: disabledValues
+        program: nativeTestProgram(),
+        random: disabledValues,
+        strokeSeed: 1
     )
     _ = engine.evaluate(
         sample: sample,
         context: context,
-        recipe: enabledRecipe,
-        random: enabledValues
+        program: nativeTestProgram(enabledRecipe),
+        random: enabledValues,
+        strokeSeed: 1
     )
 
     #expect(disabledCursor == enabledCursor)

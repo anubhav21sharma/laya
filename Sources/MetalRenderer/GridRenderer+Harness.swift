@@ -5,12 +5,33 @@ import PatternEngine
 
 @MainActor
 extension GridRenderer {
-    func installNativeHarnessBrushes() throws {
+    public func installNativeHarnessBrushes() throws {
         try activateDrawBrush(
             makeNativeHarnessBrush(mode: .draw)
         )
         try activateEraserBrush(
             makeNativeHarnessBrush(mode: .erase)
+        )
+    }
+
+    public func nativeHarnessStrokeStyle(
+        color: InkColor = .black,
+        diameter: Float = GridCanvasContract.brushRadius * 2,
+        compositeMode: StrokeCompositeMode = .draw,
+        eraserStrength: Float = 1,
+        seed: UInt64
+    ) throws -> StrokeRenderStyle {
+        guard let brush = preparedBrush(for: compositeMode) else {
+            throw MetalRendererError.compiledBrushUnavailable(compositeMode)
+        }
+        return StrokeRenderStyle(
+            color: color,
+            diameter: diameter,
+            compositeMode: compositeMode,
+            eraserStrength: eraserStrength,
+            program: brush.program,
+            renderIdentity: brush.renderIdentity,
+            seed: seed
         )
     }
 
@@ -88,7 +109,7 @@ extension GridRenderer {
         )
     }
 
-    static func nativeHarnessDefinition(
+    nonisolated static func nativeHarnessDefinition(
         mode: StrokeCompositeMode
     ) throws -> BrushDefinition {
         let one = BrushMappingDefinition(
@@ -543,16 +564,14 @@ extension GridRenderer {
         forceCommitFailure: Bool = false
     ) throws -> GPUFrameMetrics {
         do {
-            if activeStroke?.compiledBrush != nil {
-                for _ in 0..<64 {
-                    try prepareCompiledCommitIfReady()
-                    if activeStroke?.pendingRevisions != nil {
-                        break
-                    }
-                    _ = try flushPendingLiveForHarness()
-                }
+            for _ in 0..<64 {
                 try prepareCompiledCommitIfReady()
+                if activeStroke?.pendingRevisions != nil {
+                    break
+                }
+                _ = try flushPendingLiveForHarness()
             }
+            try prepareCompiledCommitIfReady()
             let metrics = try submitCommitForHarness(
                 forceFailure: forceCommitFailure
             )
@@ -638,17 +657,14 @@ extension GridRenderer {
         drainFrameOutcomes()
         drainCompletedUploadRanges()
         try prepareCompiledCommitIfReady()
-        let nativeIsReady = activeStroke?.compiledBrush != nil
-            && activeStroke?.scheduler?.authoritativeIsDrained == true
+        let nativeIsReady =
+            activeStroke?.scheduler?.authoritativeIsDrained == true
             && activeStroke?.scheduler?.predictedCount == 0
             && !needsReplayClear
-        let legacyIsReady = activeStroke?.compiledBrush == nil
-            && liveStroke.bakedHighWater == liveStroke.emittedHighWater
-            && replayStroke.bakedHighWater == replayStroke.emittedHighWater
         guard activeStroke?.commitRequested == true,
               activeStroke?.pendingTokenBearingFrameCount == 0,
               activeStroke?.pendingRevisions != nil,
-              nativeIsReady || legacyIsReady
+              nativeIsReady
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -865,7 +881,7 @@ extension GridRenderer {
         activeEraserBrush?.renderIdentity
     }
     var harnessCapturedCompiledBrushIdentity: BrushRenderIdentity? {
-        activeStroke?.compiledBrush?.renderIdentity
+        activeStroke?.compiledBrush.renderIdentity
     }
     var harnessScheduledAuthoritativeRecords:
         [ProjectedDepositionRecord]

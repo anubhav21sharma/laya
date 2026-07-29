@@ -32,7 +32,7 @@ public enum BrushCharacterizationEvidenceError: Error, Equatable, LocalizedError
         case let .recordCount(expected, actual):
             "Brush characterization expected \(expected) records, found \(actual)."
         case .sceneSetMismatch:
-            "Brush characterization scene names do not match the expected Slice 4 matrix."
+            "Brush characterization scene names do not match the expected native deposition matrix."
         case .digestMismatch:
             "Brush characterization canonical or logical digest does not match the baseline."
         }

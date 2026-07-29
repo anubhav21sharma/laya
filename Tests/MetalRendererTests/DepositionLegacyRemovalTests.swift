@@ -4,46 +4,69 @@ import Testing
 @Suite("Deposition legacy removal")
 struct DepositionLegacyRemovalTests {
     @Test
-    func productionRendererContainsNoLegacyDepositionSurface() throws {
+    func activeProductionContainsNoLegacyDepositionRuntimeSurface() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let fileManager = FileManager.default
-        let rendererRoot = repositoryRoot.appendingPathComponent(
-            "Sources/MetalRenderer"
-        )
-        let explicitFiles = [
+        let productionRoots = [
+            repositoryRoot.appendingPathComponent("Sources/PatternEngine"),
+            repositoryRoot.appendingPathComponent("Sources/MetalRenderer"),
+            repositoryRoot.appendingPathComponent("Sources/EditorCore"),
+            repositoryRoot.appendingPathComponent("App/PatternSpike"),
+        ]
+        let explicitFiles: [URL] = [
             repositoryRoot.appendingPathComponent(
                 "Sources/CShaderTypes/include/ShaderTypes.h"
-            ),
-            repositoryRoot.appendingPathComponent(
-                "Sources/EditorCore/Brushes/AnchorBrushCatalog.swift"
             ),
         ]
         let forbiddenTokens = [
             "compatibilityRecipe",
+            "LegacyBrushRecipeAdapter.",
             "BrushMaterialState",
             "BoundedWashSurface",
             "PatternMaterialWireBoundedWash",
+            "PatternDepositionEdgeWetConcentration",
             "patternWash",
             "pipelines.stamp",
             "washDeposit",
             "washSoften",
             "washResolve",
+            "legacyIsReady",
+            "compiledBrush: nil",
+            "let compiledBrush: CompiledBrush?",
+            "execution.compiledBrush != nil",
+            "func compatibilityRandomValues(",
+            """
+            func materialInputs(
+                    _ material: BrushMaterial
+                ) -> BrushMaterialInputs
+            """,
+            """
+            public static func legacy(
+                    recipe: BrushRecipe
+            """,
+        ]
+        let allowedHistoricalSchemaFiles: Set<String> = [
+            "Sources/PatternEngine/BrushModel/LegacyBrushRecipeAdapter.swift",
         ]
 
-        let rendererFiles = try #require(
-            fileManager.enumerator(
-                at: rendererRoot,
-                includingPropertiesForKeys: [.isRegularFileKey]
+        var discoveredFiles: [URL] = []
+        for root in productionRoots {
+            let files = try #require(
+                fileManager.enumerator(
+                    at: root,
+                    includingPropertiesForKeys: [.isRegularFileKey]
+                )
             )
-        )
-        .compactMap { $0 as? URL }
-        .filter {
-            ["swift", "metal"].contains($0.pathExtension)
+            .compactMap { $0 as? URL }
+            .filter {
+                ["swift", "metal", "h"].contains($0.pathExtension)
+            }
+            discoveredFiles.append(contentsOf: files)
         }
-        let productionFiles = (rendererFiles + explicitFiles)
+        let productionFiles = (discoveredFiles + explicitFiles)
             .sorted { $0.path < $1.path }
         var violations: [String] = []
 
@@ -53,7 +76,13 @@ struct DepositionLegacyRemovalTests {
                 of: repositoryRoot.path + "/",
                 with: ""
             )
-            for token in forbiddenTokens where source.contains(token) {
+            for token in forbiddenTokens
+            where source.contains(token)
+                && !(
+                    token == "LegacyBrushRecipeAdapter."
+                        && allowedHistoricalSchemaFiles.contains(relativePath)
+                )
+            {
                 violations.append("\(relativePath): \(token)")
             }
         }

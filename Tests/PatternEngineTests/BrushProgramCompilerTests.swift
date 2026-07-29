@@ -2,7 +2,7 @@ import Testing
 @testable import PatternEngine
 
 @Test(arguments: AnchorRecipeFixtures.all)
-func compiledProgramMatchesLegacyEvaluation(
+func compiledProgramCharacterizationIsDeterministic(
     _ fixture: AnchorRecipeFixture
 ) throws {
     let definition = try LegacyBrushRecipeAdapter.definition(
@@ -16,21 +16,20 @@ func compiledProgramMatchesLegacyEvaluation(
         drawableSize: PatternSize(width: 256, height: 256),
         worldCenter: WorldPoint(x: 128, y: 128)
     )
-    #expect(program.compatibilityRecipe == fixture.recipe)
     for trace in [
         StrokeTraceFixtures.pressureRamp,
         StrokeTraceFixtures.curved,
         StrokeTraceFixtures.predictionCorrection,
     ] {
-        let legacy = BrushCharacterizer.record(
-            trace: trace, recipe: fixture.recipe, nominalDiameter: 20,
-            color: .black, seed: 71, viewport: viewport
-        )
-        let compiled = BrushCharacterizer.record(
+        let first = BrushCharacterizer.record(
             trace: trace, program: program, nominalDiameter: 20,
             color: .black, seed: 71, viewport: viewport
         )
-        #expect(compiled == legacy)
+        let repeated = BrushCharacterizer.record(
+            trace: trace, program: program, nominalDiameter: 20,
+            color: .black, seed: 71, viewport: viewport
+        )
+        #expect(first == repeated)
     }
 }
 

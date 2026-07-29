@@ -312,207 +312,12 @@ public struct BrushDynamicsEngine: Sendable {
         random: BrushRandomValues,
         strokeSeed: UInt64
     ) -> DabAttributes {
-        if let recipe = program.compatibilityRecipe {
-            return evaluateLegacy(
-                sample: sample,
-                context: context,
-                recipe: recipe,
-                random: random
-            )
-        }
-        return evaluateNative(
+        evaluateNative(
             sample: sample,
             context: context,
             program: program,
             random: random,
             strokeSeed: strokeSeed
-        )
-    }
-
-    /// Temporary compatibility entry point. Production stroke setup passes a
-    /// precompiled `BrushProgram`; this adapter remains for test harnesses.
-    @available(
-        *, deprecated,
-        message: "Compile BrushDefinition to BrushProgram and call evaluate(sample:context:program:random:strokeSeed:)."
-    )
-    public func evaluate(
-        sample: InterpolatedStrokeSample,
-        context: BrushStrokeContext,
-        recipe: BrushRecipe,
-        random: BrushRandomValues
-    ) -> DabAttributes {
-        let definition = try! LegacyBrushRecipeAdapter.definition(
-            from: recipe,
-            displayName: recipe.id.rawValue
-        )
-        let program = try! BrushProgramCompiler.compile(definition)
-        return evaluate(
-            sample: sample,
-            context: context,
-            program: program,
-            random: random,
-            strokeSeed: 1
-        )
-    }
-
-    private func evaluateLegacy(
-        sample: InterpolatedStrokeSample,
-        context: BrushStrokeContext,
-        recipe: BrushRecipe,
-        random: BrushRandomValues
-    ) -> DabAttributes {
-        let pressure = sample.capabilities.contains(.pressure)
-            ? sample.pressure
-            : recipe.noPressureNeutral
-        let inputs = Inputs(
-            sample: sample,
-            context: context,
-            pressure: pressure
-        )
-
-        let sizeFactor = evaluate(
-            recipe.sizeMapping,
-            inputs: inputs,
-            disabledValue: 1
-        )
-        let taperEnvelope = taperEnvelope(
-            context: context,
-            recipe: recipe
-        )
-        let sizeTaper = recipe.taper.effects.contains(.size)
-            ? interpolate(
-                from: recipe.taper.minimumSize,
-                to: 1,
-                fraction: taperEnvelope
-            )
-            : 1
-        let diameter = context.nominalDiameter * sizeFactor * sizeTaper
-        let radius = diameter * 0.5
-
-        let spacingFactor = evaluate(
-            recipe.spacingMapping,
-            inputs: inputs,
-            disabledValue: 1
-        )
-        let randomizedSpacing = diameter
-            * recipe.baseSpacingFraction
-            * spacingFactor
-            * (1 + symmetric(random.spacing) * recipe.randomization.spacing)
-        let spacingUpperBound = max(
-            1,
-            min(8, diameter * recipe.maximumSpacingFraction)
-        )
-        let spacing = min(
-            spacingUpperBound,
-            max(1, randomizedSpacing)
-        )
-
-        let flowFactor = evaluate(
-            recipe.flowMapping,
-            inputs: inputs,
-            disabledValue: 1
-        )
-        let flowTaper = recipe.taper.effects.contains(.flow)
-            ? interpolate(
-                from: recipe.taper.minimumFlow,
-                to: 1,
-                fraction: taperEnvelope
-            )
-            : 1
-        let flow = clamp01(recipe.baseFlow * flowFactor * flowTaper)
-
-        let rotation = recipe.baseRotation
-            + evaluate(
-                recipe.rotationMapping,
-                inputs: inputs,
-                disabledValue: 0
-            )
-            + symmetric(random.rotation) * recipe.randomization.rotation
-        let scatterFactor = evaluate(
-            recipe.scatterMapping,
-            inputs: inputs,
-            disabledValue: 1
-        )
-        let maximumScatter = context.nominalDiameter
-            * recipe.baseScatterFraction
-            * scatterFactor
-            * recipe.randomization.scatter
-        let scatter = SIMD2(
-            symmetric(random.scatterX) * maximumScatter,
-            symmetric(random.scatterY) * maximumScatter
-        )
-        let position = WorldPoint(sample.position.simd + scatter)
-
-        let cosine = cos(rotation)
-        let sine = sin(rotation)
-        let brushToWorld = Affine2D(
-            xAxis: SIMD2(cosine, sine) * radius,
-            yAxis: SIMD2(-sine, cosine) * radius * recipe.aspectRatio,
-            translation: position.simd
-        )
-
-        let hardness = clamp01(
-            recipe.baseHardness
-                * evaluate(
-                    recipe.hardnessMapping,
-                    inputs: inputs,
-                    disabledValue: 1
-                )
-        )
-        let grainScale = recipe.grainTransform.scale
-            * evaluate(
-                recipe.grainMapping,
-                inputs: inputs,
-                disabledValue: 1
-            )
-        let grainOffset = recipe.grainTransform.offset + SIMD2(
-            symmetric(random.grainX) * recipe.randomization.grain,
-            symmetric(random.grainY) * recipe.randomization.grain
-        )
-        let color = adjustedColor(
-            context.color,
-            adjustment: recipe.colorAdjustment
-        )
-        let materialContribution = clamp01(
-            recipe.material.strength
-                * (
-                    1
-                        + symmetric(random.materialVariation)
-                        * recipe.randomization.material
-                )
-        )
-
-        return DabAttributes(
-            position: position,
-            brushToWorld: brushToWorld,
-            radius: radius,
-            diameter: diameter,
-            spacing: spacing,
-            flow: flow,
-            strokeOpacity: recipe.strokeOpacity,
-            rotation: rotation,
-            scatter: scatter,
-            hardness: hardness,
-            grainOffset: grainOffset,
-            grainScale: grainScale,
-            grainRotation: recipe.grainTransform.rotation,
-            color: color,
-            colorAdjustment: recipe.colorAdjustment,
-            materialFamily: recipe.material.family,
-            materialContribution: materialContribution,
-            sourceDistance: context.traveledDistance,
-            ordinal: context.ordinal,
-            isPredicted: context.isPredicted,
-            primaryGrainToWorld: recipe.grain == .opaque
-                ? nil
-                : grainFrame(
-                    scale: grainScale,
-                    rotation: recipe.grainTransform.rotation,
-                    offset: grainOffset
-                ),
-            secondaryGrainToWorld: nil,
-            materialInputs: materialInputs(recipe.material),
-            randomValues: compatibilityRandomValues(random)
         )
     }
 
@@ -655,8 +460,7 @@ public struct BrushDynamicsEngine: Sendable {
             ordinal: context.ordinal, channel: .secondaryColorMix
         ) + perStampColorJitter.secondaryColorMix
             + perStrokeColorJitter.secondaryColorMix)
-        let materialFamily = program.compatibilityRecipe?.material.family
-            ?? nativeMaterialFamily(definition.material)
+        let materialFamily = nativeMaterialFamily(definition.material)
         let materialContribution = clamp01(
             definition.material.strength * (
                 1 + symmetric(random.materialVariation)
@@ -737,22 +541,6 @@ public struct BrushDynamicsEngine: Sendable {
             totalDistance: totalDistance,
             nominalDiameter: nominalDiameter,
             taper: definition.taper,
-            retainedReplayStartDistance: retainedReplayStartDistance
-        )
-    }
-
-    public func applyingKnownTotalDistance(
-        _ dab: DabAttributes,
-        totalDistance: Float,
-        nominalDiameter: Float,
-        recipe: BrushRecipe,
-        retainedReplayStartDistance: Float? = nil
-    ) -> DabAttributes {
-        applyingKnownTotalDistance(
-            dab,
-            totalDistance: totalDistance,
-            nominalDiameter: nominalDiameter,
-            taper: recipe.taper,
             retainedReplayStartDistance: retainedReplayStartDistance
         )
     }
@@ -981,29 +769,6 @@ private extension BrushDynamicsEngine {
         }
     }
 
-    func evaluate(
-        _ mapping: BrushMapping,
-        inputs: Inputs,
-        disabledValue: Float
-    ) -> Float {
-        guard mapping.response != .disabled else { return disabledValue }
-        let input = inputs.value(for: mapping.input)
-        let response: Float
-        switch mapping.response {
-        case .disabled:
-            return disabledValue
-        case .linear:
-            response = input
-        case .boundedPower:
-            response = pow(input, mapping.exponent)
-        }
-        return interpolate(
-            from: mapping.outputMinimum,
-            to: mapping.outputMaximum,
-            fraction: response
-        )
-    }
-
     func nativePlacementJitter(
         fraction: Float,
         nominalDiameter: Float,
@@ -1161,28 +926,6 @@ private extension BrushDynamicsEngine {
 
     func taperEnvelope(
         context: BrushStrokeContext,
-        recipe: BrushRecipe
-    ) -> Float {
-        let start = envelope(
-            distance: context.traveledDistance,
-            length: recipe.taper.start,
-            nominalDiameter: context.nominalDiameter
-        )
-        let end: Float
-        if let totalDistance = context.totalDistance {
-            end = envelope(
-                distance: max(0, totalDistance - context.traveledDistance),
-                length: recipe.taper.end,
-                nominalDiameter: context.nominalDiameter
-            )
-        } else {
-            end = 1
-        }
-        return min(start, end)
-    }
-
-    func taperEnvelope(
-        context: BrushStrokeContext,
         taper: BrushTaperConfiguration
     ) -> Float {
         let start = envelope(
@@ -1289,27 +1032,6 @@ private extension BrushDynamicsEngine {
     }
 
     func materialInputs(
-        _ material: BrushMaterial
-    ) -> BrushMaterialInputs {
-        let semantics: (BrushAccumulationMode, BrushEdgeTreatment) = switch material.family {
-        case .ink: (.flow, .none)
-        case .dry: (.flow, .dryBreakup)
-        case .glaze: (.uniformGlaze, .markerOverlap)
-        case .boundedWash: (.flow, .wetConcentration)
-        }
-        return BrushMaterialInputs(
-            accumulation: semantics.0,
-            interaction: .none,
-            edgeTreatment: semantics.1,
-            strength: material.strength,
-            wetness: material.wetness,
-            bleedRadius: material.bleedRadius,
-            accumulationLimit: material.accumulationLimit,
-            interactionParameters: nil
-        )
-    }
-
-    func materialInputs(
         _ material: BrushMaterialDefinition
     ) -> BrushMaterialInputs {
         BrushMaterialInputs(
@@ -1376,24 +1098,6 @@ private extension BrushDynamicsEngine {
             xAxis: SIMD2(cosine, sine),
             yAxis: SIMD2(-sine, cosine),
             translation: anchor + rotatedOffset
-        )
-    }
-
-    func compatibilityRandomValues(
-        _ compatibility: BrushRandomValues
-    ) -> BrushLogicalRandomValues {
-        BrushLogicalRandomValues(
-            compatibility: compatibility,
-            size: 0,
-            flow: 0,
-            opacity: 0,
-            hardness: 0,
-            offsetX: 0,
-            offsetY: 0,
-            hue: 0,
-            saturation: 0,
-            brightness: 0,
-            secondaryColorMix: 0
         )
     }
 

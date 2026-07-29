@@ -181,7 +181,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     struct ActiveStrokeExecution {
         let token: RendererOperationToken
         let style: StrokeRenderStyle
-        let compiledBrush: CompiledBrush?
+        let compiledBrush: CompiledBrush
         let renderIdentity: BrushRenderIdentity
         var scheduler: FrameScheduler?
         var commitRequested: Bool
@@ -1023,15 +1023,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try requireCollectingStroke(token: token)
         do {
             try finishStrokeTransient(token: token, sample: sample)
-            if activeStroke?.compiledBrush != nil {
-                try requestCompiledStrokeCommit(
-                    maximumRetainedBytes: maximumRetainedBytes
-                )
-            } else {
-                try prepareCurrentStrokeCommit(
-                    maximumRetainedBytes: maximumRetainedBytes
-                )
-            }
+            try requestCompiledStrokeCommit(
+                maximumRetainedBytes: maximumRetainedBytes
+            )
         } catch {
             discardPendingRevisionsIfPossible()
             activeStroke = nil
@@ -1085,15 +1079,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         do {
-            if activeStroke?.compiledBrush != nil {
-                try requestCompiledStrokeCommit(
-                    maximumRetainedBytes: maximumRetainedBytes
-                )
-            } else {
-                try prepareCurrentStrokeCommit(
-                    maximumRetainedBytes: maximumRetainedBytes
-                )
-            }
+            try requestCompiledStrokeCommit(
+                maximumRetainedBytes: maximumRetainedBytes
+            )
         } catch {
             discardPendingRevisionsIfPossible()
             activeStroke = nil
@@ -1730,7 +1718,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.rasterRevisionStorageLimitExceeded
         }
         guard var execution = activeStroke,
-              execution.compiledBrush != nil,
               var scheduler = execution.scheduler,
               !execution.commitRequested,
               execution.pendingRevisions == nil
@@ -1750,7 +1737,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     func prepareCompiledCommitIfReady() throws {
         guard var execution = activeStroke,
-              execution.compiledBrush != nil,
               execution.commitRequested,
               execution.pendingRevisions == nil,
               execution.scheduler?.authoritativeIsDrained == true,
@@ -1817,6 +1803,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard activeStroke == nil else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        guard let brush = preparedBrush(for: .draw) else {
+            throw MetalRendererError.compiledBrushUnavailable(.draw)
+        }
         let token = RendererOperationToken(rawValue: nextHarnessTokenRawValue)
         nextHarnessTokenRawValue &+= 1
         if nextHarnessTokenRawValue == 0 {
@@ -1826,14 +1815,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             color: .black,
             diameter: radius * 2,
             compositeMode: .draw,
-            eraserStrength: 1
+            eraserStrength: 1,
+            program: brush.program,
+            renderIdentity: brush.renderIdentity,
+            seed: token.rawValue
         )
         resetLiveState()
         activeStroke = ActiveStrokeExecution(
             token: token,
             style: style,
-            compiledBrush: nil,
-            renderIdentity: style.renderIdentity,
+            compiledBrush: brush,
+            renderIdentity: brush.renderIdentity,
             scheduler: FrameScheduler(budget: depositionFrameBudget),
             commitRequested: false,
             commitRetainedByteLimit: nil,
@@ -2430,7 +2422,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func projectedRecords(
         for dab: DabAttributes
     ) throws -> [ProjectedDabRecord] {
-        guard let activeStroke else {
+        guard activeStroke != nil else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let footprint = StampFootprint(
@@ -2445,11 +2437,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             for: footprint,
             using: tilingStrategy
         )
-        guard activeStroke.compiledBrush != nil else {
-            throw MetalRendererError.compiledBrushUnavailable(
-                activeStroke.style.compositeMode
-            )
-        }
         return try fragments.map { fragment in
             let isometryOrdinal = try compiledIsometryOrdinal(
                 for: fragment
@@ -2712,7 +2699,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         PatternCompositeUniforms(
             parameters: SIMD4(
                 activeStroke?.style.color.alpha ?? 1,
-                activeStroke?.compiledBrush?.program.definition.material
+                activeStroke?.compiledBrush.program.definition.material
                     .accumulationLimit ?? 1,
                 activeStroke?.style.compositeMode == .erase
                     ? activeStroke?.style.eraserStrength ?? 1
@@ -3262,10 +3249,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let binding = execution.compiledBrush?.depositionPipeline
-            ?? pipelines.harnessDeposition
-        let material = execution.compiledBrush?.depositionMaterial
-            ?? pipelines.harnessDepositionMaterial
+        let binding = execution.compiledBrush.depositionPipeline
+        let material = execution.compiledBrush.depositionMaterial
 
         // Authoritative work owns the frame whenever it is present. This
         // keeps a frame to one render target, so preflight and submission are
@@ -3558,9 +3543,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         texture: any MTLTexture,
         layer: FrameUpload.Layer
     ) throws {
-        guard let brush = activeStroke?.compiledBrush else {
+        guard let execution = activeStroke else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        let brush = execution.compiledBrush
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = texture
         pass.colorAttachments[0].loadAction = .load

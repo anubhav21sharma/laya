@@ -285,13 +285,6 @@ public enum HarnessRunError: Error, Equatable, LocalizedError {
 
 @MainActor
 public final class HarnessRunner {
-    static let defaultStrokeStyle = StrokeRenderStyle(
-        color: .black,
-        diameter: GridCanvasContract.brushRadius * 2,
-        compositeMode: .draw,
-        eraserStrength: 1
-    )
-
     nonisolated static func translationInput(
         for program: TilingHarnessProgram
     ) -> TranslationHarnessInput? {
@@ -1355,6 +1348,7 @@ public final class HarnessRunner {
                 tiling: .grid
             )
         )
+        try pristineGridRenderer?.installNativeHarnessBrushes()
     }
 
     public func run(

@@ -12,8 +12,6 @@ public struct GridPipelineLibrary {
     public let radialResizeCopy: any MTLComputePipelineState
     public let commit: any MTLRenderPipelineState
     public let replayClear: any MTLRenderPipelineState
-    let harnessDeposition: DepositionPipelineBinding
-    let harnessDepositionMaterial: DepositionMaterialBinding
 
     public init(device: any MTLDevice, library: any MTLLibrary) throws {
         display = try Self.makePipeline(
@@ -92,60 +90,13 @@ public struct GridPipelineLibrary {
             fragment: "patternClearFragment",
             configure: { $0.isBlendingEnabled = false }
         )
-        let harnessBrushKey = BrushPipelineKey(
-            backend: .deposition,
-            accumulation: .opaque,
-            edgeTreatment: .none,
-            functionConstants: BrushFunctionConstants(
-                usesSecondaryShape: false,
-                usesGrain: false,
-                usesSecondaryGrain: false,
-                usesDestinationSampling: false
-            )
-        )
-        let harnessKey = DepositionPipelineKey(
-            brush: harnessBrushKey,
-            abiVersion: DepositionABI.version,
-            colorPixelFormatRawValue: Self.colorPixelFormat.rawValue,
-            sampleCount: Self.sampleCount
-        )
-        harnessDeposition = DepositionPipelineBinding(
-            key: harnessKey,
-            state: try Self.makeHarnessDepositionPipeline(
-                device: device,
-                library: library
-            )
-        )
-        harnessDepositionMaterial = .harnessOpaque
-    }
-
-    private static func makeHarnessDepositionPipeline(
-        device: any MTLDevice,
-        library: any MTLLibrary
-    ) throws -> any MTLRenderPipelineState {
-        let constants = harnessDepositionFunctionConstants()
-        return try makePipeline(
-            device: device,
-            library: library,
-            label: "Harness Native Deposition",
-            vertex: "patternProjectedDepositionVertex",
-            fragment: "patternDepositionFragment",
-            constants: constants,
-            configure: { attachment in
-                attachment.isBlendingEnabled = true
-                attachment.sourceRGBBlendFactor = .one
-                attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
-                attachment.sourceAlphaBlendFactor = .one
-                attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-            }
-        )
     }
 
     static func makeHarnessDiagnosticPipeline(
         device: any MTLDevice,
         library: any MTLLibrary
     ) throws -> any MTLRenderPipelineState {
-        let constants = harnessDepositionFunctionConstants()
+        let constants = harnessDiagnosticFunctionConstants()
         return try makePipeline(
             device: device,
             library: library,
@@ -163,7 +114,7 @@ public struct GridPipelineLibrary {
         )
     }
 
-    private static func harnessDepositionFunctionConstants()
+    private static func harnessDiagnosticFunctionConstants()
         -> MTLFunctionConstantValues
     {
         let constants = MTLFunctionConstantValues()

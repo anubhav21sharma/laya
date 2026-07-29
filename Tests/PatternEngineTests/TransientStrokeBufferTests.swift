@@ -125,7 +125,7 @@ private func transientChunk(
 
 private func transientGenerator(seed: UInt64) -> BrushStrokeGenerator {
     BrushStrokeGenerator(
-        recipe: .legacyEquivalent,
+        program: nativeTestProgram(),
         nominalDiameter: 20,
         color: .black,
         seed: seed

@@ -30,22 +30,30 @@ private func estimatedSample(
     )
 }
 
-private let style = StrokeRenderStyle(
-    color: .black,
-    diameter: 20,
-    compositeMode: .draw,
-    eraserStrength: 1
-)
-
-private let capturedProgram = AnchorBrushCatalog.dryPencil.program
-private let capturedProgramStyle = StrokeRenderStyle(
-    color: .black,
-    diameter: 20,
-    compositeMode: .draw,
-    eraserStrength: 1,
+private let style = editorTestStyle(program: AnchorBrushCatalog.ink.program)
+private let capturedProgram = AnchorBrushCatalog.dryMedia.program
+private let capturedProgramStyle = editorTestStyle(
     program: capturedProgram,
     seed: 41
 )
+
+private func editorTestStyle(
+    program: BrushProgram,
+    seed: UInt64 = 1
+) -> StrokeRenderStyle {
+    StrokeRenderStyle(
+        color: .black,
+        diameter: 20,
+        compositeMode: .draw,
+        eraserStrength: 1,
+        program: program,
+        renderIdentity: try! BrushRenderIdentity(
+            definitionID: program.definition.id,
+            semanticHash: String(repeating: "a", count: 64)
+        ),
+        seed: seed
+    )
+}
 
 private let squareConfiguration = PeriodicSymmetryConfiguration(
     presetID: .squareKaleidoscope,

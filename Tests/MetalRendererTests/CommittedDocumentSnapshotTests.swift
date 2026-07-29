@@ -109,6 +109,7 @@ struct CommittedDocumentSnapshotTests {
         )
         let committed = snapshotOpaqueBytes(size, salt: 3)
         try renderer.replaceCanonicalPixelsForHarness(committed)
+        try renderer.installNativeHarnessBrushes()
         _ = try renderer.beginFixedProjectedStrokeForHarness(
             at: WorldPoint(x: 17, y: 23)
         )

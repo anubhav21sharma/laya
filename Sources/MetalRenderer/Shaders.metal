@@ -338,7 +338,6 @@ static float patternDepositionCoverage(
             evaluated * (1.0 + 0.25 * edgeStrength * edgeBand)
         );
         break;
-    case PatternDepositionEdgeWetConcentration:
     default:
         return 0.0;
     }

@@ -56,6 +56,7 @@ extension HarnessRunner {
                         configuration.periodicConfiguration
                 )
             )
+            try gridRenderer.installNativeHarnessBrushes()
         }
 
         let state = GridProgramState(renderer: gridRenderer)
@@ -821,7 +822,9 @@ extension HarnessRunner {
                     timestamp: 0,
                     phase: .began
                 ),
-                style: Self.defaultStrokeStyle
+                style: try gridRenderer.nativeHarnessStrokeStyle(
+                    seed: activeToken.rawValue
+                )
             )
             let rejectedState =
                 gridRenderer.harnessTilingMutationSnapshot
@@ -1472,7 +1475,9 @@ extension HarnessRunner {
                 try renderer.beginStroke(
                     token: token,
                     sample: sample,
-                    style: Self.defaultStrokeStyle
+                    style: try renderer.nativeHarnessStrokeStyle(
+                        seed: token.rawValue
+                    )
                 )
                 measurements.activeOperationToken = token
             case .moved:
@@ -1534,7 +1539,7 @@ extension HarnessRunner {
         scene: HarnessScene,
         configuration: HarnessRenderConfiguration
     ) throws -> GridRenderer {
-        try GridRenderer(
+        let renderer = try GridRenderer(
             device: device,
             library: library,
             drawableSize: PatternSize(
@@ -1546,6 +1551,8 @@ extension HarnessRunner {
                 periodicConfiguration: configuration.periodicConfiguration
             )
         )
+        try renderer.installNativeHarnessBrushes()
+        return renderer
     }
 
     private func validateRotationalVisibleCellPair(

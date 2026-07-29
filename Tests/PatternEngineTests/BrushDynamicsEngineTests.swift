@@ -60,8 +60,9 @@ import Testing
         let dab = BrushDynamicsEngine().evaluate(
             sample: sample,
             context: context,
-            recipe: recipe,
-            random: .centered
+            program: nativeTestProgram(recipe),
+            random: .centered,
+            strokeSeed: 1
         )
         #expect(close(dab.diameter, expectedDiameter))
     }
@@ -135,7 +136,7 @@ import Testing
             ordinal: 7,
             isPredicted: true
         ),
-        recipe: recipe,
+        program: nativeTestProgram(recipe),
         random: BrushRandomValues(
             spacing: 0.75,
             scatterX: 0.75,
@@ -144,7 +145,8 @@ import Testing
             grainX: 0.75,
             grainY: 0.25,
             materialVariation: 0.75
-        )
+        ),
+        strokeSeed: 1
     )
 
     #expect(close(dab.diameter, 15))
@@ -272,7 +274,7 @@ import Testing
             $0,
             totalDistance: 100,
             nominalDiameter: 20,
-            recipe: recipe,
+            definition: nativeTestDefinition(recipe),
             retainedReplayStartDistance: retained.first?.sourceDistance
         )
     }
@@ -355,8 +357,9 @@ private func evaluate(
     BrushDynamicsEngine().evaluate(
         sample: sample,
         context: context,
-        recipe: recipe,
-        random: random
+        program: nativeTestProgram(recipe),
+        random: random,
+        strokeSeed: 1
     )
 }
 

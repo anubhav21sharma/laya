@@ -175,71 +175,16 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
         self.worldBoundsMaximum = worldBoundsMaximum
     }
 
-    public static func legacy(
-        recipe: BrushRecipe,
-        dab: LogicalDab,
-        seed: UInt64,
-        ordinal: UInt64
-    ) -> Self {
-        legacy(
-            recipe: recipe,
-            dab: dab,
-            seed: seed,
-            ordinal: ordinal,
-            compatibilityRandom: randomValues(seed: seed, ordinal: ordinal)
-        )
-    }
-
-    static func legacy(
-        recipe: BrushRecipe,
-        dab: LogicalDab,
-        seed: UInt64,
-        ordinal: UInt64,
-        compatibilityRandom: BrushRandomValues
-    ) -> Self {
-        let primaryGrainFrame = grainFrame(
-            scale: dab.grainScale,
-            rotation: dab.grainRotation,
-            offset: dab.grainOffset
-        )
-        let secondaryGrainFrame = Affine2D.identity
-        let extent = SIMD2(
-            abs(dab.brushToWorld.xAxis.x) + abs(dab.brushToWorld.yAxis.x),
-            abs(dab.brushToWorld.xAxis.y) + abs(dab.brushToWorld.yAxis.y)
-        )
-        return Self(
-            ordinal: ordinal,
-            dab: dab,
-            primaryGrainFrame: primaryGrainFrame,
-            secondaryGrainFrame: secondaryGrainFrame,
-            hasPrimaryGrain: recipe.grain != .opaque,
-            hasSecondaryGrain: false,
-            secondaryColorMix: 0,
-            accumulationEnabled: recipe.material.accumulationLimit < 1,
-            interactionEnabled: recipe.material.wetness > 0,
-            edgeEnabled: recipe.material.bleedRadius > 0,
-            materialStrength: recipe.material.strength,
-            materialWetness: recipe.material.wetness,
-            materialBleedRadius: recipe.material.bleedRadius,
-            materialSoftenPasses: UInt64(recipe.material.softenPasses),
-            materialAccumulationLimit: recipe.material.accumulationLimit,
-            compatibilityRandom: compatibilityRandom,
-            extensionRandom: .zero,
-            worldBoundsMinimum: dab.position.simd - extent,
-            worldBoundsMaximum: dab.position.simd + extent
-        )
-    }
-
     /// Builds the frozen schema-v1 payload from a runtime logical dab.
     ///
     /// Runtime bounds include the material halo. Schema v1 predates that
     /// contract and permanently records tip-only bounds, so this factory
     /// deliberately derives the legacy footprint instead of serializing
-    /// `dab.worldBounds`. The recipe remains necessary only for the legacy
-    /// soften-pass scalar, which is not part of `BrushMaterialInputs`.
+    /// `dab.worldBounds`. The definition supplies the soften-pass scalar,
+    /// which is not part of `BrushMaterialInputs`.
     public static func logicalDab(
         _ dab: LogicalDab,
-        compatibilityRecipe recipe: BrushRecipe
+        definition: BrushDefinition
     ) -> Self {
         // Schema v1 encoded the evaluated frame even when the recipe's
         // primary grain was opaque. Reconstructing it here also preserves the
@@ -259,7 +204,7 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
             dab: dab,
             primaryGrainFrame: primaryGrainFrame,
             secondaryGrainFrame: secondaryGrainFrame,
-            hasPrimaryGrain: recipe.grain != .opaque,
+            hasPrimaryGrain: !definition.coverage.grains.isEmpty,
             hasSecondaryGrain: dab.secondaryGrainToWorld != nil,
             secondaryColorMix: dab.secondaryColorMix,
             // These scalar-derived flags are part of the frozen schema-v1
@@ -270,7 +215,9 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
             materialStrength: dab.materialInputs.strength,
             materialWetness: dab.materialInputs.wetness,
             materialBleedRadius: dab.materialInputs.bleedRadius,
-            materialSoftenPasses: UInt64(recipe.material.softenPasses),
+            materialSoftenPasses: UInt64(
+                definition.material.softenPasses
+            ),
             materialAccumulationLimit: dab.materialInputs.accumulationLimit,
             compatibilityRandom: dab.randomValues.compatibility,
             extensionRandom: BrushExtensionRandomChannels(
@@ -295,43 +242,9 @@ public struct BrushCharacterizationDigestPayload: Equatable, Sendable {
         )
     }
 
-    private static func randomValues(
-        seed: UInt64,
-        ordinal: UInt64
-    ) -> BrushRandomValues {
-        var random = BrushRandom(seed: seed)
-        var values = BrushRandomValues.centered
-        for _ in 0...ordinal {
-            values = random.nextValues()
-        }
-        return values
-    }
 }
 
 public enum BrushCharacterizer {
-    public static func record(
-        trace: StrokeTraceFixture,
-        recipe: BrushRecipe,
-        nominalDiameter: Float,
-        color: InkColor,
-        seed: UInt64,
-        viewport: ViewportTransform
-    ) -> BrushCharacterizationRecord {
-        let definition = try! LegacyBrushRecipeAdapter.definition(
-            from: recipe,
-            displayName: recipe.id.rawValue
-        )
-        let program = try! BrushProgramCompiler.compile(definition)
-        return record(
-            trace: trace,
-            program: program,
-            nominalDiameter: nominalDiameter,
-            color: color,
-            seed: seed,
-            viewport: viewport
-        )
-    }
-
     public static func record(
         trace: StrokeTraceFixture,
         program: BrushProgram,
@@ -351,15 +264,6 @@ public enum BrushCharacterizer {
                 $0.phase == .ended || $0.phase == .cancelled
             }.count == 1
         )
-        let compatibilityRecipe: BrushRecipe
-        if let recipe = program.compatibilityRecipe {
-            compatibilityRecipe = recipe
-        } else {
-            preconditionFailure(
-                "Native program characterization belongs to logical batches"
-            )
-        }
-
         var input = BrushInputDeriver()
         var generator = BrushStrokeGenerator(
             program: program,
@@ -376,7 +280,7 @@ public enum BrushCharacterizer {
             let emit: (LogicalDab) -> Void = { dab in
                 let payload = BrushCharacterizationDigestPayload.logicalDab(
                     dab,
-                    compatibilityRecipe: compatibilityRecipe
+                    definition: program.definition
                 )
                 payloads.append(payload)
             }

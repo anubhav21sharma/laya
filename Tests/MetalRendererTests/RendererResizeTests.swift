@@ -326,6 +326,82 @@ func resizeRejectsInvalidDimensionsAndHistoryCostBeforeMutation() throws {
     #expect(renderer.isIdle)
 }
 
+@Test
+@MainActor
+func failedNativeClearIsAtomicAndDiscardsOnlyItsProvisionalPair() throws {
+    let size = PixelSize(width: 64, height: 64)
+    guard let renderer = try makeResizeRenderer(pixelSize: size) else {
+        return
+    }
+    let original = deterministicPixels(size)
+    try renderer.replaceCanonicalPixelsForHarness(original)
+    let snapshot = renderer.harnessTilingMutationSnapshot
+    let residentBytes = renderer.harnessRasterRevisionResidentBytes
+    var completions: [RendererOperationCompletion] = []
+    renderer.onOperationCompleted = { completions.append($0) }
+    let token = RendererOperationToken(rawValue: 41)
+
+    try renderer.requestClearForHarness(
+        token: token,
+        maximumRetainedBytes: 1_000_000,
+        forceFailure: true
+    )
+    #expect(renderer.harnessRasterRevisionResidentBytes > residentBytes)
+    #expect(throws: MetalRendererError.commandFailed(
+        "injected harness command-buffer failure"
+    )) {
+        try renderer.finishRasterOperationForHarness()
+    }
+
+    #expect(renderer.harnessTilingMutationSnapshot == snapshot)
+    #expect(try canonicalBytes(renderer) == original)
+    #expect(renderer.harnessRasterRevisionResidentBytes == residentBytes)
+    #expect(renderer.isIdle)
+    #expect(completions.count == 1)
+    guard case let .failure(completedToken, _) = completions.first else {
+        Issue.record("Expected exactly one native clear failure")
+        return
+    }
+    #expect(completedToken == token)
+}
+
+@Test
+@MainActor
+func nativeRestoreRejectsMismatchedCanonicalSizeBeforeSubmission() throws {
+    guard let renderer = try makeResizeRenderer(
+        pixelSize: PixelSize(width: 64, height: 64)
+    ) else {
+        return
+    }
+    let mismatchedSize = PixelSize(width: 65, height: 64)
+    let region = PixelRegionSet(
+        [try #require(
+            PixelRect(minX: 0, minY: 0, maxX: 65, maxY: 64)
+        )],
+        clippedTo: mismatchedSize
+    )
+    let mismatched = RasterRevisionReference(
+        id: StoredRasterRevisionID(rawValue: 999),
+        pixelSize: mismatchedSize,
+        regions: region,
+        retainedBytes: 65 * 64 * 4
+    )
+
+    #expect(throws: MetalRendererError.rasterRevisionTextureSizeMismatch(
+        expectedWidth: 64,
+        expectedHeight: 64,
+        actualWidth: 65,
+        actualHeight: 64
+    )) {
+        try renderer.requestRasterRestore(
+            token: RendererOperationToken(rawValue: 42),
+            revision: mismatched
+        )
+    }
+    #expect(renderer.isIdle)
+    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+}
+
 private func deterministicPixels(_ size: PixelSize) -> [UInt8] {
     var bytes = [UInt8](repeating: 0, count: size.width * size.height * 4)
     for y in 0..<size.height {

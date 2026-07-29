@@ -27,29 +27,6 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     private var lastDirection: Float
     private var lastEmittedSourcePosition: WorldPoint?
 
-    @available(
-        *, deprecated,
-        message: "Compile BrushDefinition to BrushProgram and initialize BrushStrokeGenerator(program:nominalDiameter:color:seed:)."
-    )
-    public init(
-        recipe: BrushRecipe,
-        nominalDiameter: Float,
-        color: InkColor,
-        seed: UInt64
-    ) {
-        let definition = try! LegacyBrushRecipeAdapter.definition(
-            from: recipe,
-            displayName: recipe.id.rawValue
-        )
-        let program = try! BrushProgramCompiler.compile(definition)
-        self.init(
-            program: program,
-            nominalDiameter: nominalDiameter,
-            color: color,
-            seed: seed
-        )
-    }
-
     public init(
         program: BrushProgram,
         nominalDiameter: Float,

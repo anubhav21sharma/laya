@@ -323,11 +323,12 @@ public final class SliceThreeHarnessRunner {
             history: history,
             completions: completions,
             point: centerPoint(scene),
-            style: StrokeRenderStyle(
+            style: try renderer.nativeHarnessStrokeStyle(
                 color: color,
                 diameter: 20,
                 compositeMode: .draw,
-                eraserStrength: 1
+                eraserStrength: 1,
+                seed: nextTokenRawValue
             ),
             capturesLive: true,
             measurements: &measurements
@@ -425,7 +426,7 @@ public final class SliceThreeHarnessRunner {
             history: history,
             completions: completions,
             point: point,
-            style: drawStyle,
+            style: try drawStyle(renderer: renderer),
             capturesLive: false,
             measurements: &measurements
         )
@@ -435,7 +436,7 @@ public final class SliceThreeHarnessRunner {
             history: history,
             completions: completions,
             point: point,
-            style: StrokeRenderStyle(
+            style: try renderer.nativeHarnessStrokeStyle(
                 color: InkColor(
                     red: 0.2,
                     green: 0.8,
@@ -444,7 +445,8 @@ public final class SliceThreeHarnessRunner {
                 )!,
                 diameter: 20,
                 compositeMode: .erase,
-                eraserStrength: 1
+                eraserStrength: 1,
+                seed: nextTokenRawValue
             ),
             capturesLive: true,
             measurements: &measurements
@@ -539,11 +541,12 @@ public final class SliceThreeHarnessRunner {
             history: history,
             completions: completions,
             point: ScreenPoint(x: 0, y: Float(scene.height) * 0.5),
-            style: StrokeRenderStyle(
+            style: try renderer.nativeHarnessStrokeStyle(
                 color: .black,
                 diameter: 12,
                 compositeMode: .draw,
-                eraserStrength: 1
+                eraserStrength: 1,
+                seed: nextTokenRawValue
             ),
             capturesLive: true,
             measurements: &measurements
@@ -624,7 +627,7 @@ public final class SliceThreeHarnessRunner {
             history: history,
             completions: completions,
             point: centerPoint(scene),
-            style: drawStyle,
+            style: try drawStyle(renderer: renderer),
             capturesLive: false,
             measurements: &measurements
         )
@@ -734,7 +737,7 @@ public final class SliceThreeHarnessRunner {
                 x: Float(scene.width) * 0.31,
                 y: Float(scene.height) * 0.43
             ),
-            style: drawStyle,
+            style: try drawStyle(renderer: renderer),
             capturesLive: false,
             measurements: &measurements
         )
@@ -1267,7 +1270,7 @@ public final class SliceThreeHarnessRunner {
         else {
             throw HarnessSceneError.missingSchemaFourField("tileWidth")
         }
-        return try GridRenderer(
+        let renderer = try GridRenderer(
             device: device,
             library: library,
             drawableSize: PatternSize(
@@ -1279,14 +1282,19 @@ public final class SliceThreeHarnessRunner {
                 tiling: tiling
             )
         )
+        try renderer.installNativeHarnessBrushes()
+        return renderer
     }
 
-    private var drawStyle: StrokeRenderStyle {
-        StrokeRenderStyle(
+    private func drawStyle(
+        renderer: GridRenderer
+    ) throws -> StrokeRenderStyle {
+        try renderer.nativeHarnessStrokeStyle(
             color: .black,
             diameter: 20,
             compositeMode: .draw,
-            eraserStrength: 1
+            eraserStrength: 1,
+            seed: nextTokenRawValue
         )
     }
 

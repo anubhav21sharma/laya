@@ -10,7 +10,7 @@ func characterizationIsStableAndSensitiveToSeed() throws {
     )
     let first = BrushCharacterizer.record(
         trace: StrokeTraceFixtures.pressureRamp,
-        recipe: .legacyEquivalent,
+        program: nativeTestProgram(),
         nominalDiameter: 20,
         color: .black,
         seed: 41,
@@ -18,7 +18,7 @@ func characterizationIsStableAndSensitiveToSeed() throws {
     )
     let repeated = BrushCharacterizer.record(
         trace: StrokeTraceFixtures.pressureRamp,
-        recipe: .legacyEquivalent,
+        program: nativeTestProgram(),
         nominalDiameter: 20,
         color: .black,
         seed: 41,
@@ -26,7 +26,7 @@ func characterizationIsStableAndSensitiveToSeed() throws {
     )
     let changed = BrushCharacterizer.record(
         trace: StrokeTraceFixtures.pressureRamp,
-        recipe: try BrushRecipe(
+        program: nativeTestProgram(try BrushRecipe(
             id: BrushRecipeID("characterization.random"),
             randomization: BrushRandomization(
                 spacing: 0.2,
@@ -35,7 +35,7 @@ func characterizationIsStableAndSensitiveToSeed() throws {
                 grain: 1,
                 material: 1
             )
-        ),
+        )),
         nominalDiameter: 20,
         color: .black,
         seed: 42,
@@ -58,7 +58,7 @@ func characterizationIgnoresPredictedTailAndUsesReplacementActualSamples() {
     )
     let record = BrushCharacterizer.record(
         trace: StrokeTraceFixtures.predictionCorrection,
-        recipe: .legacyEquivalent,
+        program: nativeTestProgram(),
         nominalDiameter: 20,
         color: .black,
         seed: 41,
@@ -77,7 +77,7 @@ func characterizationCompletesTheLongTraceWithStableLogicalOutput() {
     )
     let first = BrushCharacterizer.record(
         trace: StrokeTraceFixtures.long,
-        recipe: .legacyEquivalent,
+        program: nativeTestProgram(),
         nominalDiameter: 20,
         color: .black,
         seed: 41,
@@ -85,7 +85,7 @@ func characterizationCompletesTheLongTraceWithStableLogicalOutput() {
     )
     let repeated = BrushCharacterizer.record(
         trace: StrokeTraceFixtures.long,
-        recipe: .legacyEquivalent,
+        program: nativeTestProgram(),
         nominalDiameter: 20,
         color: .black,
         seed: 41,
@@ -242,7 +242,7 @@ func legacyPayloadUsesTheFullyEvaluatedGrainFrameFromItsDab() throws {
         isPredicted: false
     )
 
-    let payload = BrushCharacterizationDigestPayload.legacy(
+    let payload = frozenSchemaPayload(
         recipe: recipe,
         dab: dab,
         seed: 1,
@@ -257,7 +257,7 @@ func legacyPayloadUsesTheFullyEvaluatedGrainFrameFromItsDab() throws {
 }
 
 @Test
-func logicalDabFactoryPreservesFrozenLegacyPayloadWhileRuntimeBoundsUseHalo()
+func logicalDabFactoryPreservesNativeRandomPayloadWhileDigestBoundsExcludeHalo()
     throws
 {
     let recipe = try BrushRecipe(
@@ -312,26 +312,32 @@ func logicalDabFactoryPreservesFrozenLegacyPayloadWhileRuntimeBoundsUseHalo()
         random: BrushRandom(seed: 41).predictedValues(),
         strokeSeed: 41
     )
-    let legacy = BrushCharacterizationDigestPayload.legacy(
-        recipe: recipe,
-        dab: dab,
-        seed: 41,
-        ordinal: 0
-    )
     let logical = BrushCharacterizationDigestPayload.logicalDab(
         dab,
-        compatibilityRecipe: recipe
+        definition: definition
     )
 
-    #expect(logical == legacy)
+    #expect(logical.compatibilityRandom == dab.randomValues.compatibility)
+    #expect(logical.extensionRandom.values == [
+        dab.randomValues.size,
+        dab.randomValues.flow,
+        dab.randomValues.opacity,
+        dab.randomValues.hardness,
+        dab.randomValues.offsetX,
+        dab.randomValues.offsetY,
+        dab.randomValues.hue,
+        dab.randomValues.saturation,
+        dab.randomValues.brightness,
+        dab.randomValues.secondaryColorMix,
+    ])
+    #expect(logical.extensionRandom.values.contains { $0 != 0 })
     #expect(dab.worldBounds.minimum.x < logical.worldBoundsMinimum.x)
     #expect(dab.worldBounds.maximum.x > logical.worldBoundsMaximum.x)
-    #expect(BrushCharacterizationDigest.digest([logical])
-        == BrushCharacterizationDigest.digest([legacy]))
+    #expect(BrushCharacterizationDigest.digest([logical]).count == 16)
 }
 
 @Test
-func everyAnchorTracePreservesLegacyPayloadsAndDigests() throws {
+func everyAnchorTraceHasDeterministicNativeCharacterization() throws {
     let viewport = ViewportTransform(
         drawableSize: PatternSize(width: 256, height: 256),
         worldCenter: WorldPoint(x: 128, y: 128)
@@ -351,55 +357,74 @@ func everyAnchorTracePreservesLegacyPayloadsAndDigests() throws {
         let program = try BrushProgramCompiler.compile(definition)
 
         for trace in traces {
-            var input = BrushInputDeriver()
-            var generator = BrushStrokeGenerator(
+            let first = BrushCharacterizer.record(
+                trace: trace,
                 program: program,
                 nominalDiameter: 20,
                 color: .black,
-                seed: 41
+                seed: 41,
+                viewport: viewport
             )
-            var dabs: [LogicalDab] = []
-
-            for sample in trace.samples where sample.kind != .predicted {
-                let worldSample = input.derive(sample, viewport: viewport)
-                switch worldSample.phase {
-                case .began:
-                    dabs.append(contentsOf: generator.beginBatches(worldSample)
-                        .flatMap(\.dabs))
-                case .moved:
-                    dabs.append(contentsOf: generator.appendBatches(worldSample)
-                        .flatMap(\.dabs))
-                case .ended:
-                    dabs.append(contentsOf: generator.finishBatches(worldSample)
-                        .flatMap(\.dabs))
-                case .cancelled:
-                    generator.cancel()
-                }
-            }
-
-            let legacy = dabs.map {
-                BrushCharacterizationDigestPayload.legacy(
-                    recipe: fixture.recipe,
-                    dab: $0,
-                    seed: 41,
-                    ordinal: $0.ordinal
-                )
-            }
-            let logical = dabs.map {
-                BrushCharacterizationDigestPayload.logicalDab(
-                    $0,
-                    compatibilityRecipe: fixture.recipe
-                )
-            }
-
-            #expect(logical == legacy)
-            #expect(
-                BrushCharacterizationDigest.digest(logical)
-                    == BrushCharacterizationDigest.digest(legacy)
+            let repeated = BrushCharacterizer.record(
+                trace: trace,
+                program: program,
+                nominalDiameter: 20,
+                color: .black,
+                seed: 41,
+                viewport: viewport
             )
+
+            #expect(first == repeated)
+            #expect(first.logicalDabCount > 0)
+            #expect(first.logicalDabDigest.count == 16)
             comparisonCount += 1
         }
     }
 
     #expect(comparisonCount == 15)
+}
+
+private func frozenSchemaPayload(
+    recipe: BrushRecipe,
+    dab: LogicalDab,
+    seed: UInt64,
+    ordinal: UInt64
+) -> BrushCharacterizationDigestPayload {
+    let cosine = cos(dab.grainRotation) * dab.grainScale
+    let sine = sin(dab.grainRotation) * dab.grainScale
+    let primaryGrainFrame = Affine2D(
+        xAxis: SIMD2(cosine, sine),
+        yAxis: SIMD2(-sine, cosine),
+        translation: dab.grainOffset
+    )
+    let extent = SIMD2(
+        abs(dab.brushToWorld.xAxis.x) + abs(dab.brushToWorld.yAxis.x),
+        abs(dab.brushToWorld.xAxis.y) + abs(dab.brushToWorld.yAxis.y)
+    )
+    var random = BrushRandom(seed: seed)
+    var compatibilityRandom = BrushRandomValues.centered
+    for _ in 0...ordinal {
+        compatibilityRandom = random.nextValues()
+    }
+    return BrushCharacterizationDigestPayload(
+        ordinal: ordinal,
+        dab: dab,
+        primaryGrainFrame: primaryGrainFrame,
+        secondaryGrainFrame: .identity,
+        hasPrimaryGrain: recipe.grain != .opaque,
+        hasSecondaryGrain: false,
+        secondaryColorMix: 0,
+        accumulationEnabled: recipe.material.accumulationLimit < 1,
+        interactionEnabled: recipe.material.wetness > 0,
+        edgeEnabled: recipe.material.bleedRadius > 0,
+        materialStrength: recipe.material.strength,
+        materialWetness: recipe.material.wetness,
+        materialBleedRadius: recipe.material.bleedRadius,
+        materialSoftenPasses: UInt64(recipe.material.softenPasses),
+        materialAccumulationLimit: recipe.material.accumulationLimit,
+        compatibilityRandom: compatibilityRandom,
+        extensionRandom: .zero,
+        worldBoundsMinimum: dab.position.simd - extent,
+        worldBoundsMaximum: dab.position.simd + extent
+    )
 }

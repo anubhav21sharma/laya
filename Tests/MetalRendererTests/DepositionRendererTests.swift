@@ -60,29 +60,12 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
-    func installedCompiledBrushRejectsLegacyFallbackAndRequiresIdentity()
+    func installedCompiledBrushRejectsMismatchedIdentityAndAcceptsMatching()
         async throws
     {
         guard let setup = try makeDepositionRendererSetup() else { return }
         let brush = try await setup.compileBrush(id: "brush.compatibility")
         try setup.renderer.activateDrawBrush(brush)
-
-        let legacyStyle = StrokeRenderStyle(
-            color: .black,
-            diameter: 20,
-            compositeMode: .draw,
-            eraserStrength: 1
-        )
-        let legacyToken = RendererOperationToken(rawValue: 91)
-        let beforeLegacy = setup.renderer.harnessTilingMutationSnapshot
-        #expect(throws: MetalRendererError.compiledBrushIdentityMismatch) {
-            try setup.renderer.beginStroke(
-                token: legacyToken,
-                sample: depositionSample(.began),
-                style: legacyStyle
-            )
-        }
-        #expect(setup.renderer.harnessTilingMutationSnapshot == beforeLegacy)
 
         let mismatchedIdentity = try BrushRenderIdentity(
             definitionID: brush.program.definition.id,
@@ -433,6 +416,74 @@ struct DepositionRendererTests {
             return
         }
         #expect(receipt.token == token)
+
+        try setup.renderer.drainCompletedOperationsForHarness()
+        #expect(completions.count == 1)
+        #expect(setup.renderer.harnessRevision == initialRevision.advanced())
+    }
+
+    @Test
+    @MainActor
+    func foreignTokenCannotMutateOrTerminateNativeStroke() async throws {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(id: "brush.token-isolation")
+        try setup.renderer.activateDrawBrush(brush)
+        let accepted = RendererOperationToken(rawValue: 101)
+        let foreign = RendererOperationToken(rawValue: 102)
+        var completions: [RendererOperationCompletion] = []
+        setup.renderer.onOperationCompleted = { completions.append($0) }
+
+        try setup.renderer.beginStroke(
+            token: accepted,
+            sample: depositionSample(.began, x: 16),
+            style: depositionStyle(brush, compositeMode: .draw)
+        )
+        let scheduledBefore =
+            setup.renderer.harnessScheduledAuthoritativeRecords
+        let snapshotBefore = setup.renderer.harnessTilingMutationSnapshot
+
+        #expect(throws: MetalRendererError.invalidRendererOperationToken) {
+            try setup.renderer.appendStroke(
+                token: foreign,
+                sample: depositionSample(.moved, x: 32)
+            )
+        }
+        #expect(throws: MetalRendererError.invalidRendererOperationToken) {
+            try setup.renderer.requestStrokeCommit(
+                token: foreign,
+                sample: depositionSample(.ended, x: 48),
+                maximumRetainedBytes: 1_000_000
+            )
+        }
+        #expect(throws: MetalRendererError.invalidRendererOperationToken) {
+            try setup.renderer.cancelStroke(token: foreign)
+        }
+
+        #expect(
+            setup.renderer.harnessScheduledAuthoritativeRecords
+                == scheduledBefore
+        )
+        #expect(
+            setup.renderer.harnessTilingMutationSnapshot == snapshotBefore
+        )
+        #expect(setup.renderer.activeStroke?.token == accepted)
+        #expect(completions.isEmpty)
+
+        try setup.renderer.requestStrokeCommit(
+            token: accepted,
+            sample: depositionSample(.ended, x: 48),
+            maximumRetainedBytes: 1_000_000
+        )
+        _ = try setup.renderer.finishCommitForHarness()
+
+        #expect(completions.count == 1)
+        guard case let .rasterSuccess(receipt) = completions.first else {
+            Issue.record("Expected exactly one accepted-token receipt")
+            return
+        }
+        #expect(receipt.token == accepted)
+        try setup.renderer.drainCompletedOperationsForHarness()
+        #expect(completions.count == 1)
     }
 
     @Test

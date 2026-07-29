@@ -29,7 +29,7 @@ private func generatorSample(
 
 private func legacyGenerator(seed: UInt64 = 1) -> BrushStrokeGenerator {
     BrushStrokeGenerator(
-        recipe: .legacyEquivalent,
+        program: nativeTestProgram(),
         nominalDiameter: 20,
         color: .black,
         seed: seed
@@ -86,7 +86,7 @@ func generatorCarriesDynamicSpacingAndNeverEmitsCoincidentDabs() throws {
         spacingMapping: .linear(input: .pressure, output: 1...2)
     )
     var generator = BrushStrokeGenerator(
-        recipe: recipe,
+        program: nativeTestProgram(recipe),
         nominalDiameter: 20,
         color: .black,
         seed: 7
@@ -146,7 +146,7 @@ func generatorInterpolatesPressurePerDab() throws {
         sizeMapping: .linear(input: .pressure, output: 0.5...1)
     )
     var generator = BrushStrokeGenerator(
-        recipe: recipe,
+        program: nativeTestProgram(recipe),
         nominalDiameter: 20,
         color: .black,
         seed: 1
@@ -251,7 +251,7 @@ func transformedFootprintsAreDeterministicForRecipeAndSeed() throws {
     )
     func output(seed: UInt64) -> [DabAttributes] {
         var generator = BrushStrokeGenerator(
-            recipe: recipe,
+            program: nativeTestProgram(recipe),
             nominalDiameter: 20,
             color: .black,
             seed: seed
@@ -308,7 +308,7 @@ func knownTotalDistanceAppliesStartAndEndTaperDeterministically() throws {
         replayLimits: BrushRecipePolicy.replayTailLimits
     )
     var generator = BrushStrokeGenerator(
-        recipe: recipe,
+        program: nativeTestProgram(recipe),
         nominalDiameter: 20,
         color: .black,
         seed: 8
@@ -325,7 +325,7 @@ func knownTotalDistanceAppliesStartAndEndTaperDeterministically() throws {
             $0,
             totalDistance: 12,
             nominalDiameter: 20,
-            recipe: recipe
+            definition: nativeTestDefinition(recipe)
         )
     }
 
@@ -351,7 +351,7 @@ func clickAndShortStrokeTaperStayFiniteAndBounded() throws {
         replayLimits: BrushRecipePolicy.replayTailLimits
     )
     var generator = BrushStrokeGenerator(
-        recipe: recipe,
+        program: nativeTestProgram(recipe),
         nominalDiameter: 20,
         color: .black,
         seed: 9
@@ -368,7 +368,7 @@ func clickAndShortStrokeTaperStayFiniteAndBounded() throws {
         click,
         totalDistance: 0,
         nominalDiameter: 20,
-        recipe: recipe
+        definition: nativeTestDefinition(recipe)
     )
     #expect(tapered.diameter == 2)
     #expect(tapered.flow == 0.15)
@@ -557,19 +557,34 @@ func failedBatchValidationLeavesGeneratorExactlyUnchanged() {
 }
 
 @Test
-func generatedLogicalDabStoresConsumedCompatibilityRandomValues() throws {
+func generatedLogicalDabStoresConsumedNativeRandomValues() throws {
     var generator = legacyGenerator(seed: 81)
     let batch = try generator.beginBatch(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     )
     var random = BrushRandom(seed: 81)
     let expected = random.nextValues()
+    let expectedExtension = [
+        BrushProgramRandomChannel.size,
+        .flow,
+        .opacity,
+        .hardness,
+        .offsetX,
+        .offsetY,
+        .hue,
+        .saturation,
+        .brightness,
+        .secondaryColorMix,
+    ].map {
+        BrushRandom.extensionUnitFloat(
+            strokeSeed: 81,
+            logicalDabOrdinal: 0,
+            outputChannel: $0
+        )
+    }
 
     #expect(batch.dabs.first?.randomValues.compatibility == expected)
-    #expect(batch.dabs.first?.randomValues.extensionValues == Array(
-        repeating: 0,
-        count: 10
-    ))
+    #expect(batch.dabs.first?.randomValues.extensionValues == expectedExtension)
 }
 
 @Test
@@ -587,7 +602,7 @@ func retroactiveTaperPreservesAppendedLogicalDabInputs() throws {
         replayLimits: BrushRecipePolicy.replayTailLimits
     )
     var generator = BrushStrokeGenerator(
-        recipe: recipe,
+        program: nativeTestProgram(recipe),
         nominalDiameter: 20,
         color: .black,
         seed: 91
@@ -604,7 +619,7 @@ func retroactiveTaperPreservesAppendedLogicalDabInputs() throws {
         original,
         totalDistance: 12,
         nominalDiameter: 20,
-        recipe: recipe
+        definition: nativeTestDefinition(recipe)
     )
 
     #expect(tapered.materialInputs == original.materialInputs)

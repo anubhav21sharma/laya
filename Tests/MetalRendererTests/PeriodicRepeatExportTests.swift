@@ -385,6 +385,7 @@ struct PeriodicRepeatExportTests {
             anchor: ScreenPoint(x: 19, y: 23)
         )
         let viewport = renderer.viewport
+        try renderer.installNativeHarnessBrushes()
         _ = try renderer.beginFixedProjectedStrokeForHarness(
             at: WorldPoint(x: 11, y: 13)
         )

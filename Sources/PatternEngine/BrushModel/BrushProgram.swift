@@ -56,9 +56,6 @@ public enum BrushBackendKind: String, Codable, Hashable, Sendable {
 public struct BrushProgram: Equatable, Sendable {
     public let definition: BrushDefinition
     public let dynamics: BrushDynamicsProgram
-    /// Present only when this definition is exactly representable by the old
-    /// renderer. PatternEngine never relies on this optional value.
-    public let compatibilityRecipe: BrushRecipe?
     public let requiredCapabilities: Set<BrushCapability>
     public let ignoredOptionalCapabilityIdentifiers: [String]
     public let requestedBackend: BrushBackendKind

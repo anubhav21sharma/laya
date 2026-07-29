@@ -57,9 +57,6 @@ public enum BrushProgramCompiler {
         return BrushProgram(
             definition: definition,
             dynamics: dynamics,
-            compatibilityRecipe: try? LegacyBrushRecipeAdapter.recipe(
-                from: definition
-            ),
             requiredCapabilities: requiredCapabilities,
             ignoredOptionalCapabilityIdentifiers: ignoredOptionalCapabilityIdentifiers,
             requestedBackend: requestedBackend

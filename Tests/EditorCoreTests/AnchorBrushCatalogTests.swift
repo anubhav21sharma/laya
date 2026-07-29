@@ -31,14 +31,14 @@ import Testing
 func anchorProgramsArePrecompiledNativeDefinitions() throws {
     for entry in AnchorBrushCatalog.all {
         #expect(entry.program.definition == entry.definition)
-        #expect(entry.program.compatibilityRecipe == nil)
+        #expect(entry.program.requestedBackend == .deposition)
         #expect(entry.definition.material.interaction == .none)
         #expect(entry.definition.performanceIntent == .realtime120)
     }
 }
 
 @Test
-func programRenderStylePreservesFieldsAndRecipeCompatibility() {
+func programRenderStylePreservesNativeFields() throws {
     let entry = AnchorBrushCatalog.dryMedia
     let color = InkColor(
         red: 0.25,
@@ -52,6 +52,10 @@ func programRenderStylePreservesFieldsAndRecipeCompatibility() {
         compositeMode: .draw,
         eraserStrength: 0.6,
         program: entry.program,
+        renderIdentity: try BrushRenderIdentity(
+            definitionID: entry.definition.id,
+            semanticHash: String(repeating: "b", count: 64)
+        ),
         seed: 91
     )
     #expect(style.color == color)

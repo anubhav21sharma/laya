@@ -1016,7 +1016,7 @@ func brushChangeKeepsSubsequentEditorActionsCoherent() throws {
 
 @Test
 @MainActor
-func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
+func pointerDownCapturesPreparedNativeProgramsAndUniqueNonzeroSeed() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let sessionEntropy: UInt64 = 0xA5A5_1234_5678_9ABC
     let controller = EditorSessionController(
@@ -1027,7 +1027,9 @@ func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
     controller.model.confirmRecipe(AnchorBrushCatalog.marker.id)
     controller.handleStrokeSample(controllerSample(.began))
     let first = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(first.program.compatibilityRecipe == nil)
+    #expect(
+        first.renderIdentity.definitionID == first.program.definition.id
+    )
     #expect(first.seed == EditorSessionController.derivedStrokeSeed(
         sequence: 1,
         sessionEntropy: sessionEntropy
@@ -1037,7 +1039,10 @@ func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
     controller.model.confirmRecipe(AnchorBrushCatalog.glaze.id)
     controller.handleStrokeSample(controllerSample(.began))
     let second = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(second.program.compatibilityRecipe == nil)
+    #expect(second.program == first.program)
+    #expect(
+        second.renderIdentity.definitionID == second.program.definition.id
+    )
     #expect(second.seed == EditorSessionController.derivedStrokeSeed(
         sequence: 2,
         sessionEntropy: sessionEntropy
@@ -1048,7 +1053,10 @@ func pointerDownCapturesSelectedProgramAndUniqueNonzeroSeed() throws {
     controller.handleTool(.erase)
     controller.handleStrokeSample(controllerSample(.began))
     let eraser = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(eraser.program.compatibilityRecipe == nil)
+    #expect(
+        eraser.renderIdentity.definitionID == eraser.program.definition.id
+    )
+    #expect(eraser.program != second.program)
     #expect(eraser.seed == EditorSessionController.derivedStrokeSeed(
         sequence: 3,
         sessionEntropy: sessionEntropy
@@ -1245,7 +1253,7 @@ func diagnosticProgramSeedAndNormalizedInputAreCapturedAtStrokeStart()
     controller.handleStrokeSample(began)
 
     let style = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(style.program.compatibilityRecipe == nil)
+    #expect(style.renderIdentity.definitionID == style.program.definition.id)
     #expect(style.seed == 0xCAFE)
     #expect(observed == [began])
 
@@ -1253,7 +1261,9 @@ func diagnosticProgramSeedAndNormalizedInputAreCapturedAtStrokeStart()
     controller.model.confirmRecipe(AnchorBrushCatalog.defaultDraw.id)
     controller.handleStrokeSample(controllerSample(.began, timestamp: 3))
     let builtIn = try #require(renderer.harnessActiveStrokeStyle)
-    #expect(builtIn.program.compatibilityRecipe == nil)
+    #expect(
+        builtIn.renderIdentity.definitionID == builtIn.program.definition.id
+    )
     #expect(builtIn.seed == 0xCAFE)
     controller.handleStrokeSample(controllerSample(.cancelled, timestamp: 4))
 }

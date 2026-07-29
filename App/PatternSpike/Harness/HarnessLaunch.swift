@@ -30,7 +30,10 @@ enum HarnessLaunch {
                 configuration: configuration,
                 gitCommit: gitCommit
             )
-            if scene.schemaVersion == 6 {
+            switch try HarnessSchemaRouting.runnerKind(
+                for: scene.schemaVersion
+            ) {
+            case .deposition:
                 Task { @MainActor in
                     do {
                         let result = try await DepositionHarnessRunner(
@@ -60,23 +63,21 @@ enum HarnessLaunch {
                     }
                 }
                 return
-            }
-            let result: HarnessRunResult
-            if scene.schemaVersion == 4 {
-                result = try SliceThreeHarnessRunner(device: device).run(
+            case .sliceThree:
+                let result = try SliceThreeHarnessRunner(device: device).run(
                     scene: scene,
                     outputDirectory: outputDirectory,
                     build: build
                 )
-            } else {
-                result = try HarnessRunner(device: device).run(
+                pass(scene: scene, result: result)
+            case .foundation:
+                let result = try HarnessRunner(device: device).run(
                     scene: scene,
                     outputDirectory: outputDirectory,
                     build: build
                 )
+                pass(scene: scene, result: result)
             }
-
-            pass(scene: scene, result: result)
         } catch {
             fail(error)
         }

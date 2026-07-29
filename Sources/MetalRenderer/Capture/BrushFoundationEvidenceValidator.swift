@@ -5,7 +5,6 @@ import PatternEngine
 
 public enum BrushFoundationEvidenceValidationStatus: Equatable, Sendable {
     case passed
-    case performancePending(gpuName: String)
 }
 
 public enum BrushFoundationEvidenceValidationError:
@@ -92,60 +91,14 @@ public struct BrushCompilerCounterEvidence:
     }
 }
 
-public struct BrushAnchorAdapterParityRecord:
-    Codable, Equatable, Sendable
-{
-    public let recipeID: String
-    public let traceName: String
-    public let programLogicalDabCount: Int
-    public let compatibilityLogicalDabCount: Int
-    public let programLogicalDabDigest: String
-    public let compatibilityLogicalDabDigest: String
-
-    public init(
-        recipeID: String,
-        traceName: String,
-        programLogicalDabCount: Int,
-        compatibilityLogicalDabCount: Int,
-        programLogicalDabDigest: String,
-        compatibilityLogicalDabDigest: String
-    ) {
-        self.recipeID = recipeID
-        self.traceName = traceName
-        self.programLogicalDabCount = programLogicalDabCount
-        self.compatibilityLogicalDabCount = compatibilityLogicalDabCount
-        self.programLogicalDabDigest = programLogicalDabDigest
-        self.compatibilityLogicalDabDigest = compatibilityLogicalDabDigest
-    }
-}
-
-public struct BrushAnchorAdapterParityEvidence:
-    Codable, Equatable, Sendable
-{
-    public static let currentSchemaVersion = 1
-
-    public let schemaVersion: Int
-    public let commit: String
-    public let records: [BrushAnchorAdapterParityRecord]
-
-    public init(
-        commit: String,
-        records: [BrushAnchorAdapterParityRecord]
-    ) {
-        schemaVersion = Self.currentSchemaVersion
-        self.commit = commit
-        self.records = records
-    }
-}
-
 public enum BrushFoundationCompilerProbe {
     public static let definitionID = "harness.native-draw"
     public static let logicalDabEvaluationCount = 1_000
 
     @MainActor
-    public static func capture(commit: String) async throws
-        -> BrushCompilerCounterEvidence
-    {
+    public static func capture(
+        commit: String
+    ) async throws -> BrushCompilerCounterEvidence {
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue()
         else {
@@ -221,7 +174,7 @@ public enum BrushFoundationCompilerProbe {
 
     @MainActor
     private static func probePackage() throws -> BrushPackage {
-        return try BrushPackage(
+        try BrushPackage(
             manifest: BrushPackageManifest(resources: []),
             definition: GridRenderer.nativeHarnessDefinition(mode: .draw),
             resourceData: [:]
@@ -247,9 +200,6 @@ public enum BrushFoundationCompilerProbe {
     }
 }
 
-/// The SwiftPM evidence executable has no app-bundled default metallib. Its
-/// compiler counter probe does not render, so it uses one deterministic Metal
-/// state while the dedicated deposition suites validate real specialization.
 @MainActor
 private final class BrushFoundationProbePipelinePreparer:
     DepositionPipelinePreparing
@@ -297,220 +247,77 @@ private final class BrushFoundationProbePipelinePreparer:
     }
 }
 
-public enum BrushFoundationEvidenceValidator {
-    public typealias DepositionValidator = (
-        URL, URL, URL, String
-    ) throws -> Void
+private struct BrushFoundationProvenance: Decodable {
+    let schemaVersion: Int
+    let commit: String
+    let configuration: String
+    let operatingSystem: String
+    let hardwareMachine: String
+    let hardwareModel: String
+    let gpuName: String
+    let artifactRoot: String
+}
 
-    public static let logicalFileName = "brush-logical-v1.json"
-    public static let parityFileName = "anchor-adapter-parity.json"
+private struct BrushFoundationPositiveRun {
+    let gpuName: String
+    let configuration: String
+    let operatingSystem: String
+}
+
+public enum BrushFoundationEvidenceValidator {
     public static let compilerFileName = "compiler-counters.json"
     public static let performanceFileName = "performance-status.txt"
+    public static let provenanceFileName = "provenance.json"
     public static let sceneDirectoryName = "scene-inputs"
 
     public static func validate(
-        logicalBaselineURL: URL,
-        rendererBaselineURL: URL,
         artifactRoot: URL,
         expectedCommit: String
     ) throws -> BrushFoundationEvidenceValidationStatus {
-        try validate(
-            logicalBaselineURL: logicalBaselineURL,
-            rendererBaselineURL: rendererBaselineURL,
-            artifactRoot: artifactRoot,
-            expectedCommit: expectedCommit,
-            depositionValidator: { _, _, sceneRoot, _ in
-                try DepositionEvidenceValidator.validateSceneSet(
-                    DepositionEvidenceValidator.loadScenes(from: sceneRoot)
-                )
-            }
-        )
-    }
-
-    static func validate(
-        logicalBaselineURL: URL,
-        rendererBaselineURL: URL,
-        artifactRoot: URL,
-        expectedCommit: String,
-        depositionValidator: DepositionValidator
-    ) throws -> BrushFoundationEvidenceValidationStatus {
         guard isCommit(expectedCommit) else {
-            throw invalid("expected commit must be 40 lowercase hexadecimal characters")
+            throw invalid(
+                "expected commit must be 40 lowercase hexadecimal characters"
+            )
         }
         let positiveRoot = artifactRoot.appendingPathComponent("positive")
         let negativeRoot = artifactRoot.appendingPathComponent(
             "negative-control"
         )
-        let sceneRoot = artifactRoot.appendingPathComponent(sceneDirectoryName)
-        try validateSceneInputs(sceneRoot)
-        try validateEvidencePairs(
-            positiveRoot: positiveRoot,
-            negativeRoot: negativeRoot
+        let scenesByName = try validateSceneInputs(
+            artifactRoot.appendingPathComponent(sceneDirectoryName)
         )
-
-        let logicalBaseline = try decodeLogicalBaseline(
-            logicalBaselineURL,
-            label: "checked logical baseline"
-        )
-        let actualLogical = try decodeLogicalBaseline(
-            artifactRoot.appendingPathComponent(logicalFileName),
-            label: "generated logical evidence"
-        )
-        try validateLogicalBaseline(logicalBaseline)
-        try validateLogicalBaseline(actualLogical)
-        guard logicalBaseline == actualLogical else {
-            throw invalid("generated 15-record logical evidence changed")
-        }
-        try validateParity(
-            at: artifactRoot.appendingPathComponent(parityFileName),
+        let positiveRun = try validatePositiveEvidence(
+            root: positiveRoot,
             expectedCommit: expectedCommit,
-            logical: actualLogical
+            scenesByName: scenesByName
         )
-
-        let rendererBaseline = try decodeRendererBaseline(
-            rendererBaselineURL,
-            label: "checked renderer baseline"
-        )
-        try rendererBaseline.validate(expectedRecordCount: 8)
-        let actualRenderer: BrushCharacterizationBaseline
-        do {
-            actualRenderer = try BrushCharacterizationBaseline.merge(
-                inputRoot: positiveRoot
-            )
-        } catch {
-            throw invalid(
-                "generated renderer characterization is incomplete or invalid: \(error.localizedDescription)"
-            )
-        }
-        do {
-            try rendererBaseline.requireMatches(actualRenderer.records)
-        } catch {
-            throw invalid(
-                "generated eight-record renderer characterization changed"
-            )
-        }
+        try validateNegativeControls(root: negativeRoot)
         try validateCompilerEvidence(
             at: artifactRoot.appendingPathComponent(compilerFileName),
             expectedCommit: expectedCommit,
-            expectedGPUName: nil
+            expectedGPUName: positiveRun.gpuName
         )
-
-        do {
-            try depositionValidator(
-                positiveRoot,
-                negativeRoot,
-                sceneRoot,
-                expectedCommit
-            )
-        } catch {
-            throw invalid(
-                "native deposition scene validation failed: \(error.localizedDescription)"
-            )
-        }
+        try validateProvenance(
+            at: artifactRoot.appendingPathComponent(provenanceFileName),
+            artifactRoot: artifactRoot,
+            expectedCommit: expectedCommit,
+            expectedRun: positiveRun
+        )
         return try validatePerformanceStatus(
             at: artifactRoot.appendingPathComponent(performanceFileName)
         )
     }
 
-    private static func validateLogicalBaseline(
-        _ baseline: BrushLogicalBaseline
-    ) throws {
-        guard baseline.schemaVersion == BrushLogicalBaseline.schemaVersion,
-              baseline.records.count == 15,
-              Set(baseline.records.map(\.recipeID)).count == 5,
-              baseline.records.allSatisfy({
-                  !$0.traceName.isEmpty
-                      && !$0.recipeID.isEmpty
-                      && $0.nominalDiameter.isFinite
-                      && $0.nominalDiameter > 0
-                      && $0.sampleCount > 0
-                      && $0.logicalDabCount > 0
-                      && isDigest($0.logicalDabDigest)
-              })
-        else {
-            throw invalid("logical evidence is not the exact valid 15-record matrix")
-        }
-    }
-
-    private static func validateParity(
-        at url: URL,
-        expectedCommit: String,
-        logical: BrushLogicalBaseline
-    ) throws {
-        let data = try regularFileData(url, label: "anchor adapter parity")
-        try requireKeys(
-            data,
-            expected: ["schemaVersion", "commit", "records"],
-            label: "anchor adapter parity"
-        )
-        let evidence: BrushAnchorAdapterParityEvidence
-        do {
-            evidence = try JSONDecoder().decode(
-                BrushAnchorAdapterParityEvidence.self,
-                from: data
-            )
-        } catch {
-            throw invalid("anchor adapter parity JSON is invalid: \(error)")
-        }
-        guard let parityObject = try? JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-              let parityRecords = parityObject["records"] as? [[String: Any]],
-              parityRecords.allSatisfy({
-                  Set($0.keys) == [
-                      "recipeID", "traceName", "programLogicalDabCount",
-                      "compatibilityLogicalDabCount",
-                      "programLogicalDabDigest",
-                      "compatibilityLogicalDabDigest",
-                  ]
-              })
-        else {
-            throw invalid("anchor adapter parity records have unexpected keys")
-        }
-        let sorted = evidence.records.sorted {
-            ($0.recipeID, $0.traceName) < ($1.recipeID, $1.traceName)
-        }
-        guard evidence.schemaVersion
-                == BrushAnchorAdapterParityEvidence.currentSchemaVersion,
-              evidence.commit == expectedCommit,
-              evidence.records == sorted,
-              evidence.records.count == 15,
-              Set(evidence.records.map {
-                  "\($0.recipeID)\u{0}\($0.traceName)"
-              }).count == 15,
-              evidence.records.allSatisfy({
-                  $0.programLogicalDabCount
-                      == $0.compatibilityLogicalDabCount
-                      && $0.programLogicalDabCount > 0
-                      && $0.programLogicalDabDigest
-                          == $0.compatibilityLogicalDabDigest
-                      && isDigest($0.programLogicalDabDigest)
-              })
-        else {
-            throw invalid("anchor adapter parity is not an exact 15-entry match")
-        }
-        let logicalByKey = Dictionary(
-            uniqueKeysWithValues: logical.records.map {
-                ("\($0.recipeID)\u{0}\($0.traceName)", $0)
-            }
-        )
-        for record in evidence.records {
-            let key = "\(record.recipeID)\u{0}\(record.traceName)"
-            guard let expected = logicalByKey[key],
-                  expected.logicalDabCount == record.programLogicalDabCount,
-                  expected.logicalDabDigest == record.programLogicalDabDigest
-            else {
-                throw invalid(
-                    "anchor adapter parity disagrees with logical evidence: \(record.recipeID)/\(record.traceName)"
-                )
-            }
-        }
-    }
-
     static func validateCompilerEvidence(
         at url: URL,
         expectedCommit: String,
-        expectedGPUName: String?
+        expectedGPUName: String
     ) throws {
+        guard !expectedGPUName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty else {
+            throw invalid("benchmark GPU name must be nonempty")
+        }
         let data = try regularFileData(url, label: "compiler counter evidence")
         try requireKeys(
             data,
@@ -531,14 +338,15 @@ public enum BrushFoundationEvidenceValidator {
         } catch {
             throw invalid("compiler counter evidence JSON is invalid: \(error)")
         }
-        guard let counterObject = try? JSONSerialization.jsonObject(with: data)
+        guard let object = try? JSONSerialization.jsonObject(with: data)
                 as? [String: Any],
               [
                   "beforeCompile", "afterFirstCompile", "afterCacheHit",
                   "afterLogicalDabs",
               ].allSatisfy({
-                  guard let snapshot = counterObject[$0] as? [String: Any]
-                  else { return false }
+                  guard let snapshot = object[$0] as? [String: Any] else {
+                      return false
+                  }
                   return Set(snapshot.keys) == [
                       "packageDecodeCount", "imageDecodeCount",
                       "textureUploadCount", "cacheHitCount",
@@ -572,7 +380,7 @@ public enum BrushFoundationEvidenceValidator {
         guard evidence.schemaVersion
                 == BrushCompilerCounterEvidence.currentSchemaVersion,
               evidence.commit == expectedCommit,
-              (expectedGPUName.map { evidence.gpuName == $0 } ?? true),
+              evidence.gpuName == expectedGPUName,
               evidence.activeDefinitionID
                 == BrushFoundationCompilerProbe.definitionID,
               evidence.residentByteCount > 0,
@@ -584,49 +392,254 @@ public enum BrushFoundationEvidenceValidator {
               evidence.afterLogicalDabs == hit
         else {
             throw invalid(
-                "compiler evidence does not prove first upload, cache hit, and zero input-path compiler work"
+                "compiler evidence does not match the benchmark GPU or prove first upload, cache hit, and zero input-path compiler work"
             )
         }
     }
 
-    private static func validateEvidencePairs(
-        positiveRoot: URL,
-        negativeRoot: URL
-    ) throws {
-        guard try directoryNames(positiveRoot)
-                == Set(DepositionEvidenceValidator.sceneNames),
-              try directoryNames(negativeRoot)
-                == Set(DepositionEvidenceValidator.sceneNames)
-        else {
+    private static func validateSceneInputs(
+        _ root: URL
+    ) throws -> [String: HarnessScene] {
+        let expected = Set(
+            DepositionEvidenceValidator.sceneNames.map { "\($0).json" }
+        )
+        guard try entryNames(root) == expected else {
             throw invalid(
-                "positive and negative directories must exactly match all native deposition scenes"
+                "scene-inputs must contain the exact 32-scene native deposition matrix"
             )
         }
-        for name in DepositionEvidenceValidator.sceneNames {
-            _ = try regularFileData(
-                positiveRoot.appendingPathComponent(name)
-                    .appendingPathComponent(
-                        "\(name).deposition-evidence.json"
-                    ),
-                label: "\(name) characterization"
+        do {
+            let scenes = try DepositionEvidenceValidator.loadScenes(from: root)
+            try DepositionEvidenceValidator.validateSceneSet(scenes)
+            return Dictionary(
+                uniqueKeysWithValues: scenes.map { ($0.name, $0) }
             )
-            let negative = negativeRoot.appendingPathComponent(name)
-            guard try directoryNames(negative)
+        } catch {
+            throw invalid(
+                "native deposition scene inputs are invalid: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func validatePositiveEvidence(
+        root: URL,
+        expectedCommit: String,
+        scenesByName: [String: HarnessScene]
+    ) throws -> BrushFoundationPositiveRun {
+        let expectedNames = Set(
+            DepositionEvidenceValidator.positiveSceneNames
+        )
+        guard try entryNames(root) == expectedNames else {
+            throw invalid(
+                "positive artifacts must contain exactly the 16 active deposition scenes"
+            )
+        }
+        let expectedEvidence = Set(expectedNames.map {
+            "\($0)/\($0).deposition-evidence.json"
+        })
+        let actualEvidence = try recursiveRegularFilePaths(
+            root: root,
+            suffix: ".deposition-evidence.json"
+        )
+        guard actualEvidence == expectedEvidence else {
+            throw invalid(
+                "positive artifacts must contain exactly one correctly named evidence file per active scene; found \(actualEvidence.sorted())"
+            )
+        }
+        let expectedBenchmarks = Set(expectedNames.map {
+            "\($0)/\($0).benchmark.json"
+        })
+        let actualBenchmarks = try recursiveRegularFilePaths(
+            root: root,
+            suffix: ".benchmark.json"
+        )
+        guard actualBenchmarks == expectedBenchmarks else {
+            throw invalid(
+                "positive artifacts must contain exactly one correctly named benchmark per active scene"
+            )
+        }
+
+        var gpuNames = Set<String>()
+        var configurations = Set<String>()
+        var operatingSystems = Set<String>()
+        for name in DepositionEvidenceValidator.positiveSceneNames {
+            let sceneRoot = root.appendingPathComponent(name)
+            try requireDirectory(sceneRoot, label: "\(name) positive artifacts")
+            let evidenceURL = sceneRoot.appendingPathComponent(
+                "\(name).deposition-evidence.json"
+            )
+            let evidence: DepositionSceneEvidence
+            do {
+                evidence = try DepositionSceneEvidence.decode(
+                    regularFileData(
+                        evidenceURL,
+                        label: "\(name) deposition evidence"
+                    )
+                )
+                guard evidence.scene == name else {
+                    throw invalid(
+                        "\(name) evidence identifies scene \(evidence.scene)"
+                    )
+                }
+                guard let scene = scenesByName[name] else {
+                    throw invalid("\(name) has no matching scene input")
+                }
+                try DepositionEvidenceValidator.validateExpectations(
+                    scene: scene,
+                    actual: evidence.invariantResults
+                )
+                guard evidence.invariantResults.values.allSatisfy({
+                    $0
+                }) else {
+                    throw invalid(
+                        "\(name) positive evidence contains a false invariant"
+                    )
+                }
+            } catch let error as BrushFoundationEvidenceValidationError {
+                throw error
+            } catch {
+                throw invalid(
+                    "\(name) deposition evidence is invalid: \(error.localizedDescription)"
+                )
+            }
+            let benchmarkURL = sceneRoot.appendingPathComponent(
+                "\(name).benchmark.json"
+            )
+            let benchmark: BenchmarkRecord
+            do {
+                benchmark = try BenchmarkRecord.decode(
+                    regularFileData(
+                        benchmarkURL,
+                        label: "\(name) benchmark"
+                    )
+                )
+            } catch {
+                throw invalid(
+                    "\(name) benchmark is invalid: \(error.localizedDescription)"
+                )
+            }
+            let gpuName = benchmark.hardware.gpuName.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            let configuration = benchmark.build.configuration
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let operatingSystem = benchmark.operatingSystem
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard benchmark.schemaVersion == 3,
+                  benchmark.sceneName == name,
+                  benchmark.build.gitCommit == expectedCommit,
+                  !configuration.isEmpty,
+                  !operatingSystem.isEmpty,
+                  !gpuName.isEmpty,
+                  benchmarkMatchesNativeEvidence(
+                      benchmark,
+                      evidence: evidence
+                  )
+            else {
+                throw invalid(
+                    "\(name) benchmark provenance does not match the active run"
+                )
+            }
+            gpuNames.insert(gpuName)
+            configurations.insert(configuration)
+            operatingSystems.insert(operatingSystem)
+        }
+        guard gpuNames.count == 1,
+              configurations.count == 1,
+              operatingSystems.count == 1,
+              let gpuName = gpuNames.first,
+              let configuration = configurations.first,
+              let operatingSystem = operatingSystems.first
+        else {
+            throw invalid(
+                "all 16 active benchmarks must identify one GPU, configuration, and operating system"
+            )
+        }
+        return BrushFoundationPositiveRun(
+            gpuName: gpuName,
+            configuration: configuration,
+            operatingSystem: operatingSystem
+        )
+    }
+
+    private static func benchmarkMatchesNativeEvidence(
+        _ benchmark: BenchmarkRecord,
+        evidence: DepositionSceneEvidence
+    ) -> Bool {
+        let (instanceBytes, overflow) =
+            evidence.projectedInstanceCount.multipliedReportingOverflow(
+                by: ShaderABI.depositionStampInstanceStride
+            )
+        guard !overflow else {
+            return false
+        }
+        return benchmark.program == "nativeDeposition"
+            && benchmark.recipeID == evidence.definitionID
+            && benchmark.logicalDabDigest == evidence.canonicalSHA256
+            && benchmark.canonicalBGRA8Digest == evidence.canonicalSHA256
+            && benchmark.logicalDabCount == evidence.logicalDabCount
+            && benchmark.peakResidentBytes == UInt64(evidence.resourceBytes)
+            && benchmark.assetResidentBytes == evidence.resourceBytes
+            && benchmark.newInstanceCounts
+                == [evidence.projectedInstanceCount]
+            && benchmark.totalProjectedFragmentCount
+                == evidence.projectedInstanceCount
+            && benchmark.totalInstanceBytes == instanceBytes
+            && benchmark.previewCommitViolationCount
+                == (evidence.previewCommitMaximumChannelDelta > 1 ? 1 : 0)
+            && benchmark.seed.map { $0 != 0 } == true
+            && benchmark.frameCount > 0
+            && benchmark.cpuEncodeMilliseconds.count == benchmark.frameCount
+            && benchmark.gpuMilliseconds.count == benchmark.frameCount
+            && benchmark.material == nil
+            && benchmark.replayMode == nil
+            && benchmark.peakRetainedSampleCount == nil
+            && benchmark.peakRetainedDabCount == nil
+            && benchmark.replayCount == nil
+            && benchmark.promotedSettledPrefixCount == nil
+            && benchmark.replayDegradationCount == nil
+            && benchmark.materialGPUMilliseconds == nil
+            && benchmark.processedWashPixelCount == nil
+            && benchmark.washWorkingBytes == nil
+            && benchmark.brushCharacterizationVersion == nil
+            && benchmark.inputSampleCount == nil
+            && benchmark.fiveHundredDabStressFrameIndex == nil
+            && benchmark.fiveHundredDabStressNewDabCount == nil
+    }
+
+    private static func validateNegativeControls(root: URL) throws {
+        let expectedNames = Set(
+            DepositionEvidenceValidator.positiveSceneNames
+        )
+        guard try entryNames(root) == expectedNames else {
+            throw invalid(
+                "negative-control artifacts must contain exactly 16 active scene pairs"
+            )
+        }
+        for name in DepositionEvidenceValidator.positiveSceneNames {
+            let directory = root.appendingPathComponent(name)
+            try requireDirectory(
+                directory,
+                label: "\(name) negative control"
+            )
+            guard try entryNames(directory)
                     == ["stdout.log", "stderr.log", "exit-status.txt"]
             else {
-                throw invalid("\(name): negative artifact file set is invalid")
+                throw invalid(
+                    "\(name): negative-control file set is invalid"
+                )
             }
             let stdout = try regularFileData(
-                negative.appendingPathComponent("stdout.log"),
+                directory.appendingPathComponent("stdout.log"),
                 label: "\(name) negative stdout",
                 allowEmpty: true
             )
             let stderr = try regularFileData(
-                negative.appendingPathComponent("stderr.log"),
+                directory.appendingPathComponent("stderr.log"),
                 label: "\(name) negative stderr"
             )
             let exit = try regularFileData(
-                negative.appendingPathComponent("exit-status.txt"),
+                directory.appendingPathComponent("exit-status.txt"),
                 label: "\(name) negative exit status"
             )
             guard stdout.isEmpty,
@@ -643,19 +656,47 @@ public enum BrushFoundationEvidenceValidator {
         }
     }
 
-    private static func validateSceneInputs(_ root: URL) throws {
-        let expected = Set(
-            DepositionEvidenceValidator.sceneNames.map { "\($0).json" }
+    private static func validateProvenance(
+        at url: URL,
+        artifactRoot: URL,
+        expectedCommit: String,
+        expectedRun: BrushFoundationPositiveRun
+    ) throws {
+        let data = try regularFileData(url, label: "foundation provenance")
+        try requireKeys(
+            data,
+            expected: [
+                "schemaVersion", "commit", "configuration",
+                "operatingSystem", "hardwareMachine", "hardwareModel",
+                "gpuName", "artifactRoot",
+            ],
+            label: "foundation provenance"
         )
-        guard try directoryNames(root) == expected else {
-            throw invalid(
-                "scene-inputs must contain the exact native deposition scene set"
+        let provenance: BrushFoundationProvenance
+        do {
+            provenance = try JSONDecoder().decode(
+                BrushFoundationProvenance.self,
+                from: data
             )
+        } catch {
+            throw invalid("foundation provenance JSON is invalid: \(error)")
         }
-        for name in expected {
-            _ = try regularFileData(
-                root.appendingPathComponent(name),
-                label: "scene input \(name)"
+        guard provenance.schemaVersion == 1,
+              provenance.commit == expectedCommit,
+              provenance.gpuName == expectedRun.gpuName,
+              provenance.configuration == expectedRun.configuration,
+              provenance.operatingSystem == expectedRun.operatingSystem,
+              provenance.artifactRoot
+                == artifactRoot.standardizedFileURL.path,
+              [
+                  provenance.hardwareMachine,
+                  provenance.hardwareModel,
+              ].allSatisfy({
+                  !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              })
+        else {
+            throw invalid(
+                "foundation provenance does not match the evidence run"
             )
         }
     }
@@ -671,61 +712,60 @@ public enum BrushFoundationEvidenceValidator {
             as: UTF8.self
         )
         guard text == "accepted\n" else {
-            throw invalid("native deposition performance status is not accepted")
+            throw invalid(
+                "native deposition performance status is not accepted"
+            )
         }
         return .passed
     }
 
-    private static func loadBenchmarkGPUName(_ url: URL) throws -> String {
-        let data = try regularFileData(url, label: "schema-6 benchmark provenance")
-        guard let object = try? JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-              let hardware = object["hardware"] as? [String: Any],
-              let gpuName = hardware["gpuName"] as? String,
-              !gpuName.isEmpty
-        else {
-            throw invalid("schema-6 benchmark GPU provenance is missing")
+    private static func recursiveRegularFilePaths(
+        root: URL,
+        suffix: String
+    ) throws -> Set<String> {
+        try requireDirectory(root, label: root.lastPathComponent)
+        let canonicalRoot = root.resolvingSymlinksInPath()
+        guard let enumerator = FileManager.default.enumerator(
+            at: canonicalRoot,
+            includingPropertiesForKeys: [
+                .isRegularFileKey, .isSymbolicLinkKey,
+            ],
+            options: []
+        ) else {
+            throw invalid("cannot enumerate \(root.path)")
         }
-        return gpuName
-    }
-
-    private static func decodeLogicalBaseline(
-        _ url: URL,
-        label: String
-    ) throws -> BrushLogicalBaseline {
-        let data = try regularFileData(url, label: label)
-        do {
-            return try JSONDecoder().decode(
-                BrushLogicalBaseline.self,
-                from: data
+        var paths = Set<String>()
+        for case let url as URL in enumerator
+        where url.lastPathComponent.hasSuffix(suffix) {
+            let values = try url.resourceValues(
+                forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
             )
-        } catch {
-            throw invalid("\(label) cannot be decoded strictly: \(error)")
+            guard values.isRegularFile == true,
+                  values.isSymbolicLink != true
+            else {
+                throw invalid(
+                    "evidence path is nonregular or a symlink: \(url.path)"
+                )
+            }
+            let basePaths = Set([
+                root.path,
+                canonicalRoot.path,
+                "/private\(root.path)",
+            ])
+            guard let basePath = basePaths.first(where: {
+                url.path.hasPrefix($0 + "/")
+            }) else {
+                throw invalid(
+                    "enumerated evidence escaped its artifact root"
+                )
+            }
+            paths.insert(String(url.path.dropFirst(basePath.count + 1)))
         }
+        return paths
     }
 
-    private static func decodeRendererBaseline(
-        _ url: URL,
-        label: String
-    ) throws -> BrushCharacterizationBaseline {
-        let data = try regularFileData(url, label: label)
-        do {
-            return try JSONDecoder().decode(
-                BrushCharacterizationBaseline.self,
-                from: data
-            )
-        } catch {
-            throw invalid("\(label) cannot be decoded strictly: \(error)")
-        }
-    }
-
-    private static func directoryNames(_ url: URL) throws -> Set<String> {
-        let values = try url.resourceValues(
-            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
-        )
-        guard values.isDirectory == true, values.isSymbolicLink != true else {
-            throw invalid("required directory is missing or is a symlink: \(url.path)")
-        }
+    private static func entryNames(_ url: URL) throws -> Set<String> {
+        try requireDirectory(url, label: url.lastPathComponent)
         return Set(
             try FileManager.default.contentsOfDirectory(
                 at: url,
@@ -733,6 +773,22 @@ public enum BrushFoundationEvidenceValidator {
                 options: []
             ).map(\.lastPathComponent)
         )
+    }
+
+    private static func requireDirectory(
+        _ url: URL,
+        label: String
+    ) throws {
+        let values = try url.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+        )
+        guard values.isDirectory == true,
+              values.isSymbolicLink != true
+        else {
+            throw invalid(
+                "\(label) is missing, not a directory, or a symlink"
+            )
+        }
     }
 
     private static func regularFileData(
@@ -747,7 +803,9 @@ public enum BrushFoundationEvidenceValidator {
             guard values.isRegularFile == true,
                   values.isSymbolicLink != true
             else {
-                throw invalid("\(label) is missing, nonregular, or a symlink")
+                throw invalid(
+                    "\(label) is missing, nonregular, or a symlink"
+                )
             }
             let data = try Data(contentsOf: url, options: [.mappedIfSafe])
             guard allowEmpty || !data.isEmpty else {
@@ -757,7 +815,9 @@ public enum BrushFoundationEvidenceValidator {
         } catch let error as BrushFoundationEvidenceValidationError {
             throw error
         } catch {
-            throw invalid("\(label) cannot be read: \(error.localizedDescription)")
+            throw invalid(
+                "\(label) cannot be read: \(error.localizedDescription)"
+            )
         }
     }
 
@@ -770,18 +830,14 @@ public enum BrushFoundationEvidenceValidator {
                 as? [String: Any],
               Set(object.keys) == expected
         else {
-            throw invalid("\(label) has missing or unexpected top-level keys")
+            throw invalid(
+                "\(label) has missing or unexpected top-level keys"
+            )
         }
     }
 
     private static func isCommit(_ value: String) -> Bool {
         value.count == 40 && value.utf8.allSatisfy {
-            ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
-        }
-    }
-
-    private static func isDigest(_ value: String) -> Bool {
-        value.count == 16 && value.utf8.allSatisfy {
             ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
         }
     }

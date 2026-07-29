@@ -61,6 +61,20 @@ func harnessSceneRejectsAnUnknownSchema() {
 }
 
 @Test
+func activeHarnessRoutingRejectsHistoricalSchemaFive() throws {
+    #expect(try HarnessSchemaRouting.runnerKind(for: 1) == .foundation)
+    #expect(try HarnessSchemaRouting.runnerKind(for: 3) == .foundation)
+    #expect(try HarnessSchemaRouting.runnerKind(for: 4) == .sliceThree)
+    #expect(try HarnessSchemaRouting.runnerKind(for: 6) == .deposition)
+    #expect(throws: HarnessSchemaRoutingError.unsupportedActiveSchema(5)) {
+        try HarnessSchemaRouting.runnerKind(for: 5)
+    }
+    #expect(throws: HarnessSchemaRoutingError.unsupportedActiveSchema(7)) {
+        try HarnessSchemaRouting.runnerKind(for: 7)
+    }
+}
+
+@Test
 func schemaFiveRoundTripsRequiredStrokeProvenanceAndChecks() throws {
     let scene = try HarnessScene.decode(schemaFiveData())
 

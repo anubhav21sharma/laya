@@ -256,8 +256,6 @@ PATTERN_WIRE_CONSTANT PatternUInt32
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionEdgeNone = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionEdgeDryBreakup = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionEdgeMarkerOverlap = 2;
-PATTERN_WIRE_CONSTANT PatternUInt32
-    PatternDepositionEdgeWetConcentration = 3;
 
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternSymmetryFamilyWireRectangular = 0;

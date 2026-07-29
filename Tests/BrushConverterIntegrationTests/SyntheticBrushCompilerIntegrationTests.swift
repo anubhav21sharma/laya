@@ -27,7 +27,7 @@ struct SyntheticBrushCompilerIntegrationTests {
 
         #expect(compiler.activeBrush === compiled)
         #expect(compiled.pipelineKey.backend == .deposition)
-        #expect(compiled.program.compatibilityRecipe == nil)
+        #expect(compiled.program.definition == reopened.definition)
         #expect(
             compiled.textures.keys.sorted()
                 == ["grain.synthetic", "shape.synthetic"]

@@ -32,25 +32,17 @@ enum BrushFoundationEvidenceGate {
             }
         }
 
-        guard arguments.count == 4 else {
+        guard arguments.count == 2 else {
             usage()
         }
         do {
             let status = try BrushFoundationEvidenceValidator.validate(
-                logicalBaselineURL: URL(fileURLWithPath: arguments[0]),
-                rendererBaselineURL: URL(fileURLWithPath: arguments[1]),
-                artifactRoot: URL(fileURLWithPath: arguments[2]),
-                expectedCommit: arguments[3]
+                artifactRoot: URL(fileURLWithPath: arguments[0]),
+                expectedCommit: arguments[1]
             )
             switch status {
             case .passed:
                 print("BRUSH FOUNDATION EVIDENCE PASS")
-            case let .performancePending(gpuName):
-                fputs(
-                    "BRUSH FOUNDATION PERFORMANCE PENDING: unstable real-Metal timing environment '\(gpuName)'.\n",
-                    stderr
-                )
-                exit(2)
             }
         } catch {
             fail(error)
@@ -59,7 +51,7 @@ enum BrushFoundationEvidenceGate {
 
     private static func usage() -> Never {
         fputs(
-            "usage: BrushFoundationEvidenceGate LOGICAL_BASELINE RENDERER_BASELINE ARTIFACT_ROOT COMMIT\n"
+            "usage: BrushFoundationEvidenceGate ARTIFACT_ROOT COMMIT\n"
                 + "       BrushFoundationEvidenceGate record-compiler-counters OUTPUT COMMIT\n",
             stderr
         )

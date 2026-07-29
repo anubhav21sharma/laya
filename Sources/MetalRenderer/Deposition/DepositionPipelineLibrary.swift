@@ -186,11 +186,6 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
                 key.brush.backend
             )
         }
-        guard key.brush.edgeTreatment != .wetConcentration else {
-            throw DepositionPipelineLibraryError.unsupportedEdgeTreatment(
-                key.brush.edgeTreatment
-            )
-        }
         guard key.sampleCount > 0 else {
             throw DepositionPipelineLibraryError.invalidSampleCount(
                 key.sampleCount
@@ -255,13 +250,17 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
 
     private func functionConstants(
         for key: BrushPipelineKey
-    ) -> MTLFunctionConstantValues {
+    ) throws -> MTLFunctionConstantValues {
         let values = MTLFunctionConstantValues()
         var secondaryShape = key.functionConstants.usesSecondaryShape
         var primaryGrain = key.functionConstants.usesGrain
         var secondaryGrain = key.functionConstants.usesSecondaryGrain
         var accumulation = accumulationWire(key.accumulation)
-        var edge = edgeWire(key.edgeTreatment)
+        guard var edge = Self.supportedEdgeWires[key.edgeTreatment] else {
+            throw DepositionPipelineLibraryError.unsupportedEdgeTreatment(
+                key.edgeTreatment
+            )
+        }
         values.setConstantValue(
             &secondaryShape,
             type: .bool,
@@ -307,18 +306,11 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
         }
     }
 
-    private func edgeWire(_ treatment: BrushEdgeTreatment) -> UInt32 {
-        switch treatment {
-        case .none:
-            PatternDepositionEdgeNone
-        case .dryBreakup:
-            PatternDepositionEdgeDryBreakup
-        case .markerOverlap:
-            PatternDepositionEdgeMarkerOverlap
-        case .wetConcentration:
-            PatternDepositionEdgeWetConcentration
-        }
-    }
+    private static let supportedEdgeWires: [BrushEdgeTreatment: UInt32] = [
+        .none: PatternDepositionEdgeNone,
+        .dryBreakup: PatternDepositionEdgeDryBreakup,
+        .markerOverlap: PatternDepositionEdgeMarkerOverlap,
+    ]
 
     private func configureBlend(
         _ attachment: MTLRenderPipelineColorAttachmentDescriptor,

@@ -97,6 +97,37 @@ struct DepositionShaderSourceTests {
     }
 
     @Test
+    func wetConcentrationHasNoProductionShaderWireOrPipelineBranch() throws {
+        let root = repositoryRoot()
+        let sources = [
+            try String(
+                contentsOf: root.appendingPathComponent(
+                    "Sources/CShaderTypes/include/ShaderTypes.h"
+                ),
+                encoding: .utf8
+            ),
+            try String(
+                contentsOf: root.appendingPathComponent(
+                    "Sources/MetalRenderer/Shaders.metal"
+                ),
+                encoding: .utf8
+            ),
+            try String(
+                contentsOf: root.appendingPathComponent(
+                    "Sources/MetalRenderer/Deposition/DepositionPipelineLibrary.swift"
+                ),
+                encoding: .utf8
+            ),
+        ]
+
+        #expect(
+            sources.allSatisfy {
+                !$0.contains("PatternDepositionEdgeWetConcentration")
+            }
+        )
+    }
+
+    @Test
     @MainActor
     func everySupportedSpecializationBuildsAProductionPipeline() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
@@ -320,16 +351,19 @@ struct DepositionShaderSourceTests {
     }
 
     private func depositionShaderSource() throws -> String {
-        let repositoryRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
         return try String(
-            contentsOf: repositoryRoot.appendingPathComponent(
+            contentsOf: repositoryRoot().appendingPathComponent(
                 "Sources/MetalRenderer/Shaders.metal"
             ),
             encoding: .utf8
         )
+    }
+
+    private func repositoryRoot() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
     }
 
     @MainActor
@@ -837,7 +871,9 @@ struct DepositionShaderSourceTests {
         case .markerOverlap:
             PatternDepositionEdgeMarkerOverlap
         case .wetConcentration:
-            PatternDepositionEdgeWetConcentration
+            preconditionFailure(
+                "Wet concentration is unavailable to production shaders"
+            )
         }
     }
 

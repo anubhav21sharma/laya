@@ -168,7 +168,7 @@ struct RadialShaderTests {
             )
         })
 
-        let eraseStyle = StrokeRenderStyle(
+        let eraseStyle = radialTemplateStyle(
             color: .black,
             diameter: 20,
             compositeMode: .erase,
@@ -508,12 +508,33 @@ struct FiniteCanvasExportTests {
     }
 }
 
-private let radialDrawStyle = StrokeRenderStyle(
-    color: .black,
-    diameter: 12,
-    compositeMode: .draw,
-    eraserStrength: 1
-)
+private let radialDrawStyle = radialTemplateStyle()
+
+private func radialTemplateStyle(
+    color: InkColor = .black,
+    diameter: Float = 12,
+    compositeMode: StrokeCompositeMode = .draw,
+    eraserStrength: Float = 1
+) -> StrokeRenderStyle {
+    let program = try! BrushProgramCompiler.compile(
+        GridRenderer.nativeHarnessDefinition(mode: compositeMode)
+    )
+    return StrokeRenderStyle(
+        color: color,
+        diameter: diameter,
+        compositeMode: compositeMode,
+        eraserStrength: eraserStrength,
+        program: program,
+        renderIdentity: try! BrushRenderIdentity(
+            definitionID: program.definition.id,
+            semanticHash: String(
+                repeating: compositeMode == .draw ? "d" : "e",
+                count: 64
+            )
+        ),
+        seed: 1
+    )
+}
 
 @MainActor
 private func makeRadialRenderer(
