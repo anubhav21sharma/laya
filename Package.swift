@@ -36,6 +36,10 @@ let package = Package(
             name: "BrushFoundationEvidenceGate",
             targets: ["BrushFoundationEvidenceGate"]
         ),
+        .executable(
+            name: "BrushDepositionEvidenceGate",
+            targets: ["BrushDepositionEvidenceGate"]
+        ),
         .library(name: "PatternFile", targets: ["PatternFile"]),
     ],
     targets: [
@@ -91,6 +95,9 @@ let package = Package(
             name: "BrushFoundationEvidenceGate",
             dependencies: ["MetalRenderer"]
         ),
+        .executableTarget(
+            name: "BrushDepositionEvidenceGate"
+        ),
         .testTarget(
             name: "PatternEngineTests",
             dependencies: ["PatternEngine"]
@@ -107,6 +114,7 @@ let package = Package(
                 "CShaderTypes",
                 "EditorCore",
                 "BrushFormat",
+                "BrushDepositionEvidenceGate",
             ]
         ),
         .testTarget(
