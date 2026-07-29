@@ -17,6 +17,12 @@ airbrush, and erase.
 - Gate-discovered native harness prerequisite:
   `87a5f4de34586d8f46f903ece8dccc8084920f46`
   (`fix(harness): restore native workload evidence`).
+- Post-review software fixes:
+  `86a814bbc463d08d42933d806014c6806df1e9a9`
+  (`fix(brush): close deposition review gaps`).
+- Optional physical-evidence gate correction:
+  `052fa20cde1c395429862dd402e39c227914a90c`
+  (`fix(gate): preserve optional evidence status`).
 - Evidence record and final source tree: the commit containing this milestone.
   Its exact full identity is written by the final clean run to
   `.build/brush-deposition-artifacts/provenance.json` and repeated in every
@@ -49,7 +55,9 @@ stable-device performance failure.
 
 ### Tests And Contracts
 
-- `swift test --no-parallel`: 1,145 tests in 68 suites passed.
+- `swift test --no-parallel`: 1,161 tests in 68 suites passed.
+- Focused post-warmup input-path storage-capacity contract: one test passed
+  after 128 warmup events and 512 audited events.
 - Focused Brush Lab headless contract: four tests in one suite passed.
 - Positive native deposition scenes: 16 of 16 passed in isolated processes.
 - Paired negative controls: 16 of 16 failed closed with exactly exit `1`,
@@ -97,13 +105,23 @@ The authoritative bundle is:
 It contains commit/toolchain/OS/kernel/hardware/GPU provenance, matching
 initial and terminal committed source trees, the exact scene matrix,
 performance status, 16 positive directories, 16 negative-control directories,
-the headless Brush Lab catalog, raw performance evidence, build/test logs, and
-`artifact-sha256.txt`. The manifest binds every other artifact file; the final
-clean run verifies every recorded digest before reporting pending or pass.
+the headless Brush Lab catalog, a `physical-profiles` root for separately
+supplied structured raw evidence, raw software performance evidence,
+build/test logs, and `artifact-sha256.txt`. The manifest binds every other
+artifact file; the final clean run verifies every recorded digest before
+reporting pending or pass.
 
 The Brush Lab catalog contains 312 sorted unique cards and 312 explicitly
 unset assessments. Its committed SHA-256 is
-`2e943ffdaf3da1ef3dc4dacbac916229c2815c86c1d04a256567a7a64a938331`.
+`6490bcf5d3d452e523b0eba7293b1bf8050ae8445a41941592bbb60c91bf7a32`.
+
+The clean reviewed run bound the artifact bundle to:
+
+- commit `052fa20cde1c395429862dd402e39c227914a90c`;
+- source-tree SHA-256
+  `d8c79e5fe06274c48483308e636aa2b241b9d039babbc20dffed10cfd4e545bc`;
+- artifact-manifest SHA-256
+  `736863281310db352d8e3aee811fd54b44956f56548e8e5621fb3d95b617ff78`.
 
 ### Software Performance Policy
 
@@ -112,12 +130,18 @@ unset assessments. Its committed SHA-256 is
   supported physical Metal hardware.
 - Completed-stroke length independence: required and validated from the raw
   401-frame projected-long-stroke series.
-- Input hot path: no decode, upload, pipeline creation, allocation, file I/O,
-  or synchronous wait; compiler/resource counters remain zero.
+- Input hot path: no decode, upload, pipeline creation, file I/O, or
+  synchronous wait; compiler/resource counters remain zero. Runtime capacity
+  instrumentation covers dab generation, tiling images/candidates/clipped
+  polygons/fragments, and scheduler/replay record stores, and observed no
+  post-warmup capacity growth across 512 audited events.
 
 The final run records the measured CPU and GPU values even when physical
 acceptance is pending. Measurements from `Apple Paravirtual device` are
 diagnostic and do not establish a 120 Hz or 60 Hz product claim.
+The reviewed run measured CPU preparation p95 `0.9119510650634766 ms` and a
+500-dab GPU frame `0.8622499881312251 ms`; both remain diagnostic because the
+GPU is paravirtual.
 
 ## Physical Hardware Acceptance
 
@@ -136,6 +160,13 @@ separate physical evidence:
 
 Virtual and paravirtual Metal measurements are diagnostic only and never
 claim `realtime120` or 60 Hz physical acceptance.
+
+Raw caller-supplied `passed`, `pending`, or `failed` strings are rejected.
+Each supplied profile must contain the exact structured evidence schema,
+commit/source-tree and toolchain provenance, physical device identity,
+threshold declarations, and a structured raw trace. The validator recomputes
+the raw trace digest and metric aggregates and requires reported samples to
+match the raw samples before a physical profile can pass.
 
 ## Manual Brush Lab Acceptance
 
@@ -163,3 +194,17 @@ Wet Mix from scratch.
 Stage 4 is not complete until every software check passes on the final commit
 and the user assesses the manual cards. The designed hardware-only pending
 state may remain explicit until the eight physical profiles are supplied.
+
+## Reviewed Completion Checklist
+
+- [x] Software-complete on committed source: the clean Stage 4 gate passed all
+      correctness, test, build, analysis, scene, binary, source, schema,
+      provenance, digest, allocation-capacity, and negative-control checks,
+      then returned the designed exit `2` on the paravirtual GPU.
+- [x] Close all seven post-review software findings with failing-first
+      regressions, including the six restored native regression cases.
+- [x] Preserve native-only production boundaries without restoring
+      `ProjectedStampInstance` or bounded-wash runtime behavior.
+- [ ] Supply and validate all eight physical-hardware evidence profiles.
+- [ ] Complete the 312-card human Brush Lab appearance and input-quality
+      assessment.
