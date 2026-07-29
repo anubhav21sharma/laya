@@ -22,6 +22,10 @@ extension UTType {
         exportedAs: "com.anubhav.brush-lab-evidence",
         conformingTo: .package
     )
+    static let brushLabProfessionalReviewMatrix = UTType(
+        exportedAs: "com.anubhav.brush-lab-professional-review-matrix",
+        conformingTo: .json
+    )
 }
 
 struct BrushLabEvidenceDocument: FileDocument {
@@ -73,6 +77,31 @@ struct BrushLabEvidenceDocument: FileDocument {
                 }
             )
         }
+    }
+}
+
+struct BrushLabProfessionalReviewMatrixDocument: FileDocument {
+    static let readableContentTypes: [UTType] = [
+        .brushLabProfessionalReviewMatrix,
+    ]
+
+    let data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        self.data = data
+    }
+
+    func fileWrapper(
+        configuration _: WriteConfiguration
+    ) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }
 
@@ -137,6 +166,9 @@ struct BrushLabView: View {
     @State private var importPresented = false
     @State private var exportPresented = false
     @State private var exportDocument: BrushLabEvidenceDocument?
+    @State private var professionalMatrixExportPresented = false
+    @State private var professionalMatrixExportDocument:
+        BrushLabProfessionalReviewMatrixDocument?
     @State private var exportError: String?
     @State private var seedDraft = "1"
     @State private var showActualDabs = true
@@ -193,6 +225,17 @@ struct BrushLabView: View {
             defaultFilename: evidenceFilename
         ) { result in
             exportDocument = nil
+            if case let .failure(error) = result {
+                exportError = error.localizedDescription
+            }
+        }
+        .fileExporter(
+            isPresented: $professionalMatrixExportPresented,
+            document: professionalMatrixExportDocument,
+            contentType: .brushLabProfessionalReviewMatrix,
+            defaultFilename: professionalReviewMatrixFilename
+        ) { result in
+            professionalMatrixExportDocument = nil
             if case let .failure(error) = result {
                 exportError = error.localizedDescription
             }
@@ -338,6 +381,16 @@ struct BrushLabView: View {
                 runtime.session.selectedManualCard == nil
                     || !runtime.controller.renderer.isIdle
             )
+
+            Button {
+                exportProfessionalReviewMatrix(runtime)
+            } label: {
+                Label(
+                    "Export Professional Review Matrix",
+                    systemImage: "square.and.arrow.up"
+                )
+            }
+            .disabled(runtime.session.isLoading)
 
             Divider()
                 .frame(height: 22)
@@ -966,21 +1019,11 @@ struct BrushLabView: View {
         do {
             let archive = try runtime.session.makeManualEvidenceArchive()
             #if os(macOS)
-            let panel = NSSavePanel()
-            panel.allowedContentTypes = [.brushLabEvidence]
-            panel.nameFieldStringValue = evidenceFilename
-            panel.canCreateDirectories = true
-            panel.begin { response in
-                guard response == .OK, let url = panel.url else { return }
-                do {
-                    try BrushLabManualEvidenceSaveService.live.save(
-                        archive,
-                        to: url
-                    )
-                    exportError = nil
-                } catch {
-                    exportError = error.localizedDescription
-                }
+            presentSavePanel(
+                contentType: .brushLabEvidence,
+                filename: evidenceFilename
+            ) { url in
+                try BrushLabManualEvidenceSaveService.live.save(archive, to: url)
             }
             #else
             exportDocument = BrushLabEvidenceDocument(
@@ -994,6 +1037,51 @@ struct BrushLabView: View {
         }
     }
 
+    private func exportProfessionalReviewMatrix(_ runtime: BrushLabRuntime) {
+        do {
+            let coordinator = BrushLabProfessionalMatrixExportCoordinator.live
+            #if os(macOS)
+            presentSavePanel(
+                contentType: .brushLabProfessionalReviewMatrix,
+                filename: professionalReviewMatrixFilename
+            ) { url in
+                try coordinator.export(runtime.session, to: url)
+            }
+            #else
+            professionalMatrixExportDocument =
+                BrushLabProfessionalReviewMatrixDocument(
+                    data: try coordinator.data(from: runtime.session)
+                )
+            professionalMatrixExportPresented = true
+            exportError = nil
+            #endif
+        } catch {
+            exportError = error.localizedDescription
+        }
+    }
+
+    #if os(macOS)
+    private func presentSavePanel(
+        contentType: UTType,
+        filename: String,
+        write: @escaping (URL) throws -> Void
+    ) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [contentType]
+        panel.nameFieldStringValue = filename
+        panel.canCreateDirectories = true
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try write(url)
+                exportError = nil
+            } catch {
+                exportError = error.localizedDescription
+            }
+        }
+    }
+    #endif
+
     private var evidenceFilename: String {
         guard let sourceName = runtime?.session.sourceName else {
             return "brush-lab-card.brushlabevidence"
@@ -1002,6 +1090,10 @@ struct BrushLabView: View {
             .deletingPathExtension()
             .lastPathComponent
         return "\(base)-card.brushlabevidence"
+    }
+
+    private var professionalReviewMatrixFilename: String {
+        "professional-brush-review-matrix.json"
     }
 }
 

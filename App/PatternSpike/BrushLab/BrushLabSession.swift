@@ -1457,6 +1457,33 @@ struct BrushLabManualEvidenceSaveService: Sendable {
     }
 }
 
+/// Writes the Stage 5 professional review catalog through the same session
+/// that owns its fixed cards and user-owned assessments. UI surfaces use this
+/// coordinator instead of directly serializing the catalog.
+struct BrushLabProfessionalMatrixExportCoordinator: Sendable {
+    typealias Writer = @Sendable (Data, URL) throws -> Void
+
+    static let live = BrushLabProfessionalMatrixExportCoordinator {
+        try $0.write(to: $1, options: .atomic)
+    }
+
+    private let write: Writer
+
+    init(write: @escaping Writer) {
+        self.write = write
+    }
+
+    @MainActor
+    func data(from session: BrushLabSession) throws -> Data {
+        try session.makeProfessionalManualCardsData()
+    }
+
+    @MainActor
+    func export(_ session: BrushLabSession, to destination: URL) throws {
+        try write(data(from: session), destination)
+    }
+}
+
 enum BrushLabEvidenceError: Error, Equatable, LocalizedError {
     case packageUnavailable
     case rendererBusy

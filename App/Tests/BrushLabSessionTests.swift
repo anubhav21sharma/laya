@@ -101,6 +101,51 @@ struct BrushLabSessionTests {
     }
 
     @Test
+    func professionalMatrixExportCoordinatorWritesTheSessionReviewArtifact()
+        throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent(
+            "professional-review-matrix.json"
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+
+        try BrushLabProfessionalMatrixExportCoordinator.live.export(
+            runtime.session,
+            to: destination
+        )
+
+        let artifact = try Data(contentsOf: destination)
+        let catalog = try JSONDecoder().decode(
+            BrushLabProfessionalManualCatalog.self,
+            from: artifact
+        )
+        #expect(catalog.schemaVersion == 2)
+        #expect(catalog.cards == BrushLabManualCard.professionalFixedMatrix)
+        #expect(Set(catalog.cards.map(\.brushID)) == Set(
+            ProfessionalBrushCatalog.all.map(\.id.rawValue)
+        ))
+        #expect(catalog.assessments.allSatisfy {
+            $0.responsiveness == nil
+                && $0.edgeQuality == nil
+                && $0.taperTermination == nil
+                && $0.textureCohesion == nil
+                && $0.pressureResponse == nil
+                && $0.tiltDirectionResponse == nil
+                && $0.buildup == nil
+                && $0.symmetryBehavior == nil
+                && $0.eraserMatch == nil
+                && $0.notes == nil
+        })
+    }
+
+    @Test
     func fixedManualCardMatrixCoversEveryAnchorAndRequiredDimension() {
         let cards = BrushLabManualCard.fixedMatrix
         let anchorIDs = Set(AnchorBrushCatalog.all.map(\.id.rawValue))

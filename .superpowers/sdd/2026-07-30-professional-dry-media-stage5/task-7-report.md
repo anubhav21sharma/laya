@@ -62,7 +62,37 @@
 
 ## Concerns
 
-- The Stage 5 Brush Lab matrix is exported separately from the current Stage
-  4 interactive/evidence workflow. A later UI pass can choose to surface the
-  professional matrix as the default review menu without relabeling Stage 4
-  evidence.
+- The Stage 5 Brush Lab matrix is exported through its own shipped action,
+  while the current Stage 4 interactive menu and evidence workflow remain
+  intentionally separate rather than being relabeled as professional.
+
+## Export Reachability Follow-up
+
+### RED
+
+- Added the production-route integration test
+  `professionalMatrixExportCoordinatorWritesTheSessionReviewArtifact` before
+  implementation. It failed because
+  `BrushLabProfessionalMatrixExportCoordinator` did not exist.
+
+### GREEN
+
+- Added `BrushLabProfessionalMatrixExportCoordinator`. It obtains bytes from
+  `BrushLabSession.makeProfessionalManualCardsData()` and atomically writes
+  the schema-v2 professional matrix.
+- Added the shipped Brush Lab action **Export Professional Review Matrix**.
+  On macOS it reuses the existing save-panel presentation helper and the
+  coordinator writes the chosen destination. On iPad it reuses `fileExporter`
+  with a dedicated JSON document type whose bytes originate from that same
+  coordinator.
+- The Stage 4 card menu and **Export Card Evidence** archive path are not
+  renamed or replaced.
+
+### Follow-up verification
+
+- Focused:
+  `swift test --disable-sandbox --no-parallel --filter 'BrushLabSessionTests|ContentViewLifecycleTests'`
+  — 54 tests passed.
+- Full serial `swift test --disable-sandbox --no-parallel` — passed.
+- macOS and iPad Simulator Debug builds — passed.
+- `git diff --check` — passed.
