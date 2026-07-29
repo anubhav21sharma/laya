@@ -141,12 +141,29 @@ func professionalCatalogResolvesChiselMarkerWithItsExactFallbackAndMaterial() th
         .asset("builtin.shape.marker-chisel"),
     ])
     #expect(compiled.definition.coverage.grains.isEmpty)
+    #expect(compiled.definition.coverage.baseHardness == 0.96)
+    #expect(compiled.definition.coverage.aspectRatio == 0.22)
+    #expect(compiled.definition.placement.strokeOpacity == 0.82)
+    #expect(compiled.definition.placement.baseSpacingFraction == 0.035)
+    #expect(compiled.definition.placement.maximumSpacingFraction == 0.10)
+    #expect(compiled.definition.dynamics.spacing == BrushMappingDefinition(
+        input: .pressure,
+        response: .constant(1),
+        scale: 1,
+        offset: 0,
+        lowerClamp: 1,
+        upperClamp: 1,
+        inverted: false,
+        jitter: 0,
+        missingInputValue: 1
+    ))
     #expect(compiled.definition.material.accumulation == .uniformGlaze)
     #expect(compiled.definition.material.edgeTreatment == .markerOverlap)
     #expect(compiled.definition.material.interaction == .none)
     #expect(compiled.definition.material.strength == 0.95)
     #expect(compiled.definition.material.accumulationLimit == 0.82)
     #expect(compiled.definition.performanceIntent == .realtime120)
+    #expect(compiled.definition.stabilization == 0.12)
     #expect(compiled.definition.taper.start == .diameterMultiples(0.35))
     #expect(compiled.definition.taper.end == .diameterMultiples(0.35))
     #expect(compiled.definition.taper.minimumSize == 0.85)

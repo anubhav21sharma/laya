@@ -54,7 +54,7 @@ func professionalCatalogCompilesToDistinctNoninteractingSemanticRecordsForEveryT
     let entries = ProfessionalBrushCatalog.all
     let compiled = try entries.map { try BrushProgramCompiler.compile($0.definition) }
     let hashes = try entries.map { try professionalDefinitionSemanticHash($0.definition) }
-    let records = entries.indices.flatMap { index in
+    let unsortedRecords = entries.indices.flatMap { index in
         let entry = entries[index]
         let program = compiled[index]
         let hash = hashes[index]
@@ -66,7 +66,8 @@ func professionalCatalogCompilesToDistinctNoninteractingSemanticRecordsForEveryT
                 program: program
             )
         }
-    }.sorted {
+    }
+    let records = unsortedRecords.sorted {
         ($0.brushID, $0.traceName) < ($1.brushID, $1.traceName)
     }
     let repeated = entries.indices.flatMap { index in
@@ -109,6 +110,25 @@ func professionalCatalogCompilesToDistinctNoninteractingSemanticRecordsForEveryT
         validatingSchemaVersion: ProfessionalBrushLogicalBaseline.schemaVersion,
         records: records
     )
+    let expectedRecordKeys = [
+        "builtin.professional-chisel-marker",
+        "builtin.professional-graphite-pencil",
+        "builtin.professional-natural-charcoal",
+        "builtin.professional-technical-ink",
+    ].flatMap { brushID in
+        [
+            "professional-corner",
+            "professional-direction-turn",
+            "professional-fast-line",
+            "professional-grid-seam",
+            "professional-hatching",
+            "professional-pressure-ramp",
+            "professional-radial-spoke",
+            "professional-slow-line",
+            "professional-tap",
+            "professional-tilt-sweep",
+        ].map { "\(brushID)\u{0}\($0)" }
+    }
 
     #expect(entries.count == 4)
     #expect(compiled == entries.map(\.program))
@@ -122,9 +142,13 @@ func professionalCatalogCompilesToDistinctNoninteractingSemanticRecordsForEveryT
     })
     #expect(records.count == 40)
     #expect(records == repeated)
-    #expect(records == records.sorted {
-        ($0.brushID, $0.traceName) < ($1.brushID, $1.traceName)
-    })
+    #expect(records.map { "\($0.brushID)\u{0}\($0.traceName)" } == expectedRecordKeys)
+    #expect(throws: ProfessionalBrushLogicalBaselineError.recordsNotSorted) {
+        _ = try ProfessionalBrushLogicalBaseline(
+            validatingSchemaVersion: ProfessionalBrushLogicalBaseline.schemaVersion,
+            records: unsortedRecords
+        )
+    }
     #expect(directionRecords == predictionFreeRecords)
     #expect(try baseline.encoded() == baseline.encoded())
     #expect(throws: BrushDefinitionValidationError.missingCapability("wetMix")) {

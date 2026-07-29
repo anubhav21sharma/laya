@@ -428,40 +428,76 @@ func chiselMarkerCompiledDabsFollowDirectionWithoutScatterAndKeepConstantSpacing
     let horizontal = chiselMarkerDab(direction: 0, velocity: 0)
     let vertical = chiselMarkerDab(direction: .pi / 2, velocity: 50_000)
     let reverse = chiselMarkerDab(direction: .pi, velocity: 100_000)
+    let zeroPressure = chiselMarkerDab(
+        pressure: 0,
+        capabilities: [.pressure],
+        velocity: 0
+    )
     let lightPressure = chiselMarkerDab(
         pressure: 0.2,
         capabilities: [.pressure],
         velocity: 0
     )
-    let maximumRandom = chiselMarkerDab(
+    let lightPressureFast = chiselMarkerDab(
+        pressure: 0.2,
+        capabilities: [.pressure],
+        velocity: 100_000
+    )
+    let maximumRandom = BrushRandomValues(
+        spacing: 0.999_999,
+        scatterX: 0.999_999,
+        scatterY: 0.999_999,
+        rotation: 0.999_999,
+        grainX: 0.999_999,
+        grainY: 0.999_999,
+        materialVariation: 0.999_999
+    )
+    let randomizedHorizontal = chiselMarkerDab(
+        direction: 0,
+        velocity: 0,
+        random: maximumRandom
+    )
+    let randomizedVertical = chiselMarkerDab(
+        direction: .pi / 2,
+        velocity: 50_000,
+        random: maximumRandom
+    )
+    let randomizedReverse = chiselMarkerDab(
+        direction: .pi,
         velocity: 100_000,
-        random: BrushRandomValues(
-            spacing: 0.999_999,
-            scatterX: 0.999_999,
-            scatterY: 0.999_999,
-            rotation: 0.999_999,
-            grainX: 0.999_999,
-            grainY: 0.999_999,
-            materialVariation: 0.999_999
-        )
+        random: maximumRandom
     )
 
-    #expect(abs((vertical.rotation - horizontal.rotation) - .pi / 2) < 0.000_01)
-    #expect(abs((reverse.rotation - vertical.rotation) - .pi / 2) < 0.000_01)
-    #expect([horizontal, vertical, reverse, maximumRandom].allSatisfy { $0.scatter == .zero })
+    #expect(abs(horizontal.rotation - Float.pi) < 0.000_01)
+    #expect(abs(vertical.rotation - 1.5 * Float.pi) < 0.000_01)
+    #expect(abs(reverse.rotation - 2 * Float.pi) < 0.000_01)
+    #expect(abs(randomizedHorizontal.rotation - Float.pi) < 0.000_01)
+    #expect(abs(randomizedVertical.rotation - 1.5 * Float.pi) < 0.000_01)
+    #expect(abs(randomizedReverse.rotation - 2 * Float.pi) < 0.000_01)
+    #expect([horizontal, vertical, reverse, randomizedHorizontal,
+             randomizedVertical, randomizedReverse].allSatisfy { $0.scatter == .zero })
     #expect(horizontal.position == WorldPoint(x: 10, y: 20))
     #expect(vertical.position == WorldPoint(x: 10, y: 20))
     #expect(reverse.position == WorldPoint(x: 10, y: 20))
-    #expect(maximumRandom.position == WorldPoint(x: 10, y: 20))
+    #expect(randomizedHorizontal.position == WorldPoint(x: 10, y: 20))
+    #expect(randomizedVertical.position == WorldPoint(x: 10, y: 20))
+    #expect(randomizedReverse.position == WorldPoint(x: 10, y: 20))
+    #expect(zeroPressure.diameter == 28)
     #expect(abs(lightPressure.diameter - 30.4) < 0.000_01)
     #expect(horizontal.diameter == 40)
     #expect(horizontal.flow == 0.56)
     #expect(abs(vertical.flow - 0.49) < 0.000_01)
     #expect(abs(reverse.flow - 0.42) < 0.000_01)
+    #expect(abs(zeroPressure.diameter * 0.035 - 0.98) < 0.000_01)
+    #expect(zeroPressure.spacing == 1)
+    #expect(abs(lightPressure.spacing - 1.064) < 0.000_01)
+    #expect(abs(lightPressureFast.spacing - 1.064) < 0.000_01)
     #expect(horizontal.spacing == 1.4)
     #expect(vertical.spacing == 1.4)
     #expect(reverse.spacing == 1.4)
-    #expect(maximumRandom.spacing == 1.4)
+    #expect(randomizedHorizontal.spacing == 1.4)
+    #expect(abs(lightPressure.spacing / lightPressure.diameter - 0.035) < 0.000_01)
+    #expect(abs(horizontal.spacing / horizontal.diameter - 0.035) < 0.000_01)
 }
 
 @Test
