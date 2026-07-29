@@ -954,6 +954,10 @@ public struct HarnessScene: Codable, Equatable, Sendable {
                   !depositionInvariantExpectations.isEmpty,
                   Set(depositionInvariantExpectations.keys).isSubset(
                       of: DepositionEvidenceValidator.allowedInvariantNames
+                        .union(
+                            ProfessionalBrushEvidenceValidator
+                                .requiredInvariantNames
+                        )
                   )
             else {
                 throw HarnessSceneError.invalidDepositionScene

@@ -17,3 +17,4 @@ does not upgrade an earlier pending or unaccepted status.
 | Compiled symmetry Phase 5 | [Product Completion](09-product-completion.md) | Implementation Complete — Physical-Device Performance Acceptance Pending |
 | Brush engine Stages 1–2 | [World-Class Brush Engine Foundation](10-world-class-brush-engine-foundation.md) | Stage 1–2 Correctness Complete — Physical-Device Performance And Input Acceptance Pending |
 | Brush engine Stage 4 | [Brush Deposition Backend](11-brush-deposition-backend.md) | Stage 4 Acceptance Pending Physical Hardware And Manual Review |
+| Brush engine Stage 5 | [Professional Dry And Non-Interacting Media](12-professional-dry-media.md) | Final Clean Evidence Run Pending |

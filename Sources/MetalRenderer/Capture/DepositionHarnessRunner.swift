@@ -83,7 +83,11 @@ public final class DepositionHarnessRunner {
             )
         }
         let stem = Self.positiveStem(scene.name)
+        let isProfessional =
+            ProfessionalBrushEvidenceValidator.positiveSceneNames
+                .contains(stem)
         guard DepositionEvidenceValidator.positiveSceneNames.contains(stem)
+                || isProfessional
         else {
             throw DepositionHarnessRunError.unknownScene(scene.name)
         }
@@ -98,6 +102,11 @@ public final class DepositionHarnessRunner {
             package: package,
             tiling: tiling
         )
+        if isProfessional {
+            _ = try await context.compiler.compileAndActivate(
+                package: package
+            )
+        }
         if stem == "deposition-erase" {
             try await seedEraseCanvas(context, scene: scene)
         }
@@ -121,21 +130,47 @@ public final class DepositionHarnessRunner {
             )
         }
 
-        var invariants = try await invariantResults(
-            stem: stem,
-            scene: scene,
-            primary: capture,
-            context: context,
-            package: package
-        )
-        invariants["strokeCompilerCountersUnchanged"] =
-            countersBeforeStroke == countersAfterStroke
-            && capture.pipelinePreparationUnchanged
-        invariants["strokePipelinePreparationUnchanged"] =
-            capture.pipelinePreparationUnchanged
+        var invariants: [String: Bool]
+        if isProfessional {
+            invariants = try await professionalInvariantResults(
+                stem: stem,
+                scene: scene,
+                primary: capture,
+                context: context,
+                package: package,
+                countersBeforeStroke: countersBeforeStroke,
+                countersAfterStroke: countersAfterStroke
+            )
+        } else {
+            invariants = try await invariantResults(
+                stem: stem,
+                scene: scene,
+                primary: capture,
+                context: context,
+                package: package
+            )
+            invariants["strokeCompilerCountersUnchanged"] =
+                countersBeforeStroke == countersAfterStroke
+                && capture.pipelinePreparationUnchanged
+            invariants["strokePipelinePreparationUnchanged"] =
+                capture.pipelinePreparationUnchanged
+        }
         for key in scene.depositionInvariantExpectations.keys
         where invariants[key] == nil {
             invariants[key] = false
+        }
+
+        if isProfessional {
+            return try finishProfessionalRun(
+                scene: scene,
+                outputDirectory: outputDirectory,
+                build: build,
+                context: context,
+                capture: capture,
+                invariants: invariants,
+                countersBeforeStroke: countersBeforeStroke,
+                countersAfterStroke: countersAfterStroke
+            )
         }
 
         let cpuReference: [UInt8]?
@@ -274,6 +309,8 @@ private extension DepositionHarnessRunner {
         let renderer: GridRenderer
         let compiler: BrushCompiler
         let compiled: CompiledBrush
+        let countersBeforeCompile: BrushCompilerCounters
+        let countersAfterCompile: BrushCompilerCounters
         let pipelineLibrary: DepositionPipelineLibrary
         let pipelineFailurePreparer:
             ArmableDepositionPipelinePreparer?
@@ -313,17 +350,20 @@ private extension DepositionHarnessRunner {
     }
 
     func package(for stem: String) throws -> BrushPackage {
-        if Self.productionAnchorSceneNames.contains(stem) {
-            guard let definition = productionAnchorDefinitions[stem] else {
-                throw DepositionHarnessRunError.invariantFailed(
-                    scene: stem,
-                    invariant: "productionAnchorDefinitionInjected"
-                )
-            }
+        if let definition = productionAnchorDefinitions[stem] {
             return try BrushPackage(
                 manifest: BrushPackageManifest(resources: []),
                 definition: definition,
                 resourceData: [:]
+            )
+        }
+        if Self.productionAnchorSceneNames.contains(stem)
+            || ProfessionalBrushEvidenceValidator.positiveSceneNames
+                .contains(stem)
+        {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: stem,
+                invariant: "productionBrushDefinitionInjected"
             )
         }
         return try DepositionHarnessFixtures.package(for: stem)
@@ -387,9 +427,11 @@ private extension DepositionHarnessRunner {
                 tiling: tiling
             )
         )
+        let countersBeforeCompile = compiler.debugCounters
         let compiled = try await compiler.compileAndActivate(
             package: package
         )
+        let countersAfterCompile = compiler.debugCounters
         if package.definition.material.accumulation == .destinationOut {
             try renderer.activateEraserBrush(compiled)
         } else {
@@ -399,6 +441,8 @@ private extension DepositionHarnessRunner {
             renderer: renderer,
             compiler: compiler,
             compiled: compiled,
+            countersBeforeCompile: countersBeforeCompile,
+            countersAfterCompile: countersAfterCompile,
             pipelineLibrary: pipelineLibrary,
             pipelineFailurePreparer: failurePreparer
         )
@@ -420,7 +464,7 @@ private extension DepositionHarnessRunner {
             trace: Self.trace(width: scene.width, height: scene.height)
         )
         let eraser = try await context.compiler.compileAndActivate(
-            package: package(for: "deposition-erase")
+            package: self.package(for: "deposition-erase")
         )
         try context.renderer.activateEraserBrush(eraser)
     }
@@ -467,7 +511,20 @@ private extension DepositionHarnessRunner {
         let style = StrokeRenderStyle(
             color: color,
             diameter: diameter
-                ?? (stem == "deposition-stamp-size-mips" ? 48 : 22),
+                ?? (
+                    stem == "deposition-stamp-size-mips"
+                        ? 48
+                        : (
+                            stem.hasPrefix("professional-")
+                                ? (
+                                    stem
+                                        == "professional-natural-charcoal"
+                                        ? 80
+                                        : 40
+                                )
+                                : 22
+                        )
+                ),
             compositeMode: compositeMode,
             eraserStrength: 0.72,
             program: context.compiled.program,
@@ -573,7 +630,8 @@ private extension DepositionHarnessRunner {
         compositeMode: StrokeCompositeMode,
         color: InkColor,
         trace: [StrokeSample],
-        partitionMode: PartitionMode = .oneFrame
+        partitionMode: PartitionMode = .oneFrame,
+        diameter: Float = 22
     ) throws -> [UInt8] {
         let renderer = context.renderer
         let pipelinePrepareCallsBefore =
@@ -587,7 +645,7 @@ private extension DepositionHarnessRunner {
         }
         let style = StrokeRenderStyle(
             color: color,
-            diameter: 22,
+            diameter: diameter,
             compositeMode: compositeMode,
             eraserStrength: 0.72,
             program: brush.program,
@@ -706,6 +764,380 @@ private extension DepositionHarnessRunner {
 }
 
 private extension DepositionHarnessRunner {
+    func professionalInvariantResults(
+        stem: String,
+        scene: HarnessScene,
+        primary: StrokeCapture,
+        context: Context,
+        package: BrushPackage,
+        countersBeforeStroke: BrushCompilerCounters,
+        countersAfterStroke: BrushCompilerCounters
+    ) async throws -> [String: Bool] {
+        let definition = context.compiled.program.definition
+        let expectedHash =
+            ProfessionalBrushEvidenceValidator.expectedSemanticHash(
+                forPositiveScene: stem
+            )
+        let expectedResources =
+            ProfessionalBrushEvidenceValidator.expectedResourceLevels(
+                forPositiveScene: stem
+            )
+        let actualResources = Dictionary(
+            uniqueKeysWithValues: context.compiled.textures.map {
+                ($0.key, $0.value.mipmapLevelCount)
+            }
+        )
+        let replayLimits = definition.replayLimits
+        return [
+            "boundedLiveWork":
+                definition.replayMode == .replayTail
+                && replayLimits == BrushRecipePolicy.replayTailLimits
+                && primary.logicalDabCount
+                    <= BrushRecipePolicy.replayTailLimits.maximumDabs
+                && primary.projectedInstanceCount
+                    <= BrushRecipePolicy.replayTailLimits
+                        .maximumProjectedInstances
+                && primary.telemetry.backlogHighWater
+                    <= BrushRecipePolicy.replayTailLimits
+                        .maximumProjectedInstances,
+            "destinationOutEraserCompatible":
+                try await professionalEraserIsCompatible(
+                    scene: scene,
+                    package: package
+                ),
+            "nonemptyVisibleOutput":
+                Self.hasNontransparentPixel(
+                    Self.textureBytes(primary.live)
+                )
+                && Self.hasNontransparentPixel(
+                    Self.textureBytes(primary.committed)
+                )
+                && Self.hasNontransparentPixel(
+                    Self.textureBytes(primary.canonical)
+                ),
+            "predictionOnOffEqual":
+                try await predictionIsEqual(
+                    scene: scene,
+                    package: package
+                ),
+            "previewCommitMaximumDeltaWithinTolerance":
+                primary.previewCommitMaximumChannelDelta <= 1,
+            "professionalDefinitionIdentityExact":
+                productionAnchorDefinitions[stem] == definition
+                && package.definition == definition
+                && context.compiled.renderIdentity.definitionID
+                    == definition.id
+                && context.compiled.renderIdentity.semanticHash
+                    == expectedHash,
+            "radialRotationAndReflectionCorrect":
+                try await professionalRadialProjectionIsCorrect(
+                    scene: scene,
+                    package: package
+                ),
+            "resolvedResourcesAndMipsExact":
+                actualResources == expectedResources,
+            "strokeCompilerCacheCountersUnchanged":
+                countersBeforeStroke == countersAfterStroke
+                    && primary.pipelinePreparationUnchanged,
+            "tilingPeriodTranslationEqual":
+                try await professionalGridTranslationIsEqual(
+                    scene: scene,
+                    package: package
+                ),
+        ]
+    }
+
+    func professionalEraserIsCompatible(
+        scene: HarnessScene,
+        package: BrushPackage
+    ) async throws -> Bool {
+        let context = try await makeContext(
+            scene: scene,
+            package: package
+        )
+        let trace = Self.trace(width: scene.width, height: scene.height)
+        let painted = try commitOnly(
+            context: context,
+            brush: context.compiled,
+            compositeMode: .draw,
+            color: .black,
+            trace: trace,
+            diameter: package.definition.id.rawValue
+                == "builtin.professional-natural-charcoal" ? 80 : 40
+        )
+        let eraserPackage = try self.package(for: "deposition-erase")
+        let eraser = try await context.compiler.compileAndActivate(
+            package: eraserPackage
+        )
+        try context.renderer.activateEraserBrush(eraser)
+        let erased = try commitOnly(
+            context: context,
+            brush: eraser,
+            compositeMode: .erase,
+            color: InkColor(red: 1, green: 0, blue: 1, alpha: 1)!,
+            trace: trace,
+            diameter: package.definition.id.rawValue
+                == "builtin.professional-natural-charcoal" ? 80 : 40
+        )
+        return Self.hasNontransparentPixel(painted)
+            && painted != erased
+            && zip(
+                stride(from: 3, to: painted.count, by: 4),
+                stride(from: 3, to: erased.count, by: 4)
+            ).contains {
+                painted[$0.0] > erased[$0.1]
+            }
+    }
+
+    func professionalGridTranslationIsEqual(
+        scene: HarnessScene,
+        package: BrushPackage
+    ) async throws -> Bool {
+        let first = try await periodicProjectionBytes(
+            scene: scene,
+            package: package,
+            tiling: .grid,
+            worldOffset: .zero
+        )
+        let second = try await periodicProjectionBytes(
+            scene: scene,
+            package: package,
+            tiling: .grid,
+            worldOffset: SIMD2(Float(scene.width), 0)
+        )
+        return first == second
+            && Self.hasNontransparentPixel(first)
+    }
+
+    func professionalRadialProjectionIsCorrect(
+        scene: HarnessScene,
+        package: BrushPackage
+    ) async throws -> Bool {
+        let configuration = FiniteSymmetryConfiguration.radial(
+            RadialSymmetryConfiguration(
+                kind: .mandala,
+                rayCount: 8,
+                center: WorldPoint(
+                    x: Float(scene.width) * 0.5,
+                    y: Float(scene.height) * 0.5
+                ),
+                referenceAngleRadians: 0.17
+            )
+        )
+        let strategy = try TilingStrategy(
+            finiteConfiguration: configuration,
+            canvasSize: PixelSize(
+                width: scene.width,
+                height: scene.height
+            )
+        )
+        let center = SIMD2(
+            Float(scene.width) * 0.5,
+            Float(scene.height) * 0.5
+        )
+        let brushToWorld = Affine2D(
+            xAxis: SIMD2(Float(scene.width) * 0.48, 0),
+            yAxis: SIMD2(0, Float(scene.height) * 0.48),
+            translation: center
+        )
+        let fragments = TilingProjection.fragments(
+            for: StampFootprint(
+                brushToWorld: brushToWorld,
+                localBounds: AxisAlignedRect(
+                    minimum: SIMD2(-1, -1),
+                    maximum: SIMD2(1, 1)
+                ),
+                coverageSymmetry: .oriented
+            ),
+            using: strategy
+        )
+        guard !fragments.isEmpty,
+              fragments.contains(where: { $0.operation.reflected }),
+              fragments.contains(where: { !$0.operation.reflected }),
+              fragments.allSatisfy({
+                  let determinant =
+                      $0.canonicalFromBrush.xAxis.x
+                        * $0.canonicalFromBrush.yAxis.y
+                      - $0.canonicalFromBrush.xAxis.y
+                        * $0.canonicalFromBrush.yAxis.x
+                  return determinant != 0
+                      && (determinant < 0) == $0.operation.reflected
+              })
+        else {
+            return false
+        }
+        let context = try await makeContext(
+            scene: scene,
+            package: package
+        )
+        try context.renderer.applyFiniteConfiguration(configuration)
+        try context.renderer.activateDrawBrush(context.compiled)
+        let capture = try performStroke(
+            context: context,
+            scene: scene,
+            stem: Self.positiveStem(scene.name),
+            diameter: package.definition.id.rawValue
+                == "builtin.professional-natural-charcoal" ? 80 : 40
+        )
+        return Self.hasNontransparentPixel(
+            Self.textureBytes(capture.committed)
+        )
+            && capture.pipelinePreparationUnchanged
+    }
+
+    func finishProfessionalRun(
+        scene: HarnessScene,
+        outputDirectory: URL,
+        build: BenchmarkBuild,
+        context: Context,
+        capture: StrokeCapture,
+        invariants: [String: Bool],
+        countersBeforeStroke: BrushCompilerCounters,
+        countersAfterStroke: BrushCompilerCounters
+    ) throws -> HarnessRunResult {
+        try FileManager.default.createDirectory(
+            at: outputDirectory,
+            withIntermediateDirectories: true
+        )
+        let liveURL = outputDirectory.appendingPathComponent(
+            "\(scene.name).live.png"
+        )
+        let committedURL = outputDirectory.appendingPathComponent(
+            "\(scene.name).committed.png"
+        )
+        let canonicalURL = outputDirectory.appendingPathComponent(
+            "\(scene.name).canonical.png"
+        )
+        try Self.writePNGAtomically(capture.live, to: liveURL)
+        try Self.writePNGAtomically(capture.committed, to: committedURL)
+        try Self.writePNGAtomically(capture.canonical, to: canonicalURL)
+
+        let definition = context.compiled.program.definition
+        let characterization =
+            ProfessionalBrushCharacterizer.record(
+                family: definition.metadata.displayName,
+                renderIdentity: context.compiled.renderIdentity,
+                trace: StrokeTraceFixtures.professionalSlowLine,
+                program: context.compiled.program
+            )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [
+            .prettyPrinted, .sortedKeys, .withoutEscapingSlashes,
+        ]
+        let characterizationData = try encoder.encode(characterization)
+        let characterizationURL = outputDirectory.appendingPathComponent(
+            "\(scene.name).characterization.json"
+        )
+        try characterizationData.write(
+            to: characterizationURL,
+            options: .atomic
+        )
+
+        let resolvedResources =
+            context.compiled.textures.keys.sorted().map { identity in
+                ProfessionalBrushResolvedResource(
+                    identity: identity,
+                    kind: identity.hasPrefix("builtin.shape.")
+                        ? "shape"
+                        : "grain",
+                    mipCount:
+                        context.compiled.textures[identity]!.mipmapLevelCount
+                )
+            }
+        let evidence = ProfessionalBrushSceneEvidence(
+            schemaVersion:
+                ProfessionalBrushSceneEvidence.currentSchemaVersion,
+            scene: Self.positiveStem(scene.name),
+            family: definition.metadata.displayName,
+            definitionID: definition.id.rawValue,
+            definitionSemanticHash:
+                context.compiled.renderIdentity.semanticHash,
+            pipelineKey: Self.pipelineDescription(
+                context.compiled.depositionPipeline.key
+            ),
+            abiVersion:
+                context.compiled.depositionPipeline.key.abiVersion,
+            residentResourceBytes: context.compiled.residentByteCount,
+            resolvedResources: resolvedResources,
+            logicalDabCount: capture.logicalDabCount,
+            projectedInstanceCount: capture.projectedInstanceCount,
+            livePNGSHA256: ProfessionalBrushEvidenceValidator.sha256(
+                try Data(contentsOf: liveURL)
+            ),
+            committedPNGSHA256:
+                ProfessionalBrushEvidenceValidator.sha256(
+                    try Data(contentsOf: committedURL)
+                ),
+            canonicalPNGSHA256:
+                ProfessionalBrushEvidenceValidator.sha256(
+                    try Data(contentsOf: canonicalURL)
+                ),
+            characterizationSHA256:
+                ProfessionalBrushEvidenceValidator.sha256(
+                    characterizationData
+                ),
+            previewCommitMaximumChannelDelta:
+                capture.previewCommitMaximumChannelDelta,
+            compilerCounters: ProfessionalBrushCompilerCounterEvidence(
+                beforeCompile: .init(context.countersBeforeCompile),
+                afterCompile: .init(context.countersAfterCompile),
+                afterCacheHit: .init(countersBeforeStroke),
+                beforeStroke: .init(countersBeforeStroke),
+                afterStroke: .init(countersAfterStroke)
+            ),
+            telemetry: DepositionTelemetryEvidence(
+                authoritativeBacklog:
+                    capture.telemetry.authoritativePending,
+                predictedBacklog:
+                    capture.telemetry.predictedPending,
+                backlogHighWater:
+                    capture.telemetry.backlogHighWater,
+                encodedInstanceCount:
+                    capture.telemetry.strokeEncodedInstanceCount,
+                bufferHighWater:
+                    capture.telemetry.strokeBufferLeaseHighWater,
+                missedFrameCount:
+                    capture.telemetry.missedFrameCount
+            ),
+            invariantResults: invariants
+        )
+        try ProfessionalBrushEvidenceValidator.validate(evidence)
+        let evidenceURL = outputDirectory.appendingPathComponent(
+            "\(scene.name).professional-evidence.json"
+        )
+        try evidence.encoded().write(to: evidenceURL, options: .atomic)
+
+        let benchmark = Self.professionalBenchmark(
+            scene: scene,
+            build: build,
+            device: device,
+            capture: capture,
+            evidence: evidence,
+            characterization: characterization
+        )
+        let benchmarkURL = outputDirectory.appendingPathComponent(
+            "\(scene.name).benchmark.json"
+        )
+        try BenchmarkRecord.encode(benchmark).write(
+            to: benchmarkURL,
+            options: .atomic
+        )
+
+        try ProfessionalBrushEvidenceValidator.validateExpectations(
+            scene: scene,
+            actual: invariants
+        )
+        return HarnessRunResult(
+            imageURL: liveURL,
+            benchmarkURL: benchmarkURL,
+            benchmark: benchmark,
+            artifactURLs: [
+                liveURL, committedURL, canonicalURL, characterizationURL,
+                evidenceURL, benchmarkURL,
+            ]
+        )
+    }
+
     func invariantResults(
         stem: String,
         scene: HarnessScene,
@@ -1142,7 +1574,8 @@ private extension DepositionHarnessRunner {
         package: BrushPackage
     ) async throws -> (
         reflectionHandednessCorrect: Bool,
-        symmetryOrderEqual: Bool
+        symmetryOrderEqual: Bool,
+        metadataHandednessCorrect: Bool
     ) {
         let context = try await makeContext(
             scene: scene,
@@ -1232,7 +1665,8 @@ private extension DepositionHarnessRunner {
             )
         return (
             flagsAreCorrect && renderedReflectionIsCorrect,
-            orderIsEqual
+            orderIsEqual,
+            flagsAreCorrect
         )
     }
 
@@ -2817,6 +3251,54 @@ private extension DepositionHarnessRunner {
             canonicalBGRA8Digest: evidence.canonicalSHA256,
             logicalDabCount: evidence.logicalDabCount,
             program: "nativeDeposition"
+        )
+    }
+
+    static func professionalBenchmark(
+        scene: HarnessScene,
+        build: BenchmarkBuild,
+        device: any MTLDevice,
+        capture: StrokeCapture,
+        evidence: ProfessionalBrushSceneEvidence,
+        characterization: ProfessionalBrushCharacterizationRecord
+    ) -> BenchmarkRecord {
+        let process = ProcessInfo.processInfo
+        let metrics = [capture.flushMetrics, capture.commitMetrics]
+            + capture.displayMetrics
+        return BenchmarkRecord(
+            schemaVersion: 3,
+            timestampUTC: "1970-01-01T00:00:00Z",
+            sceneName: scene.name,
+            hardware: BenchmarkHardware(
+                gpuName: device.name,
+                logicalProcessorCount: process.activeProcessorCount,
+                physicalMemoryBytes: process.physicalMemory
+            ),
+            operatingSystem: process.operatingSystemVersionString,
+            build: build,
+            frameCount: metrics.count,
+            cpuEncodeMilliseconds: metrics.map(
+                \.cpuEncodeMilliseconds
+            ),
+            gpuMilliseconds: metrics.map(\.gpuMilliseconds),
+            peakResidentBytes: UInt64(evidence.residentResourceBytes),
+            newInstanceCounts: [evidence.projectedInstanceCount],
+            totalProjectedFragmentCount:
+                evidence.projectedInstanceCount,
+            totalInstanceBytes:
+                evidence.projectedInstanceCount
+                    * ShaderABI.depositionStampInstanceStride,
+            previewCommitViolationCount:
+                evidence.previewCommitMaximumChannelDelta > 1 ? 1 : 0,
+            recipeID: evidence.definitionID,
+            seed: seed,
+            assetResidentBytes: evidence.residentResourceBytes,
+            logicalDabDigest: characterization.logicalDabDigest,
+            canonicalBGRA8Digest: DepositionSceneEvidence.sha256(
+                Self.textureBytes(capture.canonical)
+            ),
+            logicalDabCount: evidence.logicalDabCount,
+            program: "professionalNativeDeposition"
         )
     }
 

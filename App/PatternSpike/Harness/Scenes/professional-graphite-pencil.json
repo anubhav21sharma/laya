@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 6,
+  "name": "professional-graphite-pencil",
+  "width": 128,
+  "height": 128,
+  "depositionInvariantExpectations": {
+    "boundedLiveWork": true,
+    "destinationOutEraserCompatible": true,
+    "nonemptyVisibleOutput": true,
+    "predictionOnOffEqual": true,
+    "previewCommitMaximumDeltaWithinTolerance": true,
+    "professionalDefinitionIdentityExact": true,
+    "radialRotationAndReflectionCorrect": true,
+    "resolvedResourcesAndMipsExact": true,
+    "strokeCompilerCacheCountersUnchanged": true,
+    "tilingPeriodTranslationEqual": true
+  }
+}

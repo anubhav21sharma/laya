@@ -51,6 +51,18 @@ enum HarnessLaunch {
                                     AnchorBrushCatalog.ink.definition,
                                 "deposition-marker":
                                     AnchorBrushCatalog.marker.definition,
+                                "professional-chisel-marker":
+                                    ProfessionalBrushCatalog.chiselMarker
+                                        .definition,
+                                "professional-graphite-pencil":
+                                    ProfessionalBrushCatalog.graphitePencil
+                                        .definition,
+                                "professional-natural-charcoal":
+                                    ProfessionalBrushCatalog.naturalCharcoal
+                                        .definition,
+                                "professional-technical-ink":
+                                    ProfessionalBrushCatalog.technicalInk
+                                        .definition,
                             ]
                         ).run(
                             scene: scene,

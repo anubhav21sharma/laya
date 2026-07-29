@@ -1,15 +1,30 @@
+import BrushFormat
 import EditorCore
 import Foundation
 import PatternEngine
 
-let records = anchorCharacterizationRecords()
-let baseline = try BrushLogicalBaseline(
-    validatingSchemaVersion: BrushLogicalBaseline.schemaVersion,
-    records: records
-)
-let encoder = JSONEncoder()
-encoder.outputFormatting = [.sortedKeys]
-FileHandle.standardOutput.write(try encoder.encode(baseline))
+let arguments = Array(CommandLine.arguments.dropFirst())
+switch arguments {
+case []:
+    let records = anchorCharacterizationRecords()
+    let baseline = try BrushLogicalBaseline(
+        validatingSchemaVersion: BrushLogicalBaseline.schemaVersion,
+        records: records
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    FileHandle.standardOutput.write(try encoder.encode(baseline))
+case ["professional"]:
+    let baseline = try professionalCharacterizationBaseline()
+    FileHandle.standardOutput.write(try baseline.encoded())
+default:
+    FileHandle.standardError.write(
+        Data(
+            "usage: BrushCharacterizationTool [professional]\n".utf8
+        )
+    )
+    exit(1)
+}
 
 private func anchorCharacterizationRecords()
     -> [BrushCharacterizationRecord]
@@ -38,4 +53,33 @@ private func anchorCharacterizationRecords()
     .sorted {
         ($0.recipeID, $0.traceName) < ($1.recipeID, $1.traceName)
     }
+}
+
+private func professionalCharacterizationBaseline() throws
+    -> ProfessionalBrushLogicalBaseline
+{
+    let records = try ProfessionalBrushCatalog.all.flatMap { entry in
+        let package = try BrushPackage(
+            manifest: BrushPackageManifest(resources: []),
+            definition: entry.definition,
+            resourceData: [:]
+        )
+        let hash = try package.contentHash
+        return StrokeTraceFixtures.professional.map { trace in
+            ProfessionalBrushCharacterizer.record(
+                family: entry.displayName,
+                definitionSemanticHash: hash,
+                trace: trace,
+                program: entry.program
+            )
+        }
+    }
+    .sorted {
+        ($0.brushID, $0.traceName) < ($1.brushID, $1.traceName)
+    }
+    return try ProfessionalBrushLogicalBaseline(
+        validatingSchemaVersion:
+            ProfessionalBrushLogicalBaseline.schemaVersion,
+        records: records
+    )
 }

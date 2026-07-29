@@ -41,6 +41,10 @@ let package = Package(
             targets: ["BrushDepositionEvidenceGate"]
         ),
         .executable(
+            name: "ProfessionalBrushEvidenceGate",
+            targets: ["ProfessionalBrushEvidenceGate"]
+        ),
+        .executable(
             name: "BrushInputAllocationProbeHarness",
             targets: ["BrushInputAllocationProbeHarness"]
         ),
@@ -93,7 +97,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "BrushCharacterizationTool",
-            dependencies: ["PatternEngine", "EditorCore", "MetalRenderer"]
+            dependencies: [
+                "PatternEngine", "EditorCore", "BrushFormat",
+                "MetalRenderer",
+            ]
+        ),
+        .executableTarget(
+            name: "ProfessionalBrushEvidenceGate",
+            dependencies: ["MetalRenderer"]
         ),
         .executableTarget(
             name: "BrushFoundationEvidenceGate",
