@@ -298,6 +298,9 @@ struct BrushLabView: View {
                     cpuPreparationNanoseconds: cpuNanoseconds,
                     eventToSubmitNanoseconds:
                         $0.eventToSubmitNanoseconds,
+                    gpuDurationNanoseconds: UInt64(
+                        max(0, $0.gpuMilliseconds) * 1_000_000
+                    ),
                     gpuCompletionNanoseconds:
                         $0.gpuCompletionNanoseconds,
                     missedFrames: newMissedFrames

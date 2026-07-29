@@ -55,8 +55,8 @@ func debugHUDHasACompactIntrinsicSize() {
     )
     host.layoutSubtreeIfNeeded()
 
-    #expect(host.fittingSize.width < 130)
-    #expect(host.fittingSize.height < 70)
+    #expect(host.fittingSize.width < 190)
+    #expect(host.fittingSize.height < 125)
 }
 
 @Test
@@ -82,10 +82,12 @@ func hostedDebugHUDSamplesOnlyWhileVisible() async throws {
     sendKey("`", keyCode: 50, to: window)
     await settle(host)
     #expect(renderer.onInteractiveFramePresented != nil)
+    #expect(renderer.onInteractiveFrameMetrics != nil)
 
     sendKey("`", keyCode: 50, to: window)
     await settle(host)
     #expect(renderer.onInteractiveFramePresented == nil)
+    #expect(renderer.onInteractiveFrameMetrics == nil)
 
     sendKey("`", keyCode: 50, modifiers: .command, to: window)
     await settle(host)

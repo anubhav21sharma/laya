@@ -3,7 +3,7 @@ import Foundation
 import MetalRenderer
 import Observation
 
-struct DebugPerformanceSnapshot: Equatable, Sendable {
+struct DebugPerformanceSnapshot: Codable, Equatable, Sendable {
     var framesPerSecond = 0.0
     var p95FrameMilliseconds = 0.0
     var missedFramePercentage = 0.0
@@ -27,7 +27,7 @@ extension DebugDurationPercentiles {
     }
 }
 
-struct DebugDepositionSnapshot: Equatable, Sendable {
+struct DebugDepositionSnapshot: Codable, Equatable, Sendable {
     var authoritativeBacklog = 0
     var predictedBacklog = 0
     var authoritativeHighWater = 0
@@ -41,7 +41,126 @@ struct DebugDepositionSnapshot: Equatable, Sendable {
     var missedFrameCount: UInt64 = 0
     var cpuPreparation = DebugDurationPercentiles()
     var eventToSubmit = DebugDurationPercentiles()
+    var gpuDuration = DebugDurationPercentiles()
     var gpuCompletion = DebugDurationPercentiles()
+}
+
+enum DebugPerformanceLogEventKind: String, Codable, Sendable {
+    case sessionStarted
+    case sample
+    case sessionEnded
+}
+
+struct DebugPerformanceContext: Codable, Equatable, Sendable {
+    let brushID: String
+    let tool: String
+    let brushDiameter: Float
+    let symmetry: String
+    let canvasWidth: Int
+    let canvasHeight: Int
+    let gridVisible: Bool
+}
+
+struct DebugPerformanceLogRecord: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let sessionID: UUID
+    let timestamp: Date
+    let kind: DebugPerformanceLogEventKind
+    let gpuName: String
+    let context: DebugPerformanceContext?
+    let snapshot: DebugPerformanceSnapshot
+}
+
+actor DebugPerformanceLogger {
+    nonisolated let logURL: URL
+
+    private let sessionID = UUID()
+    private var fileHandle: FileHandle?
+    private let encoder: JSONEncoder
+
+    init(
+        directory: URL? = nil,
+        filename: String? = nil
+    ) {
+        let root = directory ?? Self.defaultDirectory()
+        let generatedName = filename ?? (
+            "brush-performance-"
+                + String(Int(Date().timeIntervalSince1970))
+                + "-"
+                + UUID().uuidString.lowercased()
+                + ".jsonl"
+        )
+        logURL = root.appendingPathComponent(
+            generatedName,
+            isDirectory: false
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        self.encoder = encoder
+    }
+
+    func record(
+        _ kind: DebugPerformanceLogEventKind,
+        snapshot: DebugPerformanceSnapshot,
+        gpuName: String,
+        context: DebugPerformanceContext? = nil
+    ) throws {
+        let record = DebugPerformanceLogRecord(
+            schemaVersion: 1,
+            sessionID: sessionID,
+            timestamp: Date(),
+            kind: kind,
+            gpuName: gpuName,
+            context: context,
+            snapshot: snapshot
+        )
+        var data = try encoder.encode(record)
+        data.append(0x0A)
+        let handle = try writableHandle()
+        try handle.write(contentsOf: data)
+        if kind != .sample {
+            try handle.synchronize()
+        }
+    }
+
+    func flush() throws {
+        try fileHandle?.synchronize()
+    }
+
+    private func writableHandle() throws -> FileHandle {
+        if let fileHandle {
+            return fileHandle
+        }
+        let manager = FileManager.default
+        try manager.createDirectory(
+            at: logURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if !manager.fileExists(atPath: logURL.path) {
+            guard manager.createFile(
+                atPath: logURL.path,
+                contents: nil
+            ) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+        }
+        let handle = try FileHandle(forWritingTo: logURL)
+        try handle.seekToEnd()
+        fileHandle = handle
+        return handle
+    }
+
+    private nonisolated static func defaultDirectory() -> URL {
+        let manager = FileManager.default
+        let library = manager.urls(
+            for: .libraryDirectory,
+            in: .userDomainMask
+        ).first ?? manager.temporaryDirectory
+        return library
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent("Pattern", isDirectory: true)
+    }
 }
 
 @MainActor
@@ -58,13 +177,17 @@ final class DebugPerformanceMonitor {
     private var currentTargetFramesPerSecond = 0
     private var cpuPreparationNanoseconds: [UInt64] = []
     private var eventToSubmitNanoseconds: [UInt64] = []
+    private var gpuDurationNanoseconds: [UInt64] = []
     private var gpuCompletionNanoseconds: [UInt64] = []
 
+    @discardableResult
     func recordPresentedFrame(
         at timestamp: TimeInterval,
         targetFramesPerSecond: Int
-    ) {
-        guard timestamp.isFinite, targetFramesPerSecond > 0 else { return }
+    ) -> Bool {
+        guard timestamp.isFinite, targetFramesPerSecond > 0 else {
+            return false
+        }
 
         if currentTargetFramesPerSecond != targetFramesPerSecond {
             resetSamples(targetFramesPerSecond: targetFramesPerSecond)
@@ -73,15 +196,15 @@ final class DebugPerformanceMonitor {
         defer { lastFrameTimestamp = timestamp }
         guard let lastFrameTimestamp else {
             lastPublicationTimestamp = timestamp
-            return
+            return false
         }
 
         let interval = timestamp - lastFrameTimestamp
-        guard interval > 0 else { return }
+        guard interval > 0 else { return false }
         guard interval < Self.suspensionInterval else {
             resetSamples(targetFramesPerSecond: targetFramesPerSecond)
             lastPublicationTimestamp = timestamp
-            return
+            return false
         }
 
         intervalsMilliseconds.append(interval * 1_000)
@@ -96,7 +219,9 @@ final class DebugPerformanceMonitor {
         {
             publishSnapshot()
             lastPublicationTimestamp = timestamp
+            return true
         }
+        return false
     }
 
     func reset() {
@@ -107,6 +232,7 @@ final class DebugPerformanceMonitor {
         currentTargetFramesPerSecond = 0
         cpuPreparationNanoseconds.removeAll(keepingCapacity: true)
         eventToSubmitNanoseconds.removeAll(keepingCapacity: true)
+        gpuDurationNanoseconds.removeAll(keepingCapacity: true)
         gpuCompletionNanoseconds.removeAll(keepingCapacity: true)
     }
 
@@ -123,6 +249,7 @@ final class DebugPerformanceMonitor {
         lifetimeBufferLeaseHighWater: Int,
         cpuPreparationNanoseconds: UInt64,
         eventToSubmitNanoseconds: UInt64,
+        gpuDurationNanoseconds: UInt64,
         gpuCompletionNanoseconds: UInt64,
         missedFrames: UInt64
     ) {
@@ -144,6 +271,10 @@ final class DebugPerformanceMonitor {
         appendBounded(
             eventToSubmitNanoseconds,
             to: &self.eventToSubmitNanoseconds
+        )
+        appendBounded(
+            gpuDurationNanoseconds,
+            to: &self.gpuDurationNanoseconds
         )
         appendBounded(
             gpuCompletionNanoseconds,
@@ -178,9 +309,46 @@ final class DebugPerformanceMonitor {
         deposition.eventToSubmit = percentiles(
             self.eventToSubmitNanoseconds
         )
+        deposition.gpuDuration = percentiles(
+            self.gpuDurationNanoseconds
+        )
         deposition.gpuCompletion = percentiles(
             self.gpuCompletionNanoseconds
         )
+        snapshot.deposition = deposition
+    }
+
+    func recordRendererFrame(
+        _ metrics: GPUFrameMetrics,
+        deposition renderer: BrushLabRendererDepositionDiagnosticSnapshot
+    ) {
+        let gpuDurationNanoseconds = metrics.gpuMilliseconds.isFinite
+            ? UInt64(max(0, metrics.gpuMilliseconds) * 1_000_000)
+            : 0
+        appendBounded(
+            gpuDurationNanoseconds,
+            to: &self.gpuDurationNanoseconds
+        )
+        var deposition = snapshot.deposition
+        deposition.authoritativeBacklog = renderer.authoritativePending
+        deposition.predictedBacklog = renderer.predictedPending
+        deposition.authoritativeHighWater = renderer.authoritativeHighWater
+        deposition.predictedHighWater = renderer.predictedHighWater
+        deposition.backlogHighWater = renderer.backlogHighWater
+        deposition.encodedDabCount = renderer.strokeEncodedDabCount
+        deposition.encodedInstanceCount = renderer.strokeEncodedInstanceCount
+        deposition.currentBufferLeaseCount = renderer.currentBufferLeaseCount
+        deposition.strokeBufferLeaseHighWater =
+            renderer.strokeBufferLeaseHighWater
+        deposition.lifetimeBufferLeaseHighWater =
+            renderer.lifetimeBufferLeaseHighWater
+        deposition.missedFrameCount = renderer.missedFrameCount
+        deposition.cpuPreparation = .init(renderer.cpuPreparation)
+        deposition.eventToSubmit = .init(renderer.eventToSubmit)
+        deposition.gpuDuration = percentiles(
+            self.gpuDurationNanoseconds
+        )
+        deposition.gpuCompletion = .init(renderer.gpuCompletion)
         snapshot.deposition = deposition
     }
 

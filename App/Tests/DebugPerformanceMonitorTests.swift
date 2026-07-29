@@ -1,18 +1,24 @@
 #if DEBUG
+import Foundation
+@testable import MetalRenderer
 import Testing
 
 @MainActor
 @Test
 func debugPerformanceMonitorReportsSteadyFrameCadence() {
     let monitor = DebugPerformanceMonitor()
+    var publicationCount = 0
 
     for frame in 0...20 {
-        monitor.recordPresentedFrame(
+        if monitor.recordPresentedFrame(
             at: Double(frame) / 60,
             targetFramesPerSecond: 60
-        )
+        ) {
+            publicationCount += 1
+        }
     }
 
+    #expect(publicationCount == 1)
     #expect(abs(monitor.snapshot.framesPerSecond - 60) < 0.001)
     #expect(abs(monitor.snapshot.p95FrameMilliseconds - 16.667) < 0.001)
     #expect(monitor.snapshot.missedFramePercentage == 0)
@@ -73,6 +79,7 @@ func debugPerformanceMonitorPublishesActualDepositionDiagnostics() {
         lifetimeBufferLeaseHighWater: 3,
         cpuPreparationNanoseconds: 1_000_000,
         eventToSubmitNanoseconds: 2_000_000,
+        gpuDurationNanoseconds: 2_500_000,
         gpuCompletionNanoseconds: 3_000_000,
         missedFrames: 1
     )
@@ -89,6 +96,7 @@ func debugPerformanceMonitorPublishesActualDepositionDiagnostics() {
         lifetimeBufferLeaseHighWater: 3,
         cpuPreparationNanoseconds: 2_000_000,
         eventToSubmitNanoseconds: 4_000_000,
+        gpuDurationNanoseconds: 5_000_000,
         gpuCompletionNanoseconds: 6_000_000,
         missedFrames: 2
     )
@@ -108,6 +116,115 @@ func debugPerformanceMonitorPublishesActualDepositionDiagnostics() {
     #expect(diagnostics.cpuPreparation.p50 == 1_000_000)
     #expect(diagnostics.cpuPreparation.p95 == 2_000_000)
     #expect(diagnostics.eventToSubmit.p95 == 4_000_000)
+    #expect(diagnostics.gpuDuration.p95 == 5_000_000)
     #expect(diagnostics.gpuCompletion.p99 == 6_000_000)
+}
+
+@MainActor
+@Test
+func debugPerformanceMonitorUsesRendererOwnedDiagnostics() {
+    let monitor = DebugPerformanceMonitor()
+    monitor.recordRendererFrame(
+        GPUFrameMetrics(
+            cpuEncodeMilliseconds: 1.5,
+            gpuMilliseconds: 2.25,
+            eventToSubmitNanoseconds: 3_000_000,
+            gpuCompletionNanoseconds: 4_000_000,
+            encodedDabCount: 7,
+            encodedInstanceCount: 13,
+            bufferLeaseCount: 2
+        ),
+        deposition: BrushLabRendererDepositionDiagnosticSnapshot(
+            authoritativePending: 9,
+            predictedPending: 3,
+            authoritativeHighWater: 19,
+            predictedHighWater: 13,
+            backlogHighWater: 32,
+            lastFrameEncodedDabCount: 7,
+            lastFrameEncodedInstanceCount: 13,
+            strokeEncodedDabCount: 17,
+            strokeEncodedInstanceCount: 31,
+            currentBufferLeaseCount: 2,
+            strokeBufferLeaseHighWater: 3,
+            lifetimeBufferLeaseHighWater: 4,
+            missedFrameCount: 5,
+            eventToSubmit: .init(p50: 2_000_000, p95: 3_000_000, p99: 4_000_000),
+            cpuPreparation: .init(p50: 1_000_000, p95: 1_500_000, p99: 2_000_000),
+            gpuCompletion: .init(p50: 3_000_000, p95: 4_000_000, p99: 5_000_000)
+        )
+    )
+
+    let diagnostics = monitor.snapshot.deposition
+    #expect(diagnostics.authoritativeBacklog == 9)
+    #expect(diagnostics.predictedBacklog == 3)
+    #expect(diagnostics.encodedDabCount == 17)
+    #expect(diagnostics.encodedInstanceCount == 31)
+    #expect(diagnostics.cpuPreparation.p95 == 1_500_000)
+    #expect(diagnostics.eventToSubmit.p95 == 3_000_000)
+    #expect(diagnostics.gpuDuration.p95 == 2_250_000)
+    #expect(diagnostics.gpuCompletion.p95 == 4_000_000)
+}
+
+@Test
+func debugPerformanceLoggerWritesReviewableJSONLines() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let logger = DebugPerformanceLogger(
+        directory: directory,
+        filename: "manual-test.jsonl"
+    )
+    let snapshot = DebugPerformanceSnapshot(
+        framesPerSecond: 59.8,
+        p95FrameMilliseconds: 17.1,
+        missedFramePercentage: 0.5,
+        targetFramesPerSecond: 60,
+        sampleCount: 42
+    )
+    let context = DebugPerformanceContext(
+        brushID: "builtin.native-ink",
+        tool: "draw",
+        brushDiameter: 40,
+        symmetry: "grid",
+        canvasWidth: 256,
+        canvasHeight: 256,
+        gridVisible: true
+    )
+
+    try await logger.record(
+        .sessionStarted,
+        snapshot: snapshot,
+        gpuName: "Test GPU"
+    )
+    try await logger.record(
+        .sample,
+        snapshot: snapshot,
+        gpuName: "Test GPU",
+        context: context
+    )
+    try await logger.record(
+        .sessionEnded,
+        snapshot: snapshot,
+        gpuName: "Test GPU"
+    )
+    try await logger.flush()
+
+    let data = try Data(contentsOf: logger.logURL)
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let records = try data.split(separator: 0x0A).map {
+        try decoder.decode(
+            DebugPerformanceLogRecord.self,
+            from: Data($0)
+        )
+    }
+    #expect(records.map(\.kind) == [
+        .sessionStarted,
+        .sample,
+        .sessionEnded,
+    ])
+    #expect(records[1].snapshot == snapshot)
+    #expect(records[1].gpuName == "Test GPU")
+    #expect(records[1].context == context)
 }
 #endif

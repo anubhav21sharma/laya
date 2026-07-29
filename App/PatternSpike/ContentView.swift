@@ -117,6 +117,8 @@ struct ContentView: View {
     #if DEBUG && os(macOS)
     @State private var debugHUDVisible = false
     @State private var debugPerformanceMonitor = DebugPerformanceMonitor()
+    @State private var debugPerformanceLogger = DebugPerformanceLogger()
+    @State private var debugPerformanceLoggingActive = false
     #endif
 
     init(controller: EditorSessionController) {
@@ -218,7 +220,8 @@ struct ContentView: View {
                     #if DEBUG && os(macOS)
                     if debugHUDVisible {
                         DebugPerformanceHUD(
-                            snapshot: debugPerformanceMonitor.snapshot
+                            snapshot: debugPerformanceMonitor.snapshot,
+                            loggingActive: debugPerformanceLoggingActive
                         )
                         .padding(8)
                         .allowsHitTesting(false)
@@ -282,7 +285,7 @@ struct ContentView: View {
             controller.onError = nil
             controller.renderer.onError = nil
             #if DEBUG && os(macOS)
-            controller.renderer.onInteractiveFramePresented = nil
+            updateDebugPerformanceSampling(controller, visible: false)
             #endif
         }
         #if DEBUG && os(macOS)
@@ -468,19 +471,80 @@ struct ContentView: View {
         _ controller: EditorSessionController,
         visible: Bool
     ) {
+        controller.renderer.onInteractiveFramePresented = nil
+        controller.renderer.onInteractiveFrameMetrics = nil
+        let monitor = debugPerformanceMonitor
+        let logger = debugPerformanceLogger
+        let gpuName = controller.renderer.device.name
         guard visible else {
-            controller.renderer.onInteractiveFramePresented = nil
+            guard debugPerformanceLoggingActive else { return }
+            debugPerformanceLoggingActive = false
+            let snapshot = monitor.snapshot
+            let context = debugPerformanceContext(controller)
+            Task {
+                try? await logger.record(
+                    .sessionEnded,
+                    snapshot: snapshot,
+                    gpuName: gpuName,
+                    context: context
+                )
+                try? await logger.flush()
+            }
             return
         }
-        let monitor = debugPerformanceMonitor
+        debugPerformanceLoggingActive = true
+        monitor.reset()
+        print("DEBUG PERF LOG \(logger.logURL.path)")
+        let initialContext = debugPerformanceContext(controller)
+        Task {
+            try? await logger.record(
+                .sessionStarted,
+                snapshot: monitor.snapshot,
+                gpuName: gpuName,
+                context: initialContext
+            )
+        }
+        controller.renderer.onInteractiveFrameMetrics = { metrics in
+            monitor.recordRendererFrame(
+                metrics,
+                deposition: controller.renderer
+                    .brushLabDiagnosticSnapshot.deposition
+            )
+        }
         controller.renderer.onInteractiveFramePresented = {
             timestamp,
             targetFramesPerSecond in
-            monitor.recordPresentedFrame(
+            guard monitor.recordPresentedFrame(
                 at: timestamp,
                 targetFramesPerSecond: targetFramesPerSecond
-            )
+            ) else {
+                return
+            }
+            let snapshot = monitor.snapshot
+            let context = debugPerformanceContext(controller)
+            Task {
+                try? await logger.record(
+                    .sample,
+                    snapshot: snapshot,
+                    gpuName: gpuName,
+                    context: context
+                )
+            }
         }
+    }
+
+    private func debugPerformanceContext(
+        _ controller: EditorSessionController
+    ) -> DebugPerformanceContext {
+        DebugPerformanceContext(
+            brushID: controller.model.selectedRecipeID.rawValue,
+            tool: String(describing: controller.model.tool),
+            brushDiameter: controller.model.brushDiameter,
+            symmetry: String(describing: controller.model.tiling),
+            canvasWidth: controller.model.pixelSize.width,
+            canvasHeight: controller.model.pixelSize.height,
+            gridVisible: controller.model.showGrid
+        )
     }
     #endif
 
