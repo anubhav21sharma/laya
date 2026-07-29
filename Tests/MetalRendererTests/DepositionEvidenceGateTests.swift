@@ -471,6 +471,51 @@ struct DepositionEvidenceGateTests {
         }
     }
 
+    @Test(arguments: ["iPad13,18", "iPad13,19"])
+    func tenthGenerationIPadCannotSatisfyMSeriesPromotionProfile(
+        _ hardwareModel: String
+    ) throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        try fixture.mutatePhysicalProfile(
+            "referenceMSeriesProMotion120Hz"
+        ) { evidence, trace in
+            var evidenceDevice = evidence["device"] as! [String: Any]
+            evidenceDevice["hardwareModel"] = hardwareModel
+            evidence["device"] = evidenceDevice
+            var traceDevice = trace["device"] as! [String: Any]
+            traceDevice["hardwareModel"] = hardwareModel
+            trace["device"] = traceDevice
+        }
+        try fixture.rewriteManifest()
+
+        #expect(throws: StageFourEvidenceValidationError.self) {
+            try fixture.validate()
+        }
+    }
+
+    @Test(arguments: ["iPad13,18", "iPad13,19"])
+    func tenthGenerationIPadCanSatisfyA14Profile(
+        _ hardwareModel: String
+    ) throws {
+        let fixture = try StageFourArtifactFixture()
+        defer { fixture.remove() }
+        try fixture.writeValidPhysicalProfiles()
+        try fixture.mutatePhysicalProfile("a14Floor60Hz") {
+            evidence, trace in
+            var evidenceDevice = evidence["device"] as! [String: Any]
+            evidenceDevice["hardwareModel"] = hardwareModel
+            evidence["device"] = evidenceDevice
+            var traceDevice = trace["device"] as! [String: Any]
+            traceDevice["hardwareModel"] = hardwareModel
+            trace["device"] = traceDevice
+        }
+        try fixture.rewriteManifest()
+
+        #expect(try fixture.validate() == .passed)
+    }
+
     @Test
     func intelMacHardwareModelCannotClaimMSeriesProcessorClass() throws {
         let fixture = try StageFourArtifactFixture()

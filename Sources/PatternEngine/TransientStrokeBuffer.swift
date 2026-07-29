@@ -158,14 +158,39 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
             self.predictionCursorBefore = predictionCursorBefore
         }
 
+        package func storeActual(
+            _ dabs: [TransientStrokeDab],
+            range: Range<Int>
+        ) throws -> TransientStrokeDabSlice {
+            return try arena.storeActual(
+                transaction: identifier,
+                dabs,
+                range: range
+            )
+        }
+
         public func storeActual(
             count: Int,
             elementAt: (Int) -> TransientStrokeDab
         ) throws -> TransientStrokeDabSlice {
-            return try arena.storeActual(
+            try arena.storeActual(
                 transaction: identifier,
                 count: count,
                 elementAt: elementAt
+            )
+        }
+
+        package func storePredicted(
+            _ dabs: [TransientStrokeDab],
+            range: Range<Int>
+        ) throws -> TransientStrokeDabSlice {
+            guard allowsPrediction else {
+                throw ReservationError.inactiveTransaction
+            }
+            return try arena.storePredicted(
+                transaction: identifier,
+                dabs,
+                range: range
             )
         }
 
@@ -183,6 +208,17 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
             )
         }
 
+        public func commit(
+            retainingActual actualChunks: [TransientStrokeChunk],
+            retainingPredicted predictedChunks: [TransientStrokeChunk]
+        ) throws {
+            try arena.commit(
+                identifier,
+                retainingActual: actualChunks,
+                retainingPredicted: predictedChunks
+            )
+        }
+
         public func commit<
             ActualChunks: Collection,
             PredictedChunks: Collection
@@ -194,10 +230,9 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
             ActualChunks.Element == TransientStrokeChunk,
             PredictedChunks.Element == TransientStrokeChunk
         {
-            try arena.commit(
-                identifier,
-                retainingActual: actualChunks,
-                retainingPredicted: predictedChunks
+            try commit(
+                retainingActual: Array(actualChunks),
+                retainingPredicted: Array(predictedChunks)
             )
         }
 
@@ -208,6 +243,41 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
                 predictionCursorBefore: predictionCursorBefore
             )
         }
+    }
+
+    private func storeActual(
+        transaction: UInt64,
+        _ dabs: [TransientStrokeDab],
+        range: Range<Int>
+    ) throws -> TransientStrokeDabSlice {
+        guard activeTransaction == transaction else {
+            throw ReservationError.inactiveTransaction
+        }
+        let count = range.count
+        guard (0 ... Self.retainedCapacity).contains(count) else {
+            throw ReservationError.capacityExceeded(
+                Self.retainedCapacity
+            )
+        }
+        let start = try freeActualStart(count: count)
+        let generation = reserveGeneration()
+        var offset = 0
+        while offset < count {
+            let slot = (start + offset) % Self.actualCapacity
+            storage[slot] = dabs[range.lowerBound + offset]
+            slotGeneration[slot] = generation
+            slotTransaction[slot] = transaction
+            offset += 1
+        }
+        actualSearchCursor = (start + count) % Self.actualCapacity
+        return TransientStrokeDabSlice(
+            arena: self,
+            regionStart: 0,
+            regionCapacity: Self.actualCapacity,
+            start: start,
+            count: count,
+            generation: generation
+        )
     }
 
     private func storeActual(
@@ -225,11 +295,13 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
         }
         let start = try freeActualStart(count: count)
         let generation = reserveGeneration()
-        for offset in 0 ..< count {
+        var offset = 0
+        while offset < count {
             let slot = (start + offset) % Self.actualCapacity
             storage[slot] = elementAt(offset)
             slotGeneration[slot] = generation
             slotTransaction[slot] = transaction
+            offset += 1
         }
         actualSearchCursor = (start + count) % Self.actualCapacity
         return TransientStrokeDabSlice(
@@ -244,12 +316,13 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
 
     private func storePredicted(
         transaction: UInt64,
-        count: Int,
-        elementAt: (Int) -> TransientStrokeDab
+        _ dabs: [TransientStrokeDab],
+        range: Range<Int>
     ) throws -> TransientStrokeDabSlice {
         guard activeTransaction == transaction else {
             throw ReservationError.inactiveTransaction
         }
+        let count = range.count
         guard (0 ... Self.retainedCapacity).contains(count)
         else {
             throw ReservationError.capacityExceeded(
@@ -259,12 +332,51 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
         let regionStart = Self.actualCapacity
         let start = try freePredictionStart(count: count)
         let generation = reserveGeneration()
-        for offset in 0 ..< count {
+        var offset = 0
+        while offset < count {
+            let slot = regionStart
+                + (start + offset) % Self.predictionCapacity
+            storage[slot] = dabs[range.lowerBound + offset]
+            slotGeneration[slot] = generation
+            slotTransaction[slot] = transaction
+            offset += 1
+        }
+        predictionSearchCursor =
+            (start + count) % Self.predictionCapacity
+        return TransientStrokeDabSlice(
+            arena: self,
+            regionStart: regionStart,
+            regionCapacity: Self.predictionCapacity,
+            start: start,
+            count: count,
+            generation: generation
+        )
+    }
+
+    private func storePredicted(
+        transaction: UInt64,
+        count: Int,
+        elementAt: (Int) -> TransientStrokeDab
+    ) throws -> TransientStrokeDabSlice {
+        guard activeTransaction == transaction else {
+            throw ReservationError.inactiveTransaction
+        }
+        guard (0 ... Self.retainedCapacity).contains(count) else {
+            throw ReservationError.capacityExceeded(
+                Self.retainedCapacity
+            )
+        }
+        let regionStart = Self.actualCapacity
+        let start = try freePredictionStart(count: count)
+        let generation = reserveGeneration()
+        var offset = 0
+        while offset < count {
             let slot = regionStart
                 + (start + offset) % Self.predictionCapacity
             storage[slot] = elementAt(offset)
             slotGeneration[slot] = generation
             slotTransaction[slot] = transaction
+            offset += 1
         }
         predictionSearchCursor =
             (start + count) % Self.predictionCapacity
@@ -328,31 +440,35 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
         return generation
     }
 
-    private func commit<
-        ActualChunks: Collection,
-        PredictedChunks: Collection
-    >(
+    private func commit(
         _ transaction: UInt64,
-        retainingActual actualChunks: ActualChunks,
-        retainingPredicted predictedChunks: PredictedChunks
-    ) throws
-    where
-        ActualChunks.Element == TransientStrokeChunk,
-        PredictedChunks.Element == TransientStrokeChunk
-    {
+        retainingActual actualChunks: [TransientStrokeChunk],
+        retainingPredicted predictedChunks: [TransientStrokeChunk]
+    ) throws {
         guard activeTransaction == transaction else {
             throw ReservationError.inactiveTransaction
         }
         let marker = nextRetainedMarker
         nextRetainedMarker &+= 1
         precondition(nextRetainedMarker != 0)
-        for chunk in actualChunks {
-            chunk.dabs.markRetained(in: self, marker: marker)
+        var chunkIndex = actualChunks.startIndex
+        while chunkIndex < actualChunks.endIndex {
+            actualChunks[chunkIndex].dabs.markRetained(
+                in: self,
+                marker: marker
+            )
+            chunkIndex += 1
         }
-        for chunk in predictedChunks {
-            chunk.dabs.markRetained(in: self, marker: marker)
+        chunkIndex = predictedChunks.startIndex
+        while chunkIndex < predictedChunks.endIndex {
+            predictedChunks[chunkIndex].dabs.markRetained(
+                in: self,
+                marker: marker
+            )
+            chunkIndex += 1
         }
-        for slot in storage.indices {
+        var slot = storage.startIndex
+        while slot < storage.endIndex {
             if slotGeneration[slot] != 0,
                retainedMarker[slot] != marker
             {
@@ -360,6 +476,7 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
                 slotGeneration[slot] = 0
             }
             slotTransaction[slot] = 0
+            slot += 1
         }
         activeTransaction = nil
     }
@@ -390,11 +507,13 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
         generation: UInt64,
         marker: UInt64
     ) {
-        for offset in 0 ..< count {
+        var offset = 0
+        while offset < count {
             let slot = regionStart
                 + (start + offset) % regionCapacity
             precondition(slotGeneration[slot] == generation)
             retainedMarker[slot] = marker
+            offset += 1
         }
     }
 
@@ -1053,7 +1172,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         return appendActual(chunk, settledInto: &settled)
     }
 
-    private func previewActualAppend(
+    package mutating func previewActualAppend(
         _ chunk: TransientStrokeChunk,
         settledInto settled: inout [TransientStrokeChunk]
     ) -> Int {
@@ -1147,8 +1266,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
     ) throws -> TransientStrokeBufferUpdate
     where Chunks.Element == TransientStrokeChunk {
         var settled: [TransientStrokeChunk] = []
+        let materialized = Array(chunks)
         let mutation = try replacePredicted(
-            with: chunks,
+            with: materialized,
             settledInto: &settled
         )
         return TransientStrokeBufferUpdate(
@@ -1166,45 +1286,51 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
     /// Renderer hot-path variant. The caller owns and pre-reserves the
     /// settlement storage, so replacement does not create a result array.
     @discardableResult
-    public mutating func replacePredicted<Chunks: Collection>(
-        with chunks: Chunks,
-        settledInto settled: inout [TransientStrokeChunk],
-        preflightSettled:
-            (([TransientStrokeChunk], Int) throws -> Void)? = nil
-    ) throws -> TransientStrokeBufferMutation
-    where Chunks.Element == TransientStrokeChunk {
+    public mutating func replacePredicted(
+        with chunks: [TransientStrokeChunk],
+        settledInto settled: inout [TransientStrokeChunk]
+    ) throws -> TransientStrokeBufferMutation {
         settled.removeAll(keepingCapacity: true)
-        guard chunks.allSatisfy({ $0.sample.kind == .predicted }) else {
-            throw TransientStrokeBufferError.nonPredictedSample
+        var chunkIndex = chunks.startIndex
+        while chunkIndex < chunks.endIndex {
+            guard chunks[chunkIndex].sample.kind == .predicted else {
+                throw TransientStrokeBufferError.nonPredictedSample
+            }
+            chunkIndex += 1
         }
-        guard chunks.count != predictedChunks.count
-            || !zip(chunks, predictedChunks).allSatisfy({
-                $0.0 == $0.1
-            })
-        else {
+        var isUnchanged = chunks.count == predictedChunks.count
+        chunkIndex = chunks.startIndex
+        while isUnchanged, chunkIndex < chunks.endIndex {
+            isUnchanged =
+                chunks[chunkIndex] == predictedChunks[chunkIndex]
+            chunkIndex += 1
+        }
+        if isUnchanged {
             return noChangeMutation()
         }
-        let replayProjectedInstanceCount =
-            try previewPredictedReplacement(
-                with: chunks,
-                settledInto: &settled
-            )
-        try preflightSettled?(
-            settled,
-            replayProjectedInstanceCount
+        _ = try previewPredictedReplacement(
+            with: chunks,
+            settledInto: &settled
         )
         settled.removeAll(keepingCapacity: true)
 
         var predictedProjectedCount = 0
         var lastGeneratorSnapshot: BrushStrokeGenerator?
-        let predictedDabCount = chunks.reduce(into: 0) { result, chunk in
-            result = Self.saturatingAdd(result, chunk.dabs.count)
+        var predictedDabCount = 0
+        chunkIndex = chunks.startIndex
+        while chunkIndex < chunks.endIndex {
+            let chunk = chunks[chunkIndex]
+            predictedDabCount = Self.saturatingAdd(
+                predictedDabCount,
+                chunk.dabs.count
+            )
             predictedProjectedCount = Self.saturatingAdd(
                 predictedProjectedCount,
                 chunk.projectedInstanceCount
             )
             lastGeneratorSnapshot =
                 chunk.generatorSnapshotAfterSample
+            chunkIndex += 1
         }
         let capacities = capacitiesForCurrentMode()
         guard
@@ -1222,7 +1348,11 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
 
         let clearedPrediction = !predictedChunks.isEmpty
         predictedChunks.removeAll(keepingCapacity: true)
-        predictedChunks.append(contentsOf: chunks)
+        chunkIndex = chunks.startIndex
+        while chunkIndex < chunks.endIndex {
+            predictedChunks.append(chunks[chunkIndex])
+            chunkIndex += 1
+        }
         predictedDabCountStorage = predictedDabCount
         predictedProjectedInstanceCountStorage =
             predictedProjectedCount
@@ -1271,14 +1401,39 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         )
     }
 
-    private func previewPredictedReplacement<Chunks: Collection>(
+    public mutating func replacePredicted<Chunks: Collection>(
         with chunks: Chunks,
-        settledInto settled: inout [TransientStrokeChunk]
-    ) throws -> Int
+        settledInto settled: inout [TransientStrokeChunk],
+        preflightSettled:
+            (([TransientStrokeChunk], Int) throws -> Void)? = nil
+    ) throws -> TransientStrokeBufferMutation
     where Chunks.Element == TransientStrokeChunk {
+        let materialized = Array(chunks)
+        settled.removeAll(keepingCapacity: true)
+        let replayProjectedInstanceCount =
+            try previewPredictedReplacement(
+                with: materialized,
+                settledInto: &settled
+            )
+        try preflightSettled?(
+            settled,
+            replayProjectedInstanceCount
+        )
+        return try replacePredicted(
+            with: materialized,
+            settledInto: &settled
+        )
+    }
+
+    package mutating func previewPredictedReplacement(
+        with chunks: [TransientStrokeChunk],
+        settledInto settled: inout [TransientStrokeChunk]
+    ) throws -> Int {
         var predictedDabCount = 0
         var predictedProjectedCount = 0
-        for chunk in chunks {
+        var chunkIndex = chunks.startIndex
+        while chunkIndex < chunks.endIndex {
+            let chunk = chunks[chunkIndex]
             predictedDabCount = Self.saturatingAdd(
                 predictedDabCount,
                 chunk.dabs.count
@@ -1287,6 +1442,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
                 predictedProjectedCount,
                 chunk.projectedInstanceCount
             )
+            chunkIndex += 1
         }
         let currentLimits = capacitiesForCurrentMode()
         guard
@@ -1333,7 +1489,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         var retainedSamples = combinedSamples
         var retainedDabs = combinedDabs
         var retainedProjected = combinedProjected
-        for chunk in actualChunks {
+        chunkIndex = actualChunks.startIndex
+        while chunkIndex < actualChunks.endIndex {
+            let chunk = actualChunks[chunkIndex]
             guard retainedSamples > limits.maximumSamples
                     || retainedDabs > limits.maximumDabs
                     || retainedProjected
@@ -1349,6 +1507,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             retainedSamples -= 1
             retainedDabs -= chunk.dabs.count
             retainedProjected -= chunk.projectedInstanceCount
+            chunkIndex += 1
         }
         guard
             retainedSamples <= limits.maximumSamples,

@@ -64,7 +64,7 @@ public struct PixelRegionSet: Equatable, Sendable {
         if writeIndex < candidates.count {
             candidates.removeLast(candidates.count - writeIndex)
         }
-        candidates.sort(by: PixelRegionSet.precedes)
+        sortInPlaceWithoutAllocation(&candidates)
         var index = 0
         while index < candidates.count {
             var current = candidates[index]
@@ -89,7 +89,26 @@ public struct PixelRegionSet: Equatable, Sendable {
             }
             index += 1
         }
-        candidates.sort(by: PixelRegionSet.precedes)
+        sortInPlaceWithoutAllocation(&candidates)
+    }
+
+    private static func sortInPlaceWithoutAllocation(
+        _ rectangles: inout [PixelRect]
+    ) {
+        guard rectangles.count > 1 else { return }
+        var index = 1
+        while index < rectangles.count {
+            let candidate = rectangles[index]
+            var insertion = index
+            while insertion > 0,
+                  precedes(candidate, rectangles[insertion - 1])
+            {
+                rectangles[insertion] = rectangles[insertion - 1]
+                insertion -= 1
+            }
+            rectangles[insertion] = candidate
+            index += 1
+        }
     }
 
     private static func precedes(_ lhs: PixelRect, _ rhs: PixelRect) -> Bool {

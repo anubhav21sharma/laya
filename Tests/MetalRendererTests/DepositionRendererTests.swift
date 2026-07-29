@@ -2038,6 +2038,47 @@ struct DepositionRendererTests {
     }
 
     @Test
+    func allocatorProbeDetectsArrayAndAcceptsProductionRoute() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [
+            root.appendingPathComponent(
+                "scripts/run-brush-input-allocation-probe.sh"
+            ).path,
+            root.appendingPathComponent(
+                ".build/brush-input-allocation-probe-tests"
+            ).path,
+            "release",
+        ]
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+        try process.run()
+        let outputData =
+            outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let output = String(decoding: outputData, as: UTF8.self)
+
+        #expect(process.terminationStatus == 0, "\(output)")
+        #expect(
+            output.contains(
+                "ALLOCATOR PROBE SELF-TEST PASS allocations="
+            ),
+            "\(output)"
+        )
+        #expect(
+            output.contains(
+                "ALLOCATOR PROBE PRODUCTION PASS allocations=0"
+            ),
+            "\(output)"
+        )
+    }
+
+    @Test
     @MainActor
     func nativePreviewMatchesCommittedPixelsWithinOneChannelValue()
         async throws

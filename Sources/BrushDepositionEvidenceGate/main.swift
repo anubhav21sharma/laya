@@ -1923,14 +1923,16 @@ public enum StageFourEvidenceValidator {
     private static func processorClass(
         forHardwareModel hardwareModel: String
     ) -> String? {
-        let a14Models: Set<String> = ["iPad13,1", "iPad13,2"]
+        let a14Models: Set<String> = [
+            "iPad13,1", "iPad13,2", "iPad13,18", "iPad13,19",
+        ]
         if a14Models.contains(hardwareModel) {
             return "A14Class"
         }
         let mSeriesModels: Set<String> = [
             "iPad13,4", "iPad13,5", "iPad13,6", "iPad13,7",
             "iPad13,8", "iPad13,9", "iPad13,10", "iPad13,11",
-            "iPad13,16", "iPad13,17", "iPad13,18", "iPad13,19",
+            "iPad13,16", "iPad13,17",
             "iPad14,3", "iPad14,4", "iPad14,5", "iPad14,6",
             "iPad16,3", "iPad16,4", "iPad16,5", "iPad16,6",
         ]

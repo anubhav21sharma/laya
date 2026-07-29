@@ -40,6 +40,10 @@ let package = Package(
             name: "BrushDepositionEvidenceGate",
             targets: ["BrushDepositionEvidenceGate"]
         ),
+        .executable(
+            name: "BrushInputAllocationProbeHarness",
+            targets: ["BrushInputAllocationProbeHarness"]
+        ),
         .library(name: "PatternFile", targets: ["PatternFile"]),
     ],
     targets: [
@@ -97,6 +101,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "BrushDepositionEvidenceGate"
+        ),
+        .executableTarget(
+            name: "BrushInputAllocationProbeHarness",
+            dependencies: ["BrushFormat", "MetalRenderer", "PatternEngine"]
         ),
         .testTarget(
             name: "PatternEngineTests",

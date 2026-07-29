@@ -356,10 +356,20 @@ validator="$scratch/debug/BrushDepositionEvidenceGate"
 
 run_logged full-tests \
   swift test --scratch-path "$scratch" --no-parallel
-run_logged input-path-storage-runtime \
+run_logged input-path-storage-diagnostic \
   swift test --scratch-path "$scratch" --no-parallel \
     --filter \
     nativeInputAndReplayPathsAllocateNothingAfterWarmup
+run_logged input-path-allocator-runtime \
+  ./scripts/run-brush-input-allocation-probe.sh "$scratch" release
+grep -Eq \
+  '^ALLOCATOR PROBE SELF-TEST PASS allocations=[1-9][0-9]*$' \
+  "$logs/input-path-allocator-runtime.stdout.log" \
+  || fail "allocator probe self-test did not detect its Array allocation"
+grep -q \
+  '^ALLOCATOR PROBE PRODUCTION PASS allocations=0$' \
+  "$logs/input-path-allocator-runtime.stdout.log" \
+  || fail "allocator probe did not prove zero production-route allocations"
 run_logged brush-lab-headless-contract \
   swift test --scratch-path "$scratch" --no-parallel \
     --filter \

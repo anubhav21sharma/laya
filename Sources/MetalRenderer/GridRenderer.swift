@@ -299,6 +299,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     /// the backing storage.
     private final class DepositionInputScratch {
         var preparedDabs: [PreparedGeneratedDab] = []
+        var transientDabs: [TransientStrokeDab] = []
         var preparedChunkRanges: [Range<Int>] = []
         var transientChunks: [TransientStrokeChunk] = []
         var settledChunks: [TransientStrokeChunk] = []
@@ -314,6 +315,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
         init() {
             preparedDabs.reserveCapacity(
+                TransientStrokeBufferContract.wholeStrokeDabCapacity
+            )
+            transientDabs.reserveCapacity(
                 TransientStrokeBufferContract.wholeStrokeDabCapacity
             )
             preparedChunkRanges.reserveCapacity(
@@ -1050,9 +1054,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         samples: Samples
     ) throws where Samples.Element == StrokeSample {
         precondition(!samples.isEmpty)
-        precondition(samples.allSatisfy { $0.kind == .predicted })
-        guard samples.allSatisfy({ $0.phase == .moved }) else {
-            throw MetalRendererError.invalidStrokeLifecycle
+        var sampleIndex = samples.startIndex
+        while sampleIndex != samples.endIndex {
+            precondition(samples[sampleIndex].kind == .predicted)
+            guard samples[sampleIndex].phase == .moved else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            sampleIndex = samples.index(after: sampleIndex)
         }
         try requireCollectingStroke(token: token)
         guard let authoritativeGenerator = strokeGenerator,
@@ -1075,6 +1083,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             keepingCapacity: true
         )
         depositionInputScratch.preparedDabs.removeAll(
+            keepingCapacity: true
+        )
+        depositionInputScratch.transientDabs.removeAll(
             keepingCapacity: true
         )
         depositionInputScratch.preparedChunkRanges.removeAll(
@@ -1141,10 +1152,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
 
+        depositionInputScratch.settledChunks.removeAll(
+            keepingCapacity: true
+        )
+        let replayProjectedInstanceCount =
+            try transientStrokeBuffer!.previewPredictedReplacement(
+                with: depositionInputScratch.transientChunks,
+                settledInto: &depositionInputScratch.settledChunks
+            )
+        try preflightStrokeMutation(
+            settledChunks: depositionInputScratch.settledChunks,
+            replayProjectedInstanceCount: replayProjectedInstanceCount
+        )
         _ = try transientStrokeBuffer!.replacePredicted(
             with: depositionInputScratch.transientChunks,
-            settledInto: &depositionInputScratch.settledChunks,
-            preflightSettled: preflightStrokeMutation
+            settledInto: &depositionInputScratch.settledChunks
         )
 
         try appendSettled(depositionInputScratch.settledChunks)
@@ -1332,6 +1354,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             keepingCapacity: true
         )
         depositionInputScratch.preparedDabs.removeAll(
+            keepingCapacity: true
+        )
+        depositionInputScratch.transientDabs.removeAll(
             keepingCapacity: true
         )
         depositionInputScratch.preparedChunkRanges.removeAll(
@@ -2545,10 +2570,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
 
         if sample.kind == .predicted {
+            depositionInputScratch.transientChunks.removeAll(
+                keepingCapacity: true
+            )
+            depositionInputScratch.transientChunks.append(chunk)
+            depositionInputScratch.settledChunks.removeAll(
+                keepingCapacity: true
+            )
+            let replayProjectedInstanceCount =
+                try transientStrokeBuffer!.previewPredictedReplacement(
+                    with: depositionInputScratch.transientChunks,
+                    settledInto: &depositionInputScratch.settledChunks
+                )
+            try preflightStrokeMutation(
+                settledChunks: depositionInputScratch.settledChunks,
+                replayProjectedInstanceCount:
+                    replayProjectedInstanceCount
+            )
             _ = try transientStrokeBuffer!.replacePredicted(
-                with: CollectionOfOne(chunk),
-                settledInto: &depositionInputScratch.settledChunks,
-                preflightSettled: preflightStrokeMutation
+                with: depositionInputScratch.transientChunks,
+                settledInto: &depositionInputScratch.settledChunks
             )
             try appendSettled(depositionInputScratch.settledChunks)
             try rebuildReplayLayer(
@@ -2564,10 +2605,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             return
         }
 
-        let update = try transientStrokeBuffer!.appendActual(
+        depositionInputScratch.settledChunks.removeAll(
+            keepingCapacity: true
+        )
+        let replayProjectedInstanceCount =
+            transientStrokeBuffer!.previewActualAppend(
+                chunk,
+                settledInto: &depositionInputScratch.settledChunks
+            )
+        try preflightStrokeMutation(
+            settledChunks: depositionInputScratch.settledChunks,
+            replayProjectedInstanceCount: replayProjectedInstanceCount
+        )
+        let update = transientStrokeBuffer!.appendActual(
             chunk,
-            settledInto: &depositionInputScratch.settledChunks,
-            preflightSettled: preflightStrokeMutation
+            settledInto: &depositionInputScratch.settledChunks
         )
         if case let .unresolvedSuffixExceedsCapacity(
             sampleCount,
@@ -2855,10 +2907,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             : globalMaximumProjected
         let capacityBefore =
             depositionInputScratch.preparedDabs.capacity
+        let transientCapacityBefore =
+            depositionInputScratch.transientDabs.capacity
         let projectedCapacityBefore =
             depositionInputScratch.projectedArena.capacity
         if resetScratch {
             depositionInputScratch.preparedDabs.removeAll(
+                keepingCapacity: true
+            )
+            depositionInputScratch.transientDabs.removeAll(
                 keepingCapacity: true
             )
             depositionInputScratch.preparedChunkRanges.removeAll(
@@ -2907,11 +2964,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     projectedRange: projectedRange
                 )
             )
+            depositionInputScratch.transientDabs.append(
+                TransientStrokeDab(
+                    attributes: dab,
+                    projectedInstanceCount: projectedRange.count
+                )
+            )
         }
         recordScratchAllocationIfNeeded(
             capacityBefore: capacityBefore,
             capacityAfter:
                 depositionInputScratch.preparedDabs.capacity
+        )
+        recordScratchAllocationIfNeeded(
+            capacityBefore: transientCapacityBefore,
+            capacityAfter:
+                depositionInputScratch.transientDabs.capacity
         )
         recordScratchAllocationIfNeeded(
             capacityBefore: projectedCapacityBefore,
@@ -5347,19 +5415,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         transaction:
             TransientStrokeDabArena.ReservationTransaction
     ) throws -> TransientStrokeDabSlice {
-        let prepared = depositionInputScratch.preparedDabs
-        let elementAt: (Int) -> TransientStrokeDab = { offset in
-            prepared[preparedRange.lowerBound + offset].transient
-        }
-        return predicted
+        let slice = predicted
             ? try transaction.storePredicted(
-                count: preparedRange.count,
-                elementAt: elementAt
+                depositionInputScratch.transientDabs,
+                range: preparedRange
             )
             : try transaction.storeActual(
-                count: preparedRange.count,
-                elementAt: elementAt
+                depositionInputScratch.transientDabs,
+                range: preparedRange
             )
+        return slice
     }
 
     private func markBrushLabInputReceipt() {
