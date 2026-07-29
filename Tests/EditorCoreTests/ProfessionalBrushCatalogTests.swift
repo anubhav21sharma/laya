@@ -32,6 +32,28 @@ func professionalCatalogResolvesGraphitePencilWithItsStableIdentity() throws {
     #expect(entry.id == graphiteID)
     #expect(entry.displayName == "Graphite Pencil")
     #expect(entry.program == compiled)
+    #expect(compiled.definition.resources == [
+        BrushResourceReference(
+            identifier: "builtin.grain.graphite",
+            kind: .grain,
+            required: false,
+            fallback: .builtIn(identifier: "builtin.grain.graphite")
+        ),
+        BrushResourceReference(
+            identifier: "builtin.grain.paper",
+            kind: .grain,
+            required: false,
+            fallback: .builtIn(identifier: "builtin.grain.paper")
+        ),
+        BrushResourceReference(
+            identifier: "builtin.shape.graphite-tip",
+            kind: .shape,
+            required: false,
+            fallback: .builtIn(identifier: "builtin.shape.graphite-tip")
+        ),
+    ])
+    #expect(compiled.definition.material.accumulation == .flow)
+    #expect(compiled.definition.material.accumulationLimit == 1)
     #expect(ProfessionalBrushCatalog.all.map(\.id) == [
         BrushRecipeID("builtin.professional-technical-ink"),
         graphiteID,

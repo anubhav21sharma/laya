@@ -129,6 +129,20 @@ func graphitePressureChangesCompiledLogicalDabSizeFlowAndOpacity() {
 }
 
 @Test
+func graphiteCompiledDabsMapLowMidAndHighSpeedSpacingAndDirection() {
+    let slow = graphitePencilDab(direction: -.pi, velocity: 0)
+    let middle = graphitePencilDab(direction: 0, velocity: 50_000)
+    let fast = graphitePencilDab(direction: .pi / 2, velocity: 100_000)
+
+    #expect(abs(slow.spacing - 1.87) < 0.000_01)
+    #expect(abs(middle.spacing - 2.2) < 0.000_01)
+    #expect(abs(fast.spacing - 2.53) < 0.000_01)
+    #expect(abs(slow.rotation - 0) < 0.000_01)
+    #expect(abs(middle.rotation - .pi) < 0.000_01)
+    #expect(abs(fast.rotation - 1.5 * .pi) < 0.000_01)
+}
+
+@Test
 func graphiteTiltUsesDualGrainsInTheirAuthoredOrderAndCoordinates() throws {
     let upright = graphitePencilDab(
         altitude: .pi / 2,
@@ -230,6 +244,8 @@ func graphiteMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
     #expect(mouse.diameter == 40)
     #expect(mouse.flow == 0.28)
     #expect(mouse.strokeOpacity == 0.88)
+    #expect(abs(mouse.hardness - 0.252) < 0.000_01)
+    #expect(abs(mouse.grainScale - 1.4) < 0.000_01)
     #expect([mouse.diameter, mouse.flow, mouse.spacing, mouse.hardness,
              mouse.grainScale].allSatisfy { $0.isFinite })
     #expect(graphitePencilProgram().replayContract.mode == .replayTail)
@@ -294,11 +310,12 @@ private func graphitePencilDab(
     altitude: Float? = .pi / 2,
     capabilities: StrokeInputCapabilities = [.pressure, .altitude],
     direction: Float = 0,
+    velocity: Float = 50_000,
     random: BrushRandomValues = .centered
 ) -> LogicalDab {
     let sample = InterpolatedStrokeSample(
         position: WorldPoint(x: 10, y: 20), pressure: pressure, timestamp: 0,
-        altitude: altitude, azimuth: nil, roll: nil, velocity: 50_000,
+        altitude: altitude, azimuth: nil, roll: nil, velocity: velocity,
         phase: .moved,
         source: capabilities.contains(.pressure) ? .tablet : .mouse,
         kind: .actual, capabilities: capabilities
