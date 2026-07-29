@@ -851,7 +851,7 @@ public final class BrushCompiler {
         maximumDimension: Int
     ) throws -> BrushCompilerResourceWork {
         let workingDimension = min(
-            BrushTextureFactory.textureSize,
+            identity.sourceDimension,
             maximumDimension
         )
         let projectedBytes = try projectedMipBytes(
@@ -884,13 +884,13 @@ public final class BrushCompiler {
             ),
             usedFallback: usedFallback,
             projectedResidentBytes: projectedBytes,
-            diagnostics: workingDimension == BrushTextureFactory.textureSize
+            diagnostics: workingDimension == identity.sourceDimension
                 ? []
                 : [
                     .resourceResampled(
                         id: resourceID,
-                        sourceWidth: BrushTextureFactory.textureSize,
-                        sourceHeight: BrushTextureFactory.textureSize,
+                        sourceWidth: identity.sourceDimension,
+                        sourceHeight: identity.sourceDimension,
                         workingWidth: workingDimension,
                         workingHeight: workingDimension
                     ),

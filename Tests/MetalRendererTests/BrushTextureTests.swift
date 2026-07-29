@@ -7,6 +7,92 @@ import Testing
 struct BrushTextureFactoryTests {
     @Test
     @MainActor
+    func stageFourTexturesKeepFrozenDimensionsMipChainsAndBaseBytes() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let factory = BrushTextureFactory(device: device)
+
+        let expected: [(BrushTextureIdentity, UInt64)] = [
+            (.hardRoundShape, 11_819_887_087_282_399_793),
+            (.softRoundShape, 18_200_779_059_462_012_717),
+            (.chiselShape, 9_915_464_843_798_455_077),
+            (.opaqueGrain, 13_884_619_858_318_455_589),
+            (.paperGrain, 1_884_076_443_172_119_784),
+            (.noiseGrain, 17_572_042_397_809_171_039),
+        ]
+
+        for (identity, expectedFingerprint) in expected {
+            let texture = try factory.makeTexture(identity: identity)
+            #expect(identity.sourceDimension == 64)
+            #expect(texture.width == 64)
+            #expect(texture.height == 64)
+            #expect(texture.mipmapLevelCount == 7)
+            #expect(fingerprint(bytes(texture)) == expectedFingerprint)
+        }
+    }
+
+    @Test
+    @MainActor
+    func professionalPackUsesDistinctDimensionAwareDeterministicAssets() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let firstFactory = BrushTextureFactory(device: device)
+        let secondFactory = BrushTextureFactory(device: device)
+        let expected: [(BrushTextureIdentity, BrushTextureKind, Int, Int, Int)] = [
+            (.technicalNibShape, .shape, 128, 8, 21_845),
+            (.graphiteTipShape, .shape, 128, 8, 21_845),
+            (.charcoalTipShape, .shape, 128, 8, 21_845),
+            (.markerChiselShape, .shape, 128, 8, 21_845),
+            (.graphiteGrain, .grain, 256, 9, 87_381),
+            (.charcoalGrain, .grain, 256, 9, 87_381),
+        ]
+        var fingerprints: Set<UInt64> = []
+
+        for (identity, kind, dimension, mipCount, residentBytes) in expected {
+            let first = try firstFactory.makeTexture(identity: identity)
+            let second = try secondFactory.makeTexture(identity: identity)
+            let base = bytes(first)
+
+            #expect(identity.kind == kind)
+            #expect(identity.sourceDimension == dimension)
+            #expect(first.width == dimension)
+            #expect(first.height == dimension)
+            #expect(first.mipmapLevelCount == mipCount)
+            #expect(mipByteCount(first) == residentBytes)
+            #expect(base.contains(where: { $0 > 0 }))
+            #expect(base.contains(where: { $0 < 255 }))
+            #expect(Set(base).count > 2)
+            #expect(fingerprints.insert(fingerprint(base)).inserted)
+
+            for level in 0..<first.mipmapLevelCount {
+                #expect(bytes(first, level: level) == bytes(second, level: level))
+            }
+        }
+    }
+
+    @Test
+    @MainActor
+    func resolverPreservesProfessionalIdentityAndSourceDimensions() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let resolver = BrushTextureResolver(device: device)
+
+        let nib = try resolver.resolve(
+            shape: .asset(BrushTextureIdentity.technicalNibShape.rawValue)
+        )
+        let grain = try resolver.resolve(
+            grain: .asset(BrushTextureIdentity.charcoalGrain.rawValue)
+        )
+
+        #expect(nib.isExact)
+        #expect(nib.resolvedIdentity == .technicalNibShape)
+        #expect(nib.texture.width == 128)
+        #expect(nib.texture.mipmapLevelCount == 8)
+        #expect(grain.isExact)
+        #expect(grain.resolvedIdentity == .charcoalGrain)
+        #expect(grain.texture.width == 256)
+        #expect(grain.texture.mipmapLevelCount == 9)
+    }
+
+    @Test
+    @MainActor
     func proceduralPackUsesR8AndCompleteDeterministicMipChains() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let firstFactory = BrushTextureFactory(device: device)
@@ -17,9 +103,9 @@ struct BrushTextureFactoryTests {
             let second = try secondFactory.makeTexture(identity: identity)
 
             #expect(first.pixelFormat == .r8Unorm)
-            #expect(first.width == BrushTextureFactory.textureSize)
-            #expect(first.height == BrushTextureFactory.textureSize)
-            #expect(first.mipmapLevelCount == 7)
+            #expect(first.width == identity.sourceDimension)
+            #expect(first.height == identity.sourceDimension)
+            #expect(first.mipmapLevelCount == mipCount(for: identity.sourceDimension))
             #expect(first.mipmapLevelCount == second.mipmapLevelCount)
             #expect(first.label == identity.rawValue)
 
@@ -69,7 +155,7 @@ struct BrushTextureFactoryTests {
         let opaque = bytes(try factory.makeTexture(identity: .opaqueGrain))
         let paper = bytes(try factory.makeTexture(identity: .paperGrain))
         let noise = bytes(try factory.makeTexture(identity: .noiseGrain))
-        let size = BrushTextureFactory.textureSize
+        let size = BrushTextureIdentity.hardRoundShape.sourceDimension
         let center = (size / 2) * size + size / 2
 
         #expect(hard[center] == 255)
@@ -279,4 +365,28 @@ private func boxAverage(
         }
     }
     return output
+}
+
+private func fingerprint(_ values: [UInt8]) -> UInt64 {
+    values.reduce(UInt64(0xCBF2_9CE4_8422_2325)) { result, value in
+        (result ^ UInt64(value)) &* 0x0000_0100_0000_01B3
+    }
+}
+
+private func mipCount(for dimension: Int) -> Int {
+    var dimension = dimension
+    var count = 1
+    while dimension > 1 {
+        dimension /= 2
+        count += 1
+    }
+    return count
+}
+
+private func mipByteCount(_ texture: any MTLTexture) -> Int {
+    (0..<texture.mipmapLevelCount).reduce(0) { partial, level in
+        let width = max(1, texture.width >> level)
+        let height = max(1, texture.height >> level)
+        return partial + width * height
+    }
 }

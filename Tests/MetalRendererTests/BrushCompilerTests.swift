@@ -786,6 +786,26 @@ struct BrushCompilerTests {
     }
 
     @Test
+    func professionalBuiltInFallbackUsesItsDeclaredSourceDimension() async throws {
+        guard let setup = try compilerSetup() else { return }
+        let package = try compilerPackage(
+            definitionID: "brush.professional-fallback",
+            resourceID: "shape.professional",
+            includeResourceData: false,
+            resourceRequired: false,
+            fallback: "builtin.shape.technical-nib"
+        )
+
+        let compiled = try await setup.compiler.compileAndActivate(
+            package: package
+        )
+
+        #expect(compiled.textures["shape.professional"]?.width == 128)
+        #expect(compiled.textures["shape.professional"]?.mipmapLevelCount == 8)
+        #expect(compiled.residentByteCount == 21_845)
+    }
+
+    @Test
     func unknownFallbackRequiredSemanticAndInteractionFailBeforeActivation() async throws {
         guard let setup = try compilerSetup() else { return }
         let old = try compilerPackage(
