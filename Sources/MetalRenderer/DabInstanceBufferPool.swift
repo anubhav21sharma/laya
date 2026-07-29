@@ -5,6 +5,11 @@ struct DabBufferSubmissionIdentity: Equatable, Sendable {
     fileprivate let reservation: DabBufferReservationState.Reservation
 }
 
+struct DabInstanceBufferPoolDiagnosticSnapshot: Equatable, Sendable {
+    let currentLeaseCount: Int
+    let leaseHighWater: Int
+}
+
 @MainActor
 public final class DabInstanceBufferPool {
     public struct Lease {
@@ -25,6 +30,14 @@ public final class DabInstanceBufferPool {
 
     private let entries: [Entry]
     private var reservationState: DabBufferReservationState
+    private var leaseHighWater = 0
+
+    var diagnosticSnapshot: DabInstanceBufferPoolDiagnosticSnapshot {
+        DabInstanceBufferPoolDiagnosticSnapshot(
+            currentLeaseCount: unavailableSlotCount,
+            leaseHighWater: leaseHighWater
+        )
+    }
 
     public init(
         device: any MTLDevice,
@@ -70,6 +83,7 @@ public final class DabInstanceBufferPool {
         ) else {
             return nil
         }
+        recordLeaseHighWater()
 
         let buffer = entries[reservation.slot].buffer
         return Lease(
@@ -98,6 +112,7 @@ public final class DabInstanceBufferPool {
         ) else {
             return nil
         }
+        recordLeaseHighWater()
         return reservations.map { reservation in
             let buffer = entries[reservation.slot].buffer
             return Lease(
@@ -183,6 +198,10 @@ public final class DabInstanceBufferPool {
         guard reservationState.abandon(lease.reservation) else {
             fatalError("Dab buffer lease is no longer reserved")
         }
+    }
+
+    private func recordLeaseHighWater() {
+        leaseHighWater = max(leaseHighWater, unavailableSlotCount)
     }
 
     func reclaimTerminalFailure(

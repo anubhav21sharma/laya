@@ -21,6 +21,16 @@ enum BrushLabManualBackground:
     case opaque
 }
 
+enum BrushLabManualTool: String, Codable, Sendable {
+    case draw
+    case erase
+}
+
+enum BrushLabManualSubstrate: String, Codable, Sendable {
+    case none
+    case recordedOpaqueStroke
+}
+
 struct BrushLabManualCard: Codable, Equatable, Sendable {
     static let schemaVersion: UInt16 = 1
     static let customAsymmetricFixture =
@@ -38,6 +48,8 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
     let predictionEnabled: Bool
     let paintRGBAHex: String
     let customResourceFixture: String?
+    let tool: BrushLabManualTool
+    let substrate: BrushLabManualSubstrate
 
     var documentMode: String {
         Self.documentMode(documentConfiguration)
@@ -73,16 +85,16 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
         AnchorBrushCatalog.all.flatMap { anchor in
             scenarios.map { scenario in
                 BrushLabManualCard(
-                    brushID: anchor.id.rawValue,
+                    anchor: anchor,
                     scenario: scenario
                 )
             }
         }.sorted { $0.cardID < $1.cardID }
     }()
 
-    private init(brushID: String, scenario: Scenario) {
+    private init(anchor: AnchorBrushEntry, scenario: Scenario) {
         schemaVersion = Self.schemaVersion
-        self.brushID = brushID
+        brushID = anchor.id.rawValue
         gesture = scenario.gesture
         diameter = scenario.diameter
         pressureProfile = scenario.pressureProfile
@@ -92,17 +104,49 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
         predictionEnabled = scenario.predictionEnabled
         paintRGBAHex = scenario.paintRGBAHex
         customResourceFixture = scenario.customResourceFixture
+        tool = anchor.role == .erase ? .erase : .draw
+        substrate = anchor.role == .erase
+            ? .recordedOpaqueStroke
+            : .none
         cardID = Self.makeID(
             brushID: brushID,
-            scenario: scenario
+            gesture: gesture,
+            diameter: diameter,
+            pressureProfile: pressureProfile,
+            inputCapabilities: inputCapabilities,
+            documentConfiguration: documentConfiguration,
+            background: background,
+            predictionEnabled: predictionEnabled,
+            paintRGBAHex: paintRGBAHex,
+            customResourceFixture: customResourceFixture,
+            tool: tool,
+            substrate: substrate
         )
     }
 
     func traceSamples() -> [StrokeSample] {
+        makeTraceSamples(
+            pressure: pressureValue,
+            capabilities: strokeCapabilities,
+            predictionEnabled: predictionEnabled
+        )
+    }
+
+    func substrateTraceSamples() -> [StrokeSample] {
+        makeTraceSamples(
+            pressure: 1,
+            capabilities: [],
+            predictionEnabled: false
+        )
+    }
+
+    private func makeTraceSamples(
+        pressure: Float,
+        capabilities: StrokeInputCapabilities,
+        predictionEnabled: Bool
+    ) -> [StrokeSample] {
         let points = tracePoints
-        let pressure = pressureValue
-        let capabilities = strokeCapabilities
-        let source: StrokeSource = capabilities.isEmpty ? .mouse : .pencil
+        let source: StrokeSource = .mouse
         let interval: TimeInterval = gesture == .slowLine ? 0.05 : 0.008
         return points.enumerated().map { index, point in
             let phase: StrokePhase
@@ -146,6 +190,8 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
         case predictionEnabled
         case paintRGBAHex
         case customResourceFixture
+        case tool
+        case substrate
     }
 
     init(from decoder: Decoder) throws {
@@ -189,6 +235,34 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
             String.self,
             forKey: .customResourceFixture
         )
+        tool = try container.decode(
+            BrushLabManualTool.self,
+            forKey: .tool
+        )
+        substrate = try container.decode(
+            BrushLabManualSubstrate.self,
+            forKey: .substrate
+        )
+        let expectedID = Self.makeID(
+            brushID: brushID,
+            gesture: gesture,
+            diameter: diameter,
+            pressureProfile: pressureProfile,
+            inputCapabilities: inputCapabilities,
+            documentConfiguration: documentConfiguration,
+            background: background,
+            predictionEnabled: predictionEnabled,
+            paintRGBAHex: paintRGBAHex,
+            customResourceFixture: customResourceFixture,
+            tool: tool,
+            substrate: substrate
+        )
+        guard cardID == expectedID else {
+            throw BrushLabManualCardCodingError.identityMismatch(
+                expected: expectedID,
+                actual: cardID
+            )
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -217,6 +291,8 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
             customResourceFixture,
             forKey: .customResourceFixture
         )
+        try container.encode(tool, forKey: .tool)
+        try container.encode(substrate, forKey: .substrate)
     }
 
     private var pressureValue: Float {
@@ -287,23 +363,39 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
 
     private static func makeID(
         brushID: String,
-        scenario: Scenario
+        gesture: BrushLabManualGesture,
+        diameter: Float,
+        pressureProfile: String,
+        inputCapabilities: [String],
+        documentConfiguration: SymmetryDocumentConfiguration,
+        background: BrushLabManualBackground,
+        predictionEnabled: Bool,
+        paintRGBAHex: String,
+        customResourceFixture: String?,
+        tool: BrushLabManualTool,
+        substrate: BrushLabManualSubstrate
     ) -> String {
-        let capability = scenario.inputCapabilities.isEmpty
+        let capability = inputCapabilities.isEmpty
             ? "none"
-            : scenario.inputCapabilities.joined(separator: "-")
-        let custom = scenario.customResourceFixture == nil
+            : inputCapabilities.joined(separator: "-")
+        let custom = customResourceFixture == nil
             ? "builtin"
             : "custom"
+        let paint = paintRGBAHex
+            .lowercased()
+            .filter(\.isHexDigit)
         return [
             brushID,
-            scenario.gesture.rawValue,
-            "d\(Int(scenario.diameter))",
-            scenario.pressureProfile,
+            tool.rawValue,
+            gesture.rawValue,
+            "d\(Int(diameter))",
+            pressureProfile,
             capability,
-            documentMode(scenario.documentConfiguration),
-            scenario.background.rawValue,
-            scenario.predictionEnabled ? "prediction-on" : "prediction-off",
+            documentMode(documentConfiguration),
+            background.rawValue,
+            predictionEnabled ? "prediction-on" : "prediction-off",
+            "c\(paint)",
+            substrate.rawValue,
             custom,
         ].joined(separator: ".")
     }
@@ -361,7 +453,6 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
         ["pressure", "altitude", "azimuth", "roll"],
     ]
     private static let scenarios: [Scenario] = {
-        let gestures = BrushLabManualGesture.allCases.flatMap { [$0, $0] }
         let diameters: [Float] = [2, 20, 2_000]
         let pressures = ["low", "medium", "high"]
         let documents: [SymmetryDocumentConfiguration] = [
@@ -370,22 +461,50 @@ struct BrushLabManualCard: Codable, Equatable, Sendable {
             reflected,
             radial,
         ]
-        return gestures.enumerated().map { index, gesture in
+        let backgrounds = BrushLabManualBackground.allCases
+        let paints = ["#111111FF", "#C43A52FF", "#245EC7FF"]
+        // Deterministic mixed-level covering array. Every pair of levels
+        // across gesture/diameter/pressure/capabilities/document/background/
+        // prediction/paint occurs at least once.
+        let coveringRows = [
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 1, 1, 1, 1, 1, 1, 1],
+            [1, 2, 2, 2, 2, 0, 1, 2],
+            [2, 0, 1, 3, 3, 1, 0, 2],
+            [3, 1, 0, 2, 2, 1, 0, 0],
+            [4, 2, 0, 1, 3, 0, 0, 1],
+            [5, 2, 2, 3, 0, 1, 1, 0],
+            [3, 0, 2, 0, 1, 0, 1, 1],
+            [5, 1, 0, 3, 1, 0, 0, 2],
+            [1, 1, 1, 0, 3, 1, 0, 0],
+            [2, 1, 1, 2, 0, 0, 1, 1],
+            [4, 0, 1, 0, 2, 1, 1, 2],
+            [2, 2, 2, 1, 1, 0, 0, 0],
+            [1, 0, 0, 1, 0, 0, 1, 2],
+            [0, 0, 2, 2, 3, 0, 1, 2],
+            [0, 2, 1, 3, 2, 0, 0, 1],
+            [4, 1, 2, 2, 1, 0, 0, 0],
+            [5, 0, 1, 1, 2, 0, 0, 1],
+            [3, 2, 1, 0, 0, 0, 0, 2],
+            [1, 0, 0, 3, 1, 0, 0, 1],
+            [2, 0, 0, 0, 2, 0, 0, 0],
+            [3, 0, 0, 1, 3, 0, 0, 0],
+            [4, 0, 0, 3, 0, 0, 0, 0],
+            [5, 0, 0, 0, 3, 0, 0, 0],
+            [3, 0, 0, 3, 0, 0, 0, 0],
+            [5, 0, 0, 2, 0, 0, 0, 0],
+        ]
+        return coveringRows.enumerated().map { index, row in
             Scenario(
-                gesture: gesture,
-                diameter: diameters[index % diameters.count],
-                pressureProfile: pressures[index % pressures.count],
-                inputCapabilities:
-                    capabilityProfiles[index % capabilityProfiles.count],
-                documentConfiguration: documents[index % documents.count],
-                background: index.isMultiple(of: 2)
-                    ? .transparent
-                    : .opaque,
-                predictionEnabled: !index.isMultiple(of: 2),
-                paintRGBAHex: ["#111111FF", "#C43A52FF", "#245EC7FF"][
-                    index % 3
-                ],
-                customResourceFixture: [4, 7].contains(index)
+                gesture: BrushLabManualGesture.allCases[row[0]],
+                diameter: diameters[row[1]],
+                pressureProfile: pressures[row[2]],
+                inputCapabilities: capabilityProfiles[row[3]],
+                documentConfiguration: documents[row[4]],
+                background: backgrounds[row[5]],
+                predictionEnabled: row[6] == 1,
+                paintRGBAHex: paints[row[7]],
+                customResourceFixture: [0, 11].contains(index)
                     ? customAsymmetricFixture
                     : nil
             )
@@ -556,5 +675,6 @@ private struct DocumentConfigurationPayload: Codable {
 
 private enum BrushLabManualCardCodingError: Error {
     case invalidDocumentConfiguration
+    case identityMismatch(expected: String, actual: String)
 }
 #endif

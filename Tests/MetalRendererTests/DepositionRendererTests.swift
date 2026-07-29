@@ -8,6 +8,55 @@ import Testing
 struct DepositionRendererTests {
     @Test
     @MainActor
+    func diagnosticsComeFromActualSchedulerEncodingPoolAndTimestamps()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(id: "brush.diagnostics")
+        try setup.renderer.activateDrawBrush(brush)
+        let token = RendererOperationToken(rawValue: 9_001)
+
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 12, y: 12),
+            style: depositionStyle(brush, compositeMode: .draw)
+        )
+        let queued = setup.renderer.brushLabDiagnosticSnapshot.deposition
+        #expect(queued.authoritativePending > 0)
+        #expect(
+            queued.authoritativeHighWater
+                >= queued.authoritativePending
+        )
+
+        try setup.renderer.requestStrokeCommit(
+            token: token,
+            sample: depositionSample(.ended, x: 48, y: 48),
+            maximumRetainedBytes: 1_000_000
+        )
+        let completion =
+            try setup.renderer.completePendingInteractiveStroke()
+        let diagnostics =
+            setup.renderer.brushLabDiagnosticSnapshot.deposition
+
+        #expect(completion.eventToSubmitNanoseconds > 0)
+        #expect(completion.gpuCompletionNanoseconds > 0)
+        #expect(diagnostics.authoritativePending == 0)
+        #expect(diagnostics.predictedPending == 0)
+        #expect(completion.encodedDabCount > 0)
+        #expect(completion.encodedInstanceCount > 0)
+        #expect(
+            diagnostics.strokeEncodedInstanceCount
+                >= UInt64(diagnostics.lastFrameEncodedInstanceCount)
+        )
+        #expect(diagnostics.bufferLeaseHighWater > 0)
+        #expect(diagnostics.currentBufferLeaseCount == 0)
+        #expect(diagnostics.eventToSubmit.p50 > 0)
+        #expect(diagnostics.gpuCompletion.p50 > 0)
+        #expect(setup.renderer.isIdle)
+    }
+
+    @Test
+    @MainActor
     func pointerDownWithoutPreparedBrushFailsBeforeMutation() async throws {
         guard let setup = try makeDepositionRendererSetup() else { return }
         let brush = try await setup.compileBrush(id: "brush.uninstalled")

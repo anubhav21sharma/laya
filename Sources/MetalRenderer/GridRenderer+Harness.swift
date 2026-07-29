@@ -278,12 +278,13 @@ extension GridRenderer {
             if activeStroke != nil {
                 counters.renderedFramesThisStroke += 1
             }
-            let cpuMilliseconds = HarnessSubmissionTiming
-                .measureThroughSubmission(
-                    since: start,
-                    submit: commandBuffer.commit
-                )
+            let submittedAtNanoseconds =
+                DispatchTime.now().uptimeNanoseconds
+            commandBuffer.commit()
+            let cpuMilliseconds = elapsedMilliseconds(since: start)
             commandBuffer.waitUntilCompleted()
+            let completedAtNanoseconds =
+                DispatchTime.now().uptimeNanoseconds
             let submittedError = drainFrameOutcomes()
             drainCompletedUploadRanges()
             if let submittedError {
@@ -296,11 +297,16 @@ extension GridRenderer {
                 report(error)
                 throw error
             }
-            return HarnessLiveFlushResult(
-                metrics: metrics(
+            let frameMetrics = metrics(
                     commandBuffer: commandBuffer,
-                    cpuMilliseconds: cpuMilliseconds
-                ),
+                    cpuMilliseconds: cpuMilliseconds,
+                    submittedAtNanoseconds: submittedAtNanoseconds,
+                    completedAtNanoseconds: completedAtNanoseconds,
+                    nativeEncoding: nativeEncoding
+                )
+            recordBrushLabCompletedFrame(frameMetrics)
+            return HarnessLiveFlushResult(
+                metrics: frameMetrics,
                 emittedHighWater: UInt64(counters.totalInstancesThisStroke),
                 encodedIdentityRanges: uploads.map(\.identityRange)
             )
@@ -560,23 +566,67 @@ extension GridRenderer {
         )
     }
 
+    public func completePendingInteractiveStroke() throws
+        -> GPUFrameMetrics
+    {
+        try completePendingInteractiveStroke(forceCommitFailure: false)
+    }
+
     public func finishCommitForHarness(
         forceCommitFailure: Bool = false
     ) throws -> GPUFrameMetrics {
+        try completePendingInteractiveStroke(
+            forceCommitFailure: forceCommitFailure
+        )
+    }
+
+    private func completePendingInteractiveStroke(
+        forceCommitFailure: Bool
+    ) throws -> GPUFrameMetrics {
         do {
+            var frames: [GPUFrameMetrics] = []
             for _ in 0..<64 {
                 try prepareCompiledCommitIfReady()
                 if activeStroke?.pendingRevisions != nil {
                     break
                 }
-                _ = try flushPendingLiveForHarness()
+                frames.append(
+                    try flushPendingLiveForHarness().metrics
+                )
             }
             try prepareCompiledCommitIfReady()
-            let metrics = try submitCommitForHarness(
-                forceFailure: forceCommitFailure
+            frames.append(
+                try submitCommitForHarness(
+                    forceFailure: forceCommitFailure
+                )
             )
             try drainCompletedOperationsForHarness()
-            return metrics
+            return GPUFrameMetrics(
+                cpuEncodeMilliseconds: frames.reduce(0) {
+                    $0 + $1.cpuEncodeMilliseconds
+                },
+                gpuMilliseconds: frames.reduce(0) {
+                    $0 + $1.gpuMilliseconds
+                },
+                eventToSubmitNanoseconds: frames.map(
+                    \.eventToSubmitNanoseconds
+                ).max() ?? 0,
+                gpuCompletionNanoseconds: frames.reduce(0) {
+                    Self.saturatingAdd(
+                        $0,
+                        $1.gpuCompletionNanoseconds
+                    )
+                },
+                encodedDabCount: frames.reduce(0) {
+                    $0 + $1.encodedDabCount
+                },
+                encodedInstanceCount: frames.reduce(0) {
+                    $0 + $1.encodedInstanceCount
+                },
+                bufferLeaseCount: frames.map(
+                    \.bufferLeaseCount
+                ).max() ?? 0
+            )
         } catch let error as MetalRendererError {
             failActiveOperationIfNeeded(error)
             throw error
@@ -641,7 +691,7 @@ extension GridRenderer {
         )
     }
 
-    public func finishRasterOperationForHarness() throws {
+    public func completePendingRasterOperation() throws {
         guard let operation = pendingRasterOperation else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -649,6 +699,10 @@ extension GridRenderer {
         if let error = drainRasterOperationOutcomes() {
             throw error
         }
+    }
+
+    public func finishRasterOperationForHarness() throws {
+        try completePendingRasterOperation()
     }
 
     func submitCommitForHarness(
@@ -688,13 +742,21 @@ extension GridRenderer {
         )
         counters.renderedFramesThisStroke += 1
         let cpuMilliseconds = elapsedMilliseconds(since: start)
+        let submittedAtNanoseconds =
+            DispatchTime.now().uptimeNanoseconds
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        let completedAtNanoseconds =
+            DispatchTime.now().uptimeNanoseconds
         try validateHarnessCommand(commandBuffer)
-        return metrics(
+        let frameMetrics = metrics(
             commandBuffer: commandBuffer,
-            cpuMilliseconds: cpuMilliseconds
+            cpuMilliseconds: cpuMilliseconds,
+            submittedAtNanoseconds: submittedAtNanoseconds,
+            completedAtNanoseconds: completedAtNanoseconds
         )
+        recordBrushLabCompletedFrame(frameMetrics)
+        return frameMetrics
     }
 
     func drainCompletedOperationsForHarness() throws {

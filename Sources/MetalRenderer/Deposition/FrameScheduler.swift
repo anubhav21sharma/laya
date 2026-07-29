@@ -5,6 +5,13 @@ struct ScheduledDepositionFrame: Equatable, Sendable {
     let predictedRemaining: Int
 }
 
+struct FrameSchedulerDiagnosticSnapshot: Equatable, Sendable {
+    let authoritativePending: Int
+    let predictedPending: Int
+    let authoritativeHighWater: Int
+    let predictedHighWater: Int
+}
+
 enum FrameSchedulerError: Error, Equatable, Sendable {
     case authoritativeCapacityExceeded(
         current: Int,
@@ -15,6 +22,15 @@ enum FrameSchedulerError: Error, Equatable, Sendable {
 }
 
 struct FrameScheduler: Sendable {
+    var diagnosticSnapshot: FrameSchedulerDiagnosticSnapshot {
+        FrameSchedulerDiagnosticSnapshot(
+            authoritativePending: authoritativeQueue.count,
+            predictedPending: predictionQueue.count,
+            authoritativeHighWater: authoritativeHighWater,
+            predictedHighWater: predictedHighWater
+        )
+    }
+
     var authoritativeIsDrained: Bool {
         authoritativeQueue.isEmpty
     }
@@ -42,6 +58,8 @@ struct FrameScheduler: Sendable {
     private var authoritativeQueue: BoundedDepositionQueue
     private var predictionQueue: BoundedDepositionQueue
     private var predictionCandidate: BoundedDepositionQueue
+    private var authoritativeHighWater = 0
+    private var predictedHighWater = 0
 
     init(budget: DepositionFrameBudget) {
         authoritativeQueue = BoundedDepositionQueue(
@@ -66,6 +84,10 @@ struct FrameScheduler: Sendable {
             )
         }
         authoritativeQueue.append(records)
+        authoritativeHighWater = max(
+            authoritativeHighWater,
+            authoritativeQueue.count
+        )
     }
 
     mutating func replacePrediction(
@@ -81,6 +103,10 @@ struct FrameScheduler: Sendable {
         predictionCandidate.reset()
         predictionCandidate.append(records)
         swap(&predictionQueue, &predictionCandidate)
+        predictedHighWater = max(
+            predictedHighWater,
+            predictionQueue.count
+        )
     }
 
     mutating func nextFrame(
@@ -117,6 +143,10 @@ struct FrameScheduler: Sendable {
             )
         }
         authoritativeQueue.append(records)
+        authoritativeHighWater = max(
+            authoritativeHighWater,
+            authoritativeQueue.count
+        )
         predictionQueue.reset()
     }
 
@@ -124,6 +154,8 @@ struct FrameScheduler: Sendable {
         authoritativeQueue.reset()
         predictionQueue.reset()
         predictionCandidate.reset()
+        authoritativeHighWater = 0
+        predictedHighWater = 0
     }
 }
 

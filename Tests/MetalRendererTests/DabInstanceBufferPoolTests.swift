@@ -7,6 +7,28 @@ import Testing
 @MainActor
 struct DabInstanceBufferPoolTests {
     @Test
+    func diagnosticsReportActualLeaseOccupancyAndHighWater() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let pool = try DabInstanceBufferPool(device: device, capacity: 1)
+
+        let first = try #require(pool.acquire(count: 2))
+        #expect(pool.diagnosticSnapshot.currentLeaseCount == 2)
+        #expect(pool.diagnosticSnapshot.leaseHighWater == 2)
+        for lease in first {
+            pool.abandon(lease)
+        }
+        #expect(pool.diagnosticSnapshot.currentLeaseCount == 0)
+        #expect(pool.diagnosticSnapshot.leaseHighWater == 2)
+
+        let second = try #require(pool.acquire(count: 3))
+        #expect(pool.diagnosticSnapshot.currentLeaseCount == 3)
+        #expect(pool.diagnosticSnapshot.leaseHighWater == 3)
+        for lease in second {
+            pool.abandon(lease)
+        }
+    }
+
+    @Test
     func buffersUseTheFrozenDepositionStride() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let pool = try DabInstanceBufferPool(device: device, capacity: 2)

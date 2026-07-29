@@ -25,6 +25,7 @@ public struct BrushLabRendererDiagnosticSnapshot: Equatable, Sendable {
     public let rasterRevisionResidentBytes: Int
     public let builtInTextureCount: Int
     public let assetFallbackCount: Int
+    public let deposition: BrushLabRendererDepositionDiagnosticSnapshot
 
     public init(
         totalDabsThisStroke: Int,
@@ -36,7 +37,8 @@ public struct BrushLabRendererDiagnosticSnapshot: Equatable, Sendable {
         dirtyRegionCount: Int,
         rasterRevisionResidentBytes: Int,
         builtInTextureCount: Int,
-        assetFallbackCount: Int
+        assetFallbackCount: Int,
+        deposition: BrushLabRendererDepositionDiagnosticSnapshot
     ) {
         self.totalDabsThisStroke = totalDabsThisStroke
         self.totalInstancesThisStroke = totalInstancesThisStroke
@@ -48,7 +50,27 @@ public struct BrushLabRendererDiagnosticSnapshot: Equatable, Sendable {
         self.rasterRevisionResidentBytes = rasterRevisionResidentBytes
         self.builtInTextureCount = builtInTextureCount
         self.assetFallbackCount = assetFallbackCount
+        self.deposition = deposition
     }
+}
+
+public struct BrushLabRendererDepositionDiagnosticSnapshot:
+    Equatable, Sendable
+{
+    public let authoritativePending: Int
+    public let predictedPending: Int
+    public let authoritativeHighWater: Int
+    public let predictedHighWater: Int
+    public let backlogHighWater: Int
+    public let lastFrameEncodedDabCount: Int
+    public let lastFrameEncodedInstanceCount: Int
+    public let strokeEncodedDabCount: UInt64
+    public let strokeEncodedInstanceCount: UInt64
+    public let currentBufferLeaseCount: Int
+    public let bufferLeaseHighWater: Int
+    public let eventToSubmit: DepositionDurationPercentiles
+    public let cpuPreparation: DepositionDurationPercentiles
+    public let gpuCompletion: DepositionDurationPercentiles
 }
 
 struct HarnessDiagnosticRenderedFrame {
@@ -113,6 +135,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var brushLabDiagnosticSnapshot:
         BrushLabRendererDiagnosticSnapshot
     {
+        let scheduler = activeStroke?.scheduler?.diagnosticSnapshot
+        let telemetry = brushLabDepositionTelemetry.snapshot
+        let timings = brushLabDepositionTelemetry.timings
+        let pool = instancePool.diagnosticSnapshot
         let liveDirty = liveStroke.dirtyRegions(
             clippedTo: storagePixelSize
         ).rectangles.count
@@ -131,7 +157,39 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             builtInTextureCount:
                 (activeDrawBrush?.textures.count ?? 0)
                     + (activeEraserBrush?.textures.count ?? 0),
-            assetFallbackCount: 0
+            assetFallbackCount: 0,
+            deposition: BrushLabRendererDepositionDiagnosticSnapshot(
+                authoritativePending:
+                    scheduler?.authoritativePending
+                        ?? telemetry.authoritativeBacklog,
+                predictedPending:
+                    scheduler?.predictedPending
+                        ?? telemetry.predictedBacklog,
+                authoritativeHighWater: max(
+                    scheduler?.authoritativeHighWater ?? 0,
+                    brushLabAuthoritativeHighWater
+                ),
+                predictedHighWater: max(
+                    scheduler?.predictedHighWater ?? 0,
+                    brushLabPredictedHighWater
+                ),
+                backlogHighWater: telemetry.backlogHighWater,
+                lastFrameEncodedDabCount:
+                    brushLabLastFrameEncodedDabCount,
+                lastFrameEncodedInstanceCount:
+                    brushLabLastFrameEncodedInstanceCount,
+                strokeEncodedDabCount: brushLabStrokeEncodedDabCount,
+                strokeEncodedInstanceCount:
+                    telemetry.encodedInstanceCount,
+                currentBufferLeaseCount: pool.currentLeaseCount,
+                bufferLeaseHighWater: max(
+                    pool.leaseHighWater,
+                    telemetry.bufferHighWater
+                ),
+                eventToSubmit: timings.eventToSubmit,
+                cpuPreparation: timings.cpuPreparation,
+                gpuCompletion: timings.gpuCompletion
+            )
         )
     }
 
@@ -169,6 +227,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     struct NativeDepositionFrameEncoding {
         let authoritativeCount: Int
         let predictedCount: Int
+        let logicalDabCount: Int
+        let uploadBufferCount: Int
         let encodedLiveClear: Bool
         let encodedReplayClear: Bool
         let replayEpoch: UInt64
@@ -321,6 +381,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private(set) var activeEraserBrush: CompiledBrush?
     let instancePool: DabInstanceBufferPool
     var depositionEncoder: DepositionEncoder?
+    private var brushLabDepositionTelemetry = DepositionTelemetry()
+    private var brushLabAuthoritativeHighWater = 0
+    private var brushLabPredictedHighWater = 0
+    private var brushLabLastFrameEncodedDabCount = 0
+    private var brushLabLastFrameEncodedInstanceCount = 0
+    private var brushLabStrokeEncodedDabCount: UInt64 = 0
+    private var brushLabPendingInputReceiptNanoseconds: UInt64?
     let revisionStore: RasterRevisionStore
     let completionMailbox = GridRenderCompletionMailbox()
     private let rasterCompletionMailbox = RendererRasterCompletionMailbox()
@@ -769,6 +836,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let compiledBrush = try compiledBrush(for: style)
+        resetBrushLabDepositionDiagnostics()
+        markBrushLabInputReceipt()
         counters = GridStructuralCounters()
         brushLabActualDabCount = 0
         brushLabPredictedDabCount = 0
@@ -841,6 +910,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         sample: StrokeSample
     ) throws {
+        markBrushLabInputReceipt()
         if sample.kind == .predicted {
             let suffix = [sample]
             try replacePredictedStrokeSuffix(
@@ -857,6 +927,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         samples: [StrokeSample]
     ) throws {
         guard !samples.isEmpty else { return }
+        markBrushLabInputReceipt()
         var index = samples.startIndex
         while index < samples.endIndex {
             if samples[index].kind == .predicted {
@@ -1714,6 +1785,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func requestCompiledStrokeCommit(
         maximumRetainedBytes: Int
     ) throws {
+        markBrushLabInputReceipt()
         guard maximumRetainedBytes >= 0 else {
             throw MetalRendererError.rasterRevisionStorageLimitExceeded
         }
@@ -1730,6 +1802,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw rendererError(for: error)
         }
         execution.scheduler = scheduler
+        recordBrushLabScheduler(scheduler)
         execution.commitRequested = true
         execution.commitRetainedByteLimit = maximumRetainedBytes
         activeStroke = execution
@@ -1951,8 +2024,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             let cpuEncodeMilliseconds = elapsedMilliseconds(
                 since: cpuEncodeStart
             )
+            let submittedAtNanoseconds =
+                DispatchTime.now().uptimeNanoseconds
+            let eventToSubmitNanoseconds =
+                takeBrushLabEventToSubmitNanoseconds(
+                    submittedAt: submittedAtNanoseconds
+                )
+            let encodedDabCount =
+                nativeEncoding?.logicalDabCount ?? 0
+            let encodedInstanceCount =
+                nativeEncoding?.instanceCount ?? 0
+            let bufferLeaseCount =
+                nativeEncoding?.uploadBufferCount ?? 0
             commandBuffer.addCompletedHandler { [weak self] completedBuffer in
                 guard completedBuffer.status == .completed else { return }
+                let completedAtNanoseconds =
+                    DispatchTime.now().uptimeNanoseconds
                 let frameMetrics = GPUFrameMetrics(
                     cpuEncodeMilliseconds: cpuEncodeMilliseconds,
                     gpuMilliseconds: max(
@@ -1961,9 +2048,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                             completedBuffer.gpuEndTime
                                 - completedBuffer.gpuStartTime
                         ) * 1_000
-                    )
+                    ),
+                    eventToSubmitNanoseconds:
+                        eventToSubmitNanoseconds,
+                    gpuCompletionNanoseconds:
+                        completedAtNanoseconds >= submittedAtNanoseconds
+                            ? completedAtNanoseconds
+                                - submittedAtNanoseconds
+                            : 0,
+                    encodedDabCount: encodedDabCount,
+                    encodedInstanceCount: encodedInstanceCount,
+                    bufferLeaseCount: bufferLeaseCount
                 )
                 Task { @MainActor [weak self] in
+                    self?.recordBrushLabCompletedFrame(frameMetrics)
                     self?.onInteractiveFrameMetrics?(frameMetrics)
                 }
             }
@@ -2220,6 +2318,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         counters.totalInstancesThisStroke += records.count
         execution.scheduler = scheduler
+        recordBrushLabScheduler(scheduler)
         activeStroke = execution
     }
 
@@ -2405,6 +2504,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         counters.totalInstancesThisStroke += records.count
         needsReplayClear = true
         execution.scheduler = scheduler
+        recordBrushLabScheduler(scheduler)
         activeStroke = execution
     }
 
@@ -3323,10 +3423,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
         depositionEncoder = encoder
         execution.scheduler = candidate
+        recordBrushLabScheduler(candidate)
+        brushLabLastFrameEncodedDabCount = Set(
+            records.map(\.identity)
+        ).count
+        brushLabLastFrameEncodedInstanceCount = records.count
+        brushLabStrokeEncodedDabCount = Self.saturatingAdd(
+            brushLabStrokeEncodedDabCount,
+            UInt64(brushLabLastFrameEncodedDabCount)
+        )
+        brushLabDepositionTelemetry.recordEncoding(
+            instanceCount: UInt64(records.count),
+            bufferCount:
+                instancePool.diagnosticSnapshot.currentLeaseCount
+        )
         activeStroke = execution
         return NativeDepositionFrameEncoding(
             authoritativeCount: frame.authoritative.count,
             predictedCount: frame.predicted.count,
+            logicalDabCount: brushLabLastFrameEncodedDabCount,
+            uploadBufferCount: prepared?.uploadCount ?? 0,
             encodedLiveClear: encodedLiveClear,
             encodedReplayClear: encodedReplayClear,
             replayEpoch: encodedReplayClear || !frame.predicted.isEmpty
@@ -4477,20 +4593,101 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    private func resetBrushLabDepositionDiagnostics() {
+        brushLabDepositionTelemetry.reset()
+        brushLabAuthoritativeHighWater = 0
+        brushLabPredictedHighWater = 0
+        brushLabLastFrameEncodedDabCount = 0
+        brushLabLastFrameEncodedInstanceCount = 0
+        brushLabStrokeEncodedDabCount = 0
+        brushLabPendingInputReceiptNanoseconds = nil
+    }
+
+    private func markBrushLabInputReceipt() {
+        if brushLabPendingInputReceiptNanoseconds == nil {
+            brushLabPendingInputReceiptNanoseconds =
+                DispatchTime.now().uptimeNanoseconds
+        }
+    }
+
+    private func recordBrushLabScheduler(_ scheduler: FrameScheduler) {
+        let snapshot = scheduler.diagnosticSnapshot
+        brushLabAuthoritativeHighWater = max(
+            brushLabAuthoritativeHighWater,
+            snapshot.authoritativeHighWater
+        )
+        brushLabPredictedHighWater = max(
+            brushLabPredictedHighWater,
+            snapshot.predictedHighWater
+        )
+        brushLabDepositionTelemetry.recordBacklog(
+            authoritative: snapshot.authoritativePending,
+            predicted: snapshot.predictedPending
+        )
+    }
+
+    func takeBrushLabEventToSubmitNanoseconds(
+        submittedAt nanoseconds: UInt64
+    ) -> UInt64 {
+        guard let receipt = brushLabPendingInputReceiptNanoseconds else {
+            return 0
+        }
+        brushLabPendingInputReceiptNanoseconds = nil
+        return nanoseconds >= receipt ? nanoseconds - receipt : 0
+    }
+
+    func recordBrushLabCompletedFrame(_ metrics: GPUFrameMetrics) {
+        guard metrics.encodedInstanceCount > 0 else { return }
+        brushLabDepositionTelemetry.recordTimings(
+            eventToSubmitNanoseconds: metrics.eventToSubmitNanoseconds,
+            cpuPreparationNanoseconds: UInt64(
+                max(0, metrics.cpuEncodeMilliseconds) * 1_000_000
+            ),
+            gpuEncodingNanoseconds: UInt64(
+                max(0, metrics.gpuMilliseconds) * 1_000_000
+            ),
+            gpuCompletionNanoseconds: metrics.gpuCompletionNanoseconds
+        )
+    }
+
+    static func saturatingAdd(
+        _ lhs: UInt64,
+        _ rhs: UInt64
+    ) -> UInt64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : sum
+    }
+
     func elapsedMilliseconds(since start: CFAbsoluteTime) -> Double {
         (CFAbsoluteTimeGetCurrent() - start) * 1_000
     }
 
     func metrics(
         commandBuffer: any MTLCommandBuffer,
-        cpuMilliseconds: Double
+        cpuMilliseconds: Double,
+        submittedAtNanoseconds: UInt64 = 0,
+        completedAtNanoseconds: UInt64 = 0,
+        nativeEncoding: NativeDepositionFrameEncoding? = nil
     ) -> GPUFrameMetrics {
-        GPUFrameMetrics(
+        let eventToSubmitNanoseconds = submittedAtNanoseconds == 0
+            ? 0
+            : takeBrushLabEventToSubmitNanoseconds(
+                submittedAt: submittedAtNanoseconds
+            )
+        return GPUFrameMetrics(
             cpuEncodeMilliseconds: cpuMilliseconds,
             gpuMilliseconds: max(
                 0,
                 (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1_000
-            )
+            ),
+            eventToSubmitNanoseconds: eventToSubmitNanoseconds,
+            gpuCompletionNanoseconds:
+                completedAtNanoseconds >= submittedAtNanoseconds
+                    ? completedAtNanoseconds - submittedAtNanoseconds
+                    : 0,
+            encodedDabCount: nativeEncoding?.logicalDabCount ?? 0,
+            encodedInstanceCount: nativeEncoding?.instanceCount ?? 0,
+            bufferLeaseCount: nativeEncoding?.uploadBufferCount ?? 0
         )
     }
 }

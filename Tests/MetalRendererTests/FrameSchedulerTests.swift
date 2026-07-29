@@ -5,6 +5,39 @@ import Testing
 @Suite("Deposition frame scheduler")
 struct FrameSchedulerTests {
     @Test
+    func diagnosticsReportActualPendingCountsAndHighWater() throws {
+        let budget = try frameBudget(
+            authoritativePerFrame: 2,
+            predictedPerFrame: 1,
+            authoritativeCapacity: 8,
+            predictedCapacity: 4
+        )
+        var scheduler = FrameScheduler(budget: budget)
+
+        try scheduler.enqueueAuthoritative(records(0..<5))
+        try scheduler.replacePrediction(records(100..<103))
+        #expect(scheduler.diagnosticSnapshot == FrameSchedulerDiagnosticSnapshot(
+            authoritativePending: 5,
+            predictedPending: 3,
+            authoritativeHighWater: 5,
+            predictedHighWater: 3
+        ))
+
+        _ = scheduler.nextFrame(budget: budget)
+        #expect(scheduler.diagnosticSnapshot == FrameSchedulerDiagnosticSnapshot(
+            authoritativePending: 3,
+            predictedPending: 2,
+            authoritativeHighWater: 5,
+            predictedHighWater: 3
+        ))
+
+        try scheduler.enqueueAuthoritative(records(10..<15))
+        #expect(
+            scheduler.diagnosticSnapshot.authoritativeHighWater == 8
+        )
+    }
+
+    @Test
     func frameTakesAuthoritativeBeforePredictionWithoutDroppingCarry()
         throws
     {

@@ -153,11 +153,34 @@ struct BrushLabFrameMetrics: Codable, Equatable, Sendable {
     var rendererSampleCount = 0
 }
 
+struct BrushLabCompletedReplay: Sendable {
+    let generationID: String
+    let cardID: String
+    let canvasHash: String
+    let traceHash: String
+    let substrateInputCount: Int
+    let input: [BrushLabInputRecord]
+    let logicalDabs: [BrushLabDabRecord]
+    let snapshot: CommittedDocumentSnapshot
+    let packageHash: String
+    let definitionID: String
+    let semanticHash: String
+    let pipelineKey: String
+    let abiVersion: UInt16
+    let diagnostics: BrushLabDiagnostics
+}
+
 @MainActor
 @Observable
 final class BrushLabSession {
     static let maximumInputRecords = 4_096
     static let maximumDabRecords = 16_384
+    private static let substrateColor = InkColor(
+        red: 0.2,
+        green: 0.45,
+        blue: 0.85,
+        alpha: 1
+    )!
 
     let controller: EditorSessionController
     let compiler: BrushCompiler
@@ -180,6 +203,7 @@ final class BrushLabSession {
     private(set) var frameMetrics = BrushLabFrameMetrics()
     private(set) var manualCards = BrushLabManualCard.fixedMatrix
     private(set) var selectedManualCardID: String?
+    private(set) var completedReplay: BrushLabCompletedReplay?
     private(set) var manualAssessments: [String: BrushLabManualAssessment] =
         Dictionary(
             uniqueKeysWithValues: BrushLabManualCard.fixedMatrix.map {
@@ -470,6 +494,15 @@ final class BrushLabSession {
         }) else {
             throw BrushLabEvidenceError.manualCardUnavailable(cardID)
         }
+        completedReplay = nil
+        try await prepareManualCard(card)
+        selectedManualCardID = cardID
+        clearTrace()
+    }
+
+    private func prepareManualCard(
+        _ card: BrushLabManualCard
+    ) async throws {
         guard let anchor = AnchorBrushCatalog.entry(
             for: BrushRecipeID(card.brushID)
         ) else {
@@ -508,7 +541,7 @@ final class BrushLabSession {
             }
             throw BrushLabEvidenceError.manualBrushUnavailable(card.brushID)
         }
-        if anchor.role == .erase {
+        if card.tool == .erase {
             try controller.installBootstrapBrushes(
                 draw: compiledBrush,
                 eraser: compiledBrush
@@ -524,25 +557,149 @@ final class BrushLabSession {
                 card.diameter
             )
         }
-        selectedManualCardID = cardID
-        clearTrace()
+        try validatePreparedCard(card, compiledBrush: compiledBrush)
     }
 
-    func replaySelectedManualCard() throws {
+    func replaySelectedManualCard() async throws
+        -> BrushLabCompletedReplay
+    {
         guard controller.renderer.isIdle else {
             throw BrushLabEvidenceError.rendererBusy
         }
-        guard let selectedManualCard else {
+        guard let card = selectedManualCard else {
             throw BrushLabEvidenceError.manualCardNotSelected
         }
+        completedReplay = nil
+        controller.clear()
+        if !controller.renderer.isIdle {
+            try controller.renderer.completePendingRasterOperation()
+        }
+        guard controller.renderer.isIdle else {
+            throw BrushLabEvidenceError.rendererBusy
+        }
+        try await prepareManualCard(card)
         clearTrace()
-        controller.handleStrokeSamples(selectedManualCard.traceSamples())
+        let substrateInputCount: Int
+        if card.substrate == .recordedOpaqueStroke {
+            controller.handleTool(.draw)
+            controller.handleInkColor(Self.substrateColor)
+            controller.model.confirmBrushDiameter(
+                min(2_000, max(40, card.diameter * 1.75))
+            )
+            controller.handleStrokeSamples(card.substrateTraceSamples())
+            _ = try controller.renderer.completePendingInteractiveStroke()
+            substrateInputCount = inputRecords.count
+            try applyAndValidateStrokeProperties(card)
+        } else {
+            substrateInputCount = 0
+            try applyAndValidateStrokeProperties(card)
+        }
+        controller.handleStrokeSamples(card.traceSamples())
+        _ = try controller.renderer.completePendingInteractiveStroke()
+        guard controller.renderer.isIdle else {
+            throw BrushLabEvidenceError.rendererBusy
+        }
+        let snapshot = try controller.renderer.captureCommittedDocument()
+        let canvasHash = Self.canvasHash(snapshot)
+        let traceHash = try Self.traceHash(
+            input: inputRecords,
+            dabs: dabRecords
+        )
+        guard let packageContentHash,
+              let compiledBrush
+        else {
+            throw BrushLabEvidenceError.packageUnavailable
+        }
+        let generationID = BrushContentHash.sha256Hex(
+            of: Data(
+                [
+                    card.cardID,
+                    packageContentHash,
+                    canvasHash,
+                    traceHash,
+                    String(deterministicSeed),
+                ].joined(separator: "\u{0}").utf8
+            )
+        )
+        let replay = BrushLabCompletedReplay(
+            generationID: generationID,
+            cardID: card.cardID,
+            canvasHash: canvasHash,
+            traceHash: traceHash,
+            substrateInputCount: substrateInputCount,
+            input: inputRecords,
+            logicalDabs: dabRecords,
+            snapshot: snapshot,
+            packageHash: packageContentHash,
+            definitionID:
+                compiledBrush.renderIdentity.definitionID.rawValue,
+            semanticHash: compiledBrush.renderIdentity.semanticHash,
+            pipelineKey: Self.pipelineKey(compiledBrush),
+            abiVersion:
+                compiledBrush.depositionPipeline.key.abiVersion,
+            diagnostics: makeDiagnostics()
+        )
+        completedReplay = replay
+        return replay
     }
 
     func clearManualCard() {
         guard controller.renderer.isIdle else { return }
         controller.clear()
+        completedReplay = nil
         clearTrace()
+    }
+
+    private func applyAndValidateStrokeProperties(
+        _ card: BrushLabManualCard
+    ) throws {
+        controller.handleTool(
+            card.tool == .erase ? .erase : .draw
+        )
+        controller.handleInkColor(card.paintColor)
+        controller.model.confirmBrushDiameter(card.diameter)
+        guard let compiledBrush else {
+            throw BrushLabEvidenceError.packageUnavailable
+        }
+        try validatePreparedCard(card, compiledBrush: compiledBrush)
+    }
+
+    private func validatePreparedCard(
+        _ card: BrushLabManualCard,
+        compiledBrush: CompiledBrush
+    ) throws {
+        let expectedTool: EditorTool =
+            card.tool == .erase ? .erase : .draw
+        let expectedComposite: StrokeCompositeMode =
+            card.tool == .erase ? .erase : .draw
+        guard controller.renderer.documentConfiguration
+                == card.documentConfiguration,
+              controller.model.documentConfiguration
+                == card.documentConfiguration,
+              controller.model.tool == expectedTool,
+              controller.model.inkColor == card.paintColor,
+              controller.model.brushDiameter == card.diameter,
+              packageContentHash
+                == compiledBrush.renderIdentity.semanticHash,
+              controller.renderer.preparedBrush(
+                for: expectedComposite
+              )?.renderIdentity == compiledBrush.renderIdentity
+        else {
+            throw BrushLabEvidenceError.manualCardStateMismatch(
+                card.cardID
+            )
+        }
+    }
+
+    private static func traceHash(
+        input: [BrushLabInputRecord],
+        dabs: [BrushLabDabRecord]
+    ) throws -> String {
+        BrushContentHash.sha256Hex(
+            of: try encodeSorted(
+                BrushLabTraceIdentity(input: input, logicalDabs: dabs)
+            )
+        )
     }
 
     var selectedManualCard: BrushLabManualCard? {
@@ -552,6 +709,10 @@ final class BrushLabSession {
 
     func clearError() {
         errorMessage = nil
+    }
+
+    func clearCompilationFailure() {
+        compilationFailure = nil
     }
 
     func updateFrameMetrics(
@@ -728,21 +889,17 @@ final class BrushLabSession {
     {
         guard let card = selectedManualCard,
               let assessment = manualAssessments[card.cardID],
-              let packageContentHash,
-              let compiledBrush
+              let replay = completedReplay,
+              replay.cardID == card.cardID
         else {
-            throw BrushLabEvidenceError.manualCardNotSelected
+            throw BrushLabEvidenceError.completedReplayUnavailable
         }
-        guard controller.renderer.isIdle else {
-            throw BrushLabEvidenceError.rendererBusy
-        }
-        let snapshot = try controller.renderer.captureCommittedDocument()
         var imageFiles: [String: Data] = [:]
-        switch snapshot.storage {
+        switch replay.snapshot.storage {
         case let .singleRaster(bytes):
             imageFiles["canvas.png"] = try Self.evidencePNG(
                 PatternRasterImage(
-                    pixelSize: snapshot.canvasSize,
+                    pixelSize: replay.snapshot.canvasSize,
                     bgra8PremultipliedBytes: bytes
                 ),
                 background: card.background
@@ -766,27 +923,38 @@ final class BrushLabSession {
                 )
             }
         }
-        let diagnostics = makeDiagnostics()
         let identity = BrushLabManualEvidence.RenderIdentity(
-            definitionID: compiledBrush.renderIdentity.definitionID.rawValue,
-            semanticHash: compiledBrush.renderIdentity.semanticHash,
-            packageHash: packageContentHash,
-            pipelineKey: Self.pipelineKey(compiledBrush),
-            abiVersion: compiledBrush.depositionPipeline.key.abiVersion
+            definitionID: replay.definitionID,
+            semanticHash: replay.semanticHash,
+            packageHash: replay.packageHash,
+            pipelineKey: replay.pipelineKey,
+            abiVersion: replay.abiVersion
         )
         let evidence = BrushLabManualEvidence(
+            generationID: replay.generationID,
             cardID: card.cardID,
             card: card,
             assessment: assessment,
             renderIdentity: identity,
-            input: inputRecords,
-            logicalDabs: dabRecords,
+            inputOrigin: "synthetic",
+            physicalDeviceStatus: .init(
+                pencil: "pending",
+                wacom: "pending"
+            ),
+            substrate: .init(
+                kind: card.substrate.rawValue,
+                inputCount: replay.substrateInputCount
+            ),
+            input: replay.input,
+            logicalDabs: replay.logicalDabs,
             imageFiles: imageFiles.keys.sorted(),
-            diagnostics: diagnostics
+            diagnostics: replay.diagnostics
         )
         var files = imageFiles
         files["evidence.json"] = try Self.encodeSorted(evidence)
-        files["telemetry.json"] = try Self.encodeSorted(diagnostics)
+        files["telemetry.json"] = try Self.encodeSorted(
+            replay.diagnostics
+        )
         return BrushLabManualEvidenceArchive(files: files)
     }
 
@@ -796,9 +964,9 @@ final class BrushLabSession {
         packageContentHash = nil
         compiledBrush = nil
         compilationReport = nil
-        compilationFailure = nil
         compilationDiagnostics = []
         drawingAvailability = .unloaded
+        completedReplay = nil
         clearTrace()
         frameMetrics = BrushLabFrameMetrics()
         cpuEncodeSamples.removeAll(keepingCapacity: true)
@@ -902,6 +1070,7 @@ final class BrushLabSession {
 
     private func makeDiagnostics() -> BrushLabDiagnostics {
         let renderer = controller.renderer.brushLabDiagnosticSnapshot
+        let deposition = renderer.deposition
         let textures = compiledBrush?.textures.map {
             BrushLabDiagnostics.Texture(
                 id: $0.key,
@@ -918,22 +1087,21 @@ final class BrushLabSession {
             textures: textures,
             residentResourceBytes:
                 compiledBrush?.report.residentResourceBytes ?? 0,
-            authoritativeBacklog:
-                depositionMetrics.authoritativeBacklog,
-            predictedBacklog: depositionMetrics.predictedBacklog,
-            backlogHighWater: depositionMetrics.backlogHighWater,
-            encodedDabCount: depositionMetrics.encodedDabCount,
+            authoritativeBacklog: deposition.authoritativePending,
+            predictedBacklog: deposition.predictedPending,
+            backlogHighWater: deposition.backlogHighWater,
+            encodedDabCount: deposition.strokeEncodedDabCount,
             encodedInstanceCount:
-                depositionMetrics.encodedInstanceCount,
+                deposition.strokeEncodedInstanceCount,
             rendererLogicalDabCount: renderer.totalDabsThisStroke,
             rendererProjectedInstanceCount:
                 renderer.totalInstancesThisStroke,
-            cpuPreparation: depositionMetrics.cpuPreparation,
-            eventToSubmit: depositionMetrics.eventToSubmit,
-            gpuCompletion: depositionMetrics.gpuCompletion,
+            cpuPreparation: .init(deposition.cpuPreparation),
+            eventToSubmit: .init(deposition.eventToSubmit),
+            gpuCompletion: .init(deposition.gpuCompletion),
             missedFrameCount: depositionMetrics.missedFrameCount,
             missedFramePercentage: frameMetrics.missedFramePercentage,
-            bufferHighWater: depositionMetrics.bufferHighWater,
+            bufferHighWater: deposition.bufferLeaseHighWater,
             lastFailureStage: compilationFailure?.stage.rawValue
         )
     }
@@ -1127,6 +1295,11 @@ private struct BrushLabManualCatalog: Encodable {
     let assessments: [BrushLabManualAssessment]
 }
 
+private struct BrushLabTraceIdentity: Encodable {
+    let input: [BrushLabInputRecord]
+    let logicalDabs: [BrushLabDabRecord]
+}
+
 struct BrushLabDiagnostics: Codable, Equatable, Sendable {
     let schemaVersion: UInt16
     let definitionHash: String?
@@ -1159,10 +1332,14 @@ struct BrushLabDiagnostics: Codable, Equatable, Sendable {
 
 private struct BrushLabManualEvidence: Encodable {
     let schemaVersion: UInt16 = 1
+    let generationID: String
     let cardID: String
     let card: BrushLabManualCard
     let assessment: BrushLabManualAssessment
     let renderIdentity: RenderIdentity
+    let inputOrigin: String
+    let physicalDeviceStatus: PhysicalDeviceStatus
+    let substrate: Substrate
     let input: [BrushLabInputRecord]
     let logicalDabs: [BrushLabDabRecord]
     let imageFiles: [String]
@@ -1175,12 +1352,46 @@ private struct BrushLabManualEvidence: Encodable {
         let pipelineKey: String
         let abiVersion: UInt16
     }
+
+    struct PhysicalDeviceStatus: Encodable {
+        let pencil: String
+        let wacom: String
+    }
+
+    struct Substrate: Encodable {
+        let kind: String
+        let inputCount: Int
+    }
 }
 
 struct BrushLabManualEvidenceArchive {
     let files: [String: Data]
 
     func writeAtomically(to destination: URL) throws {
+        try BrushLabManualEvidenceSaveService.live.save(
+            self,
+            to: destination
+        )
+    }
+}
+
+struct BrushLabManualEvidenceSaveService: Sendable {
+    typealias EntryWriter = @Sendable (Data, URL) throws -> Void
+
+    static let live = BrushLabManualEvidenceSaveService {
+        try $0.write(to: $1, options: .atomic)
+    }
+
+    private let writeEntry: EntryWriter
+
+    init(_ writeEntry: @escaping EntryWriter) {
+        self.writeEntry = writeEntry
+    }
+
+    func save(
+        _ archive: BrushLabManualEvidenceArchive,
+        to destination: URL
+    ) throws {
         let manager = FileManager.default
         let parent = destination.deletingLastPathComponent()
         var isDirectory: ObjCBool = false
@@ -1190,7 +1401,7 @@ struct BrushLabManualEvidenceArchive {
         ), isDirectory.boolValue else {
             throw BrushLabEvidenceError.archiveParentUnavailable
         }
-        guard files.keys.allSatisfy({
+        guard archive.files.keys.allSatisfy({
             !$0.isEmpty
                 && !$0.contains("/")
                 && $0 != "."
@@ -1212,10 +1423,10 @@ struct BrushLabManualEvidenceArchive {
                 try? manager.removeItem(at: temporary)
             }
         }
-        for name in files.keys.sorted() {
-            try files[name]!.write(
-                to: temporary.appendingPathComponent(name),
-                options: .atomic
+        for name in archive.files.keys.sorted() {
+            try writeEntry(
+                archive.files[name]!,
+                temporary.appendingPathComponent(name)
             )
         }
         if manager.fileExists(atPath: destination.path) {
@@ -1234,9 +1445,11 @@ enum BrushLabEvidenceError: Error, Equatable, LocalizedError {
     case packageUnavailable
     case rendererBusy
     case manualCardNotSelected
+    case completedReplayUnavailable
     case manualCardUnavailable(String)
     case manualBrushUnavailable(String)
     case manualDiameterUnavailable(Float)
+    case manualCardStateMismatch(String)
     case documentConfigurationUnavailable
     case archiveParentUnavailable
     case invalidArchivePath
@@ -1249,12 +1462,16 @@ enum BrushLabEvidenceError: Error, Equatable, LocalizedError {
             "Finish or cancel the active canvas operation first."
         case .manualCardNotSelected:
             "Select a Brush Lab manual card first."
+        case .completedReplayUnavailable:
+            "Replay the selected Brush Lab card to completion before export."
         case let .manualCardUnavailable(cardID):
             "Brush Lab manual card '\(cardID)' is unavailable."
         case let .manualBrushUnavailable(brushID):
             "Brush Lab brush '\(brushID)' is unavailable."
         case let .manualDiameterUnavailable(diameter):
             "Brush Lab diameter \(diameter) is unavailable."
+        case let .manualCardStateMismatch(cardID):
+            "Brush Lab card '\(cardID)' no longer matches renderer state."
         case .documentConfigurationUnavailable:
             "Clear the document before changing the manual-card projection."
         case .archiveParentUnavailable:

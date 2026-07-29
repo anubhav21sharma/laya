@@ -5,13 +5,28 @@ import MetalKit
 public struct GPUFrameMetrics: Codable, Equatable, Sendable {
     public let cpuEncodeMilliseconds: Double
     public let gpuMilliseconds: Double
+    public let eventToSubmitNanoseconds: UInt64
+    public let gpuCompletionNanoseconds: UInt64
+    public let encodedDabCount: Int
+    public let encodedInstanceCount: Int
+    public let bufferLeaseCount: Int
 
     public init(
         cpuEncodeMilliseconds: Double,
-        gpuMilliseconds: Double
+        gpuMilliseconds: Double,
+        eventToSubmitNanoseconds: UInt64 = 0,
+        gpuCompletionNanoseconds: UInt64 = 0,
+        encodedDabCount: Int = 0,
+        encodedInstanceCount: Int = 0,
+        bufferLeaseCount: Int = 0
     ) {
         self.cpuEncodeMilliseconds = cpuEncodeMilliseconds
         self.gpuMilliseconds = gpuMilliseconds
+        self.eventToSubmitNanoseconds = eventToSubmitNanoseconds
+        self.gpuCompletionNanoseconds = gpuCompletionNanoseconds
+        self.encodedDabCount = encodedDabCount
+        self.encodedInstanceCount = encodedInstanceCount
+        self.bufferLeaseCount = bufferLeaseCount
     }
 }
 

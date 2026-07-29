@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import MetalRenderer
 import Observation
 
 struct DebugPerformanceSnapshot: Equatable, Sendable {
@@ -16,6 +17,14 @@ struct DebugDurationPercentiles: Codable, Equatable, Sendable {
     var p50: UInt64 = 0
     var p95: UInt64 = 0
     var p99: UInt64 = 0
+}
+
+extension DebugDurationPercentiles {
+    init(_ source: DepositionDurationPercentiles) {
+        p50 = source.p50
+        p95 = source.p95
+        p99 = source.p99
+    }
 }
 
 struct DebugDepositionSnapshot: Equatable, Sendable {

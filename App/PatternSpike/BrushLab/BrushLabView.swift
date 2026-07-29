@@ -142,8 +142,6 @@ struct BrushLabView: View {
     @State private var showActualDabs = true
     @State private var showPredictedDabs = true
     @State private var performanceMonitor = DebugPerformanceMonitor()
-    @State private var lastRendererDabCount = 0
-    @State private var lastRendererInstanceCount = 0
     @State private var lastDisplayMissedFrameCount: UInt64 = 0
 
     var body: some View {
@@ -267,27 +265,8 @@ struct BrushLabView: View {
                 runtime.session.recordRendererFrameMetrics($0)
                 let renderer = runtime.controller.renderer
                     .brushLabDiagnosticSnapshot
-                let encodedDabs = UInt64(
-                    renderer.totalDabsThisStroke >= lastRendererDabCount
-                        ? renderer.totalDabsThisStroke
-                            - lastRendererDabCount
-                        : renderer.totalDabsThisStroke
-                )
-                let encodedInstances = UInt64(
-                    renderer.totalInstancesThisStroke
-                        >= lastRendererInstanceCount
-                        ? renderer.totalInstancesThisStroke
-                            - lastRendererInstanceCount
-                        : renderer.totalInstancesThisStroke
-                )
-                lastRendererDabCount = renderer.totalDabsThisStroke
-                lastRendererInstanceCount =
-                    renderer.totalInstancesThisStroke
                 let cpuNanoseconds = UInt64(
                     max(0, $0.cpuEncodeMilliseconds) * 1_000_000
-                )
-                let gpuNanoseconds = UInt64(
-                    max(0, $0.gpuMilliseconds) * 1_000_000
                 )
                 let displayMissedFrames =
                     performanceMonitor.snapshot.missedFrameCount
@@ -297,14 +276,19 @@ struct BrushLabView: View {
                     : 0
                 lastDisplayMissedFrameCount = displayMissedFrames
                 performanceMonitor.recordDepositionSample(
-                    authoritativeBacklog: renderer.actualDabCount,
-                    predictedBacklog: renderer.predictedDabCount,
-                    encodedDabs: encodedDabs,
-                    encodedInstances: encodedInstances,
-                    bufferCount: encodedInstances == 0 ? 0 : 1,
+                    authoritativeBacklog:
+                        renderer.deposition.authoritativePending,
+                    predictedBacklog:
+                        renderer.deposition.predictedPending,
+                    encodedDabs: UInt64($0.encodedDabCount),
+                    encodedInstances:
+                        UInt64($0.encodedInstanceCount),
+                    bufferCount: $0.bufferLeaseCount,
                     cpuPreparationNanoseconds: cpuNanoseconds,
-                    eventToSubmitNanoseconds: cpuNanoseconds,
-                    gpuCompletionNanoseconds: gpuNanoseconds,
+                    eventToSubmitNanoseconds:
+                        $0.eventToSubmitNanoseconds,
+                    gpuCompletionNanoseconds:
+                        $0.gpuCompletionNanoseconds,
                     missedFrames: newMissedFrames
                 )
                 runtime.session.updateDepositionMetrics(
@@ -387,11 +371,14 @@ struct BrushLabView: View {
             }
 
             Button("Replay Card") {
-                do {
-                    try runtime.session.replaySelectedManualCard()
-                    exportError = nil
-                } catch {
-                    exportError = error.localizedDescription
+                Task {
+                    do {
+                        _ = try await runtime.session
+                            .replaySelectedManualCard()
+                        exportError = nil
+                    } catch {
+                        exportError = error.localizedDescription
+                    }
                 }
             }
             .disabled(
@@ -935,18 +922,36 @@ struct BrushLabView: View {
 
     private func resetDiagnosticsTracking() {
         performanceMonitor.reset()
-        lastRendererDabCount = 0
-        lastRendererInstanceCount = 0
         lastDisplayMissedFrameCount = 0
     }
 
     private func exportEvidence(_ runtime: BrushLabRuntime) {
         do {
-            exportDocument = try BrushLabEvidenceDocument(
-                archive: runtime.session.makeManualEvidenceArchive()
+            let archive = try runtime.session.makeManualEvidenceArchive()
+            #if os(macOS)
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [.brushLabEvidence]
+            panel.nameFieldStringValue = evidenceFilename
+            panel.canCreateDirectories = true
+            panel.begin { response in
+                guard response == .OK, let url = panel.url else { return }
+                do {
+                    try BrushLabManualEvidenceSaveService.live.save(
+                        archive,
+                        to: url
+                    )
+                    exportError = nil
+                } catch {
+                    exportError = error.localizedDescription
+                }
+            }
+            #else
+            exportDocument = BrushLabEvidenceDocument(
+                archive: archive
             )
             exportPresented = true
             exportError = nil
+            #endif
         } catch {
             exportError = error.localizedDescription
         }

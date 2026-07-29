@@ -16,14 +16,14 @@ struct BrushLabSessionTests {
         let cards = BrushLabManualCard.fixedMatrix
         let anchorIDs = Set(AnchorBrushCatalog.all.map(\.id.rawValue))
 
-        #expect(cards.count == 72)
+        #expect(cards.count == 156)
         #expect(cards.map(\.cardID) == cards.map(\.cardID).sorted())
         #expect(Set(cards.map(\.cardID)).count == cards.count)
         #expect(Set(cards.map(\.brushID)) == anchorIDs)
 
         for anchorID in anchorIDs {
             let anchorCards = cards.filter { $0.brushID == anchorID }
-            #expect(anchorCards.count == 12)
+            #expect(anchorCards.count == 26)
             #expect(Set(anchorCards.map(\.gesture)) == Set(
                 BrushLabManualGesture.allCases
             ))
@@ -63,6 +63,41 @@ struct BrushLabSessionTests {
     }
 
     @Test
+    func manualCardScheduleProvidesFullPairwiseFactorCoveragePerAnchor() {
+        let anchorID = AnchorBrushCatalog.ink.id.rawValue
+        let cards = BrushLabManualCard.fixedMatrix.filter {
+            $0.brushID == anchorID
+        }
+        let rows = cards.map { card in
+            [
+                card.gesture.rawValue,
+                String(card.diameter),
+                card.pressureProfile,
+                card.inputCapabilities.joined(separator: "+"),
+                card.documentMode,
+                card.background.rawValue,
+                card.predictionEnabled ? "on" : "off",
+                card.paintRGBAHex,
+            ]
+        }
+        let literalLevelCounts = [6, 3, 3, 4, 4, 2, 2, 3]
+
+        for first in literalLevelCounts.indices {
+            for second in literalLevelCounts.indices where second > first {
+                let pairs = Set(rows.map {
+                    "\($0[first])|\($0[second])"
+                })
+                #expect(
+                    pairs.count
+                        == literalLevelCounts[first]
+                            * literalLevelCounts[second],
+                    "Factors \(first) and \(second) remain coupled"
+                )
+            }
+        }
+    }
+
+    @Test
     func freshSessionsProduceByteIdenticalManualCardJSON() throws {
         guard let first = try makeRuntime(),
               let second = try makeRuntime()
@@ -76,7 +111,7 @@ struct BrushLabSessionTests {
         #expect(firstData == secondData)
         #expect(
             BrushContentHash.sha256Hex(of: firstData)
-                == "cabfd2d0fb1f6007fef745ca7e1480e9906f45f6f2361a2f8568874b2432d3e2"
+                == "8bf5697a355d42c1a05826d0b1d51eba4070666002c5bbd5021bfc4c72f7c65d"
         )
     }
 
@@ -109,10 +144,10 @@ struct BrushLabSessionTests {
         })
 
         try await runtime.session.selectManualCard(card.cardID)
-        try runtime.session.replaySelectedManualCard()
-        _ = try runtime.controller.renderer.finishCommitForHarness()
+        let generation = try await runtime.session.replaySelectedManualCard()
 
         #expect(runtime.session.selectedManualCardID == card.cardID)
+        #expect(generation.cardID == card.cardID)
         #expect(runtime.session.package?.definition.id.rawValue == card.brushID)
         #expect(runtime.controller.model.brushDiameter == card.diameter)
         #expect(runtime.controller.model.inkColor == card.paintColor)
@@ -130,19 +165,164 @@ struct BrushLabSessionTests {
     }
 
     @Test
+    func repeatedReplayProducesIdenticalPixelsAndTraceWithoutHarnessHelper()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let card = try #require(runtime.session.manualCards.first {
+            $0.brushID == AnchorBrushCatalog.ink.id.rawValue
+                && $0.documentMode == "plain"
+                && !$0.predictionEnabled
+                && $0.customResourceFixture == nil
+        })
+        try await runtime.session.selectManualCard(card.cardID)
+
+        let first = try await runtime.session.replaySelectedManualCard()
+        let firstArchive = try runtime.session.makeManualEvidenceArchive()
+        let second = try await runtime.session.replaySelectedManualCard()
+        let secondArchive = try runtime.session.makeManualEvidenceArchive()
+
+        #expect(first.canvasHash == second.canvasHash)
+        #expect(first.traceHash == second.traceHash)
+        #expect(firstArchive.files["canvas.png"]
+            == secondArchive.files["canvas.png"])
+        #expect(first.input == second.input)
+        #expect(first.logicalDabs == second.logicalDabs)
+        #expect(runtime.controller.renderer.isIdle)
+    }
+
+    @Test
+    func exportRemainsBoundToCompletedCardAfterMutableUIStateChanges()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let card = try #require(runtime.session.manualCards.first {
+            $0.brushID == AnchorBrushCatalog.ink.id.rawValue
+                && $0.documentMode == "plain"
+        })
+        try await runtime.session.selectManualCard(card.cardID)
+        let generation = try await runtime.session.replaySelectedManualCard()
+
+        runtime.controller.handleTool(.erase)
+        runtime.controller.handleInkColor(
+            InkColor(red: 1, green: 1, blue: 1, alpha: 1)!
+        )
+        runtime.controller.model.confirmBrushDiameter(137)
+        let archive = try runtime.session.makeManualEvidenceArchive()
+        let evidence = try #require(archive.files["evidence.json"])
+        let object = try #require(
+            JSONSerialization.jsonObject(with: evidence)
+                as? [String: Any]
+        )
+        let exportedCard = try #require(
+            object["card"] as? [String: Any]
+        )
+
+        #expect(object["generationID"] as? String == generation.generationID)
+        #expect(object["cardID"] as? String == card.cardID)
+        #expect(exportedCard["paintRGBAHex"] as? String == card.paintRGBAHex)
+        #expect(exportedCard["tool"] as? String == card.tool.rawValue)
+    }
+
+    @Test
+    func eraserReplayHasVisibleReproducibleProductionSubstrate()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let card = try #require(runtime.session.manualCards.first {
+            $0.brushID == AnchorBrushCatalog.eraser.id.rawValue
+                && $0.documentMode == "plain"
+                && !$0.predictionEnabled
+        })
+        try await runtime.session.selectManualCard(card.cardID)
+
+        let first = try await runtime.session.replaySelectedManualCard()
+        let firstPNG = try #require(
+            runtime.session.makeManualEvidenceArchive().files["canvas.png"]
+        )
+        let second = try await runtime.session.replaySelectedManualCard()
+        let secondArchive = try runtime.session.makeManualEvidenceArchive()
+        let secondPNG = try #require(secondArchive.files["canvas.png"])
+        let evidence = try #require(secondArchive.files["evidence.json"])
+        let object = try #require(
+            JSONSerialization.jsonObject(with: evidence)
+                as? [String: Any]
+        )
+
+        #expect(card.substrate != .none)
+        #expect(first.canvasHash == second.canvasHash)
+        #expect(firstPNG == secondPNG)
+        #expect(first.substrateInputCount > 0)
+        #expect((object["substrate"] as? [String: Any])?["kind"] as? String
+            == card.substrate.rawValue)
+        #expect(Set(second.input.map(\.source)) == ["mouse"])
+    }
+
+    @Test
+    func syntheticCardsCannotClaimPhysicalPencilOrWacomEvidence()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let card = try #require(runtime.session.manualCards.first {
+            $0.inputCapabilities.contains("roll")
+                && $0.brushID == AnchorBrushCatalog.ink.id.rawValue
+                && $0.documentMode == "plain"
+        })
+        try await runtime.session.selectManualCard(card.cardID)
+        _ = try await runtime.session.replaySelectedManualCard()
+        let evidence = try #require(
+            runtime.session.makeManualEvidenceArchive()
+                .files["evidence.json"]
+        )
+        let object = try #require(
+            JSONSerialization.jsonObject(with: evidence)
+                as? [String: Any]
+        )
+        let physical = try #require(
+            object["physicalDeviceStatus"] as? [String: Any]
+        )
+
+        #expect(object["inputOrigin"] as? String == "synthetic")
+        #expect(physical["pencil"] as? String == "pending")
+        #expect(physical["wacom"] as? String == "pending")
+        #expect(Set(runtime.session.inputRecords.map(\.source)) == ["mouse"])
+        #expect(runtime.session.inputRecords.contains {
+            $0.capabilities != 0
+        })
+    }
+
+    @Test
+    func decodedCardRejectsPaintMutationUnderAStaleStableID() throws {
+        let card = try #require(BrushLabManualCard.fixedMatrix.first {
+            $0.paintRGBAHex == "#111111FF"
+        })
+        let data = try JSONEncoder().encode(card)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        object["paintRGBAHex"] = "#C43A52FF"
+        let mutated = try JSONSerialization.data(withJSONObject: object)
+
+        #expect(throws: (any Error).self) {
+            _ = try JSONDecoder().decode(
+                BrushLabManualCard.self,
+                from: mutated
+            )
+        }
+    }
+
+    @Test
     func manualEvidenceArchiveWritesJSONPNGsAndTelemetryAtomically()
         async throws
     {
         guard let runtime = try makeRuntime() else { return }
         let card = try #require(runtime.session.manualCards.first {
             $0.brushID == AnchorBrushCatalog.ink.id.rawValue
-                && $0.gesture == .fastLine
                 && $0.documentMode == "plain"
                 && !$0.predictionEnabled
         })
         try await runtime.session.selectManualCard(card.cardID)
-        try runtime.session.replaySelectedManualCard()
-        _ = try runtime.controller.renderer.finishCommitForHarness()
+        _ = try await runtime.session.replaySelectedManualCard()
 
         let archive = try runtime.session.makeManualEvidenceArchive()
         #expect(Set(archive.files.keys) == [
@@ -199,6 +379,73 @@ struct BrushLabSessionTests {
             try FileManager.default.contentsOfDirectory(
                 atPath: root.path
             ).allSatisfy { !$0.hasPrefix(".card.brushlabevidence.tmp-") }
+        )
+    }
+
+    @Test
+    func productionEvidenceSaverReplacesAtomicallyAndPreservesOnFailure()
+        throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "laya-brush-lab-production-save-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false
+        )
+        let destination = root.appendingPathComponent(
+            "card.brushlabevidence",
+            isDirectory: true
+        )
+        let first = BrushLabManualEvidenceArchive(files: [
+            "canvas.png": Data([1]),
+            "evidence.json": Data("first".utf8),
+            "telemetry.json": Data("telemetry-1".utf8),
+        ])
+        let replacement = BrushLabManualEvidenceArchive(files: [
+            "canvas.png": Data([2]),
+            "evidence.json": Data("second".utf8),
+            "telemetry.json": Data("telemetry-2".utf8),
+        ])
+        try BrushLabManualEvidenceSaveService.live.save(
+            first,
+            to: destination
+        )
+        try BrushLabManualEvidenceSaveService.live.save(
+            replacement,
+            to: destination
+        )
+        #expect(
+            try Data(
+                contentsOf: destination.appendingPathComponent(
+                    "evidence.json"
+                )
+            ) == Data("second".utf8)
+        )
+
+        let failing = BrushLabManualEvidenceSaveService { data, url in
+            if url.lastPathComponent == "telemetry.json" {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            try data.write(to: url, options: .atomic)
+        }
+        #expect(throws: CocoaError.self) {
+            try failing.save(first, to: destination)
+        }
+        #expect(
+            try Data(
+                contentsOf: destination.appendingPathComponent(
+                    "evidence.json"
+                )
+            ) == Data("second".utf8)
+        )
+        #expect(
+            try FileManager.default.contentsOfDirectory(
+                atPath: root.path
+            ).allSatisfy { !$0.contains(".tmp-") }
         )
     }
 
@@ -430,6 +677,29 @@ struct BrushLabSessionTests {
         #expect(runtime.session.compiledBrush == nil)
     }
 
+    @Test
+    func typedCompilationFailurePersistsUntilExplicitlyCleared()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        await runtime.session.loadPackage(
+            try makeCorruptResourcePackage(),
+            sourceName: "corrupt.layabrush"
+        )
+        let failure = try #require(runtime.session.compilationFailure)
+        #expect(failure.stage == .imageDecode)
+
+        await runtime.session.loadPackage(
+            try makePackage(),
+            sourceName: "valid.layabrush"
+        )
+        #expect(runtime.session.drawingAvailability == .available)
+        #expect(runtime.session.compilationFailure == failure)
+
+        runtime.session.clearCompilationFailure()
+        #expect(runtime.session.compilationFailure == nil)
+    }
+
     private func makeRuntime() throws -> (
         controller: EditorSessionController,
         session: BrushLabSession
@@ -516,6 +786,67 @@ struct BrushLabSessionTests {
             manifest: BrushPackageManifest(resources: []),
             definition: definition,
             resourceData: [:]
+        )
+    }
+
+    private func makeCorruptResourcePackage() throws -> BrushPackage {
+        let resourceID = "brush-lab.corrupt.shape"
+        let data = Data([1, 2, 3, 4])
+        let resource = try BrushPackageResource(
+            id: resourceID,
+            kind: .shape,
+            mediaType: "image/png",
+            data: data,
+            pixelWidth: 4,
+            pixelHeight: 4
+        )
+        let base = AnchorBrushCatalog.ink.definition
+        let definition = try BrushDefinition(
+            id: BrushRecipeID("brush-lab.corrupt"),
+            schemaVersion: base.schemaVersion,
+            metadata: base.metadata,
+            capabilities: base.capabilities,
+            resources: [
+                BrushResourceReference(
+                    identifier: resourceID,
+                    kind: .shape,
+                    required: true,
+                    fallback: nil
+                ),
+            ],
+            coverage: BrushCoverageDefinition(
+                shapes: [
+                    BrushShapeLayerDefinition(
+                        shape: .asset(resourceID),
+                        combination: .replace,
+                        scale: 1,
+                        rotation: 0,
+                        offset: .zero
+                    ),
+                ],
+                grains: [],
+                baseHardness: base.coverage.baseHardness,
+                aspectRatio: base.coverage.aspectRatio,
+                tipThreshold: base.coverage.tipThreshold,
+                antialiasing: base.coverage.antialiasing
+            ),
+            placement: base.placement,
+            dynamics: base.dynamics,
+            color: base.color,
+            material: base.material,
+            stabilization: base.stabilization,
+            taper: base.taper,
+            replayMode: base.replayMode,
+            replayLimits: base.replayLimits,
+            seedPolicy: base.seedPolicy,
+            limits: base.limits,
+            performanceIntent: base.performanceIntent,
+            compatibility: base.compatibility
+        )
+        return try BrushPackage(
+            manifest: BrushPackageManifest(resources: [resource]),
+            definition: definition,
+            resourceData: [resourceID: data]
         )
     }
 
