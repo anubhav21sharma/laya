@@ -4522,27 +4522,10 @@ private enum DepositionHarnessFixtures {
     ) throws -> BrushDefinition {
         let one = constant(1)
         let zero = constant(0)
-        var capabilities: [BrushCapabilityDeclaration] = []
-        if grains.count == 2 {
-            capabilities.append(
-                BrushCapabilityDeclaration(
-                    identifier: BrushCapability.dualGrain.rawValue,
-                    required: true
-                )
-            )
-        }
-        if shapes.count == 2 {
-            capabilities.append(
-                BrushCapabilityDeclaration(
-                    identifier: BrushCapability.dualShape.rawValue,
-                    required: true
-                )
-            )
-        }
         return try BrushDefinition(
             id: BrushRecipeID(id),
             metadata: BrushMetadata(displayName: name),
-            capabilities: capabilities,
+            capabilities: [],
             resources: resources,
             coverage: BrushCoverageDefinition(
                 shapes: shapes,

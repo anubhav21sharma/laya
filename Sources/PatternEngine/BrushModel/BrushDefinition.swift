@@ -135,7 +135,12 @@ private enum BrushDefinitionValidator {
         capabilities: [BrushCapabilityDeclaration]
     ) throws {
         guard (1...2).contains(coverage.shapes.count), coverage.grains.count <= 2, coverage.shapes[0].combination == .replace else { throw BrushDefinitionValidationError.invalidCoverage(field: "layers") }
-        if coverage.shapes.count == 2,
+        let declaresDualLayerCapability = capabilities.contains(where: {
+            $0.identifier == BrushCapability.dualShape.rawValue
+                || $0.identifier == BrushCapability.dualGrain.rawValue
+        })
+        if declaresDualLayerCapability,
+           coverage.shapes.count == 2,
            !capabilities.contains(where: {
                $0.identifier == BrushCapability.dualShape.rawValue && $0.required
            })
@@ -144,7 +149,8 @@ private enum BrushDefinitionValidator {
                 BrushCapability.dualShape.rawValue
             )
         }
-        if coverage.grains.count == 2,
+        if declaresDualLayerCapability,
+           coverage.grains.count == 2,
            !capabilities.contains(where: {
                $0.identifier == BrushCapability.dualGrain.rawValue && $0.required
            })

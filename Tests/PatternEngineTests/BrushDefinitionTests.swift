@@ -329,7 +329,7 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
     #expect(throws: BrushDefinitionValidationError.self) { try definition.replacing(color: invalidColor) }
 }
 
-@Test func definitionRequiresRequiredDualLayerCapabilitiesForEverySecondLayer() throws {
+@Test func definitionPreservesLegacyDualLayersAndValidatesDeclaredCapabilities() throws {
     let base = try BrushDefinition.fixture()
     let twoShapes = BrushCoverageDefinition(
         shapes: [
@@ -347,17 +347,24 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
         baseHardness: 1, aspectRatio: 1, tipThreshold: 0, antialiasing: true
     )
 
+    #expect(
+        try base.replacing(coverage: twoShapes).capabilities.isEmpty
+    )
+    #expect(
+        try base.replacing(coverage: twoGrains).capabilities.isEmpty
+    )
+
     for capabilities in [
-        [],
         [BrushCapabilityDeclaration(identifier: "dualShape", required: false)],
+        [BrushCapabilityDeclaration(identifier: "dualGrain", required: true)],
     ] {
         #expect(throws: BrushDefinitionValidationError.missingCapability("dualShape")) {
             try base.replacing(capabilities: capabilities, coverage: twoShapes)
         }
     }
     for capabilities in [
-        [],
         [BrushCapabilityDeclaration(identifier: "dualGrain", required: false)],
+        [BrushCapabilityDeclaration(identifier: "dualShape", required: true)],
     ] {
         #expect(throws: BrushDefinitionValidationError.missingCapability("dualGrain")) {
             try base.replacing(capabilities: capabilities, coverage: twoGrains)

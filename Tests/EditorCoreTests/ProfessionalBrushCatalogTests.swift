@@ -192,20 +192,6 @@ func naturalCharcoalValidationRejectsMissingOrOptionalDualLayerCapabilities() th
     }
 }
 
-@Test
-func graphitePencilValidationRejectsItsSoleDualGrainCapabilityRemoved() throws {
-    #expect(throws: BrushDefinitionValidationError.missingCapability("dualGrain")) {
-        try decodeMutatedGraphitePencil(removing: "dualGrain")
-    }
-}
-
-@Test
-func naturalCharcoalValidationRejectsBothDualLayerCapabilitiesRemoved() throws {
-    #expect(throws: BrushDefinitionValidationError.missingCapability("dualShape")) {
-        try decodeMutatedNaturalCharcoal(removing: ["dualGrain", "dualShape"])
-    }
-}
-
 private func decodeMutatedNaturalCharcoal(
     removing identifiers: Set<String> = [],
     markingOptional optionalIdentifier: String? = nil
@@ -214,15 +200,6 @@ private func decodeMutatedNaturalCharcoal(
         ProfessionalBrushCatalog.naturalCharcoal.definition,
         removing: identifiers,
         markingOptional: optionalIdentifier
-    )
-}
-
-private func decodeMutatedGraphitePencil(
-    removing identifier: String
-) throws -> BrushDefinition {
-    try decodeMutated(
-        ProfessionalBrushCatalog.graphitePencil.definition,
-        removing: [identifier]
     )
 }
 
