@@ -264,6 +264,7 @@ final class BrushLabSession {
     private(set) var errorMessage: String?
     private var cpuEncodeSamples: [Double] = []
     private var gpuSamples: [Double] = []
+    private var professionalSelectionGeneration: UInt64 = 0
 
     init(controller: EditorSessionController, compiler: BrushCompiler) {
         self.controller = controller
@@ -589,12 +590,54 @@ final class BrushLabSession {
         }) else {
             throw BrushLabEvidenceError.manualCardUnavailable(cardID)
         }
-        completedReplay = nil
-        try await prepareProfessionalManualCard(card)
+        let generation = nextProfessionalSelectionGeneration()
+        let prepared = try await compileProfessionalManualCard(card)
+        guard generation == professionalSelectionGeneration,
+              controller.renderer.isIdle
+        else {
+            throw CancellationError()
+        }
+        try await controller.resetReviewDocument(
+            to: card.documentConfiguration
+        )
+        guard generation == professionalSelectionGeneration,
+              controller.renderer.isIdle
+        else {
+            throw CancellationError()
+        }
+        try compiler.commitCompilationBatch(prepared.batch)
+        try controller.installBootstrapBrushes(
+            draw: prepared.draw,
+            eraser: prepared.eraser
+        )
+        let active = try configureProfessionalPass(
+            card.passes[0],
+            card: card,
+            drawBrush: prepared.draw,
+            eraserBrush: prepared.eraser
+        )
+
+        package = prepared.package
+        sourceName = "\(card.cardID).professional-review"
+        packageContentHash = prepared.packageHash
+        activeDrawingPackageContentHash = prepared.packageHash
+        compiledBrush = prepared.draw
+        compilationReport = prepared.draw.report
+        compilationFailure = nil
+        compilationDiagnostics = prepared.draw.diagnostics.map(
+            Self.diagnosticDescription
+        )
+        drawingAvailability = .available
+        professionalDrawBrush = prepared.draw
+        professionalEraserBrush = prepared.eraser
+        activeProfessionalCompiledBrush = active
         reviewMatrix = .stageFiveProfessional
         selectedProfessionalManualCardID = cardID
+        completedReplay = nil
         resetProfessionalPassNavigation()
         clearTrace()
+        errorMessage = nil
+        isLoading = false
     }
 
     private func prepareManualCard(
@@ -665,81 +708,44 @@ final class BrushLabSession {
         try validatePreparedCard(card, compiledBrush: compiledBrush)
     }
 
-    private func prepareProfessionalManualCard(
+    private struct PreparedProfessionalManualCard {
+        let batch: BrushCompilationBatch
+        let package: BrushPackage
+        let packageHash: String
+        let draw: CompiledBrush
+        let eraser: CompiledBrush
+    }
+
+    private func compileProfessionalManualCard(
         _ card: BrushLabProfessionalManualCard
-    ) async throws {
+    ) async throws -> PreparedProfessionalManualCard {
         guard let entry = ProfessionalBrushCatalog.entry(
             for: BrushRecipeID(card.brushID)
         ) else {
             throw BrushLabEvidenceError.manualBrushUnavailable(card.brushID)
         }
-        if controller.renderer.documentConfiguration
-            != card.documentConfiguration
-        {
-            switch card.documentConfiguration {
-            case let .periodic(configuration):
-                controller.handlePeriodicConfiguration(configuration)
-            case let .finite(configuration):
-                controller.handleFiniteConfiguration(configuration)
-            }
-        }
-        guard controller.renderer.documentConfiguration
-                == card.documentConfiguration
-        else {
-            throw BrushLabEvidenceError.documentConfigurationUnavailable
-        }
-
-        isLoading = true
-        defer { isLoading = false }
-        errorMessage = nil
-        compilationFailure = nil
-        prepareInspectionState()
         let drawPackage = try Self.builtInPackage(
             definition: entry.definition
         )
-        package = drawPackage
-        sourceName = "\(card.cardID).professional-review"
-        do {
-            let drawHash = try drawPackage.contentHash
-            packageContentHash = drawHash
-            let draw = try await compiler.compileAndActivate(
-                package: drawPackage
+        let eraserPackage = try Self.builtInPackage(
+            definition: EditorBrushCatalog.eraser.definition
+        )
+        let packageHash = try drawPackage.contentHash
+        let batch = try await compiler.prepareCompilationBatch(
+            packages: [drawPackage, eraserPackage]
+        )
+        guard batch.brushes.count == 2 else {
+            throw BrushLabEvidenceError.manualCardStateMismatch(
+                card.cardID
             )
-            let eraser = try await compiler.compileAndActivate(
-                definition: EditorBrushCatalog.eraser.definition
-            )
-            try controller.installBootstrapBrushes(
-                draw: draw,
-                eraser: eraser
-            )
-            compiledBrush = draw
-            professionalDrawBrush = draw
-            professionalEraserBrush = eraser
-            activeProfessionalCompiledBrush = draw
-            compilationReport = draw.report
-            compilationDiagnostics = draw.diagnostics.map(
-                Self.diagnosticDescription
-            )
-            activeDrawingPackageContentHash = drawHash
-            drawingAvailability = .available
-            try applyAndValidateProfessionalPass(
-                card.passes[0],
-                card: card
-            )
-        } catch let failure as BrushCompilationFailure {
-            compilationFailure = failure
-            drawingAvailability = .compilationFailed(
-                "Compiler \(failure.stage.rawValue): \(failure.reason). "
-                    + "The previous drawing brush remains active."
-            )
-            throw failure
-        } catch {
-            errorMessage = error.localizedDescription
-            drawingAvailability = .compilationFailed(
-                error.localizedDescription
-            )
-            throw error
         }
+        return PreparedProfessionalManualCard(
+            batch: batch,
+            package: drawPackage,
+            packageHash: packageHash,
+            draw: batch.brushes[0],
+            eraser: batch.brushes[1]
+        )
     }
 
     func replaySelectedManualCard() async throws
@@ -837,11 +843,7 @@ final class BrushLabSession {
         }
         if nextProfessionalPassIndex == 0 {
             completedReplay = nil
-            try await controller.clearAndAwaitCompletion()
-            guard controller.renderer.isIdle else {
-                throw BrushLabEvidenceError.rendererBusy
-            }
-            try await prepareProfessionalManualCard(card)
+            try await resetPreparedProfessionalReview(card)
             clearTrace()
             professionalPassRecords.removeAll(keepingCapacity: true)
             currentProfessionalPassIndex = nil
@@ -866,11 +868,7 @@ final class BrushLabSession {
             throw BrushLabEvidenceError.professionalCardNotSelected
         }
         completedReplay = nil
-        try await controller.clearAndAwaitCompletion()
-        guard controller.renderer.isIdle else {
-            throw BrushLabEvidenceError.rendererBusy
-        }
-        try await prepareProfessionalManualCard(card)
+        try await resetPreparedProfessionalReview(card)
         clearTrace()
         resetProfessionalPassNavigation()
         for pass in card.passes {
@@ -879,6 +877,23 @@ final class BrushLabSession {
         let replay = try completeProfessionalReplay(card: card)
         completedReplay = replay
         return replay
+    }
+
+    private func resetPreparedProfessionalReview(
+        _ card: BrushLabProfessionalManualCard
+    ) async throws {
+        guard let professionalDrawBrush,
+              let professionalEraserBrush
+        else {
+            throw BrushLabEvidenceError.packageUnavailable
+        }
+        try await controller.resetReviewDocument(
+            to: card.documentConfiguration
+        )
+        try controller.installBootstrapBrushes(
+            draw: professionalDrawBrush,
+            eraser: professionalEraserBrush
+        )
     }
 
     private func executeProfessionalPass(
@@ -1009,25 +1024,42 @@ final class BrushLabSession {
         _ pass: BrushLabProfessionalManualPass,
         card: BrushLabProfessionalManualCard
     ) throws {
-        let brush: CompiledBrush?
+        guard let professionalDrawBrush,
+              let professionalEraserBrush
+        else {
+            throw BrushLabEvidenceError.packageUnavailable
+        }
+        activeProfessionalCompiledBrush = try configureProfessionalPass(
+            pass,
+            card: card,
+            drawBrush: professionalDrawBrush,
+            eraserBrush: professionalEraserBrush
+        )
+    }
+
+    private func configureProfessionalPass(
+        _ pass: BrushLabProfessionalManualPass,
+        card: BrushLabProfessionalManualCard,
+        drawBrush: CompiledBrush,
+        eraserBrush: CompiledBrush
+    ) throws -> CompiledBrush {
+        let brush: CompiledBrush
         let composite: StrokeCompositeMode
         switch pass.role {
         case .professionalDraw:
-            brush = professionalDrawBrush
+            brush = drawBrush
             composite = .draw
         case .retainedStageFourEraser:
-            brush = professionalEraserBrush
+            brush = eraserBrush
             composite = .erase
         }
-        guard let brush,
-              brush.renderIdentity.definitionID.rawValue == pass.brushID
+        guard brush.renderIdentity.definitionID.rawValue == pass.brushID
         else {
             throw BrushLabEvidenceError.manualBrushUnavailable(pass.brushID)
         }
         controller.handleTool(pass.tool == .erase ? .erase : .draw)
         controller.handleInkColor(card.paintColor)
         controller.model.confirmBrushDiameter(pass.nominalDiameter)
-        activeProfessionalCompiledBrush = brush
         guard controller.renderer.documentConfiguration
                 == card.documentConfiguration,
               controller.model.documentConfiguration
@@ -1042,12 +1074,18 @@ final class BrushLabSession {
                 card.cardID
             )
         }
+        return brush
     }
 
     private func resetProfessionalPassNavigation() {
         professionalPassRecords.removeAll(keepingCapacity: true)
         currentProfessionalPassIndex = nil
         nextProfessionalPassIndex = 0
+    }
+
+    private func nextProfessionalSelectionGeneration() -> UInt64 {
+        professionalSelectionGeneration &+= 1
+        return professionalSelectionGeneration
     }
 
     private func validatePreparedCard(

@@ -121,3 +121,52 @@ Manual perceptual assessments remain unset and user-owned. Real Apple Pencil,
 Wacom/tablet, and physical-device performance evidence remains pending. The
 synthetic executable cards validate routing and semantics but do not claim
 human visual approval or physical-device evidence.
+
+## Review-state preservation follow-up
+
+The post-implementation review findings are closed without changing either
+manual-card catalog:
+
+- Professional draw and retained-eraser packages now compile into an isolated
+  compiler batch. Cache, counters, active brush, diagnostics, renderer state,
+  document state, replay state, and Brush Lab observables publish only after
+  both compiles succeed.
+- Selection resets through one awaited production-controller operation, then
+  installs the draw/eraser pair and publishes the selected card together.
+  Plain, periodic, and radial-rotation cards can now be selected and replayed
+  sequentially with empty history at each boundary.
+- Concurrent selection is generation-guarded; a superseded compilation cannot
+  replace the latest selected card or compiler state.
+- Professional replay reuses the committed brush pair instead of recompiling
+  and mutating inspection state.
+- Every named professional scenario now has an explicit semantic validator for
+  its literal pass/stroke/sample counts, lifecycle phases, actual/predicted
+  kinds, timing, geometry, source, capabilities, pressures, angles, document
+  geometry, and retained-eraser contract. These errors are reported before the
+  canonical digest boundary.
+- Stage 4 bytes remain frozen, and the Stage 5 canonical-card hash remains
+  `ef36da0a12c26ea335032b4f596005b762617da6f7057fe47ffc1031872fdf5e`.
+
+The RED transition test originally failed with
+`documentConfigurationUnavailable` on a non-empty document. The complete
+state-snapshot test proved that the old failure path cleared replay/session
+state, and the per-scenario mutation matrix recorded 15 missing or non-specific
+semantic failures before the explicit validator was added.
+
+Final focused verification:
+
+```text
+swift test --disable-sandbox --no-parallel --filter BrushLabSessionTests
+```
+
+Passed: 35 tests in 1 suite, including sequential configuration transitions,
+latest-selection race handling, full observable-state preservation on the
+second compilation failure, all existing replay/export contracts, and all 15
+scenario-specific semantic mutations.
+
+```text
+swift build --disable-sandbox --target ProfessionalBrushEvidenceValidation
+git diff --check
+```
+
+Both passed.

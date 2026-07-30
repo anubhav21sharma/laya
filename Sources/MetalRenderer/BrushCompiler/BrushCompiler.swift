@@ -80,6 +80,32 @@ private enum BrushCompilerCounterField {
     case activation
 }
 
+public final class BrushCompilationBatch {
+    public let brushes: [CompiledBrush]
+
+    fileprivate let owner: ObjectIdentifier
+    fileprivate let baseRevision: UInt64
+    fileprivate let cache: BrushResourceCache
+    fileprivate let counters: BrushCompilerCounters
+    fileprivate let activeBrush: CompiledBrush?
+
+    fileprivate init(
+        owner: ObjectIdentifier,
+        baseRevision: UInt64,
+        cache: BrushResourceCache,
+        counters: BrushCompilerCounters,
+        activeBrush: CompiledBrush?,
+        brushes: [CompiledBrush]
+    ) {
+        self.owner = owner
+        self.baseRevision = baseRevision
+        self.cache = cache
+        self.counters = counters
+        self.activeBrush = activeBrush
+        self.brushes = brushes
+    }
+}
+
 @MainActor
 public final class BrushCompiler {
     public private(set) var activeBrush: CompiledBrush?
@@ -120,6 +146,7 @@ public final class BrushCompiler {
     private var counters: BrushCompilerCounters
     private var requestGeneration: UInt64
     private var packageHashTask: Task<String, Error>?
+    private var stateRevision: UInt64 = 0
 
     public convenience init(
         device: any MTLDevice,
@@ -177,6 +204,60 @@ public final class BrushCompiler {
             resourceData: [:]
         )
         return try await compileAndActivate(package: package)
+    }
+
+    /// Compiles an ordered brush set against an isolated copy of compiler
+    /// state. Failed or superseded preparation cannot alter the live cache,
+    /// active brush, counters, or diagnostics.
+    public func prepareCompilationBatch(
+        packages: [BrushPackage]
+    ) async throws -> BrushCompilationBatch {
+        guard !packages.isEmpty else {
+            throw CancellationError()
+        }
+        let baseRevision = stateRevision
+        let staging = BrushCompiler(
+            device: device,
+            commandQueue: commandQueue,
+            profile: profile,
+            pipelinePreparing: pipelinePreparing,
+            testHooks: testHooks
+        )
+        staging.cache = cache
+        staging.counters = counters
+        staging.activeBrush = activeBrush
+
+        var brushes: [CompiledBrush] = []
+        brushes.reserveCapacity(packages.count)
+        for package in packages {
+            brushes.append(
+                try await staging.compileAndActivate(package: package)
+            )
+        }
+        return BrushCompilationBatch(
+            owner: ObjectIdentifier(self),
+            baseRevision: baseRevision,
+            cache: staging.cache,
+            counters: staging.counters,
+            activeBrush: staging.activeBrush,
+            brushes: brushes
+        )
+    }
+
+    /// Publishes a successfully prepared batch only if the live compiler has
+    /// not changed since preparation began.
+    public func commitCompilationBatch(
+        _ batch: BrushCompilationBatch
+    ) throws {
+        guard batch.owner == ObjectIdentifier(self),
+              batch.baseRevision == stateRevision
+        else {
+            throw CancellationError()
+        }
+        cache = batch.cache
+        counters = batch.counters
+        activeBrush = batch.activeBrush
+        stateRevision &+= 1
     }
 
     public func compileAndActivate(
@@ -660,13 +741,18 @@ public final class BrushCompiler {
     public func handleMemoryPressure(
         targetResidentBytes: Int
     ) -> BrushResourcePressureResult {
-        cache.handleMemoryPressure(targetResidentBytes: targetResidentBytes)
+        let result = cache.handleMemoryPressure(
+            targetResidentBytes: targetResidentBytes
+        )
+        stateRevision &+= 1
+        return result
     }
 
     private func beginRequest() throws -> UInt64 {
         let (next, overflow) = requestGeneration.addingReportingOverflow(1)
         guard !overflow else { throw CancellationError() }
         requestGeneration = next
+        stateRevision &+= 1
         packageHashTask?.cancel()
         packageHashTask = nil
         return next

@@ -269,7 +269,109 @@ struct BrushLabSessionTests {
     }
 
     @Test
-    func failedProfessionalCompilationPreservesPreviouslyActiveBrush()
+    func professionalSelectionResetsPlainPeriodicAndRadialReviewDocuments()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        runtime.session.selectReviewMatrix(.stageFiveProfessional)
+        let cards = runtime.session.professionalManualCards.filter {
+            $0.brushID
+                == ProfessionalBrushCatalog.technicalInk.id.rawValue
+        }
+        let plain = try #require(cards.first {
+            $0.gesture == .slowLine
+        })
+        let periodic = try #require(cards.first {
+            $0.gesture == .periodicSeamCrossing
+        })
+        let radial = try #require(cards.first {
+            $0.gesture == .radialRotation
+        })
+
+        for card in [plain, periodic, radial] {
+            try await runtime.session.selectReviewCard(card.cardID)
+            #expect(
+                runtime.controller.renderer.documentConfiguration
+                    == card.documentConfiguration
+            )
+            #expect(
+                runtime.controller.model.documentConfiguration
+                    == card.documentConfiguration
+            )
+            #expect(
+                runtime.controller.historyAvailabilityForTesting.canUndo
+                    == false
+            )
+            #expect(
+                runtime.controller.historyAvailabilityForTesting.canRedo
+                    == false
+            )
+
+            let replay = try await runtime.session.replaySelectedReviewCard()
+            #expect(replay.cardID == card.cardID)
+            #expect(
+                replay.snapshot.documentConfiguration
+                    == card.documentConfiguration
+            )
+            #expect(replay.snapshot.documentDomainLocked)
+        }
+    }
+
+    @Test
+    func latestProfessionalSelectionWinsConcurrentCompilation() async throws {
+        let gate = ProfessionalCompilationGate(
+            definitionID:
+                ProfessionalBrushCatalog.graphitePencil.id.rawValue
+        )
+        guard let runtime = try makeRuntime(
+            compilerHooks: BrushCompilerTestHooks { context in
+                await gate.pauseFirstMatching(context)
+            }
+        ) else {
+            return
+        }
+        runtime.session.selectReviewMatrix(.stageFiveProfessional)
+        let superseded = try #require(
+            runtime.session.professionalManualCards.first {
+                $0.brushID
+                    == ProfessionalBrushCatalog.graphitePencil.id.rawValue
+                    && $0.gesture == .slowLine
+            }
+        )
+        let latest = try #require(
+            runtime.session.professionalManualCards.first {
+                $0.brushID
+                    == ProfessionalBrushCatalog.technicalInk.id.rawValue
+                    && $0.gesture == .periodicSeamCrossing
+            }
+        )
+
+        let supersededSelection = Task {
+            try await runtime.session.selectReviewCard(superseded.cardID)
+        }
+        await gate.waitUntilPaused()
+        try await runtime.session.selectReviewCard(latest.cardID)
+        gate.resume()
+
+        await #expect(throws: CancellationError.self) {
+            try await supersededSelection.value
+        }
+        #expect(
+            runtime.session.selectedProfessionalManualCardID
+                == latest.cardID
+        )
+        #expect(
+            runtime.session.compiledBrush?.renderIdentity.definitionID
+                == ProfessionalBrushCatalog.technicalInk.id
+        )
+        #expect(
+            runtime.controller.renderer.documentConfiguration
+                == latest.documentConfiguration
+        )
+    }
+
+    @Test
+    func failedProfessionalCompilationPreservesEveryReviewObservable()
         async throws
     {
         guard let runtime = try makeRuntime(
@@ -282,37 +384,26 @@ struct BrushLabSessionTests {
             runtime.session.professionalManualCards.first {
                 $0.brushID
                     == ProfessionalBrushCatalog.technicalInk.id.rawValue
+                    && $0.gesture == .eraserRetrace
             }
         )
         let graphite = try #require(
             runtime.session.professionalManualCards.first {
                 $0.brushID
                     == ProfessionalBrushCatalog.graphitePencil.id.rawValue
+                    && $0.gesture == .radialRotation
             }
         )
         try await runtime.session.selectReviewCard(technical.cardID)
-        let retainedIdentity = try #require(
-            runtime.controller.renderer.preparedBrush(for: .draw)?
-                .renderIdentity
-        )
+        _ = try await runtime.session.replaySelectedReviewCard()
+        let before = try professionalReviewSnapshot(runtime)
 
         await #expect(throws: BrushCompilationFailure.self) {
             try await runtime.session.selectReviewCard(graphite.cardID)
         }
 
-        #expect(
-            runtime.controller.renderer.preparedBrush(for: .draw)?
-                .renderIdentity == retainedIdentity
-        )
-        #expect(
-            runtime.session.selectedProfessionalManualCardID
-                == technical.cardID
-        )
-        guard case .compilationFailed = runtime.session.drawingAvailability
-        else {
-            Issue.record("Professional compilation failure was not retained")
-            return
-        }
+        let after = try professionalReviewSnapshot(runtime)
+        #expect(after == before)
     }
 
     @Test
@@ -521,6 +612,236 @@ struct BrushLabSessionTests {
             )
             #expect(throws: Error.self, "\(name)") {
                 _ = try ProfessionalManualEvidenceValidator.validate(data)
+            }
+        }
+    }
+
+    @Test
+    func professionalManualValidatorReportsEveryScenarioSemanticBeforeDigest()
+        throws
+    {
+        let pending = try BrushLabProfessionalManualCatalog.pending()
+            .encoded()
+        let cases: [
+            (
+                String,
+                String,
+                (inout [String: Any], Int) -> Void
+            )
+        ] = [
+            ("tap", "professional manual semantic: tap", {
+                object, index in
+                mutateProfessionalStroke(
+                    in: &object,
+                    cardIndex: index
+                ) {
+                    var samples = $0["samples"] as! [[String: Any]]
+                    samples.remove(at: 1)
+                    samples[1]["sampleIndex"] = 1
+                    $0["samples"] = samples
+                }
+            }),
+            ("slowLine", "professional manual semantic: lineTiming", {
+                object, index in
+                mutateProfessionalSample(
+                    in: &object,
+                    cardIndex: index,
+                    sampleIndex: 1
+                ) {
+                    $0["timeOffset"] = 0.049
+                }
+            }),
+            ("fastLine", "professional manual semantic: lineTiming", {
+                object, index in
+                mutateProfessionalSample(
+                    in: &object,
+                    cardIndex: index,
+                    sampleIndex: 2
+                ) {
+                    $0["y"] = 127
+                }
+            }),
+            ("pressureRamp", "professional manual semantic: pressureRamp", {
+                object, index in
+                mutateProfessionalSample(
+                    in: &object,
+                    cardIndex: index,
+                    sampleIndex: 2
+                ) {
+                    $0["pressure"] = 0.6
+                }
+            }),
+            ("tiltSweep", "professional manual semantic: tiltSweep", {
+                object, index in
+                mutateProfessionalSample(
+                    in: &object,
+                    cardIndex: index,
+                    sampleIndex: 1
+                ) {
+                    $0["azimuth"] = 0.6
+                }
+            }),
+            ("curve", "professional manual semantic: curve", {
+                object, index in
+                mutateProfessionalSample(
+                    in: &object,
+                    cardIndex: index,
+                    sampleIndex: 2
+                ) {
+                    $0["x"] = 113
+                }
+            }),
+            ("sharpCorner", "professional manual semantic: sharpCorner", {
+                object, index in
+                mutateProfessionalSample(
+                    in: &object,
+                    cardIndex: index,
+                    sampleIndex: 1
+                ) {
+                    $0["y"] = 191
+                }
+            }),
+            ("crossHatch", "professional manual semantic: crossHatch", {
+                object, index in
+                mutateProfessionalSample(
+                    in: &object,
+                    cardIndex: index,
+                    strokeIndex: 3,
+                    sampleIndex: 1
+                ) {
+                    $0["y"] = 73
+                }
+            }),
+            (
+                "repeatedBuildup",
+                "professional manual semantic: repeatedBuildup",
+                { object, index in
+                    mutateProfessionalSample(
+                        in: &object,
+                        cardIndex: index,
+                        strokeIndex: 3,
+                        sampleIndex: 2
+                    ) {
+                        $0["x"] = 129
+                    }
+                }
+            ),
+            (
+                "periodicSeamCrossing",
+                "professional manual semantic: periodicSeamCrossing",
+                { object, index in
+                    mutateProfessionalSample(
+                        in: &object,
+                        cardIndex: index,
+                        sampleIndex: 0
+                    ) {
+                        $0["x"] = 5
+                    }
+                }
+            ),
+            (
+                "radialRotation",
+                "professional manual semantic: radialRotation",
+                { object, index in
+                    mutateProfessionalDocument(
+                        in: &object,
+                        cardIndex: index
+                    ) {
+                        $0["rayCount"] = 7
+                    }
+                }
+            ),
+            (
+                "radialReflection",
+                "professional manual semantic: radialReflection",
+                { object, index in
+                    mutateProfessionalDocument(
+                        in: &object,
+                        cardIndex: index
+                    ) {
+                        $0["centerX"] = 1_023
+                    }
+                }
+            ),
+            (
+                "eraserRetrace",
+                "professional manual semantic: eraserRetrace",
+                { object, index in
+                    mutateProfessionalSample(
+                        in: &object,
+                        cardIndex: index,
+                        passIndex: 1,
+                        sampleIndex: 2
+                    ) {
+                        $0["x"] = 129
+                    }
+                }
+            ),
+            (
+                "mouseFallback",
+                "professional manual semantic: mouseFallback",
+                { object, index in
+                    mutateProfessionalSample(
+                        in: &object,
+                        cardIndex: index,
+                        sampleIndex: 2
+                    ) {
+                        $0["pressure"] = 0.9
+                    }
+                }
+            ),
+            (
+                "tabletInput",
+                "professional manual semantic: tabletInput",
+                { object, index in
+                    mutateProfessionalSample(
+                        in: &object,
+                        cardIndex: index,
+                        sampleIndex: 4
+                    ) {
+                        $0["roll"] = 0.25
+                    }
+                }
+            ),
+        ]
+
+        for (gesture, expectedError, mutate) in cases {
+            var object = try #require(
+                JSONSerialization.jsonObject(with: pending)
+                    as? [String: Any]
+            )
+            let cards = try #require(
+                object["cards"] as? [[String: Any]]
+            )
+            let cardIndex = try #require(cards.firstIndex {
+                $0["gesture"] as? String == gesture
+            })
+            mutate(&object, cardIndex)
+            let data = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            do {
+                try ProfessionalManualEvidenceValidator.validateSemantics(
+                    data
+                )
+                Issue.record(
+                    "Semantic boundary accepted invalid \(gesture)"
+                )
+            } catch {
+                #expect(
+                    error.localizedDescription == expectedError,
+                    "\(gesture) boundary: \(error.localizedDescription)"
+                )
+            }
+            do {
+                _ = try ProfessionalManualEvidenceValidator.validate(data)
+                Issue.record("Accepted invalid \(gesture) semantics")
+            } catch {
+                #expect(
+                    error.localizedDescription == expectedError,
+                    "\(gesture): \(error.localizedDescription)"
+                )
             }
         }
     }
@@ -1452,9 +1773,237 @@ struct BrushLabSessionTests {
         #expect(runtime.session.compilationFailure == nil)
     }
 
+    private struct ProfessionalReviewDocumentSnapshot: Equatable {
+        let canvasSize: PixelSize
+        let documentConfiguration: SymmetryDocumentConfiguration
+        let documentDomainLocked: Bool
+        let radialGeometryLocked: Bool
+        let storageHash: String
+
+        init(_ snapshot: CommittedDocumentSnapshot) {
+            canvasSize = snapshot.canvasSize
+            documentConfiguration = snapshot.documentConfiguration
+            documentDomainLocked = snapshot.documentDomainLocked
+            radialGeometryLocked = snapshot.radialGeometryLocked
+            var bytes = Data()
+            switch snapshot.storage {
+            case let .singleRaster(pixels):
+                bytes.append(contentsOf: pixels)
+            case let .radialPages(pages):
+                for page in pages.sorted(by: {
+                    $0.coordinate < $1.coordinate
+                }) {
+                    bytes.append(
+                        contentsOf:
+                        "\(page.coordinate.x),\(page.coordinate.y)\0".utf8
+                    )
+                    bytes.append(contentsOf: page.bgra8PremultipliedBytes)
+                }
+            }
+            storageHash = BrushContentHash.sha256Hex(of: bytes)
+        }
+    }
+
+    private struct CompletedProfessionalReplaySnapshot: Equatable {
+        let generationID: String
+        let cardID: String
+        let canvasHash: String
+        let traceHash: String
+        let substrateInputCount: Int
+        let snapshot: ProfessionalReviewDocumentSnapshot
+        let packageHash: String
+        let definitionID: String
+        let semanticHash: String
+        let pipelineKey: String
+        let abiVersion: UInt16
+        let diagnostics: BrushLabDiagnostics
+        let professionalPasses: [BrushLabProfessionalPassReplay]
+
+        init?(_ replay: BrushLabCompletedReplay?) {
+            guard let replay else { return nil }
+            generationID = replay.generationID
+            cardID = replay.cardID
+            canvasHash = replay.canvasHash
+            traceHash = replay.traceHash
+            substrateInputCount = replay.substrateInputCount
+            snapshot = .init(replay.snapshot)
+            packageHash = replay.packageHash
+            definitionID = replay.definitionID
+            semanticHash = replay.semanticHash
+            pipelineKey = replay.pipelineKey
+            abiVersion = replay.abiVersion
+            diagnostics = replay.diagnostics
+            professionalPasses = replay.professionalPasses
+        }
+    }
+
+    private struct ProfessionalReviewStateSnapshot: Equatable {
+        let reviewMatrix: BrushLabReviewMatrix
+        let selectedManualCardID: String?
+        let selectedProfessionalManualCardID: String?
+        let completedReplay: CompletedProfessionalReplaySnapshot?
+        let packageDefinitionID: String?
+        let sourceName: String?
+        let packageContentHash: String?
+        let activeDrawingPackageContentHash: String?
+        let compiledIdentity: BrushRenderIdentity?
+        let compilationReport: BrushCompilationReport?
+        let compilationFailure: BrushCompilationFailure?
+        let compilationDiagnostics: [String]
+        let drawingAvailability: BrushLabDrawingAvailability
+        let inputRecords: [BrushLabInputRecord]
+        let dabRecords: [BrushLabDabRecord]
+        let droppedInputRecordCount: Int
+        let droppedDabRecordCount: Int
+        let professionalPassRecords: [BrushLabProfessionalPassReplay]
+        let currentProfessionalPassIndex: Int?
+        let nextProfessionalPassIndex: Int
+        let professionalDrawIdentity: BrushRenderIdentity?
+        let professionalEraserIdentity: BrushRenderIdentity?
+        let activeProfessionalIdentity: BrushRenderIdentity?
+        let frameMetrics: BrushLabFrameMetrics
+        let isLoading: Bool
+        let errorMessage: String?
+        let compilerDiagnostics: BrushCompilerDiagnosticSnapshot
+        let rendererDrawIdentity: BrushRenderIdentity?
+        let rendererEraserIdentity: BrushRenderIdentity?
+        let document: ProfessionalReviewDocumentSnapshot
+        let modelDocumentConfiguration: SymmetryDocumentConfiguration
+        let modelPixelSize: PixelSize
+        let modelTool: EditorTool
+        let modelInkColor: InkColor
+        let modelBrushDiameter: Float
+        let modelSelectedRecipeID: BrushRecipeID
+        let modelCanUndo: Bool
+        let modelCanRedo: Bool
+        let transactionState: EditorTransactionState
+    }
+
+    private func professionalReviewSnapshot(
+        _ runtime: (
+            controller: EditorSessionController,
+            session: BrushLabSession
+        )
+    ) throws -> ProfessionalReviewStateSnapshot {
+        ProfessionalReviewStateSnapshot(
+            reviewMatrix: runtime.session.reviewMatrix,
+            selectedManualCardID: runtime.session.selectedManualCardID,
+            selectedProfessionalManualCardID:
+                runtime.session.selectedProfessionalManualCardID,
+            completedReplay: .init(runtime.session.completedReplay),
+            packageDefinitionID: runtime.session.package?.definition.id.rawValue,
+            sourceName: runtime.session.sourceName,
+            packageContentHash: runtime.session.packageContentHash,
+            activeDrawingPackageContentHash:
+                runtime.session.activeDrawingPackageContentHash,
+            compiledIdentity:
+                runtime.session.compiledBrush?.renderIdentity,
+            compilationReport: runtime.session.compilationReport,
+            compilationFailure: runtime.session.compilationFailure,
+            compilationDiagnostics:
+                runtime.session.compilationDiagnostics,
+            drawingAvailability: runtime.session.drawingAvailability,
+            inputRecords: runtime.session.inputRecords,
+            dabRecords: runtime.session.dabRecords,
+            droppedInputRecordCount:
+                runtime.session.droppedInputRecordCount,
+            droppedDabRecordCount:
+                runtime.session.droppedDabRecordCount,
+            professionalPassRecords:
+                runtime.session.professionalPassRecords,
+            currentProfessionalPassIndex:
+                runtime.session.currentProfessionalPassIndex,
+            nextProfessionalPassIndex:
+                runtime.session.nextProfessionalPassIndex,
+            professionalDrawIdentity:
+                runtime.session.professionalDrawBrush?.renderIdentity,
+            professionalEraserIdentity:
+                runtime.session.professionalEraserBrush?.renderIdentity,
+            activeProfessionalIdentity:
+                runtime.session.activeProfessionalCompiledBrush?
+                    .renderIdentity,
+            frameMetrics: runtime.session.frameMetrics,
+            isLoading: runtime.session.isLoading,
+            errorMessage: runtime.session.errorMessage,
+            compilerDiagnostics:
+                runtime.session.compiler.diagnosticSnapshot,
+            rendererDrawIdentity:
+                runtime.controller.renderer.preparedBrush(for: .draw)?
+                    .renderIdentity,
+            rendererEraserIdentity:
+                runtime.controller.renderer.preparedBrush(for: .erase)?
+                    .renderIdentity,
+            document: .init(
+                try runtime.controller.renderer.captureCommittedDocument()
+            ),
+            modelDocumentConfiguration:
+                runtime.controller.model.documentConfiguration,
+            modelPixelSize: runtime.controller.model.pixelSize,
+            modelTool: runtime.controller.model.tool,
+            modelInkColor: runtime.controller.model.inkColor,
+            modelBrushDiameter: runtime.controller.model.brushDiameter,
+            modelSelectedRecipeID:
+                runtime.controller.model.selectedRecipeID,
+            modelCanUndo: runtime.controller.model.canUndo,
+            modelCanRedo: runtime.controller.model.canRedo,
+            transactionState:
+                runtime.controller.transactionStateForTesting
+        )
+    }
+
+    private func mutateProfessionalDocument(
+        in object: inout [String: Any],
+        cardIndex: Int,
+        _ mutate: (inout [String: Any]) -> Void
+    ) {
+        var cards = object["cards"] as! [[String: Any]]
+        var document =
+            cards[cardIndex]["documentConfiguration"] as! [String: Any]
+        mutate(&document)
+        cards[cardIndex]["documentConfiguration"] = document
+        object["cards"] = cards
+    }
+
+    private func mutateProfessionalStroke(
+        in object: inout [String: Any],
+        cardIndex: Int,
+        passIndex: Int = 0,
+        strokeIndex: Int = 0,
+        _ mutate: (inout [String: Any]) -> Void
+    ) {
+        var cards = object["cards"] as! [[String: Any]]
+        var passes = cards[cardIndex]["passes"] as! [[String: Any]]
+        var strokes = passes[passIndex]["strokes"] as! [[String: Any]]
+        mutate(&strokes[strokeIndex])
+        passes[passIndex]["strokes"] = strokes
+        cards[cardIndex]["passes"] = passes
+        object["cards"] = cards
+    }
+
+    private func mutateProfessionalSample(
+        in object: inout [String: Any],
+        cardIndex: Int,
+        passIndex: Int = 0,
+        strokeIndex: Int = 0,
+        sampleIndex: Int,
+        _ mutate: (inout [String: Any]) -> Void
+    ) {
+        mutateProfessionalStroke(
+            in: &object,
+            cardIndex: cardIndex,
+            passIndex: passIndex,
+            strokeIndex: strokeIndex
+        ) {
+            var samples = $0["samples"] as! [[String: Any]]
+            mutate(&samples[sampleIndex])
+            $0["samples"] = samples
+        }
+    }
+
     private func makeRuntime(
         forceClearFailure: (() -> Bool)? = nil,
-        brushCacheBudgetBytes: Int = 128 * 1_024 * 1_024
+        brushCacheBudgetBytes: Int = 128 * 1_024 * 1_024,
+        compilerHooks: BrushCompilerTestHooks = .none
     ) throws -> (
         controller: EditorSessionController,
         session: BrushLabSession
@@ -1479,24 +2028,68 @@ struct BrushLabSessionTests {
         } else {
             controller = EditorSessionController(renderer: renderer)
         }
-        let compiler = try BrushCompiler(
+        let profile = try BrushDeviceProfile(
+            registryID: renderer.device.registryID,
+            recommendedWorkingSetBytes: 1_024 * 1_024 * 1_024,
+            maximumWorkingTextureDimension: 4_096,
+            brushCacheBudgetBytes: brushCacheBudgetBytes,
+            targetFramesPerSecond: 120
+        )
+        let pipelineLibrary = try makeNativeDepositionPipelineLibrary(
+            device: renderer.device
+        )
+        let compiler = BrushCompiler(
             device: renderer.device,
             commandQueue: queue,
-            profile: BrushDeviceProfile(
-                registryID: renderer.device.registryID,
-                recommendedWorkingSetBytes: 1_024 * 1_024 * 1_024,
-                maximumWorkingTextureDimension: 4_096,
-                brushCacheBudgetBytes: brushCacheBudgetBytes,
-                targetFramesPerSecond: 120
-            ),
-            pipelineLibrary: try makeNativeDepositionPipelineLibrary(
-                device: renderer.device
-            )
+            profile: profile,
+            pipelinePreparing: pipelineLibrary,
+            testHooks: compilerHooks
         )
         return (
             controller,
             BrushLabSession(controller: controller, compiler: compiler)
         )
+    }
+
+    @MainActor
+    private final class ProfessionalCompilationGate {
+        private let definitionID: String
+        private var hasPaused = false
+        private var pauseContinuation: CheckedContinuation<Void, Never>?
+        private var arrivalContinuation: CheckedContinuation<Void, Never>?
+
+        init(definitionID: String) {
+            self.definitionID = definitionID
+        }
+
+        func pauseFirstMatching(
+            _ context: BrushCompilerPhaseContext
+        ) async {
+            guard !hasPaused,
+                  context.phase == .beforeDecode,
+                  context.definitionID == definitionID
+            else {
+                return
+            }
+            hasPaused = true
+            arrivalContinuation?.resume()
+            arrivalContinuation = nil
+            await withCheckedContinuation {
+                pauseContinuation = $0
+            }
+        }
+
+        func waitUntilPaused() async {
+            guard !hasPaused else { return }
+            await withCheckedContinuation {
+                arrivalContinuation = $0
+            }
+        }
+
+        func resume() {
+            pauseContinuation?.resume()
+            pauseContinuation = nil
+        }
     }
 
     private func expectStaleDocumentMutationRejected(

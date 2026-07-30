@@ -1,6 +1,29 @@
 import CoreFoundation
 import Foundation
 
+public enum ProfessionalManualSemanticError:
+    String, Error, Equatable, LocalizedError, Sendable
+{
+    case tap
+    case lineTiming
+    case pressureRamp
+    case tiltSweep
+    case curve
+    case sharpCorner
+    case crossHatch
+    case repeatedBuildup
+    case periodicSeamCrossing
+    case radialRotation
+    case radialReflection
+    case eraserRetrace
+    case mouseFallback
+    case tabletInput
+
+    public var errorDescription: String? {
+        "professional manual semantic: \(rawValue)"
+    }
+}
+
 public enum ProfessionalManualEvidenceValidator {
     private static let cardKeys: Set<String> = [
         "cardID", "schemaVersion", "brushID", "gesture",
@@ -48,6 +71,20 @@ public enum ProfessionalManualEvidenceValidator {
     private static let retainedEraserID = "builtin.native-eraser"
 
     public static func validate(_ data: Data) throws -> Bool {
+        try validateCatalog(data, requireCanonicalHash: true)
+    }
+
+    /// Validates the complete executable review meaning without consulting the
+    /// canonical-card digest. This is the explicit boundary used to prove that
+    /// named scenarios fail for their own semantic defect.
+    public static func validateSemantics(_ data: Data) throws {
+        _ = try validateCatalog(data, requireCanonicalHash: false)
+    }
+
+    private static func validateCatalog(
+        _ data: Data,
+        requireCanonicalHash: Bool
+    ) throws -> Bool {
         let object = try ArtifactFileSystem.jsonObject(
             data,
             label: "professional manual catalog"
@@ -115,6 +152,9 @@ public enum ProfessionalManualEvidenceValidator {
             try validateGestureSemantics(
                 gesture: gesture,
                 cardID: cardID,
+                background: card["background"] as! String,
+                predictionEnabled: predictionEnabled,
+                document: document,
                 passes: validatedPasses
             )
             cardIDs.append(cardID)
@@ -134,18 +174,20 @@ public enum ProfessionalManualEvidenceValidator {
                 "professional manual cards are not the exact sorted brush/gesture matrix"
             )
         }
-        let canonicalCards = try JSONSerialization.data(
-            withJSONObject: cards,
-            options: [.sortedKeys]
-        )
-        let actualCanonicalHash = ArtifactFileSystem.sha256(canonicalCards)
-        guard actualCanonicalHash
-                == ProfessionalBrushTruth.canonicalManualCardsSHA256
-        else {
-            throw ArtifactFileSystem.invalid(
-                "professional manual card truth changed: "
-                    + actualCanonicalHash
+        if requireCanonicalHash {
+            let canonicalCards = try JSONSerialization.data(
+                withJSONObject: cards,
+                options: [.sortedKeys]
             )
+            let actualCanonicalHash = ArtifactFileSystem.sha256(canonicalCards)
+            guard actualCanonicalHash
+                    == ProfessionalBrushTruth.canonicalManualCardsSHA256
+            else {
+                throw ArtifactFileSystem.invalid(
+                    "professional manual card truth changed: "
+                        + actualCanonicalHash
+                )
+            }
         }
 
         let assessmentIDs = assessments.compactMap {
@@ -187,6 +229,9 @@ public enum ProfessionalManualEvidenceValidator {
         let x: Double
         let y: Double
         let pressure: Double
+        let timeOffset: Double
+        let phase: String
+        let kind: String
         let altitude: Double?
         let azimuth: Double?
         let roll: Double?
@@ -326,17 +371,6 @@ public enum ProfessionalManualEvidenceValidator {
                             "professional manual sample is invalid"
                         )
                     }
-                    let expectedPhase =
-                        sampleIndex == 0
-                        ? "began"
-                        : sampleIndex == samples.count - 1
-                            ? "ended"
-                            : "moved"
-                    guard phase == expectedPhase else {
-                        throw ArtifactFileSystem.invalid(
-                            "professional sample lifecycle is invalid"
-                        )
-                    }
                     previousTime = timeOffset
                     anyPredicted = anyPredicted || kind == "predicted"
                     let altitude = try optionalNumber(
@@ -372,6 +406,9 @@ public enum ProfessionalManualEvidenceValidator {
                         x: x,
                         y: y,
                         pressure: pressure,
+                        timeOffset: timeOffset,
+                        phase: phase,
+                        kind: kind,
                         altitude: altitude,
                         azimuth: azimuth,
                         roll: roll
@@ -400,6 +437,9 @@ public enum ProfessionalManualEvidenceValidator {
     private static func validateGestureSemantics(
         gesture: String,
         cardID: String,
+        background: String,
+        predictionEnabled: Bool,
+        document: [String: Any],
         passes: [ValidatedPass]
     ) throws {
         guard passes[0].role == "professionalDraw" else {
@@ -407,143 +447,432 @@ public enum ProfessionalManualEvidenceValidator {
                 "professional review must begin with its professional brush"
             )
         }
+        let standardLine: [(Double, Double)] = [
+            (48, 128), (88, 128), (128, 128), (168, 128), (208, 128),
+        ]
+        let expressiveLine: [(Double, Double)] = [
+            (48, 128), (88, 112), (128, 128), (168, 144), (208, 128),
+        ]
+        let standardPressure = [Double](repeating: 0.55, count: 5)
+
         switch gesture {
         case "tap":
             let expectedDiameter: Double
+            let expectedPressure: Double
             if cardID.hasSuffix(".minimum") {
                 expectedDiameter = 2
+                expectedPressure = 0.25
             } else if cardID.hasSuffix(".nominal") {
                 expectedDiameter = 20
+                expectedPressure = 0.55
             } else if cardID.hasSuffix(".maximum") {
                 expectedDiameter = 2_000
+                expectedPressure = 0.9
             } else {
-                throw ArtifactFileSystem.invalid(
-                    "tap review size label is invalid"
-                )
+                throw ProfessionalManualSemanticError.tap
             }
             guard passes.count == 1,
-                  passes[0].nominalDiameter == expectedDiameter
+                  exactPass(
+                      passes[0],
+                      diameter: expectedDiameter,
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 1
+                  ),
+                  matchesStroke(
+                      passes[0].strokes[0],
+                      points: [(128, 128), (128, 128), (128, 128)],
+                      pressures: [Double](
+                          repeating: expectedPressure,
+                          count: 3
+                      ),
+                      interval: 0.01
+                  )
             else {
-                throw ArtifactFileSystem.invalid(
-                    "tap review diameter does not match its label"
-                )
+                throw ProfessionalManualSemanticError.tap
+            }
+        case "slowLine":
+            guard background == "opaque",
+                  !predictionEnabled,
+                  passes.count == 1,
+                  exactPass(
+                      passes[0],
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 1
+                  ),
+                  matchesStroke(
+                      passes[0].strokes[0],
+                      points: standardLine,
+                      pressures: standardPressure,
+                      interval: 0.05
+                  )
+            else {
+                throw ProfessionalManualSemanticError.lineTiming
+            }
+        case "fastLine":
+            guard background == "opaque",
+                  predictionEnabled,
+                  passes.count == 1,
+                  exactPass(
+                      passes[0],
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 1
+                  ),
+                  matchesStroke(
+                      passes[0].strokes[0],
+                      points: standardLine,
+                      pressures: standardPressure,
+                      interval: 0.004,
+                      predictedIndex: 3
+                  )
+            else {
+                throw ProfessionalManualSemanticError.lineTiming
             }
         case "pressureRamp":
-            let samples = try oneStroke(passes, gesture: gesture)
-            let pressure = samples.map(\.pressure)
-            guard passes[0].inputSource == "pencil",
-                  passes[0].capabilities == ["pressure"],
-                  pressure.first == 0.1,
-                  pressure.last == 1,
-                  zip(pressure, pressure.dropFirst()).allSatisfy({
-                      $0.0 < $0.1
-                  })
+            guard passes.count == 1,
+                  exactPass(
+                      passes[0],
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 1
+                  ),
+                  matchesStroke(
+                      passes[0].strokes[0],
+                      points: expressiveLine,
+                      pressures: [0.1, 0.325, 0.55, 0.775, 1],
+                      interval: 0.014
+                  )
             else {
-                throw ArtifactFileSystem.invalid(
-                    "pressure ramp must use monotonic Pencil pressure 0.1 through 1"
-                )
+                throw ProfessionalManualSemanticError.pressureRamp
             }
         case "tiltSweep":
-            let samples = try oneStroke(passes, gesture: gesture)
-            let altitude = samples.compactMap(\.altitude)
-            guard passes[0].inputSource == "pencil",
-                  passes[0].capabilities
-                    == ["pressure", "altitude", "azimuth"],
-                  altitude.count == samples.count,
-                  samples.allSatisfy({ $0.azimuth != nil }),
-                  zip(altitude, altitude.dropFirst()).allSatisfy({
-                      $0.0 > $0.1
-                  })
+            guard predictionEnabled,
+                  passes.count == 1,
+                  exactPass(
+                      passes[0],
+                      source: "pencil",
+                      capabilities: [
+                          "pressure", "altitude", "azimuth",
+                      ],
+                      strokeCount: 1
+                  ),
+                  matchesStroke(
+                      passes[0].strokes[0],
+                      points: expressiveLine,
+                      pressures: [Double](repeating: 0.55, count: 5),
+                      interval: 0.014,
+                      predictedIndex: 3,
+                      altitudes: [1.3, 1.05, 0.8, 0.55, 0.3],
+                      azimuths: [0.2, 0.5, 0.8, 1.1, 1.4]
+                  )
             else {
-                throw ArtifactFileSystem.invalid(
-                    "tilt sweep must use monotonic Pencil tilt and azimuth"
-                )
+                throw ProfessionalManualSemanticError.tiltSweep
+            }
+        case "curve":
+            guard passes.count == 1,
+                  exactPass(
+                      passes[0],
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 1
+                  ),
+                  matchesStroke(
+                      passes[0].strokes[0],
+                      points: [
+                          (48, 160), (72, 112), (112, 80), (160, 88),
+                          (208, 136),
+                      ],
+                      pressures: standardPressure,
+                      interval: 0.014
+                  )
+            else {
+                throw ProfessionalManualSemanticError.curve
+            }
+        case "sharpCorner":
+            guard passes.count == 1,
+                  exactPass(
+                      passes[0],
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 1
+                  ),
+                  matchesStroke(
+                      passes[0].strokes[0],
+                      points: [
+                          (48, 192), (128, 192), (128, 64), (208, 64),
+                      ],
+                      pressures: [Double](repeating: 0.55, count: 4),
+                      interval: 0.014
+                  )
+            else {
+                throw ProfessionalManualSemanticError.sharpCorner
             }
         case "tabletInput":
-            let samples = try oneStroke(passes, gesture: gesture)
-            guard passes[0].inputSource == "tablet",
-                  passes[0].capabilities
-                    == ["pressure", "altitude", "azimuth", "roll"],
-                  Set(samples.map(\.pressure)).count > 1,
-                  Set(samples.compactMap(\.altitude)).count > 1,
-                  samples.allSatisfy({
-                      $0.azimuth != nil && $0.roll != nil
-                  })
+            guard predictionEnabled,
+                  passes.count == 1,
+                  exactPass(
+                      passes[0],
+                      source: "tablet",
+                      capabilities: [
+                          "pressure", "altitude", "azimuth", "roll",
+                      ],
+                      strokeCount: 1
+                  ),
+                  matchesStroke(
+                      passes[0].strokes[0],
+                      points: expressiveLine,
+                      pressures: [0.25, 0.45, 0.65, 0.8, 0.6],
+                      interval: 0.012,
+                      predictedIndex: 3,
+                      altitudes: [1.2, 1.05, 0.9, 0.7, 0.5],
+                      azimuths: [0.1, 0.35, 0.6, 0.85, 1.1],
+                      rolls: [-0.3, -0.15, 0, 0.15, 0.3]
+                  )
             else {
-                throw ArtifactFileSystem.invalid(
-                    "tablet review must use useful tablet pressure and tilt"
-                )
+                throw ProfessionalManualSemanticError.tabletInput
             }
         case "mouseFallback":
-            let samples = try oneStroke(passes, gesture: gesture)
-            guard passes[0].inputSource == "mouse",
-                  passes[0].capabilities.isEmpty,
-                  samples.allSatisfy({
-                      $0.altitude == nil
-                          && $0.azimuth == nil
-                          && $0.roll == nil
-                  })
+            guard passes.count == 1,
+                  exactPass(
+                      passes[0],
+                      source: "mouse",
+                      capabilities: [],
+                      strokeCount: 1
+                  ),
+                  matchesStroke(
+                      passes[0].strokes[0],
+                      points: expressiveLine,
+                      pressures: [Double](repeating: 1, count: 5),
+                      interval: 0.012
+                  )
             else {
-                throw ArtifactFileSystem.invalid(
-                    "mouse fallback contains Pencil-only input"
-                )
+                throw ProfessionalManualSemanticError.mouseFallback
             }
         case "crossHatch":
+            let hatchPoints: [[(Double, Double)]] = [
+                [(56, 72), (184, 200)],
+                [(88, 56), (216, 184)],
+                [(56, 184), (184, 56)],
+                [(88, 200), (216, 72)],
+            ]
+            let hatchMatches = passes.count == 1
+                && zip(
+                    passes[0].strokes,
+                    hatchPoints
+                ).allSatisfy {
+                    matchesStroke(
+                        $0.0,
+                        points: $0.1,
+                        pressures: [0.72, 0.72],
+                        interval: 0.025
+                    )
+                }
             guard passes.count == 1,
-                  passes[0].strokes.count >= 4,
-                  Set(passes[0].strokes.map(geometry)).count
-                    == passes[0].strokes.count
+                  exactPass(
+                      passes[0],
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 4
+                  ),
+                  hatchMatches
             else {
-                throw ArtifactFileSystem.invalid(
-                    "cross-hatching must contain distinct strokes"
-                )
+                throw ProfessionalManualSemanticError.crossHatch
             }
         case "repeatedBuildup":
             guard passes.count == 1,
-                  passes[0].strokes.count >= 3,
-                  Set(passes[0].strokes.map(geometry)).count == 1
+                  exactPass(
+                      passes[0],
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 4
+                  ),
+                  passes[0].strokes.allSatisfy({
+                      matchesStroke(
+                          $0,
+                          points: standardLine,
+                          pressures: [Double](repeating: 0.7, count: 5),
+                          interval: 0.012
+                      )
+                  })
             else {
-                throw ArtifactFileSystem.invalid(
-                    "buildup must repeat an overlapping stroke"
-                )
+                throw ProfessionalManualSemanticError.repeatedBuildup
+            }
+        case "periodicSeamCrossing":
+            guard predictionEnabled,
+                  integer(document["presetID"]) == 0,
+                  number(document["repeatWidth"]) == 256,
+                  number(document["repeatHeight"]) == 256,
+                  number(document["orientationRadians"]) == 0,
+                  passes.count == 1,
+                  exactPass(
+                      passes[0],
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 1
+                  ),
+                  matchesStroke(
+                      passes[0].strokes[0],
+                      points: [(4, 128), (128, 128), (252, 128)],
+                      pressures: [0.55, 0.55, 0.55],
+                      interval: 0.014,
+                      predictedIndex: 1
+                  )
+            else {
+                throw ProfessionalManualSemanticError.periodicSeamCrossing
+            }
+        case "radialRotation":
+            guard exactRadialDocument(document, kind: 1),
+                  exactRadialStroke(
+                      passes,
+                      predictionEnabled: predictionEnabled
+                  )
+            else {
+                throw ProfessionalManualSemanticError.radialRotation
+            }
+        case "radialReflection":
+            guard exactRadialDocument(document, kind: 0),
+                  exactRadialStroke(
+                      passes,
+                      predictionEnabled: predictionEnabled
+                  )
+            else {
+                throw ProfessionalManualSemanticError.radialReflection
             }
         case "eraserRetrace":
             guard passes.count == 2,
+                  background == "opaque",
                   passes.map(\.role)
                     == [
                         "professionalDraw",
                         "retainedStageFourEraser",
                     ],
                   passes[1].brushID == retainedEraserID,
-                  passes[0].strokes.count == 1,
-                  passes[1].strokes.count == 1,
-                  geometry(passes[0].strokes[0])
-                    == geometry(passes[1].strokes[0])
+                  exactPass(
+                      passes[0],
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 1
+                  ),
+                  exactPass(
+                      passes[1],
+                      role: "retainedStageFourEraser",
+                      tool: "erase",
+                      diameter: 20,
+                      source: "pencil",
+                      capabilities: ["pressure"],
+                      strokeCount: 1
+                  ),
+                  passes.allSatisfy({
+                      matchesStroke(
+                          $0.strokes[0],
+                          points: [
+                              (56, 72), (92, 104), (128, 136),
+                              (164, 168), (200, 200),
+                          ],
+                          pressures: [Double](
+                              repeating: 0.65,
+                              count: 5
+                          ),
+                          interval: 0.012
+                      )
+                  })
             else {
-                throw ArtifactFileSystem.invalid(
-                    "eraser retrace must draw substrate then retrace with the retained eraser"
-                )
+                throw ProfessionalManualSemanticError.eraserRetrace
             }
         default:
-            _ = try oneStroke(passes, gesture: gesture)
+            preconditionFailure("Unhandled professional review gesture")
         }
     }
 
-    private static func oneStroke(
+    private static func exactPass(
+        _ pass: ValidatedPass,
+        role: String = "professionalDraw",
+        tool: String = "draw",
+        diameter: Double = 20,
+        source: String,
+        capabilities: [String],
+        strokeCount: Int
+    ) -> Bool {
+        pass.role == role
+            && pass.tool == tool
+            && pass.nominalDiameter == diameter
+            && pass.inputSource == source
+            && pass.capabilities == capabilities
+            && pass.strokes.count == strokeCount
+    }
+
+    private static func matchesStroke(
+        _ stroke: ValidatedStroke,
+        points: [(Double, Double)],
+        pressures: [Double],
+        interval: Double,
+        predictedIndex: Int? = nil,
+        altitudes: [Double]? = nil,
+        azimuths: [Double]? = nil,
+        rolls: [Double]? = nil
+    ) -> Bool {
+        guard stroke.samples.count == points.count,
+              pressures.count == points.count,
+              altitudes == nil || altitudes?.count == points.count,
+              azimuths == nil || azimuths?.count == points.count,
+              rolls == nil || rolls?.count == points.count
+        else {
+            return false
+        }
+        return stroke.samples.indices.allSatisfy { index in
+            let sample = stroke.samples[index]
+            let expectedPhase =
+                index == 0
+                ? "began"
+                : index == stroke.samples.count - 1 ? "ended" : "moved"
+            let expectedKind =
+                predictedIndex == index ? "predicted" : "actual"
+            return sample.x == points[index].0
+                && sample.y == points[index].1
+                && sample.pressure == pressures[index]
+                && abs(
+                    sample.timeOffset - Double(index) * interval
+                ) <= 1e-12
+                && sample.phase == expectedPhase
+                && sample.kind == expectedKind
+                && sample.altitude == altitudes?[index]
+                && sample.azimuth == azimuths?[index]
+                && sample.roll == rolls?[index]
+        }
+    }
+
+    private static func exactRadialDocument(
+        _ document: [String: Any],
+        kind: Int
+    ) -> Bool {
+        integer(document["radialKind"]) == kind
+            && integer(document["rayCount"]) == 8
+            && number(document["centerX"]) == 1_024
+            && number(document["centerY"]) == 1_024
+            && number(document["referenceAngleRadians"]) == 0
+    }
+
+    private static func exactRadialStroke(
         _ passes: [ValidatedPass],
-        gesture: String
-    ) throws -> [ValidatedSample] {
-        guard passes.count == 1, passes[0].strokes.count == 1 else {
-            throw ArtifactFileSystem.invalid(
-                "\(gesture) must contain one explicit stroke"
+        predictionEnabled: Bool
+    ) -> Bool {
+        predictionEnabled
+            && passes.count == 1
+            && exactPass(
+                passes[0],
+                source: "pencil",
+                capabilities: ["pressure"],
+                strokeCount: 1
             )
-        }
-        return passes[0].strokes[0].samples
-    }
-
-    private static func geometry(_ stroke: ValidatedStroke) -> String {
-        stroke.samples.map { "\($0.x),\($0.y)" }
-            .joined(separator: ";")
+            && matchesStroke(
+                passes[0].strokes[0],
+                points: [(128, 24), (196, 92), (128, 232)],
+                pressures: [0.55, 0.55, 0.55],
+                interval: 0.014,
+                predictedIndex: 1
+            )
     }
 
     private static func validateAssessment(
@@ -628,19 +957,6 @@ public enum ProfessionalManualEvidenceValidator {
             throw ArtifactFileSystem.invalid(
                 "manual document does not match its review action"
             )
-        }
-        if gesture == "radialRotation" {
-            guard integer(document["radialKind"]) == 1 else {
-                throw ArtifactFileSystem.invalid(
-                    "radial rotation card has the wrong symmetry kind"
-                )
-            }
-        } else if gesture == "radialReflection" {
-            guard integer(document["radialKind"]) == 0 else {
-                throw ArtifactFileSystem.invalid(
-                    "radial reflection card has the wrong symmetry kind"
-                )
-            }
         }
     }
 
