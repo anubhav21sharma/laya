@@ -1695,7 +1695,7 @@ struct StageFourArtifactFixture {
             ),
             "deposition-layer-matrix": (
                 "evidence.layer-multiply-2-true",
-                "6cd54e9f53dbb905c61b7d1cacc39d0194e2f42281ade84559e5e0eb29cac4d4"
+                "5174a83f0d09ee496185f83c9fcea4bf8666b13bdee087a6d0ec69a165c3408b"
             ),
             "deposition-marker": (
                 "builtin.native-marker",

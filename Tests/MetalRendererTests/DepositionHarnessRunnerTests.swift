@@ -373,6 +373,11 @@ struct DepositionHarnessRunnerTests {
         )
 
         #expect(evidence.invariantResults[invariant] == true)
+        #expect(
+            StageFourEvidenceValidator.expectedSemanticHash(
+                forPositiveScene: sceneName
+            ) == evidence.semanticHash
+        )
     }
 }
 

@@ -572,7 +572,7 @@ public enum StageFourEvidenceValidator {
         "deposition-layer-matrix": SceneTruth(
             definitionID: "evidence.layer-multiply-2-true",
             semanticHash:
-            "6cd54e9f53dbb905c61b7d1cacc39d0194e2f42281ade84559e5e0eb29cac4d4",
+            "5174a83f0d09ee496185f83c9fcea4bf8666b13bdee087a6d0ec69a165c3408b",
             pipelineKey:
             "deposition:flow:none:s1:g1:h1:d0:abi1:format80:samples1",
             resourceBytes: 21844,
