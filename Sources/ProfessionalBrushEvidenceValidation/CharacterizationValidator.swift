@@ -34,10 +34,13 @@ enum CharacterizationValidator {
             label: "professional characterization baseline"
         )
         guard let records = object["records"] as? [[String: Any]],
-              records.count == 40
+              records.count == 40,
+              ArtifactFileSystem.sha256(data)
+                == ProfessionalBrushTruth
+                    .professionalCharacterizationBaselineSHA256
         else {
             throw ArtifactFileSystem.invalid(
-                "professional characterization baseline record count is invalid"
+                "professional characterization baseline is not the exact golden baseline"
             )
         }
         for record in records {
@@ -65,10 +68,11 @@ enum CharacterizationValidator {
         }
         guard baseline.schemaVersion
                 == ProfessionalBrushLogicalBaseline.schemaVersion,
-              actual == expected
+              actual == expected,
+              baseline.records.allSatisfy(isExactRecord)
         else {
             throw ArtifactFileSystem.invalid(
-                "professional characterization baseline membership is not exact"
+                "professional characterization baseline membership or record truth is not exact"
             )
         }
         return baseline
@@ -109,5 +113,35 @@ enum CharacterizationValidator {
             boundsKeys,
             label: "characterization world bounds"
         )
+    }
+
+    private static func isExactRecord(
+        _ record: ProfessionalBrushCharacterizationRecord
+    ) -> Bool {
+        guard let truth = ProfessionalBrushTruth.truthByDefinitionID[
+            record.brushID
+        ] else {
+            return false
+        }
+        return record.schemaVersion
+                == ProfessionalBrushLogicalBaseline.schemaVersion
+            && record.family == truth.family
+            && record.definitionSemanticHash == truth.semanticHash
+            && ProfessionalBrushTruth.traces.contains(record.traceName)
+            && record.sampleCount > 0
+            && record.logicalDabCount > 0
+            && record.logicalDabDigest.utf8.count == 16
+            && record.logicalDabDigest.utf8.allSatisfy({
+                (48 ... 57).contains($0) || (97 ... 102).contains($0)
+            })
+            && record.minimumDiameter > 0
+            && record.minimumFlow >= 0
+            && record.maximumFlow <= 1
+            && record.minimumOpacity >= 0
+            && record.maximumOpacity <= 1
+            && record.minimumHardness >= 0
+            && record.maximumHardness <= 1
+            && record.minimumGrainScale > 0
+            && record.minimumScatterMagnitude >= 0
     }
 }

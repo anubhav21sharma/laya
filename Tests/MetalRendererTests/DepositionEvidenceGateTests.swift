@@ -635,7 +635,7 @@ private struct FixturePhysicalProfile {
     let eventKinds: [String]
 }
 
-private struct StageFourArtifactFixture {
+struct StageFourArtifactFixture {
     let root: URL
     let commit = String(repeating: "a", count: 40)
     let gpuName = "Apple Paravirtual device"

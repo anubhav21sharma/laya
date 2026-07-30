@@ -29,6 +29,8 @@ struct ProfessionalSceneTruth {
 }
 
 enum ProfessionalBrushTruth {
+    static let professionalCharacterizationBaselineSHA256 =
+        "d4758be3310facf05683c4e8560428aad8b5ff47e331c9f7632fb802aad94ea2"
     static let positiveSceneNames = [
         "professional-chisel-marker",
         "professional-graphite-pencil",
@@ -115,4 +117,10 @@ enum ProfessionalBrushTruth {
             resourceLevels: ["builtin.shape.technical-nib": 8]
         ),
     ]
+    static let truthByDefinitionID: [String: ProfessionalSceneTruth] =
+        Dictionary(
+            uniqueKeysWithValues: sceneTruth.values.map {
+                ($0.definitionID, $0)
+            }
+        )
 }

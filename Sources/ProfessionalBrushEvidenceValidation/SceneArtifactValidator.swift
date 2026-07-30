@@ -237,6 +237,7 @@ enum SceneArtifactValidator {
               evidence.residentResourceBytes == truth.residentBytes,
               evidence.logicalDabCount > 0,
               evidence.projectedInstanceCount >= evidence.logicalDabCount,
+              evidence.previewCommitMaximumChannelDelta >= 0,
               evidence.previewCommitMaximumChannelDelta <= 1,
               evidence.rendererExecutableSHA256
                 == expectedRendererSHA256
@@ -246,6 +247,7 @@ enum SceneArtifactValidator {
             )
         }
         try validateResources(evidence, truth: truth, scene: scene)
+        try validateNumericBounds(evidence, truth: truth, scene: scene)
         let rasters = try loadRasters(directory: directory, scene: scene)
         try validatePNGHashes(
             directory: directory,
@@ -399,6 +401,8 @@ enum SceneArtifactValidator {
         }
         let predictionDelta = RasterObservationValidator
             .maximumChannelDelta(predictionOff, predictionOn)
+        let previewCommitDelta = RasterObservationValidator
+            .maximumChannelDelta(live, committed)
         let gridDelta = RasterObservationValidator.maximumChannelDelta(
             gridOrigin,
             gridTranslated
@@ -438,6 +442,10 @@ enum SceneArtifactValidator {
                 == observation.radialRotationMaximumChannelDelta
             && reflectionDelta
                 == observation.radialReflectionMaximumChannelDelta
+        let previewCommitMatches =
+            previewCommitDelta <= 1
+            && previewCommitDelta
+                == evidence.previewCommitMaximumChannelDelta
         let uploads = UInt64(truth.resourceLevels.count)
         let compiled = CompilerCounterSnapshot(
             packageDecodeCount: 1,
@@ -479,7 +487,7 @@ enum SceneArtifactValidator {
             "predictionOnOffEqual":
                 hashesMatch && deltasMatch && predictionDelta == 0,
             "previewCommitMaximumDeltaWithinTolerance":
-                evidence.previewCommitMaximumChannelDelta <= 1,
+                previewCommitMatches,
             "professionalDefinitionIdentityExact": true,
             "radialRotationAndReflectionCorrect":
                 hashesMatch && deltasMatch
@@ -496,6 +504,69 @@ enum SceneArtifactValidator {
             "tilingPeriodTranslationEqual":
                 hashesMatch && deltasMatch && gridDelta == 0,
         ]
+    }
+
+    private static func validateNumericBounds(
+        _ evidence: SceneEvidence,
+        truth: ProfessionalSceneTruth,
+        scene: String
+    ) throws {
+        guard evidence.logicalDabCount <= 2_048,
+              evidence.projectedInstanceCount <= 4_096,
+              let projected = UInt64(
+                  exactly: evidence.projectedInstanceCount
+              ),
+              (1 ... projected).contains(
+                  evidence.telemetry.encodedInstanceCount
+              ),
+              (1 ... 3).contains(evidence.telemetry.bufferHighWater),
+              evidence.telemetry.missedFrameCount == 0,
+              evidence.telemetry.authoritativeBacklog == 0,
+              evidence.telemetry.predictedBacklog == 0,
+              (1 ... evidence.projectedInstanceCount).contains(
+                  evidence.telemetry.backlogHighWater
+              ),
+              (0 ... 2).contains(
+                  evidence.observations
+                    .pipelinePrepareCallCountBeforeStroke
+              ),
+              (0 ... 2).contains(
+                  evidence.observations
+                    .pipelinePrepareCallCountAfterStroke
+              )
+        else {
+            throw ArtifactFileSystem.invalid(
+                "\(scene) evidence counters are negative, zero, or outside runtime bounds: "
+                    + "logical=\(evidence.logicalDabCount) "
+                    + "projected=\(evidence.projectedInstanceCount) "
+                    + "encoded=\(evidence.telemetry.encodedInstanceCount) "
+                    + "buffer=\(evidence.telemetry.bufferHighWater) "
+                    + "missed=\(evidence.telemetry.missedFrameCount) "
+                    + "backlog=\(evidence.telemetry.backlogHighWater) "
+                    + "pipeline=\(evidence.observations.pipelinePrepareCallCountBeforeStroke)/"
+                    + "\(evidence.observations.pipelinePrepareCallCountAfterStroke)"
+            )
+        }
+
+        let resourceCount = UInt64(truth.resourceLevels.count)
+        let snapshots = [
+            evidence.compilerCounters.beforeCompile,
+            evidence.compilerCounters.afterCompile,
+            evidence.compilerCounters.afterCacheHit,
+            evidence.compilerCounters.beforeStroke,
+            evidence.compilerCounters.afterStroke,
+        ]
+        guard snapshots.allSatisfy({
+            $0.packageDecodeCount <= 2
+                && $0.imageDecodeCount == 0
+                && $0.textureUploadCount <= resourceCount
+                && $0.cacheHitCount <= resourceCount
+                && $0.activationCount <= 2
+        }) else {
+            throw ArtifactFileSystem.invalid(
+                "\(scene) compiler counters exceed applicable totals"
+            )
+        }
     }
 
     private static func validateBenchmark(

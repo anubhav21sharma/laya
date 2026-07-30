@@ -152,7 +152,10 @@ struct ProfessionalBrushEvidenceValidatorTests {
             "hardware-model.txt": "VirtualMac\n",
             "hardware.txt": "",
             "kernel.txt": "Darwin Fixture\n",
-            "operating-system.txt": "ProductVersion: 26.0\n",
+            "operating-system.txt":
+                "ProductName:\t\tmacOS\n"
+                + "ProductVersion:\t\t26.0\n"
+                + "BuildVersion:\t\t25A123\n",
             "swift-toolchain.txt": "Swift 6\nBuild\n",
             "validator-nm-undefined.txt": "_Foundation\n",
             "validator-otool.txt": "/usr/lib/libSystem.B.dylib\n",
@@ -180,7 +183,7 @@ struct ProfessionalBrushEvidenceValidatorTests {
             "swiftVersion": "Swift 6 Build",
             "xcodeVersion": "Xcode 26 Build 1",
             "xcodegenVersion": "Version: 2.44",
-            "operatingSystem": "Fixture OS",
+            "operatingSystem": "Version 26.0 (Build 25A123)",
             "kernel": "Darwin Fixture",
             "hardwareMachine": "arm64",
             "hardwareModel": "VirtualMac",
@@ -205,6 +208,50 @@ struct ProfessionalBrushEvidenceValidatorTests {
             expectedSourceTreeSHA256: tree,
             expectedStageFourManifestSHA256: stageFour,
             expectedStageFourExitStatus: 2
+        )
+
+        for rawOperatingSystem in [
+            "ProductName:\t\tmacOS\n"
+                + "ProductVersion:\t\t26.0\n"
+                + "BuildVersion:\t\t25A999\n",
+            "ProductName:\t\tmacOS\n"
+                + "ProductVersion:\t\t26.0\n"
+                + "UnknownVersion:\t\t25A123\n",
+            "ProductName:\t\tmacOS\n"
+                + "ProductVersion:\t\t26.0\n"
+                + "BuildVersion:\t\t25A123\n"
+                + "Extra:\t\tfield\n",
+        ] {
+            let operatingSystemURL = raw.appendingPathComponent(
+                "operating-system.txt"
+            )
+            let rawOperatingSystemData = Data(rawOperatingSystem.utf8)
+            try rawOperatingSystemData.write(to: operatingSystemURL)
+            var contradictory = provenance
+            var contradictoryHashes = rawHashes
+            contradictoryHashes["operating-system.txt"] =
+                ArtifactFileSystem.sha256(rawOperatingSystemData)
+            contradictory["rawProvenanceSHA256"] = contradictoryHashes
+            try JSONSerialization.data(
+                withJSONObject: contradictory,
+                options: [.sortedKeys]
+            ).write(to: root.appendingPathComponent("provenance.json"))
+            #expect(
+                throws: Error.self,
+                "raw OS: \(rawOperatingSystem)"
+            ) {
+                _ = try ProvenanceValidator.validate(
+                    root: raw,
+                    artifactRoot: root,
+                    expectedCommit: commit,
+                    expectedSourceTreeSHA256: tree,
+                    expectedStageFourManifestSHA256: stageFour,
+                    expectedStageFourExitStatus: 2
+                )
+            }
+        }
+        try Data(rawValues["operating-system.txt"]!.utf8).write(
+            to: raw.appendingPathComponent("operating-system.txt")
         )
 
         let kernelURL = raw.appendingPathComponent("kernel.txt")
@@ -246,6 +293,64 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 expectedStageFourManifestSHA256: stageFour,
                 expectedStageFourExitStatus: 2
             )
+        }
+    }
+
+    @Test
+    func characterizationBaselineBindsEveryRecordToGoldenTruth() throws {
+        let baseline =
+            try professionalCharacterizationBaselineForValidation()
+        let valid = try baseline.encoded()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false
+        )
+        let url = root.appendingPathComponent("baseline.json")
+        try valid.write(to: url)
+        _ = try CharacterizationValidator.validateBaseline(url)
+
+        let mutations: [(String, (inout [String: Any]) -> Void)] = [
+            ("family", { $0["family"] = "Wrong Family" }),
+            ("semantic hash", {
+                $0["definitionSemanticHash"] =
+                    String(repeating: "0", count: 64)
+            }),
+            ("logical digest", {
+                $0["logicalDabDigest"] =
+                    String(repeating: "0", count: 64)
+            }),
+            ("metric", {
+                $0["maximumDiameter"] =
+                    (($0["maximumDiameter"] as? NSNumber)?.doubleValue
+                        ?? 0) + 1
+            }),
+        ]
+        for (name, mutate) in mutations {
+            var object = try #require(
+                JSONSerialization.jsonObject(with: valid)
+                    as? [String: Any]
+            )
+            var records = try #require(
+                object["records"] as? [[String: Any]]
+            )
+            let index = try #require(
+                records.firstIndex {
+                    $0["traceName"] as? String
+                        == "professional-fast-line"
+                }
+            )
+            mutate(&records[index])
+            object["records"] = records
+            try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            ).write(to: url)
+            #expect(throws: Error.self, "\(name)") {
+                _ = try CharacterizationValidator.validateBaseline(url)
+            }
         }
     }
 

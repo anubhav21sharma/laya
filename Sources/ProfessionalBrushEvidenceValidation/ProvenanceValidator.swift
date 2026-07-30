@@ -113,6 +113,10 @@ enum ProvenanceValidator {
                 == trimmed(rawData["hardware-machine.txt"]),
               object["hardwareModel"] as? String
                 == trimmed(rawData["hardware-model.txt"]),
+              operatingSystem
+                == normalizedOperatingSystem(
+                    rawData["operating-system.txt"]
+                ),
               let executableHash =
                 object["rendererExecutableSHA256"] as? String,
               ArtifactFileSystem.isSHA256(executableHash)
@@ -157,5 +161,47 @@ enum ProvenanceValidator {
             return nil
         }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedOperatingSystem(
+        _ data: Data?
+    ) -> String? {
+        guard let data,
+              let text = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        var fields: [String: String] = [:]
+        for rawLine in text.split(
+            omittingEmptySubsequences: false,
+            whereSeparator: \.isNewline
+        ) {
+            let line = String(rawLine)
+            if line.isEmpty {
+                continue
+            }
+            guard let separator = line.firstIndex(of: ":") else {
+                return nil
+            }
+            let key = String(line[..<separator])
+            let value = String(line[line.index(after: separator)...])
+                .trimmingCharacters(in: .whitespaces)
+            guard !key.isEmpty,
+                  !value.isEmpty,
+                  fields.updateValue(value, forKey: key) == nil
+            else {
+                return nil
+            }
+        }
+        guard Set(fields.keys) == [
+            "ProductName", "ProductVersion", "BuildVersion",
+        ],
+            fields["ProductName"] == "macOS",
+            let version = fields["ProductVersion"],
+            let build = fields["BuildVersion"]
+        else {
+            return nil
+        }
+        return "Version \(version) (Build \(build))"
     }
 }

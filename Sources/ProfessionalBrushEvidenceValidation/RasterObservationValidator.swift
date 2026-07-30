@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import UniformTypeIdentifiers
 
 struct DecodedRaster {
     let width: Int
@@ -10,7 +11,13 @@ struct DecodedRaster {
 
 enum RasterObservationValidator {
     static func decode(_ data: Data, label: String) throws -> DecodedRaster {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+        let pngSignature: [UInt8] = [
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        ]
+        guard data.starts(with: pngSignature),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetType(source) as String?
+                == UTType.png.identifier,
               CGImageSourceGetCount(source) == 1,
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
               image.width == 128,
