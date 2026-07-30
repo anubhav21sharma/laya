@@ -91,9 +91,15 @@ final clean gate reruns this coverage inside the complete serialized suite.
 Each positive scene produces exactly:
 
 - `live.png`, `committed.png`, and `canonical.png`;
+- prediction-on/off, grid-origin/translated, eraser-before/after, and four
+  radial rendered/reference observation PNGs;
 - `characterization.json`;
 - `benchmark.json`;
-- `evidence.json`.
+- `evidence.json`;
+- `professional-performance.json`;
+- `professional-five-hundred-dabs.raw.json`;
+- `professional-long-stroke.raw.json`;
+- `professional-long-stroke-trace.json`.
 
 The scene evidence binds the professional definition ID and semantic hash,
 resolved resource identities and mip counts, resident bytes, deposition

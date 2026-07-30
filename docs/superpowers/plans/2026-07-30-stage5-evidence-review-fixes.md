@@ -215,9 +215,11 @@ terminal fields only to the freshly derived result; never use text as proof.
 Bind the exact shipped 68-card catalog and nested schema. Allow only explicit
 assessment enumerations plus bounded notes; all-null is pending, exact complete
 values pass, and partial/unknown/misspelled input fails. Require Stage 5
-physical profiles to be the exact eight Stage 4 schema-v2 profiles already
-validated by the frozen validator, byte-bind them to that bundle, and add a
-positive known-hardware GPU identity check.
+physical profiles to use the same eight stable profile identifiers and frozen
+schema-v2 validation semantics as Stage 4, while binding distinct Stage 5 raw
+measurements to all four professional brush identities and resources. Never
+copy or relabel Stage 4 profile bytes as Stage 5 evidence. Add a positive
+known-hardware GPU identity check.
 
 - [ ] **Step 6: Verify focused artifact GREEN**
 
