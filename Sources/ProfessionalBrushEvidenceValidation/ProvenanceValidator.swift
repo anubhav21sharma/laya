@@ -39,7 +39,7 @@ enum ProvenanceValidator {
                 root.appendingPathComponent(name),
                 label: "raw provenance \(name)"
             )
-            guard !data.isEmpty else {
+            guard name == "hardware.txt" || !data.isEmpty else {
                 throw ArtifactFileSystem.invalid(
                     "raw provenance is empty: \(name)"
                 )

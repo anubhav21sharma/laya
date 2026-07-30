@@ -150,7 +150,7 @@ struct ProfessionalBrushEvidenceValidatorTests {
         let rawValues: [String: String] = [
             "hardware-machine.txt": "arm64\n",
             "hardware-model.txt": "VirtualMac\n",
-            "hardware.txt": "Chipset Model: Virtual\n",
+            "hardware.txt": "",
             "kernel.txt": "Darwin Fixture\n",
             "operating-system.txt": "ProductVersion: 26.0\n",
             "swift-toolchain.txt": "Swift 6\nBuild\n",
@@ -206,6 +206,30 @@ struct ProfessionalBrushEvidenceValidatorTests {
             expectedStageFourManifestSHA256: stageFour,
             expectedStageFourExitStatus: 2
         )
+
+        let kernelURL = raw.appendingPathComponent("kernel.txt")
+        try Data().write(to: kernelURL)
+        var emptyKernel = provenance
+        var emptyKernelHashes = rawHashes
+        emptyKernelHashes["kernel.txt"] =
+            ArtifactFileSystem.sha256(Data())
+        emptyKernel["rawProvenanceSHA256"] = emptyKernelHashes
+        try JSONSerialization.data(
+            withJSONObject: emptyKernel,
+            options: [.sortedKeys]
+        ).write(to: root.appendingPathComponent("provenance.json"))
+        #expect(throws: Error.self) {
+            _ = try ProvenanceValidator.validate(
+                root: raw,
+                artifactRoot: root,
+                expectedCommit: commit,
+                expectedSourceTreeSHA256: tree,
+                expectedStageFourManifestSHA256: stageFour,
+                expectedStageFourExitStatus: 2
+            )
+        }
+        try Data(rawValues["kernel.txt"]!.utf8).write(to: kernelURL)
+
         var mutated = provenance
         mutated["rendererExecutableSHA256"] =
             String(repeating: "0", count: 64)
