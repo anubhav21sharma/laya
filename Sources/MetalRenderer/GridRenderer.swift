@@ -94,6 +94,12 @@ public struct HarnessLiveFlushResult {
     public let emittedHighWater: UInt64
     public let encodedIdentityRanges: [Range<UInt64>]
     public let authoritativeBacklogRemaining: Int
+    public let replayRetention: HarnessReplayRetentionSnapshot
+}
+
+public struct HarnessReplayRetentionSnapshot: Equatable, Sendable {
+    public let retainedDabCount: Int
+    public let visibleProjectedInstanceCount: Int
 }
 
 struct HarnessTilingMutationSnapshot: Equatable {

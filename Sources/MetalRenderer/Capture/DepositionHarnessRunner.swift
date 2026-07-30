@@ -624,6 +624,11 @@ private extension DepositionHarnessRunner {
                         currentGeneratedProjectedInstanceHighWater,
                     encodedGPUInstanceCount:
                         result.metrics.encodedInstanceCount,
+                    retainedDabCount:
+                        result.replayRetention.retainedDabCount,
+                    visibleProjectedInstanceCount:
+                        result.replayRetention
+                            .visibleProjectedInstanceCount,
                     encodedLogicalDabIdentityRanges:
                         result.encodedIdentityRanges
                 )

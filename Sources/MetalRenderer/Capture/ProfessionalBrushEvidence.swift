@@ -523,6 +523,8 @@ public struct ProfessionalLongStrokeIdentityFrame:
     public let previousGeneratedProjectedInstanceHighWater: Int
     public let generatedProjectedInstanceHighWater: Int
     public let encodedGPUInstanceCount: Int
+    public let retainedDabCount: Int
+    public let visibleProjectedInstanceCount: Int
     public let encodedLogicalDabIdentityRanges:
         [ProfessionalEncodedIdentityRange]
 
@@ -534,6 +536,8 @@ public struct ProfessionalLongStrokeIdentityFrame:
         previousGeneratedProjectedInstanceHighWater: Int,
         generatedProjectedInstanceHighWater: Int,
         encodedGPUInstanceCount: Int,
+        retainedDabCount: Int,
+        visibleProjectedInstanceCount: Int,
         encodedLogicalDabIdentityRanges: [Range<UInt64>]
     ) {
         self.inputPhase = inputPhase
@@ -547,6 +551,9 @@ public struct ProfessionalLongStrokeIdentityFrame:
         self.generatedProjectedInstanceHighWater =
             generatedProjectedInstanceHighWater
         self.encodedGPUInstanceCount = encodedGPUInstanceCount
+        self.retainedDabCount = retainedDabCount
+        self.visibleProjectedInstanceCount =
+            visibleProjectedInstanceCount
         self.encodedLogicalDabIdentityRanges =
             encodedLogicalDabIdentityRanges.map(
                 ProfessionalEncodedIdentityRange.init

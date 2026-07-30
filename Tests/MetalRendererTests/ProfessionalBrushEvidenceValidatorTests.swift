@@ -455,8 +455,119 @@ struct ProfessionalBrushEvidenceValidatorTests {
             referenceKey: "longStroke"
         ) { raw in
             var frames = raw["identityFrames"] as! [[String: Any]]
-            frames[127]["inputPhase"] = "commit"
+            frames[0]["inputPhase"] = "moved"
+            frames[1]["inputPhase"] = "began"
             raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[64]["retainedDabCount"] = 2_049
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[64]["visibleProjectedInstanceCount"] = 4_097
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[64]["retainedDabCount"] = -1
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[64]["visibleProjectedInstanceCount"] = 1.5
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[64].removeValue(forKey: "retainedDabCount")
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[64].removeValue(
+                forKey: "visibleProjectedInstanceCount"
+            )
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[64]["unexpectedRetentionClaim"] = 1
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            let frames = raw["identityFrames"] as! [[String: Any]]
+            raw["identityFrames"] = frames.map { frame in
+                var zeroed = frame
+                zeroed["retainedDabCount"] = 0
+                zeroed["visibleProjectedInstanceCount"] = 0
+                return zeroed
+            }
         }
         reject(value)
 
@@ -1181,6 +1292,9 @@ private func professionalPerformanceFixture(
                 "generatedProjectedInstanceHighWater":
                     (index + 1) * 64,
                 "encodedGPUInstanceCount": 64,
+                "retainedDabCount": index + 1,
+                "visibleProjectedInstanceCount":
+                    min((index + 1) * 64, 4_096),
                 "encodedLogicalDabIdentityRanges": [
                     [
                         "lowerBound": index,

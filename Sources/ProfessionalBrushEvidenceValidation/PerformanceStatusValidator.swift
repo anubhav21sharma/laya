@@ -367,6 +367,7 @@ enum PerformanceStatusValidator {
         _ = try auditIdentityFrames(
             identityFrames,
             scene: scene,
+            maximumRetainedDabs: maximumDabs,
             maximumProjectedInstancesPerFrame: maximumProjected,
             expectedFinalLogicalDabHighWater: logicalDabs,
             expectedProjectedInstanceTotal: projected
@@ -660,11 +661,13 @@ enum PerformanceStatusValidator {
     private static func auditIdentityFrames(
         _ frames: [[String: Any]],
         scene: String,
+        maximumRetainedDabs: Int,
         maximumProjectedInstancesPerFrame: Int,
         expectedFinalLogicalDabHighWater: Int,
         expectedProjectedInstanceTotal: Int
     ) throws -> LongStrokeIdentityAudit {
         guard frames.count == 128,
+              maximumRetainedDabs > 0,
               maximumProjectedInstancesPerFrame > 0,
               expectedFinalLogicalDabHighWater > 0,
               expectedProjectedInstanceTotal > 0,
@@ -683,6 +686,7 @@ enum PerformanceStatusValidator {
         var newLogicalDabCounts: [UInt64] = []
         var restampedLogicalDabCounts: [UInt64] = []
         var newGeneratedProjectedInstanceCounts: [Int] = []
+        var sawRetainedDab = false
         for (frameIndex, frame) in frames.enumerated() {
             guard Set(frame.keys) == [
                 "inputPhase",
@@ -692,6 +696,8 @@ enum PerformanceStatusValidator {
                 "previousGeneratedProjectedInstanceHighWater",
                 "generatedProjectedInstanceHighWater",
                 "encodedGPUInstanceCount",
+                "retainedDabCount",
+                "visibleProjectedInstanceCount",
                 "encodedLogicalDabIdentityRanges",
             ],
                 frame["inputPhase"] as? String
@@ -732,6 +738,17 @@ enum PerformanceStatusValidator {
                 ),
                 encodedGPU >= 0,
                 encodedGPU <= maximumProjectedInstancesPerFrame,
+                let retainedDabCount = integer(
+                    frame["retainedDabCount"]
+                ),
+                retainedDabCount >= 0,
+                retainedDabCount <= maximumRetainedDabs,
+                let visibleProjectedInstanceCount = integer(
+                    frame["visibleProjectedInstanceCount"]
+                ),
+                visibleProjectedInstanceCount >= 0,
+                visibleProjectedInstanceCount
+                    <= maximumProjectedInstancesPerFrame,
                 let ranges =
                   frame["encodedLogicalDabIdentityRanges"]
                     as? [[String: Any]]
@@ -773,6 +790,7 @@ enum PerformanceStatusValidator {
                 currentGeneratedProjected - previousGeneratedProjected
             generatedProjectedHighWater = currentGeneratedProjected
             maximumEncodedGPU = max(maximumEncodedGPU, encodedGPU)
+            sawRetainedDab = sawRetainedDab || retainedDabCount > 0
             newLogicalDabCounts.append(newlyEncoded)
             restampedLogicalDabCounts.append(0)
             newGeneratedProjectedInstanceCounts.append(
@@ -780,12 +798,14 @@ enum PerformanceStatusValidator {
             )
             priorEmittedHighWater = emitted
         }
-        guard encodedHighWater == expectedFinal,
+        guard sawRetainedDab,
+              encodedHighWater == expectedFinal,
               generatedProjectedHighWater
                 == expectedProjectedInstanceTotal
         else {
             throw ArtifactFileSystem.invalid(
-                "\(scene): long-stroke identity totals disagree "
+                "\(scene): long-stroke retained replay state or "
+                    + "identity totals disagree "
                     + "(logical high-water \(encodedHighWater)/"
                     + "\(expectedFinal); generated projected "
                     + "\(generatedProjectedHighWater)/"

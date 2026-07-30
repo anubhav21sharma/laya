@@ -471,7 +471,9 @@ Each positive professional scene also emits:
 - a raw 128-input long-stroke trace and CPU/GPU measurements for the exact
   `began`, 126 `moved`, and `ended` live-input frames, excluding raster commit;
 - per-frame logical-dab identity ranges and previous/emitted high-waters,
-  generated projected-instance high-waters, and submitted GPU work counts;
+  generated projected-instance high-waters, submitted GPU work counts, and
+  the runtime transient buffer's retained-dab and visible projected-instance
+  counts immediately after each live flush;
 - compiler/resource counter snapshots before and after each hot workload;
 - source commit, renderer executable, GPU, OS, brush identity, semantic hash,
   and resource topology provenance; and
@@ -482,9 +484,13 @@ The long-stroke workload uses a fixed `512 × 512` grid context and exactly
 so every measured segment has equal length and the replay tail reaches steady
 bounded work during the early quartile. Replay limits bound retained and
 per-frame encoded work, not cumulative whole-stroke totals. The validator
-derives new logical dabs and zero restamped logical dabs from contiguous
-identity ranges, binds the final logical high-water to the lifetime logical
-dab total, derives generated projected work from monotonic cumulative
+checks every runtime retained-dab count against `2048`, every runtime visible
+projected-instance count against `4096`, and requires nonzero retained state
+so synthetic zero-filled evidence cannot pass. These runtime retention limits
+do not constrain the length of newly encoded logical identity ranges. The
+validator derives new logical dabs and zero restamped logical dabs from
+contiguous identity ranges, binds the final logical high-water to the lifetime
+logical dab total, derives generated projected work from monotonic cumulative
 high-waters, and binds its final high-water to the lifetime generated
 projected-instance total. Submitted GPU instance counts independently prove
 the encoder work bound.

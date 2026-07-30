@@ -124,6 +124,9 @@ The software policy is:
 - established 500-dab GPU workload below `3 ms` only on qualifying stable
   physical Metal hardware;
 - completed-stroke-length-independent live work;
+- every exact long-stroke live frame records the transient replay buffer's
+  runtime retained-dab and visible projected-instance counts, bounded by
+  `2048` and `4096` respectively, with nonzero retained state required;
 - no compiler, decode, upload, pipeline creation, file I/O, or synchronous
   wait on the production input path;
 - resource residency bounded by each compiled definition and device budget.

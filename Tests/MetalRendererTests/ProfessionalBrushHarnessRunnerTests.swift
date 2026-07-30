@@ -312,6 +312,12 @@ struct ProfessionalBrushHarnessRunnerTests {
         let tracePhases = traceSamples.compactMap {
             $0["phase"] as? String
         }
+        let retainedDabCounts = identityFrames.compactMap {
+            ($0["retainedDabCount"] as? NSNumber)?.intValue
+        }
+        let visibleProjectedInstanceCounts = identityFrames.compactMap {
+            ($0["visibleProjectedInstanceCount"] as? NSNumber)?.intValue
+        }
         #expect(identityFrames.count == 128)
         #expect(
             (longRaw["cpuPreparationMilliseconds"] as? [Double])?
@@ -322,6 +328,17 @@ struct ProfessionalBrushHarnessRunnerTests {
         )
         #expect(measuredPhases == tracePhases)
         #expect(!measuredPhases.contains("commit"))
+        #expect(retainedDabCounts.count == 128)
+        #expect(
+            retainedDabCounts.allSatisfy { (0...2_048).contains($0) }
+        )
+        #expect(retainedDabCounts.contains { $0 > 0 })
+        #expect(visibleProjectedInstanceCounts.count == 128)
+        #expect(
+            visibleProjectedInstanceCounts.allSatisfy {
+                (0...4_096).contains($0)
+            }
+        )
         #expect(result.artifactURLs.count == 20)
         #expect(Set(result.artifactURLs.map(\.lastPathComponent)) == [
             "\(sceneName).benchmark.json",

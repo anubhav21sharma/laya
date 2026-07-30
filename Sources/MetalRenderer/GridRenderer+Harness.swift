@@ -258,7 +258,14 @@ extension GridRenderer {
             encodedIdentityRanges:
                 lastEncodedAuthoritativeIdentityRange.map { [$0] } ?? [],
             authoritativeBacklogRemaining:
-                activeStroke?.scheduler?.authoritativeCount ?? 0
+                activeStroke?.scheduler?.authoritativeCount ?? 0,
+            replayRetention: HarnessReplayRetentionSnapshot(
+                retainedDabCount:
+                    transientStrokeBuffer?.retainedDabCount ?? 0,
+                visibleProjectedInstanceCount:
+                    transientStrokeBuffer?
+                        .visibleProjectedInstanceCount ?? 0
+            )
         )
     }
 
