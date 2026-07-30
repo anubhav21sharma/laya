@@ -4,6 +4,7 @@ import Foundation
 import Metal
 import PatternEngine
 @testable import MetalRenderer
+@testable import ProfessionalBrushEvidenceValidation
 import Testing
 
 @Suite("Professional brush harness runner", .serialized)
@@ -37,6 +38,77 @@ struct ProfessionalBrushHarnessRunnerTests {
         )
     }
 
+    @Test
+    func sceneLoaderRejectsFilenameAndDecodedNameMismatch() throws {
+        let directory = temporaryDirectory(named: "scene-name-binding")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false
+        )
+        let source = professionalSceneDirectory().appendingPathComponent(
+            "professional-technical-ink.json"
+        )
+        try FileManager.default.copyItem(
+            at: source,
+            to: directory.appendingPathComponent(
+                "professional-renamed-input.json"
+            )
+        )
+
+        #expect(throws: Error.self) {
+            _ = try ProfessionalBrushEvidenceValidator.loadScenes(
+                from: directory
+            )
+        }
+    }
+
+    @Test
+    func negativeSceneMayFlipOnlyProfessionalDefinitionIdentity() throws {
+        let directory = temporaryDirectory(named: "negative-pair-contract")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false
+        )
+        for name in ProfessionalBrushEvidenceValidator.sceneNames {
+            let source = professionalSceneDirectory().appendingPathComponent(
+                "\(name).json"
+            )
+            let destination = directory.appendingPathComponent("\(name).json")
+            if name == "professional-technical-ink-negative-control" {
+                var object = try #require(
+                    JSONSerialization.jsonObject(
+                        with: Data(contentsOf: source)
+                    ) as? [String: Any]
+                )
+                var expectations = try #require(
+                    object["depositionInvariantExpectations"]
+                        as? [String: Bool]
+                )
+                expectations["professionalDefinitionIdentityExact"] = true
+                expectations["predictionOnOffEqual"] = false
+                object["depositionInvariantExpectations"] = expectations
+                try JSONSerialization.data(
+                    withJSONObject: object,
+                    options: [.prettyPrinted, .sortedKeys]
+                ).write(to: destination)
+            } else {
+                try FileManager.default.copyItem(
+                    at: source,
+                    to: destination
+                )
+            }
+        }
+
+        let scenes = try ProfessionalBrushEvidenceValidator.loadScenes(
+            from: directory
+        )
+        #expect(throws: Error.self) {
+            try ProfessionalBrushEvidenceValidator.validateSceneSet(scenes)
+        }
+    }
+
     @Test(arguments: professionalEntries)
     private func committedDefinitionsMatchGoldenSemanticHashesAndResources(
         _ fixture: ProfessionalEntryFixture
@@ -62,6 +134,7 @@ struct ProfessionalBrushHarnessRunnerTests {
 
     @Test
     func evidenceSchemaRejectsEveryRequiredFieldMutation() throws {
+        #expect(ProfessionalBrushSceneEvidence.currentSchemaVersion == 2)
         let valid = professionalEvidenceFixture()
         try ProfessionalBrushEvidenceValidator.validate(valid)
 
@@ -166,7 +239,7 @@ struct ProfessionalBrushHarnessRunnerTests {
             scene: repositoryScene(named: sceneName),
             outputDirectory: output,
             build: BenchmarkBuild(
-                configuration: "Testing",
+                configuration: "Debug",
                 gitCommit: String(repeating: "e", count: 40)
             )
         )
@@ -180,14 +253,157 @@ struct ProfessionalBrushHarnessRunnerTests {
 
         try ProfessionalBrushEvidenceValidator.validate(evidence)
         #expect(evidence.invariantResults.values.allSatisfy { $0 })
+        let decodedCanonical = try RasterObservationValidator.decode(
+            Data(
+                contentsOf: output.appendingPathComponent(
+                    "\(sceneName).canonical.png"
+                )
+            ),
+            label: "canonical"
+        )
+        #expect(
+            ArtifactFileSystem.sha256(Data(decodedCanonical.bgra))
+                == evidence.observations.canonicalBGRA8SHA256
+        )
+        let benchmarkObject = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(
+                    contentsOf: output.appendingPathComponent(
+                        "\(sceneName).benchmark.json"
+                    )
+                )
+            ) as? [String: Any]
+        )
+        #expect(
+            Set(benchmarkObject.keys)
+                == SceneArtifactValidator.benchmarkKeys
+        )
         #expect(Set(result.artifactURLs.map(\.lastPathComponent)) == [
             "\(sceneName).benchmark.json",
             "\(sceneName).canonical.png",
             "\(sceneName).characterization.json",
             "\(sceneName).committed.png",
+            "\(sceneName).eraser-after.png",
+            "\(sceneName).eraser-before.png",
+            "\(sceneName).grid-origin.png",
+            "\(sceneName).grid-translated.png",
             "\(sceneName).live.png",
+            "\(sceneName).prediction-off.png",
+            "\(sceneName).prediction-on.png",
             "\(sceneName).professional-evidence.json",
+            "\(sceneName).radial-reflection-reference.png",
+            "\(sceneName).radial-reflection-rendered.png",
+            "\(sceneName).radial-rotation-reference.png",
+            "\(sceneName).radial-rotation-rendered.png",
         ])
+    }
+
+    @Test
+    @MainActor
+    func artifactValidatorDerivesAllPositiveClaimsFromRawFiles()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let root = temporaryDirectory(named: "positive-artifact-root")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        var gpuName = ""
+        var operatingSystem = ""
+        var executableHash = ""
+        for sceneName in
+            ProfessionalBrushEvidenceValidator.positiveSceneNames
+        {
+            let emitted = root.appendingPathComponent(
+                "emitted-\(sceneName)"
+            )
+            let destination = root.appendingPathComponent(sceneName)
+            let result = try await professionalHarnessRunner(
+                device: device,
+                library: depositionHarnessTestLibrary(device: device)
+            ).run(
+                scene: repositoryScene(named: sceneName),
+                outputDirectory: emitted,
+                build: BenchmarkBuild(
+                    configuration: "Debug",
+                    gitCommit: String(repeating: "e", count: 40)
+                )
+            )
+            try FileManager.default.createDirectory(
+                at: destination,
+                withIntermediateDirectories: false
+            )
+            for sourceURL in result.artifactURLs {
+                var name = String(
+                    sourceURL.lastPathComponent.dropFirst(
+                        "\(sceneName).".count
+                    )
+                )
+                if name == "professional-evidence.json" {
+                    name = "evidence.json"
+                }
+                try FileManager.default.copyItem(
+                    at: sourceURL,
+                    to: destination.appendingPathComponent(name)
+                )
+            }
+            try FileManager.default.removeItem(at: emitted)
+            gpuName = result.benchmark.hardware.gpuName
+            operatingSystem = result.benchmark.operatingSystem
+            let evidence = try ProfessionalBrushSceneEvidence.decode(
+                Data(
+                    contentsOf: destination.appendingPathComponent(
+                        "evidence.json"
+                    )
+                )
+            )
+            executableHash = evidence.rendererExecutableSHA256
+        }
+
+        #expect(
+            try SceneArtifactValidator.validatePositive(
+                root: root,
+                expectedCommit: String(repeating: "e", count: 40),
+                expectedGPUName: gpuName,
+                expectedOperatingSystem: operatingSystem,
+                expectedRendererSHA256: executableHash,
+                baseline:
+                    try professionalCharacterizationBaselineForValidation()
+            ) >= 0
+        )
+
+        let mutatedScene =
+            ProfessionalBrushEvidenceValidator.positiveSceneNames[0]
+        let evidenceURL = root.appendingPathComponent(mutatedScene)
+            .appendingPathComponent("evidence.json")
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: evidenceURL)
+            ) as? [String: Any]
+        )
+        var observations = try #require(
+            object["observations"] as? [String: Any]
+        )
+        observations["canonicalBGRA8SHA256"] =
+            String(repeating: "0", count: 64)
+        object["observations"] = observations
+        try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys]
+        ).write(to: evidenceURL)
+        #expect(throws: Error.self) {
+            _ = try SceneArtifactValidator.validatePositive(
+                root: root,
+                expectedCommit: String(repeating: "e", count: 40),
+                expectedGPUName: gpuName,
+                expectedOperatingSystem: operatingSystem,
+                expectedRendererSHA256: executableHash,
+                baseline:
+                    try professionalCharacterizationBaselineForValidation()
+            )
+        }
     }
 
     @Test(
@@ -312,6 +528,7 @@ private func professionalEvidenceFixture() -> ProfessionalBrushSceneEvidence {
         committedPNGSHA256: String(repeating: "b", count: 64),
         canonicalPNGSHA256: String(repeating: "c", count: 64),
         characterizationSHA256: String(repeating: "d", count: 64),
+        rendererExecutableSHA256: String(repeating: "e", count: 64),
         previewCommitMaximumChannelDelta: 1,
         compilerCounters: ProfessionalBrushCompilerCounterEvidence(
             beforeCompile: .zero,
@@ -327,6 +544,41 @@ private func professionalEvidenceFixture() -> ProfessionalBrushSceneEvidence {
             encodedInstanceCount: 4,
             bufferHighWater: 1,
             missedFrameCount: 0
+        ),
+        observations: ProfessionalBrushInvariantObservations(
+            liveBGRA8SHA256: String(repeating: "1", count: 64),
+            committedBGRA8SHA256: String(repeating: "2", count: 64),
+            canonicalBGRA8SHA256: String(repeating: "3", count: 64),
+            liveNontransparentPixelCount: 1,
+            committedNontransparentPixelCount: 1,
+            canonicalNontransparentPixelCount: 1,
+            predictionOffBGRA8SHA256: String(repeating: "4", count: 64),
+            predictionOnBGRA8SHA256: String(repeating: "4", count: 64),
+            predictionMaximumChannelDelta: 0,
+            gridOriginBGRA8SHA256: String(repeating: "5", count: 64),
+            gridTranslatedBGRA8SHA256: String(repeating: "5", count: 64),
+            gridMaximumChannelDelta: 0,
+            eraserBeforeBGRA8SHA256: String(repeating: "6", count: 64),
+            eraserAfterBGRA8SHA256: String(repeating: "7", count: 64),
+            eraserBeforeNontransparentPixelCount: 2,
+            eraserAfterNontransparentPixelCount: 1,
+            eraserReducedAlphaPixelCount: 1,
+            radialRotationRenderedBGRA8SHA256:
+                String(repeating: "8", count: 64),
+            radialRotationReferenceBGRA8SHA256:
+                String(repeating: "8", count: 64),
+            radialRotationMaximumChannelDelta: 0,
+            radialReflectionRenderedBGRA8SHA256:
+                String(repeating: "9", count: 64),
+            radialReflectionReferenceBGRA8SHA256:
+                String(repeating: "9", count: 64),
+            radialReflectionMaximumChannelDelta: 0,
+            replayMode: "replayTail",
+            replayMaximumSamples: 256,
+            replayMaximumDabs: 2_048,
+            replayMaximumProjectedInstances: 4_096,
+            pipelinePrepareCallCountBeforeStroke: 1,
+            pipelinePrepareCallCountAfterStroke: 1
         ),
         invariantResults: Dictionary(
             uniqueKeysWithValues:
@@ -352,6 +604,34 @@ private func professionalSceneDirectory() -> URL {
         .deletingLastPathComponent()
         .deletingLastPathComponent()
         .appendingPathComponent("App/PatternSpike/Harness/Scenes")
+}
+
+private func professionalCharacterizationBaselineForValidation()
+    throws -> ProfessionalBrushLogicalBaseline
+{
+    let records = try ProfessionalBrushCatalog.all.flatMap { entry in
+        let package = try BrushPackage(
+            manifest: BrushPackageManifest(resources: []),
+            definition: entry.definition,
+            resourceData: [:]
+        )
+        let hash = try package.contentHash
+        return StrokeTraceFixtures.professional.map { trace in
+            ProfessionalBrushCharacterizer.record(
+                family: entry.displayName,
+                definitionSemanticHash: hash,
+                trace: trace,
+                program: entry.program
+            )
+        }
+    }.sorted {
+        ($0.brushID, $0.traceName) < ($1.brushID, $1.traceName)
+    }
+    return try ProfessionalBrushLogicalBaseline(
+        validatingSchemaVersion:
+            ProfessionalBrushLogicalBaseline.schemaVersion,
+        records: records
+    )
 }
 
 @MainActor

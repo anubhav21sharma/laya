@@ -104,14 +104,27 @@ let package = Package(
         ),
         .executableTarget(
             name: "ProfessionalBrushEvidenceGate",
-            dependencies: ["MetalRenderer"]
+            dependencies: ["ProfessionalBrushEvidenceValidation"]
         ),
         .executableTarget(
             name: "BrushFoundationEvidenceGate",
             dependencies: ["MetalRenderer"]
         ),
+        .target(
+            name: "BrushDepositionEvidenceValidation"
+        ),
+        .target(
+            name: "ProfessionalBrushEvidenceValidation",
+            dependencies: [
+                "BrushDepositionEvidenceValidation",
+                "BrushFormat",
+                "CShaderTypes",
+                "PatternEngine",
+            ]
+        ),
         .executableTarget(
-            name: "BrushDepositionEvidenceGate"
+            name: "BrushDepositionEvidenceGate",
+            dependencies: ["BrushDepositionEvidenceValidation"]
         ),
         .executableTarget(
             name: "BrushInputAllocationProbeHarness",
@@ -133,7 +146,8 @@ let package = Package(
                 "CShaderTypes",
                 "EditorCore",
                 "BrushFormat",
-                "BrushDepositionEvidenceGate",
+                "BrushDepositionEvidenceValidation",
+                "ProfessionalBrushEvidenceValidation",
             ]
         ),
         .testTarget(
@@ -174,6 +188,7 @@ let package = Package(
                 "MetalRenderer",
                 "PatternEngine",
                 "PatternFile",
+                "ProfessionalBrushEvidenceValidation",
             ],
             path: "App",
             exclude: [

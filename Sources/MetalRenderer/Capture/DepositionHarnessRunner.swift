@@ -131,8 +131,9 @@ public final class DepositionHarnessRunner {
         }
 
         var invariants: [String: Bool]
+        let professionalAudit: ProfessionalRunAudit?
         if isProfessional {
-            invariants = try await professionalInvariantResults(
+            let audit = try await professionalInvariantResults(
                 stem: stem,
                 scene: scene,
                 primary: capture,
@@ -141,7 +142,10 @@ public final class DepositionHarnessRunner {
                 countersBeforeStroke: countersBeforeStroke,
                 countersAfterStroke: countersAfterStroke
             )
+            professionalAudit = audit
+            invariants = audit.invariantResults
         } else {
+            professionalAudit = nil
             invariants = try await invariantResults(
                 stem: stem,
                 scene: scene,
@@ -167,6 +171,7 @@ public final class DepositionHarnessRunner {
                 build: build,
                 context: context,
                 capture: capture,
+                audit: professionalAudit!,
                 invariants: invariants,
                 countersBeforeStroke: countersBeforeStroke,
                 countersAfterStroke: countersAfterStroke
@@ -330,6 +335,26 @@ private extension DepositionHarnessRunner {
         let displayMetrics: [GPUFrameMetrics]
         let pipelinePreparationUnchanged: Bool
         let telemetry: BrushLabRendererDepositionDiagnosticSnapshot
+    }
+
+    struct ProfessionalRasterPair {
+        let first: [UInt8]
+        let second: [UInt8]
+    }
+
+    struct ProfessionalRadialObservations {
+        let rotation: ProfessionalRasterPair
+        let reflection: ProfessionalRasterPair
+    }
+
+    struct ProfessionalRunAudit {
+        let invariantResults: [String: Bool]
+        let prediction: ProfessionalRasterPair
+        let grid: ProfessionalRasterPair
+        let eraser: ProfessionalRasterPair
+        let radial: ProfessionalRadialObservations
+        let pipelinePrepareCallCountBeforeStroke: Int
+        let pipelinePrepareCallCountAfterStroke: Int
     }
 
     struct SeededFailureContext {
@@ -772,7 +797,7 @@ private extension DepositionHarnessRunner {
         package: BrushPackage,
         countersBeforeStroke: BrushCompilerCounters,
         countersAfterStroke: BrushCompilerCounters
-    ) async throws -> [String: Bool] {
+    ) async throws -> ProfessionalRunAudit {
         let definition = context.compiled.program.definition
         let expectedHash =
             ProfessionalBrushEvidenceValidator.expectedSemanticHash(
@@ -788,7 +813,27 @@ private extension DepositionHarnessRunner {
             }
         )
         let replayLimits = definition.replayLimits
-        return [
+        let pipelineBefore =
+            context.pipelineLibrary.debugPrepareCallCount
+        let prediction = try await professionalPredictionObservation(
+            scene: scene,
+            package: package
+        )
+        let eraser = try await professionalEraserObservation(
+            scene: scene,
+            package: package
+        )
+        let radial = try await professionalRadialProjectionObservations(
+            scene: scene,
+            package: package
+        )
+        let grid = try await professionalGridTranslationObservation(
+            scene: scene,
+            package: package
+        )
+        let pipelineAfter =
+            context.pipelineLibrary.debugPrepareCallCount
+        let results = [
             "boundedLiveWork":
                 definition.replayMode == .replayTail
                 && replayLimits == BrushRecipePolicy.replayTailLimits
@@ -801,10 +846,12 @@ private extension DepositionHarnessRunner {
                     <= BrushRecipePolicy.replayTailLimits
                         .maximumProjectedInstances,
             "destinationOutEraserCompatible":
-                try await professionalEraserIsCompatible(
-                    scene: scene,
-                    package: package
-                ),
+                Self.hasNontransparentPixel(eraser.first)
+                && eraser.first != eraser.second
+                && Self.reducedAlphaPixelCount(
+                    before: eraser.first,
+                    after: eraser.second
+                ) > 0,
             "nonemptyVisibleOutput":
                 Self.hasNontransparentPixel(
                     Self.textureBytes(primary.live)
@@ -816,10 +863,7 @@ private extension DepositionHarnessRunner {
                     Self.textureBytes(primary.canonical)
                 ),
             "predictionOnOffEqual":
-                try await predictionIsEqual(
-                    scene: scene,
-                    package: package
-                ),
+                prediction.first == prediction.second,
             "previewCommitMaximumDeltaWithinTolerance":
                 primary.previewCommitMaximumChannelDelta <= 1,
             "professionalDefinitionIdentityExact":
@@ -830,27 +874,39 @@ private extension DepositionHarnessRunner {
                 && context.compiled.renderIdentity.semanticHash
                     == expectedHash,
             "radialRotationAndReflectionCorrect":
-                try await professionalRadialProjectionIsCorrect(
-                    scene: scene,
-                    package: package
-                ),
+                Self.maximumChannelDelta(
+                    radial.rotation.first,
+                    radial.rotation.second
+                ) <= 8
+                && Self.maximumChannelDelta(
+                    radial.reflection.first,
+                    radial.reflection.second
+                ) <= 8,
             "resolvedResourcesAndMipsExact":
                 actualResources == expectedResources,
             "strokeCompilerCacheCountersUnchanged":
                 countersBeforeStroke == countersAfterStroke
-                    && primary.pipelinePreparationUnchanged,
+                    && primary.pipelinePreparationUnchanged
+                    && pipelineBefore == pipelineAfter,
             "tilingPeriodTranslationEqual":
-                try await professionalGridTranslationIsEqual(
-                    scene: scene,
-                    package: package
-                ),
+                grid.first == grid.second
+                    && Self.hasNontransparentPixel(grid.first),
         ]
+        return ProfessionalRunAudit(
+            invariantResults: results,
+            prediction: prediction,
+            grid: grid,
+            eraser: eraser,
+            radial: radial,
+            pipelinePrepareCallCountBeforeStroke: pipelineBefore,
+            pipelinePrepareCallCountAfterStroke: pipelineAfter
+        )
     }
 
-    func professionalEraserIsCompatible(
+    func professionalEraserObservation(
         scene: HarnessScene,
         package: BrushPackage
-    ) async throws -> Bool {
+    ) async throws -> ProfessionalRasterPair {
         let context = try await makeContext(
             scene: scene,
             package: package
@@ -879,20 +935,13 @@ private extension DepositionHarnessRunner {
             diameter: package.definition.id.rawValue
                 == "builtin.professional-natural-charcoal" ? 80 : 40
         )
-        return Self.hasNontransparentPixel(painted)
-            && painted != erased
-            && zip(
-                stride(from: 3, to: painted.count, by: 4),
-                stride(from: 3, to: erased.count, by: 4)
-            ).contains {
-                painted[$0.0] > erased[$0.1]
-            }
+        return ProfessionalRasterPair(first: painted, second: erased)
     }
 
-    func professionalGridTranslationIsEqual(
+    func professionalGridTranslationObservation(
         scene: HarnessScene,
         package: BrushPackage
-    ) async throws -> Bool {
+    ) async throws -> ProfessionalRasterPair {
         let first = try await periodicProjectionBytes(
             scene: scene,
             package: package,
@@ -905,84 +954,102 @@ private extension DepositionHarnessRunner {
             tiling: .grid,
             worldOffset: SIMD2(Float(scene.width), 0)
         )
-        return first == second
-            && Self.hasNontransparentPixel(first)
+        return ProfessionalRasterPair(first: first, second: second)
     }
 
-    func professionalRadialProjectionIsCorrect(
+    func professionalRadialProjectionObservations(
         scene: HarnessScene,
         package: BrushPackage
-    ) async throws -> Bool {
-        let configuration = FiniteSymmetryConfiguration.radial(
-            RadialSymmetryConfiguration(
-                kind: .mandala,
-                rayCount: 8,
-                center: WorldPoint(
-                    x: Float(scene.width) * 0.5,
-                    y: Float(scene.height) * 0.5
-                ),
-                referenceAngleRadians: 0.17
-            )
+    ) async throws -> ProfessionalRadialObservations {
+        let trace = Self.professionalRadialTrace(
+            width: scene.width,
+            height: scene.height
         )
-        let strategy = try TilingStrategy(
-            finiteConfiguration: configuration,
-            canvasSize: PixelSize(
-                width: scene.width,
-                height: scene.height
-            )
-        )
-        let center = SIMD2(
-            Float(scene.width) * 0.5,
-            Float(scene.height) * 0.5
-        )
-        let brushToWorld = Affine2D(
-            xAxis: SIMD2(Float(scene.width) * 0.48, 0),
-            yAxis: SIMD2(0, Float(scene.height) * 0.48),
-            translation: center
-        )
-        let fragments = TilingProjection.fragments(
-            for: StampFootprint(
-                brushToWorld: brushToWorld,
-                localBounds: AxisAlignedRect(
-                    minimum: SIMD2(-1, -1),
-                    maximum: SIMD2(1, 1)
-                ),
-                coverageSymmetry: .oriented
-            ),
-            using: strategy
-        )
-        guard !fragments.isEmpty,
-              fragments.contains(where: { $0.operation.reflected }),
-              fragments.contains(where: { !$0.operation.reflected }),
-              fragments.allSatisfy({
-                  let determinant =
-                      $0.canonicalFromBrush.xAxis.x
-                        * $0.canonicalFromBrush.yAxis.y
-                      - $0.canonicalFromBrush.xAxis.y
-                        * $0.canonicalFromBrush.yAxis.x
-                  return determinant != 0
-                      && (determinant < 0) == $0.operation.reflected
-              })
-        else {
-            return false
-        }
-        let context = try await makeContext(
+        let plain = try await professionalFiniteProjectionBytes(
             scene: scene,
-            package: package
+            package: package,
+            configuration: .plain,
+            trace: trace
         )
+        let rotationRendered = try await professionalFiniteProjectionBytes(
+            scene: scene,
+            package: package,
+            configuration: .radial(
+                RadialSymmetryConfiguration(
+                    kind: .rotation,
+                    rayCount: 2,
+                    center: WorldPoint(
+                        x: Float(scene.width) * 0.5,
+                        y: Float(scene.height) * 0.5
+                    ),
+                    referenceAngleRadians: 0
+                )
+            ),
+            trace: trace
+        )
+        let reflectionRendered =
+            try await professionalFiniteProjectionBytes(
+                scene: scene,
+                package: package,
+                configuration: .radial(
+                    RadialSymmetryConfiguration(
+                        kind: .mirror,
+                        rayCount: 1,
+                        center: WorldPoint(
+                            x: Float(scene.width) * 0.5,
+                            y: Float(scene.height) * 0.5
+                        ),
+                        referenceAngleRadians: 0
+                    )
+                ),
+                trace: trace
+            )
+        return ProfessionalRadialObservations(
+            rotation: ProfessionalRasterPair(
+                first: rotationRendered,
+                second: Self.mergedWithTransformedCopy(
+                    plain,
+                    width: scene.width,
+                    height: scene.height,
+                    transform: .rotateHalfTurn
+                )
+            ),
+            reflection: ProfessionalRasterPair(
+                first: reflectionRendered,
+                second: Self.mergedWithTransformedCopy(
+                    plain,
+                    width: scene.width,
+                    height: scene.height,
+                    transform: .reflectVertically
+                )
+            )
+        )
+    }
+
+    func professionalFiniteProjectionBytes(
+        scene: HarnessScene,
+        package: BrushPackage,
+        configuration: FiniteSymmetryConfiguration,
+        trace: [StrokeSample]
+    ) async throws -> [UInt8] {
+        let context = try await makeContext(scene: scene, package: package)
         try context.renderer.applyFiniteConfiguration(configuration)
         try context.renderer.activateDrawBrush(context.compiled)
         let capture = try performStroke(
             context: context,
             scene: scene,
             stem: Self.positiveStem(scene.name),
+            trace: trace,
             diameter: package.definition.id.rawValue
                 == "builtin.professional-natural-charcoal" ? 80 : 40
         )
-        return Self.hasNontransparentPixel(
-            Self.textureBytes(capture.committed)
-        )
-            && capture.pipelinePreparationUnchanged
+        guard capture.pipelinePreparationUnchanged else {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: scene.name,
+                invariant: "strokePipelinePreparationUnchanged"
+            )
+        }
+        return Self.textureBytes(capture.committed)
     }
 
     func finishProfessionalRun(
@@ -991,6 +1058,7 @@ private extension DepositionHarnessRunner {
         build: BenchmarkBuild,
         context: Context,
         capture: StrokeCapture,
+        audit: ProfessionalRunAudit,
         invariants: [String: Bool],
         countersBeforeStroke: BrushCompilerCounters,
         countersAfterStroke: BrushCompilerCounters
@@ -1011,6 +1079,46 @@ private extension DepositionHarnessRunner {
         try Self.writePNGAtomically(capture.live, to: liveURL)
         try Self.writePNGAtomically(capture.committed, to: committedURL)
         try Self.writePNGAtomically(capture.canonical, to: canonicalURL)
+
+        let observationRasters: [(String, [UInt8])] = [
+            ("prediction-off", audit.prediction.first),
+            ("prediction-on", audit.prediction.second),
+            ("grid-origin", audit.grid.first),
+            ("grid-translated", audit.grid.second),
+            ("eraser-before", audit.eraser.first),
+            ("eraser-after", audit.eraser.second),
+            (
+                "radial-rotation-rendered",
+                audit.radial.rotation.first
+            ),
+            (
+                "radial-rotation-reference",
+                audit.radial.rotation.second
+            ),
+            (
+                "radial-reflection-rendered",
+                audit.radial.reflection.first
+            ),
+            (
+                "radial-reflection-reference",
+                audit.radial.reflection.second
+            ),
+        ]
+        var observationURLs: [URL] = []
+        for (name, bytes) in observationRasters {
+            let url = outputDirectory.appendingPathComponent(
+                "\(scene.name).\(name).png"
+            )
+            try Self.writePNGAtomically(
+                bgra: bytes,
+                pixelSize: PixelSize(
+                    width: scene.width,
+                    height: scene.height
+                ),
+                to: url
+            )
+            observationURLs.append(url)
+        }
 
         let definition = context.compiled.program.definition
         let characterization =
@@ -1044,6 +1152,75 @@ private extension DepositionHarnessRunner {
                         context.compiled.textures[identity]!.mipmapLevelCount
                 )
             }
+        guard let replayLimits = definition.replayLimits else {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: scene.name,
+                invariant: "boundedLiveWork"
+            )
+        }
+        let liveBytes = Self.textureBytes(capture.live)
+        let committedBytes = Self.textureBytes(capture.committed)
+        let canonicalBytes = Self.textureBytes(capture.canonical)
+        let observations = ProfessionalBrushInvariantObservations(
+            liveBGRA8SHA256: Self.sha256(liveBytes),
+            committedBGRA8SHA256: Self.sha256(committedBytes),
+            canonicalBGRA8SHA256: Self.sha256(canonicalBytes),
+            liveNontransparentPixelCount:
+                Self.nontransparentPixelCount(liveBytes),
+            committedNontransparentPixelCount:
+                Self.nontransparentPixelCount(committedBytes),
+            canonicalNontransparentPixelCount:
+                Self.nontransparentPixelCount(canonicalBytes),
+            predictionOffBGRA8SHA256:
+                Self.sha256(audit.prediction.first),
+            predictionOnBGRA8SHA256:
+                Self.sha256(audit.prediction.second),
+            predictionMaximumChannelDelta: Self.maximumChannelDelta(
+                audit.prediction.first,
+                audit.prediction.second
+            ),
+            gridOriginBGRA8SHA256: Self.sha256(audit.grid.first),
+            gridTranslatedBGRA8SHA256: Self.sha256(audit.grid.second),
+            gridMaximumChannelDelta: Self.maximumChannelDelta(
+                audit.grid.first,
+                audit.grid.second
+            ),
+            eraserBeforeBGRA8SHA256: Self.sha256(audit.eraser.first),
+            eraserAfterBGRA8SHA256: Self.sha256(audit.eraser.second),
+            eraserBeforeNontransparentPixelCount:
+                Self.nontransparentPixelCount(audit.eraser.first),
+            eraserAfterNontransparentPixelCount:
+                Self.nontransparentPixelCount(audit.eraser.second),
+            eraserReducedAlphaPixelCount: Self.reducedAlphaPixelCount(
+                before: audit.eraser.first,
+                after: audit.eraser.second
+            ),
+            radialRotationRenderedBGRA8SHA256:
+                Self.sha256(audit.radial.rotation.first),
+            radialRotationReferenceBGRA8SHA256:
+                Self.sha256(audit.radial.rotation.second),
+            radialRotationMaximumChannelDelta: Self.maximumChannelDelta(
+                audit.radial.rotation.first,
+                audit.radial.rotation.second
+            ),
+            radialReflectionRenderedBGRA8SHA256:
+                Self.sha256(audit.radial.reflection.first),
+            radialReflectionReferenceBGRA8SHA256:
+                Self.sha256(audit.radial.reflection.second),
+            radialReflectionMaximumChannelDelta: Self.maximumChannelDelta(
+                audit.radial.reflection.first,
+                audit.radial.reflection.second
+            ),
+            replayMode: "replayTail",
+            replayMaximumSamples: replayLimits.maximumSamples,
+            replayMaximumDabs: replayLimits.maximumDabs,
+            replayMaximumProjectedInstances:
+                replayLimits.maximumProjectedInstances,
+            pipelinePrepareCallCountBeforeStroke:
+                audit.pipelinePrepareCallCountBeforeStroke,
+            pipelinePrepareCallCountAfterStroke:
+                audit.pipelinePrepareCallCountAfterStroke
+        )
         let evidence = ProfessionalBrushSceneEvidence(
             schemaVersion:
                 ProfessionalBrushSceneEvidence.currentSchemaVersion,
@@ -1076,6 +1253,8 @@ private extension DepositionHarnessRunner {
                 ProfessionalBrushEvidenceValidator.sha256(
                     characterizationData
                 ),
+            rendererExecutableSHA256:
+                try Self.runningExecutableSHA256(),
             previewCommitMaximumChannelDelta:
                 capture.previewCommitMaximumChannelDelta,
             compilerCounters: ProfessionalBrushCompilerCounterEvidence(
@@ -1099,6 +1278,7 @@ private extension DepositionHarnessRunner {
                 missedFrameCount:
                     capture.telemetry.missedFrameCount
             ),
+            observations: observations,
             invariantResults: invariants
         )
         try ProfessionalBrushEvidenceValidator.validate(evidence)
@@ -1134,7 +1314,7 @@ private extension DepositionHarnessRunner {
             artifactURLs: [
                 liveURL, committedURL, canonicalURL, characterizationURL,
                 evidenceURL, benchmarkURL,
-            ]
+            ] + observationURLs
         )
     }
 
@@ -1306,6 +1486,17 @@ private extension DepositionHarnessRunner {
         scene: HarnessScene,
         package: BrushPackage
     ) async throws -> Bool {
+        let observation = try await professionalPredictionObservation(
+            scene: scene,
+            package: package
+        )
+        return observation.first == observation.second
+    }
+
+    func professionalPredictionObservation(
+        scene: HarnessScene,
+        package: BrushPackage
+    ) async throws -> ProfessionalRasterPair {
         let actual = Self.trace(
             width: scene.width,
             height: scene.height
@@ -1332,7 +1523,7 @@ private extension DepositionHarnessRunner {
             package: package,
             trace: predicted
         )
-        return without == with
+        return ProfessionalRasterPair(first: without, second: with)
     }
 
     func tilingTranslationIsEqual(
@@ -1574,8 +1765,7 @@ private extension DepositionHarnessRunner {
         package: BrushPackage
     ) async throws -> (
         reflectionHandednessCorrect: Bool,
-        symmetryOrderEqual: Bool,
-        metadataHandednessCorrect: Bool
+        symmetryOrderEqual: Bool
     ) {
         let context = try await makeContext(
             scene: scene,
@@ -1665,8 +1855,7 @@ private extension DepositionHarnessRunner {
             )
         return (
             flagsAreCorrect && renderedReflectionIsCorrect,
-            orderIsEqual,
-            flagsAreCorrect
+            orderIsEqual
         )
     }
 
@@ -3164,6 +3353,113 @@ private extension DepositionHarnessRunner {
         }
     }
 
+    static func nontransparentPixelCount(_ bytes: [UInt8]) -> Int {
+        stride(from: 3, to: bytes.count, by: 4).reduce(0) {
+            $0 + (bytes[$1] == 0 ? 0 : 1)
+        }
+    }
+
+    static func sha256(_ bytes: [UInt8]) -> String {
+        ProfessionalBrushEvidenceValidator.sha256(Data(bytes))
+    }
+
+    static func runningExecutableSHA256() throws -> String {
+        guard let argument = CommandLine.arguments.first else {
+            throw DepositionHarnessRunError.metalResourceUnavailable(
+                "the running executable identity"
+            )
+        }
+        let url = URL(fileURLWithPath: argument)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        return ProfessionalBrushEvidenceValidator.sha256(
+            try Data(contentsOf: url)
+        )
+    }
+
+    static func reducedAlphaPixelCount(
+        before: [UInt8],
+        after: [UInt8]
+    ) -> Int {
+        guard before.count == after.count else { return 0 }
+        return stride(from: 3, to: before.count, by: 4).reduce(0) {
+            $0 + (before[$1] > after[$1] ? 1 : 0)
+        }
+    }
+
+    enum HalfTurnOrReflection {
+        case rotateHalfTurn
+        case reflectVertically
+    }
+
+    static func mergedWithTransformedCopy(
+        _ source: [UInt8],
+        width: Int,
+        height: Int,
+        transform: HalfTurnOrReflection
+    ) -> [UInt8] {
+        precondition(source.count == width * height * 4)
+        var result = source
+        for y in 0..<height {
+            for x in 0..<width {
+                let transformedX: Int
+                let transformedY: Int
+                switch transform {
+                case .rotateHalfTurn:
+                    transformedX = width - 1 - x
+                    transformedY = height - 1 - y
+                case .reflectVertically:
+                    transformedX = x
+                    transformedY = height - 1 - y
+                }
+                let sourceIndex = (y * width + x) * 4
+                let destinationIndex =
+                    (transformedY * width + transformedX) * 4
+                for channel in 0..<3 {
+                    result[destinationIndex + channel] = min(
+                        result[destinationIndex + channel],
+                        source[sourceIndex + channel]
+                    )
+                }
+                result[destinationIndex + 3] = max(
+                    result[destinationIndex + 3],
+                    source[sourceIndex + 3]
+                )
+            }
+        }
+        return result
+    }
+
+    static func professionalRadialTrace(
+        width: Int,
+        height: Int
+    ) -> [StrokeSample] {
+        let y = Float(height) * 0.32
+        return [
+            sample(
+                x: Float(width) * 0.28,
+                y: y,
+                pressure: 0.8,
+                timestamp: 0,
+                phase: .began
+            ),
+            sample(
+                x: Float(width) * 0.72,
+                y: y,
+                pressure: 0.8,
+                timestamp: 0.01,
+                phase: .moved
+            ),
+            sample(
+                x: Float(width) * 0.72,
+                y: y,
+                pressure: 0.8,
+                timestamp: 0.02,
+                phase: .ended
+            ),
+        ]
+    }
+
     static func expectedMipProbeAlpha(
         decoded: DecodedBrushTexture,
         diameter: Float
@@ -3283,6 +3579,7 @@ private extension DepositionHarnessRunner {
             gpuMilliseconds: metrics.map(\.gpuMilliseconds),
             peakResidentBytes: UInt64(evidence.residentResourceBytes),
             newInstanceCounts: [evidence.projectedInstanceCount],
+            missedFrameCount: Int(evidence.telemetry.missedFrameCount),
             totalProjectedFragmentCount:
                 evidence.projectedInstanceCount,
             totalInstanceBytes:
@@ -3292,6 +3589,7 @@ private extension DepositionHarnessRunner {
                 evidence.previewCommitMaximumChannelDelta > 1 ? 1 : 0,
             recipeID: evidence.definitionID,
             seed: seed,
+            replayMode: "replayTail",
             assetResidentBytes: evidence.residentResourceBytes,
             logicalDabDigest: characterization.logicalDabDigest,
             canonicalBGRA8Digest: DepositionSceneEvidence.sha256(

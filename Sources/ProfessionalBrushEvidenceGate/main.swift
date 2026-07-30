@@ -1,13 +1,13 @@
 import Darwin
 import Foundation
-import MetalRenderer
+import ProfessionalBrushEvidenceValidation
 
 @main
 enum ProfessionalBrushEvidenceGate {
     static func main() {
         do {
             let options = try parse(Array(CommandLine.arguments.dropFirst()))
-            let status = try ProfessionalBrushEvidenceValidator.validate(
+            let status = try ProfessionalBrushArtifactValidator.validate(
                 artifactRoot: URL(fileURLWithPath: options.artifacts),
                 expectedCommit: options.commit,
                 expectedSourceTreeSHA256: options.sourceTreeSHA256,
@@ -45,7 +45,7 @@ enum ProfessionalBrushEvidenceGate {
 
     private static func parse(_ arguments: [String]) throws -> Options {
         guard arguments.count == 8 else {
-            throw ProfessionalBrushEvidenceValidationError.invalid(usage)
+            throw ProfessionalBrushArtifactValidationError.invalid(usage)
         }
         var values: [String: String] = [:]
         var index = 0
@@ -57,7 +57,7 @@ enum ProfessionalBrushEvidenceGate {
             ].contains(flag),
                 values[flag] == nil
             else {
-                throw ProfessionalBrushEvidenceValidationError.invalid(
+                throw ProfessionalBrushArtifactValidationError.invalid(
                     usage
                 )
             }
@@ -72,7 +72,7 @@ enum ProfessionalBrushEvidenceGate {
                 values["--stage-four-artifacts"],
               stageFourArtifacts.hasPrefix("/")
         else {
-            throw ProfessionalBrushEvidenceValidationError.invalid(usage)
+            throw ProfessionalBrushArtifactValidationError.invalid(usage)
         }
         return Options(
             artifacts: artifacts,

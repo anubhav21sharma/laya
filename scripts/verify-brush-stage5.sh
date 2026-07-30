@@ -126,7 +126,17 @@ run_positive_scene() {
   cp "$output/$name.professional-evidence.json" \
     "$destination/evidence.json"
   cp "$output/$name.benchmark.json" "$destination/benchmark.json"
-  [[ "$(find "$output" -type f | wc -l | tr -d ' ')" -eq 6 ]] \
+  local observation
+  for observation in \
+    eraser-after eraser-before grid-origin grid-translated \
+    prediction-off prediction-on \
+    radial-reflection-reference radial-reflection-rendered \
+    radial-rotation-reference radial-rotation-rendered
+  do
+    cp "$output/$name.$observation.png" \
+      "$destination/$observation.png"
+  done
+  [[ "$(find "$output" -type f | wc -l | tr -d ' ')" -eq 16 ]] \
     || fail "positive professional scene emitted an unexpected file: $name"
 }
 
@@ -233,6 +243,19 @@ copy_physical_profiles() {
   [[ -n "$input" ]] || return 0
   [[ -d "$input" && ! -L "$input" ]] \
     || fail "physical evidence input must be a regular directory"
+  local candidate
+  while IFS= read -r -d '' candidate; do
+    case "$(basename "$candidate")" in
+      a14Floor60Hz|inputToPhoton|memoryWarning|pencil|\
+referenceMSeriesProMotion120Hz|suspendResume|sustainedThermal|wacom) ;;
+      *)
+        fail \
+          "physical evidence contains an unknown profile: $(basename "$candidate")"
+        ;;
+    esac
+  done < <(find "$input" -mindepth 1 -maxdepth 1 -print0)
+  [[ "$(find "$input" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 8 ]] \
+    || fail "physical evidence must contain the exact eight-profile set"
   local profile
   for profile in \
     a14Floor60Hz inputToPhoton memoryWarning pencil \
@@ -244,6 +267,21 @@ copy_physical_profiles() {
       cp -R "$input/$profile" "$artifacts/physical-profiles/$profile"
     fi
   done
+}
+
+copy_manual_evidence() {
+  local input="${PROFESSIONAL_BRUSH_MANUAL_EVIDENCE_FILE:-}"
+  if [[ -z "$input" ]]; then
+    write_card_exporter_package
+    run_logged manual-card-export \
+      swift run --package-path "$card_package" \
+        --configuration debug CardExporter \
+        "$artifacts/manual-cards/catalog.json"
+    return
+  fi
+  [[ -f "$input" && ! -L "$input" ]] \
+    || fail "manual evidence input must be a regular non-symlink file"
+  cp "$input" "$artifacts/manual-cards/catalog.json"
 }
 
 write_json_status_and_provenance() {
@@ -265,7 +303,7 @@ write_json_status_and_provenance() {
 
   local provenance="$artifacts/provenance.json"
   plutil -create xml1 "$provenance"
-  plutil -insert schemaVersion -integer 1 "$provenance"
+  plutil -insert schemaVersion -integer 2 "$provenance"
   plutil -insert commit -string "$commit" "$provenance"
   plutil -insert sourceTreeSHA256 -string "$source_tree_hash" "$provenance"
   plutil -insert configuration -string Debug "$provenance"
@@ -283,6 +321,23 @@ write_json_status_and_provenance() {
   plutil -insert stageFourExitStatus -integer "$stage_four_exit" "$provenance"
   plutil -insert stageFourArtifactManifestSHA256 \
     -string "$stage_four_manifest_hash" "$provenance"
+  plutil -insert rendererExecutableSHA256 \
+    -string "$renderer_executable_hash" "$provenance"
+  plutil -insert rawProvenanceSHA256 -dictionary "$provenance"
+  local raw_name raw_hash raw_key
+  for raw_name in \
+    hardware-machine.txt hardware-model.txt hardware.txt kernel.txt \
+    operating-system.txt swift-toolchain.txt validator-nm-undefined.txt \
+    validator-otool.txt xcode-toolchain.txt xcodegen-toolchain.txt
+  do
+    raw_hash="$(
+      shasum -a 256 "$artifacts/raw-provenance/$raw_name" \
+        | awk '{print $1}'
+    )"
+    raw_key="${raw_name//./\\.}"
+    plutil -insert "rawProvenanceSHA256.$raw_key" \
+      -string "$raw_hash" "$provenance"
+  done
   plutil -convert json "$provenance"
 
   local regression="$artifacts/stage-four-regression.json"
@@ -320,6 +375,8 @@ mkdir -p \
   "$artifacts/negative-control" \
   "$artifacts/manual-cards" \
   "$artifacts/physical-profiles" \
+  "$artifacts/raw-provenance" \
+  "$artifacts/runtime" \
   "$artifacts/scene-inputs" \
   "$work" "$logs"
 
@@ -339,6 +396,7 @@ sw_vers >"$logs/operating-system.txt"
 uname -a >"$logs/kernel.txt"
 sysctl -n hw.model >"$logs/hardware-model.txt"
 system_profiler SPDisplaysDataType >"$logs/hardware.txt"
+uname -m >"$logs/hardware-machine.txt"
 swift_version="$(
   tr '\n' ' ' <"$logs/swift-toolchain.txt" \
     | sed -E 's/[[:space:]]+/ /g; s/[[:space:]]+$//'
@@ -361,6 +419,17 @@ run_logged gate-build \
 validator="$scratch/debug/ProfessionalBrushEvidenceGate"
 [[ -x "$validator" ]] \
   || fail "ProfessionalBrushEvidenceGate executable is unavailable"
+otool -L "$validator" \
+  >"$artifacts/raw-provenance/validator-otool.txt"
+nm -u "$validator" \
+  >"$artifacts/raw-provenance/validator-nm-undefined.txt"
+if rg -i \
+    'Metal\.framework|MetalKit|MTLCreateSystemDefaultDevice|MetalRenderer|GridRenderer' \
+    "$artifacts/raw-provenance/validator-otool.txt" \
+    "$artifacts/raw-provenance/validator-nm-undefined.txt"
+then
+  fail "ProfessionalBrushEvidenceGate crosses the forbidden Metal boundary"
+fi
 
 run_logged full-tests \
   swift test --scratch-path "$scratch" --disable-sandbox --no-parallel
@@ -402,6 +471,10 @@ run_logged ipad-analyze xcodebuild \
 app_binary="$derived_mac/Build/Products/Debug/PatternSpike.app/Contents/MacOS/PatternSpike"
 [[ -x "$app_binary" ]] \
   || fail "Mac professional harness binary is unavailable"
+cp "$app_binary" "$artifacts/runtime/PatternSpike"
+renderer_executable_hash="$(
+  shasum -a 256 "$artifacts/runtime/PatternSpike" | awk '{print $1}'
+)"
 
 scene_names=(
   professional-chisel-marker
@@ -424,11 +497,7 @@ run_logged characterization-export \
 cp "$logs/characterization-export.stdout.log" \
   "$artifacts/characterization-baseline.json"
 
-write_card_exporter_package
-run_logged manual-card-export \
-  swift run --package-path "$card_package" \
-    --configuration debug CardExporter \
-    "$artifacts/manual-cards/catalog.json"
+copy_manual_evidence
 copy_physical_profiles
 
 gpu_name="$(
@@ -443,7 +512,10 @@ lower_gpu="$(printf '%s' "$gpu_name" | tr '[:upper:]' '[:lower:]')"
 case "$lower_gpu" in
   *paravirtual*) gpu_classification="paravirtual" ;;
   *virtual*|*simulator*) gpu_classification="virtual" ;;
-  *) gpu_classification="physical" ;;
+  apple\ [am][0-9]*|amd\ [a-z0-9]*|intel\ [a-z0-9]*)
+    gpu_classification="physical"
+    ;;
+  *) gpu_classification="unknown" ;;
 esac
 
 metrics="$(
@@ -484,6 +556,13 @@ SWIFT
 read -r cpu_p95 gpu_500 <<<"$metrics"
 [[ -n "$cpu_p95" && -n "$gpu_500" ]] \
   || fail "professional performance metrics are unavailable"
+for raw_name in \
+  hardware-machine.txt hardware-model.txt hardware.txt kernel.txt \
+  operating-system.txt swift-toolchain.txt xcode-toolchain.txt \
+  xcodegen-toolchain.txt
+do
+  cp "$logs/$raw_name" "$artifacts/raw-provenance/$raw_name"
+done
 write_json_status_and_provenance
 
 run_logged git-diff-check git diff --check

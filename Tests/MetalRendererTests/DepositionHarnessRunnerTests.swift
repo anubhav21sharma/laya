@@ -1,5 +1,5 @@
 import BrushFormat
-import BrushDepositionEvidenceGate
+import BrushDepositionEvidenceValidation
 import EditorCore
 import Foundation
 import Metal

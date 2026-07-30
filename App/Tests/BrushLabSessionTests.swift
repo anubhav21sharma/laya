@@ -6,6 +6,7 @@ import Foundation
 import Metal
 @testable import MetalRenderer
 import PatternEngine
+@testable import ProfessionalBrushEvidenceValidation
 import Testing
 
 @Suite("Brush Lab session", .serialized)
@@ -98,6 +99,61 @@ struct BrushLabSessionTests {
         guard let runtime = try makeRuntime() else { return }
         #expect(try runtime.session.makeProfessionalManualCardsData()
             == professional)
+    }
+
+    @Test
+    func professionalManualArtifactValidatorRequiresExactUserOwnedEvidence()
+        throws
+    {
+        let pending = try BrushLabProfessionalManualCatalog.pending()
+            .encoded()
+        #expect(
+            try ProfessionalManualEvidenceValidator.validate(pending)
+                == false
+        )
+
+        let cards = BrushLabManualCard.professionalFixedMatrix
+        let complete = BrushLabProfessionalManualCatalog(
+            cards: cards,
+            assessments: cards.map {
+                BrushLabManualAssessment(
+                    cardID: $0.cardID,
+                    responsiveness: "pass",
+                    edgeQuality: "pass",
+                    taperTermination: "pass",
+                    textureCohesion: "pass",
+                    pressureResponse: "pass",
+                    tiltDirectionResponse: "pass",
+                    buildup: "pass",
+                    symmetryBehavior: "pass",
+                    eraserMatch: "pass",
+                    notes: "reviewed"
+                )
+            }
+        )
+        #expect(
+            try ProfessionalManualEvidenceValidator.validate(
+                try complete.encoded()
+            )
+        )
+
+        var object = try #require(
+            JSONSerialization.jsonObject(with: pending)
+                as? [String: Any]
+        )
+        var mutatedCards = try #require(
+            object["cards"] as? [[String: Any]]
+        )
+        mutatedCards[0]["gesture"] = "unknown"
+        object["cards"] = mutatedCards
+        #expect(throws: Error.self) {
+            _ = try ProfessionalManualEvidenceValidator.validate(
+                try JSONSerialization.data(
+                    withJSONObject: object,
+                    options: [.sortedKeys]
+                )
+            )
+        }
     }
 
     @Test

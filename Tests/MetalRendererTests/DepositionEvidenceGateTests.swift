@@ -1,4 +1,4 @@
-@testable import BrushDepositionEvidenceGate
+@testable import BrushDepositionEvidenceValidation
 import CryptoKit
 import Foundation
 @testable import MetalRenderer
