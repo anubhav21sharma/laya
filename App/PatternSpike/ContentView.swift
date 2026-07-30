@@ -31,7 +31,9 @@ enum EditorFocusTarget: Hashable {
 @MainActor
 func makeBootstrapEditorSession(
     device: any MTLDevice,
-    library: any MTLLibrary
+    library: any MTLLibrary,
+    selectionStore: any EditorBrushSelectionStore =
+        UserDefaultsEditorBrushSelectionStore.live
 ) async throws -> EditorSessionController {
     let configuration = try TilingCanvasConfiguration(
         pixelSize: GridCanvasContract.defaultPixelSize,
@@ -65,20 +67,77 @@ func makeBootstrapEditorSession(
         ),
         pipelineLibrary: pipelineLibrary
     )
-    let controller = EditorSessionController(
+    return try await makeBootstrapEditorSession(
         renderer: renderer,
         compileDefinition: { definition in
             try await compiler.compileAndActivate(definition: definition)
+        },
+        selectionStore: selectionStore
+    )
+}
+
+@MainActor
+func makeBootstrapEditorSession(
+    renderer: GridRenderer,
+    compileDefinition: @escaping @MainActor @Sendable
+        (BrushDefinition) async throws -> CompiledBrush,
+    selectionStore: any EditorBrushSelectionStore
+) async throws -> EditorSessionController {
+    let controller = EditorSessionController(
+        renderer: renderer,
+        compileDefinition: compileDefinition,
+        selectionStore: selectionStore
+    )
+    let storedID = selectionStore.readSelectedBrushID().map {
+        BrushRecipeID($0)
+    }
+    let resolvedID = storedID.flatMap(EditorBrushCatalog.resolveSelection)
+        ?? EditorBrushCatalog.defaultDraw.id
+    let requestedEntry = EditorBrushCatalog.drawEntry(for: resolvedID)
+        ?? EditorBrushCatalog.defaultDraw
+    let eraser = try await compileDefinition(
+        EditorBrushCatalog.eraser.definition
+    )
+    guard eraser.renderIdentity.definitionID == EditorBrushCatalog.eraser.id
+    else {
+        throw MetalRendererError.invalidCompiledBrush
+    }
+
+    do {
+        try await installBootstrapSelection(
+            requestedEntry,
+            eraser: eraser,
+            controller: controller,
+            compileDefinition: compileDefinition
+        )
+    } catch {
+        guard requestedEntry.id != EditorBrushCatalog.defaultDraw.id else {
+            throw error
         }
-    )
-    let draw = try await compiler.compileAndActivate(
-        definition: EditorBrushCatalog.defaultDraw.definition
-    )
-    let eraser = try await compiler.compileAndActivate(
-        definition: EditorBrushCatalog.eraser.definition
-    )
-    try controller.installBootstrapBrushes(draw: draw, eraser: eraser)
+        try await installBootstrapSelection(
+            EditorBrushCatalog.defaultDraw,
+            eraser: eraser,
+            controller: controller,
+            compileDefinition: compileDefinition
+        )
+    }
     return controller
+}
+
+@MainActor
+private func installBootstrapSelection(
+    _ entry: EditorBrushEntry,
+    eraser: CompiledBrush,
+    controller: EditorSessionController,
+    compileDefinition: @MainActor @Sendable
+        (BrushDefinition) async throws -> CompiledBrush
+) async throws {
+    let draw = try await compileDefinition(entry.definition)
+    guard draw.renderIdentity.definitionID == entry.id else {
+        throw MetalRendererError.invalidCompiledBrush
+    }
+    try controller.installBootstrapBrushes(draw: draw, eraser: eraser)
+    try controller.confirmBootstrapBrushSelection(entry.id)
 }
 
 struct EditorCanvasHost: View {

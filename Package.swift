@@ -219,6 +219,7 @@ let package = Package(
                 "PatternSpike/Panels/EditorTopBar.swift",
                 "PatternSpike/Panels/TilingInspector.swift",
                 "PatternSpike/Panels/ToolRail.swift",
+                "PatternSpike/Persistence/EditorBrushSelectionStore.swift",
                 "PatternSpike/Persistence/PatternProjectBridge.swift",
                 "PatternSpike/Persistence/PatternProjectFileDocument.swift",
                 "Tests/ContentViewLifecycleTests.swift",

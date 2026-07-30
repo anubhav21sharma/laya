@@ -150,7 +150,7 @@ func makeNativeDepositionPipelineLibrary(
 }
 
 @MainActor
-private func makeNativeCompiler(
+func makeNativeCompiler(
     renderer: GridRenderer
 ) throws -> BrushCompiler {
     guard let queue = renderer.device.makeCommandQueue() else {
@@ -201,6 +201,27 @@ private final class GatedSelectionCompiler {
 
 private enum GatedSelectionCompilerError: Error {
     case missingPendingSelection(BrushRecipeID)
+}
+
+@MainActor
+private final class RecordingBrushSelectionStore:
+    EditorBrushSelectionStore
+{
+    var storedID: String?
+    private(set) var writes: [String] = []
+
+    init(storedID: String? = nil) {
+        self.storedID = storedID
+    }
+
+    func readSelectedBrushID() -> String? {
+        storedID
+    }
+
+    func writeSelectedBrushID(_ id: String) {
+        storedID = id
+        writes.append(id)
+    }
 }
 
 private let controllerRadialConfiguration = RadialSymmetryConfiguration(
@@ -1102,12 +1123,43 @@ func selectionConfirmsOnlyAfterCompiledRendererActivation() async throws {
 
 @Test
 @MainActor
+func successfulSelectionPersistsTheCanonicalActivatedBrushExactlyOnce()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let store = RecordingBrushSelectionStore()
+    let controller = EditorSessionController(
+        renderer: renderer,
+        compileDefinition: { definition in
+            try await compiler.compileAndActivate(definition: definition)
+        },
+        selectionStore: store
+    )
+    let ink = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.defaultDraw.definition
+    )
+    let eraser = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.eraser.definition
+    )
+    try controller.installBootstrapBrushes(draw: ink, eraser: eraser)
+
+    await controller.selectBrush(AnchorBrushCatalog.marker.id)
+
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.chiselMarker.id)
+    #expect(store.writes == [EditorBrushCatalog.chiselMarker.id.rawValue])
+}
+
+@Test
+@MainActor
 func failedSelectionPreservesInstalledBrushAndModelSelection() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let compiler = try makeNativeCompiler(renderer: renderer)
+    let store = RecordingBrushSelectionStore()
     let controller = EditorSessionController(
         renderer: renderer,
-        compileDefinition: { _ in throw MetalRendererError.unsupportedBrushProgram }
+        compileDefinition: { _ in throw MetalRendererError.unsupportedBrushProgram },
+        selectionStore: store
     )
     let ink = try await compiler.compileAndActivate(
         definition: EditorBrushCatalog.defaultDraw.definition
@@ -1124,6 +1176,36 @@ func failedSelectionPreservesInstalledBrushAndModelSelection() async throws {
     #expect(controller.model.selectedRecipeID == beforeModel)
     #expect(renderer.harnessPreparedDrawBrushIdentity == beforeDraw)
     #expect(renderer.harnessPreparedDrawBrushIdentity == ink.renderIdentity)
+    #expect(store.writes.isEmpty)
+}
+
+@Test
+@MainActor
+func mismatchedCompiledSelectionCannotPublishModelOrPersistence() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let wrongBrush = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.graphitePencil.definition
+    )
+    let store = RecordingBrushSelectionStore()
+    let controller = EditorSessionController(
+        renderer: renderer,
+        compileDefinition: { _ in wrongBrush },
+        selectionStore: store
+    )
+    let ink = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.defaultDraw.definition
+    )
+    let eraser = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.eraser.definition
+    )
+    try controller.installBootstrapBrushes(draw: ink, eraser: eraser)
+
+    await controller.selectBrush(EditorBrushCatalog.chiselMarker.id)
+
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
+    #expect(renderer.harnessPreparedDrawBrushIdentity == ink.renderIdentity)
+    #expect(store.writes.isEmpty)
 }
 
 @Test
@@ -1134,11 +1216,13 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
     guard let renderer = try makeControllerRenderer() else { return }
     let compiler = try makeNativeCompiler(renderer: renderer)
     let gate = GatedSelectionCompiler()
+    let store = RecordingBrushSelectionStore()
     let controller = EditorSessionController(
         renderer: renderer,
         compileDefinition: { definition in
             try await gate.compile(definition)
-        }
+        },
+        selectionStore: store
     )
     let ink = try await compiler.compileAndActivate(
         definition: EditorBrushCatalog.defaultDraw.definition
@@ -1180,6 +1264,7 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
         renderer.harnessPreparedDrawBrushIdentity
             == airbrush.renderIdentity
     )
+    #expect(store.writes == [EditorBrushCatalog.nativeAirbrush.id.rawValue])
 
     try gate.complete(EditorBrushCatalog.chiselMarker.id, with: marker)
     await staleSelection.value
@@ -1188,6 +1273,55 @@ func latestCompletedSelectionWinsWhenEarlierCompilationFinishesStale()
         renderer.harnessPreparedDrawBrushIdentity
             == airbrush.renderIdentity
     )
+    #expect(store.writes == [EditorBrushCatalog.nativeAirbrush.id.rawValue])
+}
+
+@Test
+@MainActor
+func replacementSessionPreservesConfirmedSelectionAndPersistenceWiring()
+    async throws
+{
+    guard let sourceRenderer = try makeControllerRenderer(),
+          let replacementRenderer = try makeControllerRenderer()
+    else { return }
+    let compiler = try makeNativeCompiler(renderer: sourceRenderer)
+    let store = RecordingBrushSelectionStore()
+    let source = EditorSessionController(
+        renderer: sourceRenderer,
+        compileDefinition: { definition in
+            try await compiler.compileAndActivate(definition: definition)
+        },
+        selectionStore: store
+    )
+    let graphite = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.graphitePencil.definition
+    )
+    let eraser = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.eraser.definition
+    )
+    try source.installBootstrapBrushes(draw: graphite, eraser: eraser)
+    try source.confirmBootstrapBrushSelection(
+        EditorBrushCatalog.graphitePencil.id
+    )
+
+    let replacement = try source.replacementSession(
+        renderer: replacementRenderer
+    )
+    #expect(
+        replacement.model.selectedRecipeID
+            == EditorBrushCatalog.graphitePencil.id
+    )
+
+    await replacement.selectBrush(AnchorBrushCatalog.marker.id)
+
+    #expect(
+        replacement.model.selectedRecipeID
+            == EditorBrushCatalog.chiselMarker.id
+    )
+    #expect(store.writes == [
+        EditorBrushCatalog.graphitePencil.id.rawValue,
+        EditorBrushCatalog.chiselMarker.id.rawValue,
+    ])
 }
 
 @Test

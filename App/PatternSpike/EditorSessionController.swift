@@ -31,6 +31,7 @@ final class EditorSessionController {
     private var selectionGeneration: UInt64 = 0
     private let compileDefinition:
         @MainActor @Sendable (BrushDefinition) async throws -> CompiledBrush
+    private let selectionStore: (any EditorBrushSelectionStore)?
     private var diagnosticFixedStrokeSeed: UInt64?
     private var pendingEstimatedProperties:
         [Int: StrokeEstimatedProperties] = [:]
@@ -125,6 +126,7 @@ final class EditorSessionController {
         ) throws -> Void)? = nil,
         compileDefinition: (@MainActor @Sendable
             (BrushDefinition) async throws -> CompiledBrush)? = nil,
+        selectionStore: (any EditorBrushSelectionStore)? = nil,
         historyMaximumBytes: Int = 200 * 1_024 * 1_024,
         strokeSeedSessionEntropy: UInt64 = EditorSessionController
             .makeStrokeSeedSessionEntropy()
@@ -165,6 +167,7 @@ final class EditorSessionController {
         }
         self.compileDefinition = compileDefinition
             ?? Self.unsupportedDefinitionCompilation
+        self.selectionStore = selectionStore
         model.confirmDocumentConfiguration(renderer.documentConfiguration)
         model.confirmPixelSize(renderer.pixelSize)
         model.confirmGeometryLocks(
@@ -440,6 +443,9 @@ final class EditorSessionController {
         else { return }
         do {
             let compiled = try await compileDefinition(entry.definition)
+            guard compiled.renderIdentity.definitionID == resolvedID else {
+                throw MetalRendererError.invalidCompiledBrush
+            }
             guard generation == selectionGeneration,
                   renderer.isIdle,
                   transaction.state == .idle,
@@ -448,6 +454,7 @@ final class EditorSessionController {
             try renderer.activateDrawBrush(compiled)
             activeDrawBrush = compiled
             model.confirmRecipe(resolvedID)
+            selectionStore?.writeSelectedBrushID(resolvedID.rawValue)
         } catch let error as MetalRendererError {
             if generation == selectionGeneration {
                 report(error)
@@ -476,9 +483,20 @@ final class EditorSessionController {
         draw: CompiledBrush,
         eraser: CompiledBrush
     ) throws {
-        try installDiagnosticDrawBrush(draw)
         try renderer.activateEraserBrush(eraser)
         activeEraserBrush = eraser
+        try installDiagnosticDrawBrush(draw)
+    }
+
+    func confirmBootstrapBrushSelection(_ id: BrushRecipeID) throws {
+        guard activeDrawBrush?.renderIdentity.definitionID == id,
+              renderer.preparedBrush(for: .draw)?.renderIdentity.definitionID
+                == id
+        else {
+            throw MetalRendererError.invalidCompiledBrush
+        }
+        model.confirmRecipe(id)
+        selectionStore?.writeSelectedBrushID(id.rawValue)
     }
 
     func replacementSession(
@@ -500,7 +518,8 @@ final class EditorSessionController {
 
         let replacement = EditorSessionController(
             renderer: replacementRenderer,
-            compileDefinition: compileDefinition
+            compileDefinition: compileDefinition,
+            selectionStore: selectionStore
         )
         replacement.model.confirmTool(model.tool)
         replacement.model.confirmInkColor(model.inkColor)
@@ -601,6 +620,48 @@ final class EditorSessionController {
                     result: .failure(rendererError)
                 )
             }
+        }
+    }
+
+    /// Establishes an empty review document in one awaited production
+    /// operation. Successful replacement removes the clear/setup history so a
+    /// review card always starts from an empty, non-undoable configuration.
+    func resetReviewDocument(
+        to configuration: SymmetryDocumentConfiguration
+    ) async throws {
+        try await clearAndAwaitCompletion()
+        guard transaction.state == .idle,
+              transaction.pendingOperation == nil,
+              awaitedClear == nil,
+              renderer.isIdle,
+              history.currentDocumentIsEmpty
+        else {
+            throw MetalRendererError.commitPendingInput
+        }
+        do {
+            try renderer.replaceEmptyDocumentConfiguration(
+                configuration,
+                pixelSize: targetPixelSize(for: configuration)
+            )
+            releaseRasterRevisions(history.removeAll())
+            refreshDerivedModelState()
+        } catch let error as MetalRendererError {
+            report(error)
+            throw error
+        } catch {
+            let rendererError = MetalRendererError.commandFailed(
+                error.localizedDescription
+            )
+            report(rendererError)
+            throw rendererError
+        }
+        guard renderer.documentConfiguration == configuration,
+              model.documentConfiguration == configuration,
+              history.currentDocumentIsEmpty,
+              !history.canUndo,
+              !history.canRedo
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
         }
     }
 

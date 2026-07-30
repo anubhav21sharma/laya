@@ -39,6 +39,27 @@ private struct HostedEditorCanvas: View {
 
 private final class EstimatedTouchIdentity {}
 
+@MainActor
+private final class LifecycleBrushSelectionStore:
+    EditorBrushSelectionStore
+{
+    var storedID: String?
+    private(set) var writes: [String] = []
+
+    init(storedID: String? = nil) {
+        self.storedID = storedID
+    }
+
+    func readSelectedBrushID() -> String? {
+        storedID
+    }
+
+    func writeSelectedBrushID(_ id: String) {
+        storedID = id
+        writes.append(id)
+    }
+}
+
 #if DEBUG
 @Test func debugHUDToggleAcceptsPhysicalGraveAndShiftedTilde() {
     #expect(isDebugHUDToggleCharacter("`"))
@@ -229,9 +250,11 @@ func contentViewBootstrapReturnsOnlyAfterProfessionalBrushesAreInstalled()
     async throws
 {
     guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let store = LifecycleBrushSelectionStore()
     let controller = try await makeBootstrapEditorSession(
         device: device,
-        library: makeNativeTestLibrary(device: device)
+        library: makeNativeTestLibrary(device: device),
+        selectionStore: store
     )
 
     #expect(
@@ -243,6 +266,186 @@ func contentViewBootstrapReturnsOnlyAfterProfessionalBrushesAreInstalled()
             == EditorBrushCatalog.eraser.id
     )
     #expect(controller.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
+    #expect(store.writes == [EditorBrushCatalog.defaultDraw.id.rawValue])
+}
+
+@Test
+@MainActor
+func bootstrapRestoresAndConfirmsAStoredCanonicalBrushOnlyAfterActivation()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let store = LifecycleBrushSelectionStore(
+        storedID: EditorBrushCatalog.graphitePencil.id.rawValue
+    )
+
+    let controller = try await makeBootstrapEditorSession(
+        renderer: renderer,
+        compileDefinition: { definition in
+            try await compiler.compileAndActivate(definition: definition)
+        },
+        selectionStore: store
+    )
+
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.graphitePencil.id)
+    #expect(
+        renderer.harnessPreparedDrawBrushIdentity?.definitionID
+            == EditorBrushCatalog.graphitePencil.id
+    )
+    #expect(
+        renderer.harnessPreparedEraserBrushIdentity?.definitionID
+            == EditorBrushCatalog.eraser.id
+    )
+    #expect(store.writes == [EditorBrushCatalog.graphitePencil.id.rawValue])
+}
+
+@Test
+@MainActor
+func bootstrapMigratesLegacySelectionAndRewritesCanonicalPersistence()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let store = LifecycleBrushSelectionStore(
+        storedID: "builtin.native-marker"
+    )
+
+    let controller = try await makeBootstrapEditorSession(
+        renderer: renderer,
+        compileDefinition: { definition in
+            try await compiler.compileAndActivate(definition: definition)
+        },
+        selectionStore: store
+    )
+
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.chiselMarker.id)
+    #expect(
+        renderer.harnessPreparedDrawBrushIdentity?.definitionID
+            == EditorBrushCatalog.chiselMarker.id
+    )
+    #expect(store.writes == [EditorBrushCatalog.chiselMarker.id.rawValue])
+}
+
+@Test
+@MainActor
+func bootstrapFallsBackFromUnknownPersistenceAndRewritesDefault()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let store = LifecycleBrushSelectionStore(storedID: " \nunknown/brush\u{0}")
+
+    let controller = try await makeBootstrapEditorSession(
+        renderer: renderer,
+        compileDefinition: { definition in
+            try await compiler.compileAndActivate(definition: definition)
+        },
+        selectionStore: store
+    )
+
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
+    #expect(
+        renderer.harnessPreparedDrawBrushIdentity?.definitionID
+            == EditorBrushCatalog.defaultDraw.id
+    )
+    #expect(store.writes == [EditorBrushCatalog.defaultDraw.id.rawValue])
+}
+
+@Test
+@MainActor
+func bootstrapCompileFailureFallsBackWithoutPublishingRequestedSelection()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let store = LifecycleBrushSelectionStore(
+        storedID: EditorBrushCatalog.graphitePencil.id.rawValue
+    )
+
+    let controller = try await makeBootstrapEditorSession(
+        renderer: renderer,
+        compileDefinition: { definition in
+            if definition.id == EditorBrushCatalog.graphitePencil.id {
+                throw MetalRendererError.unsupportedBrushProgram
+            }
+            return try await compiler.compileAndActivate(
+                definition: definition
+            )
+        },
+        selectionStore: store
+    )
+
+    #expect(controller.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
+    #expect(
+        renderer.harnessPreparedDrawBrushIdentity?.definitionID
+            == EditorBrushCatalog.defaultDraw.id
+    )
+    #expect(
+        renderer.harnessPreparedEraserBrushIdentity?.definitionID
+            == EditorBrushCatalog.eraser.id
+    )
+    #expect(store.writes == [EditorBrushCatalog.defaultDraw.id.rawValue])
+}
+
+@Test
+@MainActor
+func bootstrapDefaultFailureDoesNotConfirmOrRewritePersistence()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let store = LifecycleBrushSelectionStore(
+        storedID: EditorBrushCatalog.graphitePencil.id.rawValue
+    )
+
+    await #expect(throws: MetalRendererError.self) {
+        _ = try await makeBootstrapEditorSession(
+            renderer: renderer,
+            compileDefinition: { definition in
+                if definition.id == EditorBrushCatalog.graphitePencil.id
+                    || definition.id == EditorBrushCatalog.defaultDraw.id
+                {
+                    throw MetalRendererError.unsupportedBrushProgram
+                }
+                return try await compiler.compileAndActivate(
+                    definition: definition
+                )
+            },
+            selectionStore: store
+        )
+    }
+
+    #expect(store.storedID == EditorBrushCatalog.graphitePencil.id.rawValue)
+    #expect(store.writes.isEmpty)
+}
+
+@Test
+@MainActor
+func bootstrapRejectsMismatchedEraserBeforePublishingSelection() async throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compiler = try makeNativeCompiler(renderer: renderer)
+    let wrongEraser = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.graphitePencil.definition
+    )
+    let store = LifecycleBrushSelectionStore()
+
+    await #expect(throws: MetalRendererError.self) {
+        _ = try await makeBootstrapEditorSession(
+            renderer: renderer,
+            compileDefinition: { definition in
+                if definition.id == EditorBrushCatalog.eraser.id {
+                    return wrongEraser
+                }
+                return try await compiler.compileAndActivate(
+                    definition: definition
+                )
+            },
+            selectionStore: store
+        )
+    }
+
+    #expect(store.writes.isEmpty)
 }
 
 @Test
