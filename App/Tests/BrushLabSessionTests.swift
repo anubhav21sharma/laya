@@ -21,7 +21,9 @@ struct BrushLabSessionTests {
 
         #expect(cards.map(\.cardID) == cards.map(\.cardID).sorted())
         #expect(Set(cards.map(\.brushID)) == professionalIDs)
-        #expect(cards.allSatisfy { $0.tool == .draw })
+        #expect(cards.allSatisfy {
+            $0.passes.first?.role == .professionalDraw
+        })
 
         for brushID in professionalIDs {
             let brushCards = cards.filter { $0.brushID == brushID }
@@ -44,15 +46,278 @@ struct BrushLabSessionTests {
             ]
             #expect(expectedGestures.isSubset(of: Set(brushCards.map(\.gesture))))
             let tapDiameters = Set(
-                brushCards.filter { $0.gesture == .tap }.map(\.diameter)
+                brushCards.filter { $0.gesture == .tap }
+                    .map(\.nominalDiameter)
             )
             #expect(tapDiameters == [2, 20, 2_000])
         }
     }
 
     @Test
+    func professionalCardCanBeSelectedThroughProductionReviewPath()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        let card = try #require(
+            runtime.session.professionalManualCards.first {
+                $0.brushID
+                    == ProfessionalBrushCatalog.graphitePencil.id.rawValue
+                    && $0.gesture == .slowLine
+            }
+        )
+
+        runtime.session.selectReviewMatrix(.stageFiveProfessional)
+        try await runtime.session.selectReviewCard(card.cardID)
+        let replay = try await runtime.session.replaySelectedReviewCard()
+
+        #expect(runtime.session.selectedReviewCardID == card.cardID)
+        #expect(
+            runtime.session.package?.definition.id
+                == ProfessionalBrushCatalog.graphitePencil.id
+        )
+        #expect(
+            runtime.controller.renderer.preparedBrush(for: .draw)?
+                .renderIdentity.definitionID
+                == ProfessionalBrushCatalog.graphitePencil.id
+        )
+        #expect(
+            runtime.controller.renderer.preparedBrush(for: .erase)?
+                .renderIdentity.definitionID
+                == EditorBrushCatalog.eraser.id
+        )
+        #expect(replay.professionalPasses.count == card.passes.count)
+        #expect(replay.professionalPasses[0].role == .professionalDraw)
+        #expect(
+            runtime.session.activeProfessionalCompiledBrush?
+                .renderIdentity.definitionID
+                == ProfessionalBrushCatalog.graphitePencil.id
+        )
+    }
+
+    @Test
+    func professionalPressureTiltAndDeviceScenariosDriveNamedInputs()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        runtime.session.selectReviewMatrix(.stageFiveProfessional)
+        let cards = BrushLabManualCard.professionalFixedMatrix.filter {
+            $0.brushID
+                == ProfessionalBrushCatalog.graphitePencil.id.rawValue
+        }
+        let pressureCard = try #require(cards.first {
+            $0.gesture == .pressureRamp
+        })
+        try await runtime.session.selectReviewCard(pressureCard.cardID)
+        let pressureReplay = try await runtime.session
+            .replaySelectedReviewCard()
+        let pressure = pressureReplay.input
+
+        let tiltCard = try #require(cards.first {
+            $0.gesture == .tiltSweep
+        })
+        try await runtime.session.selectReviewCard(tiltCard.cardID)
+        let tiltReplay = try await runtime.session.replaySelectedReviewCard()
+        let tilt = tiltReplay.input
+
+        let mouseCard = try #require(cards.first {
+            $0.gesture == .mouseFallback
+        })
+        try await runtime.session.selectReviewCard(mouseCard.cardID)
+        let mouseReplay = try await runtime.session.replaySelectedReviewCard()
+        let mouse = mouseReplay.input
+
+        let tabletCard = try #require(cards.first {
+            $0.gesture == .tabletInput
+        })
+        try await runtime.session.selectReviewCard(tabletCard.cardID)
+        let tabletReplay = try await runtime.session
+            .replaySelectedReviewCard()
+        let tablet = tabletReplay.input
+        let pressureTiltCapabilities: StrokeInputCapabilities = [
+            .pressure, .altitude, .azimuth,
+        ]
+
+        #expect(Set(pressure.map(\.source)) == ["pencil"])
+        #expect(pressure.first?.pressure == 0.1)
+        #expect(pressure.last?.pressure == 1)
+        #expect(zip(pressure, pressure.dropFirst()).allSatisfy {
+            $0.0.pressure < $0.1.pressure
+        })
+
+        let altitudes = try tilt.map {
+            try #require($0.altitude)
+        }
+        #expect(Set(tilt.map(\.source)) == ["pencil"])
+        #expect(zip(altitudes, altitudes.dropFirst()).allSatisfy {
+            $0.0 > $0.1
+        })
+        #expect(tilt.allSatisfy {
+            $0.capabilities
+                & pressureTiltCapabilities.rawValue
+                == pressureTiltCapabilities.rawValue
+                && $0.azimuth != nil
+        })
+
+        #expect(Set(mouse.map(\.source)) == ["mouse"])
+        #expect(mouse.allSatisfy {
+            $0.capabilities == 0
+                && $0.altitude == nil
+                && $0.azimuth == nil
+                && $0.roll == nil
+        })
+
+        #expect(Set(tablet.map(\.source)) == ["tablet"])
+        #expect(Set(tablet.map(\.pressure)).count > 1)
+        #expect(Set(tablet.compactMap(\.altitude)).count > 1)
+        #expect(tablet.allSatisfy {
+            $0.capabilities
+                & pressureTiltCapabilities.rawValue
+                == pressureTiltCapabilities.rawValue
+        })
+    }
+
+    @Test
+    func professionalMultiStrokeAndEraserLabelsDescribeExecutableActions()
+        async throws
+    {
+        guard let runtime = try makeRuntime() else { return }
+        runtime.session.selectReviewMatrix(.stageFiveProfessional)
+        let cards = BrushLabManualCard.professionalFixedMatrix.filter {
+            $0.brushID
+                == ProfessionalBrushCatalog.technicalInk.id.rawValue
+        }
+        let crossHatch = try #require(cards.first {
+            $0.gesture == .crossHatch
+        })
+        let buildup = try #require(cards.first {
+            $0.gesture == .repeatedBuildup
+        })
+        let eraser = try #require(cards.first {
+            $0.gesture == .eraserRetrace
+        })
+
+        try await runtime.session.selectReviewCard(crossHatch.cardID)
+        let crossHatchReplay = try await runtime.session
+            .replaySelectedReviewCard()
+        #expect(crossHatchReplay.input.filter {
+            $0.phase == "began"
+        }.count == 4)
+        #expect(crossHatchReplay.professionalPasses[0].strokeCount == 4)
+
+        try await runtime.session.selectReviewCard(buildup.cardID)
+        let buildupReplay = try await runtime.session.replaySelectedReviewCard()
+        #expect(buildupReplay.input.filter {
+            $0.phase == "began"
+        }.count == 4)
+        #expect(buildupReplay.professionalPasses[0].strokeCount == 4)
+
+        #expect(eraser.passes.map(\.role) == [
+            .professionalDraw,
+            .retainedStageFourEraser,
+        ])
+        #expect(eraser.passes.map(\.tool) == [.draw, .erase])
+        #expect(eraser.passes[0].brushID == eraser.brushID)
+        #expect(
+            eraser.passes[1].brushID
+                == EditorBrushCatalog.eraser.id.rawValue
+        )
+        #expect(
+            eraser.passes[0].strokes[0].samples.map {
+                SIMD2($0.x, $0.y)
+            }
+                == eraser.passes[1].strokes[0].samples.map {
+                    SIMD2($0.x, $0.y)
+                }
+        )
+
+        try await runtime.session.selectReviewCard(eraser.cardID)
+        #expect(runtime.session.nextProfessionalPass?.passIndex == 0)
+        let draw = try await runtime.session.replayNextProfessionalPass()
+        #expect(draw.role == .professionalDraw)
+        #expect(
+            runtime.session.activeProfessionalCompiledBrush?
+                .renderIdentity.definitionID
+                == ProfessionalBrushCatalog.technicalInk.id
+        )
+        #expect(runtime.session.currentProfessionalPass?.passIndex == 0)
+        #expect(runtime.session.nextProfessionalPass?.passIndex == 1)
+
+        let erase = try await runtime.session.replayNextProfessionalPass()
+        #expect(erase.role == .retainedStageFourEraser)
+        #expect(erase.definitionID == EditorBrushCatalog.eraser.id.rawValue)
+        #expect(
+            runtime.session.activeProfessionalCompiledBrush?
+                .renderIdentity.definitionID
+                == EditorBrushCatalog.eraser.id
+        )
+        #expect(runtime.session.currentProfessionalPass?.passIndex == 1)
+        #expect(runtime.session.nextProfessionalPass == nil)
+        #expect(
+            runtime.session.completedReplay?.professionalPasses.map(\.role)
+                == [
+                    .professionalDraw,
+                    .retainedStageFourEraser,
+                ]
+        )
+        let drawInput = Array(
+            runtime.session.inputRecords[draw.inputRange]
+        ).map { SIMD2($0.x, $0.y) }
+        let eraseInput = Array(
+            runtime.session.inputRecords[erase.inputRange]
+        ).map { SIMD2($0.x, $0.y) }
+        #expect(drawInput == eraseInput)
+    }
+
+    @Test
+    func failedProfessionalCompilationPreservesPreviouslyActiveBrush()
+        async throws
+    {
+        guard let runtime = try makeRuntime(
+            brushCacheBudgetBytes: 64 * 1_024
+        ) else {
+            return
+        }
+        runtime.session.selectReviewMatrix(.stageFiveProfessional)
+        let technical = try #require(
+            runtime.session.professionalManualCards.first {
+                $0.brushID
+                    == ProfessionalBrushCatalog.technicalInk.id.rawValue
+            }
+        )
+        let graphite = try #require(
+            runtime.session.professionalManualCards.first {
+                $0.brushID
+                    == ProfessionalBrushCatalog.graphitePencil.id.rawValue
+            }
+        )
+        try await runtime.session.selectReviewCard(technical.cardID)
+        let retainedIdentity = try #require(
+            runtime.controller.renderer.preparedBrush(for: .draw)?
+                .renderIdentity
+        )
+
+        await #expect(throws: BrushCompilationFailure.self) {
+            try await runtime.session.selectReviewCard(graphite.cardID)
+        }
+
+        #expect(
+            runtime.controller.renderer.preparedBrush(for: .draw)?
+                .renderIdentity == retainedIdentity
+        )
+        #expect(
+            runtime.session.selectedProfessionalManualCardID
+                == technical.cardID
+        )
+        guard case .compilationFailed = runtime.session.drawingAvailability
+        else {
+            Issue.record("Professional compilation failure was not retained")
+            return
+        }
+    }
+
+    @Test
     func professionalManualAssessmentsStartUnsetAndRemainUserOwned() {
-        let assessment = BrushLabManualAssessment(
+        let assessment = BrushLabProfessionalManualAssessment(
             cardID: "builtin.professional-technical-ink.manual"
         )
 
@@ -81,7 +346,7 @@ struct BrushLabSessionTests {
         )
 
         #expect(stageFour != professional)
-        #expect(decoded.schemaVersion == 2)
+        #expect(decoded.schemaVersion == 3)
         #expect(decoded.cards == BrushLabManualCard.professionalFixedMatrix)
         #expect(decoded.assessments.allSatisfy {
             $0.responsiveness == nil
@@ -112,11 +377,11 @@ struct BrushLabSessionTests {
                 == false
         )
 
-        let cards = BrushLabManualCard.professionalFixedMatrix
+        let cards = BrushLabProfessionalManualCard.fixedMatrix
         let complete = BrushLabProfessionalManualCatalog(
             cards: cards,
             assessments: cards.map {
-                BrushLabManualAssessment(
+                BrushLabProfessionalManualAssessment(
                     cardID: $0.cardID,
                     responsiveness: "pass",
                     edgeQuality: "pass",
@@ -157,6 +422,110 @@ struct BrushLabSessionTests {
     }
 
     @Test
+    func professionalManualValidatorRejectsNestedSchemaAndSemanticMutations()
+        throws
+    {
+        let pending = try BrushLabProfessionalManualCatalog.pending()
+            .encoded()
+        #expect(
+            ProfessionalBrushTruth.canonicalManualCardsSHA256
+                == "ef36da0a12c26ea335032b4f596005b762617da6f7057fe47ffc1031872fdf5e"
+        )
+        let mutations: [(String, (inout [String: Any]) -> Void)] = [
+            ("root key", { $0["unexpected"] = true }),
+            ("catalog schema", { $0["schemaVersion"] = 2 }),
+            ("card key", { object in
+                var cards = object["cards"] as! [[String: Any]]
+                cards[0]["unexpected"] = true
+                object["cards"] = cards
+            }),
+            ("card schema", { object in
+                var cards = object["cards"] as! [[String: Any]]
+                cards[0]["schemaVersion"] = 1
+                object["cards"] = cards
+            }),
+            ("pass key", { object in
+                var cards = object["cards"] as! [[String: Any]]
+                var passes = cards[0]["passes"] as! [[String: Any]]
+                passes[0]["unexpected"] = true
+                cards[0]["passes"] = passes
+                object["cards"] = cards
+            }),
+            ("pass role", { object in
+                var cards = object["cards"] as! [[String: Any]]
+                var passes = cards[0]["passes"] as! [[String: Any]]
+                passes[0]["role"] = "substrate"
+                cards[0]["passes"] = passes
+                object["cards"] = cards
+            }),
+            ("pass source", { object in
+                var cards = object["cards"] as! [[String: Any]]
+                var passes = cards[0]["passes"] as! [[String: Any]]
+                passes[0]["inputSource"] = "mouse"
+                cards[0]["passes"] = passes
+                object["cards"] = cards
+            }),
+            ("stroke key", { object in
+                var cards = object["cards"] as! [[String: Any]]
+                var passes = cards[0]["passes"] as! [[String: Any]]
+                var strokes = passes[0]["strokes"] as! [[String: Any]]
+                strokes[0]["unexpected"] = true
+                passes[0]["strokes"] = strokes
+                cards[0]["passes"] = passes
+                object["cards"] = cards
+            }),
+            ("sample key", { object in
+                var cards = object["cards"] as! [[String: Any]]
+                var passes = cards[0]["passes"] as! [[String: Any]]
+                var strokes = passes[0]["strokes"] as! [[String: Any]]
+                var samples = strokes[0]["samples"] as! [[String: Any]]
+                samples[0]["unexpected"] = true
+                strokes[0]["samples"] = samples
+                passes[0]["strokes"] = strokes
+                cards[0]["passes"] = passes
+                object["cards"] = cards
+            }),
+            ("sample pressure type", { object in
+                var cards = object["cards"] as! [[String: Any]]
+                var passes = cards[0]["passes"] as! [[String: Any]]
+                var strokes = passes[0]["strokes"] as! [[String: Any]]
+                var samples = strokes[0]["samples"] as! [[String: Any]]
+                samples[0]["pressure"] = true
+                strokes[0]["samples"] = samples
+                passes[0]["strokes"] = strokes
+                cards[0]["passes"] = passes
+                object["cards"] = cards
+            }),
+            ("assessment key", { object in
+                var values =
+                    object["assessments"] as! [[String: Any]]
+                values[0]["unexpected"] = true
+                object["assessments"] = values
+            }),
+            ("assessment value", { object in
+                var values =
+                    object["assessments"] as! [[String: Any]]
+                values[0]["responsiveness"] = "approved"
+                object["assessments"] = values
+            }),
+        ]
+        for (name, mutate) in mutations {
+            var object = try #require(
+                JSONSerialization.jsonObject(with: pending)
+                    as? [String: Any]
+            )
+            mutate(&object)
+            let data = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            #expect(throws: Error.self, "\(name)") {
+                _ = try ProfessionalManualEvidenceValidator.validate(data)
+            }
+        }
+    }
+
+    @Test
     func professionalMatrixExportCoordinatorWritesTheSessionReviewArtifact()
         throws
     {
@@ -182,7 +551,7 @@ struct BrushLabSessionTests {
             BrushLabProfessionalManualCatalog.self,
             from: artifact
         )
-        #expect(catalog.schemaVersion == 2)
+        #expect(catalog.schemaVersion == 3)
         #expect(catalog.cards == BrushLabManualCard.professionalFixedMatrix)
         #expect(Set(catalog.cards.map(\.brushID)) == Set(
             ProfessionalBrushCatalog.all.map(\.id.rawValue)
@@ -1084,7 +1453,8 @@ struct BrushLabSessionTests {
     }
 
     private func makeRuntime(
-        forceClearFailure: (() -> Bool)? = nil
+        forceClearFailure: (() -> Bool)? = nil,
+        brushCacheBudgetBytes: Int = 128 * 1_024 * 1_024
     ) throws -> (
         controller: EditorSessionController,
         session: BrushLabSession
@@ -1116,7 +1486,7 @@ struct BrushLabSessionTests {
                 registryID: renderer.device.registryID,
                 recommendedWorkingSetBytes: 1_024 * 1_024 * 1_024,
                 maximumWorkingTextureDimension: 4_096,
-                brushCacheBudgetBytes: 128 * 1_024 * 1_024,
+                brushCacheBudgetBytes: brushCacheBudgetBytes,
                 targetFramesPerSecond: 120
             ),
             pipelineLibrary: try makeNativeDepositionPipelineLibrary(

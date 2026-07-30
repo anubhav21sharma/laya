@@ -378,7 +378,8 @@ struct BrushLabView: View {
                 )
             }
             .disabled(
-                runtime.session.selectedManualCard == nil
+                runtime.session.reviewMatrix != .stageFourDiagnostic
+                    || runtime.session.selectedManualCard == nil
                     || !runtime.controller.renderer.isIdle
             )
 
@@ -412,36 +413,50 @@ struct BrushLabView: View {
                 runtime.session.clearTrace()
             }
 
+            Picker(
+                "Review Matrix",
+                selection: Binding(
+                    get: { runtime.session.reviewMatrix },
+                    set: { runtime.session.selectReviewMatrix($0) }
+                )
+            ) {
+                ForEach(BrushLabReviewMatrix.allCases) { matrix in
+                    Text(matrix.displayName).tag(matrix)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 280)
+            .accessibilityIdentifier("Brush Lab Review Matrix")
+
             Menu {
-                ForEach(runtime.session.manualCards, id: \.cardID) { card in
-                    Button(card.cardID) {
-                        Task {
-                            do {
-                                try await runtime.session.selectManualCard(
-                                    card.cardID
-                                )
-                                resetDiagnosticsTracking()
-                                exportError = nil
-                            } catch {
-                                exportError = error.localizedDescription
-                            }
-                        }
+                switch runtime.session.reviewMatrix {
+                case .stageFourDiagnostic:
+                    ForEach(
+                        runtime.session.manualCards,
+                        id: \.cardID
+                    ) { card in
+                        reviewCardButton(runtime, cardID: card.cardID)
+                    }
+                case .stageFiveProfessional:
+                    ForEach(
+                        runtime.session.professionalManualCards,
+                        id: \.cardID
+                    ) { card in
+                        reviewCardButton(runtime, cardID: card.cardID)
                     }
                 }
             } label: {
                 Label(
-                    runtime.session.selectedManualCard.map {
-                        "\($0.gesture.rawValue) · \($0.brushID)"
-                    } ?? "Select Card",
+                    selectedReviewLabel(runtime.session),
                     systemImage: "rectangle.stack"
                 )
             }
 
-            Button("Replay Card") {
+            Button("Replay All Passes") {
                 Task {
                     do {
                         _ = try await runtime.session
-                            .replaySelectedManualCard()
+                            .replaySelectedReviewCard()
                         exportError = nil
                     } catch {
                         exportError = error.localizedDescription
@@ -449,9 +464,27 @@ struct BrushLabView: View {
                 }
             }
             .disabled(
-                runtime.session.selectedManualCard == nil
+                runtime.session.selectedReviewCardID == nil
                     || !runtime.controller.renderer.isIdle
             )
+
+            if runtime.session.reviewMatrix == .stageFiveProfessional {
+                Button("Replay Next Pass") {
+                    Task {
+                        do {
+                            _ = try await runtime.session
+                                .replayNextProfessionalPass()
+                            exportError = nil
+                        } catch {
+                            exportError = error.localizedDescription
+                        }
+                    }
+                }
+                .disabled(
+                    runtime.session.nextProfessionalPass == nil
+                        || !runtime.controller.renderer.isIdle
+                )
+            }
 
             Button("Clear Card") {
                 runtime.session.clearManualCard()
@@ -473,6 +506,36 @@ struct BrushLabView: View {
         .controlSize(.small)
         .padding(8)
         .background(.bar)
+    }
+
+    private func reviewCardButton(
+        _ runtime: BrushLabRuntime,
+        cardID: String
+    ) -> some View {
+        Button(cardID) {
+            Task {
+                do {
+                    try await runtime.session.selectReviewCard(cardID)
+                    resetDiagnosticsTracking()
+                    exportError = nil
+                } catch {
+                    exportError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func selectedReviewLabel(_ session: BrushLabSession) -> String {
+        switch session.reviewMatrix {
+        case .stageFourDiagnostic:
+            session.selectedManualCard.map {
+                "\($0.gesture.rawValue) · \($0.brushID)"
+            } ?? "Select Diagnostic Card"
+        case .stageFiveProfessional:
+            session.selectedProfessionalManualCard.map {
+                "\($0.gesture.rawValue) · \($0.brushID)"
+            } ?? "Select Professional Card"
+        }
     }
 
     private func drawingPad(_ runtime: BrushLabRuntime) -> some View {
@@ -622,38 +685,87 @@ struct BrushLabView: View {
 
     @ViewBuilder
     private func manualCardSection(_ session: BrushLabSession) -> some View {
-        inspectorHeader("Manual Card")
-        if let card = session.selectedManualCard {
-            keyValue("ID", card.cardID)
-            keyValue("Gesture", card.gesture.rawValue)
-            keyValue(
-                "Size / pressure",
-                "\(card.diameter) / \(card.pressureProfile)"
-            )
-            keyValue("Projection", card.documentMode)
-            keyValue(
-                "Background / prediction",
-                "\(card.background.rawValue) / "
-                    + (card.predictionEnabled ? "on" : "off")
-            )
-            keyValue(
-                "Capabilities",
-                card.inputCapabilities.isEmpty
-                    ? "none"
-                    : card.inputCapabilities.joined(separator: ", ")
-            )
-            keyValue(
-                "Custom fixture",
-                card.customResourceFixture ?? "none"
-            )
-            Text("Assessment pending user input")
-                .font(.caption2.monospaced())
-                .foregroundStyle(.orange)
-        } else {
-            Text("Select one of \(session.manualCards.count) fixed cards")
+        inspectorHeader(session.reviewMatrix.displayName)
+        switch session.reviewMatrix {
+        case .stageFourDiagnostic:
+            if let card = session.selectedManualCard {
+                keyValue("ID", card.cardID)
+                keyValue("Gesture", card.gesture.rawValue)
+                keyValue(
+                    "Size / pressure",
+                    "\(card.diameter) / \(card.pressureProfile)"
+                )
+                keyValue("Projection", card.documentMode)
+                keyValue(
+                    "Background / prediction",
+                    "\(card.background.rawValue) / "
+                        + (card.predictionEnabled ? "on" : "off")
+                )
+                keyValue(
+                    "Capabilities",
+                    card.inputCapabilities.isEmpty
+                        ? "none"
+                        : card.inputCapabilities.joined(separator: ", ")
+                )
+                keyValue(
+                    "Custom fixture",
+                    card.customResourceFixture ?? "none"
+                )
+            } else {
+                Text(
+                    "Select one of \(session.manualCards.count) "
+                        + "frozen Stage 4 diagnostic cards"
+                )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            }
+        case .stageFiveProfessional:
+            if let card = session.selectedProfessionalManualCard {
+                keyValue("ID", card.cardID)
+                keyValue("Gesture", card.gesture.rawValue)
+                keyValue("Projection", card.documentMode)
+                keyValue("Ordered passes", "\(card.passes.count)")
+                ForEach(card.passes, id: \.passIndex) { pass in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(
+                            "Pass \(pass.passIndex + 1): "
+                                + "\(pass.role.rawValue)"
+                        )
+                        .font(.caption.monospaced().weight(.semibold))
+                        Text(
+                            "\(pass.tool.rawValue) · \(pass.brushID) · "
+                                + "\(pass.nominalDiameter) px · "
+                                + "\(pass.inputSource.rawValue) · "
+                                + "\(pass.strokes.count) stroke(s)"
+                        )
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                keyValue(
+                    "Current pass",
+                    session.currentProfessionalPass.map {
+                        "\($0.passIndex + 1)"
+                    } ?? "not started"
+                )
+                keyValue(
+                    "Next pass",
+                    session.nextProfessionalPass.map {
+                        "\($0.passIndex + 1)"
+                    } ?? "complete"
+                )
+            } else {
+                Text(
+                    "Select one of \(session.professionalManualCards.count) "
+                        + "executable Stage 5 professional cards"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
         }
+        Text("Assessment pending user input")
+            .font(.caption2.monospaced())
+            .foregroundStyle(.orange)
     }
 
     @ViewBuilder

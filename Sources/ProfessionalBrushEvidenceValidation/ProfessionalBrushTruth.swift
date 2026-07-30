@@ -29,6 +29,8 @@ struct ProfessionalSceneTruth {
 }
 
 enum ProfessionalBrushTruth {
+    static let canonicalManualCardsSHA256 =
+        "ef36da0a12c26ea335032b4f596005b762617da6f7057fe47ffc1031872fdf5e"
     static let professionalCharacterizationBaselineSHA256 =
         "d4758be3310facf05683c4e8560428aad8b5ff47e331c9f7632fb802aad94ea2"
     static let positiveSceneNames = [
