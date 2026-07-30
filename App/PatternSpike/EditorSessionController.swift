@@ -526,6 +526,7 @@ final class EditorSessionController {
         replacement.model.confirmBrushDiameter(model.brushDiameter)
         replacement.model.confirmRecipe(model.selectedRecipeID)
         replacement.handleGridVisibility(model.showGrid)
+        _ = nextSelectionGeneration()
         return replacement
     }
 

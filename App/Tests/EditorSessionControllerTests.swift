@@ -1326,6 +1326,62 @@ func replacementSessionPreservesConfirmedSelectionAndPersistenceWiring()
 
 @Test
 @MainActor
+func replacementInvalidatesSelectionCompilingOnTheSourceSession()
+    async throws
+{
+    guard let sourceRenderer = try makeControllerRenderer(),
+          let replacementRenderer = try makeControllerRenderer()
+    else { return }
+    let compiler = try makeNativeCompiler(renderer: sourceRenderer)
+    let gate = GatedSelectionCompiler()
+    let store = RecordingBrushSelectionStore()
+    let source = EditorSessionController(
+        renderer: sourceRenderer,
+        compileDefinition: { definition in
+            try await gate.compile(definition)
+        },
+        selectionStore: store
+    )
+    let ink = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.defaultDraw.definition
+    )
+    let eraser = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.eraser.definition
+    )
+    let marker = try await compiler.compileAndActivate(
+        definition: EditorBrushCatalog.chiselMarker.definition
+    )
+    try source.installBootstrapBrushes(draw: ink, eraser: eraser)
+
+    let obsoleteSelection = Task { @MainActor in
+        await source.selectBrush(EditorBrushCatalog.chiselMarker.id)
+    }
+    for _ in 0..<32 where gate.pendingIDs.isEmpty {
+        await Task.yield()
+    }
+    #expect(gate.pendingIDs == [EditorBrushCatalog.chiselMarker.id])
+
+    let replacement = try source.replacementSession(
+        renderer: replacementRenderer
+    )
+    #expect(
+        replacement.model.selectedRecipeID
+            == EditorBrushCatalog.defaultDraw.id
+    )
+
+    try gate.complete(EditorBrushCatalog.chiselMarker.id, with: marker)
+    await obsoleteSelection.value
+
+    #expect(source.model.selectedRecipeID == EditorBrushCatalog.defaultDraw.id)
+    #expect(
+        sourceRenderer.harnessPreparedDrawBrushIdentity
+            == ink.renderIdentity
+    )
+    #expect(store.writes.isEmpty)
+}
+
+@Test
+@MainActor
 func selectionDuringStrokeLeavesCurrentIdentityUntilNextStroke()
     async throws
 {
