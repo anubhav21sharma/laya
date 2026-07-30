@@ -1471,6 +1471,303 @@ struct BrushCompilerTests {
     }
 
     @Test
+    func preparationAtMaximumRevisionPoisonsWithoutObservableMutation()
+        async throws
+    {
+        guard let setup = try compilerSetup(
+            initialRequestGeneration: 17,
+            initialStateRevision: .max
+        ) else { return }
+        let beforeDiagnostics = setup.compiler.diagnosticSnapshot
+        let beforeCounters = setup.compiler.debugCounters
+        let beforeKeys = setup.compiler.cachedKeys
+        let beforePinnedKeys = setup.compiler.pinnedKeys
+        let beforeResidentBytes = setup.compiler.residentByteCount
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await setup.compiler.prepareCompilationBatch(
+                packages: [
+                    try compilerPackage(
+                        definitionID: "brush.exhausted.prepare"
+                    ),
+                ]
+            )
+        }
+
+        #expect(
+            setup.compiler.revisionSnapshot
+                == BrushCompilerRevisionSnapshot(
+                    requestGeneration: 17,
+                    stateRevision: .max,
+                    isExhausted: true
+                )
+        )
+        #expect(setup.compiler.diagnosticSnapshot == beforeDiagnostics)
+        #expect(setup.compiler.debugCounters == beforeCounters)
+        #expect(setup.compiler.cachedKeys == beforeKeys)
+        #expect(setup.compiler.pinnedKeys == beforePinnedKeys)
+        #expect(setup.compiler.residentByteCount == beforeResidentBytes)
+    }
+
+    @Test
+    func beginRequestOverflowNeverPartiallyAdvancesEitherCounter()
+        async throws
+    {
+        guard let generationSetup = try compilerSetup(
+            initialRequestGeneration: .max,
+            initialStateRevision: 41
+        ), let revisionSetup = try compilerSetup(
+            initialRequestGeneration: 23,
+            initialStateRevision: .max
+        ) else { return }
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await generationSetup.compiler.compileAndActivate(
+                package: try compilerPackage(
+                    definitionID: "brush.exhausted.generation"
+                )
+            )
+        }
+        #expect(
+            generationSetup.compiler.revisionSnapshot
+                == BrushCompilerRevisionSnapshot(
+                    requestGeneration: .max,
+                    stateRevision: 41,
+                    isExhausted: true
+                )
+        )
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await revisionSetup.compiler.compileAndActivate(
+                package: try compilerPackage(
+                    definitionID: "brush.exhausted.revision"
+                )
+            )
+        }
+        #expect(
+            revisionSetup.compiler.revisionSnapshot
+                == BrushCompilerRevisionSnapshot(
+                    requestGeneration: 23,
+                    stateRevision: .max,
+                    isExhausted: true
+                )
+        )
+        #expect(generationSetup.compiler.diagnosticSnapshot.counters == .zero)
+        #expect(revisionSetup.compiler.diagnosticSnapshot.counters == .zero)
+    }
+
+    @Test
+    func commitAtMaximumPoisonsAndRejectsAncientBatchAndToken()
+        async throws
+    {
+        guard let setup = try compilerSetup(
+            initialStateRevision: UInt64.max - 1
+        ) else { return }
+        let committed = try await setup.compiler.prepareCompilationBatch(
+            packages: [
+                try compilerPackage(
+                    definitionID: "brush.exhausted.committed",
+                    resourceID: "shape.exhausted.committed"
+                ),
+            ]
+        )
+        let ancient = try await setup.compiler.prepareCompilationBatch(
+            packages: [
+                try compilerPackage(
+                    definitionID: "brush.exhausted.ancient",
+                    resourceID: "shape.exhausted.ancient",
+                    resourceBytes: compilerCoveragePNG,
+                    width: 2,
+                    height: 2
+                ),
+            ]
+        )
+        let rollback =
+            try setup.compiler.commitCompilationBatch(committed)
+        let active = try #require(setup.compiler.activeBrush)
+        let beforeDiagnostics = setup.compiler.diagnosticSnapshot
+        let beforeCounters = setup.compiler.debugCounters
+        let beforeKeys = setup.compiler.cachedKeys
+        let beforePinnedKeys = setup.compiler.pinnedKeys
+        let beforeResidentBytes = setup.compiler.residentByteCount
+
+        #expect(throws: CancellationError.self) {
+            _ = try setup.compiler.commitCompilationBatch(ancient)
+        }
+
+        #expect(setup.compiler.activeBrush === active)
+        #expect(setup.compiler.diagnosticSnapshot == beforeDiagnostics)
+        #expect(setup.compiler.debugCounters == beforeCounters)
+        #expect(setup.compiler.cachedKeys == beforeKeys)
+        #expect(setup.compiler.pinnedKeys == beforePinnedKeys)
+        #expect(setup.compiler.residentByteCount == beforeResidentBytes)
+        #expect(
+            setup.compiler.revisionSnapshot
+                == BrushCompilerRevisionSnapshot(
+                    requestGeneration: 0,
+                    stateRevision: .max,
+                    isExhausted: true
+                )
+        )
+        #expect(throws: CancellationError.self) {
+            try setup.compiler.rollbackCompilationBatch(rollback)
+        }
+        await #expect(throws: CancellationError.self) {
+            _ = try await setup.compiler.prepareCompilationBatch(
+                packages: [
+                    try compilerPackage(
+                        definitionID: "brush.exhausted.after-commit"
+                    ),
+                ]
+            )
+        }
+    }
+
+    @Test
+    func rollbackAtMaximumPoisonsAndPreservesCommittedState()
+        async throws
+    {
+        guard let setup = try compilerSetup(
+            initialStateRevision: UInt64.max - 1
+        ) else { return }
+        let batch = try await setup.compiler.prepareCompilationBatch(
+            packages: [
+                try compilerPackage(
+                    definitionID: "brush.exhausted.rollback",
+                    resourceID: "shape.exhausted.rollback"
+                ),
+            ]
+        )
+        let rollback = try setup.compiler.commitCompilationBatch(batch)
+        let committed = try #require(setup.compiler.activeBrush)
+        let beforeDiagnostics = setup.compiler.diagnosticSnapshot
+        let beforeCounters = setup.compiler.debugCounters
+        let beforeKeys = setup.compiler.cachedKeys
+        let beforePinnedKeys = setup.compiler.pinnedKeys
+        let beforeResidentBytes = setup.compiler.residentByteCount
+
+        #expect(throws: CancellationError.self) {
+            try setup.compiler.rollbackCompilationBatch(rollback)
+        }
+
+        #expect(setup.compiler.activeBrush === committed)
+        #expect(setup.compiler.diagnosticSnapshot == beforeDiagnostics)
+        #expect(setup.compiler.debugCounters == beforeCounters)
+        #expect(setup.compiler.cachedKeys == beforeKeys)
+        #expect(setup.compiler.pinnedKeys == beforePinnedKeys)
+        #expect(setup.compiler.residentByteCount == beforeResidentBytes)
+        #expect(
+            setup.compiler.revisionSnapshot
+                == BrushCompilerRevisionSnapshot(
+                    requestGeneration: 0,
+                    stateRevision: .max,
+                    isExhausted: true
+                )
+        )
+        #expect(throws: CancellationError.self) {
+            try setup.compiler.rollbackCompilationBatch(rollback)
+        }
+        await #expect(throws: CancellationError.self) {
+            _ = try await setup.compiler.compileAndActivate(
+                package: try compilerPackage(
+                    definitionID: "brush.exhausted.after-rollback"
+                )
+            )
+        }
+    }
+
+    @Test
+    func memoryPressureMutationAtMaximumPermanentlyPoisonsCompiler()
+        async throws
+    {
+        guard let setup = try compilerSetup(
+            initialStateRevision: UInt64.max - 3
+        ) else { return }
+        let ancient = try await setup.compiler.prepareCompilationBatch(
+            packages: [
+                try compilerPackage(
+                    definitionID: "brush.exhausted.pressure-ancient",
+                    resourceID: "shape.exhausted.pressure-ancient"
+                ),
+            ]
+        )
+        _ = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.exhausted.pressure-a",
+                resourceID: "shape.exhausted.pressure-a"
+            )
+        )
+        _ = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.exhausted.pressure-b",
+                resourceID: "shape.exhausted.pressure-b",
+                resourceBytes: compilerCoveragePNG,
+                width: 2,
+                height: 2
+            )
+        )
+        let active = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.exhausted.pressure-c",
+                resourceID: "shape.exhausted.pressure-c",
+                resourceBytes: compilerWidePNG,
+                width: 8,
+                height: 4
+            )
+        )
+        #expect(setup.compiler.cachedKeys.count == 3)
+        #expect(
+            setup.compiler.revisionSnapshot
+                == BrushCompilerRevisionSnapshot(
+                    requestGeneration: 3,
+                    stateRevision: .max,
+                    isExhausted: false
+                )
+        )
+
+        let pressure = setup.compiler.handleMemoryPressure(
+            targetResidentBytes: active.residentByteCount
+        )
+        guard case let .satisfied(evictedKeys) = pressure else {
+            Issue.record("Expected pressure eviction")
+            return
+        }
+        #expect(evictedKeys.count == 2)
+        #expect(setup.compiler.cachedKeys.count == 1)
+        #expect(setup.compiler.activeBrush === active)
+        #expect(
+            setup.compiler.revisionSnapshot
+                == BrushCompilerRevisionSnapshot(
+                    requestGeneration: 3,
+                    stateRevision: .max,
+                    isExhausted: true
+                )
+        )
+        let afterDiagnostics = setup.compiler.diagnosticSnapshot
+        let afterCounters = setup.compiler.debugCounters
+        let afterKeys = setup.compiler.cachedKeys
+        let afterPinnedKeys = setup.compiler.pinnedKeys
+        let afterResidentBytes = setup.compiler.residentByteCount
+
+        #expect(throws: CancellationError.self) {
+            _ = try setup.compiler.commitCompilationBatch(ancient)
+        }
+        await #expect(throws: CancellationError.self) {
+            _ = try await setup.compiler.compileAndActivate(
+                package: try compilerPackage(
+                    definitionID: "brush.exhausted.after-pressure"
+                )
+            )
+        }
+        #expect(setup.compiler.activeBrush === active)
+        #expect(setup.compiler.diagnosticSnapshot == afterDiagnostics)
+        #expect(setup.compiler.debugCounters == afterCounters)
+        #expect(setup.compiler.cachedKeys == afterKeys)
+        #expect(setup.compiler.pinnedKeys == afterPinnedKeys)
+        #expect(setup.compiler.residentByteCount == afterResidentBytes)
+    }
+
+    @Test
     func oneCompilationThenOneThousandLogicalDabsDoesNotTouchCompiler() async throws {
         guard let setup = try compilerSetup() else { return }
         let compiled = try await setup.compiler.compileAndActivate(
@@ -1515,7 +1812,9 @@ private let compilerWidePNG = Data(
 private func compilerSetup(
     maximumWorkingTextureDimension: Int = 4_096,
     brushCacheBudgetBytes: Int = 128 * 1_024 * 1_024,
-    targetFramesPerSecond: Int = 120
+    targetFramesPerSecond: Int = 120,
+    initialRequestGeneration: UInt64 = 0,
+    initialStateRevision: UInt64 = 0
 ) throws -> (
     compiler: BrushCompiler,
     device: any MTLDevice,
@@ -1537,7 +1836,9 @@ private func compilerSetup(
                 targetFramesPerSecond: targetFramesPerSecond
             ),
             pipelinePreparing: pipelines,
-            testHooks: .none
+            testHooks: .none,
+            initialRequestGeneration: initialRequestGeneration,
+            initialStateRevision: initialStateRevision
         ),
         device,
         queue,

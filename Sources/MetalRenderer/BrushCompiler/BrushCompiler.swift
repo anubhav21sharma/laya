@@ -128,6 +128,12 @@ public final class BrushCompilationRollbackToken {
     }
 }
 
+struct BrushCompilerRevisionSnapshot: Equatable, Sendable {
+    let requestGeneration: UInt64
+    let stateRevision: UInt64
+    let isExhausted: Bool
+}
+
 @MainActor
 public final class BrushCompiler {
     public private(set) var activeBrush: CompiledBrush?
@@ -159,6 +165,14 @@ public final class BrushCompiler {
         cache.residentByteCount
     }
 
+    var revisionSnapshot: BrushCompilerRevisionSnapshot {
+        BrushCompilerRevisionSnapshot(
+            requestGeneration: requestGeneration,
+            stateRevision: stateRevision,
+            isExhausted: revisionExhausted
+        )
+    }
+
     private let device: any MTLDevice
     private let commandQueue: any MTLCommandQueue
     private let profile: BrushDeviceProfile
@@ -168,7 +182,8 @@ public final class BrushCompiler {
     private var counters: BrushCompilerCounters
     private var requestGeneration: UInt64
     private var packageHashTask: Task<String, Error>?
-    private var stateRevision: UInt64 = 0
+    private var stateRevision: UInt64
+    private var revisionExhausted: Bool
 
     public convenience init(
         device: any MTLDevice,
@@ -204,7 +219,9 @@ public final class BrushCompiler {
         commandQueue: any MTLCommandQueue,
         profile: BrushDeviceProfile,
         pipelinePreparing: any DepositionPipelinePreparing,
-        testHooks: BrushCompilerTestHooks
+        testHooks: BrushCompilerTestHooks,
+        initialRequestGeneration: UInt64 = 0,
+        initialStateRevision: UInt64 = 0
     ) {
         self.device = device
         self.commandQueue = commandQueue
@@ -213,8 +230,10 @@ public final class BrushCompiler {
         self.testHooks = testHooks
         cache = BrushResourceCache(byteBudget: profile.brushCacheBudgetBytes)
         counters = .zero
-        requestGeneration = 0
+        requestGeneration = initialRequestGeneration
         packageHashTask = nil
+        stateRevision = initialStateRevision
+        revisionExhausted = false
     }
 
     public func compileAndActivate(
@@ -237,6 +256,7 @@ public final class BrushCompiler {
         guard !packages.isEmpty else {
             throw CancellationError()
         }
+        try requireRevisionCapacity()
         let baseRevision = stateRevision
         let staging = BrushCompiler(
             device: device,
@@ -256,6 +276,7 @@ public final class BrushCompiler {
                 try await staging.compileAndActivate(package: package)
             )
         }
+        try requireRevisionCapacity()
         return BrushCompilationBatch(
             owner: ObjectIdentifier(self),
             baseRevision: baseRevision,
@@ -271,6 +292,7 @@ public final class BrushCompiler {
     public func commitCompilationBatch(
         _ batch: BrushCompilationBatch
     ) throws -> BrushCompilationRollbackToken {
+        let nextRevision = try nextStateRevision()
         guard batch.owner == ObjectIdentifier(self),
               batch.baseRevision == stateRevision
         else {
@@ -278,7 +300,7 @@ public final class BrushCompiler {
         }
         let rollback = BrushCompilationRollbackToken(
             owner: ObjectIdentifier(self),
-            committedRevision: stateRevision &+ 1,
+            committedRevision: nextRevision,
             cache: cache,
             counters: counters,
             activeBrush: activeBrush
@@ -286,7 +308,7 @@ public final class BrushCompiler {
         cache = batch.cache
         counters = batch.counters
         activeBrush = batch.activeBrush
-        stateRevision &+= 1
+        stateRevision = nextRevision
         return rollback
     }
 
@@ -296,6 +318,7 @@ public final class BrushCompiler {
     public func rollbackCompilationBatch(
         _ rollback: BrushCompilationRollbackToken
     ) throws {
+        let nextRevision = try nextStateRevision()
         guard rollback.owner == ObjectIdentifier(self),
               rollback.committedRevision == stateRevision
         else {
@@ -304,7 +327,7 @@ public final class BrushCompiler {
         cache = rollback.cache
         counters = rollback.counters
         activeBrush = rollback.activeBrush
-        stateRevision &+= 1
+        stateRevision = nextRevision
     }
 
     public func compileAndActivate(
@@ -791,18 +814,57 @@ public final class BrushCompiler {
         let result = cache.handleMemoryPressure(
             targetResidentBytes: targetResidentBytes
         )
-        stateRevision &+= 1
+        if case let .satisfied(evictedKeys) = result,
+           !evictedKeys.isEmpty,
+           !revisionExhausted
+        {
+            let (nextRevision, overflow) =
+                stateRevision.addingReportingOverflow(1)
+            if overflow {
+                exhaustRevision()
+            } else {
+                stateRevision = nextRevision
+            }
+        }
         return result
     }
 
     private func beginRequest() throws -> UInt64 {
-        let (next, overflow) = requestGeneration.addingReportingOverflow(1)
-        guard !overflow else { throw CancellationError() }
-        requestGeneration = next
-        stateRevision &+= 1
+        guard !revisionExhausted else { throw CancellationError() }
+        let (nextGeneration, generationOverflow) =
+            requestGeneration.addingReportingOverflow(1)
+        let (nextRevision, revisionOverflow) =
+            stateRevision.addingReportingOverflow(1)
+        guard !generationOverflow, !revisionOverflow else {
+            exhaustRevision()
+            throw CancellationError()
+        }
+        requestGeneration = nextGeneration
+        stateRevision = nextRevision
         packageHashTask?.cancel()
         packageHashTask = nil
-        return next
+        return nextGeneration
+    }
+
+    private func requireRevisionCapacity() throws {
+        _ = try nextStateRevision()
+    }
+
+    private func nextStateRevision() throws -> UInt64 {
+        guard !revisionExhausted else { throw CancellationError() }
+        let (nextRevision, overflow) =
+            stateRevision.addingReportingOverflow(1)
+        guard !overflow else {
+            exhaustRevision()
+            throw CancellationError()
+        }
+        return nextRevision
+    }
+
+    private func exhaustRevision() {
+        revisionExhausted = true
+        packageHashTask?.cancel()
+        packageHashTask = nil
     }
 
     private func packageContentHash(
@@ -838,7 +900,9 @@ public final class BrushCompiler {
 
     private func ensureCurrent(_ generation: UInt64) throws {
         try Task.checkCancellation()
-        guard generation == requestGeneration else {
+        guard !revisionExhausted,
+              generation == requestGeneration
+        else {
             throw CancellationError()
         }
     }
