@@ -65,8 +65,8 @@ private func professionalCharacterizationBaseline() throws
             resourceData: [:]
         )
         let hash = try package.contentHash
-        return StrokeTraceFixtures.professional.map { trace in
-            ProfessionalBrushCharacterizer.record(
+        return try StrokeTraceFixtures.professional.map { trace in
+            try ProfessionalBrushCharacterizer.record(
                 family: entry.displayName,
                 definitionSemanticHash: hash,
                 trace: trace,

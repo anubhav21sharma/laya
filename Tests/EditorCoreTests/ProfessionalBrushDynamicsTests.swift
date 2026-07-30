@@ -38,16 +38,16 @@ func technicalInkMouseFallbackEmitsFiniteUsefulDab() {
 }
 
 @Test
-func technicalInkReplayIsDeterministicAndDoesNotRequestInteraction() {
+func technicalInkReplayIsDeterministicAndDoesNotRequestInteraction() throws {
     let program = ProfessionalBrushCatalog.technicalInk.program
     let trace = StrokeTraceFixtures.professionalPressureRamp
-    let first = ProfessionalBrushCharacterizer.record(
+    let first = try ProfessionalBrushCharacterizer.record(
         family: "Ink",
         definitionSemanticHash: String(repeating: "a", count: 64),
         trace: trace,
         program: program
     )
-    let repeated = ProfessionalBrushCharacterizer.record(
+    let repeated = try ProfessionalBrushCharacterizer.record(
         family: "Ink",
         definitionSemanticHash: String(repeating: "a", count: 64),
         trace: trace,

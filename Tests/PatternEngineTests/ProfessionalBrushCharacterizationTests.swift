@@ -1,26 +1,81 @@
 import Foundation
-import PatternEngine
+@testable import PatternEngine
 import Testing
 
 @Test
-func professionalCharacterizerPinsTheCalibrationInputsAndIgnoresPrediction() throws {
+func professionalCharacterizerEvaluatesThenReplacesPredictedSuffix() throws {
     let program = nativeTestProgram()
     let expectedHash = String(repeating: "a", count: 64)
-    let predicted = ProfessionalBrushCharacterizer.record(
+    let began = characterizationSample(
+        x: 64,
+        y: 64,
+        pressure: 0.4,
+        timestamp: 50,
+        phase: .began
+    )
+    let moved = characterizationSample(
+        x: 256,
+        y: 64,
+        pressure: 0.6,
+        timestamp: 50.1,
+        phase: .moved
+    )
+    let predictedFirst = characterizationSample(
+        x: 256,
+        y: 320,
+        pressure: 0.8,
+        timestamp: 50.2,
+        phase: .moved,
+        kind: .predicted
+    )
+    let predictedSecond = characterizationSample(
+        x: 384,
+        y: 320,
+        pressure: 0.9,
+        timestamp: 50.25,
+        phase: .moved,
+        kind: .predicted
+    )
+    let corrected = characterizationSample(
+        x: 256,
+        y: 224,
+        pressure: 0.8,
+        timestamp: 50.2,
+        phase: .moved
+    )
+    let ended = characterizationSample(
+        x: 384,
+        y: 224,
+        pressure: 1,
+        timestamp: 50.3,
+        phase: .ended
+    )
+    let withPrediction = StrokeTraceFixture(
+        name: "prediction-replacement",
+        samples: [
+            began,
+            moved,
+            predictedFirst,
+            predictedSecond,
+            corrected,
+            ended,
+        ]
+    )
+    let predictionFreeFinalTrace = StrokeTraceFixture(
+        name: "prediction-replacement",
+        samples: [began, moved, corrected, ended]
+    )
+
+    let characterized = try ProfessionalBrushCharacterizer.characterize(
         family: "Calibration",
         definitionSemanticHash: expectedHash,
-        trace: StrokeTraceFixtures.professionalDirectionTurn,
+        trace: withPrediction,
         program: program
     )
-    let authoritative = ProfessionalBrushCharacterizer.record(
+    let authoritative = try ProfessionalBrushCharacterizer.record(
         family: "Calibration",
         definitionSemanticHash: expectedHash,
-        trace: StrokeTraceFixture(
-            name: "professional-direction-turn",
-            samples: StrokeTraceFixtures.professionalDirectionTurn.samples.filter {
-                $0.kind == .actual || $0.kind == .coalesced
-            }
-        ),
+        trace: predictionFreeFinalTrace,
         program: program
     )
 
@@ -31,17 +86,25 @@ func professionalCharacterizerPinsTheCalibrationInputsAndIgnoresPrediction() thr
         drawableSize: PatternSize(width: 512, height: 512),
         worldCenter: WorldPoint(x: 256, y: 256)
     ))
-    #expect(predicted == authoritative)
-    #expect(predicted.sampleCount == 4)
-    #expect(predicted.brushID == program.definition.id.rawValue)
-    #expect(predicted.definitionSemanticHash == expectedHash)
-    #expect(predicted.logicalDabCount > 0)
-    #expect(predicted.minimumDiameter <= predicted.maximumDiameter)
-    #expect(predicted.worldBounds.minimumX <= predicted.worldBounds.maximumX)
+    #expect(characterized.evaluatedPredictedSampleCount == 2)
+    #expect(characterized.evaluatedPredictedLogicalDabCount > 0)
+    #expect(characterized.record == authoritative)
+    #expect(characterized.record.sampleCount == 4)
+    #expect(characterized.record.brushID == program.definition.id.rawValue)
+    #expect(characterized.record.definitionSemanticHash == expectedHash)
+    #expect(characterized.record.logicalDabCount > 0)
+    #expect(
+        characterized.record.minimumDiameter
+            <= characterized.record.maximumDiameter
+    )
+    #expect(
+        characterized.record.worldBounds.minimumX
+            <= characterized.record.worldBounds.maximumX
+    )
 }
 
 @Test
-func professionalCharacterizerIgnoresEstimatedUpdates() {
+func professionalCharacterizerIgnoresEstimatedUpdates() throws {
     let program = nativeTestProgram()
     let hash = String(repeating: "a", count: 64)
     let authoritativeSamples = StrokeTraceFixtures
@@ -64,7 +127,7 @@ func professionalCharacterizerIgnoresEstimatedUpdates() {
             + [estimatedUpdate]
             + authoritativeSamples.dropFirst(2)
     )
-    let authoritative = ProfessionalBrushCharacterizer.record(
+    let authoritative = try ProfessionalBrushCharacterizer.record(
         family: "Calibration",
         definitionSemanticHash: hash,
         trace: StrokeTraceFixture(
@@ -73,7 +136,7 @@ func professionalCharacterizerIgnoresEstimatedUpdates() {
         ),
         program: program
     )
-    let actual = ProfessionalBrushCharacterizer.record(
+    let actual = try ProfessionalBrushCharacterizer.record(
         family: "Calibration",
         definitionSemanticHash: hash,
         trace: withEstimatedUpdate,
@@ -81,6 +144,52 @@ func professionalCharacterizerIgnoresEstimatedUpdates() {
     )
 
     #expect(actual == authoritative)
+}
+
+@Test
+func professionalCharacterizerRejectsInvalidCallerInput() throws {
+    let program = nativeTestProgram()
+    let hash = String(repeating: "a", count: 64)
+    let predictionOnlyTrace = StrokeTraceFixture(
+        name: "prediction-only",
+        samples: [
+            characterizationSample(
+                x: 64,
+                y: 64,
+                pressure: 0.5,
+                timestamp: 1,
+                phase: .moved,
+                kind: .predicted
+            ),
+        ]
+    )
+    let mismatchedIdentity = try BrushRenderIdentity(
+        definitionID: BrushRecipeID(rawValue: "different-brush"),
+        semanticHash: hash
+    )
+
+    #expect(
+        throws: ProfessionalBrushCharacterizationRecordError
+            .emptyAuthoritativeOutput
+    ) {
+        _ = try ProfessionalBrushCharacterizer.record(
+            family: "Calibration",
+            definitionSemanticHash: hash,
+            trace: predictionOnlyTrace,
+            program: program
+        )
+    }
+    #expect(
+        throws: ProfessionalBrushCharacterizationRecordError
+            .renderIdentityMismatch
+    ) {
+        _ = try ProfessionalBrushCharacterizer.record(
+            family: "Calibration",
+            renderIdentity: mismatchedIdentity,
+            trace: StrokeTraceFixtures.professionalTap,
+            program: program
+        )
+    }
 }
 
 @Test
@@ -166,5 +275,24 @@ private func professionalRecord(
         minimumScatterMagnitude: 0,
         maximumScatterMagnitude: 0.25,
         worldBounds: bounds
+    )
+}
+
+private func characterizationSample(
+    x: Float,
+    y: Float,
+    pressure: Float,
+    timestamp: TimeInterval,
+    phase: StrokePhase,
+    kind: StrokeSampleKind = .actual
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x, y: y),
+        pressure: pressure,
+        timestamp: timestamp,
+        phase: phase,
+        source: .pencil,
+        kind: kind,
+        capabilities: [.pressure]
     )
 }

@@ -10,6 +10,8 @@ public enum ProfessionalBrushCharacterizationRecordError:
     case nonfiniteMetric
     case malformedMetricRange
     case malformedBounds
+    case emptyAuthoritativeOutput
+    case renderIdentityMismatch
 }
 
 public struct ProfessionalBrushWorldBounds: Codable, Equatable, Sendable {
@@ -305,47 +307,81 @@ public enum ProfessionalBrushCharacterizer {
         definitionSemanticHash: String,
         trace: StrokeTraceFixture,
         program: BrushProgram
-    ) -> ProfessionalBrushCharacterizationRecord {
-        var input = BrushInputDeriver()
-        var generator = BrushStrokeGenerator(
+    ) throws -> ProfessionalBrushCharacterizationRecord {
+        try characterize(
+            family: family,
+            definitionSemanticHash: definitionSemanticHash,
+            trace: trace,
+            program: program
+        ).record
+    }
+
+    static func characterize(
+        family: String,
+        definitionSemanticHash: String,
+        trace: StrokeTraceFixture,
+        program: BrushProgram
+    ) throws -> ProfessionalBrushCharacterizationResult {
+        var authoritativeInput = BrushInputDeriver()
+        var authoritativeGenerator = BrushStrokeGenerator(
             program: program,
             nominalDiameter: nominalDiameter,
             color: color,
             seed: seed
         )
+        var predictionCursor: PredictionCursor?
         var sampleCount = 0
         var dabs: [LogicalDab] = []
         var payloads: [BrushCharacterizationDigestPayload] = []
+        var evaluatedPredictedSampleCount = 0
+        var evaluatedPredictedLogicalDabCount = 0
 
-        for sample in trace.samples where sample.kind == .actual
-            || sample.kind == .coalesced
-        {
-            let worldSample = input.derive(sample, viewport: viewport)
-            sampleCount += 1
-            let emit: (LogicalDab) -> Void = { dab in
-                dabs.append(dab)
-                payloads.append(
-                    BrushCharacterizationDigestPayload.logicalDab(
-                        dab,
-                        definition: program.definition
-                    )
+        for sample in trace.samples {
+            switch sample.kind {
+            case .actual, .coalesced:
+                predictionCursor = nil
+                let worldSample = authoritativeInput.derive(
+                    sample,
+                    viewport: viewport
                 )
-            }
-            switch worldSample.phase {
-            case .began:
-                generator.begin(worldSample, emit: emit)
-            case .moved:
-                generator.append(worldSample, emit: emit)
-            case .ended:
-                generator.finish(worldSample, emit: emit)
-            case .cancelled:
-                generator.cancel()
+                sampleCount += 1
+                generate(
+                    worldSample,
+                    with: &authoritativeGenerator
+                ) { dab in
+                    dabs.append(dab)
+                    payloads.append(
+                        BrushCharacterizationDigestPayload.logicalDab(
+                            dab,
+                            definition: program.definition
+                        )
+                    )
+                }
+            case .predicted:
+                var cursor = predictionCursor ?? PredictionCursor(
+                    input: authoritativeInput,
+                    generator: authoritativeGenerator
+                )
+                let worldSample = cursor.input.deriveAdvancingPrediction(
+                    sample,
+                    viewport: viewport
+                )
+                evaluatedPredictedSampleCount += 1
+                generate(worldSample, with: &cursor.generator) { _ in
+                    evaluatedPredictedLogicalDabCount += 1
+                }
+                predictionCursor = cursor
+            case .estimatedUpdate:
+                continue
             }
         }
 
-        precondition(!dabs.isEmpty, "Professional traces must emit a dab")
+        guard !dabs.isEmpty else {
+            throw ProfessionalBrushCharacterizationRecordError
+                .emptyAuthoritativeOutput
+        }
         let metrics = Metrics(dabs: dabs)
-        return try! ProfessionalBrushCharacterizationRecord(
+        let record = try ProfessionalBrushCharacterizationRecord(
             schemaVersion: ProfessionalBrushLogicalBaseline.schemaVersion,
             family: family,
             brushID: program.definition.id.rawValue,
@@ -370,6 +406,35 @@ public enum ProfessionalBrushCharacterizer {
             maximumScatterMagnitude: metrics.maximumScatterMagnitude,
             worldBounds: metrics.worldBounds
         )
+        return ProfessionalBrushCharacterizationResult(
+            record: record,
+            evaluatedPredictedSampleCount:
+                evaluatedPredictedSampleCount,
+            evaluatedPredictedLogicalDabCount:
+                evaluatedPredictedLogicalDabCount
+        )
+    }
+
+    private static func generate(
+        _ sample: WorldStrokeSample,
+        with generator: inout BrushStrokeGenerator,
+        emit: (LogicalDab) -> Void
+    ) {
+        switch sample.phase {
+        case .began:
+            generator.begin(sample, emit: emit)
+        case .moved:
+            generator.append(sample, emit: emit)
+        case .ended:
+            generator.finish(sample, emit: emit)
+        case .cancelled:
+            generator.cancel()
+        }
+    }
+
+    private struct PredictionCursor {
+        var input: BrushInputDeriver
+        var generator: BrushStrokeGenerator
     }
 
     public static func record(
@@ -377,9 +442,12 @@ public enum ProfessionalBrushCharacterizer {
         renderIdentity: BrushRenderIdentity,
         trace: StrokeTraceFixture,
         program: BrushProgram
-    ) -> ProfessionalBrushCharacterizationRecord {
-        precondition(renderIdentity.definitionID == program.definition.id)
-        return record(
+    ) throws -> ProfessionalBrushCharacterizationRecord {
+        guard renderIdentity.definitionID == program.definition.id else {
+            throw ProfessionalBrushCharacterizationRecordError
+                .renderIdentityMismatch
+        }
+        return try record(
             family: family,
             definitionSemanticHash: renderIdentity.semanticHash,
             trace: trace,
@@ -434,4 +502,10 @@ public enum ProfessionalBrushCharacterizer {
             )
         }
     }
+}
+
+struct ProfessionalBrushCharacterizationResult: Equatable, Sendable {
+    let record: ProfessionalBrushCharacterizationRecord
+    let evaluatedPredictedSampleCount: Int
+    let evaluatedPredictedLogicalDabCount: Int
 }

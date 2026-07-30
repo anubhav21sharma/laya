@@ -54,12 +54,12 @@ func professionalCatalogCompilesToDistinctNoninteractingSemanticRecordsForEveryT
     let entries = ProfessionalBrushCatalog.all
     let compiled = try entries.map { try BrushProgramCompiler.compile($0.definition) }
     let hashes = try entries.map { try professionalDefinitionSemanticHash($0.definition) }
-    let unsortedRecords = entries.indices.flatMap { index in
+    let unsortedRecords = try entries.indices.flatMap { index in
         let entry = entries[index]
         let program = compiled[index]
         let hash = hashes[index]
-        return StrokeTraceFixtures.professional.map { trace in
-            ProfessionalBrushCharacterizer.record(
+        return try StrokeTraceFixtures.professional.map { trace in
+            try ProfessionalBrushCharacterizer.record(
                 family: entry.displayName,
                 definitionSemanticHash: hash,
                 trace: trace,
@@ -70,12 +70,12 @@ func professionalCatalogCompilesToDistinctNoninteractingSemanticRecordsForEveryT
     let records = unsortedRecords.sorted {
         ($0.brushID, $0.traceName) < ($1.brushID, $1.traceName)
     }
-    let repeated = entries.indices.flatMap { index in
+    let repeated = try entries.indices.flatMap { index in
         let entry = entries[index]
         let program = compiled[index]
         let hash = hashes[index]
-        return StrokeTraceFixtures.professional.map { trace in
-            ProfessionalBrushCharacterizer.record(
+        return try StrokeTraceFixtures.professional.map { trace in
+            try ProfessionalBrushCharacterizer.record(
                 family: entry.displayName,
                 definitionSemanticHash: hash,
                 trace: trace,
@@ -94,10 +94,10 @@ func professionalCatalogCompilesToDistinctNoninteractingSemanticRecordsForEveryT
     let directionRecords = records.filter {
         $0.traceName == StrokeTraceFixtures.professionalDirectionTurn.name
     }
-    let predictionFreeRecords = entries.indices.map { index in
+    let predictionFreeRecords = try entries.indices.map { index in
         let entry = entries[index]
         let program = compiled[index]
-        return ProfessionalBrushCharacterizer.record(
+        return try ProfessionalBrushCharacterizer.record(
             family: entry.displayName,
             definitionSemanticHash: hashes[index],
             trace: predictionFreeTrace,
