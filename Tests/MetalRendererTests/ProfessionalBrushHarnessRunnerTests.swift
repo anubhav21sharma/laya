@@ -326,6 +326,20 @@ struct ProfessionalBrushHarnessRunnerTests {
         #expect(
             (longRaw["gpuMilliseconds"] as? [Double])?.count == 128
         )
+        let eventToSubmitNanoseconds = try #require(
+            longRaw["eventToSubmitNanoseconds"] as? [NSNumber]
+        ).map(\.uint64Value)
+        #expect(eventToSubmitNanoseconds.count == 128)
+        #expect(
+            longRaw["displayFrameBudgetNanoseconds"] as? Int
+                == 16_666_667
+        )
+        #expect(
+            longRaw["missedFrameCount"] as? Int
+                == eventToSubmitNanoseconds.filter {
+                    $0 >= 16_666_667
+                }.count
+        )
         #expect(measuredPhases == tracePhases)
         #expect(!measuredPhases.contains("commit"))
         #expect(retainedDabCounts.count == 128)
@@ -603,9 +617,11 @@ struct ProfessionalBrushHarnessRunnerTests {
             withJSONObject: benchmark,
             options: [.sortedKeys]
         ).write(to: benchmarkURL)
-        #expect(throws: Error.self) {
-            try validate()
-        }
+        // The one-frame primary capture is a deterministic correctness
+        // diagnostic, not the per-input software performance workload.
+        // Preserve and bind its timing counter without using it as the
+        // Stage 5 missed-frame verdict.
+        try validate()
 
         for value in [-1, Int.max] {
             try restore()
@@ -795,6 +811,7 @@ struct ProfessionalBrushHarnessRunnerTests {
         var operatingSystem = ""
         var maximumCPUP95 = 0.0
         var maximumGPU500Dab = 0.0
+        var softwareMissedFrameCountByBrush: [String: UInt64] = [:]
         for sceneName in
             ProfessionalBrushEvidenceValidator.positiveSceneNames
         {
@@ -861,6 +878,19 @@ struct ProfessionalBrushHarnessRunnerTests {
                         .max()
                 )
             )
+            let longRaw = try #require(
+                JSONSerialization.jsonObject(
+                    with: Data(
+                        contentsOf: destination.appendingPathComponent(
+                            "professional-long-stroke.raw.json"
+                        )
+                    )
+                ) as? [String: Any]
+            )
+            softwareMissedFrameCountByBrush[sceneName] =
+                try #require(
+                    longRaw["missedFrameCount"] as? NSNumber
+                ).uint64Value
             let evidence = try ProfessionalBrushSceneEvidence.decode(
                 Data(
                     contentsOf: destination.appendingPathComponent(
@@ -974,7 +1004,7 @@ struct ProfessionalBrushHarnessRunnerTests {
             "rendererExecutableSHA256": executableHash,
         ]).write(to: root.appendingPathComponent("provenance.json"))
         try testJSONData([
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "correctnessPassed": true,
             "gpuName": gpuName,
             "gpuClassification":
@@ -983,6 +1013,8 @@ struct ProfessionalBrushHarnessRunnerTests {
             "cpuPreparationBudgetMilliseconds": 2.0,
             "gpu500DabMilliseconds": maximumGPU500Dab,
             "gpu500DabBudgetMilliseconds": 3.0,
+            "softwareEventToSubmitMissedFrameCountByBrush":
+                softwareMissedFrameCountByBrush,
         ]).write(
             to: root.appendingPathComponent(
                 "performance-status.json"
@@ -1319,8 +1351,8 @@ func professionalCharacterizationBaselineForValidation()
             resourceData: [:]
         )
         let hash = try package.contentHash
-        return StrokeTraceFixtures.professional.map { trace in
-            ProfessionalBrushCharacterizer.record(
+        return try StrokeTraceFixtures.professional.map { trace in
+            try ProfessionalBrushCharacterizer.record(
                 family: entry.displayName,
                 definitionSemanticHash: hash,
                 trace: trace,

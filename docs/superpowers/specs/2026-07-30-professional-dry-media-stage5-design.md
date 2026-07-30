@@ -497,12 +497,49 @@ the encoder work bound.
 
 The Stage 5 validator derives the GPU maximum, zero hot-path compiler/resource
 counter deltas, zero completed-stroke restamping, and bounded long-stroke
-quartile growth from those raw artifacts. It also requires the signed
-least-squares slope across all 128 CPU samples and all 128 GPU samples to be
-at most `0.001 ms/frame`; negative warm-up decay remains valid. No status
-boolean can assert these claims. All four brushes must be below `3 ms` for a
-physical result to complete; paravirtual, virtual, simulator, and unknown GPUs
-remain pending even when their diagnostic numbers are below budget.
+quartile growth from those raw artifacts. Long-stroke raw schema 4 retains
+and digest-binds all 128 chronological CPU samples, GPU samples,
+event-to-submit nanosecond samples, input phases, work counts, and runtime
+replay-retention snapshots as the authoritative measurements.
+
+The long-stroke artifact records the exact software frame budget as
+`16,666,667 ns` and a derived missed-frame count. The artifact-only validator
+independently counts every raw event-to-submit sample at or above that budget,
+requires the stored count to match, and publishes the exact per-brush counts
+in performance-status schema 3. A nonzero count is diagnostic in the software
+gate because host scheduling can preempt the user-interactive test process; it
+does not fabricate or weaken a physical missed-frame result.
+Every sample must also be strictly positive; zero is the renderer's
+unmeasured/default sentinel and cannot establish timing evidence.
+The primary scene's one-frame capture still preserves its runtime telemetry
+counter as a diagnostic. That capture intentionally batches the whole
+deterministic correctness trace between one receipt and one submit, so host
+scheduling preemption in that synthetic batch is not the Stage 5 per-input
+software performance verdict. The 128-frame workload flushes each live input
+in chronological order and is the authoritative diagnostic software timing
+path. True input-to-photon and physical-display missed-frame requirements
+remain separate physical gates and are not weakened by this distinction.
+
+For trend estimation, the 128 samples are partitioned without gaps or overlap
+into exactly 16 contiguous eight-frame blocks: `[0, 8)`, `[8, 16)`, through
+`[120, 128)`. Each block median is the average of its sorted fourth and fifth
+values. The deterministic Theil-Sen estimator derives all 120 pairwise slopes
+for `i < j` at exact frame-center indices `3.5, 11.5, ..., 123.5`, sorts them,
+and averages zero-based sorted indices 59 and 60. The reported signed result
+therefore remains in `ms/frame`. The artifact records the exact block
+membership, medians, estimator identifier, and CPU/GPU slopes for
+auditability, but the artifact-only validator recomputes all of them from the
+128 raw values and never trusts the derived claims.
+
+This predeclared estimator prevents isolated or multiple bounded GPU timestamp
+or queue-contaminated blocks from dominating the trend while preserving
+sustained growth: the controlled sustained linear `+0.004 ms/frame` series
+yields all 120 pairwise block-median slopes at exactly `0.004 ms/frame` and
+therefore fails. Both CPU and GPU block-median slopes must be at most
+`0.001 ms/frame`; negative warm-up decay remains valid. No status boolean can
+assert these claims. All four brushes must be below `3 ms` for a physical
+result to complete; paravirtual, virtual, simulator, and unknown GPUs remain
+pending even when their diagnostic numbers are below budget.
 
 ## 13. Stage 5 Gate
 

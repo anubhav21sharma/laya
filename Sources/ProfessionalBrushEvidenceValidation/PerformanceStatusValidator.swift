@@ -10,6 +10,13 @@ enum PerformanceStatusValidator {
         let cpuPreparationBudgetMilliseconds: Double
         let gpu500DabMilliseconds: Double
         let gpu500DabBudgetMilliseconds: Double
+        let softwareEventToSubmitMissedFrameCountByBrush:
+            [String: UInt64]
+    }
+
+    private struct PerformanceMeasurements {
+        let gpuMillisecondsByBrush: [String: Double]
+        let missedFrameCountByBrush: [String: UInt64]
     }
 
     static func validate(
@@ -34,6 +41,7 @@ enum PerformanceStatusValidator {
                 "cpuPreparationBudgetMilliseconds",
                 "gpu500DabMilliseconds",
                 "gpu500DabBudgetMilliseconds",
+                "softwareEventToSubmitMissedFrameCountByBrush",
             ],
             label: "performance status"
         )
@@ -45,15 +53,16 @@ enum PerformanceStatusValidator {
                 "performance status is malformed"
             )
         }
-        let gpuByBrush = try validateProfessionalPerformanceArtifacts(
+        let measurements = try validateProfessionalPerformanceArtifacts(
             positiveRoot: positiveRoot,
             expectedGPUName: expectedGPUName,
             expectedOperatingSystem: expectedOperatingSystem,
             expectedCommit: expectedCommit,
             expectedRendererSHA256: expectedRendererSHA256
         )
+        let gpuByBrush = measurements.gpuMillisecondsByBrush
         guard let measuredGPU = gpuByBrush.values.max(),
-              status.schemaVersion == 2,
+              status.schemaVersion == 3,
               status.correctnessPassed,
               status.gpuName == expectedGPUName,
               status.gpuClassification
@@ -69,7 +78,9 @@ enum PerformanceStatusValidator {
               status.gpu500DabMilliseconds.isFinite,
               status.gpu500DabMilliseconds >= 0,
               status.gpu500DabBudgetMilliseconds == 3,
-              close(status.gpu500DabMilliseconds, measuredGPU)
+              close(status.gpu500DabMilliseconds, measuredGPU),
+              status.softwareEventToSubmitMissedFrameCountByBrush
+                == measurements.missedFrameCountByBrush
         else {
             throw ArtifactFileSystem.invalid(
                 "performance status disagrees with Stage 5 professional artifacts"
@@ -92,7 +103,7 @@ enum PerformanceStatusValidator {
         expectedOperatingSystem: String,
         expectedCommit: String,
         expectedRendererSHA256: String
-    ) throws -> [String: Double] {
+    ) throws -> PerformanceMeasurements {
         guard try ArtifactFileSystem.entryNames(positiveRoot)
                 == Set(ProfessionalBrushTruth.positiveSceneNames)
         else {
@@ -100,10 +111,11 @@ enum PerformanceStatusValidator {
                 "professional performance scene set is not exact"
             )
         }
-        var result: [String: Double] = [:]
+        var gpuResult: [String: Double] = [:]
+        var missedFrameResult: [String: UInt64] = [:]
         for scene in ProfessionalBrushTruth.positiveSceneNames {
             let directory = positiveRoot.appendingPathComponent(scene)
-            result[scene] = try validatePerformanceIndex(
+            let measurement = try validatePerformanceIndex(
                 directory: directory,
                 scene: scene,
                 expectedGPUName: expectedGPUName,
@@ -111,8 +123,13 @@ enum PerformanceStatusValidator {
                 expectedCommit: expectedCommit,
                 expectedRendererSHA256: expectedRendererSHA256
             )
+            gpuResult[scene] = measurement.gpuMilliseconds
+            missedFrameResult[scene] = measurement.missedFrameCount
         }
-        return result
+        return PerformanceMeasurements(
+            gpuMillisecondsByBrush: gpuResult,
+            missedFrameCountByBrush: missedFrameResult
+        )
     }
 
     private static func validatePerformanceIndex(
@@ -122,7 +139,7 @@ enum PerformanceStatusValidator {
         expectedOperatingSystem: String,
         expectedCommit: String,
         expectedRendererSHA256: String
-    ) throws -> Double {
+    ) throws -> (gpuMilliseconds: Double, missedFrameCount: UInt64) {
         guard let truth = ProfessionalBrushTruth.sceneTruth[scene] else {
             throw ArtifactFileSystem.invalid(
                 "\(scene): professional performance truth is missing"
@@ -185,14 +202,14 @@ enum PerformanceStatusValidator {
             truth: truth,
             source: source
         )
-        try validateLongStroke(
+        let missedFrameCount = try validateLongStroke(
             longData,
             directory: directory,
             scene: scene,
             truth: truth,
             source: source
         )
-        return gpu
+        return (gpu, missedFrameCount)
     }
 
     private static func referencedRawData(
@@ -276,7 +293,7 @@ enum PerformanceStatusValidator {
         scene: String,
         truth: ProfessionalSceneTruth,
         source: [String: Any]
-    ) throws {
+    ) throws -> UInt64 {
         let raw = try ArtifactFileSystem.jsonObject(
             data,
             label: "\(scene) long-stroke raw evidence"
@@ -288,7 +305,10 @@ enum PerformanceStatusValidator {
                 "semanticHash", "resolvedResources", "source",
                 "inputSampleCount", "tracePath", "traceSHA256",
                 "cpuPreparationMilliseconds", "gpuMilliseconds",
-                "identityFrames",
+                "eventToSubmitNanoseconds",
+                "displayFrameBudgetNanoseconds",
+                "missedFrameCount",
+                "trend", "identityFrames",
                 "logicalDabCount", "projectedInstanceCount",
                 "replayMode", "replayMaximumDabs",
                 "replayMaximumProjectedInstances",
@@ -296,7 +316,7 @@ enum PerformanceStatusValidator {
             ],
             label: "\(scene) long-stroke raw evidence"
         )
-        guard integer(raw["schemaVersion"]) == 2,
+        guard integer(raw["schemaVersion"]) == 4,
               raw["workloadID"] as? String
                 == "professional-long-stroke",
               raw["scene"] as? String == scene,
@@ -311,8 +331,15 @@ enum PerformanceStatusValidator {
               ArtifactFileSystem.isSHA256(traceDigest),
               let cpu = doubles(raw["cpuPreparationMilliseconds"]),
               let gpu = doubles(raw["gpuMilliseconds"]),
+              let eventToSubmit =
+                unsignedIntegers(raw["eventToSubmitNanoseconds"]),
               cpu.count == 128,
               gpu.count == 128,
+              eventToSubmit.count == 128,
+              unsignedInteger(raw["displayFrameBudgetNanoseconds"])
+                == 16_666_667,
+              let storedMissedFrameCount =
+                unsignedInteger(raw["missedFrameCount"]),
               let identityFrames =
                 raw["identityFrames"] as? [[String: Any]],
               identityFrames.count == 128,
@@ -335,6 +362,12 @@ enum PerformanceStatusValidator {
                 "\(scene): long-stroke work is not length-independent or hot-path clean"
             )
         }
+        guard eventToSubmit.allSatisfy({ $0 > 0 }) else {
+            throw ArtifactFileSystem.invalid(
+                "\(scene): long-stroke event-to-submit samples must "
+                    + "contain measured positive durations"
+            )
+        }
         guard countersBefore == countersAfter else {
             throw ArtifactFileSystem.invalid(
                 "\(scene): long-stroke compiler/resource counters changed "
@@ -344,6 +377,21 @@ enum PerformanceStatusValidator {
                     )
             )
         }
+        let derivedMissedFrameCount = UInt64(
+            eventToSubmit.lazy.filter { $0 >= 16_666_667 }.count
+        )
+        guard storedMissedFrameCount == derivedMissedFrameCount else {
+            throw ArtifactFileSystem.invalid(
+                "\(scene): long-stroke missed-frame count does not "
+                    + "derive from the 128 event-to-submit samples"
+            )
+        }
+        let trend = try auditLongStrokeTrend(
+            raw["trend"],
+            cpuMilliseconds: cpu,
+            gpuMilliseconds: gpu,
+            scene: scene
+        )
         guard stableQuartiles(cpu), stableQuartiles(gpu) else {
             let cpuQuartiles = quartileP95s(cpu)
             let gpuQuartiles = quartileP95s(gpu)
@@ -353,15 +401,15 @@ enum PerformanceStatusValidator {
                     + "GPU early/late \(gpuQuartiles.early)/\(gpuQuartiles.late) ms)"
             )
         }
-        guard let cpuSlope = leastSquaresSlope(cpu),
-              let gpuSlope = leastSquaresSlope(gpu),
-              cpuSlope <= 0.001,
-              gpuSlope <= 0.001
+        guard trend.cpuSlopeMillisecondsPerFrame <= 0.001,
+              trend.gpuSlopeMillisecondsPerFrame <= 0.001
         else {
             throw ArtifactFileSystem.invalid(
-                "\(scene): long-stroke least-squares slope exceeds "
-                    + "0.001 ms/frame (CPU \(slopeOrNaN(cpu)); "
-                    + "GPU \(slopeOrNaN(gpu)))"
+                "\(scene): long-stroke eight-frame block-median "
+                    + "Theil-Sen slope exceeds "
+                    + "0.001 ms/frame (CPU "
+                    + "\(trend.cpuSlopeMillisecondsPerFrame); GPU "
+                    + "\(trend.gpuSlopeMillisecondsPerFrame))"
             )
         }
         _ = try auditIdentityFrames(
@@ -388,6 +436,7 @@ enum PerformanceStatusValidator {
             scene: scene,
             truth: truth
         )
+        return derivedMissedFrameCount
     }
 
     private static func validateTrace(
@@ -595,6 +644,12 @@ enum PerformanceStatusValidator {
         return result.count == values.count ? result : nil
     }
 
+    private static func unsignedIntegers(_ value: Any?) -> [UInt64]? {
+        guard let values = value as? [Any] else { return nil }
+        let result = values.compactMap(unsignedInteger)
+        return result.count == values.count ? result : nil
+    }
+
     private static func number(_ value: Any?) -> NSNumber? {
         guard let number = value as? NSNumber,
               CFGetTypeID(number) != CFBooleanGetTypeID()
@@ -629,26 +684,215 @@ enum PerformanceStatusValidator {
         )
     }
 
-    private static func leastSquaresSlope(
-        _ values: [Double]
+    private static func theilSenSlope(
+        _ values: [Double],
+        frameIndices: [Double]
     ) -> Double? {
-        guard values.count == 128 else { return nil }
-        let meanX = Double(values.count - 1) / 2
-        let meanY = values.reduce(0, +) / Double(values.count)
-        var numerator = 0.0
-        var denominator = 0.0
-        for (index, value) in values.enumerated() {
-            let centeredX = Double(index) - meanX
-            numerator += centeredX * (value - meanY)
-            denominator += centeredX * centeredX
+        guard values.count == 16,
+              frameIndices.count == values.count,
+              values.allSatisfy(\.isFinite),
+              frameIndices.allSatisfy(\.isFinite)
+        else {
+            return nil
         }
-        guard denominator > 0 else { return nil }
-        let slope = numerator / denominator
-        return slope.isFinite ? slope : nil
+        var pairwiseSlopes: [Double] = []
+        pairwiseSlopes.reserveCapacity(120)
+        for first in 0 ..< values.count {
+            for second in (first + 1) ..< values.count {
+                let frameDistance =
+                    frameIndices[second] - frameIndices[first]
+                guard frameDistance > 0 else { return nil }
+                let slope =
+                    (values[second] - values[first]) / frameDistance
+                guard slope.isFinite else { return nil }
+                pairwiseSlopes.append(slope)
+            }
+        }
+        guard pairwiseSlopes.count == 120 else { return nil }
+        pairwiseSlopes.sort()
+        return (pairwiseSlopes[59] + pairwiseSlopes[60]) / 2
     }
 
-    private static func slopeOrNaN(_ values: [Double]) -> Double {
-        leastSquaresSlope(values) ?? .nan
+    private struct LongStrokeTrendBlockAudit {
+        let startFrameIndex: Int
+        let endFrameIndexExclusive: Int
+        let centerFrameIndex: Double
+        let cpuMedianMilliseconds: Double
+        let gpuMedianMilliseconds: Double
+    }
+
+    private struct LongStrokeTrendAudit {
+        let blocks: [LongStrokeTrendBlockAudit]
+        let cpuSlopeMillisecondsPerFrame: Double
+        let gpuSlopeMillisecondsPerFrame: Double
+    }
+
+    private static func auditLongStrokeTrend(
+        _ value: Any?,
+        cpuMilliseconds: [Double],
+        gpuMilliseconds: [Double],
+        scene: String
+    ) throws -> LongStrokeTrendAudit {
+        let estimator =
+            "theil-sen-of-contiguous-eight-frame-block-medians-v1"
+        guard let object = value as? [String: Any] else {
+            throw ArtifactFileSystem.invalid(
+                "\(scene): long-stroke trend evidence is malformed"
+            )
+        }
+        try ArtifactFileSystem.requireExactKeys(
+            object,
+            [
+                "estimator", "blockSize", "blocks",
+                "cpuSlopeMillisecondsPerFrame",
+                "gpuSlopeMillisecondsPerFrame",
+            ],
+            label: "\(scene) long-stroke trend evidence"
+        )
+        guard object["estimator"] as? String == estimator,
+              integer(object["blockSize"]) == 8,
+              let encodedBlocks =
+                object["blocks"] as? [[String: Any]],
+              let derived = deriveLongStrokeTrend(
+                  cpuMilliseconds: cpuMilliseconds,
+                  gpuMilliseconds: gpuMilliseconds
+              ),
+              encodedBlocks.count == derived.blocks.count,
+              let encodedCPUSlope =
+                number(
+                    object["cpuSlopeMillisecondsPerFrame"]
+                )?.doubleValue,
+              encodedCPUSlope.isFinite,
+              let encodedGPUSlope =
+                number(
+                    object["gpuSlopeMillisecondsPerFrame"]
+                )?.doubleValue,
+              encodedGPUSlope.isFinite,
+              close(
+                  encodedCPUSlope,
+                  derived.cpuSlopeMillisecondsPerFrame
+              ),
+              close(
+                  encodedGPUSlope,
+                  derived.gpuSlopeMillisecondsPerFrame
+              )
+        else {
+            throw ArtifactFileSystem.invalid(
+                "\(scene): long-stroke trend evidence disagrees "
+                    + "with its 128 raw frame samples"
+            )
+        }
+        for (index, encoded) in encodedBlocks.enumerated() {
+            let expected = derived.blocks[index]
+            guard Set(encoded.keys) == [
+                "startFrameIndex",
+                "endFrameIndexExclusive",
+                "centerFrameIndex",
+                "cpuMedianMilliseconds",
+                "gpuMedianMilliseconds",
+            ],
+                integer(encoded["startFrameIndex"])
+                    == expected.startFrameIndex,
+                integer(encoded["endFrameIndexExclusive"])
+                    == expected.endFrameIndexExclusive,
+                let center =
+                  number(encoded["centerFrameIndex"])?.doubleValue,
+                center.isFinite,
+                close(center, expected.centerFrameIndex),
+                let cpuMedian =
+                  number(
+                      encoded["cpuMedianMilliseconds"]
+                  )?.doubleValue,
+                cpuMedian.isFinite,
+                cpuMedian >= 0,
+                close(
+                    cpuMedian,
+                    expected.cpuMedianMilliseconds
+                ),
+                let gpuMedian =
+                  number(
+                      encoded["gpuMedianMilliseconds"]
+                  )?.doubleValue,
+                gpuMedian.isFinite,
+                gpuMedian >= 0,
+                close(
+                    gpuMedian,
+                    expected.gpuMedianMilliseconds
+                )
+            else {
+                throw ArtifactFileSystem.invalid(
+                    "\(scene): long-stroke trend block \(index) "
+                        + "has invalid membership, ordering, or medians"
+                )
+            }
+        }
+        return derived
+    }
+
+    private static func deriveLongStrokeTrend(
+        cpuMilliseconds: [Double],
+        gpuMilliseconds: [Double]
+    ) -> LongStrokeTrendAudit? {
+        let blockSize = 8
+        guard cpuMilliseconds.count == 128,
+              gpuMilliseconds.count == 128,
+              cpuMilliseconds.allSatisfy({
+                  $0.isFinite && $0 >= 0
+              }),
+              gpuMilliseconds.allSatisfy({
+                  $0.isFinite && $0 >= 0
+              })
+        else {
+            return nil
+        }
+        var blocks: [LongStrokeTrendBlockAudit] = []
+        blocks.reserveCapacity(cpuMilliseconds.count / blockSize)
+        for start in stride(
+            from: 0,
+            to: cpuMilliseconds.count,
+            by: blockSize
+        ) {
+            let end = start + blockSize
+            blocks.append(
+                LongStrokeTrendBlockAudit(
+                    startFrameIndex: start,
+                    endFrameIndexExclusive: end,
+                    centerFrameIndex:
+                        Double(start) + Double(blockSize - 1) / 2,
+                    cpuMedianMilliseconds: median(
+                        cpuMilliseconds[start ..< end]
+                    ),
+                    gpuMedianMilliseconds: median(
+                        gpuMilliseconds[start ..< end]
+                    )
+                )
+            )
+        }
+        let centers = blocks.map(\.centerFrameIndex)
+        guard let cpuSlope = theilSenSlope(
+            blocks.map(\.cpuMedianMilliseconds),
+            frameIndices: centers
+        ),
+            let gpuSlope = theilSenSlope(
+                blocks.map(\.gpuMedianMilliseconds),
+                frameIndices: centers
+            )
+        else {
+            return nil
+        }
+        return LongStrokeTrendAudit(
+            blocks: blocks,
+            cpuSlopeMillisecondsPerFrame: cpuSlope,
+            gpuSlopeMillisecondsPerFrame: gpuSlope
+        )
+    }
+
+    private static func median(
+        _ values: ArraySlice<Double>
+    ) -> Double {
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        return (sorted[middle - 1] + sorted[middle]) / 2
     }
 
     private struct LongStrokeIdentityAudit {

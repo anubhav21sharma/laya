@@ -127,12 +127,25 @@ The software policy is:
 - every exact long-stroke live frame records the transient replay buffer's
   runtime retained-dab and visible projected-instance counts, bounded by
   `2048` and `4096` respectively, with nonzero retained state required;
+- all 128 raw long-stroke timings remain authoritative while schema 4 reports
+  16 contiguous eight-frame medians and deterministic Theil-Sen slopes from
+  all 120 pairs at exact block-center frame indices; the validator recomputes
+  every derived value, accepts multiple bounded timing-contaminated blocks
+  without hiding sustained `+0.004 ms/frame` growth, and keeps the
+  `0.001 ms/frame` limit unchanged;
+- the same schema preserves all 128 chronological event-to-submit samples,
+  records the exact `16,666,667 ns` software frame budget, and requires a
+  strictly-positive sample at every frame plus a validator-derived exact
+  missed-frame count; nonzero software counts remain diagnostic and are
+  published per brush in performance-status schema 3; the primary one-frame
+  correctness capture's counter remains diagnostic because it intentionally
+  batches the deterministic trace rather than modeling per-input submission;
 - no compiler, decode, upload, pipeline creation, file I/O, or synchronous
   wait on the production input path;
 - resource residency bounded by each compiled definition and device budget.
 
-The final clean run records the measured maximum professional CPU p95 and
-Stage 4 500-dab GPU diagnostic in:
+The final clean run records the measured maximum professional CPU p95, Stage 5
+500-dab GPU diagnostic, and per-brush software event-to-submit miss counts in:
 
 ```text
 .build/professional-brush-artifacts/performance-status.json

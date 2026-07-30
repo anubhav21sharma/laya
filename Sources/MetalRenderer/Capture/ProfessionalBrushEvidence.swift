@@ -431,9 +431,134 @@ public struct ProfessionalLongStrokeTrace:
     }
 }
 
+public struct ProfessionalLongStrokeTrendBlock:
+    Codable, Equatable, Sendable
+{
+    public let startFrameIndex: Int
+    public let endFrameIndexExclusive: Int
+    public let centerFrameIndex: Double
+    public let cpuMedianMilliseconds: Double
+    public let gpuMedianMilliseconds: Double
+}
+
+public struct ProfessionalLongStrokeTrendEvidence:
+    Codable, Equatable, Sendable
+{
+    public static let estimatorIdentifier =
+        "theil-sen-of-contiguous-eight-frame-block-medians-v1"
+    public static let samplesPerBlock = 8
+
+    public let estimator: String
+    public let blockSize: Int
+    public let blocks: [ProfessionalLongStrokeTrendBlock]
+    public let cpuSlopeMillisecondsPerFrame: Double
+    public let gpuSlopeMillisecondsPerFrame: Double
+
+    public init?(
+        cpuMilliseconds: [Double],
+        gpuMilliseconds: [Double]
+    ) {
+        guard cpuMilliseconds.count == 128,
+              gpuMilliseconds.count == 128,
+              cpuMilliseconds.allSatisfy({
+                  $0.isFinite && $0 >= 0
+              }),
+              gpuMilliseconds.allSatisfy({
+                  $0.isFinite && $0 >= 0
+              })
+        else {
+            return nil
+        }
+        var blocks: [ProfessionalLongStrokeTrendBlock] = []
+        blocks.reserveCapacity(
+            cpuMilliseconds.count / Self.samplesPerBlock
+        )
+        for start in stride(
+            from: 0,
+            to: cpuMilliseconds.count,
+            by: Self.samplesPerBlock
+        ) {
+            let end = start + Self.samplesPerBlock
+            blocks.append(
+                ProfessionalLongStrokeTrendBlock(
+                    startFrameIndex: start,
+                    endFrameIndexExclusive: end,
+                    centerFrameIndex:
+                        Double(start)
+                            + Double(Self.samplesPerBlock - 1) / 2,
+                    cpuMedianMilliseconds: Self.median(
+                        cpuMilliseconds[start ..< end]
+                    ),
+                    gpuMedianMilliseconds: Self.median(
+                        gpuMilliseconds[start ..< end]
+                    )
+                )
+            )
+        }
+        let centers = blocks.map(\.centerFrameIndex)
+        guard let cpuSlope = Self.theilSenSlope(
+            blocks.map(\.cpuMedianMilliseconds),
+            frameIndices: centers
+        ),
+            let gpuSlope = Self.theilSenSlope(
+                blocks.map(\.gpuMedianMilliseconds),
+                frameIndices: centers
+            )
+        else {
+            return nil
+        }
+        estimator = Self.estimatorIdentifier
+        blockSize = Self.samplesPerBlock
+        self.blocks = blocks
+        cpuSlopeMillisecondsPerFrame = cpuSlope
+        gpuSlopeMillisecondsPerFrame = gpuSlope
+    }
+
+    private static func median(
+        _ values: ArraySlice<Double>
+    ) -> Double {
+        let sorted = values.sorted()
+        return (
+            sorted[Self.samplesPerBlock / 2 - 1]
+                + sorted[Self.samplesPerBlock / 2]
+        ) / 2
+    }
+
+    private static func theilSenSlope(
+        _ values: [Double],
+        frameIndices: [Double]
+    ) -> Double? {
+        guard values.count == 16,
+              frameIndices.count == values.count,
+              values.allSatisfy(\.isFinite),
+              frameIndices.allSatisfy(\.isFinite)
+        else {
+            return nil
+        }
+        var pairwiseSlopes: [Double] = []
+        pairwiseSlopes.reserveCapacity(120)
+        for first in 0 ..< values.count {
+            for second in (first + 1) ..< values.count {
+                let frameDistance =
+                    frameIndices[second] - frameIndices[first]
+                guard frameDistance > 0 else { return nil }
+                let slope =
+                    (values[second] - values[first]) / frameDistance
+                guard slope.isFinite else { return nil }
+                pairwiseSlopes.append(slope)
+            }
+        }
+        guard pairwiseSlopes.count == 120 else { return nil }
+        pairwiseSlopes.sort()
+        return (pairwiseSlopes[59] + pairwiseSlopes[60]) / 2
+    }
+}
+
 public struct ProfessionalLongStrokeEvidence:
     Codable, Equatable, Sendable
 {
+    public static let displayFrameBudgetNanoseconds: UInt64 = 16_666_667
+
     public let schemaVersion: Int
     public let workloadID: String
     public let scene: String
@@ -446,6 +571,10 @@ public struct ProfessionalLongStrokeEvidence:
     public let traceSHA256: String
     public let cpuPreparationMilliseconds: [Double]
     public let gpuMilliseconds: [Double]
+    public let eventToSubmitNanoseconds: [UInt64]
+    public let displayFrameBudgetNanoseconds: UInt64
+    public let missedFrameCount: UInt64
+    public let trend: ProfessionalLongStrokeTrendEvidence
     public let identityFrames: [ProfessionalLongStrokeIdentityFrame]
     public let logicalDabCount: Int
     public let projectedInstanceCount: Int
@@ -467,6 +596,8 @@ public struct ProfessionalLongStrokeEvidence:
         traceSHA256: String,
         cpuPreparationMilliseconds: [Double],
         gpuMilliseconds: [Double],
+        eventToSubmitNanoseconds: [UInt64],
+        trend: ProfessionalLongStrokeTrendEvidence,
         identityFrames: [ProfessionalLongStrokeIdentityFrame],
         logicalDabCount: Int,
         projectedInstanceCount: Int,
@@ -477,7 +608,7 @@ public struct ProfessionalLongStrokeEvidence:
         compilerCountersAfter:
             ProfessionalBrushCompilerCounterSnapshot
     ) {
-        schemaVersion = 2
+        schemaVersion = 4
         workloadID = "professional-long-stroke"
         self.scene = scene
         self.definitionID = definitionID
@@ -489,6 +620,15 @@ public struct ProfessionalLongStrokeEvidence:
         self.traceSHA256 = traceSHA256
         self.cpuPreparationMilliseconds = cpuPreparationMilliseconds
         self.gpuMilliseconds = gpuMilliseconds
+        self.eventToSubmitNanoseconds = eventToSubmitNanoseconds
+        displayFrameBudgetNanoseconds =
+            Self.displayFrameBudgetNanoseconds
+        missedFrameCount = UInt64(
+            eventToSubmitNanoseconds.lazy.filter {
+                $0 >= Self.displayFrameBudgetNanoseconds
+            }.count
+        )
+        self.trend = trend
         self.identityFrames = identityFrames
         self.logicalDabCount = logicalDabCount
         self.projectedInstanceCount = projectedInstanceCount

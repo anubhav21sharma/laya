@@ -78,7 +78,7 @@ struct ProfessionalBrushEvidenceValidatorTests {
         let root = fixture.root
         defer { try? FileManager.default.removeItem(at: root) }
         let valid: [String: Any] = [
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "correctnessPassed": true,
             "gpuName": "Mystery GPU",
             "gpuClassification": "unknown",
@@ -86,6 +86,12 @@ struct ProfessionalBrushEvidenceValidatorTests {
             "cpuPreparationBudgetMilliseconds": 2.0,
             "gpu500DabMilliseconds": 1.0,
             "gpu500DabBudgetMilliseconds": 3.0,
+            "softwareEventToSubmitMissedFrameCountByBrush":
+                Dictionary(
+                    uniqueKeysWithValues:
+                        ProfessionalBrushEvidenceValidator
+                            .positiveSceneNames.map { ($0, 0) }
+                ),
         ]
         #expect(
             try PerformanceStatusValidator.validate(
@@ -387,7 +393,119 @@ struct ProfessionalBrushEvidenceValidatorTests {
         #expect(try validatePerformanceFixture(valid, gpuMaximum: 1))
         try? FileManager.default.removeItem(at: valid.root)
 
+        let isolatedSpike = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: isolatedSpike,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var gpu = raw["gpuMilliseconds"] as! [Double]
+            gpu[119] = 16
+            raw["gpuMilliseconds"] = gpu
+        }
+        #expect(
+            try validatePerformanceFixture(
+                isolatedSpike,
+                gpuMaximum: 1
+            )
+        )
+        try? FileManager.default.removeItem(at: isolatedSpike.root)
+
+        let contaminatedBlocks = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: contaminatedBlocks,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var gpu = raw["gpuMilliseconds"] as! [Double]
+            for index in 64 ..< 88 {
+                gpu[index] += 20
+            }
+            raw["gpuMilliseconds"] = gpu
+            rebuildTheilSenLongStrokeTrend(&raw)
+        }
+        #expect(
+            try validatePerformanceFixture(
+                contaminatedBlocks,
+                gpuMaximum: 1
+            )
+        )
+        try? FileManager.default.removeItem(at: contaminatedBlocks.root)
+
+        let diagnosticMiss = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: diagnosticMiss,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var timings =
+                raw["eventToSubmitNanoseconds"] as! [Int]
+            timings[64] = 16_666_667
+            raw["eventToSubmitNanoseconds"] = timings
+            raw["missedFrameCount"] = 1
+        }
+        #expect(
+            try validatePerformanceFixture(
+                diagnosticMiss,
+                gpuMaximum: 1
+            )
+        )
+        try? FileManager.default.removeItem(at: diagnosticMiss.root)
+
         var value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var timings =
+                raw["eventToSubmitNanoseconds"] as! [Int]
+            timings[64] = 0
+            raw["eventToSubmitNanoseconds"] = timings
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            raw["missedFrameCount"] = 1
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var timings =
+                raw["eventToSubmitNanoseconds"] as! [Int]
+            timings.removeLast()
+            raw["eventToSubmitNanoseconds"] = timings
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            raw["displayFrameBudgetNanoseconds"] = 16_666_668
+        }
+        reject(value)
+
+        value = try fixture()
         try FileManager.default.removeItem(
             at: value.root.appendingPathComponent(
                 "professional-technical-ink"
@@ -410,6 +528,106 @@ struct ProfessionalBrushEvidenceValidatorTests {
             referenceKey: "fiveHundredDabs"
         ) {
             $0["semanticHash"] = String(repeating: "0", count: 64)
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var trend = raw["trend"] as! [String: Any]
+            var blocks = trend["blocks"] as! [[String: Any]]
+            blocks.removeLast()
+            trend["blocks"] = blocks
+            raw["trend"] = trend
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var trend = raw["trend"] as! [String: Any]
+            var blocks = trend["blocks"] as! [[String: Any]]
+            blocks.swapAt(4, 5)
+            trend["blocks"] = blocks
+            raw["trend"] = trend
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var trend = raw["trend"] as! [String: Any]
+            var blocks = trend["blocks"] as! [[String: Any]]
+            blocks[1]["startFrameIndex"] = 9
+            trend["blocks"] = blocks
+            raw["trend"] = trend
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var trend = raw["trend"] as! [String: Any]
+            var blocks = trend["blocks"] as! [[String: Any]]
+            blocks[8]["gpuMedianMilliseconds"] = 0.2
+            trend["blocks"] = blocks
+            raw["trend"] = trend
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var trend = raw["trend"] as! [String: Any]
+            trend["gpuSlopeMillisecondsPerFrame"] = 0.000_1
+            raw["trend"] = trend
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var trend = raw["trend"] as! [String: Any]
+            trend["unexpectedDerivedClaim"] = true
+            raw["trend"] = trend
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var trend = raw["trend"] as! [String: Any]
+            trend["estimator"] =
+                "least-squares-of-contiguous-eight-frame-block-medians-v1"
+            raw["trend"] = trend
         }
         reject(value)
 
@@ -646,9 +864,12 @@ struct ProfessionalBrushEvidenceValidatorTests {
             filename: "professional-long-stroke.raw.json",
             referenceKey: "longStroke"
         ) { raw in
-            raw["cpuPreparationMilliseconds"] = (0..<128).map {
-                0.1 + Double($0) * 0.004
-            }
+            setLinearLongStrokeTiming(
+                &raw,
+                rawKey: "cpuPreparationMilliseconds",
+                blockMedianKey: "cpuMedianMilliseconds",
+                slopeKey: "cpuSlopeMillisecondsPerFrame"
+            )
         }
         reject(value)
 
@@ -659,11 +880,34 @@ struct ProfessionalBrushEvidenceValidatorTests {
             filename: "professional-long-stroke.raw.json",
             referenceKey: "longStroke"
         ) { raw in
-            raw["gpuMilliseconds"] = (0..<128).map {
-                0.1 + Double($0) * 0.004
-            }
+            setLinearLongStrokeTiming(
+                &raw,
+                rawKey: "gpuMilliseconds",
+                blockMedianKey: "gpuMedianMilliseconds",
+                slopeKey: "gpuSlopeMillisecondsPerFrame"
+            )
         }
         reject(value)
+
+        for nonfinite in ["NaN", "1e999"] {
+            value = try fixture()
+            try mutatePerformanceRawBytesAndRebind(
+                fixture: value,
+                scene: "professional-chisel-marker",
+                filename: "professional-long-stroke.raw.json",
+                referenceKey: "longStroke"
+            ) { data in
+                var text = String(decoding: data, as: UTF8.self)
+                let key = text.range(of: "\"gpuMilliseconds\"")!
+                let value = text.range(
+                    of: "0.1",
+                    range: key.upperBound ..< text.endIndex
+                )!
+                text.replaceSubrange(value, with: nonfinite)
+                return Data(text.utf8)
+            }
+            reject(value)
+        }
 
         value = try fixture()
         let traceDirectory = value.root.appendingPathComponent(
@@ -1018,6 +1262,39 @@ struct ProfessionalBrushEvidenceValidatorTests {
     }
 
     @Test
+    func stageFiveGateEmitsCurrentPerformanceStatusSchema() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let script = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "scripts/verify-brush-stage5.sh"
+            ),
+            encoding: .utf8
+        )
+
+        #expect(
+            script.contains(
+                "plutil -insert schemaVersion -integer 3 \"$performance\""
+            )
+        )
+        #expect(
+            script.contains(
+                "softwareEventToSubmitMissedFrameCountByBrush"
+            )
+        )
+        #expect(
+            script.contains(
+                "plutil -extract missedFrameCount raw -o -"
+            )
+        )
+        for scene in ProfessionalBrushEvidenceValidator.positiveSceneNames {
+            #expect(script.contains(scene))
+        }
+    }
+
+    @Test
     func suppliedUnknownPhysicalProfileFailsBeforeCopying() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1303,8 +1580,18 @@ private func professionalPerformanceFixture(
                 ],
             ]
         }
+        let trendBlocks: [[String: Any]] = (0..<16).map { index in
+            let start = index * 8
+            return [
+                "startFrameIndex": start,
+                "endFrameIndexExclusive": start + 8,
+                "centerFrameIndex": Double(start) + 3.5,
+                "cpuMedianMilliseconds": 0.1,
+                "gpuMedianMilliseconds": 0.1,
+            ]
+        }
         let long = try testJSONData([
-            "schemaVersion": 2,
+            "schemaVersion": 4,
             "workloadID": "professional-long-stroke",
             "scene": scene,
             "definitionID": definitionID,
@@ -1317,6 +1604,18 @@ private func professionalPerformanceFixture(
             "cpuPreparationMilliseconds":
                 Array(repeating: 0.1, count: 128),
             "gpuMilliseconds": Array(repeating: 0.1, count: 128),
+            "eventToSubmitNanoseconds":
+                Array(repeating: 1_000_000, count: 128),
+            "displayFrameBudgetNanoseconds": 16_666_667,
+            "missedFrameCount": 0,
+            "trend": [
+                "estimator":
+                    "theil-sen-of-contiguous-eight-frame-block-medians-v1",
+                "blockSize": 8,
+                "blocks": trendBlocks,
+                "cpuSlopeMillisecondsPerFrame": 0.0,
+                "gpuSlopeMillisecondsPerFrame": 0.0,
+            ],
             "identityFrames": identityFrames,
             "logicalDabCount": 128,
             "projectedInstanceCount": 8_192,
@@ -1794,8 +2093,20 @@ private func validatePerformanceFixture(
     _ fixture: ProfessionalPerformanceTestFixture,
     gpuMaximum: Double
 ) throws -> Bool {
+    var missedFrameCounts: [String: UInt64] = [:]
+    for scene in ProfessionalBrushEvidenceValidator.positiveSceneNames {
+        let raw = try JSONSerialization.jsonObject(
+            with: Data(
+                contentsOf: fixture.root.appendingPathComponent(
+                    "\(scene)/professional-long-stroke.raw.json"
+                )
+            )
+        ) as! [String: Any]
+        missedFrameCounts[scene] =
+            (raw["missedFrameCount"] as! NSNumber).uint64Value
+    }
     let status = try testJSONData([
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "correctnessPassed": true,
         "gpuName": "Apple M4",
         "gpuClassification": "physical",
@@ -1803,6 +2114,8 @@ private func validatePerformanceFixture(
         "cpuPreparationBudgetMilliseconds": 2.0,
         "gpu500DabMilliseconds": gpuMaximum,
         "gpu500DabBudgetMilliseconds": 3.0,
+        "softwareEventToSubmitMissedFrameCountByBrush":
+            missedFrameCounts,
     ])
     return try PerformanceStatusValidator.validate(
         status,
@@ -1835,4 +2148,98 @@ private func mutatePerformanceRawAndRebind(
         reference["sha256"] = digest
         index[referenceKey] = reference
     }
+}
+
+private func mutatePerformanceRawBytesAndRebind(
+    fixture: ProfessionalPerformanceTestFixture,
+    scene: String,
+    filename: String,
+    referenceKey: String,
+    _ mutation: (Data) throws -> Data
+) throws {
+    let directory = fixture.root.appendingPathComponent(scene)
+    let raw = directory.appendingPathComponent(filename)
+    try mutation(Data(contentsOf: raw)).write(to: raw)
+    let digest = ArtifactFileSystem.sha256(try Data(contentsOf: raw))
+    try mutateTestJSONObject(
+        at: directory.appendingPathComponent(
+            "professional-performance.json"
+        )
+    ) { index in
+        var reference = index[referenceKey] as! [String: Any]
+        reference["sha256"] = digest
+        index[referenceKey] = reference
+    }
+}
+
+private func setLinearLongStrokeTiming(
+    _ raw: inout [String: Any],
+    rawKey: String,
+    blockMedianKey: String,
+    slopeKey: String
+) {
+    raw[rawKey] = (0..<128).map {
+        0.1 + Double($0) * 0.004
+    }
+    var trend = raw["trend"] as! [String: Any]
+    var blocks = trend["blocks"] as! [[String: Any]]
+    for index in blocks.indices {
+        let centerFrameIndex = Double(index * 8) + 3.5
+        blocks[index][blockMedianKey] =
+            0.1 + centerFrameIndex * 0.004
+    }
+    trend["blocks"] = blocks
+    trend[slopeKey] = 0.004
+    raw["trend"] = trend
+}
+
+private func rebuildTheilSenLongStrokeTrend(
+    _ raw: inout [String: Any]
+) {
+    let blockSize = 8
+    let cpu = raw["cpuPreparationMilliseconds"] as! [Double]
+    let gpu = raw["gpuMilliseconds"] as! [Double]
+    var blocks: [[String: Any]] = []
+    for start in stride(from: 0, to: 128, by: blockSize) {
+        let end = start + blockSize
+        let cpuSorted = cpu[start ..< end].sorted()
+        let gpuSorted = gpu[start ..< end].sorted()
+        blocks.append([
+            "startFrameIndex": start,
+            "endFrameIndexExclusive": end,
+            "centerFrameIndex": Double(start) + 3.5,
+            "cpuMedianMilliseconds":
+                (cpuSorted[3] + cpuSorted[4]) / 2,
+            "gpuMedianMilliseconds":
+                (gpuSorted[3] + gpuSorted[4]) / 2,
+        ])
+    }
+    let centers = blocks.map {
+        $0["centerFrameIndex"] as! Double
+    }
+    func slope(_ key: String) -> Double {
+        let medians = blocks.map { $0[key] as! Double }
+        var pairwise: [Double] = []
+        for first in 0 ..< medians.count {
+            for second in (first + 1) ..< medians.count {
+                pairwise.append(
+                    (medians[second] - medians[first])
+                        / (centers[second] - centers[first])
+                )
+            }
+        }
+        pairwise.sort()
+        #expect(pairwise.count == 120)
+        return (pairwise[59] + pairwise[60]) / 2
+    }
+    raw["trend"] = [
+        "estimator":
+            "theil-sen-of-contiguous-eight-frame-block-medians-v1",
+        "blockSize": blockSize,
+        "blocks": blocks,
+        "cpuSlopeMillisecondsPerFrame":
+            slope("cpuMedianMilliseconds"),
+        "gpuSlopeMillisecondsPerFrame":
+            slope("gpuMedianMilliseconds"),
+    ]
 }

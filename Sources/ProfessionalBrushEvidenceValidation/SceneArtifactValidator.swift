@@ -524,7 +524,6 @@ enum SceneArtifactValidator {
                   evidence.telemetry.encodedInstanceCount
               ),
               (1 ... 3).contains(evidence.telemetry.bufferHighWater),
-              evidence.telemetry.missedFrameCount == 0,
               evidence.telemetry.authoritativeBacklog == 0,
               evidence.telemetry.predictedBacklog == 0,
               (1 ... evidence.projectedInstanceCount).contains(

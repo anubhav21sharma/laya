@@ -1229,7 +1229,7 @@ private extension DepositionHarnessRunner {
 
         let definition = context.compiled.program.definition
         let characterization =
-            ProfessionalBrushCharacterizer.record(
+            try ProfessionalBrushCharacterizer.record(
                 family: definition.metadata.displayName,
                 renderIdentity: context.compiled.renderIdentity,
                 trace: StrokeTraceFixtures.professionalSlowLine,
@@ -1534,9 +1534,24 @@ private extension DepositionHarnessRunner {
             collectPerformanceEvidence: true
         )
         let longAfter = longContext.compiler.debugCounters
+        let cpuMilliseconds = capture.strokeMetrics.map(
+            \.cpuEncodeMilliseconds
+        )
+        let gpuMilliseconds = capture.strokeMetrics.map(
+            \.gpuMilliseconds
+        )
+        let eventToSubmitNanoseconds = capture.strokeMetrics.map(
+            \.eventToSubmitNanoseconds
+        )
         guard capture.strokeMetrics.count == 128,
               capture.identityFrames.count == 128,
-              let limits = package.definition.replayLimits
+              eventToSubmitNanoseconds.count == 128,
+              eventToSubmitNanoseconds.allSatisfy({ $0 > 0 }),
+              let limits = package.definition.replayLimits,
+              let trend = ProfessionalLongStrokeTrendEvidence(
+                  cpuMilliseconds: cpuMilliseconds,
+                  gpuMilliseconds: gpuMilliseconds
+              )
         else {
             throw DepositionHarnessRunError.invariantFailed(
                 scene: scene.name,
@@ -1552,10 +1567,10 @@ private extension DepositionHarnessRunner {
             inputSampleCount: trace.count,
             traceSHA256:
                 ProfessionalBrushEvidenceValidator.sha256(traceData),
-            cpuPreparationMilliseconds: capture.strokeMetrics.map(
-                \.cpuEncodeMilliseconds
-            ),
-            gpuMilliseconds: capture.strokeMetrics.map(\.gpuMilliseconds),
+            cpuPreparationMilliseconds: cpuMilliseconds,
+            gpuMilliseconds: gpuMilliseconds,
+            eventToSubmitNanoseconds: eventToSubmitNanoseconds,
+            trend: trend,
             identityFrames: capture.identityFrames,
             logicalDabCount: capture.logicalDabCount,
             projectedInstanceCount: capture.projectedInstanceCount,

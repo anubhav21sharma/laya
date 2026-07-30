@@ -295,7 +295,7 @@ copy_manual_evidence() {
 write_json_status_and_provenance() {
   local performance="$artifacts/performance-status.json"
   plutil -create xml1 "$performance"
-  plutil -insert schemaVersion -integer 2 "$performance"
+  plutil -insert schemaVersion -integer 3 "$performance"
   plutil -insert correctnessPassed -bool true "$performance"
   plutil -insert gpuName -string "$gpu_name" "$performance"
   plutil -insert gpuClassification -string "$gpu_classification" \
@@ -305,6 +305,23 @@ write_json_status_and_provenance() {
   plutil -insert cpuPreparationBudgetMilliseconds -float 2 "$performance"
   plutil -insert gpu500DabMilliseconds -float "$gpu_500" "$performance"
   plutil -insert gpu500DabBudgetMilliseconds -float 3 "$performance"
+  plutil -insert softwareEventToSubmitMissedFrameCountByBrush \
+    -dictionary "$performance"
+  local scene missed
+  for scene in \
+    professional-chisel-marker professional-graphite-pencil \
+    professional-natural-charcoal professional-technical-ink
+  do
+    missed="$(
+      plutil -extract missedFrameCount raw -o - \
+        "$artifacts/positive/$scene/professional-long-stroke.raw.json"
+    )"
+    [[ "$missed" =~ ^[0-9]+$ ]] \
+      || fail "professional event-to-submit missed-frame count is invalid: $scene"
+    plutil -insert \
+      "softwareEventToSubmitMissedFrameCountByBrush.$scene" \
+      -integer "$missed" "$performance"
+  done
   plutil -convert json "$performance"
 
   local provenance="$artifacts/provenance.json"
