@@ -179,31 +179,64 @@ func professionalCatalogResolvesChiselMarkerWithItsExactFallbackAndMaterial() th
 @Test
 func naturalCharcoalValidationRejectsMissingOrOptionalDualLayerCapabilities() throws {
     #expect(throws: BrushDefinitionValidationError.missingCapability("dualShape")) {
-        try decodeMutatedNaturalCharcoal(removing: "dualShape")
+        try decodeMutatedNaturalCharcoal(removing: ["dualShape"])
     }
     #expect(throws: BrushDefinitionValidationError.missingCapability("dualShape")) {
         try decodeMutatedNaturalCharcoal(markingOptional: "dualShape")
     }
     #expect(throws: BrushDefinitionValidationError.missingCapability("dualGrain")) {
-        try decodeMutatedNaturalCharcoal(removing: "dualGrain")
+        try decodeMutatedNaturalCharcoal(removing: ["dualGrain"])
     }
     #expect(throws: BrushDefinitionValidationError.missingCapability("dualGrain")) {
         try decodeMutatedNaturalCharcoal(markingOptional: "dualGrain")
     }
 }
 
+@Test
+func graphitePencilValidationRejectsItsSoleDualGrainCapabilityRemoved() throws {
+    #expect(throws: BrushDefinitionValidationError.missingCapability("dualGrain")) {
+        try decodeMutatedGraphitePencil(removing: "dualGrain")
+    }
+}
+
+@Test
+func naturalCharcoalValidationRejectsBothDualLayerCapabilitiesRemoved() throws {
+    #expect(throws: BrushDefinitionValidationError.missingCapability("dualShape")) {
+        try decodeMutatedNaturalCharcoal(removing: ["dualGrain", "dualShape"])
+    }
+}
+
 private func decodeMutatedNaturalCharcoal(
-    removing identifier: String? = nil,
+    removing identifiers: Set<String> = [],
+    markingOptional optionalIdentifier: String? = nil
+) throws -> BrushDefinition {
+    try decodeMutated(
+        ProfessionalBrushCatalog.naturalCharcoal.definition,
+        removing: identifiers,
+        markingOptional: optionalIdentifier
+    )
+}
+
+private func decodeMutatedGraphitePencil(
+    removing identifier: String
+) throws -> BrushDefinition {
+    try decodeMutated(
+        ProfessionalBrushCatalog.graphitePencil.definition,
+        removing: [identifier]
+    )
+}
+
+private func decodeMutated(
+    _ definition: BrushDefinition,
+    removing identifiers: Set<String> = [],
     markingOptional optionalIdentifier: String? = nil
 ) throws -> BrushDefinition {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-    let data = try encoder.encode(ProfessionalBrushCatalog.naturalCharcoal.definition)
+    let data = try encoder.encode(definition)
     var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
     var capabilities = try #require(object["capabilities"] as? [[String: Any]])
-    if let identifier {
-        capabilities.removeAll { $0["identifier"] as? String == identifier }
-    }
+    capabilities.removeAll { identifiers.contains($0["identifier"] as? String ?? "") }
     if let optionalIdentifier {
         let index = try #require(capabilities.firstIndex {
             $0["identifier"] as? String == optionalIdentifier

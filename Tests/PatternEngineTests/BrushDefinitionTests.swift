@@ -329,6 +329,42 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
     #expect(throws: BrushDefinitionValidationError.self) { try definition.replacing(color: invalidColor) }
 }
 
+@Test func definitionRequiresRequiredDualLayerCapabilitiesForEverySecondLayer() throws {
+    let base = try BrushDefinition.fixture()
+    let twoShapes = BrushCoverageDefinition(
+        shapes: [
+            BrushShapeLayerDefinition(shape: .hardRound, combination: .replace, scale: 1, rotation: 0, offset: .zero),
+            BrushShapeLayerDefinition(shape: .softRound, combination: .multiply, scale: 1, rotation: 0, offset: .zero),
+        ],
+        grains: [], baseHardness: 1, aspectRatio: 1, tipThreshold: 0, antialiasing: true
+    )
+    let twoGrains = BrushCoverageDefinition(
+        shapes: base.coverage.shapes,
+        grains: [
+            BrushGrainLayerDefinition(grain: .paper, coordinateMode: .canonical, transform: .identity, grainMovementFraction: 0, grainFollowsBrushRotation: false, strength: 1),
+            BrushGrainLayerDefinition(grain: .noise, coordinateMode: .brushLocal, transform: .identity, grainMovementFraction: 0, grainFollowsBrushRotation: false, strength: 1),
+        ],
+        baseHardness: 1, aspectRatio: 1, tipThreshold: 0, antialiasing: true
+    )
+
+    for capabilities in [
+        [],
+        [BrushCapabilityDeclaration(identifier: "dualShape", required: false)],
+    ] {
+        #expect(throws: BrushDefinitionValidationError.missingCapability("dualShape")) {
+            try base.replacing(capabilities: capabilities, coverage: twoShapes)
+        }
+    }
+    for capabilities in [
+        [],
+        [BrushCapabilityDeclaration(identifier: "dualGrain", required: false)],
+    ] {
+        #expect(throws: BrushDefinitionValidationError.missingCapability("dualGrain")) {
+            try base.replacing(capabilities: capabilities, coverage: twoGrains)
+        }
+    }
+}
+
 @Test func definitionCodableRoundTripIsStable() throws {
     let definition = try LegacyBrushRecipeAdapter.definition(from: AnchorRecipeFixtures.all[0].recipe, displayName: "Technical Ink")
     let encoder = JSONEncoder()
@@ -384,6 +420,7 @@ private extension BrushDefinition {
 
     func replacing(
         dynamics: BrushDynamicsDefinition? = nil,
+        capabilities: [BrushCapabilityDeclaration]? = nil,
         coverage: BrushCoverageDefinition? = nil,
         color: BrushColorBehaviorDefinition? = nil,
         material: BrushMaterialDefinition? = nil,
@@ -395,7 +432,7 @@ private extension BrushDefinition {
     ) throws -> BrushDefinition {
         try BrushDefinition(
             id: id, schemaVersion: schemaVersion, metadata: metadata,
-            capabilities: capabilities, resources: resources ?? self.resources,
+            capabilities: capabilities ?? self.capabilities, resources: resources ?? self.resources,
             coverage: coverage ?? self.coverage, placement: placement ?? self.placement,
             dynamics: dynamics ?? self.dynamics, color: color ?? self.color,
             material: material ?? self.material,
