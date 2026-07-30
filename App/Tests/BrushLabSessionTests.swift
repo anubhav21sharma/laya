@@ -371,6 +371,118 @@ struct BrushLabSessionTests {
     }
 
     @Test
+    func stageFourSelectionSupersedesPausedProfessionalSelectionExactly()
+        async throws
+    {
+        let gate = ProfessionalCompilationGate(
+            definitionID:
+                ProfessionalBrushCatalog.graphitePencil.id.rawValue
+        )
+        guard let runtime = try makeRuntime(
+            compilerHooks: BrushCompilerTestHooks { context in
+                await gate.pauseFirstMatching(context)
+            }
+        ) else {
+            return
+        }
+        runtime.session.selectReviewMatrix(.stageFiveProfessional)
+        let superseded = try #require(
+            runtime.session.professionalManualCards.first {
+                $0.brushID
+                    == ProfessionalBrushCatalog.graphitePencil.id.rawValue
+                    && $0.gesture == .periodicSeamCrossing
+            }
+        )
+        let winning = try #require(
+            runtime.session.manualCards.first {
+                $0.brushID == AnchorBrushCatalog.ink.id.rawValue
+                    && $0.documentMode == "plain"
+                    && !$0.predictionEnabled
+                    && $0.customResourceFixture == nil
+            }
+        )
+
+        let supersededSelection = Task {
+            try await runtime.session.selectReviewCard(superseded.cardID)
+        }
+        await gate.waitUntilPaused()
+        runtime.session.selectReviewMatrix(.stageFourDiagnostic)
+        try await runtime.session.selectReviewCard(winning.cardID)
+        _ = try await runtime.session.replaySelectedReviewCard()
+        let winningState = try professionalReviewSnapshot(runtime)
+        gate.resume()
+
+        await #expect(throws: CancellationError.self) {
+            try await supersededSelection.value
+        }
+        #expect(try professionalReviewSnapshot(runtime) == winningState)
+        #expect(
+            runtime.controller.renderer.documentConfiguration
+                == winning.documentConfiguration
+        )
+        #expect(
+            runtime.controller.renderer.preparedBrush(for: .draw)?
+                .renderIdentity
+                == runtime.session.compiledBrush?.renderIdentity
+        )
+    }
+
+    @Test
+    func professionalSelectionSupersedesPausedStageFourSelectionExactly()
+        async throws
+    {
+        let gate = ProfessionalCompilationGate(
+            definitionID: AnchorBrushCatalog.ink.id.rawValue
+        )
+        guard let runtime = try makeRuntime(
+            compilerHooks: BrushCompilerTestHooks { context in
+                await gate.pauseFirstMatching(context)
+            }
+        ) else {
+            return
+        }
+        let superseded = try #require(
+            runtime.session.manualCards.first {
+                $0.brushID == AnchorBrushCatalog.ink.id.rawValue
+                    && $0.documentMode == "plain"
+                    && !$0.predictionEnabled
+                    && $0.customResourceFixture == nil
+            }
+        )
+        let winning = try #require(
+            runtime.session.professionalManualCards.first {
+                $0.brushID
+                    == ProfessionalBrushCatalog.technicalInk.id.rawValue
+                    && $0.gesture == .slowLine
+            }
+        )
+
+        let supersededSelection = Task {
+            try await runtime.session.selectReviewCard(superseded.cardID)
+        }
+        await gate.waitUntilPaused()
+        runtime.session.selectReviewMatrix(.stageFiveProfessional)
+        try await runtime.session.selectReviewCard(winning.cardID)
+        _ = try await runtime.session.replaySelectedReviewCard()
+        let winningState = try professionalReviewSnapshot(runtime)
+        gate.resume()
+
+        await #expect(throws: CancellationError.self) {
+            try await supersededSelection.value
+        }
+        #expect(try professionalReviewSnapshot(runtime) == winningState)
+        #expect(
+            runtime.controller.renderer.documentConfiguration
+                == winning.documentConfiguration
+        )
+        #expect(
+            runtime.controller.renderer.preparedBrush(for: .draw)?
+                .renderIdentity
+                == runtime.session.compiledBrush?.renderIdentity
+        )
+    }
+
+    @Test
     func failedProfessionalCompilationPreservesEveryReviewObservable()
         async throws
     {
@@ -843,6 +955,103 @@ struct BrushLabSessionTests {
                     "\(gesture): \(error.localizedDescription)"
                 )
             }
+        }
+    }
+
+    @Test
+    func professionalManualValidatorChecksEveryScenarioLabelBeforeDigest()
+        throws
+    {
+        let pending = try BrushLabProfessionalManualCatalog.pending()
+            .encoded()
+        let expectedErrors = [
+            "tap": "professional manual semantic: tap",
+            "slowLine": "professional manual semantic: lineTiming",
+            "fastLine": "professional manual semantic: lineTiming",
+            "pressureRamp": "professional manual semantic: pressureRamp",
+            "tiltSweep": "professional manual semantic: tiltSweep",
+            "curve": "professional manual semantic: curve",
+            "sharpCorner": "professional manual semantic: sharpCorner",
+            "crossHatch": "professional manual semantic: crossHatch",
+            "repeatedBuildup":
+                "professional manual semantic: repeatedBuildup",
+            "periodicSeamCrossing":
+                "professional manual semantic: periodicSeamCrossing",
+            "radialRotation":
+                "professional manual semantic: radialRotation",
+            "radialReflection":
+                "professional manual semantic: radialReflection",
+            "eraserRetrace":
+                "professional manual semantic: eraserRetrace",
+            "mouseFallback":
+                "professional manual semantic: mouseFallback",
+            "tabletInput":
+                "professional manual semantic: tabletInput",
+        ]
+        let canonical = try #require(
+            JSONSerialization.jsonObject(with: pending)
+                as? [String: Any]
+        )
+        let canonicalCards = try #require(
+            canonical["cards"] as? [[String: Any]]
+        )
+
+        for gesture in expectedErrors.keys.sorted() {
+            let cardIndex = try #require(canonicalCards.firstIndex {
+                $0["gesture"] as? String == gesture
+            })
+            let expectedError = expectedErrors[gesture]!
+            let canonicalCard = canonicalCards[cardIndex]
+            let paint = try #require(
+                canonicalCard["paintRGBAHex"] as? String
+            )
+            let background = try #require(
+                canonicalCard["background"] as? String
+            )
+
+            var paintMutation = canonical
+            var paintCards =
+                paintMutation["cards"] as! [[String: Any]]
+            paintCards[cardIndex]["paintRGBAHex"] =
+                paint == "#111111FF" ? "#C43A52FF" : "#111111FF"
+            paintMutation["cards"] = paintCards
+            try expectProfessionalSemanticFailure(
+                paintMutation,
+                gesture: gesture,
+                mutation: "paint",
+                expectedError: expectedError
+            )
+
+            var backgroundMutation = canonical
+            var backgroundCards =
+                backgroundMutation["cards"] as! [[String: Any]]
+            backgroundCards[cardIndex]["background"] =
+                background == "opaque" ? "transparent" : "opaque"
+            backgroundMutation["cards"] = backgroundCards
+            try expectProfessionalSemanticFailure(
+                backgroundMutation,
+                gesture: gesture,
+                mutation: "background",
+                expectedError: expectedError
+            )
+
+            guard gesture != "tap" else { continue }
+            var suffixMutation = canonical
+            var suffixCards =
+                suffixMutation["cards"] as! [[String: Any]]
+            let cardID = try #require(
+                suffixCards[cardIndex]["cardID"] as? String
+            )
+            #expect(cardID.hasSuffix(".standard"))
+            suffixCards[cardIndex]["cardID"] =
+                String(cardID.dropLast("standard".count)) + "alternate"
+            suffixMutation["cards"] = suffixCards
+            try expectProfessionalSemanticFailure(
+                suffixMutation,
+                gesture: gesture,
+                mutation: "variant",
+                expectedError: expectedError
+            )
         }
     }
 
@@ -1997,6 +2206,38 @@ struct BrushLabSessionTests {
             var samples = $0["samples"] as! [[String: Any]]
             mutate(&samples[sampleIndex])
             $0["samples"] = samples
+        }
+    }
+
+    private func expectProfessionalSemanticFailure(
+        _ object: [String: Any],
+        gesture: String,
+        mutation: String,
+        expectedError: String
+    ) throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys]
+        )
+        do {
+            try ProfessionalManualEvidenceValidator.validateSemantics(data)
+            Issue.record(
+                "Semantic boundary accepted \(gesture) \(mutation)"
+            )
+        } catch {
+            #expect(
+                error.localizedDescription == expectedError,
+                "\(gesture) \(mutation): \(error.localizedDescription)"
+            )
+        }
+        do {
+            _ = try ProfessionalManualEvidenceValidator.validate(data)
+            Issue.record("Accepted \(gesture) \(mutation)")
+        } catch {
+            #expect(
+                error.localizedDescription == expectedError,
+                "\(gesture) \(mutation) digest: \(error.localizedDescription)"
+            )
         }
     }
 

@@ -264,7 +264,7 @@ final class BrushLabSession {
     private(set) var errorMessage: String?
     private var cpuEncodeSamples: [Double] = []
     private var gpuSamples: [Double] = []
-    private var professionalSelectionGeneration: UInt64 = 0
+    private var sessionOperationGeneration: UInt64 = 0
 
     init(controller: EditorSessionController, compiler: BrushCompiler) {
         self.controller = controller
@@ -450,8 +450,14 @@ final class BrushLabSession {
             errorMessage = BrushLabEvidenceError.rendererBusy.localizedDescription
             return
         }
+        let operation = nextSessionOperationGeneration()
         isLoading = true
         errorMessage = nil
+        defer {
+            if isCurrentSessionOperation(operation) {
+                isLoading = false
+            }
+        }
         do {
             let package = try await Task.detached(
                 priority: .userInitiated
@@ -464,11 +470,18 @@ final class BrushLabSession {
                 }
                 return try BrushPackageIO.load(from: url)
             }.value
-            await loadPackage(package, sourceName: url.lastPathComponent)
+            try requireCurrentSessionOperation(operation)
+            try await loadPackage(
+                package,
+                sourceName: url.lastPathComponent,
+                operation: operation
+            )
+        } catch is CancellationError {
         } catch {
-            errorMessage = error.localizedDescription
+            if isCurrentSessionOperation(operation) {
+                errorMessage = error.localizedDescription
+            }
         }
-        isLoading = false
     }
 
     func loadPackage(_ package: BrushPackage, sourceName: String) async {
@@ -476,7 +489,36 @@ final class BrushLabSession {
             errorMessage = BrushLabEvidenceError.rendererBusy.localizedDescription
             return
         }
+        let operation = nextSessionOperationGeneration()
+        do {
+            try await loadPackage(
+                package,
+                sourceName: sourceName,
+                operation: operation
+            )
+        } catch is CancellationError {
+        } catch {
+            if isCurrentSessionOperation(operation) {
+                errorMessage = error.localizedDescription
+                drawingAvailability = .compilationFailed(
+                    error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func loadPackage(
+        _ package: BrushPackage,
+        sourceName: String,
+        operation: UInt64
+    ) async throws {
+        try requireCurrentSessionOperation(operation)
         isLoading = true
+        defer {
+            if isCurrentSessionOperation(operation) {
+                isLoading = false
+            }
+        }
         errorMessage = nil
         prepareInspectionState()
         self.package = package
@@ -489,12 +531,16 @@ final class BrushLabSession {
                 drawingAvailability = .unsupportedInteraction(
                     package.definition.material.interaction
                 )
-                isLoading = false
                 return
             }
-            let compiled = try await compiler.compileAndActivate(
-                package: package
+            let batch = try await compiler.prepareCompilationBatch(
+                packages: [package]
             )
+            try requireCurrentSessionOperation(operation)
+            guard let compiled = batch.brushes.first else {
+                throw CancellationError()
+            }
+            try compiler.commitCompilationBatch(batch)
             compiledBrush = compiled
             compilationReport = compiled.report
             compilationDiagnostics = compiled.diagnostics.map(
@@ -509,18 +555,21 @@ final class BrushLabSession {
                 drawingAvailability = .available
             }
         } catch let failure as BrushCompilationFailure {
+            try requireCurrentSessionOperation(operation)
             compilationFailure = failure
             drawingAvailability = .compilationFailed(
                 "Compiler \(failure.stage.rawValue): \(failure.reason). "
                     + "The previous drawing brush remains active."
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            try requireCurrentSessionOperation(operation)
             errorMessage = error.localizedDescription
             drawingAvailability = .compilationFailed(
                 error.localizedDescription
             )
         }
-        isLoading = false
     }
 
     func setDeterministicSeed(_ seed: UInt64) throws {
@@ -540,8 +589,10 @@ final class BrushLabSession {
 
     func selectReviewMatrix(_ matrix: BrushLabReviewMatrix) {
         guard controller.renderer.isIdle else { return }
+        _ = nextSessionOperationGeneration()
         reviewMatrix = matrix
         completedReplay = nil
+        isLoading = false
         clearTrace()
     }
 
@@ -574,8 +625,10 @@ final class BrushLabSession {
         }) else {
             throw BrushLabEvidenceError.manualCardUnavailable(cardID)
         }
+        let operation = nextSessionOperationGeneration()
         completedReplay = nil
-        try await prepareManualCard(card)
+        try await prepareManualCard(card, operation: operation)
+        try requireCurrentSessionOperation(operation)
         reviewMatrix = .stageFourDiagnostic
         selectedManualCardID = cardID
         clearTrace()
@@ -590,22 +643,20 @@ final class BrushLabSession {
         }) else {
             throw BrushLabEvidenceError.manualCardUnavailable(cardID)
         }
-        let generation = nextProfessionalSelectionGeneration()
+        let operation = nextSessionOperationGeneration()
         let prepared = try await compileProfessionalManualCard(card)
-        guard generation == professionalSelectionGeneration,
-              controller.renderer.isIdle
-        else {
-            throw CancellationError()
-        }
-        try await controller.resetReviewDocument(
-            to: card.documentConfiguration
-        )
-        guard generation == professionalSelectionGeneration,
-              controller.renderer.isIdle
-        else {
+        try requireCurrentSessionOperation(operation)
+        guard controller.renderer.isIdle else {
             throw CancellationError()
         }
         try compiler.commitCompilationBatch(prepared.batch)
+        try await controller.resetReviewDocument(
+            to: card.documentConfiguration
+        )
+        try requireCurrentSessionOperation(operation)
+        guard controller.renderer.isIdle else {
+            throw CancellationError()
+        }
         try controller.installBootstrapBrushes(
             draw: prepared.draw,
             eraser: prepared.eraser
@@ -641,8 +692,10 @@ final class BrushLabSession {
     }
 
     private func prepareManualCard(
-        _ card: BrushLabManualCard
+        _ card: BrushLabManualCard,
+        operation: UInt64
     ) async throws {
+        try requireCurrentSessionOperation(operation)
         guard let anchor = AnchorBrushCatalog.entry(
             for: BrushRecipeID(card.brushID)
         ) else {
@@ -677,10 +730,12 @@ final class BrushLabSession {
                 card.customResourceFixture
                     == BrushLabManualCard.customAsymmetricFixture
         )
-        await loadPackage(
+        try await loadPackage(
             package,
-            sourceName: "\(card.cardID).layabrush"
+            sourceName: "\(card.cardID).layabrush",
+            operation: operation
         )
+        try requireCurrentSessionOperation(operation)
         guard let compiledBrush,
               drawingAvailability == .available
         else {
@@ -757,12 +812,15 @@ final class BrushLabSession {
         guard let card = selectedManualCard else {
             throw BrushLabEvidenceError.manualCardNotSelected
         }
+        let operation = nextSessionOperationGeneration()
         completedReplay = nil
         try await controller.clearAndAwaitCompletion()
+        try requireCurrentSessionOperation(operation)
         guard controller.renderer.isIdle else {
             throw BrushLabEvidenceError.rendererBusy
         }
-        try await prepareManualCard(card)
+        try await prepareManualCard(card, operation: operation)
+        try requireCurrentSessionOperation(operation)
         clearTrace()
         let substrateInputCount: Int
         if card.substrate == .recordedOpaqueStroke {
@@ -841,9 +899,11 @@ final class BrushLabSession {
         guard card.passes.indices.contains(nextProfessionalPassIndex) else {
             throw BrushLabEvidenceError.professionalPassUnavailable
         }
+        let operation = nextSessionOperationGeneration()
         if nextProfessionalPassIndex == 0 {
             completedReplay = nil
             try await resetPreparedProfessionalReview(card)
+            try requireCurrentSessionOperation(operation)
             clearTrace()
             professionalPassRecords.removeAll(keepingCapacity: true)
             currentProfessionalPassIndex = nil
@@ -867,8 +927,10 @@ final class BrushLabSession {
         guard let card = selectedProfessionalManualCard else {
             throw BrushLabEvidenceError.professionalCardNotSelected
         }
+        let operation = nextSessionOperationGeneration()
         completedReplay = nil
         try await resetPreparedProfessionalReview(card)
+        try requireCurrentSessionOperation(operation)
         clearTrace()
         resetProfessionalPassNavigation()
         for pass in card.passes {
@@ -1000,8 +1062,10 @@ final class BrushLabSession {
 
     func clearManualCard() {
         guard controller.renderer.isIdle else { return }
+        _ = nextSessionOperationGeneration()
         controller.clear()
         completedReplay = nil
+        isLoading = false
         resetProfessionalPassNavigation()
         clearTrace()
     }
@@ -1083,9 +1147,21 @@ final class BrushLabSession {
         nextProfessionalPassIndex = 0
     }
 
-    private func nextProfessionalSelectionGeneration() -> UInt64 {
-        professionalSelectionGeneration &+= 1
-        return professionalSelectionGeneration
+    private func nextSessionOperationGeneration() -> UInt64 {
+        sessionOperationGeneration &+= 1
+        return sessionOperationGeneration
+    }
+
+    private func isCurrentSessionOperation(_ operation: UInt64) -> Bool {
+        operation == sessionOperationGeneration
+    }
+
+    private func requireCurrentSessionOperation(
+        _ operation: UInt64
+    ) throws {
+        guard isCurrentSessionOperation(operation) else {
+            throw CancellationError()
+        }
     }
 
     private func validatePreparedCard(

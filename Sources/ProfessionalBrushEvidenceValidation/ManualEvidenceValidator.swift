@@ -153,6 +153,7 @@ public enum ProfessionalManualEvidenceValidator {
                 gesture: gesture,
                 cardID: cardID,
                 background: card["background"] as! String,
+                paintRGBAHex: card["paintRGBAHex"] as! String,
                 predictionEnabled: predictionEnabled,
                 document: document,
                 passes: validatedPasses
@@ -438,10 +439,18 @@ public enum ProfessionalManualEvidenceValidator {
         gesture: String,
         cardID: String,
         background: String,
+        paintRGBAHex: String,
         predictionEnabled: Bool,
         document: [String: Any],
         passes: [ValidatedPass]
     ) throws {
+        try validateScenarioLabels(
+            gesture: gesture,
+            cardID: cardID,
+            background: background,
+            paintRGBAHex: paintRGBAHex,
+            predictionEnabled: predictionEnabled
+        )
         guard passes[0].role == "professionalDraw" else {
             throw ArtifactFileSystem.invalid(
                 "professional review must begin with its professional brush"
@@ -781,6 +790,118 @@ public enum ProfessionalManualEvidenceValidator {
             else {
                 throw ProfessionalManualSemanticError.eraserRetrace
             }
+        default:
+            preconditionFailure("Unhandled professional review gesture")
+        }
+    }
+
+    private static func validateScenarioLabels(
+        gesture: String,
+        cardID: String,
+        background: String,
+        paintRGBAHex: String,
+        predictionEnabled: Bool
+    ) throws {
+        let expectedBackground: String
+        let expectedPaint: String
+        let expectedPrediction: Bool
+        switch gesture {
+        case "tap":
+            expectedBackground = "transparent"
+            expectedPaint = "#111111FF"
+            expectedPrediction = false
+        case "slowLine":
+            expectedBackground = "opaque"
+            expectedPaint = "#111111FF"
+            expectedPrediction = false
+        case "fastLine":
+            expectedBackground = "opaque"
+            expectedPaint = "#111111FF"
+            expectedPrediction = true
+        case "pressureRamp":
+            expectedBackground = "transparent"
+            expectedPaint = "#111111FF"
+            expectedPrediction = false
+        case "tiltSweep":
+            expectedBackground = "transparent"
+            expectedPaint = "#111111FF"
+            expectedPrediction = true
+        case "curve", "sharpCorner":
+            expectedBackground = "opaque"
+            expectedPaint = "#C43A52FF"
+            expectedPrediction = false
+        case "crossHatch", "repeatedBuildup":
+            expectedBackground = "opaque"
+            expectedPaint = "#245EC7FF"
+            expectedPrediction = false
+        case "periodicSeamCrossing",
+             "radialRotation",
+             "radialReflection":
+            expectedBackground = "transparent"
+            expectedPaint = "#111111FF"
+            expectedPrediction = true
+        case "eraserRetrace":
+            expectedBackground = "opaque"
+            expectedPaint = "#111111FF"
+            expectedPrediction = false
+        case "mouseFallback":
+            expectedBackground = "transparent"
+            expectedPaint = "#111111FF"
+            expectedPrediction = false
+        case "tabletInput":
+            expectedBackground = "transparent"
+            expectedPaint = "#111111FF"
+            expectedPrediction = true
+        default:
+            preconditionFailure("Unhandled professional review gesture")
+        }
+        let suffixIsExact =
+            gesture == "tap"
+            ? cardID.hasSuffix(".minimum")
+                || cardID.hasSuffix(".nominal")
+                || cardID.hasSuffix(".maximum")
+            : cardID.hasSuffix(".standard")
+        guard suffixIsExact,
+              background == expectedBackground,
+              paintRGBAHex == expectedPaint,
+              predictionEnabled == expectedPrediction
+        else {
+            throw semanticError(for: gesture)
+        }
+    }
+
+    private static func semanticError(
+        for gesture: String
+    ) -> ProfessionalManualSemanticError {
+        switch gesture {
+        case "tap":
+            .tap
+        case "slowLine", "fastLine":
+            .lineTiming
+        case "pressureRamp":
+            .pressureRamp
+        case "tiltSweep":
+            .tiltSweep
+        case "curve":
+            .curve
+        case "sharpCorner":
+            .sharpCorner
+        case "crossHatch":
+            .crossHatch
+        case "repeatedBuildup":
+            .repeatedBuildup
+        case "periodicSeamCrossing":
+            .periodicSeamCrossing
+        case "radialRotation":
+            .radialRotation
+        case "radialReflection":
+            .radialReflection
+        case "eraserRetrace":
+            .eraserRetrace
+        case "mouseFallback":
+            .mouseFallback
+        case "tabletInput":
+            .tabletInput
         default:
             preconditionFailure("Unhandled professional review gesture")
         }
