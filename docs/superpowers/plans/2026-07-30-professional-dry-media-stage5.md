@@ -26,6 +26,12 @@ macOS 14+, iPadOS 18+.
 **Approved design:**
 `docs/superpowers/specs/2026-07-30-professional-dry-media-stage5-design.md`
 
+**Implementation status:** All six slices and all software tasks are
+complete. The clean Stage 5 gate reaches its designed exit `2`,
+`BRUSH STAGE 5 MANUAL/PHYSICAL PENDING`. Product acceptance remains pending
+only for the 68 user-owned perceptual assessments and eight physical-device
+profiles listed in the milestone.
+
 ## Global Constraints
 
 - Execute directly on `main`; the user explicitly requested the existing main
@@ -118,17 +124,17 @@ macOS 14+, iPadOS 18+.
 
 **Steps:**
 
-- [ ] Write tests that independently verify trace lifecycle, ordering,
+- [x] Write tests that independently verify trace lifecycle, ordering,
   capability-bearing values, record sorting, duplicate/nonfinite rejection,
   deterministic encoding, and prediction replacement.
-- [ ] Run the focused tests and record the expected RED failures.
-- [ ] Implement the smallest platform-free corpus and characterization model.
-- [ ] Run:
+- [x] Run the focused tests and record the expected RED failures.
+- [x] Implement the smallest platform-free corpus and characterization model.
+- [x] Run:
   `swift test --disable-sandbox --no-parallel --filter
   'Professional(StrokeTrace|BrushCharacterization)Tests'`.
-- [ ] Run `swift test --disable-sandbox --no-parallel`.
-- [ ] Run `git diff --check`.
-- [ ] Commit as `feat(brush): add Stage 5 calibration corpus`.
+- [x] Run `swift test --disable-sandbox --no-parallel`.
+- [x] Run `git diff --check`.
+- [x] Commit as `feat(brush): add Stage 5 calibration corpus`.
 
 ---
 
@@ -164,18 +170,18 @@ macOS 14+, iPadOS 18+.
 
 **Steps:**
 
-- [ ] Write tests that fail if any old texture changes, any new dimension or
+- [x] Write tests that fail if any old texture changes, any new dimension or
   mip count is wrong, generation differs between runs, a professional texture
   is blank/uniform, identities are confused, or compiler byte accounting is
   not dimension-aware.
-- [ ] Run the focused tests and record RED.
-- [ ] Implement dimension ownership and the six deterministic generators.
-- [ ] Run:
+- [x] Run the focused tests and record RED.
+- [x] Implement dimension ownership and the six deterministic generators.
+- [x] Run:
   `swift test --disable-sandbox --no-parallel --filter
   'Brush(Texture|Compiler)Tests'`.
-- [ ] Run `swift test --disable-sandbox --no-parallel`.
-- [ ] Run `git diff --check`.
-- [ ] Commit as `feat(brush): add professional texture pack`.
+- [x] Run `swift test --disable-sandbox --no-parallel`.
+- [x] Run `git diff --check`.
+- [x] Commit as `feat(brush): add professional texture pack`.
 
 ---
 
@@ -209,17 +215,17 @@ macOS 14+, iPadOS 18+.
 
 **Steps:**
 
-- [ ] Write catalog/definition and end-to-end logical-dab behavior tests;
+- [x] Write catalog/definition and end-to-end logical-dab behavior tests;
   avoid assertions that only repeat stored constants.
-- [ ] Run the focused tests and record RED.
-- [ ] Implement Technical Ink and only shared definition helpers whose second
+- [x] Run the focused tests and record RED.
+- [x] Implement Technical Ink and only shared definition helpers whose second
   use is already required by this plan.
-- [ ] Run:
+- [x] Run:
   `swift test --disable-sandbox --no-parallel --filter
   'ProfessionalBrush(Catalog|Dynamics)Tests'`.
-- [ ] Run `swift test --disable-sandbox --no-parallel`.
-- [ ] Run `git diff --check`.
-- [ ] Commit as `feat(brush): add professional technical ink`.
+- [x] Run `swift test --disable-sandbox --no-parallel`.
+- [x] Run `git diff --check`.
+- [x] Commit as `feat(brush): add professional technical ink`.
 
 ---
 
@@ -249,17 +255,17 @@ macOS 14+, iPadOS 18+.
 
 **Steps:**
 
-- [ ] Add real logical-dab tests that distinguish light/heavy pressure,
+- [x] Add real logical-dab tests that distinguish light/heavy pressure,
   upright/tilted input, repeated seeds, mouse fallback, and a deliberately
   missing dual-grain declaration.
-- [ ] Run focused tests and record RED.
-- [ ] Implement Graphite Pencil.
-- [ ] Run:
+- [x] Run focused tests and record RED.
+- [x] Implement Graphite Pencil.
+- [x] Run:
   `swift test --disable-sandbox --no-parallel --filter
   'ProfessionalBrush(Catalog|Dynamics)Tests'`.
-- [ ] Run `swift test --disable-sandbox --no-parallel`.
-- [ ] Run `git diff --check`.
-- [ ] Commit as `feat(brush): add professional graphite pencil`.
+- [x] Run `swift test --disable-sandbox --no-parallel`.
+- [x] Run `git diff --check`.
+- [x] Commit as `feat(brush): add professional graphite pencil`.
 
 ---
 
@@ -292,17 +298,17 @@ macOS 14+, iPadOS 18+.
 
 **Steps:**
 
-- [ ] Add real logical-dab and validation tests for the two-layer resources,
+- [x] Add real logical-dab and validation tests for the two-layer resources,
   comparative dynamic ranges, deterministic variation, and capability
   failures.
-- [ ] Run focused tests and record RED.
-- [ ] Implement Natural Charcoal.
-- [ ] Run:
+- [x] Run focused tests and record RED.
+- [x] Implement Natural Charcoal.
+- [x] Run:
   `swift test --disable-sandbox --no-parallel --filter
   'ProfessionalBrush(Catalog|Dynamics)Tests'`.
-- [ ] Run `swift test --disable-sandbox --no-parallel`.
-- [ ] Run `git diff --check`.
-- [ ] Commit as `feat(brush): add professional natural charcoal`.
+- [x] Run `swift test --disable-sandbox --no-parallel`.
+- [x] Run `git diff --check`.
+- [x] Commit as `feat(brush): add professional natural charcoal`.
 
 ---
 
@@ -336,14 +342,14 @@ macOS 14+, iPadOS 18+.
 
 **Steps:**
 
-- [ ] Add marker and cross-family tests, run them, and record RED.
-- [ ] Implement Chisel Marker and the complete ordered catalog.
-- [ ] Run:
+- [x] Add marker and cross-family tests, run them, and record RED.
+- [x] Implement Chisel Marker and the complete ordered catalog.
+- [x] Run:
   `swift test --disable-sandbox --no-parallel --filter
   'ProfessionalBrush|AnchorBrushCharacterizationTests'`.
-- [ ] Run `swift test --disable-sandbox --no-parallel`.
-- [ ] Run `git diff --check`.
-- [ ] Commit as `feat(brush): add professional chisel marker`.
+- [x] Run `swift test --disable-sandbox --no-parallel`.
+- [x] Run `git diff --check`.
+- [x] Commit as `feat(brush): add professional chisel marker`.
 
 ---
 
@@ -387,20 +393,20 @@ macOS 14+, iPadOS 18+.
 
 **Steps:**
 
-- [ ] Add EditorCore migration/order tests and app integration tests for
+- [x] Add EditorCore migration/order tests and app integration tests for
   bootstrap, picker order, restored legacy IDs, rapid selection, failure
   rollback, draw/erase/draw, and professional manual-card generation.
-- [ ] Run focused tests and record RED.
-- [ ] Implement the composed editor catalog and migrate app consumers.
-- [ ] Run:
+- [x] Run focused tests and record RED.
+- [x] Implement the composed editor catalog and migrate app consumers.
+- [x] Run:
   `swift test --disable-sandbox --no-parallel --filter
   'EditorBrushCatalogTests|ContentViewLifecycleTests|EditorSessionControllerTests|BrushLabSessionTests'`.
-- [ ] Regenerate the Xcode project if source membership requires it:
+- [x] Regenerate the Xcode project if source membership requires it:
   `xcodegen generate --spec App/project.yml`.
-- [ ] Build both app schemes for macOS and iPad Simulator.
-- [ ] Run `swift test --disable-sandbox --no-parallel`.
-- [ ] Run `git diff --check`.
-- [ ] Commit as `feat(app): adopt professional brush catalog`.
+- [x] Build both app schemes for macOS and iPad Simulator.
+- [x] Run `swift test --disable-sandbox --no-parallel`.
+- [x] Run `git diff --check`.
+- [x] Commit as `feat(app): adopt professional brush catalog`.
 
 ---
 
@@ -464,43 +470,43 @@ macOS 14+, iPadOS 18+.
 
 **Steps:**
 
-- [ ] Write focused harness and artifact-validator tests first, including
+- [x] Write focused harness and artifact-validator tests first, including
   mutations for every required field, file, status, source hash, duplicate,
   order, negative-control, and raw-pass-string rejection.
-- [ ] Run focused tests and record RED.
-- [ ] Implement the Stage 5 evidence schema, scenes, runner support,
+- [x] Run focused tests and record RED.
+- [x] Implement the Stage 5 evidence schema, scenes, runner support,
   characterization export, executable validator, and clean script.
-- [ ] Run:
+- [x] Run:
   `swift test --disable-sandbox --no-parallel --filter
   'ProfessionalBrush(HarnessRunner|EvidenceValidator)Tests'`.
-- [ ] Run every positive and negative scene from a built macOS app.
-- [ ] Run `swift test --disable-sandbox --no-parallel`.
-- [ ] Regenerate the Xcode project and build/analyze macOS and iPad Simulator.
-- [ ] Commit all Task 8 source, tests, scenes, script, and milestone.
-- [ ] From that clean commit, run `scripts/verify-brush-stage5.sh`; accept only
+- [x] Run every positive and negative scene from a built macOS app.
+- [x] Run `swift test --disable-sandbox --no-parallel`.
+- [x] Regenerate the Xcode project and build/analyze macOS and iPad Simulator.
+- [x] Commit all Task 8 source, tests, scenes, script, and milestone.
+- [x] From that clean commit, run `scripts/verify-brush-stage5.sh`; accept only
   exit `0` or the designed exit `2`.
-- [ ] If the clean gate changes the milestone or checked-in status document,
+- [x] If the clean gate changes the milestone or checked-in status document,
   update it from measured evidence, commit that documentation-only delta, and
   rerun the clean gate.
-- [ ] Run `git diff --check`.
-- [ ] Commit implementation as
+- [x] Run `git diff --check`.
+- [x] Commit implementation as
   `feat(gate): add Stage 5 professional brush evidence`.
 
 ---
 
 ## Whole-Stage Completion Review
 
-- [ ] Verify `git status --short` contains only the allowed untracked
+- [x] Verify `git status --short` contains only the allowed untracked
   `.vscode/`.
-- [ ] Run `swift test --disable-sandbox --no-parallel`.
-- [ ] Run the Stage 4 clean gate and confirm its software result is unchanged.
-- [ ] Run `scripts/verify-brush-stage5.sh` from a clean commit and capture its
+- [x] Run `swift test --disable-sandbox --no-parallel`.
+- [x] Run the Stage 4 clean gate and confirm its software result is unchanged.
+- [x] Run `scripts/verify-brush-stage5.sh` from a clean commit and capture its
   exact exit and terminal status.
-- [ ] Run a fresh whole-range review from the pre-Stage-5 base through HEAD
+- [x] Run a fresh whole-range review from the pre-Stage-5 base through HEAD
   against the design and this plan.
-- [ ] Fix every Critical/Important correctness, security, maintainability, or
+- [x] Fix every Critical/Important correctness, security, maintainability, or
   plan-compliance finding with focused tests, then rerun the affected gates.
-- [ ] Confirm manual perceptual cards are pending rather than self-approved.
-- [ ] Report the four shipped brushes, editor migrations, deterministic and
+- [x] Confirm manual perceptual cards are pending rather than self-approved.
+- [x] Report the four shipped brushes, editor migrations, deterministic and
   Metal evidence, software performance, and the exact remaining
   iPad/Pencil/Wacom/manual validation to the user.

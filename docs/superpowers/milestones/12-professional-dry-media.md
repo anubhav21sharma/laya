@@ -1,6 +1,6 @@
 # Professional Dry And Non-Interacting Media
 
-**Status:** Final Clean Evidence Run Pending
+**Status:** Software Complete — Manual And Physical Acceptance Pending
 
 ## Scope
 
@@ -85,6 +85,36 @@ swift test --disable-sandbox --no-parallel \
 
 Its first implementation-complete run passed 11 tests in two suites. The
 final clean gate reruns this coverage inside the complete serialized suite.
+
+## Latest Clean Gate Result
+
+A clean committed run on 2026-07-30 completed with exit `2` and the exact
+terminal classification:
+
+```text
+BRUSH STAGE 5 MANUAL/PHYSICAL PENDING
+```
+
+That is the designed all-software-green state, not a correctness failure. The
+run established:
+
+- the Stage 4 prerequisite remained software-correct and ended only in its
+  designed physical-performance-pending state on the paravirtual host;
+- the complete suite passed 1,297 tests in 70 suites;
+- the focused professional coverage passed 97 tests in three suites;
+- the macOS and iPad Simulator targets both built and analyzed;
+- all four positive professional scenes and four paired fail-closed negative
+  controls passed artifact-only validation;
+- software correctness and the CPU preparation budget passed, while
+  paravirtual GPU measurements remained diagnostic and could not establish a
+  physical-device performance claim.
+
+The exact commit, source-tree digest, toolchain, hardware classification,
+Stage 4 artifact binding, renderer executable digest, measured timings, and
+per-brush missed-frame diagnostics remain in the generated provenance and
+performance-status files. They intentionally are not copied into this
+checked-in document, which avoids a circular commit identity and makes each
+clean rerun the authoritative source.
 
 ## Automated Evidence
 
@@ -199,7 +229,7 @@ not accepted.
 - [x] Add four positive and four paired fail-closed Metal scenes.
 - [x] Add exact artifact schemas and artifact-only validation.
 - [x] Preserve the frozen Stage 4 scene/evidence truth.
-- [ ] Run the Stage 5 gate from the final clean committed source and record
+- [x] Run the Stage 5 gate from the final clean committed source and record
       its exact terminal result.
 - [ ] Complete all 68 human perceptual assessments.
 - [ ] Supply and validate all eight physical-hardware profiles.
