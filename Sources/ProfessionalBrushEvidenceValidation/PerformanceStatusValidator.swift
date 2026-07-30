@@ -207,7 +207,10 @@ enum PerformanceStatusValidator {
             directory: directory,
             scene: scene,
             truth: truth,
-            source: source
+            source: source,
+            enforceGPUStability:
+                ArtifactFileSystem.gpuClassification(expectedGPUName)
+                    == "physical"
         )
         return (gpu, missedFrameCount)
     }
@@ -292,7 +295,8 @@ enum PerformanceStatusValidator {
         directory: URL,
         scene: String,
         truth: ProfessionalSceneTruth,
-        source: [String: Any]
+        source: [String: Any],
+        enforceGPUStability: Bool
     ) throws -> UInt64 {
         let raw = try ArtifactFileSystem.jsonObject(
             data,
@@ -392,25 +396,37 @@ enum PerformanceStatusValidator {
             gpuMilliseconds: gpu,
             scene: scene
         )
-        guard stableQuartiles(cpu), stableQuartiles(gpu) else {
-            let cpuQuartiles = quartileP95s(cpu)
-            let gpuQuartiles = quartileP95s(gpu)
+        guard stableQuartiles(cpu) else {
+            let quartiles = quartileP95s(cpu)
             throw ArtifactFileSystem.invalid(
-                "\(scene): long-stroke quartiles are not stable "
-                    + "(CPU early/late \(cpuQuartiles.early)/\(cpuQuartiles.late) ms; "
-                    + "GPU early/late \(gpuQuartiles.early)/\(gpuQuartiles.late) ms)"
+                "\(scene): long-stroke CPU quartiles are not stable "
+                    + "(early/late \(quartiles.early)/"
+                    + "\(quartiles.late) ms)"
             )
         }
-        guard trend.cpuSlopeMillisecondsPerFrame <= 0.001,
-              trend.gpuSlopeMillisecondsPerFrame <= 0.001
-        else {
+        guard trend.cpuSlopeMillisecondsPerFrame <= 0.001 else {
             throw ArtifactFileSystem.invalid(
-                "\(scene): long-stroke eight-frame block-median "
-                    + "Theil-Sen slope exceeds "
-                    + "0.001 ms/frame (CPU "
-                    + "\(trend.cpuSlopeMillisecondsPerFrame); GPU "
-                    + "\(trend.gpuSlopeMillisecondsPerFrame))"
+                "\(scene): long-stroke CPU eight-frame block-median "
+                    + "Theil-Sen slope exceeds 0.001 ms/frame "
+                    + "(\(trend.cpuSlopeMillisecondsPerFrame))"
             )
+        }
+        if enforceGPUStability {
+            guard stableQuartiles(gpu) else {
+                let quartiles = quartileP95s(gpu)
+                throw ArtifactFileSystem.invalid(
+                    "\(scene): long-stroke GPU quartiles are not stable "
+                        + "(early/late \(quartiles.early)/"
+                        + "\(quartiles.late) ms)"
+                )
+            }
+            guard trend.gpuSlopeMillisecondsPerFrame <= 0.001 else {
+                throw ArtifactFileSystem.invalid(
+                    "\(scene): long-stroke GPU eight-frame block-median "
+                        + "Theil-Sen slope exceeds 0.001 ms/frame "
+                        + "(\(trend.gpuSlopeMillisecondsPerFrame))"
+                )
+            }
         }
         _ = try auditIdentityFrames(
             identityFrames,

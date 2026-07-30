@@ -535,11 +535,16 @@ This predeclared estimator prevents isolated or multiple bounded GPU timestamp
 or queue-contaminated blocks from dominating the trend while preserving
 sustained growth: the controlled sustained linear `+0.004 ms/frame` series
 yields all 120 pairwise block-median slopes at exactly `0.004 ms/frame` and
-therefore fails. Both CPU and GPU block-median slopes must be at most
-`0.001 ms/frame`; negative warm-up decay remains valid. No status boolean can
-assert these claims. All four brushes must be below `3 ms` for a physical
-result to complete; paravirtual, virtual, simulator, and unknown GPUs remain
-pending even when their diagnostic numbers are below budget.
+therefore exercises the exact slope boundary. CPU quartile stability and the
+CPU slope limit of `0.001 ms/frame` are unconditional software gates. The
+validator always digest-checks and independently recomputes the exact raw GPU
+blocks, medians, and Theil-Sen slope, but GPU quartile stability and the same
+`0.001 ms/frame` slope limit are acceptance gates only on qualifying physical
+hardware. On paravirtual, virtual, simulator, and unknown GPUs those exact
+values remain published diagnostics: they neither complete `realtime120` nor
+fail software correctness. Negative warm-up decay remains valid. No status
+boolean can assert these claims. All four brushes must also be below `3 ms`
+for a physical result to complete.
 
 ## 13. Stage 5 Gate
 

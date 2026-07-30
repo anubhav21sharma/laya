@@ -993,6 +993,115 @@ struct ProfessionalBrushEvidenceValidatorTests {
     }
 
     @Test
+    func gpuTrendGatesOnlyPhysicalHardwareButIsAlwaysAudited() throws {
+        let paravirtualGPU = try professionalPerformanceFixture(
+            gpuName: "Apple Paravirtual device"
+        )
+        defer {
+            try? FileManager.default.removeItem(at: paravirtualGPU.root)
+        }
+        try mutatePerformanceRawAndRebind(
+            fixture: paravirtualGPU,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            setLinearLongStrokeTiming(
+                &raw,
+                rawKey: "gpuMilliseconds",
+                blockMedianKey: "gpuMedianMilliseconds",
+                slopeKey: "gpuSlopeMillisecondsPerFrame"
+            )
+        }
+        #expect(
+            try validatePerformanceFixture(
+                paravirtualGPU,
+                gpuMaximum: 1
+            ) == false
+        )
+
+        let paravirtualCPU = try professionalPerformanceFixture(
+            gpuName: "Apple Paravirtual device"
+        )
+        defer {
+            try? FileManager.default.removeItem(at: paravirtualCPU.root)
+        }
+        try mutatePerformanceRawAndRebind(
+            fixture: paravirtualCPU,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            setLinearLongStrokeTiming(
+                &raw,
+                rawKey: "cpuPreparationMilliseconds",
+                blockMedianKey: "cpuMedianMilliseconds",
+                slopeKey: "cpuSlopeMillisecondsPerFrame"
+            )
+        }
+        #expect(throws: Error.self) {
+            _ = try validatePerformanceFixture(
+                paravirtualCPU,
+                gpuMaximum: 1
+            )
+        }
+
+        let physicalGPU = try professionalPerformanceFixture(
+            gpuName: "Apple M4"
+        )
+        defer {
+            try? FileManager.default.removeItem(at: physicalGPU.root)
+        }
+        try mutatePerformanceRawAndRebind(
+            fixture: physicalGPU,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            setLinearLongStrokeTiming(
+                &raw,
+                rawKey: "gpuMilliseconds",
+                blockMedianKey: "gpuMedianMilliseconds",
+                slopeKey: "gpuSlopeMillisecondsPerFrame"
+            )
+        }
+        #expect(throws: Error.self) {
+            _ = try validatePerformanceFixture(
+                physicalGPU,
+                gpuMaximum: 1
+            )
+        }
+
+        for gpuName in [
+            "Apple M4",
+            "Apple Paravirtual device",
+            "Virtual GPU",
+            "Mystery GPU",
+        ] {
+            let fixture = try professionalPerformanceFixture(
+                gpuName: gpuName
+            )
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            try mutatePerformanceRawAndRebind(
+                fixture: fixture,
+                scene: "professional-chisel-marker",
+                filename: "professional-long-stroke.raw.json",
+                referenceKey: "longStroke"
+            ) { raw in
+                var trend = raw["trend"] as! [String: Any]
+                trend["gpuSlopeMillisecondsPerFrame"] = 0.000_1
+                raw["trend"] = trend
+            }
+            #expect(throws: Error.self, "\(gpuName)") {
+                _ = try validatePerformanceFixture(
+                    fixture,
+                    gpuMaximum: 1
+                )
+            }
+        }
+    }
+
+    @Test
     func provenanceBindsRawFilesAndRendererExecutable() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1429,6 +1538,7 @@ private struct ProfessionalPerformanceTestFixture {
     let commit: String
     let renderer: String
     let operatingSystem: String
+    let gpuName: String
 }
 
 private func professionalPerformanceFixture(
@@ -1656,7 +1766,8 @@ private func professionalPerformanceFixture(
         root: root,
         commit: commit,
         renderer: renderer,
-        operatingSystem: operatingSystem
+        operatingSystem: operatingSystem,
+        gpuName: gpuName
     )
 }
 
@@ -2108,8 +2219,9 @@ private func validatePerformanceFixture(
     let status = try testJSONData([
         "schemaVersion": 3,
         "correctnessPassed": true,
-        "gpuName": "Apple M4",
-        "gpuClassification": "physical",
+        "gpuName": fixture.gpuName,
+        "gpuClassification":
+            ArtifactFileSystem.gpuClassification(fixture.gpuName),
         "cpuPreparationP95Milliseconds": 1.25,
         "cpuPreparationBudgetMilliseconds": 2.0,
         "gpu500DabMilliseconds": gpuMaximum,
@@ -2119,7 +2231,7 @@ private func validatePerformanceFixture(
     ])
     return try PerformanceStatusValidator.validate(
         status,
-        expectedGPUName: "Apple M4",
+        expectedGPUName: fixture.gpuName,
         expectedOperatingSystem: fixture.operatingSystem,
         expectedCommit: fixture.commit,
         expectedRendererSHA256: fixture.renderer,

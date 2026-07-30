@@ -137,8 +137,12 @@ The software policy is:
   16 contiguous eight-frame medians and deterministic Theil-Sen slopes from
   all 120 pairs at exact block-center frame indices; the validator recomputes
   every derived value, accepts multiple bounded timing-contaminated blocks
-  without hiding sustained `+0.004 ms/frame` growth, and keeps the
-  `0.001 ms/frame` limit unchanged;
+  without hiding sustained `+0.004 ms/frame` growth, and always enforces CPU
+  quartile stability plus the `0.001 ms/frame` CPU slope limit; exact raw GPU
+  samples, block medians, and slopes remain digest-bound diagnostics on
+  nonphysical devices, while qualifying physical hardware additionally
+  enforces GPU quartile stability and the unchanged `0.001 ms/frame` slope
+  limit;
 - the same schema preserves all 128 chronological event-to-submit samples,
   records the exact `16,666,667 ns` software frame budget, and requires a
   strictly-positive sample at every frame plus a validator-derived exact
@@ -160,7 +164,9 @@ The final clean run records the measured maximum professional CPU p95, Stage 5
 Exact per-scene CPU samples, GPU samples, resource bytes, renderer identity,
 and OS/GPU provenance remain in the four positive benchmark files. Values
 from a simulator, virtual, or paravirtual GPU are diagnostic and cannot
-establish 60 Hz or `realtime120` acceptance.
+establish 60 Hz or `realtime120` acceptance. Their exact raw GPU timing,
+block-median, and Theil-Sen values remain validator-recomputed and published,
+but cannot fail the unconditional software-correctness result.
 
 ## Manual And Physical Acceptance
 
