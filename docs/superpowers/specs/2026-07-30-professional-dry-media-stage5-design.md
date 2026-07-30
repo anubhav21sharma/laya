@@ -455,6 +455,40 @@ Physical profiles remain pending until hardware exists:
 - suspend/resume;
 - true input-to-photon capture.
 
+Stage 5 performance and physical evidence is distinct from Stage 4 evidence.
+It may reuse the eight established profile identifiers, but it must not copy
+or relabel Stage 4 profile bytes. Every supplied Stage 5 profile binds raw
+input and timing samples to all four professional definition IDs, their exact
+semantic hashes, and their resolved resource topology. This includes both
+grain resources for graphite and charcoal.
+
+Each positive professional scene also emits:
+
+- a raw three-sample, exactly 500-record deposition measurement;
+- a raw 128-input long-stroke trace and per-frame CPU/GPU measurements;
+- per-frame new/restamped instance counts;
+- compiler/resource counter snapshots before and after each hot workload;
+- source commit, renderer executable, GPU, OS, brush identity, semantic hash,
+  and resource topology provenance; and
+- a digest index binding every raw performance artifact.
+
+The long-stroke workload uses a fixed `512 × 512` grid context and exactly
+128 mouse inputs. Its alternating endpoints are `(64, 256)` and `(448, 256)`,
+so every measured segment has equal length and the replay tail reaches steady
+bounded work during the early quartile. Replay limits bound retained and
+per-frame encoded work, not cumulative whole-stroke totals; lifetime logical
+dab and generated projected-instance totals remain diagnostic. Raw per-frame
+encoder instance counts prove the retained-work bound, while encoded identity
+ranges independently prove that no previously completed identity was
+restamped.
+
+The Stage 5 validator derives the GPU maximum, zero hot-path compiler/resource
+counter deltas, zero completed-stroke restamping, and bounded long-stroke
+quartile growth from those raw artifacts. No status boolean can assert these
+claims. All four brushes must be below `3 ms` for a physical result to
+complete; paravirtual, virtual, simulator, and unknown GPUs remain pending
+even when their diagnostic numbers are below budget.
+
 ## 13. Stage 5 Gate
 
 `scripts/verify-brush-stage5.sh` runs on a clean committed source tree and:

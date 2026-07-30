@@ -126,6 +126,14 @@ run_positive_scene() {
   cp "$output/$name.professional-evidence.json" \
     "$destination/evidence.json"
   cp "$output/$name.benchmark.json" "$destination/benchmark.json"
+  cp "$output/professional-performance.json" \
+    "$destination/professional-performance.json"
+  cp "$output/professional-five-hundred-dabs.raw.json" \
+    "$destination/professional-five-hundred-dabs.raw.json"
+  cp "$output/professional-long-stroke.raw.json" \
+    "$destination/professional-long-stroke.raw.json"
+  cp "$output/professional-long-stroke-trace.json" \
+    "$destination/professional-long-stroke-trace.json"
   local observation
   for observation in \
     eraser-after eraser-before grid-origin grid-translated \
@@ -136,7 +144,7 @@ run_positive_scene() {
     cp "$output/$name.$observation.png" \
       "$destination/$observation.png"
   done
-  [[ "$(find "$output" -type f | wc -l | tr -d ' ')" -eq 16 ]] \
+  [[ "$(find "$output" -type f | wc -l | tr -d ' ')" -eq 20 ]] \
     || fail "positive professional scene emitted an unexpected file: $name"
 }
 
@@ -287,7 +295,7 @@ copy_manual_evidence() {
 write_json_status_and_provenance() {
   local performance="$artifacts/performance-status.json"
   plutil -create xml1 "$performance"
-  plutil -insert schemaVersion -integer 1 "$performance"
+  plutil -insert schemaVersion -integer 2 "$performance"
   plutil -insert correctnessPassed -bool true "$performance"
   plutil -insert gpuName -string "$gpu_name" "$performance"
   plutil -insert gpuClassification -string "$gpu_classification" \
@@ -297,8 +305,6 @@ write_json_status_and_provenance() {
   plutil -insert cpuPreparationBudgetMilliseconds -float 2 "$performance"
   plutil -insert gpu500DabMilliseconds -float "$gpu_500" "$performance"
   plutil -insert gpu500DabBudgetMilliseconds -float 3 "$performance"
-  plutil -insert completedStrokeLengthIndependent -bool true "$performance"
-  plutil -insert hotPathCompilerResourceCountersZero -bool true "$performance"
   plutil -convert json "$performance"
 
   local provenance="$artifacts/provenance.json"
@@ -519,7 +525,7 @@ case "$lower_gpu" in
 esac
 
 metrics="$(
-  xcrun swift - "$artifacts" "$stage_four_artifacts" <<'SWIFT'
+  xcrun swift - "$artifacts" <<'SWIFT'
 import Foundation
 
 func object(_ url: URL) throws -> [String: Any] {
@@ -531,7 +537,6 @@ func p95(_ values: [Double]) -> Double {
     return sorted[max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1)]
 }
 let root = URL(fileURLWithPath: CommandLine.arguments[1])
-let stageFour = URL(fileURLWithPath: CommandLine.arguments[2])
 let names = [
     "professional-chisel-marker",
     "professional-graphite-pencil",
@@ -544,12 +549,14 @@ let cpu = try names.map {
     )
     return p95(benchmark["cpuEncodeMilliseconds"] as! [Double])
 }.max()!
-let five = try object(
-    stageFour.appendingPathComponent(
-        "logs/five-hundred-dabs.benchmark.json"
+let gpu = try names.map {
+    let raw = try object(
+        root.appendingPathComponent(
+            "positive/\($0)/professional-five-hundred-dabs.raw.json"
+        )
     )
-)
-let gpu = (five["dabGPUMilliseconds"] as! [Double]).max()!
+    return (raw["gpuMilliseconds"] as! [Double]).max()!
+}.max()!
 print(String(format: "%.17g %.17g", cpu, gpu))
 SWIFT
 )"

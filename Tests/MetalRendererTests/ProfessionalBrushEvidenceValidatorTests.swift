@@ -1,4 +1,5 @@
 import Foundation
+import BrushDepositionEvidenceValidation
 @testable import MetalRenderer
 @testable import ProfessionalBrushEvidenceValidation
 import Testing
@@ -71,33 +72,20 @@ struct ProfessionalBrushEvidenceValidatorTests {
     func performanceStatusIsArtifactDerivedAndUnknownGPUStaysPending()
         throws
     {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fixture = try professionalPerformanceFixture(
+            gpuName: "Mystery GPU"
+        )
+        let root = fixture.root
         defer { try? FileManager.default.removeItem(at: root) }
-        let logs = root.appendingPathComponent("logs")
-        try FileManager.default.createDirectory(
-            at: logs,
-            withIntermediateDirectories: true
-        )
-        try JSONSerialization.data(
-            withJSONObject: ["dabGPUMilliseconds": [2.5]],
-            options: [.sortedKeys]
-        ).write(
-            to: logs.appendingPathComponent(
-                "five-hundred-dabs.benchmark.json"
-            )
-        )
         let valid: [String: Any] = [
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "correctnessPassed": true,
             "gpuName": "Mystery GPU",
             "gpuClassification": "unknown",
             "cpuPreparationP95Milliseconds": 1.25,
             "cpuPreparationBudgetMilliseconds": 2.0,
-            "gpu500DabMilliseconds": 2.5,
+            "gpu500DabMilliseconds": 1.0,
             "gpu500DabBudgetMilliseconds": 3.0,
-            "completedStrokeLengthIndependent": true,
-            "hotPathCompilerResourceCountersZero": true,
         ]
         #expect(
             try PerformanceStatusValidator.validate(
@@ -106,8 +94,11 @@ struct ProfessionalBrushEvidenceValidatorTests {
                     options: [.sortedKeys]
                 ),
                 expectedGPUName: "Mystery GPU",
+                expectedOperatingSystem: fixture.operatingSystem,
+                expectedCommit: fixture.commit,
+                expectedRendererSHA256: fixture.renderer,
                 measuredCPUP95Milliseconds: 1.25,
-                stageFourRoot: root
+                positiveRoot: root
             ) == false
         )
         for (key, value) in [
@@ -125,10 +116,387 @@ struct ProfessionalBrushEvidenceValidatorTests {
                         options: [.sortedKeys]
                     ),
                     expectedGPUName: "Mystery GPU",
+                    expectedOperatingSystem: fixture.operatingSystem,
+                    expectedCommit: fixture.commit,
+                    expectedRendererSHA256: fixture.renderer,
                     measuredCPUP95Milliseconds: 1.25,
-                    stageFourRoot: root
+                    positiveRoot: root
                 )
             }
+        }
+    }
+
+    @Test
+    func copiedStageFourPhysicalProfilesAreNotStageFiveEvidence() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let stageFour = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: stageFour)
+        }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        let source = stageFour.appendingPathComponent(
+            "physical-profiles",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: source,
+            withIntermediateDirectories: true
+        )
+        for profile in StageFourEvidenceValidator.requiredPhysicalProfiles {
+            let sourceProfile = source.appendingPathComponent(
+                profile,
+                isDirectory: true
+            )
+            let copiedProfile = root.appendingPathComponent(
+                profile,
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: sourceProfile,
+                withIntermediateDirectories: true
+            )
+            try FileManager.default.createDirectory(
+                at: copiedProfile,
+                withIntermediateDirectories: true
+            )
+            let bytes = Data("stage-four-\(profile)".utf8)
+            try bytes.write(
+                to: sourceProfile.appendingPathComponent("evidence.json")
+            )
+            try bytes.write(
+                to: copiedProfile.appendingPathComponent("evidence.json")
+            )
+        }
+
+        #expect(throws: Error.self) {
+            _ = try PhysicalEvidenceValidator.validate(
+                root: root,
+                expectedCommit: String(repeating: "a", count: 40),
+                expectedSourceTreeSHA256:
+                    String(repeating: "b", count: 64),
+                expectedRendererSHA256:
+                    String(repeating: "c", count: 64)
+            )
+        }
+    }
+
+    @Test
+    func performanceStatusRejectsSelfAttestedInvariantBooleans() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let logs = root.appendingPathComponent("logs")
+        try FileManager.default.createDirectory(
+            at: logs,
+            withIntermediateDirectories: true
+        )
+        try testJSONData([
+            "dabGPUMilliseconds": [1.0],
+        ]).write(
+            to: logs.appendingPathComponent(
+                "five-hundred-dabs.benchmark.json"
+            )
+        )
+        let status = try testJSONData([
+            "schemaVersion": 1,
+            "correctnessPassed": true,
+            "gpuName": "Apple M4",
+            "gpuClassification": "physical",
+            "cpuPreparationP95Milliseconds": 1.0,
+            "cpuPreparationBudgetMilliseconds": 2.0,
+            "gpu500DabMilliseconds": 1.0,
+            "gpu500DabBudgetMilliseconds": 3.0,
+            "completedStrokeLengthIndependent": true,
+            "hotPathCompilerResourceCountersZero": true,
+        ])
+
+        #expect(throws: Error.self) {
+            _ = try PerformanceStatusValidator.validate(
+                status,
+                expectedGPUName: "Apple M4",
+                expectedOperatingSystem: "Version 26.0",
+                expectedCommit: String(repeating: "a", count: 40),
+                expectedRendererSHA256:
+                    String(repeating: "b", count: 64),
+                measuredCPUP95Milliseconds: 1,
+                positiveRoot: root
+            )
+        }
+    }
+
+    @Test
+    func physicalEvidenceBindsEveryProfileAndProfessionalBrushToRawData()
+        throws
+    {
+        let fixture = try professionalPhysicalFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        #expect(
+            try PhysicalEvidenceValidator.validate(
+                root: fixture.root,
+                expectedCommit: fixture.commit,
+                expectedSourceTreeSHA256: fixture.tree,
+                expectedRendererSHA256: fixture.renderer
+            )
+        )
+
+        let profile = fixture.root.appendingPathComponent(
+            "pencil/evidence.json"
+        )
+        let validProfile = try Data(contentsOf: profile)
+        try mutateTestJSONObject(at: profile) { object in
+            var workloads = object["workloads"] as! [[String: Any]]
+            workloads.removeLast()
+            object["workloads"] = workloads
+        }
+        #expect(throws: Error.self) {
+            _ = try PhysicalEvidenceValidator.validate(
+                root: fixture.root,
+                expectedCommit: fixture.commit,
+                expectedSourceTreeSHA256: fixture.tree,
+                expectedRendererSHA256: fixture.renderer
+            )
+        }
+        try validProfile.write(to: profile)
+
+        let raw = fixture.root.appendingPathComponent(
+            "pencil/raw/builtin.professional-graphite-pencil.json"
+        )
+        let validRaw = try Data(contentsOf: raw)
+        try mutateTestJSONObject(at: raw) {
+            $0["semanticHash"] = String(repeating: "0", count: 64)
+        }
+        #expect(throws: Error.self) {
+            _ = try PhysicalEvidenceValidator.validate(
+                root: fixture.root,
+                expectedCommit: fixture.commit,
+                expectedSourceTreeSHA256: fixture.tree,
+                expectedRendererSHA256: fixture.renderer
+            )
+        }
+        try validRaw.write(to: raw)
+
+        try mutateTestJSONObject(at: raw) { object in
+            var missed = object["missedFrameFlags"] as! [Any]
+            missed[0] = true
+            object["missedFrameFlags"] = missed
+        }
+        #expect(throws: Error.self) {
+            _ = try PhysicalEvidenceValidator.validate(
+                root: fixture.root,
+                expectedCommit: fixture.commit,
+                expectedSourceTreeSHA256: fixture.tree,
+                expectedRendererSHA256: fixture.renderer
+            )
+        }
+        try validRaw.write(to: raw)
+
+        try mutateTestJSONObject(at: profile) {
+            $0["profileID"] = "wacom"
+        }
+        #expect(throws: Error.self) {
+            _ = try PhysicalEvidenceValidator.validate(
+                root: fixture.root,
+                expectedCommit: fixture.commit,
+                expectedSourceTreeSHA256: fixture.tree,
+                expectedRendererSHA256: fixture.renderer
+            )
+        }
+    }
+
+    @Test
+    func performanceEvidenceRejectsIdentityDigestCounterAndWorkloadMutations()
+        throws
+    {
+        func fixture() throws -> ProfessionalPerformanceTestFixture {
+            try professionalPerformanceFixture(gpuName: "Apple M4")
+        }
+        func reject(
+            _ fixture: ProfessionalPerformanceTestFixture,
+            gpuMaximum: Double = 1
+        ) {
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            #expect(throws: Error.self) {
+                _ = try validatePerformanceFixture(
+                    fixture,
+                    gpuMaximum: gpuMaximum
+                )
+            }
+        }
+
+        var value = try fixture()
+        try FileManager.default.removeItem(
+            at: value.root.appendingPathComponent(
+                "professional-technical-ink"
+            )
+        )
+        reject(value)
+
+        value = try fixture()
+        try FileManager.default.createDirectory(
+            at: value.root.appendingPathComponent("extra-brush"),
+            withIntermediateDirectories: false
+        )
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-graphite-pencil",
+            filename: "professional-five-hundred-dabs.raw.json",
+            referenceKey: "fiveHundredDabs"
+        ) {
+            $0["semanticHash"] = String(repeating: "0", count: 64)
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutateTestJSONObject(
+            at: value.root.appendingPathComponent(
+                "professional-graphite-pencil/"
+                    + "professional-five-hundred-dabs.raw.json"
+            )
+        ) {
+            $0["recordCount"] = 499
+        }
+        reject(value)
+
+        value = try fixture()
+        try FileManager.default.removeItem(
+            at: value.root.appendingPathComponent(
+                "professional-natural-charcoal/"
+                    + "professional-long-stroke.raw.json"
+            )
+        )
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-natural-charcoal",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var after =
+                raw["compilerCountersAfter"] as! [String: Any]
+            after["textureUploadCount"] = 5
+            raw["compilerCountersAfter"] = after
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var restamped =
+                raw["restampedInstanceCounts"] as! [Int]
+            restamped[64] = 1
+            raw["restampedInstanceCounts"] = restamped
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var newInstances =
+                raw["newInstanceCounts"] as! [Any]
+            newInstances[64] = true
+            raw["newInstanceCounts"] = newInstances
+        }
+        reject(value)
+
+        value = try fixture()
+        let traceDirectory = value.root.appendingPathComponent(
+            "professional-technical-ink"
+        )
+        let traceURL = traceDirectory.appendingPathComponent(
+            "professional-long-stroke-trace.json"
+        )
+        try mutateTestJSONObject(at: traceURL) { trace in
+            var samples = trace["samples"] as! [[String: Any]]
+            samples[64]["x"] = 65.0
+            trace["samples"] = samples
+        }
+        let changedTraceDigest = ArtifactFileSystem.sha256(
+            try Data(contentsOf: traceURL)
+        )
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-technical-ink",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) {
+            $0["traceSHA256"] = changedTraceDigest
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-technical-ink",
+            filename: "professional-five-hundred-dabs.raw.json",
+            referenceKey: "fiveHundredDabs"
+        ) {
+            $0["gpuMilliseconds"] = [3.0, 2.0, 1.0]
+        }
+        reject(value, gpuMaximum: 3)
+
+        value = try fixture()
+        try mutateTestJSONObject(
+            at: value.root.appendingPathComponent(
+                "professional-chisel-marker/"
+                    + "professional-performance.json"
+            )
+        ) {
+            $0["unexpected"] = true
+        }
+        reject(value)
+    }
+
+    @Test
+    func physicalEvidenceRejectsPartialProfileSetsAndUnknownFiles()
+        throws
+    {
+        var fixture = try professionalPhysicalFixture()
+        try FileManager.default.removeItem(
+            at: fixture.root.appendingPathComponent("wacom")
+        )
+        #expect(throws: Error.self) {
+            _ = try PhysicalEvidenceValidator.validate(
+                root: fixture.root,
+                expectedCommit: fixture.commit,
+                expectedSourceTreeSHA256: fixture.tree,
+                expectedRendererSHA256: fixture.renderer
+            )
+        }
+        try? FileManager.default.removeItem(at: fixture.root)
+
+        fixture = try professionalPhysicalFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try Data("unknown".utf8).write(
+            to: fixture.root.appendingPathComponent(
+                "wacom/raw/unknown.json"
+            )
+        )
+        #expect(throws: Error.self) {
+            _ = try PhysicalEvidenceValidator.validate(
+                root: fixture.root,
+                expectedCommit: fixture.commit,
+                expectedSourceTreeSHA256: fixture.tree,
+                expectedRendererSHA256: fixture.renderer
+            )
         }
     }
 
@@ -522,4 +890,536 @@ private func artifactManifestFixture() throws -> URL {
         to: root.appendingPathComponent("artifact-sha256.txt")
     )
     return root
+}
+
+private func testJSONData(_ object: Any) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: object,
+        options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    )
+}
+
+private struct ProfessionalPerformanceTestFixture {
+    let root: URL
+    let commit: String
+    let renderer: String
+    let operatingSystem: String
+}
+
+private func professionalPerformanceFixture(
+    gpuName: String
+) throws -> ProfessionalPerformanceTestFixture {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "professional-performance-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+        at: root,
+        withIntermediateDirectories: true
+    )
+    let commit = String(repeating: "a", count: 40)
+    let renderer = String(repeating: "b", count: 64)
+    let operatingSystem = "Version 26.0 (Build 25A1)"
+    let truths: [(String, String, String, [(String, String, Int)])] = [
+        (
+            "professional-chisel-marker",
+            "builtin.professional-chisel-marker",
+            "2c1b9c2c7770dacfd4eee5e5fc6bbbf57b202bbcb15b6edca37de868ed2ec1f1",
+            [("builtin.shape.marker-chisel", "shape", 8)]
+        ),
+        (
+            "professional-graphite-pencil",
+            "builtin.professional-graphite-pencil",
+            "10af674df1d65e52efde75a68860e554c31e75dda12c17027bb728a47550aa52",
+            [
+                ("builtin.grain.graphite", "grain", 9),
+                ("builtin.grain.paper", "grain", 7),
+                ("builtin.shape.graphite-tip", "shape", 8),
+            ]
+        ),
+        (
+            "professional-natural-charcoal",
+            "builtin.professional-natural-charcoal",
+            "c686a582f773263649cb5259851eeffbe2403d38ed9a2be4ae9114bb7c8bd007",
+            [
+                ("builtin.grain.charcoal", "grain", 9),
+                ("builtin.grain.paper", "grain", 7),
+                ("builtin.shape.charcoal-tip", "shape", 8),
+                ("builtin.shape.soft-round", "shape", 7),
+            ]
+        ),
+        (
+            "professional-technical-ink",
+            "builtin.professional-technical-ink",
+            "394e34d6ddccb13978714550537cae9b2cab9e566032b6b3ddc25b6eab0d5534",
+            [("builtin.shape.technical-nib", "shape", 8)]
+        ),
+    ]
+    let counters: [String: Any] = [
+        "packageDecodeCount": 1,
+        "imageDecodeCount": 0,
+        "textureUploadCount": 1,
+        "cacheHitCount": 0,
+        "activationCount": 1,
+    ]
+    let source: [String: Any] = [
+        "gitCommit": commit,
+        "rendererExecutableSHA256": renderer,
+        "gpuName": gpuName,
+        "operatingSystem": operatingSystem,
+    ]
+    for (scene, definitionID, semanticHash, rawResources) in truths {
+        let directory = root.appendingPathComponent(
+            scene,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let resources = rawResources.map {
+            [
+                "identity": $0.0,
+                "kind": $0.1,
+                "mipCount": $0.2,
+            ] as [String: Any]
+        }
+        var traceSamples: [[String: Any]] = []
+        for index in 0..<128 {
+            let phase =
+                index == 0
+                    ? "began"
+                    : (index == 127 ? "ended" : "moved")
+            traceSamples.append([
+                "x": index.isMultiple(of: 2) ? 64.0 : 448.0,
+                "y": 256.0,
+                "pressure": Double(Float(0.58)),
+                "timestamp": Double(index) * 0.004,
+                "phase": phase,
+                "source": "mouse",
+                "kind": "actual",
+            ])
+        }
+        let trace = try testJSONData([
+            "schemaVersion": 1,
+            "scene": scene,
+            "definitionID": definitionID,
+            "semanticHash": semanticHash,
+            "samples": traceSamples,
+        ])
+        try trace.write(
+            to: directory.appendingPathComponent(
+                "professional-long-stroke-trace.json"
+            )
+        )
+        let five = try testJSONData([
+            "schemaVersion": 1,
+            "workloadID": "professional-500-dabs",
+            "scene": scene,
+            "definitionID": definitionID,
+            "semanticHash": semanticHash,
+            "resolvedResources": resources,
+            "source": source,
+            "recordCount": 500,
+            "measurementCount": 3,
+            "gpuMilliseconds": [1.0, 0.9, 0.8],
+            "compilerCountersBefore": counters,
+            "compilerCountersAfter": counters,
+        ])
+        try five.write(
+            to: directory.appendingPathComponent(
+                "professional-five-hundred-dabs.raw.json"
+            )
+        )
+        let long = try testJSONData([
+            "schemaVersion": 1,
+            "workloadID": "professional-long-stroke",
+            "scene": scene,
+            "definitionID": definitionID,
+            "semanticHash": semanticHash,
+            "resolvedResources": resources,
+            "source": source,
+            "inputSampleCount": 128,
+            "tracePath": "professional-long-stroke-trace.json",
+            "traceSHA256": ArtifactFileSystem.sha256(trace),
+            "cpuPreparationMilliseconds":
+                Array(repeating: 0.1, count: 128),
+            "gpuMilliseconds": Array(repeating: 0.1, count: 128),
+            "newInstanceCounts": Array(repeating: 64, count: 128),
+            "restampedInstanceCounts": Array(repeating: 0, count: 128),
+            "logicalDabCount": 128,
+            "projectedInstanceCount": 8_192,
+            "replayMode": "replayTail",
+            "replayMaximumDabs": 2_048,
+            "replayMaximumProjectedInstances": 4_096,
+            "compilerCountersBefore": counters,
+            "compilerCountersAfter": counters,
+        ])
+        try long.write(
+            to: directory.appendingPathComponent(
+                "professional-long-stroke.raw.json"
+            )
+        )
+        let index = try testJSONData([
+            "schemaVersion": 1,
+            "scene": scene,
+            "definitionID": definitionID,
+            "semanticHash": semanticHash,
+            "resolvedResources": resources,
+            "source": source,
+            "fiveHundredDabs": [
+                "path": "professional-five-hundred-dabs.raw.json",
+                "sha256": ArtifactFileSystem.sha256(five),
+            ],
+            "longStroke": [
+                "path": "professional-long-stroke.raw.json",
+                "sha256": ArtifactFileSystem.sha256(long),
+            ],
+        ])
+        try index.write(
+            to: directory.appendingPathComponent(
+                "professional-performance.json"
+            )
+        )
+    }
+    return ProfessionalPerformanceTestFixture(
+        root: root,
+        commit: commit,
+        renderer: renderer,
+        operatingSystem: operatingSystem
+    )
+}
+
+private struct ProfessionalPhysicalTestFixture {
+    let root: URL
+    let commit: String
+    let tree: String
+    let renderer: String
+}
+
+private func professionalPhysicalFixture()
+    throws -> ProfessionalPhysicalTestFixture
+{
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "professional-physical-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+        at: root,
+        withIntermediateDirectories: true
+    )
+    let commit = String(repeating: "a", count: 40)
+    let tree = String(repeating: "b", count: 64)
+    let renderer = String(repeating: "c", count: 64)
+    let source: [String: Any] = [
+        "commit": commit,
+        "sourceTreeSHA256": tree,
+        "rendererExecutableSHA256": renderer,
+    ]
+    let truths: [(String, String, [(String, String, Int)])] = [
+        (
+            "builtin.professional-chisel-marker",
+            "2c1b9c2c7770dacfd4eee5e5fc6bbbf57b202bbcb15b6edca37de868ed2ec1f1",
+            [("builtin.shape.marker-chisel", "shape", 8)]
+        ),
+        (
+            "builtin.professional-graphite-pencil",
+            "10af674df1d65e52efde75a68860e554c31e75dda12c17027bb728a47550aa52",
+            [
+                ("builtin.grain.graphite", "grain", 9),
+                ("builtin.grain.paper", "grain", 7),
+                ("builtin.shape.graphite-tip", "shape", 8),
+            ]
+        ),
+        (
+            "builtin.professional-natural-charcoal",
+            "c686a582f773263649cb5259851eeffbe2403d38ed9a2be4ae9114bb7c8bd007",
+            [
+                ("builtin.grain.charcoal", "grain", 9),
+                ("builtin.grain.paper", "grain", 7),
+                ("builtin.shape.charcoal-tip", "shape", 8),
+                ("builtin.shape.soft-round", "shape", 7),
+            ]
+        ),
+        (
+            "builtin.professional-technical-ink",
+            "394e34d6ddccb13978714550537cae9b2cab9e566032b6b3ddc25b6eab0d5534",
+            [("builtin.shape.technical-nib", "shape", 8)]
+        ),
+    ]
+    let profiles: [(String, [String: Any])] = [
+        (
+            "a14Floor60Hz",
+            physicalDevice(
+                platform: "iPadOS", hardware: "iPad13,2",
+                gpu: "Apple A14 GPU", refresh: 60,
+                inputKind: "touch", vendor: "Apple",
+                model: "Multi-Touch Display",
+                telemetry: "UITouch.timestamp", prediction: "none"
+            )
+        ),
+        (
+            "inputToPhoton",
+            physicalDevice(
+                platform: "iPadOS", hardware: "iPad16,1",
+                gpu: "Apple M4", refresh: 60,
+                inputKind: "applePencil", vendor: "Apple",
+                model: "Apple Pencil Pro",
+                telemetry:
+                    "UIEvent.coalescedTouches+predictedTouches",
+                prediction: "coalescedAndPredicted"
+            )
+        ),
+        (
+            "memoryWarning",
+            physicalDevice(
+                platform: "iPadOS", hardware: "iPad16,1",
+                gpu: "Apple M4", refresh: 60,
+                inputKind: "touch", vendor: "Apple",
+                model: "Multi-Touch Display",
+                telemetry: "UITouch.timestamp", prediction: "none"
+            )
+        ),
+        (
+            "pencil",
+            physicalDevice(
+                platform: "iPadOS", hardware: "iPad16,1",
+                gpu: "Apple M4", refresh: 60,
+                inputKind: "applePencil", vendor: "Apple",
+                model: "Apple Pencil Pro",
+                telemetry:
+                    "UIEvent.coalescedTouches+predictedTouches",
+                prediction: "coalescedAndPredicted"
+            )
+        ),
+        (
+            "referenceMSeriesProMotion120Hz",
+            physicalDevice(
+                platform: "iPadOS", hardware: "iPad16,1",
+                gpu: "Apple M4", refresh: 120,
+                inputKind: "touch", vendor: "Apple",
+                model: "Multi-Touch Display",
+                telemetry: "UITouch.timestamp", prediction: "none"
+            )
+        ),
+        (
+            "suspendResume",
+            physicalDevice(
+                platform: "iPadOS", hardware: "iPad16,1",
+                gpu: "Apple M4", refresh: 60,
+                inputKind: "touch", vendor: "Apple",
+                model: "Multi-Touch Display",
+                telemetry: "UITouch.timestamp", prediction: "none"
+            )
+        ),
+        (
+            "sustainedThermal",
+            physicalDevice(
+                platform: "iPadOS", hardware: "iPad16,1",
+                gpu: "Apple M4", refresh: 60,
+                inputKind: "touch", vendor: "Apple",
+                model: "Multi-Touch Display",
+                telemetry: "UITouch.timestamp", prediction: "none"
+            )
+        ),
+        (
+            "wacom",
+            physicalDevice(
+                platform: "macOS", hardware: "Mac16,1",
+                gpu: "Apple M4", refresh: 60,
+                inputKind: "wacomStylus", vendor: "Wacom",
+                model: "Wacom Intuos Pro",
+                telemetry: "NSEvent.tabletPoint",
+                prediction: "coalesced"
+            )
+        ),
+    ]
+    let counters: [String: Any] = [
+        "packageDecodeCount": 1,
+        "imageDecodeCount": 0,
+        "textureUploadCount": 4,
+        "cacheHitCount": 0,
+        "activationCount": 1,
+    ]
+    for (profileID, device) in profiles {
+        let directory = root.appendingPathComponent(
+            profileID,
+            isDirectory: true
+        )
+        let rawRoot = directory.appendingPathComponent(
+            "raw",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: rawRoot,
+            withIntermediateDirectories: true
+        )
+        let prediction = device["predictionMode"] as! String
+        var workloads: [[String: Any]] = []
+        for (definitionID, semanticHash, rawResources) in truths {
+            let resources = rawResources.map {
+                [
+                    "identity": $0.0,
+                    "kind": $0.1,
+                    "mipCount": $0.2,
+                ] as [String: Any]
+            }
+            var samples: [[String: Any]] = []
+            for index in 0..<20 {
+                let kind: String
+                switch prediction {
+                case "coalescedAndPredicted":
+                    kind = ["actual", "coalesced", "predicted"][
+                        index % 3
+                    ]
+                case "coalesced":
+                    kind = index.isMultiple(of: 2)
+                        ? "actual" : "coalesced"
+                default:
+                    kind = "actual"
+                }
+                samples.append([
+                    "timestampNanoseconds": index * 1_000_000,
+                    "phase":
+                        index == 0
+                            ? "began"
+                            : (index == 19 ? "ended" : "moved"),
+                    "kind": kind,
+                    "pressure": 0.5,
+                    "x": Double(index),
+                    "y": 10.0,
+                ])
+            }
+            let raw = try testJSONData([
+                "schemaVersion": 1,
+                "profileID": profileID,
+                "scenarioID": "professional-\(profileID)",
+                "source": source,
+                "device": device,
+                "definitionID": definitionID,
+                "semanticHash": semanticHash,
+                "resolvedResources": resources,
+                "inputSampleCount": 20,
+                "inputSamples": samples,
+                "cpuPreparationMilliseconds":
+                    Array(repeating: 0.1, count: 20),
+                "gpu500DabMilliseconds": [1.0, 0.9, 0.8],
+                "missedFrameFlags":
+                    Array(repeating: 0, count: 20),
+                "compilerCountersBefore": counters,
+                "compilerCountersAfter": counters,
+            ])
+            try raw.write(
+                to: rawRoot.appendingPathComponent(
+                    "\(definitionID).json"
+                )
+            )
+            workloads.append([
+                "definitionID": definitionID,
+                "semanticHash": semanticHash,
+                "resolvedResources": resources,
+                "rawTracePath": "raw/\(definitionID).json",
+                "rawTraceSHA256": ArtifactFileSystem.sha256(raw),
+            ])
+        }
+        try testJSONData([
+            "schemaVersion": 1,
+            "profileID": profileID,
+            "scenarioID": "professional-\(profileID)",
+            "source": source,
+            "device": device,
+            "workloads": workloads,
+        ]).write(
+            to: directory.appendingPathComponent("evidence.json")
+        )
+    }
+    return ProfessionalPhysicalTestFixture(
+        root: root,
+        commit: commit,
+        tree: tree,
+        renderer: renderer
+    )
+}
+
+private func physicalDevice(
+    platform: String,
+    hardware: String,
+    gpu: String,
+    refresh: Double,
+    inputKind: String,
+    vendor: String,
+    model: String,
+    telemetry: String,
+    prediction: String
+) -> [String: Any] {
+    [
+        "platform": platform,
+        "hardwareModel": hardware,
+        "gpuName": gpu,
+        "gpuRegistryID": "0x1234",
+        "displayRefreshHertz": refresh,
+        "inputKind": inputKind,
+        "inputVendor": vendor,
+        "inputModel": model,
+        "inputTelemetryProvenance": telemetry,
+        "predictionMode": prediction,
+    ]
+}
+
+private func mutateTestJSONObject(
+    at url: URL,
+    _ mutation: (inout [String: Any]) throws -> Void
+) throws {
+    var object = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: url)
+    ) as! [String: Any]
+    try mutation(&object)
+    try testJSONData(object).write(to: url)
+}
+
+private func validatePerformanceFixture(
+    _ fixture: ProfessionalPerformanceTestFixture,
+    gpuMaximum: Double
+) throws -> Bool {
+    let status = try testJSONData([
+        "schemaVersion": 2,
+        "correctnessPassed": true,
+        "gpuName": "Apple M4",
+        "gpuClassification": "physical",
+        "cpuPreparationP95Milliseconds": 1.25,
+        "cpuPreparationBudgetMilliseconds": 2.0,
+        "gpu500DabMilliseconds": gpuMaximum,
+        "gpu500DabBudgetMilliseconds": 3.0,
+    ])
+    return try PerformanceStatusValidator.validate(
+        status,
+        expectedGPUName: "Apple M4",
+        expectedOperatingSystem: fixture.operatingSystem,
+        expectedCommit: fixture.commit,
+        expectedRendererSHA256: fixture.renderer,
+        measuredCPUP95Milliseconds: 1.25,
+        positiveRoot: fixture.root
+    )
+}
+
+private func mutatePerformanceRawAndRebind(
+    fixture: ProfessionalPerformanceTestFixture,
+    scene: String,
+    filename: String,
+    referenceKey: String,
+    _ mutation: (inout [String: Any]) throws -> Void
+) throws {
+    let directory = fixture.root.appendingPathComponent(scene)
+    let raw = directory.appendingPathComponent(filename)
+    try mutateTestJSONObject(at: raw, mutation)
+    let digest = ArtifactFileSystem.sha256(try Data(contentsOf: raw))
+    try mutateTestJSONObject(
+        at: directory.appendingPathComponent(
+            "professional-performance.json"
+        )
+    ) { index in
+        var reference = index[referenceKey] as! [String: Any]
+        reference["sha256"] = digest
+        index[referenceKey] = reference
+    }
 }

@@ -284,3 +284,222 @@ public struct ProfessionalBrushSceneEvidence:
         return evidence
     }
 }
+
+public struct ProfessionalPerformanceSource:
+    Codable, Equatable, Sendable
+{
+    public let gitCommit: String
+    public let rendererExecutableSHA256: String
+    public let gpuName: String
+    public let operatingSystem: String
+
+    public init(
+        gitCommit: String,
+        rendererExecutableSHA256: String,
+        gpuName: String,
+        operatingSystem: String
+    ) {
+        self.gitCommit = gitCommit
+        self.rendererExecutableSHA256 = rendererExecutableSHA256
+        self.gpuName = gpuName
+        self.operatingSystem = operatingSystem
+    }
+}
+
+public struct ProfessionalRawEvidenceReference:
+    Codable, Equatable, Sendable
+{
+    public let path: String
+    public let sha256: String
+
+    public init(path: String, sha256: String) {
+        self.path = path
+        self.sha256 = sha256
+    }
+}
+
+public struct ProfessionalPerformanceIndex:
+    Codable, Equatable, Sendable
+{
+    public let schemaVersion: Int
+    public let scene: String
+    public let definitionID: String
+    public let semanticHash: String
+    public let resolvedResources: [ProfessionalBrushResolvedResource]
+    public let source: ProfessionalPerformanceSource
+    public let fiveHundredDabs: ProfessionalRawEvidenceReference
+    public let longStroke: ProfessionalRawEvidenceReference
+
+    public init(
+        schemaVersion: Int = 1,
+        scene: String,
+        definitionID: String,
+        semanticHash: String,
+        resolvedResources: [ProfessionalBrushResolvedResource],
+        source: ProfessionalPerformanceSource,
+        fiveHundredDabs: ProfessionalRawEvidenceReference,
+        longStroke: ProfessionalRawEvidenceReference
+    ) {
+        self.schemaVersion = schemaVersion
+        self.scene = scene
+        self.definitionID = definitionID
+        self.semanticHash = semanticHash
+        self.resolvedResources = resolvedResources
+        self.source = source
+        self.fiveHundredDabs = fiveHundredDabs
+        self.longStroke = longStroke
+    }
+}
+
+public struct ProfessionalFiveHundredDabEvidence:
+    Codable, Equatable, Sendable
+{
+    public let schemaVersion: Int
+    public let workloadID: String
+    public let scene: String
+    public let definitionID: String
+    public let semanticHash: String
+    public let resolvedResources: [ProfessionalBrushResolvedResource]
+    public let source: ProfessionalPerformanceSource
+    public let recordCount: Int
+    public let measurementCount: Int
+    public let gpuMilliseconds: [Double]
+    public let compilerCountersBefore:
+        ProfessionalBrushCompilerCounterSnapshot
+    public let compilerCountersAfter:
+        ProfessionalBrushCompilerCounterSnapshot
+
+    public init(
+        scene: String,
+        definitionID: String,
+        semanticHash: String,
+        resolvedResources: [ProfessionalBrushResolvedResource],
+        source: ProfessionalPerformanceSource,
+        gpuMilliseconds: [Double],
+        compilerCountersBefore:
+            ProfessionalBrushCompilerCounterSnapshot,
+        compilerCountersAfter:
+            ProfessionalBrushCompilerCounterSnapshot
+    ) {
+        schemaVersion = 1
+        workloadID = "professional-500-dabs"
+        self.scene = scene
+        self.definitionID = definitionID
+        self.semanticHash = semanticHash
+        self.resolvedResources = resolvedResources
+        self.source = source
+        recordCount = 500
+        measurementCount = gpuMilliseconds.count
+        self.gpuMilliseconds = gpuMilliseconds
+        self.compilerCountersBefore = compilerCountersBefore
+        self.compilerCountersAfter = compilerCountersAfter
+    }
+}
+
+public struct ProfessionalLongStrokeTraceSample:
+    Codable, Equatable, Sendable
+{
+    public let x: Float
+    public let y: Float
+    public let pressure: Float
+    public let timestamp: Double
+    public let phase: String
+    public let source: String
+    public let kind: String
+}
+
+public struct ProfessionalLongStrokeTrace:
+    Codable, Equatable, Sendable
+{
+    public let schemaVersion: Int
+    public let scene: String
+    public let definitionID: String
+    public let semanticHash: String
+    public let samples: [ProfessionalLongStrokeTraceSample]
+
+    public init(
+        scene: String,
+        definitionID: String,
+        semanticHash: String,
+        samples: [ProfessionalLongStrokeTraceSample]
+    ) {
+        schemaVersion = 1
+        self.scene = scene
+        self.definitionID = definitionID
+        self.semanticHash = semanticHash
+        self.samples = samples
+    }
+}
+
+public struct ProfessionalLongStrokeEvidence:
+    Codable, Equatable, Sendable
+{
+    public let schemaVersion: Int
+    public let workloadID: String
+    public let scene: String
+    public let definitionID: String
+    public let semanticHash: String
+    public let resolvedResources: [ProfessionalBrushResolvedResource]
+    public let source: ProfessionalPerformanceSource
+    public let inputSampleCount: Int
+    public let tracePath: String
+    public let traceSHA256: String
+    public let cpuPreparationMilliseconds: [Double]
+    public let gpuMilliseconds: [Double]
+    public let newInstanceCounts: [Int]
+    public let restampedInstanceCounts: [Int]
+    public let logicalDabCount: Int
+    public let projectedInstanceCount: Int
+    public let replayMode: String
+    public let replayMaximumDabs: Int
+    public let replayMaximumProjectedInstances: Int
+    public let compilerCountersBefore:
+        ProfessionalBrushCompilerCounterSnapshot
+    public let compilerCountersAfter:
+        ProfessionalBrushCompilerCounterSnapshot
+
+    public init(
+        scene: String,
+        definitionID: String,
+        semanticHash: String,
+        resolvedResources: [ProfessionalBrushResolvedResource],
+        source: ProfessionalPerformanceSource,
+        inputSampleCount: Int,
+        traceSHA256: String,
+        cpuPreparationMilliseconds: [Double],
+        gpuMilliseconds: [Double],
+        newInstanceCounts: [Int],
+        restampedInstanceCounts: [Int],
+        logicalDabCount: Int,
+        projectedInstanceCount: Int,
+        replayMaximumDabs: Int,
+        replayMaximumProjectedInstances: Int,
+        compilerCountersBefore:
+            ProfessionalBrushCompilerCounterSnapshot,
+        compilerCountersAfter:
+            ProfessionalBrushCompilerCounterSnapshot
+    ) {
+        schemaVersion = 1
+        workloadID = "professional-long-stroke"
+        self.scene = scene
+        self.definitionID = definitionID
+        self.semanticHash = semanticHash
+        self.resolvedResources = resolvedResources
+        self.source = source
+        self.inputSampleCount = inputSampleCount
+        tracePath = "professional-long-stroke-trace.json"
+        self.traceSHA256 = traceSHA256
+        self.cpuPreparationMilliseconds = cpuPreparationMilliseconds
+        self.gpuMilliseconds = gpuMilliseconds
+        self.newInstanceCounts = newInstanceCounts
+        self.restampedInstanceCounts = restampedInstanceCounts
+        self.logicalDabCount = logicalDabCount
+        self.projectedInstanceCount = projectedInstanceCount
+        replayMode = "replayTail"
+        self.replayMaximumDabs = replayMaximumDabs
+        self.replayMaximumProjectedInstances =
+            replayMaximumProjectedInstances
+        self.compilerCountersBefore = compilerCountersBefore
+        self.compilerCountersAfter = compilerCountersAfter
+    }
+}

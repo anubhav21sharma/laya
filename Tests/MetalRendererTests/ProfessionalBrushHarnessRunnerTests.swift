@@ -282,6 +282,7 @@ struct ProfessionalBrushHarnessRunnerTests {
             Set(benchmarkObject.keys)
                 == SceneArtifactValidator.benchmarkKeys
         )
+        #expect(result.artifactURLs.count == 20)
         #expect(Set(result.artifactURLs.map(\.lastPathComponent)) == [
             "\(sceneName).benchmark.json",
             "\(sceneName).canonical.png",
@@ -299,6 +300,10 @@ struct ProfessionalBrushHarnessRunnerTests {
             "\(sceneName).radial-reflection-rendered.png",
             "\(sceneName).radial-rotation-reference.png",
             "\(sceneName).radial-rotation-rendered.png",
+            "professional-five-hundred-dabs.raw.json",
+            "professional-long-stroke.raw.json",
+            "professional-long-stroke-trace.json",
+            "professional-performance.json",
         ])
     }
 
@@ -340,11 +345,14 @@ struct ProfessionalBrushHarnessRunnerTests {
                 withIntermediateDirectories: false
             )
             for sourceURL in result.artifactURLs {
-                var name = String(
-                    sourceURL.lastPathComponent.dropFirst(
-                        "\(sceneName).".count
+                let prefix = "\(sceneName)."
+                var name = sourceURL.lastPathComponent.hasPrefix(prefix)
+                    ? String(
+                        sourceURL.lastPathComponent.dropFirst(
+                            prefix.count
+                        )
                     )
-                )
+                    : sourceURL.lastPathComponent
                 if name == "professional-evidence.json" {
                     name = "evidence.json"
                 }
@@ -729,6 +737,7 @@ struct ProfessionalBrushHarnessRunnerTests {
         var gpuName = ""
         var operatingSystem = ""
         var maximumCPUP95 = 0.0
+        var maximumGPU500Dab = 0.0
         for sceneName in
             ProfessionalBrushEvidenceValidator.positiveSceneNames
         {
@@ -754,11 +763,14 @@ struct ProfessionalBrushHarnessRunnerTests {
                 withIntermediateDirectories: false
             )
             for sourceURL in result.artifactURLs {
-                var name = String(
-                    sourceURL.lastPathComponent.dropFirst(
-                        "\(sceneName).".count
+                let prefix = "\(sceneName)."
+                var name = sourceURL.lastPathComponent.hasPrefix(prefix)
+                    ? String(
+                        sourceURL.lastPathComponent.dropFirst(
+                            prefix.count
+                        )
                     )
-                )
+                    : sourceURL.lastPathComponent
                 if name == "professional-evidence.json" {
                     name = "evidence.json"
                 }
@@ -774,6 +786,22 @@ struct ProfessionalBrushHarnessRunnerTests {
                 maximumCPUP95,
                 testPercentile95(
                     result.benchmark.cpuEncodeMilliseconds
+                )
+            )
+            let performanceRaw = try #require(
+                JSONSerialization.jsonObject(
+                    with: Data(
+                        contentsOf: destination.appendingPathComponent(
+                            "professional-five-hundred-dabs.raw.json"
+                        )
+                    )
+                ) as? [String: Any]
+            )
+            maximumGPU500Dab = max(
+                maximumGPU500Dab,
+                try #require(
+                    (performanceRaw["gpuMilliseconds"] as? [Double])?
+                        .max()
                 )
             )
             let evidence = try ProfessionalBrushSceneEvidence.decode(
@@ -889,17 +917,15 @@ struct ProfessionalBrushHarnessRunnerTests {
             "rendererExecutableSHA256": executableHash,
         ]).write(to: root.appendingPathComponent("provenance.json"))
         try testJSONData([
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "correctnessPassed": true,
             "gpuName": gpuName,
             "gpuClassification":
                 ArtifactFileSystem.gpuClassification(gpuName),
             "cpuPreparationP95Milliseconds": maximumCPUP95,
             "cpuPreparationBudgetMilliseconds": 2.0,
-            "gpu500DabMilliseconds": 2.5,
+            "gpu500DabMilliseconds": maximumGPU500Dab,
             "gpu500DabBudgetMilliseconds": 3.0,
-            "completedStrokeLengthIndependent": true,
-            "hotPathCompilerResourceCountersZero": true,
         ]).write(
             to: root.appendingPathComponent(
                 "performance-status.json"

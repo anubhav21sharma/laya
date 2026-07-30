@@ -133,7 +133,9 @@ public enum ProfessionalBrushArtifactValidator {
         )
         let physicalComplete = try PhysicalEvidenceValidator.validate(
             root: artifactRoot.appendingPathComponent("physical-profiles"),
-            stageFourRoot: expectedStageFourArtifactRoot
+            expectedCommit: expectedCommit,
+            expectedSourceTreeSHA256: expectedSourceTreeSHA256,
+            expectedRendererSHA256: rendererHash
         )
         let performanceComplete = try PerformanceStatusValidator.validate(
             ArtifactFileSystem.regularFileData(
@@ -143,8 +145,11 @@ public enum ProfessionalBrushArtifactValidator {
                 label: "performance status"
             ),
             expectedGPUName: provenance.gpuName,
+            expectedOperatingSystem: provenance.operatingSystem,
+            expectedCommit: expectedCommit,
+            expectedRendererSHA256: rendererHash,
             measuredCPUP95Milliseconds: maximumCPUP95,
-            stageFourRoot: expectedStageFourArtifactRoot
+            positiveRoot: artifactRoot.appendingPathComponent("positive")
         )
         try ArtifactFileSystem.validateManifest(root: artifactRoot)
 

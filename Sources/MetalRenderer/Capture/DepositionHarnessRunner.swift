@@ -165,6 +165,14 @@ public final class DepositionHarnessRunner {
         }
 
         if isProfessional {
+            let performance = scene.name.hasSuffix("-negative-control")
+                ? nil
+                : try await professionalPerformanceArtifacts(
+                    scene: scene,
+                    build: build,
+                    package: package,
+                    primary: capture
+                )
             return try finishProfessionalRun(
                 scene: scene,
                 outputDirectory: outputDirectory,
@@ -174,7 +182,8 @@ public final class DepositionHarnessRunner {
                 audit: professionalAudit!,
                 invariants: invariants,
                 countersBeforeStroke: countersBeforeStroke,
-                countersAfterStroke: countersAfterStroke
+                countersAfterStroke: countersAfterStroke,
+                performance: performance
             )
         }
 
@@ -332,6 +341,9 @@ private extension DepositionHarnessRunner {
         let previewCommitMaximumChannelDelta: UInt8
         let flushMetrics: GPUFrameMetrics
         let commitMetrics: GPUFrameMetrics
+        let strokeMetrics: [GPUFrameMetrics]
+        let newInstanceCounts: [Int]
+        let restampedInstanceCounts: [Int]
         let displayMetrics: [GPUFrameMetrics]
         let pipelinePreparationUnchanged: Bool
         let telemetry: BrushLabRendererDepositionDiagnosticSnapshot
@@ -355,6 +367,13 @@ private extension DepositionHarnessRunner {
         let radial: ProfessionalRadialObservations
         let pipelinePrepareCallCountBeforeStroke: Int
         let pipelinePrepareCallCountAfterStroke: Int
+    }
+
+    struct ProfessionalPerformanceArtifacts {
+        let index: Data
+        let fiveHundredDabs: Data
+        let longStroke: Data
+        let longStrokeTrace: Data
     }
 
     struct SeededFailureContext {
@@ -407,6 +426,7 @@ private extension DepositionHarnessRunner {
         scene: HarnessScene,
         package: BrushPackage,
         tiling: TilingKind = .grid,
+        drawableSize: PixelSize? = nil,
         cacheBudgetBytes: Int = 64 * 1_024 * 1_024,
         armablePipelineFailure: Bool = false
     ) async throws -> Context {
@@ -437,18 +457,19 @@ private extension DepositionHarnessRunner {
             pipelinePreparing: failurePreparer ?? pipelineLibrary,
             testHooks: .none
         )
+        let size = drawableSize ?? PixelSize(
+            width: scene.width,
+            height: scene.height
+        )
         let renderer = try GridRenderer(
             device: device,
             library: library,
             drawableSize: PatternSize(
-                width: Float(scene.width),
-                height: Float(scene.height)
+                width: Float(size.width),
+                height: Float(size.height)
             ),
             configuration: TilingCanvasConfiguration(
-                pixelSize: PixelSize(
-                    width: scene.width,
-                    height: scene.height
-                ),
+                pixelSize: size,
                 tiling: tiling
             )
         )
@@ -508,7 +529,8 @@ private extension DepositionHarnessRunner {
         )!,
         zoom: Float = 1,
         cancel: Bool = false,
-        diameter: Float? = nil
+        diameter: Float? = nil,
+        collectPerformanceEvidence: Bool = false
     ) throws -> StrokeCapture {
         let renderer = context.renderer
         let pipelinePrepareCallsBefore =
@@ -562,12 +584,35 @@ private extension DepositionHarnessRunner {
             style: style
         )
         var intermediateMetrics: [GPUFrameMetrics] = []
+        var performanceMetrics: [GPUFrameMetrics] = []
+        var newInstanceCounts: [Int] = []
+        var restampedInstanceCounts: [Int] = []
+        var encodedHighWater: UInt64 = 0
+        func recordPerformanceFlush(_ result: HarnessLiveFlushResult) {
+            performanceMetrics.append(result.metrics)
+            newInstanceCounts.append(result.metrics.encodedInstanceCount)
+            let restamped = result.encodedIdentityRanges.reduce(0) {
+                partial, range in
+                let upper = min(range.upperBound, encodedHighWater)
+                return partial + (
+                    upper > range.lowerBound
+                        ? Int(upper - range.lowerBound) : 0
+                )
+            }
+            restampedInstanceCounts.append(restamped)
+            encodedHighWater = max(
+                encodedHighWater,
+                result.emittedHighWater
+            )
+        }
         for sample in samples.dropFirst().dropLast() {
             try renderer.appendStroke(token: token, sample: sample)
             if partitionMode == .everySample, sample.kind != .predicted {
-                intermediateMetrics.append(
-                    try renderer.flushPendingLiveForHarness().metrics
-                )
+                let result = try renderer.flushPendingLiveForHarness()
+                intermediateMetrics.append(result.metrics)
+                if collectPerformanceEvidence {
+                    recordPerformanceFlush(result)
+                }
             }
         }
         if !cancel {
@@ -581,14 +626,20 @@ private extension DepositionHarnessRunner {
             + renderer.harnessScheduledPredictedRecords
         let logical = renderer.harnessCounters.totalDabsThisStroke
         let projected = renderer.harnessCounters.totalInstancesThisStroke
-        var flushMetrics =
-            try renderer.flushPendingLiveForHarness().metrics
+        let firstFlush = try renderer.flushPendingLiveForHarness()
+        var flushMetrics = firstFlush.metrics
+        if collectPerformanceEvidence {
+            recordPerformanceFlush(firstFlush)
+        }
         while !renderer.harnessScheduledAuthoritativeRecords.isEmpty
                 || !renderer.harnessScheduledPredictedRecords.isEmpty
         {
-            let frame = try renderer.flushPendingLiveForHarness()
-            flushMetrics = frame.metrics
-            intermediateMetrics.append(frame.metrics)
+            let result = try renderer.flushPendingLiveForHarness()
+            flushMetrics = result.metrics
+            intermediateMetrics.append(result.metrics)
+            if collectPerformanceEvidence {
+                recordPerformanceFlush(result)
+            }
         }
         let liveFrame = try renderer.renderOffscreenDisplayForHarness(
             width: scene.width,
@@ -640,6 +691,12 @@ private extension DepositionHarnessRunner {
             previewCommitMaximumChannelDelta: previewDelta,
             flushMetrics: flushMetrics,
             commitMetrics: commitMetrics,
+            strokeMetrics: collectPerformanceEvidence
+                ? performanceMetrics + [commitMetrics] : [],
+            newInstanceCounts: collectPerformanceEvidence
+                ? newInstanceCounts + [0] : [],
+            restampedInstanceCounts: collectPerformanceEvidence
+                ? restampedInstanceCounts + [0] : [],
             displayMetrics: intermediateMetrics
                 + [liveFrame.metrics, committedFrame.metrics],
             pipelinePreparationUnchanged:
@@ -1061,7 +1118,8 @@ private extension DepositionHarnessRunner {
         audit: ProfessionalRunAudit,
         invariants: [String: Bool],
         countersBeforeStroke: BrushCompilerCounters,
-        countersAfterStroke: BrushCompilerCounters
+        countersAfterStroke: BrushCompilerCounters,
+        performance: ProfessionalPerformanceArtifacts?
     ) throws -> HarnessRunResult {
         try FileManager.default.createDirectory(
             at: outputDirectory,
@@ -1302,6 +1360,29 @@ private extension DepositionHarnessRunner {
             to: benchmarkURL,
             options: .atomic
         )
+        var performanceURLs: [URL] = []
+        if let performance {
+            let performanceFiles: [(String, Data)] = [
+                ("professional-performance.json", performance.index),
+                (
+                    "professional-five-hundred-dabs.raw.json",
+                    performance.fiveHundredDabs
+                ),
+                (
+                    "professional-long-stroke.raw.json",
+                    performance.longStroke
+                ),
+                (
+                    "professional-long-stroke-trace.json",
+                    performance.longStrokeTrace
+                ),
+            ]
+            for (name, data) in performanceFiles {
+                let url = outputDirectory.appendingPathComponent(name)
+                try data.write(to: url, options: .atomic)
+                performanceURLs.append(url)
+            }
+        }
 
         try ProfessionalBrushEvidenceValidator.validateExpectations(
             scene: scene,
@@ -1314,8 +1395,276 @@ private extension DepositionHarnessRunner {
             artifactURLs: [
                 liveURL, committedURL, canonicalURL, characterizationURL,
                 evidenceURL, benchmarkURL,
-            ] + observationURLs
+            ] + observationURLs + performanceURLs
         )
+    }
+
+    func professionalPerformanceArtifacts(
+        scene: HarnessScene,
+        build: BenchmarkBuild,
+        package: BrushPackage,
+        primary: StrokeCapture
+    ) async throws -> ProfessionalPerformanceArtifacts {
+        let stem = Self.positiveStem(scene.name)
+        let context = try await makeContext(
+            scene: scene,
+            package: package
+        )
+        let resources =
+            context.compiled.textures.keys.sorted().map { identity in
+                ProfessionalBrushResolvedResource(
+                    identity: identity,
+                    kind: identity.hasPrefix("builtin.shape.")
+                        ? "shape" : "grain",
+                    mipCount:
+                        context.compiled.textures[identity]!.mipmapLevelCount
+                )
+            }
+        let source = ProfessionalPerformanceSource(
+            gitCommit: build.gitCommit,
+            rendererExecutableSHA256:
+                try Self.runningExecutableSHA256(),
+            gpuName: device.name,
+            operatingSystem:
+                ProcessInfo.processInfo.operatingSystemVersionString
+        )
+
+        let fiveBefore = context.compiler.debugCounters
+        let fiveGPU = try measureProfessionalFiveHundredDabs(
+            records: primary.scheduledRecords,
+            context: context,
+            width: scene.width,
+            height: scene.height
+        )
+        let fiveAfter = context.compiler.debugCounters
+        let five = ProfessionalFiveHundredDabEvidence(
+            scene: stem,
+            definitionID: package.definition.id.rawValue,
+            semanticHash: context.compiled.renderIdentity.semanticHash,
+            resolvedResources: resources,
+            source: source,
+            gpuMilliseconds: fiveGPU,
+            compilerCountersBefore: .init(fiveBefore),
+            compilerCountersAfter: .init(fiveAfter)
+        )
+
+        let performanceSize = PixelSize(width: 512, height: 512)
+        let trace = Self.professionalLongStrokeTrace(
+            width: performanceSize.width,
+            height: performanceSize.height
+        )
+        let traceRecord = ProfessionalLongStrokeTrace(
+            scene: stem,
+            definitionID: package.definition.id.rawValue,
+            semanticHash: context.compiled.renderIdentity.semanticHash,
+            samples: trace.map {
+                ProfessionalLongStrokeTraceSample(
+                    x: $0.position.x,
+                    y: $0.position.y,
+                    pressure: $0.pressure,
+                    timestamp: $0.timestamp,
+                    phase: Self.phaseName($0.phase),
+                    source: "mouse",
+                    kind: "actual"
+                )
+            }
+        )
+        let traceData = try Self.professionalJSON(traceRecord)
+        let longContext = try await makeContext(
+            scene: scene,
+            package: package,
+            drawableSize: performanceSize
+        )
+        let longBefore = longContext.compiler.debugCounters
+        let capture = try performStroke(
+            context: longContext,
+            scene: scene,
+            stem: stem,
+            trace: trace,
+            partitionMode: .everySample,
+            collectPerformanceEvidence: true
+        )
+        let longAfter = longContext.compiler.debugCounters
+        guard capture.strokeMetrics.count == 128,
+              capture.newInstanceCounts.count == 128,
+              capture.restampedInstanceCounts.count == 128,
+              let limits = package.definition.replayLimits
+        else {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: scene.name,
+                invariant: "professionalLongStrokeEvidenceComplete"
+            )
+        }
+        let long = ProfessionalLongStrokeEvidence(
+            scene: stem,
+            definitionID: package.definition.id.rawValue,
+            semanticHash: longContext.compiled.renderIdentity.semanticHash,
+            resolvedResources: resources,
+            source: source,
+            inputSampleCount: trace.count,
+            traceSHA256:
+                ProfessionalBrushEvidenceValidator.sha256(traceData),
+            cpuPreparationMilliseconds: capture.strokeMetrics.map(
+                \.cpuEncodeMilliseconds
+            ),
+            gpuMilliseconds: capture.strokeMetrics.map(\.gpuMilliseconds),
+            newInstanceCounts: capture.newInstanceCounts,
+            restampedInstanceCounts: capture.restampedInstanceCounts,
+            logicalDabCount: capture.logicalDabCount,
+            projectedInstanceCount: capture.projectedInstanceCount,
+            replayMaximumDabs: limits.maximumDabs,
+            replayMaximumProjectedInstances:
+                limits.maximumProjectedInstances,
+            compilerCountersBefore: .init(longBefore),
+            compilerCountersAfter: .init(longAfter)
+        )
+        let fiveData = try Self.professionalJSON(five)
+        let longData = try Self.professionalJSON(long)
+        let index = ProfessionalPerformanceIndex(
+            scene: stem,
+            definitionID: package.definition.id.rawValue,
+            semanticHash: context.compiled.renderIdentity.semanticHash,
+            resolvedResources: resources,
+            source: source,
+            fiveHundredDabs: .init(
+                path: "professional-five-hundred-dabs.raw.json",
+                sha256:
+                    ProfessionalBrushEvidenceValidator.sha256(fiveData)
+            ),
+            longStroke: .init(
+                path: "professional-long-stroke.raw.json",
+                sha256:
+                    ProfessionalBrushEvidenceValidator.sha256(longData)
+            )
+        )
+        return ProfessionalPerformanceArtifacts(
+            index: try Self.professionalJSON(index),
+            fiveHundredDabs: fiveData,
+            longStroke: longData,
+            longStrokeTrace: traceData
+        )
+    }
+
+    func measureProfessionalFiveHundredDabs(
+        records: [ProjectedDepositionRecord],
+        context: Context,
+        width: Int,
+        height: Int
+    ) throws -> [Double] {
+        guard !records.isEmpty else {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: context.compiled.program.definition.id.rawValue,
+                invariant: "professionalFiveHundredDabSource"
+            )
+        }
+        let exact = (0..<500).map { records[$0 % records.count] }
+        var measurements: [Double] = []
+        for _ in 0..<3 {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.storageMode = .shared
+            descriptor.usage = [.renderTarget, .shaderRead]
+            guard let target = device.makeTexture(descriptor: descriptor),
+                  let queue = device.makeCommandQueue(),
+                  let commandBuffer = queue.makeCommandBuffer()
+            else {
+                throw DepositionHarnessRunError
+                    .metalResourceUnavailable(
+                        "professional 500-dab measurement resources"
+                    )
+            }
+            let empty = [UInt8](
+                repeating: 0,
+                count: width * height * 4
+            )
+            target.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: empty,
+                bytesPerRow: width * 4
+            )
+            let pool = try DabInstanceBufferPool(device: device)
+            var encoder = DepositionEncoder(
+                instancePool: pool,
+                frameUniforms: Self.frameUniforms(
+                    width: width,
+                    height: height
+                )
+            )
+            let prepared = try encoder.preflight(
+                records: exact,
+                binding: context.compiled.depositionPipeline,
+                material: context.compiled.depositionMaterial,
+                target: target
+            )
+            _ = try encoder.encode(
+                prepared,
+                into: target,
+                commandBuffer: commandBuffer
+            )
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            guard commandBuffer.status == .completed else {
+                throw DepositionHarnessRunError
+                    .metalResourceUnavailable(
+                        "completed professional 500-dab command"
+                    )
+            }
+            measurements.append(
+                max(
+                    0,
+                    (
+                        commandBuffer.gpuEndTime
+                            - commandBuffer.gpuStartTime
+                    ) * 1_000
+                )
+            )
+        }
+        return measurements
+    }
+
+    static func professionalLongStrokeTrace(
+        width: Int,
+        height: Int
+    ) -> [StrokeSample] {
+        (0..<128).map { index in
+            let x = Float(width)
+                * (index.isMultiple(of: 2) ? 0.125 : 0.875)
+            let y = Float(height) * 0.5
+            let phase: StrokePhase =
+                index == 0 ? .began : (index == 127 ? .ended : .moved)
+            return StrokeSample(
+                position: ScreenPoint(x: x, y: y),
+                pressure: 0.58,
+                timestamp: Double(index) * 0.004,
+                phase: phase,
+                source: .mouse,
+                kind: .actual
+            )
+        }
+    }
+
+    static func phaseName(_ phase: StrokePhase) -> String {
+        switch phase {
+        case .began: "began"
+        case .moved: "moved"
+        case .ended: "ended"
+        case .cancelled: "cancelled"
+        }
+    }
+
+    static func professionalJSON<T: Encodable>(
+        _ value: T
+    ) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [
+            .prettyPrinted, .sortedKeys, .withoutEscapingSlashes,
+        ]
+        return try encoder.encode(value)
     }
 
     func invariantResults(
