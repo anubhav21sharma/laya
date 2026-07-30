@@ -1336,6 +1336,141 @@ struct BrushCompilerTests {
     }
 
     @Test
+    func batchRollbackRestoresExactCompilerStateAndAdvancesRevision()
+        async throws
+    {
+        guard let setup = try compilerSetup() else { return }
+        let original = try await setup.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.rollback.original",
+                resourceID: "shape.rollback.original"
+            )
+        )
+        let beforeDiagnostics = setup.compiler.diagnosticSnapshot
+        let beforeCounters = setup.compiler.debugCounters
+        let beforeKeys = setup.compiler.cachedKeys
+        let beforePinnedKeys = setup.compiler.pinnedKeys
+        let beforeResidentBytes = setup.compiler.residentByteCount
+        let preparedBeforeRollback = try await setup.compiler
+            .prepareCompilationBatch(
+                packages: [
+                    try compilerPackage(
+                        definitionID: "brush.rollback.stale",
+                        resourceID: "shape.rollback.stale",
+                        resourceBytes: compilerCoveragePNG,
+                        width: 2,
+                        height: 2
+                    ),
+                ]
+            )
+        let committed = try await setup.compiler.prepareCompilationBatch(
+            packages: [
+                try compilerPackage(
+                    definitionID: "brush.rollback.committed",
+                    resourceID: "shape.rollback.committed",
+                    resourceBytes: compilerWidePNG,
+                    width: 8,
+                    height: 4
+                ),
+            ]
+        )
+
+        let rollback = try setup.compiler.commitCompilationBatch(committed)
+        #expect(
+            setup.compiler.activeBrush?.program.definition.id.rawValue
+                == "brush.rollback.committed"
+        )
+        try setup.compiler.rollbackCompilationBatch(rollback)
+
+        #expect(setup.compiler.activeBrush === original)
+        #expect(setup.compiler.diagnosticSnapshot == beforeDiagnostics)
+        #expect(setup.compiler.debugCounters == beforeCounters)
+        #expect(setup.compiler.cachedKeys == beforeKeys)
+        #expect(setup.compiler.pinnedKeys == beforePinnedKeys)
+        #expect(setup.compiler.residentByteCount == beforeResidentBytes)
+        #expect(throws: CancellationError.self) {
+            _ = try setup.compiler.commitCompilationBatch(
+                preparedBeforeRollback
+            )
+        }
+    }
+
+    @Test
+    func batchRollbackRejectsForeignDoubleAndStaleTokensWithoutMutation()
+        async throws
+    {
+        guard let first = try compilerSetup(),
+              let second = try compilerSetup()
+        else {
+            return
+        }
+        let original = try await first.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.rollback.owner",
+                resourceID: "shape.rollback.owner"
+            )
+        )
+        let prepared = try await first.compiler.prepareCompilationBatch(
+            packages: [
+                try compilerPackage(
+                    definitionID: "brush.rollback.candidate",
+                    resourceID: "shape.rollback.candidate",
+                    resourceBytes: compilerCoveragePNG,
+                    width: 2,
+                    height: 2
+                ),
+            ]
+        )
+        let rollback = try first.compiler.commitCompilationBatch(prepared)
+
+        let foreignBefore = second.compiler.diagnosticSnapshot
+        #expect(throws: CancellationError.self) {
+            try second.compiler.rollbackCompilationBatch(rollback)
+        }
+        #expect(second.compiler.diagnosticSnapshot == foreignBefore)
+
+        try first.compiler.rollbackCompilationBatch(rollback)
+        let restored = first.compiler.diagnosticSnapshot
+        #expect(first.compiler.activeBrush === original)
+        #expect(throws: CancellationError.self) {
+            try first.compiler.rollbackCompilationBatch(rollback)
+        }
+        #expect(first.compiler.diagnosticSnapshot == restored)
+
+        let staleBatch = try await first.compiler.prepareCompilationBatch(
+            packages: [
+                try compilerPackage(
+                    definitionID: "brush.rollback.to-stale",
+                    resourceID: "shape.rollback.to-stale"
+                ),
+            ]
+        )
+        let staleRollback =
+            try first.compiler.commitCompilationBatch(staleBatch)
+        let superseding = try await first.compiler.compileAndActivate(
+            package: try compilerPackage(
+                definitionID: "brush.rollback.superseding",
+                resourceID: "shape.rollback.superseding",
+                resourceBytes: compilerWidePNG,
+                width: 8,
+                height: 4
+            )
+        )
+        let staleBefore = first.compiler.diagnosticSnapshot
+        let staleKeys = first.compiler.cachedKeys
+        let stalePinnedKeys = first.compiler.pinnedKeys
+        let staleResidentBytes = first.compiler.residentByteCount
+        #expect(throws: CancellationError.self) {
+            try first.compiler.rollbackCompilationBatch(staleRollback)
+        }
+        #expect(first.compiler.activeBrush === superseding)
+        #expect(first.compiler.diagnosticSnapshot == staleBefore)
+        #expect(first.compiler.cachedKeys == staleKeys)
+        #expect(first.compiler.pinnedKeys == stalePinnedKeys)
+        #expect(first.compiler.residentByteCount == staleResidentBytes)
+    }
+
+    @Test
     func oneCompilationThenOneThousandLogicalDabsDoesNotTouchCompiler() async throws {
         guard let setup = try compilerSetup() else { return }
         let compiled = try await setup.compiler.compileAndActivate(

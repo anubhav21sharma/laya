@@ -519,6 +519,43 @@ struct BrushLabSessionTests {
     }
 
     @Test
+    func failedProfessionalResetRollsBackEveryCompilerAndReviewObservable()
+        async throws
+    {
+        var forceClearFailure = false
+        guard let runtime = try makeRuntime(
+            forceClearFailure: { forceClearFailure }
+        ) else {
+            return
+        }
+        runtime.session.selectReviewMatrix(.stageFiveProfessional)
+        let retained = try #require(
+            runtime.session.professionalManualCards.first {
+                $0.brushID
+                    == ProfessionalBrushCatalog.technicalInk.id.rawValue
+                    && $0.gesture == .eraserRetrace
+            }
+        )
+        let rejected = try #require(
+            runtime.session.professionalManualCards.first {
+                $0.brushID
+                    == ProfessionalBrushCatalog.graphitePencil.id.rawValue
+                    && $0.gesture == .periodicSeamCrossing
+            }
+        )
+        try await runtime.session.selectReviewCard(retained.cardID)
+        _ = try await runtime.session.replaySelectedReviewCard()
+        let before = try professionalReviewSnapshot(runtime)
+
+        forceClearFailure = true
+        await #expect(throws: MetalRendererError.self) {
+            try await runtime.session.selectReviewCard(rejected.cardID)
+        }
+
+        #expect(try professionalReviewSnapshot(runtime) == before)
+    }
+
+    @Test
     func professionalManualAssessmentsStartUnsetAndRemainUserOwned() {
         let assessment = BrushLabProfessionalManualAssessment(
             cardID: "builtin.professional-technical-ink.manual"
@@ -2074,6 +2111,10 @@ struct BrushLabSessionTests {
         let isLoading: Bool
         let errorMessage: String?
         let compilerDiagnostics: BrushCompilerDiagnosticSnapshot
+        let compilerCachedKeys: [String]
+        let compilerPinnedKeys: [String]
+        let compilerResidentBytes: Int
+        let compilerActiveIdentity: BrushRenderIdentity?
         let rendererDrawIdentity: BrushRenderIdentity?
         let rendererEraserIdentity: BrushRenderIdentity?
         let document: ProfessionalReviewDocumentSnapshot
@@ -2136,6 +2177,12 @@ struct BrushLabSessionTests {
             errorMessage: runtime.session.errorMessage,
             compilerDiagnostics:
                 runtime.session.compiler.diagnosticSnapshot,
+            compilerCachedKeys: runtime.session.compiler.cachedKeys,
+            compilerPinnedKeys: runtime.session.compiler.pinnedKeys,
+            compilerResidentBytes:
+                runtime.session.compiler.residentByteCount,
+            compilerActiveIdentity:
+                runtime.session.compiler.activeBrush?.renderIdentity,
             rendererDrawIdentity:
                 runtime.controller.renderer.preparedBrush(for: .draw)?
                     .renderIdentity,

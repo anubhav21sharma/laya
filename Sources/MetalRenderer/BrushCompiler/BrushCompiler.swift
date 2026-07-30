@@ -106,6 +106,28 @@ public final class BrushCompilationBatch {
     }
 }
 
+public final class BrushCompilationRollbackToken {
+    fileprivate let owner: ObjectIdentifier
+    fileprivate let committedRevision: UInt64
+    fileprivate let cache: BrushResourceCache
+    fileprivate let counters: BrushCompilerCounters
+    fileprivate let activeBrush: CompiledBrush?
+
+    fileprivate init(
+        owner: ObjectIdentifier,
+        committedRevision: UInt64,
+        cache: BrushResourceCache,
+        counters: BrushCompilerCounters,
+        activeBrush: CompiledBrush?
+    ) {
+        self.owner = owner
+        self.committedRevision = committedRevision
+        self.cache = cache
+        self.counters = counters
+        self.activeBrush = activeBrush
+    }
+}
+
 @MainActor
 public final class BrushCompiler {
     public private(set) var activeBrush: CompiledBrush?
@@ -248,15 +270,40 @@ public final class BrushCompiler {
     /// not changed since preparation began.
     public func commitCompilationBatch(
         _ batch: BrushCompilationBatch
-    ) throws {
+    ) throws -> BrushCompilationRollbackToken {
         guard batch.owner == ObjectIdentifier(self),
               batch.baseRevision == stateRevision
         else {
             throw CancellationError()
         }
+        let rollback = BrushCompilationRollbackToken(
+            owner: ObjectIdentifier(self),
+            committedRevision: stateRevision &+ 1,
+            cache: cache,
+            counters: counters,
+            activeBrush: activeBrush
+        )
         cache = batch.cache
         counters = batch.counters
         activeBrush = batch.activeBrush
+        stateRevision &+= 1
+        return rollback
+    }
+
+    /// Restores the state replaced by one exact batch commit. Rollback never
+    /// rewinds the compiler revision, so every batch prepared before either
+    /// the commit or rollback remains invalid.
+    public func rollbackCompilationBatch(
+        _ rollback: BrushCompilationRollbackToken
+    ) throws {
+        guard rollback.owner == ObjectIdentifier(self),
+              rollback.committedRevision == stateRevision
+        else {
+            throw CancellationError()
+        }
+        cache = rollback.cache
+        counters = rollback.counters
+        activeBrush = rollback.activeBrush
         stateRevision &+= 1
     }
 

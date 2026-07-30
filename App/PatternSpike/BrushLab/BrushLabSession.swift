@@ -540,7 +540,7 @@ final class BrushLabSession {
             guard let compiled = batch.brushes.first else {
                 throw CancellationError()
             }
-            try compiler.commitCompilationBatch(batch)
+            _ = try compiler.commitCompilationBatch(batch)
             compiledBrush = compiled
             compilationReport = compiled.report
             compilationDiagnostics = compiled.diagnostics.map(
@@ -649,24 +649,53 @@ final class BrushLabSession {
         guard controller.renderer.isIdle else {
             throw CancellationError()
         }
-        try compiler.commitCompilationBatch(prepared.batch)
-        try await controller.resetReviewDocument(
-            to: card.documentConfiguration
-        )
-        try requireCurrentSessionOperation(operation)
-        guard controller.renderer.isIdle else {
-            throw CancellationError()
+        guard let firstPass = card.passes.first,
+              card.passes.enumerated().allSatisfy({
+                  $0.offset == $0.element.passIndex
+              }),
+              prepared.package.definition.id.rawValue == card.brushID,
+              prepared.draw.renderIdentity.definitionID.rawValue
+                == card.brushID,
+              prepared.eraser.renderIdentity.definitionID
+                == EditorBrushCatalog.eraser.id,
+              prepared.packageHash
+                == prepared.draw.renderIdentity.semanticHash
+        else {
+            throw BrushLabEvidenceError.manualCardStateMismatch(
+                card.cardID
+            )
         }
-        try controller.installBootstrapBrushes(
-            draw: prepared.draw,
-            eraser: prepared.eraser
-        )
-        let active = try configureProfessionalPass(
-            card.passes[0],
-            card: card,
-            drawBrush: prepared.draw,
-            eraserBrush: prepared.eraser
-        )
+        for pass in card.passes {
+            _ = try resolveProfessionalPass(
+                pass,
+                drawBrush: prepared.draw,
+                eraserBrush: prepared.eraser
+            )
+        }
+        let rollback = try compiler.commitCompilationBatch(prepared.batch)
+        let active: CompiledBrush
+        do {
+            try await controller.resetReviewDocument(
+                to: card.documentConfiguration
+            )
+            try requireCurrentSessionOperation(operation)
+            guard controller.renderer.isIdle else {
+                throw CancellationError()
+            }
+            try controller.installBootstrapBrushes(
+                draw: prepared.draw,
+                eraser: prepared.eraser
+            )
+            active = try configureProfessionalPass(
+                firstPass,
+                card: card,
+                drawBrush: prepared.draw,
+                eraserBrush: prepared.eraser
+            )
+        } catch let selectionError {
+            try compiler.rollbackCompilationBatch(rollback)
+            throw selectionError
+        }
 
         package = prepared.package
         sourceName = "\(card.cardID).professional-review"
@@ -1107,20 +1136,13 @@ final class BrushLabSession {
         drawBrush: CompiledBrush,
         eraserBrush: CompiledBrush
     ) throws -> CompiledBrush {
-        let brush: CompiledBrush
-        let composite: StrokeCompositeMode
-        switch pass.role {
-        case .professionalDraw:
-            brush = drawBrush
-            composite = .draw
-        case .retainedStageFourEraser:
-            brush = eraserBrush
-            composite = .erase
-        }
-        guard brush.renderIdentity.definitionID.rawValue == pass.brushID
-        else {
-            throw BrushLabEvidenceError.manualBrushUnavailable(pass.brushID)
-        }
+        let resolved = try resolveProfessionalPass(
+            pass,
+            drawBrush: drawBrush,
+            eraserBrush: eraserBrush
+        )
+        let brush = resolved.brush
+        let composite = resolved.composite
         controller.handleTool(pass.tool == .erase ? .erase : .draw)
         controller.handleInkColor(card.paintColor)
         controller.model.confirmBrushDiameter(pass.nominalDiameter)
@@ -1139,6 +1161,40 @@ final class BrushLabSession {
             )
         }
         return brush
+    }
+
+    private func resolveProfessionalPass(
+        _ pass: BrushLabProfessionalManualPass,
+        drawBrush: CompiledBrush,
+        eraserBrush: CompiledBrush
+    ) throws -> (
+        brush: CompiledBrush,
+        composite: StrokeCompositeMode
+    ) {
+        let brush: CompiledBrush
+        let composite: StrokeCompositeMode
+        let expectedTool: BrushLabManualTool
+        switch pass.role {
+        case .professionalDraw:
+            brush = drawBrush
+            composite = .draw
+            expectedTool = .draw
+        case .retainedStageFourEraser:
+            brush = eraserBrush
+            composite = .erase
+            expectedTool = .erase
+        }
+        guard pass.tool == expectedTool,
+              pass.nominalDiameter.isFinite,
+              pass.nominalDiameter
+                >= EditorConfiguration.minimumBrushDiameter,
+              pass.nominalDiameter
+                <= EditorConfiguration.maximumBrushDiameter,
+              brush.renderIdentity.definitionID.rawValue == pass.brushID
+        else {
+            throw BrushLabEvidenceError.manualBrushUnavailable(pass.brushID)
+        }
+        return (brush, composite)
     }
 
     private func resetProfessionalPassNavigation() {
