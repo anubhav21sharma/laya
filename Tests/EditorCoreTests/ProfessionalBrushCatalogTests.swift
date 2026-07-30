@@ -58,6 +58,30 @@ func professionalCatalogResolvesGraphitePencilWithItsStableIdentity() throws {
 }
 
 @Test
+func graphitePencilDeclaresItsDualGrainCapabilityAsRequired() throws {
+    let definition = ProfessionalBrushCatalog.graphitePencil.definition
+
+    #expect(definition.coverage.grains.count == 2)
+    #expect(definition.capabilities == [
+        BrushCapabilityDeclaration(identifier: "dualGrain", required: true),
+    ])
+    #expect(
+        try BrushProgramCompiler.compile(definition).requiredCapabilities
+            == [.dualGrain]
+    )
+}
+
+@Test
+func graphitePencilRejectsAnOptionalDualGrainDeclaration() throws {
+    #expect(throws: BrushDefinitionValidationError.missingCapability("dualGrain")) {
+        try decodeMutated(
+            ProfessionalBrushCatalog.graphitePencil.definition,
+            markingOptional: "dualGrain"
+        )
+    }
+}
+
+@Test
 func professionalCatalogResolvesNaturalCharcoalWithOrderedDualLayers() throws {
     let charcoalID = BrushRecipeID("builtin.professional-natural-charcoal")
     let entry = try #require(ProfessionalBrushCatalog.entry(for: charcoalID))
