@@ -281,10 +281,14 @@ struct ProfessionalBrushEvidenceValidatorTests {
         }
         try validRaw.write(to: raw)
 
-        try mutateTestJSONObject(at: raw) { object in
-            var missed = object["missedFrameFlags"] as! [Any]
-            missed[0] = true
-            object["missedFrameFlags"] = missed
+        try mutatePhysicalRawAndRebind(
+            fixture: fixture,
+            profileID: "pencil",
+            definitionID: "builtin.professional-graphite-pencil"
+        ) { object in
+            var events = object["events"] as! [[String: Any]]
+            events[0]["kind"] = 7
+            object["events"] = events
         }
         #expect(throws: Error.self) {
             _ = try PhysicalEvidenceValidator.validate(
@@ -294,10 +298,60 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 expectedRendererSHA256: fixture.renderer
             )
         }
-        try validRaw.write(to: raw)
+    }
 
-        try mutateTestJSONObject(at: profile) {
-            $0["profileID"] = "wacom"
+    @Test
+    func physicalEvidenceRejectsProfileRelabelingAndFailedThresholds()
+        throws
+    {
+        var fixture = try professionalPhysicalFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let pencilRaw = fixture.root.appendingPathComponent(
+            "pencil/raw/builtin.professional-graphite-pencil.json"
+        )
+        let a14Raw = fixture.root.appendingPathComponent(
+            "a14Floor60Hz/raw/builtin.professional-graphite-pencil.json"
+        )
+        var copied = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: pencilRaw)
+        ) as! [String: Any]
+        let a14Evidence = try JSONSerialization.jsonObject(
+            with: Data(
+                contentsOf: fixture.root.appendingPathComponent(
+                    "a14Floor60Hz/evidence.json"
+                )
+            )
+        ) as! [String: Any]
+        copied["profileID"] = "a14Floor60Hz"
+        copied["scenarioID"] = "professional-a14Floor60Hz"
+        copied["device"] = a14Evidence["device"]
+        try testJSONData(copied).write(to: a14Raw)
+        try rebindPhysicalRaw(
+            fixture: fixture,
+            profileID: "a14Floor60Hz",
+            definitionID: "builtin.professional-graphite-pencil"
+        )
+        #expect(throws: Error.self) {
+            _ = try PhysicalEvidenceValidator.validate(
+                root: fixture.root,
+                expectedCommit: fixture.commit,
+                expectedSourceTreeSHA256: fixture.tree,
+                expectedRendererSHA256: fixture.renderer
+            )
+        }
+
+        try? FileManager.default.removeItem(at: fixture.root)
+        fixture = try professionalPhysicalFixture()
+        try mutatePhysicalRawAndRebind(
+            fixture: fixture,
+            profileID: "inputToPhoton",
+            definitionID: "builtin.professional-technical-ink"
+        ) { raw in
+            var measurements =
+                raw["measurements"] as! [String: Any]
+            measurements["inputToPhotonP95Milliseconds"] =
+                Array(repeating: 17.0, count: 120)
+            raw["measurements"] = measurements
         }
         #expect(throws: Error.self) {
             _ = try PhysicalEvidenceValidator.validate(
@@ -328,6 +382,10 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 )
             }
         }
+
+        let valid = try fixture()
+        #expect(try validatePerformanceFixture(valid, gpuMaximum: 1))
+        try? FileManager.default.removeItem(at: valid.root)
 
         var value = try fixture()
         try FileManager.default.removeItem(
@@ -396,10 +454,9 @@ struct ProfessionalBrushEvidenceValidatorTests {
             filename: "professional-long-stroke.raw.json",
             referenceKey: "longStroke"
         ) { raw in
-            var restamped =
-                raw["restampedInstanceCounts"] as! [Int]
-            restamped[64] = 1
-            raw["restampedInstanceCounts"] = restamped
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[127]["inputPhase"] = "commit"
+            raw["identityFrames"] = frames
         }
         reject(value)
 
@@ -410,10 +467,90 @@ struct ProfessionalBrushEvidenceValidatorTests {
             filename: "professional-long-stroke.raw.json",
             referenceKey: "longStroke"
         ) { raw in
-            var newInstances =
-                raw["newInstanceCounts"] as! [Any]
-            newInstances[64] = true
-            raw["newInstanceCounts"] = newInstances
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            var ranges =
+                frames[64]["encodedLogicalDabIdentityRanges"]
+                    as! [[String: Any]]
+            ranges[0]["lowerBound"] = 0
+            frames[64]["encodedLogicalDabIdentityRanges"] = ranges
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[64]["previousEncodedLogicalDabHighWater"] = true
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            raw["logicalDabCount"] = 129
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[64]["generatedProjectedInstanceHighWater"] =
+                64 * 65 + 1
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            frames[64]["encodedGPUInstanceCount"] = 4_097
+            raw["identityFrames"] = frames
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            raw["cpuPreparationMilliseconds"] = (0..<128).map {
+                0.1 + Double($0) * 0.004
+            }
+        }
+        reject(value)
+
+        value = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: value,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            raw["gpuMilliseconds"] = (0..<128).map {
+                0.1 + Double($0) * 0.004
+            }
         }
         reject(value)
 
@@ -1031,8 +1168,29 @@ private func professionalPerformanceFixture(
                 "professional-five-hundred-dabs.raw.json"
             )
         )
+        let identityFrames: [[String: Any]] = (0..<128).map { index in
+            [
+                "inputPhase":
+                    index == 0
+                        ? "began" : (index == 127 ? "ended" : "moved"),
+                "previousEncodedLogicalDabHighWater": index,
+                "emittedLogicalDabHighWater": index + 1,
+                "authoritativeLogicalDabBacklogRemaining": 0,
+                "previousGeneratedProjectedInstanceHighWater":
+                    index * 64,
+                "generatedProjectedInstanceHighWater":
+                    (index + 1) * 64,
+                "encodedGPUInstanceCount": 64,
+                "encodedLogicalDabIdentityRanges": [
+                    [
+                        "lowerBound": index,
+                        "upperBound": index + 1,
+                    ],
+                ],
+            ]
+        }
         let long = try testJSONData([
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "workloadID": "professional-long-stroke",
             "scene": scene,
             "definitionID": definitionID,
@@ -1045,8 +1203,7 @@ private func professionalPerformanceFixture(
             "cpuPreparationMilliseconds":
                 Array(repeating: 0.1, count: 128),
             "gpuMilliseconds": Array(repeating: 0.1, count: 128),
-            "newInstanceCounts": Array(repeating: 64, count: 128),
-            "restampedInstanceCounts": Array(repeating: 0, count: 128),
+            "identityFrames": identityFrames,
             "logicalDabCount": 128,
             "projectedInstanceCount": 8_192,
             "replayMode": "replayTail",
@@ -1147,93 +1304,9 @@ private func professionalPhysicalFixture()
             [("builtin.shape.technical-nib", "shape", 8)]
         ),
     ]
-    let profiles: [(String, [String: Any])] = [
-        (
-            "a14Floor60Hz",
-            physicalDevice(
-                platform: "iPadOS", hardware: "iPad13,2",
-                gpu: "Apple A14 GPU", refresh: 60,
-                inputKind: "touch", vendor: "Apple",
-                model: "Multi-Touch Display",
-                telemetry: "UITouch.timestamp", prediction: "none"
-            )
-        ),
-        (
-            "inputToPhoton",
-            physicalDevice(
-                platform: "iPadOS", hardware: "iPad16,1",
-                gpu: "Apple M4", refresh: 60,
-                inputKind: "applePencil", vendor: "Apple",
-                model: "Apple Pencil Pro",
-                telemetry:
-                    "UIEvent.coalescedTouches+predictedTouches",
-                prediction: "coalescedAndPredicted"
-            )
-        ),
-        (
-            "memoryWarning",
-            physicalDevice(
-                platform: "iPadOS", hardware: "iPad16,1",
-                gpu: "Apple M4", refresh: 60,
-                inputKind: "touch", vendor: "Apple",
-                model: "Multi-Touch Display",
-                telemetry: "UITouch.timestamp", prediction: "none"
-            )
-        ),
-        (
-            "pencil",
-            physicalDevice(
-                platform: "iPadOS", hardware: "iPad16,1",
-                gpu: "Apple M4", refresh: 60,
-                inputKind: "applePencil", vendor: "Apple",
-                model: "Apple Pencil Pro",
-                telemetry:
-                    "UIEvent.coalescedTouches+predictedTouches",
-                prediction: "coalescedAndPredicted"
-            )
-        ),
-        (
-            "referenceMSeriesProMotion120Hz",
-            physicalDevice(
-                platform: "iPadOS", hardware: "iPad16,1",
-                gpu: "Apple M4", refresh: 120,
-                inputKind: "touch", vendor: "Apple",
-                model: "Multi-Touch Display",
-                telemetry: "UITouch.timestamp", prediction: "none"
-            )
-        ),
-        (
-            "suspendResume",
-            physicalDevice(
-                platform: "iPadOS", hardware: "iPad16,1",
-                gpu: "Apple M4", refresh: 60,
-                inputKind: "touch", vendor: "Apple",
-                model: "Multi-Touch Display",
-                telemetry: "UITouch.timestamp", prediction: "none"
-            )
-        ),
-        (
-            "sustainedThermal",
-            physicalDevice(
-                platform: "iPadOS", hardware: "iPad16,1",
-                gpu: "Apple M4", refresh: 60,
-                inputKind: "touch", vendor: "Apple",
-                model: "Multi-Touch Display",
-                telemetry: "UITouch.timestamp", prediction: "none"
-            )
-        ),
-        (
-            "wacom",
-            physicalDevice(
-                platform: "macOS", hardware: "Mac16,1",
-                gpu: "Apple M4", refresh: 60,
-                inputKind: "wacomStylus", vendor: "Wacom",
-                model: "Wacom Intuos Pro",
-                telemetry: "NSEvent.tabletPoint",
-                prediction: "coalesced"
-            )
-        ),
-    ]
+    let profiles = StageFourEvidenceValidator.requiredPhysicalProfiles.map {
+        ($0, physicalScenario(for: $0))
+    }
     let counters: [String: Any] = [
         "packageDecodeCount": 1,
         "imageDecodeCount": 0,
@@ -1241,7 +1314,8 @@ private func professionalPhysicalFixture()
         "cacheHitCount": 0,
         "activationCount": 1,
     ]
-    for (profileID, device) in profiles {
+    for (profileID, scenario) in profiles {
+        let device = scenario.device
         let directory = root.appendingPathComponent(
             profileID,
             isDirectory: true
@@ -1254,7 +1328,6 @@ private func professionalPhysicalFixture()
             at: rawRoot,
             withIntermediateDirectories: true
         )
-        let prediction = device["predictionMode"] as! String
         var workloads: [[String: Any]] = []
         for (definitionID, semanticHash, rawResources) in truths {
             let resources = rawResources.map {
@@ -1264,34 +1337,8 @@ private func professionalPhysicalFixture()
                     "mipCount": $0.2,
                 ] as [String: Any]
             }
-            var samples: [[String: Any]] = []
-            for index in 0..<20 {
-                let kind: String
-                switch prediction {
-                case "coalescedAndPredicted":
-                    kind = ["actual", "coalesced", "predicted"][
-                        index % 3
-                    ]
-                case "coalesced":
-                    kind = index.isMultiple(of: 2)
-                        ? "actual" : "coalesced"
-                default:
-                    kind = "actual"
-                }
-                samples.append([
-                    "timestampNanoseconds": index * 1_000_000,
-                    "phase":
-                        index == 0
-                            ? "began"
-                            : (index == 19 ? "ended" : "moved"),
-                    "kind": kind,
-                    "pressure": 0.5,
-                    "x": Double(index),
-                    "y": 10.0,
-                ])
-            }
             let raw = try testJSONData([
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "profileID": profileID,
                 "scenarioID": "professional-\(profileID)",
                 "source": source,
@@ -1299,13 +1346,11 @@ private func professionalPhysicalFixture()
                 "definitionID": definitionID,
                 "semanticHash": semanticHash,
                 "resolvedResources": resources,
-                "inputSampleCount": 20,
-                "inputSamples": samples,
-                "cpuPreparationMilliseconds":
-                    Array(repeating: 0.1, count: 20),
-                "gpu500DabMilliseconds": [1.0, 0.9, 0.8],
-                "missedFrameFlags":
-                    Array(repeating: 0, count: 20),
+                "sampleCount": scenario.sampleCount,
+                "sampleTimestampsNanoseconds":
+                    scenario.sampleTimestampsNanoseconds,
+                "events": scenario.events,
+                "measurements": scenario.measurements,
                 "compilerCountersBefore": counters,
                 "compilerCountersAfter": counters,
             ])
@@ -1323,7 +1368,7 @@ private func professionalPhysicalFixture()
             ])
         }
         try testJSONData([
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "profileID": profileID,
             "scenarioID": "professional-\(profileID)",
             "source": source,
@@ -1341,29 +1386,283 @@ private func professionalPhysicalFixture()
     )
 }
 
+private struct ProfessionalPhysicalScenario {
+    let device: [String: Any]
+    let sampleCount: Int
+    let sampleTimestampsNanoseconds: [Int]
+    let events: [[String: Any]]
+    let measurements: [String: Any]
+}
+
+private func physicalScenario(
+    for profileID: String
+) -> ProfessionalPhysicalScenario {
+    let sampleCount: Int
+    let interval: Int
+    let orderedKinds: [String]
+    let device: [String: Any]
+    switch profileID {
+    case "a14Floor60Hz":
+        sampleCount = 301
+        interval = 16_666_667
+        orderedKinds = ["inputSample", "displayFrame"]
+        device = physicalDevice(
+            platform: "iPadOS", hardware: "iPad13,2",
+            processorClass: "A14Class", gpu: "Apple A14 GPU",
+            refresh: 60, displayProvenance:
+                "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+            inputKind: "touch", vendor: "Apple",
+            model: "Multi-Touch Display",
+            telemetry: "UITouch.timestamp", transport: "builtIn"
+        )
+    case "inputToPhoton":
+        sampleCount = 120
+        interval = 42_016_807
+        orderedKinds = ["inputEvent", "photonObserved"]
+        device = physicalDevice(
+            platform: "iPadOS", hardware: "iPad16,3",
+            processorClass: "MSeries", gpu: "Apple M4",
+            refresh: 60, displayProvenance:
+                "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+            inputKind: "applePencil", vendor: "Apple",
+            model: "Apple Pencil Pro",
+            telemetry: "UIEvent.coalescedTouches+predictedTouches",
+            transport: "wireless"
+        )
+    case "memoryWarning":
+        sampleCount = 6
+        interval = 1_000_000_000
+        orderedKinds = ["memoryWarning", "rendererRecovered"]
+        device = physicalDevice(
+            platform: "iPadOS", hardware: "iPad16,3",
+            processorClass: "MSeries", gpu: "Apple M4",
+            refresh: 60, displayProvenance:
+                "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+            inputKind: "touch", vendor: "Apple",
+            model: "Multi-Touch Display",
+            telemetry: "UITouch.timestamp", transport: "builtIn"
+        )
+    case "pencil":
+        sampleCount = 241
+        interval = 4_166_667
+        orderedKinds = ["inputSample", "renderedSample"]
+        device = physicalDevice(
+            platform: "iPadOS", hardware: "iPad16,3",
+            processorClass: "MSeries", gpu: "Apple M4",
+            refresh: 60, displayProvenance:
+                "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+            inputKind: "applePencil", vendor: "Apple",
+            model: "Apple Pencil Pro",
+            telemetry: "UIEvent.coalescedTouches+predictedTouches",
+            transport: "wireless"
+        )
+    case "referenceMSeriesProMotion120Hz":
+        sampleCount = 601
+        interval = 8_333_334
+        orderedKinds = ["inputSample", "displayFrame"]
+        device = physicalDevice(
+            platform: "iPadOS", hardware: "iPad16,3",
+            processorClass: "MSeries", gpu: "Apple M4",
+            refresh: 120, displayProvenance:
+                "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+            inputKind: "touch", vendor: "Apple",
+            model: "Multi-Touch Display",
+            telemetry: "UITouch.timestamp", transport: "builtIn"
+        )
+    case "suspendResume":
+        sampleCount = 6
+        interval = 1_000_000_000
+        orderedKinds = [
+            "applicationSuspended", "applicationResumed",
+            "rendererRecovered",
+        ]
+        device = physicalDevice(
+            platform: "iPadOS", hardware: "iPad16,3",
+            processorClass: "MSeries", gpu: "Apple M4",
+            refresh: 60, displayProvenance:
+                "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+            inputKind: "touch", vendor: "Apple",
+            model: "Multi-Touch Display",
+            telemetry: "UITouch.timestamp", transport: "builtIn"
+        )
+    case "sustainedThermal":
+        sampleCount = 601
+        interval = 1_000_000_000
+        orderedKinds = ["thermalStateSample", "displayFrame"]
+        device = physicalDevice(
+            platform: "iPadOS", hardware: "iPad16,3",
+            processorClass: "MSeries", gpu: "Apple M4",
+            refresh: 60, displayProvenance:
+                "CADisplayLink.maximumFramesPerSecond+frameTimestampTrace",
+            inputKind: "touch", vendor: "Apple",
+            model: "Multi-Touch Display",
+            telemetry: "UITouch.timestamp", transport: "builtIn"
+        )
+    case "wacom":
+        sampleCount = 121
+        interval = 8_333_334
+        orderedKinds = ["inputSample", "renderedSample"]
+        device = physicalDevice(
+            platform: "macOS", hardware: "Mac16,1",
+            processorClass: "MSeries", gpu: "Apple M4",
+            refresh: 60, displayProvenance:
+                "CGDisplayMode.refreshRate+frameTimestampTrace",
+            inputKind: "wacomStylus", vendor: "Wacom",
+            model: "Wacom Intuos Pro",
+            telemetry: "NSEvent.tabletPoint", transport: "usb"
+        )
+    default:
+        preconditionFailure("unknown physical profile \(profileID)")
+    }
+    let timestamps = (0..<sampleCount).map {
+        10_000_000 + $0 * interval
+    }
+    var events: [[String: Any]] = []
+    for (sampleIndex, timestamp) in timestamps.enumerated() {
+        for (kindIndex, kind) in orderedKinds.enumerated() {
+            events.append([
+                "kind": kind,
+                "sampleIndex": sampleIndex,
+                "timestampNanoseconds":
+                    timestamp
+                        - (orderedKinds.count - kindIndex - 1)
+                            * 1_000_000,
+            ])
+        }
+    }
+    let zero = Array(repeating: 0.0, count: sampleCount)
+    let measurements: [String: Any]
+    switch profileID {
+    case "a14Floor60Hz", "referenceMSeriesProMotion120Hz":
+        measurements = [
+            "cpuPreparationP95Milliseconds":
+                Array(repeating: 0.1, count: sampleCount),
+            "gpu500DabMilliseconds":
+                Array(repeating: 1.0, count: sampleCount),
+            "missedFrameFraction": zero,
+        ]
+    case "inputToPhoton":
+        measurements = [
+            "inputToPhotonP95Milliseconds":
+                Array(repeating: 1.0, count: sampleCount),
+        ]
+    case "memoryWarning":
+        measurements = [
+            "memoryWarningRecoveryMilliseconds":
+                Array(repeating: 1.0, count: sampleCount),
+            "recoveryFailureCount": zero,
+        ]
+    case "pencil":
+        measurements = [
+            "inputContinuityFailureCount": zero,
+            "predictionTransitionFailureCount": zero,
+        ]
+    case "suspendResume":
+        measurements = [
+            "recoveryFailureCount": zero,
+            "suspendResumeRecoveryMilliseconds":
+                Array(repeating: 1.0, count: sampleCount),
+        ]
+    case "sustainedThermal":
+        measurements = [
+            "cpuPreparationP95Milliseconds":
+                Array(repeating: 0.1, count: sampleCount),
+            "gpu500DabMilliseconds":
+                Array(repeating: 1.0, count: sampleCount),
+            "missedFrameFraction": zero,
+            "thermalDurationSeconds":
+                [0.0] + Array(repeating: 1.0, count: sampleCount - 1),
+        ]
+    case "wacom":
+        measurements = [
+            "inputContinuityFailureCount": zero,
+            "pressureMonotonicityFailureCount": zero,
+        ]
+    default:
+        preconditionFailure("unknown physical profile \(profileID)")
+    }
+    return ProfessionalPhysicalScenario(
+        device: device,
+        sampleCount: sampleCount,
+        sampleTimestampsNanoseconds: timestamps,
+        events: events,
+        measurements: measurements
+    )
+}
+
 private func physicalDevice(
     platform: String,
     hardware: String,
+    processorClass: String,
     gpu: String,
     refresh: Double,
+    displayProvenance: String,
     inputKind: String,
     vendor: String,
     model: String,
     telemetry: String,
-    prediction: String
+    transport: String
 ) -> [String: Any] {
     [
         "platform": platform,
+        "operatingSystem": "\(platform) 26.0",
         "hardwareModel": hardware,
+        "processorClass": processorClass,
         "gpuName": gpu,
         "gpuRegistryID": "0x1234",
-        "displayRefreshHertz": refresh,
-        "inputKind": inputKind,
-        "inputVendor": vendor,
-        "inputModel": model,
-        "inputTelemetryProvenance": telemetry,
-        "predictionMode": prediction,
+        "display": [
+            "nominalRefreshHertz": refresh,
+            "measuredRefreshHertz": refresh,
+            "measurementProvenance": displayProvenance,
+        ],
+        "inputDevice": [
+            "kind": inputKind,
+            "vendor": vendor,
+            "model": model,
+            "transport": transport,
+            "samplingHertz": 240.0,
+            "telemetryProvenance": telemetry,
+        ],
     ]
+}
+
+private func mutatePhysicalRawAndRebind(
+    fixture: ProfessionalPhysicalTestFixture,
+    profileID: String,
+    definitionID: String,
+    _ mutation: (inout [String: Any]) throws -> Void
+) throws {
+    let raw = fixture.root.appendingPathComponent(
+        "\(profileID)/raw/\(definitionID).json"
+    )
+    try mutateTestJSONObject(at: raw, mutation)
+    try rebindPhysicalRaw(
+        fixture: fixture,
+        profileID: profileID,
+        definitionID: definitionID
+    )
+}
+
+private func rebindPhysicalRaw(
+    fixture: ProfessionalPhysicalTestFixture,
+    profileID: String,
+    definitionID: String
+) throws {
+    let raw = fixture.root.appendingPathComponent(
+        "\(profileID)/raw/\(definitionID).json"
+    )
+    let digest = ArtifactFileSystem.sha256(try Data(contentsOf: raw))
+    let evidence = fixture.root.appendingPathComponent(
+        "\(profileID)/evidence.json"
+    )
+    try mutateTestJSONObject(at: evidence) { object in
+        var workloads = object["workloads"] as! [[String: Any]]
+        let index = workloads.firstIndex {
+            $0["definitionID"] as? String == definitionID
+        }!
+        workloads[index]["rawTraceSHA256"] = digest
+        object["workloads"] = workloads
+    }
 }
 
 private func mutateTestJSONObject(

@@ -51,6 +51,97 @@ public enum StageFourEvidenceValidator {
         sceneTruth[scene]?.semanticHash
     }
 
+    /// Reuses the frozen Stage 4 physical-profile contract for later gates
+    /// without allowing those gates to redefine device, event, duration, or
+    /// metric-threshold semantics.
+    public static func validatePhysicalProfileTrace(
+        profileID: String,
+        device: [String: Any],
+        sampleCount: Int,
+        sampleTimestampsNanoseconds: [Int],
+        events: [[String: Any]],
+        measurements: [String: [Double]]
+    ) throws {
+        guard let profileRequirement =
+                physicalProfileRequirements[profileID],
+              let metricRequirements =
+                physicalMetricRequirements[profileID],
+              sampleCount >= profileRequirement.minimumSampleCount,
+              validPhysicalDevice(
+                  device,
+                  requirement: profileRequirement
+              ),
+              Set(measurements.keys) == Set(metricRequirements.keys),
+              validPhysicalTimestamps(
+                  sampleTimestampsNanoseconds,
+                  sampleCount: sampleCount,
+                  minimumDurationNanoseconds:
+                      profileRequirement.minimumDurationNanoseconds
+              ),
+              let eventTimestamps = physicalEventTimestamps(
+                  events,
+                  requiredCounts: profileRequirement.requiredEventCounts,
+                  orderedKinds: profileRequirement.orderedEventKinds,
+                  sampleTimestamps: sampleTimestampsNanoseconds
+              )
+        else {
+            throw invalid(
+                "\(profileID): physical profile trace identity, device, or events are invalid"
+            )
+        }
+        for metricID in metricRequirements.keys.sorted() {
+            guard let values = measurements[metricID],
+                  values.count == sampleCount,
+                  validDurations(values),
+                  let requirement = metricRequirements[metricID],
+                  let aggregated = aggregate(
+                      values,
+                      kind: requirement.aggregation
+                  ),
+                  thresholdSatisfied(
+                      aggregated,
+                      relation: requirement.relation,
+                      threshold: requirement.threshold
+                  )
+            else {
+                throw invalid(
+                    "\(profileID): physical profile metric \(metricID) is malformed or failed its frozen threshold"
+                )
+            }
+        }
+        guard let missedFrames =
+                derivedMissedFrameSamplesIfRefreshClaimMatchesEvents(
+                    profileID: profileID,
+                    device: device,
+                    eventTimestamps: eventTimestamps
+                )
+        else {
+            throw invalid(
+                "\(profileID): display refresh claim does not match observed frame timestamps"
+            )
+        }
+        var derived = derivedPhysicalSamples(
+            profileID: profileID,
+            sampleTimestamps: sampleTimestampsNanoseconds,
+            eventTimestamps: eventTimestamps
+        )
+        if !missedFrames.isEmpty {
+            derived["missedFrameFraction"] = missedFrames
+        }
+        for (metricID, derivedValues) in derived {
+            guard let claimed = measurements[metricID],
+                  claimed.count == derivedValues.count,
+                  zip(claimed, derivedValues).allSatisfy({
+                      close($0.0, $0.1)
+                  })
+            else {
+                throw invalid(
+                    "\(profileID): physical profile metric \(metricID) does not match raw events"
+                )
+            }
+        }
+    }
+
     public static let requiredMetamorphicInvariants = [
         "batchPartitionsEqual",
         "cancelPreservesCanonical",

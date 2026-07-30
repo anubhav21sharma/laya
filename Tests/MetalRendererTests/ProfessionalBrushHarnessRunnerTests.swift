@@ -282,6 +282,46 @@ struct ProfessionalBrushHarnessRunnerTests {
             Set(benchmarkObject.keys)
                 == SceneArtifactValidator.benchmarkKeys
         )
+        let longRaw = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(
+                    contentsOf: output.appendingPathComponent(
+                        "professional-long-stroke.raw.json"
+                    )
+                )
+            ) as? [String: Any]
+        )
+        let trace = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(
+                    contentsOf: output.appendingPathComponent(
+                        "professional-long-stroke-trace.json"
+                    )
+                )
+            ) as? [String: Any]
+        )
+        let identityFrames = try #require(
+            longRaw["identityFrames"] as? [[String: Any]]
+        )
+        let traceSamples = try #require(
+            trace["samples"] as? [[String: Any]]
+        )
+        let measuredPhases = identityFrames.compactMap {
+            $0["inputPhase"] as? String
+        }
+        let tracePhases = traceSamples.compactMap {
+            $0["phase"] as? String
+        }
+        #expect(identityFrames.count == 128)
+        #expect(
+            (longRaw["cpuPreparationMilliseconds"] as? [Double])?
+                .count == 128
+        )
+        #expect(
+            (longRaw["gpuMilliseconds"] as? [Double])?.count == 128
+        )
+        #expect(measuredPhases == tracePhases)
+        #expect(!measuredPhases.contains("commit"))
         #expect(result.artifactURLs.count == 20)
         #expect(Set(result.artifactURLs.map(\.lastPathComponent)) == [
             "\(sceneName).benchmark.json",

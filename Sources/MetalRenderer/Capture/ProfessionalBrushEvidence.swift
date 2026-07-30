@@ -446,8 +446,7 @@ public struct ProfessionalLongStrokeEvidence:
     public let traceSHA256: String
     public let cpuPreparationMilliseconds: [Double]
     public let gpuMilliseconds: [Double]
-    public let newInstanceCounts: [Int]
-    public let restampedInstanceCounts: [Int]
+    public let identityFrames: [ProfessionalLongStrokeIdentityFrame]
     public let logicalDabCount: Int
     public let projectedInstanceCount: Int
     public let replayMode: String
@@ -468,8 +467,7 @@ public struct ProfessionalLongStrokeEvidence:
         traceSHA256: String,
         cpuPreparationMilliseconds: [Double],
         gpuMilliseconds: [Double],
-        newInstanceCounts: [Int],
-        restampedInstanceCounts: [Int],
+        identityFrames: [ProfessionalLongStrokeIdentityFrame],
         logicalDabCount: Int,
         projectedInstanceCount: Int,
         replayMaximumDabs: Int,
@@ -479,7 +477,7 @@ public struct ProfessionalLongStrokeEvidence:
         compilerCountersAfter:
             ProfessionalBrushCompilerCounterSnapshot
     ) {
-        schemaVersion = 1
+        schemaVersion = 2
         workloadID = "professional-long-stroke"
         self.scene = scene
         self.definitionID = definitionID
@@ -491,8 +489,7 @@ public struct ProfessionalLongStrokeEvidence:
         self.traceSHA256 = traceSHA256
         self.cpuPreparationMilliseconds = cpuPreparationMilliseconds
         self.gpuMilliseconds = gpuMilliseconds
-        self.newInstanceCounts = newInstanceCounts
-        self.restampedInstanceCounts = restampedInstanceCounts
+        self.identityFrames = identityFrames
         self.logicalDabCount = logicalDabCount
         self.projectedInstanceCount = projectedInstanceCount
         replayMode = "replayTail"
@@ -501,5 +498,58 @@ public struct ProfessionalLongStrokeEvidence:
             replayMaximumProjectedInstances
         self.compilerCountersBefore = compilerCountersBefore
         self.compilerCountersAfter = compilerCountersAfter
+    }
+}
+
+public struct ProfessionalEncodedIdentityRange:
+    Codable, Equatable, Sendable
+{
+    public let lowerBound: UInt64
+    public let upperBound: UInt64
+
+    public init(_ range: Range<UInt64>) {
+        lowerBound = range.lowerBound
+        upperBound = range.upperBound
+    }
+}
+
+public struct ProfessionalLongStrokeIdentityFrame:
+    Codable, Equatable, Sendable
+{
+    public let inputPhase: String
+    public let previousEncodedLogicalDabHighWater: UInt64
+    public let emittedLogicalDabHighWater: UInt64
+    public let authoritativeLogicalDabBacklogRemaining: Int
+    public let previousGeneratedProjectedInstanceHighWater: Int
+    public let generatedProjectedInstanceHighWater: Int
+    public let encodedGPUInstanceCount: Int
+    public let encodedLogicalDabIdentityRanges:
+        [ProfessionalEncodedIdentityRange]
+
+    public init(
+        inputPhase: String,
+        previousEncodedLogicalDabHighWater: UInt64,
+        emittedLogicalDabHighWater: UInt64,
+        authoritativeLogicalDabBacklogRemaining: Int,
+        previousGeneratedProjectedInstanceHighWater: Int,
+        generatedProjectedInstanceHighWater: Int,
+        encodedGPUInstanceCount: Int,
+        encodedLogicalDabIdentityRanges: [Range<UInt64>]
+    ) {
+        self.inputPhase = inputPhase
+        self.previousEncodedLogicalDabHighWater =
+            previousEncodedLogicalDabHighWater
+        self.emittedLogicalDabHighWater = emittedLogicalDabHighWater
+        self.authoritativeLogicalDabBacklogRemaining =
+            authoritativeLogicalDabBacklogRemaining
+        self.previousGeneratedProjectedInstanceHighWater =
+            previousGeneratedProjectedInstanceHighWater
+        self.generatedProjectedInstanceHighWater =
+            generatedProjectedInstanceHighWater
+        self.encodedGPUInstanceCount = encodedGPUInstanceCount
+        self.encodedLogicalDabIdentityRanges =
+            encodedLogicalDabIdentityRanges.map(
+                ProfessionalEncodedIdentityRange.init
+            )
     }
 }

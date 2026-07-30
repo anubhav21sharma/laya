@@ -288,7 +288,7 @@ enum PerformanceStatusValidator {
                 "semanticHash", "resolvedResources", "source",
                 "inputSampleCount", "tracePath", "traceSHA256",
                 "cpuPreparationMilliseconds", "gpuMilliseconds",
-                "newInstanceCounts", "restampedInstanceCounts",
+                "identityFrames",
                 "logicalDabCount", "projectedInstanceCount",
                 "replayMode", "replayMaximumDabs",
                 "replayMaximumProjectedInstances",
@@ -296,7 +296,7 @@ enum PerformanceStatusValidator {
             ],
             label: "\(scene) long-stroke raw evidence"
         )
-        guard integer(raw["schemaVersion"]) == 1,
+        guard integer(raw["schemaVersion"]) == 2,
               raw["workloadID"] as? String
                 == "professional-long-stroke",
               raw["scene"] as? String == scene,
@@ -313,11 +313,9 @@ enum PerformanceStatusValidator {
               let gpu = doubles(raw["gpuMilliseconds"]),
               cpu.count == 128,
               gpu.count == 128,
-              let newInstances = integers(raw["newInstanceCounts"]),
-              let restamped = integers(raw["restampedInstanceCounts"]),
-              newInstances.count == 128,
-              restamped.count == 128,
-              restamped.allSatisfy({ $0 == 0 }),
+              let identityFrames =
+                raw["identityFrames"] as? [[String: Any]],
+              identityFrames.count == 128,
               let logicalDabs = integer(raw["logicalDabCount"]),
               let projected = integer(raw["projectedInstanceCount"]),
               let maximumDabs = integer(raw["replayMaximumDabs"]),
@@ -325,23 +323,54 @@ enum PerformanceStatusValidator {
                 integer(raw["replayMaximumProjectedInstances"]),
               maximumDabs == 2_048,
               maximumProjected == 4_096,
-              newInstances.allSatisfy({
-                  $0 >= 0 && $0 <= maximumProjected
-              }),
               logicalDabs > 0,
               projected >= logicalDabs,
               raw["replayMode"] as? String == "replayTail",
-              validUnchangedCounters(
-                  raw["compilerCountersBefore"],
-                  raw["compilerCountersAfter"]
-              ),
-              stableQuartiles(cpu),
-              stableQuartiles(gpu)
+              let countersBefore =
+                counterSnapshot(raw["compilerCountersBefore"]),
+              let countersAfter =
+                counterSnapshot(raw["compilerCountersAfter"])
         else {
             throw ArtifactFileSystem.invalid(
                 "\(scene): long-stroke work is not length-independent or hot-path clean"
             )
         }
+        guard countersBefore == countersAfter else {
+            throw ArtifactFileSystem.invalid(
+                "\(scene): long-stroke compiler/resource counters changed "
+                    + counterDeltaDescription(
+                        before: countersBefore,
+                        after: countersAfter
+                    )
+            )
+        }
+        guard stableQuartiles(cpu), stableQuartiles(gpu) else {
+            let cpuQuartiles = quartileP95s(cpu)
+            let gpuQuartiles = quartileP95s(gpu)
+            throw ArtifactFileSystem.invalid(
+                "\(scene): long-stroke quartiles are not stable "
+                    + "(CPU early/late \(cpuQuartiles.early)/\(cpuQuartiles.late) ms; "
+                    + "GPU early/late \(gpuQuartiles.early)/\(gpuQuartiles.late) ms)"
+            )
+        }
+        guard let cpuSlope = leastSquaresSlope(cpu),
+              let gpuSlope = leastSquaresSlope(gpu),
+              cpuSlope <= 0.001,
+              gpuSlope <= 0.001
+        else {
+            throw ArtifactFileSystem.invalid(
+                "\(scene): long-stroke least-squares slope exceeds "
+                    + "0.001 ms/frame (CPU \(slopeOrNaN(cpu)); "
+                    + "GPU \(slopeOrNaN(gpu)))"
+            )
+        }
+        _ = try auditIdentityFrames(
+            identityFrames,
+            scene: scene,
+            maximumProjectedInstancesPerFrame: maximumProjected,
+            expectedFinalLogicalDabHighWater: logicalDabs,
+            expectedProjectedInstanceTotal: projected
+        )
         let traceData = try ArtifactFileSystem.regularFileData(
             directory.appendingPathComponent(
                 "professional-long-stroke-trace.json"
@@ -502,18 +531,44 @@ enum PerformanceStatusValidator {
         _ before: Any?,
         _ after: Any?
     ) -> Bool {
-        guard let before = before as? [String: Any],
-              let after = after as? [String: Any],
-              Set(before.keys) == counterKeys,
-              Set(after.keys) == counterKeys
+        guard let before = counterSnapshot(before),
+              let after = counterSnapshot(after)
         else {
             return false
         }
-        return before.keys.allSatisfy {
-            unsignedInteger(before[$0])
-                == unsignedInteger(after[$0])
-                && unsignedInteger(before[$0]) != nil
+        return before == after
+    }
+
+    private static func counterSnapshot(
+        _ value: Any?
+    ) -> [String: UInt64]? {
+        guard let object = value as? [String: Any],
+              Set(object.keys) == counterKeys
+        else {
+            return nil
         }
+        var result: [String: UInt64] = [:]
+        for key in counterKeys {
+            guard let count = unsignedInteger(object[key]) else {
+                return nil
+            }
+            result[key] = count
+        }
+        return result
+    }
+
+    private static func counterDeltaDescription(
+        before: [String: UInt64],
+        after: [String: UInt64]
+    ) -> String {
+        counterKeys.sorted().map { key in
+            let first = before[key]!
+            let last = after[key]!
+            let delta = last >= first
+                ? "+\(last - first)"
+                : "-\(first - last)"
+            return "\(key)=\(first)->\(last)(\(delta))"
+        }.joined(separator: ", ")
     }
 
     private static func dictionariesEqual(
@@ -560,9 +615,191 @@ enum PerformanceStatusValidator {
 
     private static func stableQuartiles(_ values: [Double]) -> Bool {
         guard values.count == 128 else { return false }
-        let early = percentile95(Array(values.prefix(32)))
-        let late = percentile95(Array(values.suffix(32)))
+        let (early, late) = quartileP95s(values)
         return late <= max(early * 2, early + 0.5)
+    }
+
+    private static func quartileP95s(
+        _ values: [Double]
+    ) -> (early: Double, late: Double) {
+        (
+            percentile95(Array(values.prefix(32))),
+            percentile95(Array(values.suffix(32)))
+        )
+    }
+
+    private static func leastSquaresSlope(
+        _ values: [Double]
+    ) -> Double? {
+        guard values.count == 128 else { return nil }
+        let meanX = Double(values.count - 1) / 2
+        let meanY = values.reduce(0, +) / Double(values.count)
+        var numerator = 0.0
+        var denominator = 0.0
+        for (index, value) in values.enumerated() {
+            let centeredX = Double(index) - meanX
+            numerator += centeredX * (value - meanY)
+            denominator += centeredX * centeredX
+        }
+        guard denominator > 0 else { return nil }
+        let slope = numerator / denominator
+        return slope.isFinite ? slope : nil
+    }
+
+    private static func slopeOrNaN(_ values: [Double]) -> Double {
+        leastSquaresSlope(values) ?? .nan
+    }
+
+    private struct LongStrokeIdentityAudit {
+        let newLogicalDabCounts: [UInt64]
+        let restampedLogicalDabCounts: [UInt64]
+        let newGeneratedProjectedInstanceCounts: [Int]
+        let maximumEncodedGPUInstanceCount: Int
+    }
+
+    private static func auditIdentityFrames(
+        _ frames: [[String: Any]],
+        scene: String,
+        maximumProjectedInstancesPerFrame: Int,
+        expectedFinalLogicalDabHighWater: Int,
+        expectedProjectedInstanceTotal: Int
+    ) throws -> LongStrokeIdentityAudit {
+        guard frames.count == 128,
+              maximumProjectedInstancesPerFrame > 0,
+              expectedFinalLogicalDabHighWater > 0,
+              expectedProjectedInstanceTotal > 0,
+              let expectedFinal = UInt64(
+                  exactly: expectedFinalLogicalDabHighWater
+              )
+        else {
+            throw ArtifactFileSystem.invalid(
+                "\(scene): long-stroke identity audit dimensions are invalid"
+            )
+        }
+        var encodedHighWater: UInt64 = 0
+        var priorEmittedHighWater: UInt64 = 0
+        var generatedProjectedHighWater = 0
+        var maximumEncodedGPU = 0
+        var newLogicalDabCounts: [UInt64] = []
+        var restampedLogicalDabCounts: [UInt64] = []
+        var newGeneratedProjectedInstanceCounts: [Int] = []
+        for (frameIndex, frame) in frames.enumerated() {
+            guard Set(frame.keys) == [
+                "inputPhase",
+                "previousEncodedLogicalDabHighWater",
+                "emittedLogicalDabHighWater",
+                "authoritativeLogicalDabBacklogRemaining",
+                "previousGeneratedProjectedInstanceHighWater",
+                "generatedProjectedInstanceHighWater",
+                "encodedGPUInstanceCount",
+                "encodedLogicalDabIdentityRanges",
+            ],
+                frame["inputPhase"] as? String
+                    == (
+                        frameIndex == 0
+                            ? "began"
+                            : (frameIndex == 127 ? "ended" : "moved")
+                    ),
+                let previous =
+                  unsignedInteger(
+                      frame["previousEncodedLogicalDabHighWater"]
+                  ),
+                previous == encodedHighWater,
+                let emitted = unsignedInteger(
+                    frame["emittedLogicalDabHighWater"]
+                ),
+                emitted >= priorEmittedHighWater,
+                emitted >= previous,
+                let backlogValue = integer(
+                    frame["authoritativeLogicalDabBacklogRemaining"]
+                ),
+                let backlog = UInt64(exactly: backlogValue),
+                let previousGeneratedProjected = integer(
+                    frame[
+                        "previousGeneratedProjectedInstanceHighWater"
+                    ]
+                ),
+                previousGeneratedProjected
+                    == generatedProjectedHighWater,
+                let currentGeneratedProjected = integer(
+                    frame["generatedProjectedInstanceHighWater"]
+                ),
+                currentGeneratedProjected >= previousGeneratedProjected,
+                currentGeneratedProjected - previousGeneratedProjected
+                    <= maximumProjectedInstancesPerFrame,
+                let encodedGPU = integer(
+                    frame["encodedGPUInstanceCount"]
+                ),
+                encodedGPU >= 0,
+                encodedGPU <= maximumProjectedInstancesPerFrame,
+                let ranges =
+                  frame["encodedLogicalDabIdentityRanges"]
+                    as? [[String: Any]]
+            else {
+                throw ArtifactFileSystem.invalid(
+                    "\(scene): long-stroke identity frame \(frameIndex) "
+                        + "has malformed, discontinuous, or over-budget metadata"
+                )
+            }
+            var newlyEncoded: UInt64 = 0
+            for range in ranges {
+                guard Set(range.keys) == ["lowerBound", "upperBound"],
+                      let lower = unsignedInteger(range["lowerBound"]),
+                      let upper = unsignedInteger(range["upperBound"]),
+                      lower == encodedHighWater,
+                      upper > lower,
+                      upper <= emitted
+                else {
+                    throw ArtifactFileSystem.invalid(
+                        "\(scene): long-stroke logical-dab identity range "
+                            + "failed continuity at frame \(frameIndex), "
+                            + "high-water \(encodedHighWater), emitted \(emitted)"
+                    )
+                }
+                newlyEncoded += upper - lower
+                encodedHighWater = upper
+            }
+            guard encodedHighWater <= emitted,
+                  emitted - encodedHighWater == backlog,
+                  backlog != 0 || encodedHighWater == emitted
+            else {
+                throw ArtifactFileSystem.invalid(
+                    "\(scene): long-stroke logical-dab backlog mismatch at "
+                        + "frame \(frameIndex), encoded \(encodedHighWater), "
+                        + "emitted \(emitted), backlog \(backlog)"
+                )
+            }
+            let generatedProjectedDelta =
+                currentGeneratedProjected - previousGeneratedProjected
+            generatedProjectedHighWater = currentGeneratedProjected
+            maximumEncodedGPU = max(maximumEncodedGPU, encodedGPU)
+            newLogicalDabCounts.append(newlyEncoded)
+            restampedLogicalDabCounts.append(0)
+            newGeneratedProjectedInstanceCounts.append(
+                generatedProjectedDelta
+            )
+            priorEmittedHighWater = emitted
+        }
+        guard encodedHighWater == expectedFinal,
+              generatedProjectedHighWater
+                == expectedProjectedInstanceTotal
+        else {
+            throw ArtifactFileSystem.invalid(
+                "\(scene): long-stroke identity totals disagree "
+                    + "(logical high-water \(encodedHighWater)/"
+                    + "\(expectedFinal); generated projected "
+                    + "\(generatedProjectedHighWater)/"
+                    + "\(expectedProjectedInstanceTotal); "
+                    + "max encoded GPU/frame \(maximumEncodedGPU))"
+            )
+        }
+        return LongStrokeIdentityAudit(
+            newLogicalDabCounts: newLogicalDabCounts,
+            restampedLogicalDabCounts: restampedLogicalDabCounts,
+            newGeneratedProjectedInstanceCounts:
+                newGeneratedProjectedInstanceCounts,
+            maximumEncodedGPUInstanceCount: maximumEncodedGPU
+        )
     }
 
     private static func percentile95(_ values: [Double]) -> Double {

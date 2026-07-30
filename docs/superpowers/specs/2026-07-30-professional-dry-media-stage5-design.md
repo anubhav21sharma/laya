@@ -460,13 +460,18 @@ It may reuse the eight established profile identifiers, but it must not copy
 or relabel Stage 4 profile bytes. Every supplied Stage 5 profile binds raw
 input and timing samples to all four professional definition IDs, their exact
 semantic hashes, and their resolved resource topology. This includes both
-grain resources for graphite and charcoal.
+grain resources for graphite and charcoal. Every profile/brush trace reuses
+the frozen Stage 4 device, input provenance, event ordering, minimum duration,
+minimum sample-count, derived-metric, and threshold contract for that exact
+profile. A generic trace copied or relabeled between profiles is invalid.
 
 Each positive professional scene also emits:
 
 - a raw three-sample, exactly 500-record deposition measurement;
-- a raw 128-input long-stroke trace and per-frame CPU/GPU measurements;
-- per-frame new/restamped instance counts;
+- a raw 128-input long-stroke trace and CPU/GPU measurements for the exact
+  `began`, 126 `moved`, and `ended` live-input frames, excluding raster commit;
+- per-frame logical-dab identity ranges and previous/emitted high-waters,
+  generated projected-instance high-waters, and submitted GPU work counts;
 - compiler/resource counter snapshots before and after each hot workload;
 - source commit, renderer executable, GPU, OS, brush identity, semantic hash,
   and resource topology provenance; and
@@ -476,18 +481,22 @@ The long-stroke workload uses a fixed `512 × 512` grid context and exactly
 128 mouse inputs. Its alternating endpoints are `(64, 256)` and `(448, 256)`,
 so every measured segment has equal length and the replay tail reaches steady
 bounded work during the early quartile. Replay limits bound retained and
-per-frame encoded work, not cumulative whole-stroke totals; lifetime logical
-dab and generated projected-instance totals remain diagnostic. Raw per-frame
-encoder instance counts prove the retained-work bound, while encoded identity
-ranges independently prove that no previously completed identity was
-restamped.
+per-frame encoded work, not cumulative whole-stroke totals. The validator
+derives new logical dabs and zero restamped logical dabs from contiguous
+identity ranges, binds the final logical high-water to the lifetime logical
+dab total, derives generated projected work from monotonic cumulative
+high-waters, and binds its final high-water to the lifetime generated
+projected-instance total. Submitted GPU instance counts independently prove
+the encoder work bound.
 
 The Stage 5 validator derives the GPU maximum, zero hot-path compiler/resource
 counter deltas, zero completed-stroke restamping, and bounded long-stroke
-quartile growth from those raw artifacts. No status boolean can assert these
-claims. All four brushes must be below `3 ms` for a physical result to
-complete; paravirtual, virtual, simulator, and unknown GPUs remain pending
-even when their diagnostic numbers are below budget.
+quartile growth from those raw artifacts. It also requires the signed
+least-squares slope across all 128 CPU samples and all 128 GPU samples to be
+at most `0.001 ms/frame`; negative warm-up decay remains valid. No status
+boolean can assert these claims. All four brushes must be below `3 ms` for a
+physical result to complete; paravirtual, virtual, simulator, and unknown GPUs
+remain pending even when their diagnostic numbers are below budget.
 
 ## 13. Stage 5 Gate
 

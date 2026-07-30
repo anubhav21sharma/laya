@@ -342,8 +342,7 @@ private extension DepositionHarnessRunner {
         let flushMetrics: GPUFrameMetrics
         let commitMetrics: GPUFrameMetrics
         let strokeMetrics: [GPUFrameMetrics]
-        let newInstanceCounts: [Int]
-        let restampedInstanceCounts: [Int]
+        let identityFrames: [ProfessionalLongStrokeIdentityFrame]
         let displayMetrics: [GPUFrameMetrics]
         let pipelinePreparationUnchanged: Bool
         let telemetry: BrushLabRendererDepositionDiagnosticSnapshot
@@ -585,24 +584,62 @@ private extension DepositionHarnessRunner {
         )
         var intermediateMetrics: [GPUFrameMetrics] = []
         var performanceMetrics: [GPUFrameMetrics] = []
-        var newInstanceCounts: [Int] = []
-        var restampedInstanceCounts: [Int] = []
+        var identityFrames: [ProfessionalLongStrokeIdentityFrame] = []
         var encodedHighWater: UInt64 = 0
-        func recordPerformanceFlush(_ result: HarnessLiveFlushResult) {
+        var generatedProjectedInstanceHighWater = 0
+        func recordPerformanceFlush(
+            _ result: HarnessLiveFlushResult,
+            inputPhase: String
+        ) throws {
             performanceMetrics.append(result.metrics)
-            newInstanceCounts.append(result.metrics.encodedInstanceCount)
-            let restamped = result.encodedIdentityRanges.reduce(0) {
-                partial, range in
-                let upper = min(range.upperBound, encodedHighWater)
-                return partial + (
-                    upper > range.lowerBound
-                        ? Int(upper - range.lowerBound) : 0
+            let previousEncodedHighWater = encodedHighWater
+            let audit = try HarnessRunner.auditLiveFlushIdentity(
+                sceneName: scene.name,
+                previousEncodedHighWater: previousEncodedHighWater,
+                flushResult: result
+            )
+            let currentGeneratedProjectedInstanceHighWater =
+                renderer.harnessCounters.totalInstancesThisStroke
+            guard currentGeneratedProjectedInstanceHighWater
+                    >= generatedProjectedInstanceHighWater
+            else {
+                throw DepositionHarnessRunError.invariantFailed(
+                    scene: scene.name,
+                    invariant:
+                        "generatedProjectedInstanceHighWaterMonotonic"
                 )
             }
-            restampedInstanceCounts.append(restamped)
-            encodedHighWater = max(
-                encodedHighWater,
-                result.emittedHighWater
+            identityFrames.append(
+                ProfessionalLongStrokeIdentityFrame(
+                    inputPhase: inputPhase,
+                    previousEncodedLogicalDabHighWater:
+                        previousEncodedHighWater,
+                    emittedLogicalDabHighWater:
+                        result.emittedHighWater,
+                    authoritativeLogicalDabBacklogRemaining:
+                        result.authoritativeBacklogRemaining,
+                    previousGeneratedProjectedInstanceHighWater:
+                        generatedProjectedInstanceHighWater,
+                    generatedProjectedInstanceHighWater:
+                        currentGeneratedProjectedInstanceHighWater,
+                    encodedGPUInstanceCount:
+                        result.metrics.encodedInstanceCount,
+                    encodedLogicalDabIdentityRanges:
+                        result.encodedIdentityRanges
+                )
+            )
+            encodedHighWater = audit.encodedHighWater
+            generatedProjectedInstanceHighWater =
+                currentGeneratedProjectedInstanceHighWater
+        }
+        if collectPerformanceEvidence,
+           partitionMode == .everySample
+        {
+            let beganResult = try renderer.flushPendingLiveForHarness()
+            intermediateMetrics.append(beganResult.metrics)
+            try recordPerformanceFlush(
+                beganResult,
+                inputPhase: Self.phaseName(samples[0].phase)
             )
         }
         for sample in samples.dropFirst().dropLast() {
@@ -611,7 +648,10 @@ private extension DepositionHarnessRunner {
                 let result = try renderer.flushPendingLiveForHarness()
                 intermediateMetrics.append(result.metrics)
                 if collectPerformanceEvidence {
-                    recordPerformanceFlush(result)
+                    try recordPerformanceFlush(
+                        result,
+                        inputPhase: Self.phaseName(sample.phase)
+                    )
                 }
             }
         }
@@ -629,7 +669,10 @@ private extension DepositionHarnessRunner {
         let firstFlush = try renderer.flushPendingLiveForHarness()
         var flushMetrics = firstFlush.metrics
         if collectPerformanceEvidence {
-            recordPerformanceFlush(firstFlush)
+            try recordPerformanceFlush(
+                firstFlush,
+                inputPhase: Self.phaseName(samples.last!.phase)
+            )
         }
         while !renderer.harnessScheduledAuthoritativeRecords.isEmpty
                 || !renderer.harnessScheduledPredictedRecords.isEmpty
@@ -638,7 +681,10 @@ private extension DepositionHarnessRunner {
             flushMetrics = result.metrics
             intermediateMetrics.append(result.metrics)
             if collectPerformanceEvidence {
-                recordPerformanceFlush(result)
+                try recordPerformanceFlush(
+                    result,
+                    inputPhase: Self.phaseName(samples.last!.phase)
+                )
             }
         }
         let liveFrame = try renderer.renderOffscreenDisplayForHarness(
@@ -692,11 +738,9 @@ private extension DepositionHarnessRunner {
             flushMetrics: flushMetrics,
             commitMetrics: commitMetrics,
             strokeMetrics: collectPerformanceEvidence
-                ? performanceMetrics + [commitMetrics] : [],
-            newInstanceCounts: collectPerformanceEvidence
-                ? newInstanceCounts + [0] : [],
-            restampedInstanceCounts: collectPerformanceEvidence
-                ? restampedInstanceCounts + [0] : [],
+                ? performanceMetrics : [],
+            identityFrames: collectPerformanceEvidence
+                ? identityFrames : [],
             displayMetrics: intermediateMetrics
                 + [liveFrame.metrics, committedFrame.metrics],
             pipelinePreparationUnchanged:
@@ -1486,8 +1530,7 @@ private extension DepositionHarnessRunner {
         )
         let longAfter = longContext.compiler.debugCounters
         guard capture.strokeMetrics.count == 128,
-              capture.newInstanceCounts.count == 128,
-              capture.restampedInstanceCounts.count == 128,
+              capture.identityFrames.count == 128,
               let limits = package.definition.replayLimits
         else {
             throw DepositionHarnessRunError.invariantFailed(
@@ -1508,8 +1551,7 @@ private extension DepositionHarnessRunner {
                 \.cpuEncodeMilliseconds
             ),
             gpuMilliseconds: capture.strokeMetrics.map(\.gpuMilliseconds),
-            newInstanceCounts: capture.newInstanceCounts,
-            restampedInstanceCounts: capture.restampedInstanceCounts,
+            identityFrames: capture.identityFrames,
             logicalDabCount: capture.logicalDabCount,
             projectedInstanceCount: capture.projectedInstanceCount,
             replayMaximumDabs: limits.maximumDabs,
