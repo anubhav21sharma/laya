@@ -803,8 +803,8 @@ final class BrushLabSession {
     private func compileProfessionalManualCard(
         _ card: BrushLabProfessionalManualCard
     ) async throws -> PreparedProfessionalManualCard {
-        guard let entry = ProfessionalBrushCatalog.entry(
-            for: BrushRecipeID(card.brushID)
+        guard let entry = Self.professionalEntry(
+            forPersistedID: BrushRecipeID(card.brushID)
         ) else {
             throw BrushLabEvidenceError.manualBrushUnavailable(card.brushID)
         }
@@ -830,6 +830,17 @@ final class BrushLabSession {
             draw: batch.brushes[0],
             eraser: batch.brushes[1]
         )
+    }
+
+    static func professionalEntry(
+        forPersistedID id: BrushRecipeID
+    ) -> ProfessionalBrushEntry? {
+        guard case let .laboratoryOnly(entry)? =
+            EditorBrushCatalog.resolvePersistedSelection(id)
+        else {
+            return nil
+        }
+        return entry
     }
 
     func replaySelectedManualCard() async throws

@@ -12,6 +12,24 @@ import Testing
 @Suite("Brush Lab session", .serialized)
 @MainActor
 struct BrushLabSessionTests {
+    @Test(arguments: [
+        "builtin.professional-technical-ink",
+        "builtin.professional-graphite-pencil",
+        "builtin.professional-natural-charcoal",
+        "builtin.professional-chisel-marker",
+    ])
+    func persistedProfessionalBrushesResolveOnlyForBrushLab(
+        persistedID: String
+    ) throws {
+        let entry = try #require(BrushLabSession.professionalEntry(
+            forPersistedID: BrushRecipeID(persistedID)
+        ))
+
+        #expect(entry.status == .correctiveRebuildRequired)
+        #expect(entry.status.laboratoryOnlyMessage ==
+            "Available only in Brush Lab while a corrective rebuild is required.")
+    }
+
     @Test
     func professionalManualCardMatrixCoversEveryRequiredStageFiveReview() {
         let cards = BrushLabManualCard.professionalFixedMatrix

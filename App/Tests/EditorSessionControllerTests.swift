@@ -1506,8 +1506,8 @@ func editorCatalogInitializesAllProgramsBeforePointerInputInFreshProcess()
             let model = EditorModel()
             #expect(spy.count == 2)
             #expect(model.selectedProgram == EditorBrushCatalog.defaultDraw.program)
-            #expect(EditorBrushCatalog.drawEntries.count == 6)
-            #expect(spy.count == 12)
+            #expect(EditorBrushCatalog.drawEntries.count == 5)
+            #expect(spy.count == 10)
 
             let controller = EditorSessionController(
                 model: model,
@@ -1516,7 +1516,7 @@ func editorCatalogInitializesAllProgramsBeforePointerInputInFreshProcess()
             controller.handleTool(.erase)
             controller.handleStrokeSample(controllerSample(.began))
             controller.handleStrokeSample(controllerSample(.cancelled))
-            #expect(spy.count == 12)
+            #expect(spy.count == 10)
         }
         return
     }

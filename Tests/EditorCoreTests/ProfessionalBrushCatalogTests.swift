@@ -3,6 +3,27 @@ import Foundation
 import PatternEngine
 import Testing
 
+@Test(arguments: [
+    "builtin.professional-technical-ink",
+    "builtin.professional-graphite-pencil",
+    "builtin.professional-natural-charcoal",
+    "builtin.professional-chisel-marker",
+])
+func professionalCatalogKeepsEveryPersistedPresetLaboratoryOnly(
+    persistedID: String
+) throws {
+    let id = BrushRecipeID(persistedID)
+    let entry = try #require(ProfessionalBrushCatalog.entry(for: id))
+
+    #expect(entry.status == .correctiveRebuildRequired)
+    #expect(entry.status.laboratoryOnlyMessage ==
+        "Available only in Brush Lab while a corrective rebuild is required.")
+    #expect(EditorBrushCatalog.drawEntry(for: id) == nil)
+    #expect(EditorBrushCatalog.resolveSelection(id) == nil)
+    #expect(EditorBrushCatalog.resolvePersistedSelection(id)
+        == .laboratoryOnly(entry))
+}
+
 @Test
 func professionalCatalogExposesTechnicalInkAsACompiledNativeBrush() throws {
     let entry = ProfessionalBrushCatalog.technicalInk

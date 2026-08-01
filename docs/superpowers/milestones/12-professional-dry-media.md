@@ -1,20 +1,28 @@
 # Professional Dry And Non-Interacting Media
 
-**Status:** Software Complete — Manual And Physical Acceptance Pending
+**Status:** Corrective Rebuild Required — Not Product Accepted
+
+> **Historical record notice (2026-08-01):** The prior Stage 5 implementation,
+> automated counts, and performance-intent labels below are retained as evidence
+> of what was measured. They do not establish current product acceptance. The
+> four professional definitions are laboratory-only while corrective rebuild
+> work is required.
 
 ## Scope
 
-Stage 5 adds four calibrated professional brush families while preserving the
-frozen Stage 4 diagnostic anchors:
+The prior Stage 5 implementation added four proposed professional brush
+families while preserving the frozen Stage 4 diagnostic anchors:
 
 - `builtin.professional-technical-ink` (`Technical Ink`);
 - `builtin.professional-graphite-pencil` (`Graphite Pencil`);
 - `builtin.professional-natural-charcoal` (`Natural Charcoal`);
 - `builtin.professional-chisel-marker` (`Chisel Marker`).
 
-The editor catalog and migrations now select these definitions. The Stage 5
-gate does not retune Stage 4, introduce wet interaction, or claim perceptual
-quality from software evidence.
+The editor catalog no longer selects these definitions. Persisted professional
+IDs resolve only to their Brush Lab entries, with a corrective-rebuild message;
+they do not silently select a substitute product brush. The current corrective
+program does not retune Stage 4 or claim perceptual quality from software
+evidence.
 
 ## Commit Binding
 
@@ -86,17 +94,17 @@ swift test --disable-sandbox --no-parallel \
 Its first implementation-complete run passed 11 tests in two suites. The
 final clean gate reruns this coverage inside the complete serialized suite.
 
-## Latest Clean Gate Result
+## Historical Clean Gate Result
 
-A clean committed run on 2026-07-30 completed with exit `2` and the exact
-terminal classification:
+A clean committed run on 2026-07-30 recorded exit `2` and the exact terminal
+classification:
 
 ```text
 BRUSH STAGE 5 MANUAL/PHYSICAL PENDING
 ```
 
-That is the designed all-software-green state, not a correctness failure. The
-run established:
+This was the historical all-software-green classification; it is not current
+correctness or product-acceptance evidence. The run recorded:
 
 - the Stage 4 prerequisite remained software-correct and ended only in its
   designed physical-performance-pending state on the paravirtual host;
@@ -194,9 +202,9 @@ The final clean run records the measured maximum professional CPU p95, Stage 5
 Exact per-scene CPU samples, GPU samples, resource bytes, renderer identity,
 and OS/GPU provenance remain in the four positive benchmark files. Values
 from a simulator, virtual, or paravirtual GPU are diagnostic and cannot
-establish 60 Hz or `realtime120` acceptance. Their exact raw GPU timing,
-block-median, and Theil-Sen values remain validator-recomputed and published,
-but cannot fail the unconditional software-correctness result.
+establish a product performance claim. Their exact raw GPU timing,
+block-median, and Theil-Sen values remain validator-recomputed and published
+as historical evidence only.
 
 ## Manual And Physical Acceptance
 
@@ -221,15 +229,17 @@ Missing manual or physical evidence is a designed pending state. Malformed or
 failing supplied evidence is an error, and caller-authored pass strings are
 not accepted.
 
-## Completion Checklist
+## Historical Checklist And Current Corrective Boundary
 
-- [x] Add four exact professional definitions, assets, catalog entries, and
-      editor migrations.
+- [x] Historical: add four exact professional definitions, assets, catalog
+      entries, and editor migrations.
 - [x] Add the stable 40-record logical characterization matrix.
 - [x] Add four positive and four paired fail-closed Metal scenes.
 - [x] Add exact artifact schemas and artifact-only validation.
 - [x] Preserve the frozen Stage 4 scene/evidence truth.
-- [x] Run the Stage 5 gate from the final clean committed source and record
-      its exact terminal result.
+- [x] Historical: run the Stage 5 gate from the final clean committed source
+      and record its exact terminal result.
+- [ ] Correctively rebuild and re-qualify the four professional definitions
+      before returning any of them to the product picker.
 - [ ] Complete all 68 human perceptual assessments.
 - [ ] Supply and validate all eight physical-hardware profiles.
