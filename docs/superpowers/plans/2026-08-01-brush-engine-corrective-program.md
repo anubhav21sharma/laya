@@ -462,6 +462,12 @@ renderable copy of the completed dab body.
 
 ### Task 6: Isolate Replaceable Prediction
 
+**Prerequisite:** Complete Task 5A in
+`docs/superpowers/plans/2026-08-02-renderer-event-dispatcher.md`. Task 5A
+centralizes all public renderer callbacks behind a bounded-retention,
+generation-aware, non-reentrant dispatcher and closes the remaining Task 5
+review findings before prediction adds another stroke-scoped producer.
+
 **Files:**
 
 - Create: `Sources/MetalRenderer/StrokeRuntime/PredictionOverlay.swift`
@@ -520,9 +526,10 @@ encoding. Drawable acquisition stays late in `draw(in:)`.
   work between the first and last deciles.
 - [ ] Commit as `perf(render): move stroke preparation off main`.
 
-**Stage B exit:** Long strokes have O(new work) CPU behavior, zero actual
-replay, bounded memory and queues, isolated prediction, causal endpoints, and
-the existing preview/commit/cancel/history/symmetry matrix passes.
+**Stage B exit:** Task 5A's renderer event dispatcher is independently clean;
+long strokes have O(new work) CPU behavior, zero actual replay, bounded memory
+and queues, isolated prediction, causal endpoints, and the existing
+preview/commit/cancel/history/symmetry matrix passes.
 
 ---
 
