@@ -155,8 +155,8 @@ but they do block `physicalProfilePassed` and `productAccepted`.
 | Layer model exists in files but not the runtime compositor | 14 |
 | Tip support/mip/cache policy is incomplete | 15 |
 | Backend/destination-sampling capability is misleading | 17 |
-| Authored charcoal uses independent parent/sub-brush behavior that shape/grain layers cannot represent | 17A, 21 |
-| Diagnostics and reference code inflate production ownership | 18 |
+| Authored charcoal uses independent parent/sub-brush behavior that shape/grain layers cannot represent | 18, 22 |
+| Diagnostics and reference code inflate production ownership | 19 |
 | `GridRenderer` owns too many live-stroke responsibilities | 5–7, 23 |
 | Four presets pass internal gates but fail user-visible quality | 1–3, 19–22 |
 | Evidence gates miss production UI behavior and honest status | 2, 3, 24–26 |
@@ -849,7 +849,7 @@ allowed. Preset catalog aliases are data migration and remain separate.
 - [ ] Run `swift test --filter 'BrushBackendRegistryTests|BrushCompilerTests|DepositionPipelineLibraryTests'`.
 - [ ] Commit as `refactor(brush): register static render backends`.
 
-### Task 17A: Add Bounded Native Composite Dry Brushes
+### Task 18: Add Bounded Native Composite Dry Brushes
 
 **Files:**
 
@@ -890,7 +890,7 @@ component.
 - [ ] Run `swift test` plus existing single-component raster anchors.
 - [ ] Commit as `feat(brush): add composite dry components`.
 
-### Task 18: Separate Diagnostics From Production Rendering
+### Task 19: Separate Diagnostics From Production Rendering
 
 **Files:**
 
@@ -934,7 +934,7 @@ exhaustive cross-family dry-brush checkpoint runs after all four candidates are
 ready. A brush may enter the product catalog only after the final manual round
 explicitly passes it. Physical iPad/Wacom status remains pending.
 
-### Task 19: Rebuild Technical Ink
+### Task 20: Rebuild Technical Ink
 
 **Files:**
 
@@ -961,7 +961,7 @@ explicitly passes it. Physical iPad/Wacom status remains pending.
   validation before starting the next brush.
 - [ ] Commit as `feat(brush): rebuild technical ink`.
 
-### Task 20: Rebuild Graphite Pencil
+### Task 21: Rebuild Graphite Pencil
 
 **Files:**
 
@@ -984,7 +984,7 @@ explicitly passes it. Physical iPad/Wacom status remains pending.
   workload and export Graphite manual candidates as pending.
 - [ ] Commit as `feat(brush): rebuild graphite pencil`.
 
-### Task 21: Rebuild Natural Charcoal
+### Task 22: Rebuild Natural Charcoal
 
 **Files:**
 
@@ -1020,7 +1020,7 @@ explicitly passes it. Physical iPad/Wacom status remains pending.
   manual candidates as pending.
 - [ ] Commit as `feat(brush): rebuild natural charcoal`.
 
-### Task 22: Rebuild Chisel Marker And Gate The Ribbon Backend
+### Task 23: Rebuild Chisel Marker And Gate The Ribbon Backend
 
 **Files:**
 
@@ -1055,7 +1055,7 @@ four stay out of the product catalog until the final manual round.
 
 ## Stage G — Integrate, Exercise The Real App, And Publish Honest Evidence
 
-### Task 23: Shrink `GridRenderer` To A Main-Actor Facade
+### Task 24: Shrink `GridRenderer` To A Main-Actor Facade
 
 **Files:**
 
@@ -1080,7 +1080,7 @@ resource decoding, evidence generation, or frame-budget policy.
   completed live stroke during input or frame draw.
 - [ ] Commit as `refactor(render): finish stroke runtime split`.
 
-### Task 24: Run The Cross-Family Functional Matrix
+### Task 25: Run The Cross-Family Functional Matrix
 
 **Files:**
 
@@ -1107,7 +1107,7 @@ and accelerated 10-minute runs.
 - [ ] Run `swift test`, then `swift run BrushCorrectiveEvidenceGate`.
 - [ ] Commit as `test(brush): add corrective evidence gate`.
 
-### Task 25: Exercise The Production macOS UI And Export Manual Candidates
+### Task 26: Exercise The Production macOS UI And Export Manual Candidates
 
 **Files:**
 
@@ -1137,7 +1137,7 @@ and accelerated 10-minute runs.
   `physicalProfilePassed`, and `productAccepted`.
 - [ ] Commit as `docs(brush): publish corrective evidence status`.
 
-### Task 26: Complete Automated Integration Verification
+### Task 27: Complete Automated Integration Verification
 
 - [ ] Run `swift test` with normal parallelism, then rerun only documented
   process-global Metal/harness suites with `--no-parallel`.
@@ -1162,7 +1162,7 @@ complete but pending. No brush is product-admitted yet.
 
 ## Post-Stage-G Acceptance Round
 
-### Task 27: Run Full Performance, Repair Failures, Then Perform Manual Review
+### Task 28: Run Full Performance, Repair Failures, Then Perform Manual Review
 
 **Files:**
 
