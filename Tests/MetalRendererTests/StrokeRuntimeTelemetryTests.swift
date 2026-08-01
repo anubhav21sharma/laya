@@ -555,6 +555,83 @@ func lateOldTelemetryFrameCannotMutateReconfiguredController() throws {
     try renderer.cancelStroke(token: newToken)
 }
 
+@MainActor
+@Test
+func queuedLogicalDabsResolveReplacementObserverAtContinuationTime()
+    async throws
+{
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let renderer = try runtimeTestRenderer(device: device)
+    let token = RendererOperationToken(rawValue: 0x4F42_5301)
+    let style = try renderer.nativeHarnessStrokeStyle(
+        diameter: 12,
+        seed: token.rawValue
+    )
+    try renderer.beginStroke(
+        token: token,
+        sample: runtimeStrokeSample(x: 0, phase: .began, timestamp: 0),
+        style: style
+    )
+
+    var initialObserverCount = 0
+    var replacementObserverCount = 0
+    renderer.onLogicalDabsGenerated = { _ in
+        initialObserverCount += 1
+    }
+    try renderer.appendStroke(
+        token: token,
+        sample: runtimeStrokeSample(x: 4_096, phase: .moved, timestamp: 1)
+    )
+
+    #expect(initialObserverCount == 256)
+    renderer.onLogicalDabsGenerated = { _ in
+        replacementObserverCount += 1
+    }
+    for _ in 0..<10_000 where replacementObserverCount == 0 {
+        await Task.yield()
+    }
+
+    #expect(initialObserverCount == 256)
+    #expect(replacementObserverCount > 0)
+    renderer.onLogicalDabsGenerated = nil
+    try renderer.cancelStroke(token: token)
+}
+
+@MainActor
+@Test
+func queuedLogicalDabsStopCallingObserverWhenPropertyBecomesNil()
+    async throws
+{
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let renderer = try runtimeTestRenderer(device: device)
+    let token = RendererOperationToken(rawValue: 0x4F42_5302)
+    let style = try renderer.nativeHarnessStrokeStyle(
+        diameter: 12,
+        seed: token.rawValue
+    )
+    try renderer.beginStroke(
+        token: token,
+        sample: runtimeStrokeSample(x: 0, phase: .began, timestamp: 0),
+        style: style
+    )
+
+    var observerCount = 0
+    renderer.onLogicalDabsGenerated = { _ in observerCount += 1 }
+    try renderer.appendStroke(
+        token: token,
+        sample: runtimeStrokeSample(x: 4_096, phase: .moved, timestamp: 1)
+    )
+
+    #expect(observerCount == 256)
+    renderer.onLogicalDabsGenerated = nil
+    for _ in 0..<1_000 {
+        await Task.yield()
+    }
+
+    #expect(observerCount == 256)
+    try renderer.cancelStroke(token: token)
+}
+
 @Test
 func replayEpochTrackerResetsForEachStroke() {
     var tracker = StrokeRuntimeReplayEpochTracker()

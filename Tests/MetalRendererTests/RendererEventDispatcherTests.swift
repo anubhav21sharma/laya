@@ -76,6 +76,30 @@ func committedCheckpointSurvivesLaterOperationFailure() async {
 
 @Test
 @MainActor
+func repeatedCheckpointsVisitEachNewlyStagedEventExactlyOnce() async {
+    let eventCount = 1_024
+    let dispatcher = RendererEventDispatcher { _ in }
+
+    dispatcher.beginOperation()
+    for value in 0..<eventCount {
+        dispatcher.stage(rendererEventProbe(UInt64(value)))
+        dispatcher.commitCheckpoint()
+    }
+
+    #expect(
+        dispatcher.diagnostics.checkpointEventVisitCount
+            == UInt64(eventCount)
+    )
+    dispatcher.endOperation(succeeded: false)
+
+    for _ in 0..<10_000 where dispatcher.diagnostics.pendingEventCount > 0 {
+        await Task.yield()
+    }
+    #expect(dispatcher.diagnostics.pendingEventCount == 0)
+}
+
+@Test
+@MainActor
 func advancingGenerationSkipsQueuedStaleEvents() async {
     var timestamps: [UInt64] = []
     let dispatcher = RendererEventDispatcher { event in
@@ -137,6 +161,40 @@ func telemetryCoalescingKeepsNewestValueAndCountsReplacement() async {
     #expect(dispatcher.diagnostics.coalescedRuntimeSnapshotCount == 1)
 }
 
+#if DEBUG
+@Test
+@MainActor
+func debugFrameCoalescingDeliversOnlyNewestPresentationAndMetrics() async {
+    var presentations: [(timestamp: TimeInterval, count: Int)] = []
+    var deliveredMetrics: [GPUFrameMetrics] = []
+    let dispatcher = RendererEventDispatcher { event in
+        switch event {
+        case let .interactiveFramePresented(timestamp, count):
+            presentations.append((timestamp, count))
+        case let .interactiveFrameMetrics(metrics):
+            deliveredMetrics.append(metrics)
+        default:
+            break
+        }
+    }
+    let oldMetrics = rendererEventFrameMetrics(value: 1)
+    let newestMetrics = rendererEventFrameMetrics(value: 2)
+
+    dispatcher.beginOperation()
+    dispatcher.stage(.interactiveFramePresented(1, 10))
+    dispatcher.stage(.interactiveFrameMetrics(oldMetrics))
+    dispatcher.stage(.interactiveFramePresented(2, 20))
+    dispatcher.stage(.interactiveFrameMetrics(newestMetrics))
+    dispatcher.endOperation(succeeded: true)
+
+    #expect(presentations.count == 1)
+    #expect(presentations.first?.timestamp == 2)
+    #expect(presentations.first?.count == 20)
+    #expect(deliveredMetrics == [newestMetrics])
+    #expect(dispatcher.diagnostics.coalescedDebugFrameEventCount == 2)
+}
+#endif
+
 @Test
 @MainActor
 func selfFeedingDrainYieldsEvery256CallbacksAndReclaimsConsumedStorage()
@@ -169,6 +227,10 @@ func selfFeedingDrainYieldsEvery256CallbacksAndReclaimsConsumedStorage()
     box.dispatcher.stage(rendererEventProbe(1))
     box.dispatcher.endOperation(succeeded: true)
 
+    #expect(RendererEventDispatcher.deliveryBudgetPerTurn == 256)
+    #expect(deliveredCount == 256)
+    #expect(box.dispatcher.diagnostics.scheduledContinuationCount == 1)
+
     for _ in 0..<100_000 where deliveredCount < expectedDeliveryCount {
         await Task.yield()
     }
@@ -177,10 +239,7 @@ func selfFeedingDrainYieldsEvery256CallbacksAndReclaimsConsumedStorage()
     #expect(maximumCallbackDepth == 1)
     #expect(box.dispatcher.diagnostics.maximumCallbackDepth == 1)
     #expect(box.dispatcher.diagnostics.scheduledContinuationCount > 1)
-    #expect(
-        maximumRetainedConsumedSlots
-            <= RendererEventDispatcher.deliveryBudgetPerTurn
-    )
+    #expect(maximumRetainedConsumedSlots == 0)
     #expect(box.dispatcher.diagnostics.retainedConsumedSlotCount == 0)
     #expect(box.dispatcher.diagnostics.pendingEventCount == 0)
 }
@@ -300,6 +359,20 @@ private func rendererEventLogicalDab(ordinal: UInt64) -> LogicalDab {
         randomValues: .neutral
     )
 }
+
+#if DEBUG
+private func rendererEventFrameMetrics(value: Int) -> GPUFrameMetrics {
+    GPUFrameMetrics(
+        cpuEncodeMilliseconds: Double(value),
+        gpuMilliseconds: Double(value),
+        eventToSubmitNanoseconds: UInt64(value),
+        gpuCompletionNanoseconds: UInt64(value),
+        encodedDabCount: value,
+        encodedInstanceCount: value,
+        bufferLeaseCount: value
+    )
+}
+#endif
 
 private func rendererEventMarker(
     timestamp: UInt64

@@ -32,6 +32,7 @@ final class RendererEventDispatcher {
         let coalescedRuntimeSnapshotCount: UInt64
         let coalescedDebugFrameEventCount: UInt64
         let staleGenerationDiscardCount: UInt64
+        let checkpointEventVisitCount: UInt64
         let retainedConsumedSlotCount: Int
     }
 
@@ -42,6 +43,7 @@ final class RendererEventDispatcher {
 
     private struct OperationFrame {
         var events: [StagedEvent] = []
+        var checkpointedEventCount = 0
     }
 
     private struct LogicalDabCursor {
@@ -65,6 +67,7 @@ final class RendererEventDispatcher {
         private var storage: [LogicalDab?] = []
         private var head = 0
         private(set) var count = 0
+        private(set) var retainedConsumedSlotCount = 0
 
         mutating func append(_ dab: LogicalDab) {
             ensureCapacity(for: count + 1)
@@ -82,6 +85,13 @@ final class RendererEventDispatcher {
                 )
             }
             storage[head] = nil
+            // Audit the slot itself: the diagnostic must expose a future
+            // regression that leaves the consumed payload resident.
+            if storage[head] != nil {
+                let (next, overflow) = retainedConsumedSlotCount
+                    .addingReportingOverflow(1)
+                retainedConsumedSlotCount = overflow ? .max : next
+            }
             head = (head + 1) % storage.count
             count -= 1
             if count == 0 {
@@ -122,6 +132,7 @@ final class RendererEventDispatcher {
     private var pendingTailNode: Int?
     private var pendingFreeNode: Int?
     private var pendingLogicalDabs = LogicalDabRing()
+    private var retainedConsumedNodePayloadCount = 0
     private var pendingRuntimeSnapshotNodes: [UInt64: Int] = [:]
     #if DEBUG
     private var pendingInteractivePresentationNode: Int?
@@ -137,6 +148,7 @@ final class RendererEventDispatcher {
     private var coalescedRuntimeSnapshotCount: UInt64 = 0
     private var coalescedDebugFrameEventCount: UInt64 = 0
     private var staleGenerationDiscardCount: UInt64 = 0
+    private var checkpointEventVisitCount: UInt64 = 0
     private var activeStrokeGeneration: UInt64?
     private var activeTelemetryGeneration: UInt64?
     private var nextStrokeGeneration: UInt64 = 0
@@ -157,6 +169,7 @@ final class RendererEventDispatcher {
             coalescedDebugFrameEventCount:
                 coalescedDebugFrameEventCount,
             staleGenerationDiscardCount: staleGenerationDiscardCount,
+            checkpointEventVisitCount: checkpointEventVisitCount,
             retainedConsumedSlotCount: retainedConsumedSlotCount
         )
     }
@@ -172,6 +185,8 @@ final class RendererEventDispatcher {
             operationFrameStorage[operationDepth].events.removeAll(
                 keepingCapacity: true
             )
+            operationFrameStorage[operationDepth]
+                .checkpointedEventCount = 0
         }
         operationDepth += 1
     }
@@ -192,10 +207,18 @@ final class RendererEventDispatcher {
             "Renderer event checkpoint requires an open operation"
         )
         let frameIndex = operationDepth - 1
-        for eventIndex in operationFrameStorage[frameIndex].events.indices {
+        let checkpointStart = operationFrameStorage[frameIndex]
+            .checkpointedEventCount
+        let checkpointEnd = operationFrameStorage[frameIndex].events.endIndex
+        for eventIndex in checkpointStart..<checkpointEnd {
             operationFrameStorage[frameIndex].events[eventIndex]
                 .isCommitted = true
         }
+        operationFrameStorage[frameIndex].checkpointedEventCount = checkpointEnd
+        checkpointEventVisitCount = Self.saturatingAdd(
+            checkpointEventVisitCount,
+            UInt64(checkpointEnd - checkpointStart)
+        )
     }
 
     func endOperation(succeeded: Bool) {
@@ -227,6 +250,7 @@ final class RendererEventDispatcher {
             operationFrameStorage[frameIndex].events.removeAll(
                 keepingCapacity: true
             )
+            operationFrameStorage[frameIndex].checkpointedEventCount = 0
             return
         }
         for index in operationFrameStorage[frameIndex].events.indices {
@@ -238,6 +262,7 @@ final class RendererEventDispatcher {
         operationFrameStorage[frameIndex].events.removeAll(
             keepingCapacity: true
         )
+        operationFrameStorage[frameIndex].checkpointedEventCount = 0
         requestDrain()
     }
 
@@ -270,9 +295,11 @@ final class RendererEventDispatcher {
     }
 
     private var retainedConsumedSlotCount: Int {
-        // Removed nodes retain reusable capacity, but never retain an event or
-        // dab payload. There is therefore no consumed payload prefix.
-        0
+        let (total, overflow) = retainedConsumedNodePayloadCount
+            .addingReportingOverflow(
+                pendingLogicalDabs.retainedConsumedSlotCount
+            )
+        return overflow ? .max : total
     }
 
     private func enqueueCommitted(_ event: RendererEvent) {
@@ -368,6 +395,10 @@ final class RendererEventDispatcher {
         if let freeIndex = pendingFreeNode {
             index = freeIndex
             pendingFreeNode = pendingNodes[freeIndex].nextFree
+            if pendingNodes[freeIndex].entry != nil {
+                precondition(retainedConsumedNodePayloadCount > 0)
+                retainedConsumedNodePayloadCount -= 1
+            }
             pendingNodes[freeIndex] = PendingNode(
                 entry: entry,
                 previous: pendingTailNode,
@@ -412,6 +443,13 @@ final class RendererEventDispatcher {
             pendingTailNode = previous
         }
         pendingNodes[index].entry = nil
+        // Audit the free node itself instead of assuming removal released its
+        // payload; tests mutation-check this readback path.
+        if pendingNodes[index].entry != nil {
+            let (next, overflow) = retainedConsumedNodePayloadCount
+                .addingReportingOverflow(1)
+            retainedConsumedNodePayloadCount = overflow ? .max : next
+        }
         pendingNodes[index].previous = nil
         pendingNodes[index].next = nil
         pendingNodes[index].nextFree = pendingFreeNode
