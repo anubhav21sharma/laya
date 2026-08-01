@@ -1,8 +1,8 @@
 {
   "schemaVersion": 6,
   "name": "professional-technical-ink",
-  "width": 128,
-  "height": 128,
+  "width": 512,
+  "height": 512,
   "depositionInvariantExpectations": {
     "boundedLiveWork": true,
     "destinationOutEraserCompatible": true,

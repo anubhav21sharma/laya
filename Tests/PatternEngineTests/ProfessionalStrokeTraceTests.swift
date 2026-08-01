@@ -33,6 +33,69 @@ func professionalTraceCorpusPinsItsOrderedLifecycleAndCapabilities() {
         == expectedProfessionalCorpus)
 }
 
+@Test
+func correctiveTraceCorpusPinsReportedDirectInputFailures() {
+    #expect(StrokeTraceFixtures.corrective.map(\.name) == [
+        "corrective-technical-ink-ten-second-line",
+        "corrective-technical-ink-fast-release",
+        "corrective-graphite-forty-pixel-line",
+        "corrective-charcoal-neutral-pressure-line",
+        "corrective-chisel-right-angle",
+        "corrective-chisel-circle",
+    ])
+
+    for trace in StrokeTraceFixtures.corrective {
+        #expect(trace.samples.first?.phase == .began)
+        #expect(trace.samples.last?.phase == .ended)
+        #expect(trace.samples.filter { $0.phase == .began }.count == 1)
+        #expect(trace.samples.filter { $0.phase == .ended }.count == 1)
+        #expect(
+            trace.samples.map(\.timestamp)
+                == trace.samples.map(\.timestamp).sorted()
+        )
+    }
+
+    let sustained = StrokeTraceFixtures.correctiveTechnicalInkTenSecondLine
+    #expect(sustained.samples.count == 121)
+    #expect(sustained.samples.first?.position == ScreenPoint(x: 64, y: 128))
+    #expect(sustained.samples.first?.timestamp == 100)
+    #expect(sustained.samples.last?.position == ScreenPoint(x: 448, y: 128))
+    #expect(sustained.samples.last?.timestamp == 110)
+
+    let release = StrokeTraceFixtures.correctiveTechnicalInkFastRelease
+    #expect(release.samples.map(\.timestamp) == [200, 200.08, 200.081])
+    #expect(release.samples.map(\.position) == [
+        ScreenPoint(x: 64, y: 224),
+        ScreenPoint(x: 416, y: 224),
+        ScreenPoint(x: 448, y: 224),
+    ])
+
+    let graphite = StrokeTraceFixtures.correctiveGraphiteFortyPixelLine
+    #expect(graphite.samples.allSatisfy { $0.pressure == 0.5 })
+    #expect(graphite.samples.allSatisfy { $0.source == .mouse })
+
+    let charcoal = StrokeTraceFixtures.correctiveCharcoalNeutralPressureLine
+    #expect(charcoal.samples.allSatisfy { $0.pressure == 0.5 })
+    #expect(charcoal.samples.allSatisfy { $0.source == .pencil })
+    #expect(charcoal.samples.allSatisfy {
+        $0.capabilities == [.pressure]
+    })
+
+    let corner = StrokeTraceFixtures.correctiveChiselRightAngle
+    #expect(corner.samples.map(\.position) == [
+        ScreenPoint(x: 96, y: 400),
+        ScreenPoint(x: 256, y: 400),
+        ScreenPoint(x: 256, y: 240),
+        ScreenPoint(x: 416, y: 240),
+    ])
+
+    let circle = StrokeTraceFixtures.correctiveChiselCircle
+    #expect(circle.samples.count == 33)
+    #expect(circle.samples.first?.position == circle.samples.last?.position)
+    #expect(circle.samples.first?.timestamp == 500)
+    #expect(circle.samples.last?.timestamp == 501.6)
+}
+
 private struct ExpectedProfessionalSample: Equatable {
     let position: ScreenPoint
     let pressure: Float

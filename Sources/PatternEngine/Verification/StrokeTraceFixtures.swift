@@ -319,6 +319,77 @@ public enum StrokeTraceFixtures {
         professionalRadialSpoke,
     ]
 
+    /// Timestamped direct-input traces that reproduce the user-visible
+    /// failures frozen by the brush corrective program. These are separate
+    /// from the Stage 5 calibration corpus because they are functional
+    /// failure fixtures, not approved characterization inputs.
+    public static let correctiveTechnicalInkTenSecondLine = StrokeTraceFixture(
+        name: "corrective-technical-ink-ten-second-line",
+        samples: correctiveTenSecondLineSamples()
+    )
+
+    public static let correctiveTechnicalInkFastRelease = StrokeTraceFixture(
+        name: "corrective-technical-ink-fast-release",
+        samples: [
+            professionalSample(64, 224, timestamp: 200, phase: .began),
+            professionalSample(416, 224, timestamp: 200.08, phase: .moved),
+            professionalSample(448, 224, timestamp: 200.081, phase: .ended),
+        ]
+    )
+
+    public static let correctiveGraphiteFortyPixelLine = StrokeTraceFixture(
+        name: "corrective-graphite-forty-pixel-line",
+        samples: [
+            professionalSample(64, 304, timestamp: 300, phase: .began),
+            professionalSample(192, 304, timestamp: 300.2, phase: .moved),
+            professionalSample(320, 304, timestamp: 300.4, phase: .moved),
+            professionalSample(448, 304, timestamp: 300.6, phase: .ended),
+        ]
+    )
+
+    public static let correctiveCharcoalNeutralPressureLine =
+        StrokeTraceFixture(
+            name: "corrective-charcoal-neutral-pressure-line",
+            samples: [
+                professionalSample(
+                    64, 352, timestamp: 400, phase: .began, source: .pencil
+                ),
+                professionalSample(
+                    192, 352, timestamp: 400.2, phase: .moved, source: .pencil
+                ),
+                professionalSample(
+                    320, 352, timestamp: 400.4, phase: .moved, source: .pencil
+                ),
+                professionalSample(
+                    448, 352, timestamp: 400.6, phase: .ended, source: .pencil
+                ),
+            ]
+        )
+
+    public static let correctiveChiselRightAngle = StrokeTraceFixture(
+        name: "corrective-chisel-right-angle",
+        samples: [
+            professionalSample(96, 400, timestamp: 500, phase: .began),
+            professionalSample(256, 400, timestamp: 500.2, phase: .moved),
+            professionalSample(256, 240, timestamp: 500.4, phase: .moved),
+            professionalSample(416, 240, timestamp: 500.6, phase: .ended),
+        ]
+    )
+
+    public static let correctiveChiselCircle = StrokeTraceFixture(
+        name: "corrective-chisel-circle",
+        samples: correctiveCircleSamples()
+    )
+
+    public static let corrective: [StrokeTraceFixture] = [
+        correctiveTechnicalInkTenSecondLine,
+        correctiveTechnicalInkFastRelease,
+        correctiveGraphiteFortyPixelLine,
+        correctiveCharcoalNeutralPressureLine,
+        correctiveChiselRightAngle,
+        correctiveChiselCircle,
+    ]
+
     private static func sample(
         _ x: Float,
         _ y: Float,
@@ -394,5 +465,43 @@ public enum StrokeTraceFixtures {
             )
         )
         return samples
+    }
+
+    private static func correctiveTenSecondLineSamples() -> [StrokeSample] {
+        var samples: [StrokeSample] = []
+        samples.reserveCapacity(121)
+        for index in 0...120 {
+            let phase: StrokePhase
+            if index == 0 {
+                phase = .began
+            } else if index == 120 {
+                phase = .ended
+            } else {
+                phase = .moved
+            }
+            samples.append(
+                professionalSample(
+                    64 + Float(index) * 3.2,
+                    128,
+                    timestamp: 100 + Double(index) / 12,
+                    phase: phase
+                )
+            )
+        }
+        return samples
+    }
+
+    private static func correctiveCircleSamples() -> [StrokeSample] {
+        (0...32).map { index in
+            let angle = Float(index) * (2 * .pi / 32)
+            let x: Float = index == 32 ? 400 : 256 + 144 * cos(angle)
+            let y: Float = index == 32 ? 256 : 256 + 144 * sin(angle)
+            return professionalSample(
+                x,
+                y,
+                timestamp: 500 + Double(index) * 0.05,
+                phase: index == 0 ? .began : (index == 32 ? .ended : .moved)
+            )
+        }
     }
 }
