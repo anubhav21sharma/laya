@@ -3160,7 +3160,7 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
-    func logicalDabObserverCancelAndNewStrokeDropsOldGenerationTail()
+    func cancelInvalidatesQueuedOldStrokeEventsButKeepsReplacementEvents()
         async throws
     {
         guard let setup = try makeDepositionRendererSetup() else { return }
@@ -3235,7 +3235,7 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
-    func nativeInkBatchFailurePublishesAcceptedPrefixExactlyOnce()
+    func partialBatchFailurePublishesAcceptedPrefixExactlyOnce()
         async throws
     {
         guard let reference = try makeDepositionRendererSetup(),

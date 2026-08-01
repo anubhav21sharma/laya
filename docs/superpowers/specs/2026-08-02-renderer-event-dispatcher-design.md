@@ -166,6 +166,10 @@ without retroactively invalidating an already committed outer event.
 - Enabling, disabling, or reconfiguring telemetry advances the telemetry
   generation. Runtime snapshots and markers from older configurations are
   skipped.
+- Asynchronous runtime-frame identity is the pair of telemetry generation and
+  frame ID. A late GPU or presentation completion from an older generation is
+  rejected before it can mutate the currently installed telemetry controller;
+  delivery-time event filtering alone is insufficient.
 - Generation comparison happens immediately before each callback invocation,
   including each dab inside a batched event.
 
@@ -183,8 +187,8 @@ For one accepted input sample, callback order is:
 the controller and generation are installed. `beginStrokeRuntime` stages its
 begin marker and snapshot only after `activeStroke`, generator, buffers, and
 coordinator are installed. `endStrokeRuntimeIfPossible` first closes/discards
-runtime frames and completes stroke teardown, then stages the final snapshot
-and marker.
+runtime frames and completes stroke teardown, then stages the final marker
+followed by its snapshot.
 
 Command-buffer completion callbacks enqueue events on `MainActor`; they never
 invoke public observers directly.

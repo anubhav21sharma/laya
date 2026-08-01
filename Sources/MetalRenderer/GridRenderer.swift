@@ -154,22 +154,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public internal(set) var counters = GridStructuralCounters()
     private var brushLabActualDabCount = 0
     private var brushLabPredictedDabCount = 0
-    private struct DeferredLogicalDabPublication {
-        let generation: UInt64
-        let dab: LogicalDab
+    private lazy var rendererEventDispatcher = RendererEventDispatcher {
+        [weak self] event in
+        self?.deliverRendererEvent(event)
     }
-    private var logicalDabPublicationGeneration: UInt64 = 0
-    private var stagedLogicalDabPublications:
-        [DeferredLogicalDabPublication] = []
-    private var readyLogicalDabPublications:
-        [DeferredLogicalDabPublication] = []
-    private var readyLogicalDabPublicationHead = 0
-    private var isDrainingLogicalDabPublications = false
-    private var logicalDabPublicationScopeDepth = 0
-    private var logicalDabPublicationScopeFailed = false
+    private var strokeEventGeneration: UInt64?
+    private var telemetryEventGeneration: UInt64?
     private var strokeRuntimeController: StrokeRuntimeProductionController?
+    struct StrokeRuntimeFrameIdentity: Hashable {
+        let telemetryGeneration: UInt64
+        let frameID: UInt64
+    }
     private var nextStrokeRuntimeFrameID: UInt64 = 1
-    private var pendingStrokeRuntimeFrameIDs: Set<UInt64> = []
+    private var pendingStrokeRuntimeFrameIDs:
+        Set<StrokeRuntimeFrameIdentity> = []
     private var strokeRuntimeReplayEpochTracker =
         StrokeRuntimeReplayEpochTracker()
     public private(set) var interactiveGridVisibility = false
@@ -188,6 +186,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         sessionID: UUID = UUID(),
         windowCapacity: Int = 600
     ) {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
+        invalidateTelemetryEventGeneration()
         strokeRuntimeController = StrokeRuntimeProductionController(
             sessionID: sessionID,
             traceProfile: profile,
@@ -196,10 +202,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         nextStrokeRuntimeFrameID = 1
         pendingStrokeRuntimeFrameIDs.removeAll(keepingCapacity: true)
         strokeRuntimeReplayEpochTracker.beginStroke(at: 0)
-        onStrokeRuntimeSnapshot?(strokeRuntimeController!.snapshot)
+        let generation = rendererEventDispatcher
+            .advanceTelemetryGeneration()
+        telemetryEventGeneration = generation
+        stageRendererEvent(
+            .strokeRuntimeSnapshot(
+                generation: generation,
+                snapshot: strokeRuntimeController!.snapshot
+            )
+        )
     }
 
     public func disableStrokeRuntimeTelemetry() {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
+        invalidateTelemetryEventGeneration()
         strokeRuntimeController = nil
         pendingStrokeRuntimeFrameIDs.removeAll(keepingCapacity: true)
     }
@@ -1010,17 +1032,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         sample: StrokeSample,
         style: StrokeRenderStyle
     ) throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        var operationSucceeded = false
         let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        defer {
+            notifyIdleStateIfChanged(from: wasIdle)
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: operationSucceeded
+            )
+        }
         guard sample.phase == .began, isIdle else {
             throw MetalRendererError.invalidStrokeLifecycle
-        }
-        beginLogicalDabPublicationScope()
-        var publicationSucceeded = false
-        defer {
-            endLogicalDabPublicationScope(
-                operationSucceeded: publicationSucceeded
-            )
         }
         let compiledBrush = try compiledBrush(for: style)
         instancePool.beginStrokeDiagnostics()
@@ -1078,7 +1101,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                         .maximumPendingAuthoritativeInstances
             )
         }
-        beginStrokeRuntime(sample)
+        strokeEventGeneration = rendererEventDispatcher
+            .advanceStrokeGeneration()
+        let runtimeBeginEvents = beginStrokeRuntime(sample)
         do {
             counters.newDabsThisEvent = 0
             if strokeRenderCoordinator != nil {
@@ -1090,7 +1115,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     coordinator: strokeRenderCoordinator!,
                     isFinishing: false
                 )
-                publicationSucceeded = true
+                stageStrokeRuntimeEvents(runtimeBeginEvents)
+                operationSucceeded = true
                 return
             }
             let inputBefore = brushInputDeriver
@@ -1115,9 +1141,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 inputDeriverBeforeSample: inputBefore,
                 isFinishing: false
             )
-            publicationSucceeded = true
+            stageStrokeRuntimeEvents(runtimeBeginEvents)
+            operationSucceeded = true
         } catch {
-            endStrokeRuntimeIfPossible()
+            _ = endStrokeRuntimeIfPossible()
             activeStroke = nil
             resetLiveState()
             throw error
@@ -1128,11 +1155,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         sample: StrokeSample
     ) throws {
-        beginLogicalDabPublicationScope()
-        var publicationSucceeded = false
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        var operationSucceeded = false
         defer {
-            endLogicalDabPublicationScope(
-                operationSucceeded: publicationSucceeded
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: operationSucceeded
             )
         }
         markBrushLabInputReceipt()
@@ -1145,7 +1173,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         } else {
             try appendAuthoritativeStroke(token: token, sample: sample)
         }
-        publicationSucceeded = true
+        operationSucceeded = true
     }
 
     public func appendStrokeBatch(
@@ -1153,11 +1181,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         samples: [StrokeSample]
     ) throws {
         guard !samples.isEmpty else { return }
-        beginLogicalDabPublicationScope()
-        var publicationSucceeded = false
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        var operationSucceeded = false
         defer {
-            endLogicalDabPublicationScope(
-                operationSucceeded: publicationSucceeded
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: operationSucceeded
             )
         }
         markBrushLabInputReceipt()
@@ -1177,17 +1206,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     token: token,
                     samples: samples[suffixStart..<index]
                 )
-                commitLogicalDabPublicationCheckpoint()
+                commitRendererEventCheckpoint()
             } else {
                 try appendAuthoritativeStroke(
                     token: token,
                     sample: samples[index]
                 )
-                commitLogicalDabPublicationCheckpoint()
+                commitRendererEventCheckpoint()
                 index += 1
             }
         }
-        publicationSucceeded = true
+        operationSucceeded = true
     }
 
     private func replacePredictedStrokeSuffix<Samples: Collection>(
@@ -1394,17 +1423,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         sample: StrokeSample,
         maximumRetainedBytes: Int
     ) throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        var operationSucceeded = false
         let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        defer {
+            notifyIdleStateIfChanged(from: wasIdle)
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: operationSucceeded
+            )
+        }
         guard sample.phase == .ended else {
             throw MetalRendererError.invalidStrokeLifecycle
-        }
-        beginLogicalDabPublicationScope()
-        var publicationSucceeded = false
-        defer {
-            endLogicalDabPublicationScope(
-                operationSucceeded: publicationSucceeded
-            )
         }
         try requireCollectingStroke(token: token)
         do {
@@ -1412,12 +1442,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             try requestCompiledStrokeCommit(
                 maximumRetainedBytes: maximumRetainedBytes
             )
-            publicationSucceeded = true
+            operationSucceeded = true
         } catch {
-            endStrokeRuntimeIfPossible()
+            let runtimeEndEvents = endStrokeRuntimeIfPossible()
             discardPendingRevisionsIfPossible()
             activeStroke = nil
             resetLiveState()
+            stageStrokeRuntimeEvents(runtimeEndEvents)
+            operationSucceeded = true
             throw error
         }
     }
@@ -1426,15 +1458,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         sample: StrokeSample
     ) throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        var operationSucceeded = false
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: operationSucceeded
+            )
+        }
         guard sample.phase == .ended else {
             throw MetalRendererError.invalidStrokeLifecycle
-        }
-        beginLogicalDabPublicationScope()
-        var publicationSucceeded = false
-        defer {
-            endLogicalDabPublicationScope(
-                operationSucceeded: publicationSucceeded
-            )
         }
         try requireCollectingStroke(token: token)
         recordStrokeRuntimeInput(sample)
@@ -1453,7 +1486,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             predictedInputDeriver = nil
             predictedStrokeGenerator = nil
             activeStroke?.isFinishedTransiently = true
-            publicationSucceeded = true
+            operationSucceeded = true
             return
         }
         if strokeRenderCoordinator != nil {
@@ -1486,15 +1519,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         predictedInputDeriver = nil
         predictedStrokeGenerator = nil
         activeStroke?.isFinishedTransiently = true
-        publicationSucceeded = true
+        operationSucceeded = true
     }
 
     public func commitFinishedStroke(
         token: RendererOperationToken,
         maximumRetainedBytes: Int
     ) throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        var operationSucceeded = false
         let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        defer {
+            notifyIdleStateIfChanged(from: wasIdle)
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: operationSucceeded
+            )
+        }
         try requireEditableStroke(token: token)
         guard activeStroke?.isFinishedTransiently == true else {
             throw MetalRendererError.invalidStrokeLifecycle
@@ -1503,10 +1544,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             try requestCompiledStrokeCommit(
                 maximumRetainedBytes: maximumRetainedBytes
             )
+            operationSucceeded = true
         } catch {
+            let runtimeEndEvents = endStrokeRuntimeIfPossible()
             discardPendingRevisionsIfPossible()
             activeStroke = nil
             resetLiveState()
+            stageStrokeRuntimeEvents(runtimeEndEvents)
+            operationSucceeded = true
             throw error
         }
     }
@@ -1515,15 +1560,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         sample: StrokeSample
     ) throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        var operationSucceeded = false
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: operationSucceeded
+            )
+        }
         guard sample.kind == .estimatedUpdate else {
             throw MetalRendererError.invalidStrokeLifecycle
-        }
-        beginLogicalDabPublicationScope()
-        var publicationSucceeded = false
-        defer {
-            endLogicalDabPublicationScope(
-                operationSucceeded: publicationSucceeded
-            )
         }
         recordStrokeRuntimeInput(sample)
         try requireEditableStroke(token: token)
@@ -1546,7 +1592,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 #if DEBUG
                 print("Ignoring late or unknown estimated stroke update: \(error)")
                 #endif
-                publicationSucceeded = true
+                operationSucceeded = true
                 return
             default:
                 throw error
@@ -1660,16 +1706,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         deferPreparedLogicalDabsForPublication(
             depositionInputScratch.preparedChunkRanges
         )
-        publicationSucceeded = true
+        operationSucceeded = true
     }
 
     public func cancelStroke(token: RendererOperationToken) throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        var operationSucceeded = false
         let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        defer {
+            notifyIdleStateIfChanged(from: wasIdle)
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: operationSucceeded
+            )
+        }
         try requireEditableStroke(token: token)
-        endStrokeRuntimeIfPossible()
+        let runtimeEndEvents = endStrokeRuntimeIfPossible()
         activeStroke = nil
         resetLiveState()
+        stageStrokeRuntimeEvents(runtimeEndEvents)
+        operationSucceeded = true
     }
 
     public func releaseRasterRevisions(
@@ -1731,8 +1787,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         revision: RasterRevisionReference,
         forceCommandFailure: Bool
     ) throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
         let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        defer {
+            notifyIdleStateIfChanged(from: wasIdle)
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         guard isIdle else {
             throw MetalRendererError.commitPendingInput
         }
@@ -1831,8 +1894,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         forceResourceAllocationFailure: Bool,
         forceCommandFailure: Bool
     ) throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
         let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        defer {
+            notifyIdleStateIfChanged(from: wasIdle)
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         guard isIdle else {
             throw MetalRendererError.commitPendingInput
         }
@@ -1982,8 +2052,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         maximumRetainedBytes: Int,
         forceFailure: Bool
     ) throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
         let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        defer {
+            notifyIdleStateIfChanged(from: wasIdle)
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         guard isIdle else {
             throw MetalRendererError.commitPendingInput
         }
@@ -2079,8 +2156,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         revision: RasterRevisionReference,
         forceFailure: Bool
     ) throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
         let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        defer {
+            notifyIdleStateIfChanged(from: wasIdle)
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         guard isIdle else {
             throw MetalRendererError.commitPendingInput
         }
@@ -2358,6 +2442,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func completePendingInteractiveStroke(
         forceCommitFailure: Bool
     ) throws -> GPUFrameMetrics {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         do {
             var frames: [GPUFrameMetrics] = []
             for _ in 0..<64 {
@@ -2498,8 +2589,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             return frameMetrics
         } catch {
             if let runtimeFrameID {
-                strokeRuntimeController?.discardFrame(id: runtimeFrameID)
-                pendingStrokeRuntimeFrameIDs.remove(runtimeFrameID)
+                discardStrokeRuntimeFrame(runtimeFrameID)
             }
             if !didFinalize {
                 if nativeEncoding != nil,
@@ -2610,6 +2700,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     public func draw(in view: MTKView) {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         _ = drainRasterOperationOutcomes()
         drainFrameOutcomes()
         drainCompletedUploadRanges()
@@ -2780,7 +2877,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 )
                 Task { @MainActor [weak self] in
                     self?.recordBrushLabCompletedFrame(frameMetrics)
-                    self?.onInteractiveFrameMetrics?(frameMetrics)
+                    self?.stageRendererEvent(
+                        .interactiveFrameMetrics(frameMetrics)
+                    )
                 }
             }
             let fallbackPresentationTimestamp =
@@ -2792,16 +2891,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     fallback: fallbackPresentationTimestamp
                 )
                 Task { @MainActor [weak self] in
-                    self?.onInteractiveFramePresented?(
-                        timestamp,
-                        targetFramesPerSecond
+                    self?.stageRendererEvent(
+                        .interactiveFramePresented(
+                            timestamp,
+                            targetFramesPerSecond
+                        )
                     )
                 }
             }
             #else
-            onInteractiveFramePresented?(
-                fallbackPresentationTimestamp,
-                targetFramesPerSecond
+            stageRendererEvent(
+                .interactiveFramePresented(
+                    fallbackPresentationTimestamp,
+                    targetFramesPerSecond
+                )
             )
             #endif
             #endif
@@ -2812,8 +2915,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             commandBuffer.commit()
         } catch let error as MetalRendererError {
             if let runtimeFrameID {
-                strokeRuntimeController?.discardFrame(id: runtimeFrameID)
-                pendingStrokeRuntimeFrameIDs.remove(runtimeFrameID)
+                discardStrokeRuntimeFrame(runtimeFrameID)
             }
             if nativeEncoding != nil,
                commandBuffer.status == .notEnqueued
@@ -2825,8 +2927,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             failActiveOperationIfNeeded(error)
         } catch {
             if let runtimeFrameID {
-                strokeRuntimeController?.discardFrame(id: runtimeFrameID)
-                pendingStrokeRuntimeFrameIDs.remove(runtimeFrameID)
+                discardStrokeRuntimeFrame(runtimeFrameID)
             }
             if nativeEncoding != nil,
                commandBuffer.status == .notEnqueued
@@ -3160,93 +3261,67 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
     #endif
 
-    private func beginLogicalDabPublicationScope() {
-        precondition(
-            logicalDabPublicationScopeDepth < Int.max,
-            "Logical-dab publication scope depth overflowed"
-        )
-        if logicalDabPublicationScopeDepth == 0 {
-            precondition(
-                stagedLogicalDabPublications.isEmpty,
-                "Logical-dab publication staging was not closed"
-            )
-            precondition(
-                !logicalDabPublicationScopeFailed,
-                "Logical-dab publication failure was not cleared"
-            )
-        }
-        logicalDabPublicationScopeDepth += 1
+    @discardableResult
+    private func beginRendererEventOperationIfNeeded() -> Bool {
+        rendererEventDispatcher.beginOperation()
+        return true
     }
 
-    private func endLogicalDabPublicationScope(
-        operationSucceeded: Bool
+    private func endRendererEventOperationIfNeeded(
+        _ ownsOperation: Bool,
+        succeeded: Bool
     ) {
-        precondition(
-            logicalDabPublicationScopeDepth > 0,
-            "Logical-dab publication scope was not open"
-        )
-        if !operationSucceeded {
-            logicalDabPublicationScopeFailed = true
-        }
-        logicalDabPublicationScopeDepth -= 1
-        guard logicalDabPublicationScopeDepth == 0 else { return }
-        if logicalDabPublicationScopeFailed {
-            stagedLogicalDabPublications.removeAll(keepingCapacity: true)
-        } else {
-            commitStagedLogicalDabPublications()
-        }
-        logicalDabPublicationScopeFailed = false
-        drainDeferredLogicalDabPublications()
+        guard ownsOperation else { return }
+        rendererEventDispatcher.endOperation(succeeded: succeeded)
     }
 
-    private func commitLogicalDabPublicationCheckpoint() {
-        precondition(
-            logicalDabPublicationScopeDepth == 1,
-            "Logical-dab checkpoints belong to the outer batch operation"
-        )
-        precondition(
-            !logicalDabPublicationScopeFailed,
-            "Failed logical-dab publication cannot be checkpointed"
-        )
-        commitStagedLogicalDabPublications()
+    private func stageRendererEvent(_ event: RendererEvent) {
+        if rendererEventDispatcher.hasOpenOperation {
+            rendererEventDispatcher.stage(event)
+            return
+        }
+        rendererEventDispatcher.beginOperation()
+        rendererEventDispatcher.stage(event)
+        rendererEventDispatcher.endOperation(succeeded: true)
     }
 
-    private func commitStagedLogicalDabPublications() {
-        guard !stagedLogicalDabPublications.isEmpty else { return }
-        readyLogicalDabPublications.append(
-            contentsOf: stagedLogicalDabPublications
-        )
-        stagedLogicalDabPublications.removeAll(keepingCapacity: true)
+    private func deliverRendererEvent(_ event: RendererEvent) {
+        switch event {
+        case let .error(error):
+            onError?(error)
+        case let .idleStateChanged(isIdle):
+            onIdleStateChange?(isIdle)
+        case let .operationCompleted(completion):
+            onOperationCompleted?(completion)
+        case let .logicalDab(_, dab):
+            onLogicalDabsGenerated?(dab)
+        case let .strokeRuntimeSnapshot(_, snapshot):
+            onStrokeRuntimeSnapshot?(snapshot)
+        case let .strokeRuntimeSegmentMarker(_, marker):
+            onStrokeRuntimeSegmentMarker?(marker)
+        #if DEBUG
+        case let .interactiveFramePresented(timestamp, count):
+            onInteractiveFramePresented?(timestamp, count)
+        case let .interactiveFrameMetrics(metrics):
+            onInteractiveFrameMetrics?(metrics)
+        #endif
+        }
     }
 
-    private func drainDeferredLogicalDabPublications() {
-        guard logicalDabPublicationScopeDepth == 0,
-              !isDrainingLogicalDabPublications
-        else { return }
-        isDrainingLogicalDabPublications = true
-        defer {
-            precondition(
-                readyLogicalDabPublicationHead
-                    == readyLogicalDabPublications.count,
-                "Logical-dab dispatcher stopped before its FIFO drained"
-            )
-            readyLogicalDabPublications.removeAll(keepingCapacity: true)
-            readyLogicalDabPublicationHead = 0
-            isDrainingLogicalDabPublications = false
-        }
-        while readyLogicalDabPublicationHead
-            < readyLogicalDabPublications.count
-        {
-            let publication = readyLogicalDabPublications[
-                readyLogicalDabPublicationHead
-            ]
-            readyLogicalDabPublicationHead += 1
-            guard publication.generation
-                    == logicalDabPublicationGeneration,
-                  let observer = onLogicalDabsGenerated
-            else { continue }
-            observer(publication.dab)
-        }
+    private func commitRendererEventCheckpoint() {
+        rendererEventDispatcher.commitCheckpoint()
+    }
+
+    private func invalidateStrokeEventGeneration() {
+        guard let generation = strokeEventGeneration else { return }
+        rendererEventDispatcher.invalidateStrokeGeneration(generation)
+        strokeEventGeneration = nil
+    }
+
+    private func invalidateTelemetryEventGeneration() {
+        guard let generation = telemetryEventGeneration else { return }
+        rendererEventDispatcher.invalidateTelemetryGeneration(generation)
+        telemetryEventGeneration = nil
     }
 
     private func deferLogicalDabsForPublication<Dabs: Collection>(
@@ -3254,24 +3329,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) where Dabs.Element == LogicalDab {
         guard !dabs.isEmpty else { return }
         precondition(
-            logicalDabPublicationScopeDepth > 0,
+            rendererEventDispatcher.hasOpenOperation,
             "Logical dabs must be recorded inside an input-operation scope"
         )
-        let shouldPublish = onLogicalDabsGenerated != nil
+        guard let generation = strokeEventGeneration else {
+            preconditionFailure(
+                "Logical dabs require an active stroke event generation"
+            )
+        }
         for dab in dabs {
             if dab.isPredicted {
                 brushLabPredictedDabCount += 1
             } else {
                 brushLabActualDabCount += 1
             }
-            if shouldPublish {
-                stagedLogicalDabPublications.append(
-                    DeferredLogicalDabPublication(
-                        generation: logicalDabPublicationGeneration,
-                        dab: dab
-                    )
-                )
-            }
+            rendererEventDispatcher.stage(
+                .logicalDab(generation: generation, dab: dab)
+            )
         }
     }
 
@@ -3279,10 +3353,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         _ ranges: Ranges
     ) where Ranges.Element == Range<Int> {
         precondition(
-            logicalDabPublicationScopeDepth > 0,
+            rendererEventDispatcher.hasOpenOperation,
             "Logical dabs must be recorded inside an input-operation scope"
         )
-        let shouldPublish = onLogicalDabsGenerated != nil
+        guard let generation = strokeEventGeneration else {
+            preconditionFailure(
+                "Logical dabs require an active stroke event generation"
+            )
+        }
         for range in ranges {
             for index in range {
                 let dab =
@@ -3292,14 +3370,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 } else {
                     brushLabActualDabCount += 1
                 }
-                if shouldPublish {
-                    stagedLogicalDabPublications.append(
-                        DeferredLogicalDabPublication(
-                            generation: logicalDabPublicationGeneration,
-                            dab: dab
-                        )
-                    )
-                }
+                rendererEventDispatcher.stage(
+                    .logicalDab(generation: generation, dab: dab)
+                )
             }
         }
     }
@@ -5434,6 +5507,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     @discardableResult
     func drainRasterOperationOutcomes() -> MetalRendererError? {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         var latestError: MetalRendererError?
         for outcome in rasterCompletionMailbox.drain() {
             if let error = processRasterOperationOutcome(outcome) {
@@ -5476,14 +5556,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 setDocumentGeometryLocked(false)
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
-                onOperationCompleted?(
-                    .rasterSuccess(
+                stageRendererEvent(
+                    .operationCompleted(.rasterSuccess(
                         RasterMutationReceipt(
                             token: operation.token,
                             before: operation.revisions.before,
                             after: operation.revisions.after
                         )
-                    )
+                    ))
                 )
                 return nil
             } catch {
@@ -5494,7 +5574,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
                 report(rendererError)
-                onOperationCompleted?(.failure(operation.token, rendererError))
+                stageRendererEvent(
+                    .operationCompleted(
+                        .failure(operation.token, rendererError)
+                    )
+                )
                 return rendererError
             }
         case let .restore(operation):
@@ -5506,7 +5590,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 canonical.acceptScratchCommit()
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
-                onOperationCompleted?(.operationSuccess(operation.token))
+                stageRendererEvent(
+                    .operationCompleted(.operationSuccess(operation.token))
+                )
                 return nil
             } catch {
                 let rendererError = (error as? MetalRendererError)
@@ -5515,7 +5601,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
                 report(rendererError)
-                onOperationCompleted?(.failure(operation.token, rendererError))
+                stageRendererEvent(
+                    .operationCompleted(
+                        .failure(operation.token, rendererError)
+                    )
+                )
                 return rendererError
             }
         case let .resize(operation):
@@ -5529,14 +5619,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 install(operation.replacement)
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
-                onOperationCompleted?(
-                    .rasterSuccess(
+                stageRendererEvent(
+                    .operationCompleted(.rasterSuccess(
                         RasterMutationReceipt(
                             token: operation.token,
                             before: operation.revisions.before,
                             after: operation.revisions.after
                         )
-                    )
+                    ))
                 )
                 return nil
             } catch {
@@ -5547,7 +5637,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
                 report(rendererError)
-                onOperationCompleted?(.failure(operation.token, rendererError))
+                stageRendererEvent(
+                    .operationCompleted(
+                        .failure(operation.token, rendererError)
+                    )
+                )
                 return rendererError
             }
         case let .resizeRestore(operation):
@@ -5561,7 +5655,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 install(operation.replacement)
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
-                onOperationCompleted?(.operationSuccess(operation.token))
+                stageRendererEvent(
+                    .operationCompleted(.operationSuccess(operation.token))
+                )
                 return nil
             } catch {
                 let rendererError = (error as? MetalRendererError)
@@ -5570,7 +5666,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 self.pendingRasterOperation = nil
                 notifyIdleStateIfChanged(from: false)
                 report(rendererError)
-                onOperationCompleted?(.failure(operation.token, rendererError))
+                stageRendererEvent(
+                    .operationCompleted(
+                        .failure(operation.token, rendererError)
+                    )
+                )
                 return rendererError
             }
         }
@@ -5595,7 +5695,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         pendingRasterOperation = nil
         notifyIdleStateIfChanged(from: false)
         report(error)
-        onOperationCompleted?(.failure(operation.token, error))
+        stageRendererEvent(
+            .operationCompleted(.failure(operation.token, error))
+        )
         return error
     }
 
@@ -5682,6 +5784,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     @discardableResult
     func drainFrameOutcomes() -> MetalRendererError? {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         var latestError: MetalRendererError?
         for outcome in completionMailbox.drain() {
             let error = processFrameOutcome(outcome)
@@ -5695,6 +5804,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func processFrameOutcome(
         _ outcome: GridRenderCompletionMailbox.Outcome
     ) -> MetalRendererError? {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         if !outcome.succeeded {
             instancePool.reclaimTerminalFailure(
                 outcome.uploadSubmissions
@@ -5761,11 +5877,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             let error = MetalRendererError.invalidRendererOperationToken
             finalizeCaptureTokens(commit.captureTokens, as: .failed)
             revisionStore.discard(commit.revisions)
-            endStrokeRuntimeIfPossible()
+            let runtimeEndEvents = endStrokeRuntimeIfPossible()
             activeStroke = nil
             resetLiveState()
+            stageStrokeRuntimeEvents(runtimeEndEvents)
             report(error)
-            onOperationCompleted?(.failure(commit.token, error))
+            stageRendererEvent(
+                .operationCompleted(.failure(commit.token, error))
+            )
             return error
         }
 
@@ -5781,19 +5900,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 before: commit.revisions.before,
                 after: commit.revisions.after
             )
-            endStrokeRuntimeIfPossible()
+            let runtimeEndEvents = endStrokeRuntimeIfPossible()
             activeStroke = nil
-            resetLiveState()
-            onOperationCompleted?(.rasterSuccess(receipt))
+            resetLiveState(invalidateStrokeEvents: false)
+            stageStrokeRuntimeEvents(runtimeEndEvents)
+            stageRendererEvent(.operationCompleted(.rasterSuccess(receipt)))
             return nil
         } catch let error as MetalRendererError {
             finalizeCaptureTokens(commit.captureTokens, as: .failed)
             discardSubmittedPairIfPossible(commit.revisions)
-            endStrokeRuntimeIfPossible()
+            let runtimeEndEvents = endStrokeRuntimeIfPossible()
             activeStroke = nil
             resetLiveState()
+            stageStrokeRuntimeEvents(runtimeEndEvents)
             report(error)
-            onOperationCompleted?(.failure(commit.token, error))
+            stageRendererEvent(
+                .operationCompleted(.failure(commit.token, error))
+            )
             return error
         } catch {
             let rendererError = MetalRendererError.commandFailed(
@@ -5801,11 +5924,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
             finalizeCaptureTokens(commit.captureTokens, as: .failed)
             discardSubmittedPairIfPossible(commit.revisions)
-            endStrokeRuntimeIfPossible()
+            let runtimeEndEvents = endStrokeRuntimeIfPossible()
             activeStroke = nil
             resetLiveState()
+            stageStrokeRuntimeEvents(runtimeEndEvents)
             report(rendererError)
-            onOperationCompleted?(.failure(commit.token, rendererError))
+            stageRendererEvent(
+                .operationCompleted(
+                    .failure(commit.token, rendererError)
+                )
+            )
             return rendererError
         }
     }
@@ -5857,8 +5985,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func resetLiveState() {
-        invalidateLogicalDabPublications()
+    private func resetLiveState(
+        invalidateStrokeEvents: Bool = true
+    ) {
         strokeGenerator?.cancel()
         strokeGenerator = nil
         strokeRenderCoordinator?.cancel()
@@ -5878,24 +6007,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         needsReplayClear = true
         nextReplayEpoch = 1
         knownStrokeTotalDistance = nil
-    }
-
-    private func invalidateLogicalDabPublications() {
-        logicalDabPublicationGeneration &+= 1
-        stagedLogicalDabPublications.removeAll(keepingCapacity: true)
-        guard !isDrainingLogicalDabPublications else { return }
-        readyLogicalDabPublications.removeAll(keepingCapacity: true)
-        readyLogicalDabPublicationHead = 0
+        if invalidateStrokeEvents {
+            invalidateStrokeEventGeneration()
+        }
     }
 
     func report(_ error: MetalRendererError) {
         lastError = error
-        onError?(error)
+        stageRendererEvent(.error(error))
     }
 
     private func notifyIdleStateIfChanged(from wasIdle: Bool) {
         guard wasIdle != isIdle else { return }
-        onIdleStateChange?(isIdle)
+        stageRendererEvent(.idleStateChanged(isIdle))
     }
 
     func abandon(_ uploads: [FrameUpload]) {
@@ -5914,6 +6038,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         error: MetalRendererError
     ) -> Bool {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         guard activeStroke?.token == token else {
             report(error)
             return false
@@ -5921,11 +6052,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let wasIdle = isIdle
         defer { notifyIdleStateIfChanged(from: wasIdle) }
         discardPendingRevisionsIfPossible()
-        endStrokeRuntimeIfPossible()
+        let runtimeEndEvents = endStrokeRuntimeIfPossible()
         activeStroke = nil
         resetLiveState()
+        stageStrokeRuntimeEvents(runtimeEndEvents)
         report(error)
-        onOperationCompleted?(.failure(token, error))
+        stageRendererEvent(.operationCompleted(.failure(token, error)))
         return true
     }
 
@@ -6075,18 +6207,41 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func beginStrokeRuntime(_ sample: StrokeSample) {
-        guard let controller = strokeRuntimeController else { return }
+    private func beginStrokeRuntime(
+        _ sample: StrokeSample
+    ) -> [RendererEvent] {
+        guard let controller = strokeRuntimeController,
+              let generation = telemetryEventGeneration
+        else {
+            return []
+        }
         do {
             let marker = try controller.beginStroke(strokeID: UUID())
             strokeRuntimeReplayEpochTracker.beginStroke(
                 at: transientStrokeBuffer?.replayEpoch ?? 0
             )
-            onStrokeRuntimeSegmentMarker?(marker)
-            onStrokeRuntimeSnapshot?(controller.snapshot)
             recordStrokeRuntimeInput(sample)
+            return [
+                .strokeRuntimeSegmentMarker(
+                    generation: generation,
+                    marker: marker
+                ),
+                .strokeRuntimeSnapshot(
+                    generation: generation,
+                    snapshot: controller.snapshot
+                ),
+            ]
         } catch {
+            invalidateTelemetryEventGeneration()
             strokeRuntimeController = nil
+            pendingStrokeRuntimeFrameIDs.removeAll(keepingCapacity: true)
+            return []
+        }
+    }
+
+    private func stageStrokeRuntimeEvents(_ events: [RendererEvent]) {
+        for event in events {
+            stageRendererEvent(event)
         }
     }
 
@@ -6107,8 +6262,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func beginStrokeRuntimeFrame(
         at prepareStarted: UInt64,
         targetFrameDurationNanoseconds: UInt64
-    ) -> UInt64? {
-        guard let controller = strokeRuntimeController else { return nil }
+    ) -> StrokeRuntimeFrameIdentity? {
+        guard let controller = strokeRuntimeController,
+              let generation = telemetryEventGeneration
+        else {
+            return nil
+        }
         let id = nextStrokeRuntimeFrameID
         nextStrokeRuntimeFrameID &+= 1
         if nextStrokeRuntimeFrameID == 0 {
@@ -6121,18 +6280,71 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 targetFrameDurationNanoseconds:
                     targetFrameDurationNanoseconds
             )
-            pendingStrokeRuntimeFrameIDs.insert(id)
-            return id
+            let identity = StrokeRuntimeFrameIdentity(
+                telemetryGeneration: generation,
+                frameID: id
+            )
+            pendingStrokeRuntimeFrameIDs.insert(identity)
+            return identity
         } catch {
             return nil
         }
     }
 
+    #if DEBUG
+    func beginStrokeRuntimeFrameForTesting()
+        -> StrokeRuntimeFrameIdentity?
+    {
+        beginStrokeRuntimeFrame(
+            at: 1,
+            targetFrameDurationNanoseconds: 16_666_667
+        )
+    }
+
+    func prepareStrokeRuntimeFrameForTesting(
+        _ identity: StrokeRuntimeFrameIdentity
+    ) {
+        recordStrokeRuntimePreparedFrame(id: identity, encoding: nil)
+    }
+
+    func submitStrokeRuntimeFrameForTesting(
+        _ identity: StrokeRuntimeFrameIdentity
+    ) {
+        recordStrokeRuntimeSubmittedFrame(id: identity, at: 3)
+    }
+
+    func completeStrokeRuntimeGPUFrameForTesting(
+        _ identity: StrokeRuntimeFrameIdentity
+    ) {
+        recordStrokeRuntimeGPUFrame(
+            id: identity,
+            measuredStart: 4,
+            measuredFinish: 5,
+            submittedAt: 3
+        )
+    }
+
+    func presentStrokeRuntimeFrameForTesting(
+        _ identity: StrokeRuntimeFrameIdentity
+    ) {
+        recordStrokeRuntimePresentedFrame(id: identity, at: 6)
+    }
+
+    var pendingStrokeRuntimeFrameCountForTesting: Int {
+        pendingStrokeRuntimeFrameIDs.count
+    }
+    #endif
+
     private func recordStrokeRuntimePreparedFrame(
-        id: UInt64?,
+        id: StrokeRuntimeFrameIdentity?,
         encoding: NativeDepositionFrameEncoding?
     ) {
-        guard let id, let controller = strokeRuntimeController else { return }
+        guard let id,
+              id.telemetryGeneration == telemetryEventGeneration,
+              let controller = strokeRuntimeController
+        else {
+            return
+        }
         let scheduler = activeStroke?.scheduler?.diagnosticSnapshot
         let currentReplayEpoch = transientStrokeBuffer?.replayEpoch ?? 0
         let replayDelta = strokeRuntimeReplayEpochTracker.consume(
@@ -6150,7 +6362,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         ))
         do {
             try controller.recordPrepared(
-                id: id,
+                id: id.frameID,
                 at: DispatchTime.now().uptimeNanoseconds,
                 newLogicalDabCount: UInt64(max(
                     0,
@@ -6170,32 +6382,51 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 residentMemoryBytes: residentBytes
             )
         } catch {
-            controller.discardFrame(id: id)
+            controller.discardFrame(id: id.frameID)
             pendingStrokeRuntimeFrameIDs.remove(id)
         }
     }
 
+    private func discardStrokeRuntimeFrame(
+        _ identity: StrokeRuntimeFrameIdentity
+    ) {
+        if identity.telemetryGeneration == telemetryEventGeneration {
+            strokeRuntimeController?.discardFrame(id: identity.frameID)
+        }
+        pendingStrokeRuntimeFrameIDs.remove(identity)
+    }
+
     private func recordStrokeRuntimeSubmittedFrame(
-        id: UInt64?,
+        id: StrokeRuntimeFrameIdentity?,
         at timestamp: UInt64
     ) {
-        guard let id, let controller = strokeRuntimeController else { return }
+        guard let id,
+              id.telemetryGeneration == telemetryEventGeneration,
+              let controller = strokeRuntimeController
+        else {
+            return
+        }
         do {
-            try controller.recordSubmitted(id: id, at: timestamp)
+            try controller.recordSubmitted(id: id.frameID, at: timestamp)
         } catch {
-            controller.discardFrame(id: id)
+            controller.discardFrame(id: id.frameID)
             pendingStrokeRuntimeFrameIDs.remove(id)
         }
     }
 
     private func recordStrokeRuntimeCompletedFrame(
-        id: UInt64?,
+        id: StrokeRuntimeFrameIdentity?,
         commandBuffer: any MTLCommandBuffer,
         submittedAt: UInt64,
         completedAt: UInt64,
         presentedAt: UInt64? = nil
     ) {
-        guard let id, let controller = strokeRuntimeController else { return }
+        guard let id,
+              id.telemetryGeneration == telemetryEventGeneration,
+              let controller = strokeRuntimeController
+        else {
+            return
+        }
         let measuredGPUStart = Self.nanoseconds(commandBuffer.gpuStartTime)
         let measuredGPUEnd = Self.nanoseconds(commandBuffer.gpuEndTime)
         let gpuStarted = max(submittedAt, measuredGPUStart)
@@ -6203,12 +6434,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let presented = max(gpuFinished, presentedAt ?? completedAt)
         do {
             _ = try controller.recordGPU(
-                id: id,
+                id: id.frameID,
                 started: gpuStarted,
                 finished: gpuFinished
             )
             if try controller.recordPresented(
-                id: id,
+                id: id.frameID,
                 at: presented,
                 semantics: .offscreenCommandCompleted
             ) {
@@ -6216,18 +6447,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 publishStrokeRuntimeSnapshotIfDue(controller)
             }
         } catch {
-            controller.discardFrame(id: id)
+            controller.discardFrame(id: id.frameID)
             pendingStrokeRuntimeFrameIDs.remove(id)
         }
     }
 
     private func recordStrokeRuntimeGPUFrame(
-        id: UInt64?,
+        id: StrokeRuntimeFrameIdentity?,
         measuredStart: UInt64,
         measuredFinish: UInt64,
         submittedAt: UInt64
     ) {
-        guard let id, let controller = strokeRuntimeController else { return }
+        guard let id,
+              id.telemetryGeneration == telemetryEventGeneration,
+              let controller = strokeRuntimeController
+        else {
+            return
+        }
         let gpuStarted = max(
             submittedAt,
             measuredStart
@@ -6238,7 +6474,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         do {
             if try controller.recordGPU(
-                id: id,
+                id: id.frameID,
                 started: gpuStarted,
                 finished: gpuFinished
             ) {
@@ -6246,19 +6482,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 publishStrokeRuntimeSnapshotIfDue(controller)
             }
         } catch {
-            controller.discardFrame(id: id)
+            controller.discardFrame(id: id.frameID)
             pendingStrokeRuntimeFrameIDs.remove(id)
         }
     }
 
     private func recordStrokeRuntimePresentedFrame(
-        id: UInt64?,
+        id: StrokeRuntimeFrameIdentity?,
         at timestamp: UInt64
     ) {
-        guard let id, let controller = strokeRuntimeController else { return }
+        guard let id,
+              id.telemetryGeneration == telemetryEventGeneration,
+              let controller = strokeRuntimeController
+        else {
+            return
+        }
         do {
             if try controller.recordPresented(
-                id: id,
+                id: id.frameID,
                 at: timestamp,
                 semantics: .drawablePresented
             ) {
@@ -6266,27 +6507,50 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 publishStrokeRuntimeSnapshotIfDue(controller)
             }
         } catch {
-            controller.discardFrame(id: id)
+            controller.discardFrame(id: id.frameID)
             pendingStrokeRuntimeFrameIDs.remove(id)
         }
     }
 
-    private func endStrokeRuntimeIfPossible() {
-        guard let controller = strokeRuntimeController else { return }
-        for id in pendingStrokeRuntimeFrameIDs.sorted() {
-            controller.discardFrame(id: id)
+    private func endStrokeRuntimeIfPossible() -> [RendererEvent] {
+        guard let controller = strokeRuntimeController,
+              let generation = telemetryEventGeneration
+        else {
+            return []
+        }
+        for identity in pendingStrokeRuntimeFrameIDs.sorted(by: {
+            $0.frameID < $1.frameID
+        }) where identity.telemetryGeneration == generation {
+            controller.discardFrame(id: identity.frameID)
         }
         controller.discardPendingFrames()
         pendingStrokeRuntimeFrameIDs.removeAll(keepingCapacity: true)
         do {
             let marker = try controller.endStroke()
-            onStrokeRuntimeSnapshot?(controller.snapshot)
-            onStrokeRuntimeSegmentMarker?(marker)
+            return [
+                .strokeRuntimeSegmentMarker(
+                    generation: generation,
+                    marker: marker
+                ),
+                .strokeRuntimeSnapshot(
+                    generation: generation,
+                    snapshot: controller.snapshot
+                ),
+            ]
         } catch {
             if let marker = try? controller.endStroke() {
-                onStrokeRuntimeSnapshot?(controller.snapshot)
-                onStrokeRuntimeSegmentMarker?(marker)
+                return [
+                    .strokeRuntimeSegmentMarker(
+                        generation: generation,
+                        marker: marker
+                    ),
+                    .strokeRuntimeSnapshot(
+                        generation: generation,
+                        snapshot: controller.snapshot
+                    ),
+                ]
             }
+            return []
         }
     }
 
@@ -6294,7 +6558,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         _ controller: StrokeRuntimeProductionController
     ) {
         guard controller.shouldPublishLiveSnapshot else { return }
-        onStrokeRuntimeSnapshot?(controller.snapshot)
+        guard let generation = telemetryEventGeneration else { return }
+        stageRendererEvent(
+            .strokeRuntimeSnapshot(
+                generation: generation,
+                snapshot: controller.snapshot
+            )
+        )
     }
 
     nonisolated private static func nanoseconds(

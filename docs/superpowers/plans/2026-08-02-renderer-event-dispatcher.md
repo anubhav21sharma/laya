@@ -209,9 +209,11 @@ and drain helpers. Wrap each public mutation and main-actor completion handler
 in dispatcher operation boundaries. Queue begin/end runtime marker and
 snapshot payloads only after state installation/rollback/teardown completes.
 Advance or invalidate stroke and telemetry generations at the lifecycle points
-specified by the design. Keep accepted-prefix checkpoints in
-`appendStrokeBatch`. Route error, idle, operation completion, and debug-frame
-callbacks through the same adapter.
+specified by the design. Identify asynchronous runtime frames by telemetry
+generation plus frame ID and reject an old-generation GPU/presentation result
+before it mutates the current telemetry controller. Keep accepted-prefix
+checkpoints in `appendStrokeBatch`. Route error, idle, operation completion,
+and debug-frame callbacks through the same adapter.
 
 - [ ] **Step 8: Prove direct callback invocation is centralized**
 

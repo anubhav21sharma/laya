@@ -279,6 +279,282 @@ func gridRendererRecordsAttributedProductionCallSites() throws {
     #expect(markers[0].strokeID == markers[1].strokeID)
 }
 
+@MainActor
+@Test
+func runtimeBeginObserverCanCancelStartReplacementWithoutOuterBeginDestroyingIt()
+    throws
+{
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let renderer = try runtimeTestRenderer(device: device)
+    renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
+    let originalToken = RendererOperationToken(rawValue: 0x4245_4741)
+    let replacementToken = RendererOperationToken(rawValue: 0x4245_4742)
+    let style = try renderer.nativeHarnessStrokeStyle(
+        diameter: 12,
+        seed: originalToken.rawValue
+    )
+    var replaced = false
+    var replacementError: MetalRendererError?
+    renderer.onStrokeRuntimeSegmentMarker = { marker in
+        guard marker.kind == .segmentBegan, !replaced else { return }
+        replaced = true
+        #expect(renderer.hasActiveStroke)
+        do {
+            try renderer.cancelStroke(token: originalToken)
+            try renderer.beginStroke(
+                token: replacementToken,
+                sample: runtimeStrokeSample(
+                    x: 16,
+                    phase: .began,
+                    timestamp: 1
+                ),
+                style: style
+            )
+        } catch let error as MetalRendererError {
+            replacementError = error
+        } catch {
+            replacementError = .commandFailed(error.localizedDescription)
+        }
+    }
+
+    try renderer.beginStroke(
+        token: originalToken,
+        sample: runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
+        style: style
+    )
+
+    #expect(replaced)
+    #expect(replacementError == nil)
+    #expect(renderer.hasActiveStroke)
+    try renderer.appendStroke(
+        token: replacementToken,
+        sample: runtimeStrokeSample(x: 32, phase: .moved, timestamp: 2)
+    )
+    do {
+        try renderer.cancelStroke(token: originalToken)
+        Issue.record("Expected the original token to be stale")
+    } catch let error as MetalRendererError {
+        #expect(error == .invalidRendererOperationToken)
+    }
+    renderer.onStrokeRuntimeSegmentMarker = nil
+    try renderer.cancelStroke(token: replacementToken)
+}
+
+@MainActor
+@Test
+func runtimeEndObserverCanStartReplacementWithoutOuterTeardownDestroyingIt()
+    throws
+{
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let renderer = try runtimeTestRenderer(device: device)
+    renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
+    let originalToken = RendererOperationToken(rawValue: 0x454E_4441)
+    let replacementToken = RendererOperationToken(rawValue: 0x454E_4442)
+    let style = try renderer.nativeHarnessStrokeStyle(
+        diameter: 12,
+        seed: originalToken.rawValue
+    )
+    try renderer.beginStroke(
+        token: originalToken,
+        sample: runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
+        style: style
+    )
+    var replaced = false
+    var replacementError: MetalRendererError?
+    renderer.onStrokeRuntimeSegmentMarker = { marker in
+        guard marker.kind == .segmentEnded, !replaced else { return }
+        replaced = true
+        #expect(renderer.isIdle)
+        do {
+            try renderer.beginStroke(
+                token: replacementToken,
+                sample: runtimeStrokeSample(
+                    x: 16,
+                    phase: .began,
+                    timestamp: 1
+                ),
+                style: style
+            )
+        } catch let error as MetalRendererError {
+            replacementError = error
+        } catch {
+            replacementError = .commandFailed(error.localizedDescription)
+        }
+    }
+
+    try renderer.cancelStroke(token: originalToken)
+
+    #expect(replaced)
+    #expect(replacementError == nil)
+    #expect(renderer.hasActiveStroke)
+    try renderer.appendStroke(
+        token: replacementToken,
+        sample: runtimeStrokeSample(x: 32, phase: .moved, timestamp: 2)
+    )
+    renderer.onStrokeRuntimeSegmentMarker = nil
+    try renderer.cancelStroke(token: replacementToken)
+}
+
+@MainActor
+@Test
+func failedCommitPublishesEndTelemetryAndIdleAfterRollback() throws {
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let renderer = try runtimeTestRenderer(device: device)
+    renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
+    let token = RendererOperationToken(rawValue: 0x524F_4C4C)
+    let style = try renderer.nativeHarnessStrokeStyle(
+        diameter: 12,
+        seed: token.rawValue
+    )
+    try renderer.beginStroke(
+        token: token,
+        sample: runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
+        style: style
+    )
+
+    enum ObservedEvent: Equatable {
+        case marker(StrokeRuntimeSegmentEventKind)
+        case snapshot
+        case idle(Bool)
+    }
+    var events: [ObservedEvent] = []
+    renderer.onStrokeRuntimeSegmentMarker = { marker in
+        #expect(renderer.isIdle)
+        events.append(.marker(marker.kind))
+    }
+    renderer.onStrokeRuntimeSnapshot = { _ in
+        #expect(renderer.isIdle)
+        events.append(.snapshot)
+    }
+    renderer.onIdleStateChange = { idle in
+        #expect(renderer.isIdle == idle)
+        events.append(.idle(idle))
+    }
+
+    #expect(throws: MetalRendererError.rasterRevisionStorageLimitExceeded) {
+        try renderer.requestStrokeCommit(
+            token: token,
+            sample: runtimeStrokeSample(x: 32, phase: .ended, timestamp: 1),
+            maximumRetainedBytes: -1
+        )
+    }
+
+    #expect(renderer.isIdle)
+    #expect(
+        events == [
+            .marker(.segmentEnded),
+            .snapshot,
+            .idle(true),
+        ]
+    )
+}
+
+@MainActor
+@Test
+func mixedLogicalDabAndRuntimeEventsPreserveCommittedOrder() throws {
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let renderer = try runtimeTestRenderer(device: device)
+    renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
+    let token = RendererOperationToken(rawValue: 0x4F52_4445)
+    let style = try renderer.nativeHarnessStrokeStyle(
+        diameter: 12,
+        seed: token.rawValue
+    )
+    enum ObservedEvent: Equatable {
+        case dab(UInt64)
+        case marker(StrokeRuntimeSegmentEventKind)
+        case snapshot
+    }
+    var events: [ObservedEvent] = []
+    renderer.onLogicalDabsGenerated = { events.append(.dab($0.ordinal)) }
+    renderer.onStrokeRuntimeSegmentMarker = {
+        events.append(.marker($0.kind))
+    }
+    renderer.onStrokeRuntimeSnapshot = { _ in events.append(.snapshot) }
+
+    try renderer.beginStroke(
+        token: token,
+        sample: runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
+        style: style
+    )
+
+    let markerIndex = try #require(
+        events.firstIndex(of: .marker(.segmentBegan))
+    )
+    let snapshotIndex = try #require(events.firstIndex(of: .snapshot))
+    let dabOrdinals: [UInt64] = events[..<markerIndex].compactMap { event in
+        guard case let .dab(ordinal) = event else { return nil }
+        return ordinal
+    }
+    #expect(!dabOrdinals.isEmpty)
+    #expect(dabOrdinals.count == markerIndex)
+    #expect(markerIndex < snapshotIndex)
+    #expect(snapshotIndex == events.index(before: events.endIndex))
+    #expect(
+        zip(dabOrdinals, dabOrdinals.dropFirst()).allSatisfy {
+            $0 <= $1
+        }
+    )
+    renderer.onLogicalDabsGenerated = nil
+    renderer.onStrokeRuntimeSegmentMarker = nil
+    renderer.onStrokeRuntimeSnapshot = nil
+    try renderer.cancelStroke(token: token)
+}
+
+@MainActor
+@Test
+func lateOldTelemetryFrameCannotMutateReconfiguredController() throws {
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let renderer = try runtimeTestRenderer(device: device)
+    let oldToken = RendererOperationToken(rawValue: 0x4F4C_4401)
+    let newToken = RendererOperationToken(rawValue: 0x4E45_5701)
+    let style = try renderer.nativeHarnessStrokeStyle(
+        diameter: 12,
+        seed: oldToken.rawValue
+    )
+    renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
+    try renderer.beginStroke(
+        token: oldToken,
+        sample: runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
+        style: style
+    )
+    let oldIdentity = try #require(
+        renderer.beginStrokeRuntimeFrameForTesting()
+    )
+    renderer.prepareStrokeRuntimeFrameForTesting(oldIdentity)
+    renderer.submitStrokeRuntimeFrameForTesting(oldIdentity)
+    try renderer.cancelStroke(token: oldToken)
+
+    renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
+    try renderer.beginStroke(
+        token: newToken,
+        sample: runtimeStrokeSample(x: 16, phase: .began, timestamp: 1),
+        style: style
+    )
+    let newIdentity = try #require(
+        renderer.beginStrokeRuntimeFrameForTesting()
+    )
+    #expect(oldIdentity.frameID == newIdentity.frameID)
+    #expect(
+        oldIdentity.telemetryGeneration
+            != newIdentity.telemetryGeneration
+    )
+    renderer.prepareStrokeRuntimeFrameForTesting(newIdentity)
+    renderer.submitStrokeRuntimeFrameForTesting(newIdentity)
+    let snapshotBeforeStaleCompletion = renderer.strokeRuntimeSnapshot
+
+    renderer.completeStrokeRuntimeGPUFrameForTesting(oldIdentity)
+    renderer.presentStrokeRuntimeFrameForTesting(oldIdentity)
+
+    #expect(renderer.pendingStrokeRuntimeFrameCountForTesting == 1)
+    #expect(renderer.strokeRuntimeSnapshot == snapshotBeforeStaleCompletion)
+    renderer.completeStrokeRuntimeGPUFrameForTesting(newIdentity)
+    #expect(renderer.pendingStrokeRuntimeFrameCountForTesting == 1)
+    renderer.presentStrokeRuntimeFrameForTesting(newIdentity)
+    #expect(renderer.pendingStrokeRuntimeFrameCountForTesting == 0)
+    try renderer.cancelStroke(token: newToken)
+}
+
 @Test
 func replayEpochTrackerResetsForEachStroke() {
     var tracker = StrokeRuntimeReplayEpochTracker()
@@ -1075,6 +1351,23 @@ private final class SyntheticRuntimeTimestampSource:
             timestamps.removeFirst()
         }
     }
+}
+
+@MainActor
+private func runtimeTestRenderer(
+    device: any MTLDevice
+) throws -> GridRenderer {
+    let renderer = try GridRenderer(
+        device: device,
+        library: try strokeRuntimeTestLibrary(device: device),
+        drawableSize: PatternSize(width: 64, height: 64),
+        configuration: try TilingCanvasConfiguration(
+            pixelSize: PixelSize(width: 64, height: 64),
+            tiling: .grid
+        )
+    )
+    try renderer.installNativeHarnessBrushes()
+    return renderer
 }
 
 private func strokeRuntimeTestLibrary(
