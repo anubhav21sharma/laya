@@ -165,6 +165,22 @@ func debugPerformanceMonitorUsesRendererOwnedDiagnostics() {
     #expect(diagnostics.gpuCompletion.p95 == 4_000_000)
 }
 
+@MainActor
+@Test
+func debugPerformanceMonitorPublishesStrokeRuntimeContract() {
+    let monitor = DebugPerformanceMonitor()
+    let runtime = debugRuntimeSnapshot()
+
+    monitor.recordStrokeRuntimeSnapshot(runtime)
+
+    #expect(monitor.snapshot.strokeRuntime == runtime)
+    #expect(monitor.snapshot.deposition.authoritativeBacklog == 3)
+    #expect(monitor.snapshot.deposition.predictedBacklog == 2)
+    #expect(monitor.snapshot.deposition.cpuPreparation.p95 == 2_000_000)
+    #expect(monitor.snapshot.deposition.eventToSubmit.p95 == 4_000_000)
+    #expect(monitor.snapshot.deposition.gpuDuration.p95 == 3_000_000)
+}
+
 @Test
 @MainActor
 func debugPerformanceLoggerWritesReviewableJSONLines() throws {
@@ -220,12 +236,134 @@ func debugPerformanceLoggerWritesReviewableJSONLines() throws {
         )
     }
     #expect(records.map(\.kind) == [
-        .sessionStarted,
+        .segmentBegan,
         .sample,
-        .sessionEnded,
+        .segmentEnded,
     ])
+    #expect(records[0].segmentID != nil)
+    #expect(records.allSatisfy { $0.segmentID == records[0].segmentID })
     #expect(records[1].snapshot == snapshot)
     #expect(records[1].gpuName == "Test GPU")
     #expect(records[1].context == context)
+}
+
+@Test
+@MainActor
+func debugPerformanceLoggerBuffersAttributedSegmentsUntilFlush() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let sessionID = UUID(
+        uuidString: "00000000-0000-0000-0000-000000000101"
+    )!
+    let segmentID = UUID(
+        uuidString: "00000000-0000-0000-0000-000000000102"
+    )!
+    let strokeID = UUID(
+        uuidString: "00000000-0000-0000-0000-000000000103"
+    )!
+    let logger = DebugPerformanceLogger(
+        directory: directory,
+        filename: "buffered-test.jsonl",
+        sessionID: sessionID
+    )
+    let snapshot = DebugPerformanceSnapshot(
+        strokeRuntime: debugRuntimeSnapshot()
+    )
+
+    try logger.record(
+        .segmentBegan,
+        snapshot: snapshot,
+        gpuName: "Test GPU",
+        segmentID: segmentID,
+        strokeID: strokeID
+    )
+    try logger.record(
+        .sample,
+        snapshot: snapshot,
+        gpuName: "Test GPU",
+        segmentID: segmentID,
+        strokeID: strokeID
+    )
+    try logger.record(
+        .segmentEnded,
+        snapshot: snapshot,
+        gpuName: "Test GPU",
+        segmentID: segmentID,
+        strokeID: strokeID
+    )
+
+    #expect(!FileManager.default.fileExists(atPath: logger.logURL.path))
+    try logger.flush()
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let records = try Data(contentsOf: logger.logURL)
+        .split(separator: 0x0A)
+        .map {
+            try decoder.decode(
+                DebugPerformanceLogRecord.self,
+                from: Data($0)
+            )
+        }
+    #expect(records.map(\.kind) == [
+        .segmentBegan,
+        .sample,
+        .segmentEnded,
+    ])
+    #expect(records.allSatisfy { $0.sessionID == sessionID })
+    #expect(records.allSatisfy { $0.segmentID == segmentID })
+    #expect(records.allSatisfy { $0.strokeID == strokeID })
+    #expect(records[1].snapshot.strokeRuntime == debugRuntimeSnapshot())
+}
+
+private func debugRuntimeSnapshot() -> StrokeRuntimeTelemetrySnapshot {
+    StrokeRuntimeTelemetrySnapshot(
+        sessionID: UUID(
+            uuidString: "00000000-0000-0000-0000-000000000101"
+        )!,
+        segmentID: UUID(
+            uuidString: "00000000-0000-0000-0000-000000000102"
+        ),
+        strokeID: UUID(
+            uuidString: "00000000-0000-0000-0000-000000000103"
+        ),
+        traceProfile: .productionTenSeconds,
+        inputProvenance: .init(
+            actual: 10,
+            coalesced: 5,
+            predicted: 3,
+            estimatedUpdate: 1
+        ),
+        newLogicalDabCount: 20,
+        newProjectedDabCount: 30,
+        authoritativeReplayCount: 0,
+        predictedReplayCount: 2,
+        authoritativeQueueDepth: 3,
+        predictedQueueDepth: 2,
+        authoritativeQueueHighWater: 7,
+        predictedQueueHighWater: 4,
+        prepare: .init(p50: 1_000_000, p95: 2_000_000, p99: 3_000_000),
+        eventToSubmit: .init(
+            p50: 2_000_000,
+            p95: 4_000_000,
+            p99: 5_000_000
+        ),
+        gpu: .init(p50: 2_000_000, p95: 3_000_000, p99: 4_000_000),
+        frame: .init(
+            p50: 16_000_000,
+            p95: 17_000_000,
+            p99: 18_000_000
+        ),
+        missedFrameCount: 1,
+        eventToSubmitMissCount: 1,
+        frameCount: 100,
+        observedDurationNanoseconds: 10_000_000_000,
+        cacheHitCount: 12,
+        cacheMissCount: 1,
+        memoryHighWaterBytes: 4_096,
+        authoritativeQueueDepths: [5, 3, 3],
+        lastTimestamps: nil
+    )
 }
 #endif

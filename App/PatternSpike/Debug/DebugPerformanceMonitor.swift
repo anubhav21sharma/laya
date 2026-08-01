@@ -11,6 +11,7 @@ struct DebugPerformanceSnapshot: Codable, Equatable, Sendable {
     var sampleCount = 0
     var missedFrameCount: UInt64 = 0
     var deposition = DebugDepositionSnapshot()
+    var strokeRuntime: StrokeRuntimeTelemetrySnapshot?
 }
 
 struct DebugDurationPercentiles: Codable, Equatable, Sendable {
@@ -47,7 +48,9 @@ struct DebugDepositionSnapshot: Codable, Equatable, Sendable {
 
 enum DebugPerformanceLogEventKind: String, Codable, Sendable {
     case sessionStarted
+    case segmentBegan
     case sample
+    case segmentEnded
     case sessionEnded
 }
 
@@ -67,6 +70,8 @@ struct DebugPerformanceLogRecord: Codable, Equatable, Sendable {
     let timestamp: Date
     let kind: DebugPerformanceLogEventKind
     let gpuName: String
+    let segmentID: UUID?
+    let strokeID: UUID?
     let context: DebugPerformanceContext?
     let snapshot: DebugPerformanceSnapshot
 }
@@ -75,13 +80,17 @@ struct DebugPerformanceLogRecord: Codable, Equatable, Sendable {
 final class DebugPerformanceLogger {
     let logURL: URL
 
-    private let sessionID = UUID()
+    private let sessionID: UUID
+    private let segmentID: UUID
     private var fileHandle: FileHandle?
+    private var pendingRecords: [Data] = []
     private let encoder: JSONEncoder
 
     init(
         directory: URL? = nil,
-        filename: String? = nil
+        filename: String? = nil,
+        sessionID: UUID = UUID(),
+        segmentID: UUID = UUID()
     ) {
         let root = directory ?? Self.defaultDirectory()
         let generatedName = filename ?? (
@@ -99,34 +108,60 @@ final class DebugPerformanceLogger {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         self.encoder = encoder
+        self.sessionID = sessionID
+        self.segmentID = segmentID
     }
 
     func record(
         _ kind: DebugPerformanceLogEventKind,
         snapshot: DebugPerformanceSnapshot,
         gpuName: String,
-        context: DebugPerformanceContext? = nil
+        context: DebugPerformanceContext? = nil,
+        segmentID: UUID? = nil,
+        strokeID: UUID? = nil
     ) throws {
+        let storedKind: DebugPerformanceLogEventKind = switch kind {
+        case .sessionStarted:
+            .segmentBegan
+        case .sessionEnded:
+            .segmentEnded
+        default:
+            kind
+        }
         let record = DebugPerformanceLogRecord(
             schemaVersion: 1,
             sessionID: sessionID,
             timestamp: Date(),
-            kind: kind,
+            kind: storedKind,
             gpuName: gpuName,
+            segmentID: segmentID
+                ?? snapshot.strokeRuntime?.segmentID
+                ?? self.segmentID,
+            strokeID: strokeID ?? snapshot.strokeRuntime?.strokeID,
             context: context,
             snapshot: snapshot
         )
         var data = try encoder.encode(record)
         data.append(0x0A)
-        let handle = try writableHandle()
-        try handle.write(contentsOf: data)
-        if kind != .sample {
-            try handle.synchronize()
-        }
+        pendingRecords.append(data)
     }
 
     func flush() throws {
-        try fileHandle?.synchronize()
+        guard !pendingRecords.isEmpty else {
+            try fileHandle?.synchronize()
+            return
+        }
+        var payload = Data()
+        payload.reserveCapacity(
+            pendingRecords.reduce(0) { $0 + $1.count }
+        )
+        for record in pendingRecords {
+            payload.append(record)
+        }
+        let handle = try writableHandle()
+        try handle.write(contentsOf: payload)
+        try handle.synchronize()
+        pendingRecords.removeAll(keepingCapacity: true)
     }
 
     private func writableHandle() throws -> FileHandle {
@@ -351,6 +386,29 @@ final class DebugPerformanceMonitor {
         )
         deposition.gpuCompletion = .init(renderer.gpuCompletion)
         snapshot.deposition = deposition
+    }
+
+    func recordStrokeRuntimeSnapshot(
+        _ runtime: StrokeRuntimeTelemetrySnapshot
+    ) {
+        var deposition = snapshot.deposition
+        deposition.authoritativeBacklog = runtime.authoritativeQueueDepth
+        deposition.predictedBacklog = runtime.predictedQueueDepth
+        deposition.authoritativeHighWater =
+            runtime.authoritativeQueueHighWater
+        deposition.predictedHighWater = runtime.predictedQueueHighWater
+        deposition.backlogHighWater = max(
+            runtime.authoritativeQueueHighWater,
+            runtime.predictedQueueHighWater
+        )
+        deposition.encodedDabCount = runtime.newLogicalDabCount
+        deposition.encodedInstanceCount = runtime.newProjectedDabCount
+        deposition.missedFrameCount = runtime.missedFrameCount
+        deposition.cpuPreparation = .init(runtime.prepare)
+        deposition.eventToSubmit = .init(runtime.eventToSubmit)
+        deposition.gpuDuration = .init(runtime.gpu)
+        snapshot.deposition = deposition
+        snapshot.strokeRuntime = runtime
     }
 
     private func resetSamples(targetFramesPerSecond: Int) {

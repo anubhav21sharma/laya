@@ -65,6 +65,10 @@ struct DepositionTelemetryTests {
         #expect(timings.gpuEncoding == percentiles(230, 250, 250))
         #expect(timings.gpuCompletion == percentiles(330, 350, 350))
         #expect(telemetry.timings == timings)
+        #expect(telemetry.snapshot.submittedFrameCount == 5)
+
+        telemetry.recordMissedFrames(1)
+        #expect(telemetry.snapshot.missedFrameFraction == 0.2)
     }
 
     @Test

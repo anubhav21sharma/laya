@@ -18,6 +18,7 @@ enum HarnessLaunch {
             let outputPath = try value(after: "--output-directory", in: arguments)
             let gitCommit = try value(after: "--git-commit", in: arguments)
             let configuration = try value(after: "--configuration", in: arguments)
+            let runtimeTraceProfile = try runtimeTraceProfile(in: arguments)
 
             guard let device = MTLCreateSystemDefaultDevice() else {
                 throw HarnessLaunchError.metalUnavailable
@@ -69,6 +70,10 @@ enum HarnessLaunch {
                             outputDirectory: outputDirectory,
                             build: build
                         )
+                        try validateRuntimeTrace(
+                            runtimeTraceProfile,
+                            result: result
+                        )
                         pass(scene: scene, result: result)
                     } catch {
                         fail(error)
@@ -81,12 +86,20 @@ enum HarnessLaunch {
                     outputDirectory: outputDirectory,
                     build: build
                 )
+                try validateRuntimeTrace(
+                    runtimeTraceProfile,
+                    result: result
+                )
                 pass(scene: scene, result: result)
             case .foundation:
                 let result = try HarnessRunner(device: device).run(
                     scene: scene,
                     outputDirectory: outputDirectory,
                     build: build
+                )
+                try validateRuntimeTrace(
+                    runtimeTraceProfile,
+                    result: result
                 )
                 pass(scene: scene, result: result)
             }
@@ -123,11 +136,49 @@ enum HarnessLaunch {
         }
         return arguments[index + 1]
     }
+
+    private static func runtimeTraceProfile(
+        in arguments: [String]
+    ) throws -> StrokeRuntimeTraceProfile? {
+        let flag = "--performance-trace"
+        guard arguments.contains(flag) else { return nil }
+        switch try value(after: flag, in: arguments) {
+        case "10-second":
+            return .productionTenSeconds
+        case "accelerated-10-minute":
+            return .productionAcceleratedTenMinutes
+        case let value:
+            throw HarnessLaunchError.invalidPerformanceTrace(value)
+        }
+    }
+
+    private static func validateRuntimeTrace(
+        _ requested: StrokeRuntimeTraceProfile?,
+        result: HarnessRunResult
+    ) throws {
+        guard let requested else { return }
+        guard let runtime = result.benchmark.strokeRuntime,
+              runtime.traceProfile == requested
+        else {
+            throw HarnessLaunchError.missingProductionRuntimeTrace(
+                requested.rawValue
+            )
+        }
+        let replayMode = StrokeRuntimeReplayMode(
+            rawValue: result.benchmark.replayMode ?? "appendOnly"
+        ) ?? .appendOnly
+        try BenchmarkStrokeRuntimeGate.validate(
+            runtime,
+            replayMode: replayMode
+        )
+    }
 }
 
 enum HarnessLaunchError: Error, LocalizedError {
     case missingArgument(String)
     case metalUnavailable
+    case invalidPerformanceTrace(String)
+    case missingProductionRuntimeTrace(String)
 
     var errorDescription: String? {
         switch self {
@@ -135,6 +186,10 @@ enum HarnessLaunchError: Error, LocalizedError {
             "Missing required harness argument \(flag)."
         case .metalUnavailable:
             "Metal is unavailable."
+        case let .invalidPerformanceTrace(value):
+            "Unknown performance trace '\(value)'; expected '10-second' or 'accelerated-10-minute'."
+        case let .missingProductionRuntimeTrace(profile):
+            "Harness result did not contain attributable production runtime telemetry for '\(profile)'."
         }
     }
 }

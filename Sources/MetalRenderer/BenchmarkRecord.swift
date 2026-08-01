@@ -32,6 +32,91 @@ public struct BenchmarkBuild: Codable, Equatable, Sendable {
     }
 }
 
+public enum StrokeRuntimeReplayMode: String, Codable, Sendable {
+    case appendOnly
+    case replayTail
+    case boundedWholeStroke
+}
+
+public enum BenchmarkStrokeRuntimeGateError:
+    Error, Equatable, LocalizedError
+{
+    case nonProductionTrace
+    case insufficientDuration(actual: UInt64, required: UInt64)
+    case appendOnlyReplay(UInt64)
+    case monotonicBacklog([Int])
+    case eventToSubmitMissFraction(actual: Double, maximum: Double)
+
+    public var errorDescription: String? {
+        switch self {
+        case .nonProductionTrace:
+            "Runtime performance evidence did not originate from a production renderer trace."
+        case let .insufficientDuration(actual, required):
+            "Runtime trace duration \(actual) ns is shorter than the required \(required) ns."
+        case let .appendOnlyReplay(count):
+            "Append-only runtime evidence recorded \(count) authoritative replays."
+        case let .monotonicBacklog(depths):
+            "Authoritative runtime backlog grows monotonically: \(depths)."
+        case let .eventToSubmitMissFraction(actual, maximum):
+            "Event-to-submit miss fraction \(actual) exceeds \(maximum)."
+        }
+    }
+}
+
+public enum BenchmarkStrokeRuntimeGate {
+    public static let maximumEventToSubmitMissFraction = 0.01
+
+    public static func validate(
+        _ snapshot: StrokeRuntimeTelemetrySnapshot,
+        replayMode: StrokeRuntimeReplayMode
+    ) throws {
+        guard snapshot.traceProfile.isProduction else {
+            throw BenchmarkStrokeRuntimeGateError.nonProductionTrace
+        }
+        let requiredDuration = snapshot.traceProfile
+            .logicalDurationNanoseconds
+        guard snapshot.observedDurationNanoseconds >= requiredDuration else {
+            throw BenchmarkStrokeRuntimeGateError.insufficientDuration(
+                actual: snapshot.observedDurationNanoseconds,
+                required: requiredDuration
+            )
+        }
+        if replayMode == .appendOnly,
+           snapshot.authoritativeReplayCount > 0
+        {
+            throw BenchmarkStrokeRuntimeGateError.appendOnlyReplay(
+                snapshot.authoritativeReplayCount
+            )
+        }
+        if growsMonotonically(snapshot.authoritativeQueueDepths) {
+            throw BenchmarkStrokeRuntimeGateError.monotonicBacklog(
+                snapshot.authoritativeQueueDepths
+            )
+        }
+        let missFraction = snapshot.eventToSubmitMissFraction
+        if missFraction > maximumEventToSubmitMissFraction {
+            throw BenchmarkStrokeRuntimeGateError
+                .eventToSubmitMissFraction(
+                    actual: missFraction,
+                    maximum: maximumEventToSubmitMissFraction
+                )
+        }
+    }
+
+    private static func growsMonotonically(_ depths: [Int]) -> Bool {
+        guard depths.count >= 3,
+              let first = depths.first,
+              let last = depths.last,
+              last > first
+        else {
+            return false
+        }
+        return zip(depths, depths.dropFirst()).allSatisfy { before, after in
+            after >= before
+        }
+    }
+}
+
 public enum BenchmarkMetricError: Error, Equatable, LocalizedError {
     case insufficientLongStrokeFrames(Int)
     case nonFiniteMeasurement(series: String, frame: Int)
@@ -296,6 +381,7 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     public let canonicalBGRA8Digest: String?
     public let inputSampleCount: Int?
     public let logicalDabCount: Int?
+    public let strokeRuntime: StrokeRuntimeTelemetrySnapshot?
 
     public init(
         schemaVersion: Int,
@@ -366,6 +452,7 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         canonicalBGRA8Digest: String? = nil,
         inputSampleCount: Int? = nil,
         logicalDabCount: Int? = nil,
+        strokeRuntime: StrokeRuntimeTelemetrySnapshot? = nil,
         program: String? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -443,6 +530,19 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
         self.canonicalBGRA8Digest = canonicalBGRA8Digest
         self.inputSampleCount = inputSampleCount
         self.logicalDabCount = logicalDabCount
+        self.strokeRuntime = strokeRuntime
+    }
+
+    public func validateStrokeRuntimePerformance(
+        replayMode: StrokeRuntimeReplayMode
+    ) throws {
+        guard let strokeRuntime else {
+            throw BenchmarkStrokeRuntimeGateError.nonProductionTrace
+        }
+        try BenchmarkStrokeRuntimeGate.validate(
+            strokeRuntime,
+            replayMode: replayMode
+        )
     }
 
     public static func encode(_ record: BenchmarkRecord) throws -> Data {

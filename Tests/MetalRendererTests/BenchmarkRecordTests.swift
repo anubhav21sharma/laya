@@ -2,6 +2,56 @@ import Foundation
 @testable import MetalRenderer
 import Testing
 
+private func runtimeBenchmarkSnapshot() -> StrokeRuntimeTelemetrySnapshot {
+    StrokeRuntimeTelemetrySnapshot(
+        sessionID: UUID(
+            uuidString: "00000000-0000-0000-0000-000000000010"
+        )!,
+        segmentID: UUID(
+            uuidString: "00000000-0000-0000-0000-000000000011"
+        ),
+        strokeID: UUID(
+            uuidString: "00000000-0000-0000-0000-000000000012"
+        ),
+        traceProfile: .productionTenSeconds,
+        inputProvenance: StrokeRuntimeInputProvenanceCounts(
+            actual: 10,
+            coalesced: 20,
+            predicted: 5,
+            estimatedUpdate: 1
+        ),
+        newLogicalDabCount: 50,
+        newProjectedDabCount: 75,
+        authoritativeReplayCount: 0,
+        predictedReplayCount: 2,
+        authoritativeQueueDepth: 0,
+        predictedQueueDepth: 0,
+        authoritativeQueueHighWater: 3,
+        predictedQueueHighWater: 2,
+        prepare: .init(p50: 100, p95: 200, p99: 300),
+        eventToSubmit: .init(p50: 200, p95: 400, p99: 600),
+        gpu: .init(p50: 300, p95: 500, p99: 700),
+        frame: .init(p50: 16_000_000, p95: 17_000_000, p99: 18_000_000),
+        missedFrameCount: 1,
+        eventToSubmitMissCount: 1,
+        frameCount: 100,
+        observedDurationNanoseconds: 10_000_000_000,
+        cacheHitCount: 12,
+        cacheMissCount: 1,
+        memoryHighWaterBytes: 32_000_000,
+        authoritativeQueueDepths: [2, 1, 0],
+        lastTimestamps: StrokeRuntimeFrameTimestamps(
+            input: 1,
+            prepareStarted: 2,
+            prepareFinished: 3,
+            submitted: 4,
+            gpuStarted: 5,
+            gpuFinished: 6,
+            presented: 7
+        )
+    )
+}
+
 @Test
 func benchmarkRecordRoundTripsWithoutLosingMetrics() throws {
     let record = BenchmarkRecord(
@@ -40,6 +90,37 @@ func benchmarkRecordRoundTripsWithoutLosingMetrics() throws {
     #expect(decoded == record)
     #expect(record.missedFrameFraction == 0.005)
     #expect(BenchmarkRecord.percentile95([1, 2, 3, 4, 100]) == 100)
+}
+
+@Test
+func benchmarkRecordRoundTripsProductionRuntimeEvidence() throws {
+    let runtime = runtimeBenchmarkSnapshot()
+    let record = BenchmarkRecord(
+        schemaVersion: 1,
+        timestampUTC: "2026-08-01T12:00:00Z",
+        sceneName: "production-ten-second-trace",
+        hardware: BenchmarkHardware(
+            gpuName: "Test GPU",
+            logicalProcessorCount: 8,
+            physicalMemoryBytes: 16_000_000_000
+        ),
+        operatingSystem: "macOS Test",
+        build: BenchmarkBuild(
+            configuration: "Debug",
+            gitCommit: "0123456789abcdef"
+        ),
+        frameCount: 100,
+        cpuEncodeMilliseconds: [0.25],
+        gpuMilliseconds: [0.50],
+        peakResidentBytes: 42_000_000,
+        strokeRuntime: runtime
+    )
+
+    let decoded = try BenchmarkRecord.decode(
+        BenchmarkRecord.encode(record)
+    )
+
+    #expect(decoded.strokeRuntime == runtime)
 }
 
 @Test

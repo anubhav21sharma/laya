@@ -7,6 +7,12 @@ public struct DepositionTelemetrySnapshot: Equatable, Sendable {
     public let encodedInstanceCount: UInt64
     public let bufferHighWater: Int
     public let missedFrameCount: UInt64
+    public let submittedFrameCount: UInt64
+
+    public var missedFrameFraction: Double {
+        guard submittedFrameCount > 0 else { return 0 }
+        return Double(missedFrameCount) / Double(submittedFrameCount)
+    }
 
     public static let zero = DepositionTelemetrySnapshot(
         authoritativeBacklog: 0,
@@ -14,7 +20,8 @@ public struct DepositionTelemetrySnapshot: Equatable, Sendable {
         backlogHighWater: 0,
         encodedInstanceCount: 0,
         bufferHighWater: 0,
-        missedFrameCount: 0
+        missedFrameCount: 0,
+        submittedFrameCount: 0
     )
 
     public init(
@@ -23,7 +30,8 @@ public struct DepositionTelemetrySnapshot: Equatable, Sendable {
         backlogHighWater: Int,
         encodedInstanceCount: UInt64,
         bufferHighWater: Int,
-        missedFrameCount: UInt64
+        missedFrameCount: UInt64,
+        submittedFrameCount: UInt64 = 0
     ) {
         self.authoritativeBacklog = authoritativeBacklog
         self.predictedBacklog = predictedBacklog
@@ -31,10 +39,13 @@ public struct DepositionTelemetrySnapshot: Equatable, Sendable {
         self.encodedInstanceCount = encodedInstanceCount
         self.bufferHighWater = bufferHighWater
         self.missedFrameCount = missedFrameCount
+        self.submittedFrameCount = submittedFrameCount
     }
 }
 
-public struct DepositionDurationPercentiles: Equatable, Sendable {
+public struct DepositionDurationPercentiles:
+    Codable, Equatable, Sendable
+{
     public let p50: UInt64
     public let p95: UInt64
     public let p99: UInt64
@@ -86,7 +97,8 @@ struct DepositionTelemetry: Sendable {
             backlogHighWater: backlogHighWater,
             encodedInstanceCount: encodedInstanceCount,
             bufferHighWater: bufferHighWater,
-            missedFrameCount: missedFrameCount
+            missedFrameCount: missedFrameCount,
+            submittedFrameCount: submittedFrameCount
         )
     }
 
@@ -105,6 +117,7 @@ struct DepositionTelemetry: Sendable {
     private var encodedInstanceCount: UInt64 = 0
     private var bufferHighWater = 0
     private var missedFrameCount: UInt64 = 0
+    private var submittedFrameCount: UInt64 = 0
     private var eventToSubmitWindow: BoundedDurationWindow
     private var cpuPreparationWindow: BoundedDurationWindow
     private var gpuEncodingWindow: BoundedDurationWindow
@@ -172,6 +185,10 @@ struct DepositionTelemetry: Sendable {
         cpuPreparationWindow.append(cpuPreparationNanoseconds)
         gpuEncodingWindow.append(gpuEncodingNanoseconds)
         gpuCompletionWindow.append(gpuCompletionNanoseconds)
+        submittedFrameCount = Self.saturatingAdd(
+            submittedFrameCount,
+            1
+        )
     }
 
     mutating func reset() {
@@ -181,6 +198,7 @@ struct DepositionTelemetry: Sendable {
         encodedInstanceCount = 0
         bufferHighWater = 0
         missedFrameCount = 0
+        submittedFrameCount = 0
         eventToSubmitWindow.reset()
         cpuPreparationWindow.reset()
         gpuEncodingWindow.reset()
@@ -196,7 +214,7 @@ struct DepositionTelemetry: Sendable {
     }
 }
 
-private struct BoundedDurationWindow: Sendable {
+struct BoundedDurationWindow: Sendable {
     private let capacity: Int
     private var samples: ContiguousArray<UInt64>
     private var sampleCount = 0

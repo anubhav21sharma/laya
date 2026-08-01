@@ -27,34 +27,24 @@ struct DebugPerformanceHUD: View {
                     )
             )
             metric(
-                "p95",
+                "frame p95",
                 String(format: "%.2f ms", snapshot.p95FrameMilliseconds)
             )
             metric(
-                "miss",
-                String(format: "%.2f%%", snapshot.missedFramePercentage)
+                "prepare p95",
+                formattedMilliseconds(prepareP95)
             )
             metric(
-                "CPU/GPU",
-                String(
-                    format: "%.2f / %.2f ms",
-                    milliseconds(snapshot.deposition.cpuPreparation.p95),
-                    milliseconds(snapshot.deposition.gpuDuration.p95)
-                )
+                "submit p95",
+                formattedMilliseconds(submitP95)
             )
             metric(
-                "in/done",
-                String(
-                    format: "%.2f / %.2f ms",
-                    milliseconds(snapshot.deposition.eventToSubmit.p95),
-                    milliseconds(snapshot.deposition.gpuCompletion.p95)
-                )
+                "GPU p95",
+                formattedMilliseconds(gpuP95)
             )
             metric(
-                "queue",
-                "\(snapshot.deposition.authoritativeBacklog)"
-                    + "/\(snapshot.deposition.predictedBacklog)"
-                    + " · max \(snapshot.deposition.backlogHighWater)"
+                "actual/pred q",
+                "\(actualQueueDepth)/\(predictedQueueDepth)"
             )
             metric("log", loggingActive ? "REC" : "off")
         }
@@ -80,6 +70,35 @@ struct DebugPerformanceHUD: View {
 
     private func milliseconds(_ nanoseconds: UInt64) -> Double {
         Double(nanoseconds) / 1_000_000
+    }
+
+    private func formattedMilliseconds(_ nanoseconds: UInt64) -> String {
+        String(format: "%.2f ms", milliseconds(nanoseconds))
+    }
+
+    private var prepareP95: UInt64 {
+        snapshot.strokeRuntime?.prepare.p95
+            ?? snapshot.deposition.cpuPreparation.p95
+    }
+
+    private var submitP95: UInt64 {
+        snapshot.strokeRuntime?.eventToSubmit.p95
+            ?? snapshot.deposition.eventToSubmit.p95
+    }
+
+    private var gpuP95: UInt64 {
+        snapshot.strokeRuntime?.gpu.p95
+            ?? snapshot.deposition.gpuDuration.p95
+    }
+
+    private var actualQueueDepth: Int {
+        snapshot.strokeRuntime?.authoritativeQueueDepth
+            ?? snapshot.deposition.authoritativeBacklog
+    }
+
+    private var predictedQueueDepth: Int {
+        snapshot.strokeRuntime?.predictedQueueDepth
+            ?? snapshot.deposition.predictedBacklog
     }
 }
 #endif
