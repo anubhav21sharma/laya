@@ -154,7 +154,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public internal(set) var counters = GridStructuralCounters()
     private var brushLabActualDabCount = 0
     private var brushLabPredictedDabCount = 0
-    private var deferredLogicalDabPublications: [LogicalDab] = []
+    private struct DeferredLogicalDabPublication {
+        let generation: UInt64
+        let dab: LogicalDab
+    }
+    private var logicalDabPublicationGeneration: UInt64 = 0
+    private var stagedLogicalDabPublications:
+        [DeferredLogicalDabPublication] = []
+    private var readyLogicalDabPublications:
+        [DeferredLogicalDabPublication] = []
+    private var readyLogicalDabPublicationHead = 0
+    private var isDrainingLogicalDabPublications = false
     private var logicalDabPublicationScopeDepth = 0
     private var logicalDabPublicationScopeFailed = false
     private var strokeRuntimeController: StrokeRuntimeProductionController?
@@ -1167,11 +1177,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     token: token,
                     samples: samples[suffixStart..<index]
                 )
+                commitLogicalDabPublicationCheckpoint()
             } else {
                 try appendAuthoritativeStroke(
                     token: token,
                     sample: samples[index]
                 )
+                commitLogicalDabPublicationCheckpoint()
                 index += 1
             }
         }
@@ -3153,6 +3165,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             logicalDabPublicationScopeDepth < Int.max,
             "Logical-dab publication scope depth overflowed"
         )
+        if logicalDabPublicationScopeDepth == 0 {
+            precondition(
+                stagedLogicalDabPublications.isEmpty,
+                "Logical-dab publication staging was not closed"
+            )
+            precondition(
+                !logicalDabPublicationScopeFailed,
+                "Logical-dab publication failure was not cleared"
+            )
+        }
         logicalDabPublicationScopeDepth += 1
     }
 
@@ -3168,21 +3190,62 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         logicalDabPublicationScopeDepth -= 1
         guard logicalDabPublicationScopeDepth == 0 else { return }
-        defer { logicalDabPublicationScopeFailed = false }
-        guard !logicalDabPublicationScopeFailed else {
-            deferredLogicalDabPublications.removeAll(keepingCapacity: true)
-            return
+        if logicalDabPublicationScopeFailed {
+            stagedLogicalDabPublications.removeAll(keepingCapacity: true)
+        } else {
+            commitStagedLogicalDabPublications()
         }
+        logicalDabPublicationScopeFailed = false
         drainDeferredLogicalDabPublications()
     }
 
+    private func commitLogicalDabPublicationCheckpoint() {
+        precondition(
+            logicalDabPublicationScopeDepth == 1,
+            "Logical-dab checkpoints belong to the outer batch operation"
+        )
+        precondition(
+            !logicalDabPublicationScopeFailed,
+            "Failed logical-dab publication cannot be checkpointed"
+        )
+        commitStagedLogicalDabPublications()
+    }
+
+    private func commitStagedLogicalDabPublications() {
+        guard !stagedLogicalDabPublications.isEmpty else { return }
+        readyLogicalDabPublications.append(
+            contentsOf: stagedLogicalDabPublications
+        )
+        stagedLogicalDabPublications.removeAll(keepingCapacity: true)
+    }
+
     private func drainDeferredLogicalDabPublications() {
-        guard !deferredLogicalDabPublications.isEmpty else { return }
-        let dabs = deferredLogicalDabPublications
-        deferredLogicalDabPublications.removeAll(keepingCapacity: true)
-        guard let observer = onLogicalDabsGenerated else { return }
-        for dab in dabs {
-            observer(dab)
+        guard logicalDabPublicationScopeDepth == 0,
+              !isDrainingLogicalDabPublications
+        else { return }
+        isDrainingLogicalDabPublications = true
+        defer {
+            precondition(
+                readyLogicalDabPublicationHead
+                    == readyLogicalDabPublications.count,
+                "Logical-dab dispatcher stopped before its FIFO drained"
+            )
+            readyLogicalDabPublications.removeAll(keepingCapacity: true)
+            readyLogicalDabPublicationHead = 0
+            isDrainingLogicalDabPublications = false
+        }
+        while readyLogicalDabPublicationHead
+            < readyLogicalDabPublications.count
+        {
+            let publication = readyLogicalDabPublications[
+                readyLogicalDabPublicationHead
+            ]
+            readyLogicalDabPublicationHead += 1
+            guard publication.generation
+                    == logicalDabPublicationGeneration,
+                  let observer = onLogicalDabsGenerated
+            else { continue }
+            observer(publication.dab)
         }
     }
 
@@ -3202,7 +3265,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 brushLabActualDabCount += 1
             }
             if shouldPublish {
-                deferredLogicalDabPublications.append(dab)
+                stagedLogicalDabPublications.append(
+                    DeferredLogicalDabPublication(
+                        generation: logicalDabPublicationGeneration,
+                        dab: dab
+                    )
+                )
             }
         }
     }
@@ -3225,7 +3293,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     brushLabActualDabCount += 1
                 }
                 if shouldPublish {
-                    deferredLogicalDabPublications.append(dab)
+                    stagedLogicalDabPublications.append(
+                        DeferredLogicalDabPublication(
+                            generation: logicalDabPublicationGeneration,
+                            dab: dab
+                        )
+                    )
                 }
             }
         }
@@ -5785,7 +5858,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func resetLiveState() {
-        deferredLogicalDabPublications.removeAll(keepingCapacity: true)
+        invalidateLogicalDabPublications()
         strokeGenerator?.cancel()
         strokeGenerator = nil
         strokeRenderCoordinator?.cancel()
@@ -5805,6 +5878,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         needsReplayClear = true
         nextReplayEpoch = 1
         knownStrokeTotalDistance = nil
+    }
+
+    private func invalidateLogicalDabPublications() {
+        logicalDabPublicationGeneration &+= 1
+        stagedLogicalDabPublications.removeAll(keepingCapacity: true)
+        guard !isDrainingLogicalDabPublications else { return }
+        readyLogicalDabPublications.removeAll(keepingCapacity: true)
+        readyLogicalDabPublicationHead = 0
     }
 
     func report(_ error: MetalRendererError) {

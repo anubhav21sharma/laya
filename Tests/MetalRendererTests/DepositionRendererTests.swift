@@ -2961,7 +2961,7 @@ struct DepositionRendererTests {
             sample: depositionSample(.moved, x: 40, y: 24)
         )
 
-        #expect(callbackCount > 0)
+        #expect(callbackCount == 1)
         #expect(cancellationError == nil)
         #expect(setup.renderer.isIdle)
         setup.renderer.onLogicalDabsGenerated = nil
@@ -3022,7 +3022,7 @@ struct DepositionRendererTests {
             sample: depositionSample(.ended, x: 52, y: 24)
         )
 
-        #expect(callbackCount > 0)
+        #expect(callbackCount == 1)
         #expect(cancellationError == nil)
         #expect(setup.renderer.isIdle)
         setup.renderer.onLogicalDabsGenerated = nil
@@ -3039,6 +3039,353 @@ struct DepositionRendererTests {
         )
         try setup.renderer.cancelStroke(token: recoveryToken)
         #expect(setup.renderer.isIdle)
+    }
+
+    @Test
+    @MainActor
+    func logicalDabObserverReentrantChainIsIterativeAndBounded()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let token = RendererOperationToken(rawValue: 90_020)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 8, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+
+        let chainLength = 256
+        var remaining = chainLength
+        var callbackDepth = 0
+        var maximumCallbackDepth = 0
+        var appendError: String?
+        setup.renderer.onLogicalDabsGenerated = { _ in
+            callbackDepth += 1
+            maximumCallbackDepth = max(maximumCallbackDepth, callbackDepth)
+            defer { callbackDepth -= 1 }
+            guard remaining > 0, appendError == nil else { return }
+            remaining -= 1
+            let index = chainLength - remaining
+            do {
+                try setup.renderer.appendStroke(
+                    token: token,
+                    sample: .mouse(
+                        position: ScreenPoint(
+                            x: index.isMultiple(of: 2) ? 24 : 28,
+                            y: 24
+                        ),
+                        timestamp: TimeInterval(index) / 240,
+                        phase: .moved
+                    )
+                )
+            } catch {
+                appendError = String(describing: error)
+            }
+        }
+
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionSample(.moved, x: 20, y: 24)
+        )
+
+        #expect(remaining == 0)
+        #expect(appendError == nil)
+        #expect(maximumCallbackDepth == 1)
+        setup.renderer.onLogicalDabsGenerated = nil
+        try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test
+    @MainActor
+    func logicalDabObserverNestedAppendPreservesFIFOOrder()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let token = RendererOperationToken(rawValue: 90_021)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 8, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+
+        var distances: [Float] = []
+        var startedNestedAppend = false
+        var nestedError: String?
+        setup.renderer.onLogicalDabsGenerated = { dab in
+            distances.append(dab.sourceDistance)
+            guard !startedNestedAppend else { return }
+            startedNestedAppend = true
+            do {
+                try setup.renderer.appendStroke(
+                    token: token,
+                    sample: depositionSample(.moved, x: 56, y: 24)
+                )
+            } catch {
+                nestedError = String(describing: error)
+            }
+        }
+
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionSample(.moved, x: 40, y: 24)
+        )
+
+        #expect(startedNestedAppend)
+        #expect(nestedError == nil)
+        #expect(distances.count > 2)
+        #expect(
+            zip(distances, distances.dropFirst()).allSatisfy { pair in
+                pair.0 <= pair.1
+            }
+        )
+        setup.renderer.onLogicalDabsGenerated = nil
+        try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test
+    @MainActor
+    func logicalDabObserverCancelAndNewStrokeDropsOldGenerationTail()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let oldToken = RendererOperationToken(rawValue: 90_022)
+        let newToken = RendererOperationToken(rawValue: 90_023)
+        let replacementColor = InkColor(
+            red: 1,
+            green: 0,
+            blue: 0,
+            alpha: 1
+        )!
+        try setup.renderer.beginStroke(
+            token: oldToken,
+            sample: depositionSample(.began, x: 8, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+
+        var observedColors: [InkColor] = []
+        var replacedStroke = false
+        var replacementError: String?
+        setup.renderer.onLogicalDabsGenerated = { dab in
+            observedColors.append(dab.color)
+            guard !replacedStroke else { return }
+            replacedStroke = true
+            do {
+                try setup.renderer.cancelStroke(token: oldToken)
+                try setup.renderer.beginStroke(
+                    token: newToken,
+                    sample: depositionSample(.began, x: 12, y: 24),
+                    style: depositionStyle(
+                        brush,
+                        compositeMode: .draw,
+                        diameter: 12,
+                        color: replacementColor
+                    )
+                )
+                try setup.renderer.appendStroke(
+                    token: newToken,
+                    sample: depositionSample(.moved, x: 44, y: 24)
+                )
+            } catch {
+                replacementError = String(describing: error)
+            }
+        }
+
+        try setup.renderer.appendStroke(
+            token: oldToken,
+            sample: depositionSample(.moved, x: 40, y: 24)
+        )
+
+        #expect(replacedStroke)
+        #expect(replacementError == nil)
+        #expect(observedColors.first == .black)
+        #expect(!observedColors.dropFirst().isEmpty)
+        #expect(
+            observedColors.dropFirst().allSatisfy {
+                $0 == replacementColor
+            }
+        )
+        setup.renderer.onLogicalDabsGenerated = nil
+        try setup.renderer.cancelStroke(token: newToken)
+        #expect(setup.renderer.isIdle)
+    }
+
+    @Test
+    @MainActor
+    func nativeInkBatchFailurePublishesAcceptedPrefixExactlyOnce()
+        async throws
+    {
+        guard let reference = try makeDepositionRendererSetup(),
+              let failing = try makeDepositionRendererSetup()
+        else { return }
+        let referenceBrush = try await reference.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        let failingBrush = try await failing.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try reference.renderer.activateDrawBrush(referenceBrush)
+        try failing.renderer.activateDrawBrush(failingBrush)
+        let referenceToken = RendererOperationToken(rawValue: 90_030)
+        let failingToken = RendererOperationToken(rawValue: 90_031)
+        let began = depositionSample(.began, x: 8, y: 24)
+        try reference.renderer.beginStroke(
+            token: referenceToken,
+            sample: began,
+            style: depositionStyle(
+                referenceBrush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try failing.renderer.beginStroke(
+            token: failingToken,
+            sample: began,
+            style: depositionStyle(
+                failingBrush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        _ = try reference.renderer.flushPendingLiveForHarness()
+        _ = try failing.renderer.flushPendingLiveForHarness()
+        let postBeginPixels = depositionTextureBytes(
+            try failing.renderer.renderOffscreenDisplayForHarness(
+                width: 64,
+                height: 64,
+                showGridLines: false
+            ).texture
+        )
+
+        var expectedPrefixDabs: [LogicalDab] = []
+        reference.renderer.onLogicalDabsGenerated = {
+            expectedPrefixDabs.append($0)
+        }
+        let acceptedSample = depositionSample(.moved, x: 40, y: 24)
+        try reference.renderer.appendStroke(
+            token: referenceToken,
+            sample: acceptedSample
+        )
+        let expectedPrefixRecords =
+            reference.renderer.harnessScheduledAuthoritativeRecords
+        let expectedCoordinator = try #require(
+            reference.renderer.compatibilityInkCoordinatorSnapshotForTesting
+        )
+        let expectedBuffer = try #require(
+            reference.renderer.transientStrokeBuffer
+        )
+        let expectedArena =
+            reference.renderer.harnessTransientDabArenaSnapshot
+        #expect(!expectedPrefixDabs.isEmpty)
+        #expect(!expectedPrefixRecords.isEmpty)
+
+        let capacity = expectedPrefixRecords.count
+        let constrainedBudget = try depositionFrameBudget(
+            maximumAuthoritativeInstances: capacity,
+            maximumPendingAuthoritativeInstances: capacity
+        )
+        let previousBudget = failing.renderer
+            .replaceDepositionFrameBudgetForHarness(constrainedBudget)
+        let previousScheduler = try #require(
+            failing.renderer.replaceActiveStrokeSchedulerForHarness(
+                constrainedBudget
+            )
+        )
+        var actualDabs: [LogicalDab] = []
+        failing.renderer.onLogicalDabsGenerated = { actualDabs.append($0) }
+
+        var batchError: MetalRendererError?
+        do {
+            try failing.renderer.appendStrokeBatch(
+                token: failingToken,
+                samples: [
+                    acceptedSample,
+                    depositionSample(.moved, x: 200, y: 24),
+                ]
+            )
+            Issue.record("Expected the second batch sample to fail preflight")
+        } catch let error as MetalRendererError {
+            batchError = error
+        }
+
+        #expect(
+            batchError
+                == .projectedInstanceCapacityExceeded(capacity)
+        )
+        #expect(actualDabs == expectedPrefixDabs)
+        #expect(
+            failing.renderer.compatibilityInkCoordinatorSnapshotForTesting
+                == expectedCoordinator
+        )
+        #expect(failing.renderer.transientStrokeBuffer == expectedBuffer)
+        #expect(
+            failing.renderer.harnessTransientDabArenaSnapshot
+                == expectedArena
+        )
+        #expect(
+            failing.renderer.harnessScheduledAuthoritativeRecords
+                == expectedPrefixRecords
+        )
+
+        _ = try reference.renderer.flushPendingLiveForHarness()
+        _ = try failing.renderer.flushPendingLiveForHarness()
+        let referencePixels = depositionTextureBytes(
+            try reference.renderer.renderOffscreenDisplayForHarness(
+                width: 64,
+                height: 64,
+                showGridLines: false
+            ).texture
+        )
+        let failingPixels = depositionTextureBytes(
+            try failing.renderer.renderOffscreenDisplayForHarness(
+                width: 64,
+                height: 64,
+                showGridLines: false
+            ).texture
+        )
+        #expect(referencePixels != postBeginPixels)
+        #expect(failingPixels == referencePixels)
+
+        failing.renderer.replaceDepositionFrameBudgetForHarness(
+            previousBudget
+        )
+        failing.renderer.restoreActiveStrokeSchedulerForHarness(
+            previousScheduler
+        )
+        let prefixCallbackCount = actualDabs.count
+        try failing.renderer.appendStroke(
+            token: failingToken,
+            sample: depositionSample(.moved, x: 72, y: 24)
+        )
+        #expect(actualDabs.count > prefixCallbackCount)
+        reference.renderer.onLogicalDabsGenerated = nil
+        failing.renderer.onLogicalDabsGenerated = nil
+        try reference.renderer.cancelStroke(token: referenceToken)
+        try failing.renderer.cancelStroke(token: failingToken)
+        #expect(failing.renderer.isIdle)
     }
 }
 
@@ -3362,10 +3709,11 @@ private func depositionStyle(
     _ brush: CompiledBrush,
     compositeMode: StrokeCompositeMode,
     diameter: Float = 20,
-    eraserStrength: Float = 1
+    eraserStrength: Float = 1,
+    color: InkColor = .black
 ) -> StrokeRenderStyle {
     StrokeRenderStyle(
-        color: .black,
+        color: color,
         diameter: diameter,
         compositeMode: compositeMode,
         eraserStrength: eraserStrength,
