@@ -83,6 +83,20 @@ struct BrushCorrectiveFunctionalTests {
             )
         }
 
+        let blank = try BrushFunctionalMetrics.measure(
+            bgra8: [UInt8](repeating: 0, count: 8 * 8 * 4),
+            width: 8,
+            height: 8,
+            centerline: [
+                ScreenPoint(x: 1, y: 3),
+                ScreenPoint(x: 5, y: 3),
+            ],
+            nominalDiameter: 2
+        )
+        #expect(blank.changedPixelCount < 128)
+        #expect(blank.alphaSupportBounds == nil)
+        #expect(blank.centerlineWidthP50 < 4)
+
         var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
         pixels[(3 * 8 + 3) * 4 + 3] = 255
         pixels[(7 * 8 + 7) * 4 + 3] = 255
@@ -103,17 +117,126 @@ struct BrushCorrectiveFunctionalTests {
     }
 
     @Test
+    func scalarReadbackCounterexamplesDetectBoundsWidthAlphaAndRetreat()
+        throws
+    {
+        let centerline = [
+            ScreenPoint(x: 2, y: 3),
+            ScreenPoint(x: 9, y: 3),
+        ]
+        let baseline = try BrushFunctionalMetrics.measure(
+            bgra8: rectanglePixels(
+                width: 12,
+                height: 8,
+                xRange: 2...8,
+                yRange: 2...4,
+                alpha: 128
+            ),
+            width: 12,
+            height: 8,
+            centerline: centerline,
+            nominalDiameter: 3
+        )
+
+        var expandedBoundsPixels = rectanglePixels(
+            width: 12,
+            height: 8,
+            xRange: 2...8,
+            yRange: 2...4,
+            alpha: 128
+        )
+        expandedBoundsPixels[(6 * 12 + 10) * 4 + 3] = 128
+        let expandedBounds = try BrushFunctionalMetrics.measure(
+            bgra8: expandedBoundsPixels,
+            width: 12,
+            height: 8,
+            centerline: centerline,
+            nominalDiameter: 3
+        )
+        #expect(expandedBounds.alphaSupportBounds == PixelBounds(
+            minimumX: 2,
+            minimumY: 2,
+            maximumX: 10,
+            maximumY: 6
+        ))
+        #expect(expandedBounds.alphaSupportBounds != baseline.alphaSupportBounds)
+
+        let wider = try BrushFunctionalMetrics.measure(
+            bgra8: rectanglePixels(
+                width: 12,
+                height: 8,
+                xRange: 2...8,
+                yRange: 1...5,
+                alpha: 128
+            ),
+            width: 12,
+            height: 8,
+            centerline: centerline,
+            nominalDiameter: 5
+        )
+        #expect(wider.centerlineWidthP50 == 5)
+        #expect(wider.centerlineWidthP95 == 5)
+        #expect(wider.centerlineWidthP50 != baseline.centerlineWidthP50)
+        #expect(wider.centerlineWidthP95 != baseline.centerlineWidthP95)
+
+        let fainter = try BrushFunctionalMetrics.measure(
+            bgra8: rectanglePixels(
+                width: 12,
+                height: 8,
+                xRange: 2...8,
+                yRange: 2...4,
+                alpha: 32
+            ),
+            width: 12,
+            height: 8,
+            centerline: centerline,
+            nominalDiameter: 3
+        )
+        #expect(abs(fainter.alphaP50 - (32 / 255)) < 0.0001)
+        #expect(abs(fainter.alphaP90 - (32 / 255)) < 0.0001)
+        #expect(fainter.alphaP50 != baseline.alphaP50)
+        #expect(fainter.alphaP90 != baseline.alphaP90)
+
+        let shortened = try BrushFunctionalMetrics.measure(
+            bgra8: rectanglePixels(
+                width: 12,
+                height: 8,
+                xRange: 2...6,
+                yRange: 2...4,
+                alpha: 128
+            ),
+            width: 12,
+            height: 8,
+            centerline: centerline,
+            nominalDiameter: 3
+        )
+        #expect(shortened.endpointRetreatPixels == 3)
+        #expect(
+            shortened.endpointRetreatPixels
+                > baseline.endpointRetreatPixels
+        )
+    }
+
+    @Test
+    @MainActor
+    func requiredMetalValidationRejectsMissingDevice() {
+        #expect(throws: RequiredFunctionalMetalError.deviceUnavailable) {
+            _ = try requiredMetalDevice(nil)
+        }
+    }
+
+    @Test
     @MainActor
     func tenSecondTechnicalInkDoesNotReplayRetainedActualBody()
         async throws
     {
-        guard let capture = try await render(
+        let capture = try await render(
             entry: ProfessionalBrushCatalog.technicalInk,
             sceneName: "professional-technical-ink",
             trace: StrokeTraceFixtures.correctiveTechnicalInkTenSecondLine,
             diameter: 40,
             baselineStem: "technical-ink-ten-second"
-        ) else { return }
+        )
 
         #expect(
             capture.maximumRetainedDabCount == 0,
@@ -126,13 +249,13 @@ struct BrushCorrectiveFunctionalTests {
     func fastReleaseTechnicalInkKeepsVisibleEndpointAtPointerUp()
         async throws
     {
-        guard let capture = try await render(
+        let capture = try await render(
             entry: ProfessionalBrushCatalog.technicalInk,
             sceneName: "professional-technical-ink",
             trace: StrokeTraceFixtures.correctiveTechnicalInkFastRelease,
             diameter: 40,
             baselineStem: "technical-ink-fast-release"
-        ) else { return }
+        )
         let measurement = try measure(
             capture,
             trace: StrokeTraceFixtures.correctiveTechnicalInkFastRelease,
@@ -151,13 +274,13 @@ struct BrushCorrectiveFunctionalTests {
     func fortyPixelGraphiteSupportMatchesNominalCursorFootprint()
         async throws
     {
-        guard let capture = try await render(
+        let capture = try await render(
             entry: ProfessionalBrushCatalog.graphitePencil,
             sceneName: "professional-graphite-pencil",
             trace: StrokeTraceFixtures.correctiveGraphiteFortyPixelLine,
             diameter: 40,
             baselineStem: "graphite-forty-pixel"
-        ) else { return }
+        )
         let measurement = try measure(
             capture,
             trace: StrokeTraceFixtures.correctiveGraphiteFortyPixelLine,
@@ -180,13 +303,13 @@ struct BrushCorrectiveFunctionalTests {
     func neutralPressureCharcoalProducesVisibleContinuousSupport()
         async throws
     {
-        guard let capture = try await render(
+        let capture = try await render(
             entry: ProfessionalBrushCatalog.naturalCharcoal,
             sceneName: "professional-natural-charcoal",
             trace: StrokeTraceFixtures.correctiveCharcoalNeutralPressureLine,
             diameter: 40,
             baselineStem: "charcoal-neutral-pressure"
-        ) else { return }
+        )
         let measurement = try measure(
             capture,
             trace: StrokeTraceFixtures.correctiveCharcoalNeutralPressureLine,
@@ -220,13 +343,13 @@ struct BrushCorrectiveFunctionalTests {
             ),
         ]
         for (trace, stem) in fixtures {
-            guard let capture = try await render(
+            let capture = try await render(
                 entry: ProfessionalBrushCatalog.chiselMarker,
                 sceneName: "professional-chisel-marker",
                 trace: trace,
                 diameter: 40,
                 baselineStem: stem
-            ) else { return }
+            )
             let measurement = try measure(
                 capture,
                 trace: trace,
@@ -234,6 +357,18 @@ struct BrushCorrectiveFunctionalTests {
                 alphaThreshold: 8
             )
 
+            #expect(
+                measurement.changedPixelCount >= 128,
+                "\(trace.name) changed only \(measurement.changedPixelCount) pixels"
+            )
+            #expect(
+                measurement.alphaSupportBounds != nil,
+                "\(trace.name) has no visible alpha support"
+            )
+            #expect(
+                measurement.centerlineWidthP50 >= 4,
+                "\(trace.name) p50 width was \(measurement.centerlineWidthP50) px"
+            )
             #expect(
                 measurement.turnProtrusionPixels <= 4,
                 "\(trace.name) protruded \(measurement.turnProtrusionPixels) px"
@@ -246,6 +381,21 @@ struct BrushCorrectiveFunctionalTests {
     }
 }
 
+private enum RequiredFunctionalMetalError: Error, Equatable {
+    case deviceUnavailable
+    case commandQueueUnavailable
+}
+
+@MainActor
+private func requiredMetalDevice(
+    _ device: (any MTLDevice)?
+) throws -> any MTLDevice {
+    guard let device else {
+        throw RequiredFunctionalMetalError.deviceUnavailable
+    }
+    return device
+}
+
 private struct FunctionalRasterCapture {
     let width: Int
     let height: Int
@@ -254,6 +404,22 @@ private struct FunctionalRasterCapture {
 }
 
 private extension BrushCorrectiveFunctionalTests {
+    func rectanglePixels(
+        width: Int,
+        height: Int,
+        xRange: ClosedRange<Int>,
+        yRange: ClosedRange<Int>,
+        alpha: UInt8
+    ) -> [UInt8] {
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        for y in yRange {
+            for x in xRange {
+                pixels[(y * width + x) * 4 + 3] = alpha
+            }
+        }
+        return pixels
+    }
+
     @MainActor
     func render(
         entry: ProfessionalBrushEntry,
@@ -261,10 +427,11 @@ private extension BrushCorrectiveFunctionalTests {
         trace: StrokeTraceFixture,
         diameter: Float,
         baselineStem: String
-    ) async throws -> FunctionalRasterCapture? {
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let commandQueue = device.makeCommandQueue()
-        else { return nil }
+    ) async throws -> FunctionalRasterCapture {
+        let device = try requiredMetalDevice(MTLCreateSystemDefaultDevice())
+        guard let commandQueue = device.makeCommandQueue() else {
+            throw RequiredFunctionalMetalError.commandQueueUnavailable
+        }
         let scene = try repositoryScene(named: sceneName)
         let library = try depositionHarnessTestLibrary(device: device)
         let profile = try BrushDeviceProfile(
