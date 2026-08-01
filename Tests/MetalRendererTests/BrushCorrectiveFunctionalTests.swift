@@ -6,21 +6,30 @@ import Metal
 import PatternEngine
 import Testing
 
+private let correctiveFunctionalCanvasSize = PixelSize(
+    width: 512,
+    height: 512
+)
+
 @Suite("Brush corrective functional", .serialized)
 struct BrushCorrectiveFunctionalTests {
     @Test
-    func professionalFunctionalScenesProvideUnclippedDirectTraceCanvas()
-        throws
-    {
-        for name in [
-            "professional-technical-ink",
-            "professional-graphite-pencil",
-            "professional-natural-charcoal",
-            "professional-chisel-marker",
-        ] {
-            let scene = try repositoryScene(named: name)
-            #expect(scene.width == 512, "\(name) width")
-            #expect(scene.height == 512, "\(name) height")
+    func correctiveTraceCorpusFitsItsDedicatedCanvasWithoutClipping() {
+        #expect(
+            correctiveFunctionalCanvasSize
+                == PixelSize(width: 512, height: 512)
+        )
+        for trace in StrokeTraceFixtures.corrective {
+            for sample in trace.samples {
+                #expect(
+                    (32...480).contains(sample.position.x),
+                    "\(trace.name) x"
+                )
+                #expect(
+                    (32...480).contains(sample.position.y),
+                    "\(trace.name) y"
+                )
+            }
         }
     }
 
@@ -232,7 +241,6 @@ struct BrushCorrectiveFunctionalTests {
     {
         let capture = try await render(
             entry: ProfessionalBrushCatalog.technicalInk,
-            sceneName: "professional-technical-ink",
             trace: StrokeTraceFixtures.correctiveTechnicalInkTenSecondLine,
             diameter: 40,
             baselineStem: "technical-ink-ten-second"
@@ -251,7 +259,6 @@ struct BrushCorrectiveFunctionalTests {
     {
         let capture = try await render(
             entry: ProfessionalBrushCatalog.technicalInk,
-            sceneName: "professional-technical-ink",
             trace: StrokeTraceFixtures.correctiveTechnicalInkFastRelease,
             diameter: 40,
             baselineStem: "technical-ink-fast-release"
@@ -276,7 +283,6 @@ struct BrushCorrectiveFunctionalTests {
     {
         let capture = try await render(
             entry: ProfessionalBrushCatalog.graphitePencil,
-            sceneName: "professional-graphite-pencil",
             trace: StrokeTraceFixtures.correctiveGraphiteFortyPixelLine,
             diameter: 40,
             baselineStem: "graphite-forty-pixel"
@@ -305,7 +311,6 @@ struct BrushCorrectiveFunctionalTests {
     {
         let capture = try await render(
             entry: ProfessionalBrushCatalog.naturalCharcoal,
-            sceneName: "professional-natural-charcoal",
             trace: StrokeTraceFixtures.correctiveCharcoalNeutralPressureLine,
             diameter: 40,
             baselineStem: "charcoal-neutral-pressure"
@@ -345,7 +350,6 @@ struct BrushCorrectiveFunctionalTests {
         for (trace, stem) in fixtures {
             let capture = try await render(
                 entry: ProfessionalBrushCatalog.chiselMarker,
-                sceneName: "professional-chisel-marker",
                 trace: trace,
                 diameter: 40,
                 baselineStem: stem
@@ -423,7 +427,6 @@ private extension BrushCorrectiveFunctionalTests {
     @MainActor
     func render(
         entry: ProfessionalBrushEntry,
-        sceneName: String,
         trace: StrokeTraceFixture,
         diameter: Float,
         baselineStem: String
@@ -432,7 +435,7 @@ private extension BrushCorrectiveFunctionalTests {
         guard let commandQueue = device.makeCommandQueue() else {
             throw RequiredFunctionalMetalError.commandQueueUnavailable
         }
-        let scene = try repositoryScene(named: sceneName)
+        let canvasSize = correctiveFunctionalCanvasSize
         let library = try depositionHarnessTestLibrary(device: device)
         let profile = try BrushDeviceProfile(
             registryID: device.registryID,
@@ -462,11 +465,11 @@ private extension BrushCorrectiveFunctionalTests {
             device: device,
             library: library,
             drawableSize: PatternSize(
-                width: Float(scene.width),
-                height: Float(scene.height)
+                width: Float(canvasSize.width),
+                height: Float(canvasSize.height)
             ),
             configuration: TilingCanvasConfiguration(
-                pixelSize: PixelSize(width: scene.width, height: scene.height),
+                pixelSize: canvasSize,
                 tiling: .grid
             )
         )
@@ -499,8 +502,8 @@ private extension BrushCorrectiveFunctionalTests {
             )
         }
         let beforeRelease = try renderer.renderOffscreenDisplayForHarness(
-            width: scene.width,
-            height: scene.height,
+            width: canvasSize.width,
+            height: canvasSize.height,
             showGridLines: false
         ).texture
         let beforeReleaseBytes = textureBytes(beforeRelease)
@@ -515,8 +518,8 @@ private extension BrushCorrectiveFunctionalTests {
             maximumRetainedDabCount: &maximumRetainedDabCount
         )
         let afterRelease = try renderer.renderOffscreenDisplayForHarness(
-            width: scene.width,
-            height: scene.height,
+            width: canvasSize.width,
+            height: canvasSize.height,
             showGridLines: false
         ).texture
         let afterReleaseBytes = textureBytes(afterRelease)
@@ -526,26 +529,26 @@ private extension BrushCorrectiveFunctionalTests {
 
         try writeFailureBaseline(
             beforeReleaseBytes,
-            width: scene.width,
-            height: scene.height,
+            width: canvasSize.width,
+            height: canvasSize.height,
             stem: "\(baselineStem)-before-release"
         )
         try writeFailureBaseline(
             afterReleaseBytes,
-            width: scene.width,
-            height: scene.height,
+            width: canvasSize.width,
+            height: canvasSize.height,
             stem: "\(baselineStem)-after-release"
         )
         try writeFailureBaseline(
             committedBytes,
-            width: scene.width,
-            height: scene.height,
+            width: canvasSize.width,
+            height: canvasSize.height,
             stem: "\(baselineStem)-committed"
         )
 
         return FunctionalRasterCapture(
-            width: scene.width,
-            height: scene.height,
+            width: canvasSize.width,
+            height: canvasSize.height,
             committedBGRA8: committedBytes,
             maximumRetainedDabCount: maximumRetainedDabCount
         )

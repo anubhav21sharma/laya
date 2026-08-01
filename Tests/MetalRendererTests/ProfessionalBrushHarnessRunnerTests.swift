@@ -43,6 +43,20 @@ struct ProfessionalBrushHarnessRunnerTests {
     }
 
     @Test
+    func artifactSceneDimensionsStayIndependentFromCorrectiveCanvases()
+        throws
+    {
+        let scenes = try ProfessionalBrushEvidenceValidator.loadScenes(
+            from: professionalSceneDirectory()
+        )
+
+        for scene in scenes {
+            #expect(scene.width == 128, "\(scene.name) width")
+            #expect(scene.height == 128, "\(scene.name) height")
+        }
+    }
+
+    @Test
     func sceneLoaderRejectsFilenameAndDecodedNameMismatch() throws {
         let directory = temporaryDirectory(named: "scene-name-binding")
         defer { try? FileManager.default.removeItem(at: directory) }

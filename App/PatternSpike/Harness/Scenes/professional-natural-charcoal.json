@@ -1,8 +1,8 @@
 {
   "schemaVersion": 6,
   "name": "professional-natural-charcoal",
-  "width": 512,
-  "height": 512,
+  "width": 128,
+  "height": 128,
   "depositionInvariantExpectations": {
     "boundedLiveWork": true,
     "destinationOutEraserCompatible": true,
