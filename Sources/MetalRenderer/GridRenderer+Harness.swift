@@ -776,7 +776,7 @@ extension GridRenderer {
         activeEraserBrush?.renderIdentity
     }
     var harnessCapturedCompiledBrushIdentity: BrushRenderIdentity? {
-        activeStroke?.compiledBrush.renderIdentity
+        activeStroke?.brush.renderIdentity
     }
     var harnessScheduledAuthoritativeRecords:
         [ProjectedDepositionRecord]

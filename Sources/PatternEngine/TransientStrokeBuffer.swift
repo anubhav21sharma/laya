@@ -925,7 +925,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         actualChunks = []
         predictedChunks = []
         actualChunks.reserveCapacity(
-            TransientStrokeBufferContract.wholeStrokeSampleCapacity
+            replayContract.mode == .appendOnly
+                ? BrushRecipePolicy.replayTailLimits.maximumSamples
+                : TransientStrokeBufferContract.wholeStrokeSampleCapacity
         )
         predictedChunks.reserveCapacity(
             TransientStrokeBufferContract.wholeStrokeSampleCapacity

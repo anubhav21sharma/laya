@@ -313,7 +313,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     struct ActiveStrokeExecution {
         let token: RendererOperationToken
         let style: StrokeRenderStyle
-        let compiledBrush: CompiledBrush
+        let brush: CompiledBrushRenderState
         let renderIdentity: BrushRenderIdentity
         var scheduler: FrameScheduler?
         var commitRequested: Bool
@@ -557,6 +557,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     var activeStroke: ActiveStrokeExecution?
     var pendingRasterOperation: PendingRasterOperation?
     var strokeGenerator: BrushStrokeGenerator?
+    var strokeRenderCoordinator: StrokeRenderCoordinator?
     var predictedStrokeGenerator: BrushStrokeGenerator?
     var transientStrokeBuffer: TransientStrokeBuffer?
     var brushInputDeriver = BrushInputDeriver()
@@ -580,6 +581,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var nextRasterSubmissionID: UInt64 = 1
     private var nextReplayEpoch: UInt64 = 1
     private var knownStrokeTotalDistance: Float?
+
+    #if DEBUG
+    enum CompatibilityInkRuntimeRoute: Equatable {
+        case incremental
+        case legacyReplay
+    }
+
+    var compatibilityInkRuntimeRoute: CompatibilityInkRuntimeRoute =
+        .incremental
+    #endif
 
     public convenience init(
         device: any MTLDevice,
@@ -1023,7 +1034,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeStroke = ActiveStrokeExecution(
             token: token,
             style: style,
-            compiledBrush: compiledBrush,
+            brush: compiledBrush.renderState,
             renderIdentity: style.renderIdentity,
             scheduler: FrameScheduler(budget: depositionFrameBudget),
             commitRequested: false,
@@ -1032,9 +1043,35 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             pendingTokenBearingFrameCount: 0,
             isFinishedTransiently: false
         )
+        if shouldUseIncrementalCompatibilityInk(
+            style: style,
+            sample: sample
+        ) {
+            strokeRenderCoordinator = try StrokeRenderCoordinator(
+                program: style.program,
+                nominalDiameter: style.diameter,
+                color: generatorColor,
+                seed: style.seed,
+                viewport: viewport,
+                authoritativeCapacity:
+                    depositionFrameBudget
+                        .maximumPendingAuthoritativeInstances
+            )
+        }
         beginStrokeRuntime(sample)
         do {
             counters.newDabsThisEvent = 0
+            if strokeRenderCoordinator != nil {
+                let emission = try strokeRenderCoordinator!.begin(
+                    actualSamples: [sample]
+                )
+                try ingestCoordinatorEmission(
+                    emission,
+                    coordinator: &strokeRenderCoordinator!,
+                    isFinishing: false
+                )
+                return
+            }
             let inputBefore = brushInputDeriver
             let generatorBefore = strokeGenerator
             let worldSample = brushInputDeriver.derive(
@@ -1261,6 +1298,27 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         try requireCollectingStroke(token: token)
         counters.newDabsThisEvent = 0
+        if strokeRenderCoordinator != nil,
+           isIncrementalCompatibilitySample(sample)
+        {
+            let emission = try strokeRenderCoordinator!.append(
+                actualSamples: [sample]
+            )
+            try ingestCoordinatorEmission(
+                emission,
+                coordinator: &strokeRenderCoordinator!,
+                isFinishing: false
+            )
+            predictedInputDeriver = nil
+            predictedStrokeGenerator = nil
+            return
+        }
+        if strokeRenderCoordinator != nil {
+            // Estimated properties need the existing bounded correction path.
+            // The legacy generator mirrors coordinator state after every
+            // successful append, so this is a causal handoff, not a replay.
+            strokeRenderCoordinator = nil
+        }
         guard let authoritativeGenerator = strokeGenerator else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -1326,6 +1384,25 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try requireCollectingStroke(token: token)
         recordStrokeRuntimeInput(sample)
         counters.newDabsThisEvent = 0
+        if strokeRenderCoordinator != nil,
+           isIncrementalCompatibilitySample(sample)
+        {
+            let emission = try strokeRenderCoordinator!.finish(
+                actualSamples: [sample]
+            )
+            try ingestCoordinatorEmission(
+                emission,
+                coordinator: &strokeRenderCoordinator!,
+                isFinishing: true
+            )
+            predictedInputDeriver = nil
+            predictedStrokeGenerator = nil
+            activeStroke?.isFinishedTransiently = true
+            return
+        }
+        if strokeRenderCoordinator != nil {
+            strokeRenderCoordinator = nil
+        }
         var previewDeriver = brushInputDeriver
         let inputBefore = previewDeriver
         let worldSample = previewDeriver.derive(
@@ -2143,7 +2220,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeStroke = ActiveStrokeExecution(
             token: token,
             style: style,
-            compiledBrush: brush,
+            brush: brush.renderState,
             renderIdentity: brush.renderIdentity,
             scheduler: FrameScheduler(budget: depositionFrameBudget),
             commitRequested: false,
@@ -2919,6 +2996,97 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         counters.totalDabsThisStroke += dabs.count
         publishLogicalDabs(dabs.lazy.map(\.attributes))
     }
+
+    /// Transfers one compatibility-ink emission into the existing projection
+    /// and frame scheduler. The coordinator remains the sole generator owner;
+    /// the mirrored legacy snapshots exist only for prediction and estimated-
+    /// input fallback until Tasks 6 and 7 move those paths as well.
+    private func ingestCoordinatorEmission(
+        _ emission: StrokeCoordinatorEmission,
+        coordinator: inout StrokeRenderCoordinator,
+        isFinishing: Bool
+    ) throws {
+        precondition(
+            emission.generatedSamples.count == 1,
+            "GridRenderer currently transfers one normalized event at a time"
+        )
+        guard let generated = emission.generatedSamples.first else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        var projectionGenerator = generated.generatorBefore
+        let dabs = try prepareGeneratedDabs(
+            generator: &projectionGenerator
+        ) { _, emit in
+            for dab in generated.dabs {
+                try emit(dab)
+            }
+        }
+        try ingestGeneratedSample(
+            generated.sample,
+            dabs: dabs,
+            generatorBeforeSample: generated.generatorBefore,
+            generatorSnapshot: generated.generatorAfter,
+            inputDeriverBeforeSample: generated.inputDeriverBefore,
+            isFinishing: isFinishing
+        )
+
+        var transferred: [AuthoritativeStrokeWork] = []
+        transferred.reserveCapacity(emission.work.count)
+        while let frame = try coordinator.prepareAuthoritativeFrame(
+            maximumDabs: max(1, emission.work.count)
+        ) {
+            transferred.append(contentsOf: frame.work)
+            try coordinator.markAuthoritativeFrameSubmitted(frame)
+        }
+        precondition(
+            transferred == emission.work,
+            "Authoritative work transfer must preserve exact ordinal order"
+        )
+        strokeGenerator = coordinator.generatorSnapshot
+        brushInputDeriver = coordinator.inputDeriverSnapshot
+    }
+
+    private func shouldUseIncrementalCompatibilityInk(
+        style: StrokeRenderStyle,
+        sample: StrokeSample
+    ) -> Bool {
+        guard style.program.definition.id.rawValue == "builtin.native-ink",
+              style.program.replayContract.mode == .appendOnly,
+              isIncrementalCompatibilitySample(sample)
+        else {
+            return false
+        }
+        #if DEBUG
+        return compatibilityInkRuntimeRoute == .incremental
+        #else
+        return true
+        #endif
+    }
+
+    private func isIncrementalCompatibilitySample(
+        _ sample: StrokeSample
+    ) -> Bool {
+        sample.kind != .predicted
+            && sample.kind != .estimatedUpdate
+            && sample.estimationUpdateIndex == nil
+            && sample.estimatedProperties.isEmpty
+            && sample.estimatedPropertiesExpectingUpdates.isEmpty
+    }
+
+    #if DEBUG
+    func setCompatibilityInkRuntimeRouteForTesting(
+        _ route: CompatibilityInkRuntimeRoute
+    ) {
+        precondition(isIdle)
+        compatibilityInkRuntimeRoute = route
+    }
+
+    var compatibilityInkCoordinatorSnapshotForTesting:
+        StrokeRenderSnapshot?
+    {
+        strokeRenderCoordinator?.snapshot
+    }
+    #endif
 
     private func publishLogicalDabs<Dabs: Collection>(
         _ dabs: Dabs
@@ -3720,7 +3888,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         PatternCompositeUniforms(
             parameters: SIMD4(
                 activeStroke?.style.color.alpha ?? 1,
-                activeStroke?.compiledBrush.program.definition.material
+                activeStroke?.brush.program.definition.material
                     .accumulationLimit ?? 1,
                 activeStroke?.style.compositeMode == .erase
                     ? activeStroke?.style.eraserStrength ?? 1
@@ -4268,8 +4436,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let binding = execution.compiledBrush.depositionPipeline
-        let material = execution.compiledBrush.depositionMaterial
+        let binding = execution.brush.resources.depositionPipeline
+        let material = execution.brush.resources.depositionMaterial
 
         // Authoritative work owns the frame whenever it is present. This
         // keeps a frame to one render target, so preflight and submission are
@@ -4647,7 +4815,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard let execution = activeStroke else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let brush = execution.compiledBrush
+        let brush = execution.brush.resources
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = texture
         pass.colorAttachments[0].loadAction = .load
@@ -5509,6 +5677,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func resetLiveState() {
         strokeGenerator?.cancel()
         strokeGenerator = nil
+        strokeRenderCoordinator?.cancel()
+        strokeRenderCoordinator = nil
         predictedStrokeGenerator?.cancel()
         predictedStrokeGenerator = nil
         transientStrokeBuffer?.cancel()

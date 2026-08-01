@@ -1,4 +1,5 @@
 import BrushFormat
+import EditorCore
 import Foundation
 import Metal
 @testable import MetalRenderer
@@ -2623,7 +2624,163 @@ struct DepositionRendererTests {
             )
         )
     }
+
+    @Test
+    @MainActor
+    func nativeInkIncrementalRouteMatchesBatchingAndDebugLegacyPixels()
+        async throws
+    {
+        guard let incremental = try makeDepositionRendererSetup(),
+              let partitioned = try makeDepositionRendererSetup(),
+              let legacy = try makeDepositionRendererSetup()
+        else { return }
+        let incrementalBrush = try await incremental.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        let partitionedBrush = try await partitioned.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        let legacyBrush = try await legacy.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        requireSendableRenderState(incrementalBrush.renderState)
+        try incremental.renderer.activateDrawBrush(incrementalBrush)
+        try partitioned.renderer.activateDrawBrush(partitionedBrush)
+        try legacy.renderer.activateDrawBrush(legacyBrush)
+        legacy.renderer.setCompatibilityInkRuntimeRouteForTesting(
+            .legacyReplay
+        )
+        let incrementalToken = RendererOperationToken(rawValue: 90_001)
+        let partitionedToken = RendererOperationToken(rawValue: 90_002)
+        let legacyToken = RendererOperationToken(rawValue: 90_003)
+        let began = depositionSample(.began, x: 8, y: 24)
+        let moved = (1...20).map { index in
+            StrokeSample.mouse(
+                position: ScreenPoint(
+                    x: 8 + Float(index) * 2,
+                    y: 24 + Float(index % 4)
+                ),
+                timestamp: TimeInterval(index) / 240,
+                phase: .moved
+            )
+        }
+        try incremental.renderer.beginStroke(
+            token: incrementalToken,
+            sample: began,
+            style: depositionStyle(
+                incrementalBrush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try legacy.renderer.beginStroke(
+            token: legacyToken,
+            sample: began,
+            style: depositionStyle(
+                legacyBrush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try partitioned.renderer.beginStroke(
+            token: partitionedToken,
+            sample: began,
+            style: depositionStyle(
+                partitionedBrush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try incremental.renderer.appendStrokeBatch(
+            token: incrementalToken,
+            samples: moved
+        )
+        let partitionWidths = [1, 7, 3, 5, 4]
+        var partitionStart = 0
+        var partitionIndex = 0
+        while partitionStart < moved.count {
+            let partitionEnd = min(
+                moved.count,
+                partitionStart
+                    + partitionWidths[partitionIndex % partitionWidths.count]
+            )
+            try partitioned.renderer.appendStrokeBatch(
+                token: partitionedToken,
+                samples: Array(moved[partitionStart..<partitionEnd])
+            )
+            partitionStart = partitionEnd
+            partitionIndex += 1
+        }
+        try legacy.renderer.appendStrokeBatch(
+            token: legacyToken,
+            samples: moved
+        )
+
+        let coordinator = try #require(
+            incremental.renderer
+                .compatibilityInkCoordinatorSnapshotForTesting
+        )
+        #expect(coordinator.authoritativeSubmittedDabCount > 0)
+        #expect(coordinator.authoritativeQueueDepth == 0)
+        #expect(coordinator.retainedCompletedDabCount == 0)
+        let partitionedCoordinator = try #require(
+            partitioned.renderer
+                .compatibilityInkCoordinatorSnapshotForTesting
+        )
+        #expect(
+            partitionedCoordinator.commitMetadata
+                == coordinator.commitMetadata
+        )
+        #expect(partitionedCoordinator.authoritativeQueueDepth == 0)
+        #expect(partitionedCoordinator.retainedCompletedDabCount == 0)
+        #expect(
+            incremental.renderer.transientStrokeBuffer?.actualChunks.isEmpty
+                == true
+        )
+        #expect(
+            incremental.renderer.brushLabDiagnosticSnapshot.replayCount == 0
+        )
+        #expect(
+            legacy.renderer.compatibilityInkCoordinatorSnapshotForTesting
+                == nil
+        )
+
+        try incremental.renderer.requestStrokeCommit(
+            token: incrementalToken,
+            sample: depositionSample(.ended, x: 52, y: 24),
+            maximumRetainedBytes: 1_000_000
+        )
+        try legacy.renderer.requestStrokeCommit(
+            token: legacyToken,
+            sample: depositionSample(.ended, x: 52, y: 24),
+            maximumRetainedBytes: 1_000_000
+        )
+        try partitioned.renderer.requestStrokeCommit(
+            token: partitionedToken,
+            sample: depositionSample(.ended, x: 52, y: 24),
+            maximumRetainedBytes: 1_000_000
+        )
+        _ = try incremental.renderer.finishCommitForHarness()
+        _ = try partitioned.renderer.finishCommitForHarness()
+        _ = try legacy.renderer.finishCommitForHarness()
+
+        let incrementalPixels = depositionTextureBytes(
+            try incremental.renderer.copyCanonicalForHarness()
+        )
+        #expect(
+            incrementalPixels == depositionTextureBytes(
+                try partitioned.renderer.copyCanonicalForHarness()
+            )
+        )
+        #expect(
+            incrementalPixels == depositionTextureBytes(
+                try legacy.renderer.copyCanonicalForHarness()
+            )
+        )
+    }
 }
+
+private func requireSendableRenderState<T: Sendable>(_: T) {}
 
 @MainActor
 private struct DepositionRendererSetup {

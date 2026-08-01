@@ -263,6 +263,32 @@ func appendOnlySettlesActualChunksAndRetainsOnlyPrediction() throws {
 }
 
 @Test
+func appendOnlyLongStrokeReturnsConstantNewWorkAndRetainsNoCompletedBody() {
+    var buffer = transientBuffer(mode: .appendOnly)
+    var maximumReturnedChunkCount = 0
+    var returnedDabCount = 0
+
+    for index in 0..<100_000 {
+        let update = buffer.appendActual(
+            transientChunk(index, dabCount: 1)
+        )
+        maximumReturnedChunkCount = max(
+            maximumReturnedChunkCount,
+            update.settledPrefix.count
+        )
+        returnedDabCount += update.settledDabCount
+        #expect(update.rejection == nil)
+        #expect(!update.requiresReplayReplacement)
+    }
+
+    #expect(maximumReturnedChunkCount == 1)
+    #expect(returnedDabCount == 100_000)
+    #expect(buffer.actualChunks.isEmpty)
+    #expect(buffer.actualDabCount == 0)
+    #expect(buffer.replayEpoch == 0)
+}
+
+@Test
 func replayTailEnforcesTheSampleAndDabCapsByOldestWholeChunk() {
     var sampleBound = transientBuffer(mode: .replayTail)
     var lastSampleUpdate = TransientStrokeBufferUpdate.noChange
