@@ -264,62 +264,121 @@ struct DebugPerformanceLogDiagnostics: Equatable, Sendable {
     let droppedRecordCount: UInt64
 }
 
-private final class DebugPerformanceLogMailbox: @unchecked Sendable {
-    struct EnqueueResult: Sendable {
-        let accepted: Bool
-        let bufferedRecordCount: Int
-        let droppedRecordCount: UInt64
+private struct DebugPerformanceLogEnqueueResult: Sendable {
+    let accepted: Bool
+    let bufferedRecordCount: Int
+    let droppedRecordCount: UInt64
+}
+
+private struct DebugPerformanceLogRecordBuffer {
+    private struct Entry {
+        let sequence: UInt64
+        let record: DebugPerformanceLogRecord
     }
 
     private let capacity: Int
-    private let lock = NSLock()
-    private var records: [DebugPerformanceLogRecord] = []
+    private var nextSequence: UInt64 = 0
+    private var boundaries: [Entry] = []
+    private var samples: [Entry] = []
+    private var firstSampleIndex = 0
+
+    var count: Int {
+        boundaries.count + samples.count - firstSampleIndex
+    }
+
+    var isEmpty: Bool { count == 0 }
 
     init(capacity: Int) {
         self.capacity = capacity
-        records.reserveCapacity(capacity)
+        samples.reserveCapacity(capacity)
+    }
+
+    mutating func enqueue(
+        _ record: DebugPerformanceLogRecord
+    ) -> DebugPerformanceLogEnqueueResult {
+        let entry = Entry(sequence: nextSequence, record: record)
+        nextSequence &+= 1
+        if record.kind == .sample {
+            guard count < capacity else {
+                return DebugPerformanceLogEnqueueResult(
+                    accepted: false,
+                    bufferedRecordCount: count,
+                    droppedRecordCount: 1
+                )
+            }
+            samples.append(entry)
+            return DebugPerformanceLogEnqueueResult(
+                accepted: true,
+                bufferedRecordCount: count,
+                droppedRecordCount: 0
+            )
+        }
+
+        boundaries.append(entry)
+        var droppedRecordCount: UInt64 = 0
+        while count > capacity, firstSampleIndex < samples.count {
+            firstSampleIndex += 1
+            droppedRecordCount &+= 1
+        }
+        return DebugPerformanceLogEnqueueResult(
+            accepted: true,
+            bufferedRecordCount: count,
+            droppedRecordCount: droppedRecordCount
+        )
+    }
+
+    func orderedRecords() -> [DebugPerformanceLogRecord] {
+        var ordered: [DebugPerformanceLogRecord] = []
+        ordered.reserveCapacity(count)
+        var boundaryIndex = 0
+        var sampleIndex = firstSampleIndex
+        while boundaryIndex < boundaries.count
+            || sampleIndex < samples.count
+        {
+            if sampleIndex == samples.count
+                || (boundaryIndex < boundaries.count
+                    && boundaries[boundaryIndex].sequence
+                        < samples[sampleIndex].sequence)
+            {
+                ordered.append(boundaries[boundaryIndex].record)
+                boundaryIndex += 1
+            } else {
+                ordered.append(samples[sampleIndex].record)
+                sampleIndex += 1
+            }
+        }
+        return ordered
+    }
+
+    mutating func removeAll() {
+        boundaries.removeAll(keepingCapacity: true)
+        samples.removeAll(keepingCapacity: true)
+        firstSampleIndex = 0
+        nextSequence = 0
+    }
+}
+
+private final class DebugPerformanceLogMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var records: DebugPerformanceLogRecordBuffer
+
+    init(capacity: Int) {
+        records = DebugPerformanceLogRecordBuffer(capacity: capacity)
     }
 
     func enqueue(
         _ record: DebugPerformanceLogRecord
-    ) -> EnqueueResult {
+    ) -> DebugPerformanceLogEnqueueResult {
         lock.lock()
         defer { lock.unlock() }
-        if records.count == capacity {
-            if record.kind == .sample {
-                return EnqueueResult(
-                    accepted: false,
-                    bufferedRecordCount: records.count,
-                    droppedRecordCount: 1
-                )
-            }
-            if let sampleIndex = records.firstIndex(
-                where: { $0.kind == .sample }
-            ) {
-                records.remove(at: sampleIndex)
-            } else {
-                records.removeFirst()
-            }
-            records.append(record)
-            return EnqueueResult(
-                accepted: true,
-                bufferedRecordCount: records.count,
-                droppedRecordCount: 1
-            )
-        }
-        records.append(record)
-        return EnqueueResult(
-            accepted: true,
-            bufferedRecordCount: records.count,
-            droppedRecordCount: 0
-        )
+        return records.enqueue(record)
     }
 
     func drain() -> [DebugPerformanceLogRecord] {
         lock.lock()
         defer { lock.unlock() }
-        let drained = records
-        records.removeAll(keepingCapacity: true)
+        let drained = records.orderedRecords()
+        records.removeAll()
         return drained
     }
 }
@@ -334,9 +393,8 @@ private actor DebugPerformanceLogSink {
         )
     }
 
-    private let pendingRecordCapacity: Int
     private let batchSize: Int
-    private var pendingRecords: [DebugPerformanceLogRecord] = []
+    private var pendingRecords: DebugPerformanceLogRecordBuffer
     private var maximumBufferedRecordCount = 0
     private var droppedRecordCount: UInt64 = 0
     private var periodicFlushScheduled = false
@@ -349,35 +407,24 @@ private actor DebugPerformanceLogSink {
         batchSize: Int
     ) {
         self.logURL = logURL
-        self.pendingRecordCapacity = pendingRecordCapacity
         self.batchSize = batchSize
+        pendingRecords = DebugPerformanceLogRecordBuffer(
+            capacity: pendingRecordCapacity
+        )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         self.encoder = encoder
-        pendingRecords.reserveCapacity(pendingRecordCapacity)
     }
 
     func enqueue(_ record: DebugPerformanceLogRecord) {
-        if pendingRecords.count == pendingRecordCapacity {
-            if record.kind == .sample {
-                droppedRecordCount &+= 1
-                return
-            }
-            if let sampleIndex = pendingRecords.firstIndex(
-                where: { $0.kind == .sample }
-            ) {
-                pendingRecords.remove(at: sampleIndex)
-            } else {
-                pendingRecords.removeFirst()
-            }
-            droppedRecordCount &+= 1
-        }
-        pendingRecords.append(record)
+        let result = pendingRecords.enqueue(record)
+        droppedRecordCount &+= result.droppedRecordCount
         maximumBufferedRecordCount = max(
             maximumBufferedRecordCount,
-            pendingRecords.count
+            result.bufferedRecordCount
         )
+        guard result.accepted else { return }
         if pendingRecords.count >= batchSize {
             try? writePendingBatch(synchronize: false)
         } else if !periodicFlushScheduled {
@@ -405,8 +452,9 @@ private actor DebugPerformanceLogSink {
             }
             return
         }
+        let records = pendingRecords.orderedRecords()
         var payload = Data()
-        for record in pendingRecords {
+        for record in records {
             var data = try encoder.encode(record)
             data.append(0x0A)
             payload.append(data)
@@ -416,7 +464,7 @@ private actor DebugPerformanceLogSink {
         if synchronize {
             try handle.synchronize()
         }
-        pendingRecords.removeAll(keepingCapacity: true)
+        pendingRecords.removeAll()
     }
 
     private func writableHandle() throws -> FileHandle {

@@ -390,6 +390,55 @@ func debugPerformanceLoggerKeepsSegmentBoundariesUnderSamplePressure()
 
 @Test
 @MainActor
+func debugPerformanceLoggerPreservesMarkerOnlyOverflowAcrossMailboxAndSink()
+    async throws
+{
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let logger = DebugPerformanceLogger(
+        directory: directory,
+        filename: "marker-only-pressure-test.jsonl",
+        pendingRecordCapacity: 2,
+        batchSize: 100
+    )
+    let snapshot = DebugPerformanceSnapshot(
+        strokeRuntime: debugRuntimeSnapshot()
+    )
+    let kinds: [DebugPerformanceLogEventKind] = [
+        .sessionStarted,
+        .segmentBegan,
+        .segmentEnded,
+        .segmentBegan,
+        .segmentEnded,
+        .sessionEnded,
+    ]
+
+    let accepted = kinds.map {
+        logger.record($0, snapshot: snapshot, gpuName: "Test GPU")
+    }
+    try await logger.flush()
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let records = try Data(contentsOf: logger.logURL)
+        .split(separator: 0x0A)
+        .map {
+            try decoder.decode(
+                DebugPerformanceLogRecord.self,
+                from: Data($0)
+            )
+        }
+    let diagnostics = await logger.diagnostics()
+
+    #expect(accepted.allSatisfy { $0 })
+    #expect(records.map(\.kind) == kinds)
+    #expect(diagnostics.maximumBufferedRecordCount == kinds.count)
+    #expect(diagnostics.droppedRecordCount == 0)
+}
+
+@Test
+@MainActor
 func debugPerformanceLoggerAcceptsNextSegmentDuringFlush() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)

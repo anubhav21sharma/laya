@@ -492,3 +492,28 @@ xcodebuild -project App/PatternSpike.xcodeproj -scheme PatternSpikeMac \
 ```
 
 Exit status: `0`; `** BUILD SUCCEEDED **`.
+
+## Round 2 — lossless telemetry boundaries
+
+The bounded logger previously protected boundaries only while a shed-able
+sample was present. Once a capacity-two mailbox or sink contained boundaries
+only, the next boundary removed the oldest record and silently broke session
+or segment ordering.
+
+Mailbox and sink now share one ordered two-lane buffer. Session and segment
+boundaries use lossless storage; samples remain capacity-bounded and are the
+only records that can be rejected or evicted. Sequence numbers merge both
+lanes back into their original order at drain time. Boundary pressure may
+therefore exceed the sample capacity, and diagnostics report that honest total
+high-water without counting any boundary as dropped.
+
+The new capacity-two regression records six marker-only events synchronously,
+forcing them through both the mailbox and the sink before flush. Before the
+fix it retained only the final two markers and reported four drops. After the
+fix all six persist in their original order with zero drops.
+
+```bash
+swift test --filter 'StrokeRuntimeTelemetryTests|DebugPerformanceMonitorTests|BenchmarkRecordTests'
+```
+
+Exit status: `0`; 64 tests passed with zero issues.
