@@ -15,8 +15,9 @@ struct StrokeRenderCoordinatorTests {
         var submittedOrdinals: [UInt64] = []
         submittedOrdinals.reserveCapacity(eventCount + 2)
 
-        let began = try coordinator.begin(
-            actualSamples: [sample(index: 0, phase: .began)]
+        let began = try commitBegin(
+            [sample(index: 0, phase: .began)],
+            coordinator: &coordinator
         )
         try submitAll(
             began,
@@ -25,8 +26,9 @@ struct StrokeRenderCoordinatorTests {
         )
         if eventCount > 1 {
             for index in 1..<eventCount {
-                let emitted = try coordinator.append(
-                    actualSamples: [sample(index: index, phase: .moved)]
+                let emitted = try commitAppend(
+                    [sample(index: index, phase: .moved)],
+                    coordinator: &coordinator
                 )
                 #expect(emitted.work.count <= 4)
                 try submitAll(
@@ -55,13 +57,14 @@ struct StrokeRenderCoordinatorTests {
     @Test
     func capacityFailureIsTransactionalAndHighWaterIsBounded() throws {
         var coordinator = try makeCoordinator(capacity: 1)
-        let first = try coordinator.begin(
-            actualSamples: [sample(index: 0, phase: .began)]
+        let first = try commitBegin(
+            [sample(index: 0, phase: .began)],
+            coordinator: &coordinator
         )
         let before = coordinator.snapshot
 
         #expect(throws: AuthoritativeStrokeQueueError.self) {
-            _ = try coordinator.append(
+            _ = try coordinator.prepareAppend(
                 actualSamples: [sample(index: 3, phase: .moved)]
             )
         }
@@ -77,10 +80,68 @@ struct StrokeRenderCoordinatorTests {
     }
 
     @Test
+    func abandonedPreparedAppendLeavesExactStateAndRetryIsIdentical() throws {
+        var coordinator = try makeCoordinator(capacity: 8)
+        let began = try coordinator.prepareBegin(
+            actualSamples: [sample(index: 0, phase: .began)]
+        )
+        try coordinator.commit(began)
+        var ordinals: [UInt64] = []
+        try submitAll(
+            began.emission,
+            coordinator: &coordinator,
+            ordinals: &ordinals
+        )
+        let before = coordinator.snapshot
+
+        let prepared = try coordinator.prepareAppend(
+            actualSamples: [sample(index: 3, phase: .moved)]
+        )
+        coordinator.abandon(prepared)
+        #expect(coordinator.snapshot == before)
+
+        let retry = try coordinator.prepareAppend(
+            actualSamples: [sample(index: 3, phase: .moved)]
+        )
+        #expect(retry.work == prepared.work)
+        try coordinator.commit(retry)
+        try submitAll(
+            retry.emission,
+            coordinator: &coordinator,
+            ordinals: &ordinals
+        )
+        #expect(coordinator.snapshot.commitMetadata.inputSampleCount == 2)
+    }
+
+    @Test
+    func queueWrapsAfterPartialRetireWithoutDrainingToEmpty() throws {
+        var queue = try AuthoritativeStrokeQueue(capacity: 5)
+        try queue.append(queueWork(0..<4))
+        let first = try #require(try queue.prepare(maximumCount: 2))
+        #expect(first.work.map(\.ordinal) == [0, 1])
+        try queue.retire(first)
+
+        try queue.append(queueWork(4..<7))
+        #expect(queue.count == 5)
+        let wrapped = try #require(try queue.prepare(maximumCount: 3))
+        #expect(wrapped.work.map(\.ordinal) == [2, 3, 4])
+        try queue.retire(wrapped)
+        #expect(queue.count == 2)
+
+        try queue.append(queueWork(7..<9))
+        let remainder = try #require(try queue.prepare(maximumCount: 5))
+        #expect(remainder.work.map(\.ordinal) == [5, 6, 7, 8])
+        try queue.retire(remainder)
+        #expect(queue.submittedCount == 9)
+        #expect(queue.isEmpty)
+    }
+
+    @Test
     func replaceableActualInputIsRejectedTransactionally() throws {
         var coordinator = try makeCoordinator(capacity: 8)
-        let began = try coordinator.begin(
-            actualSamples: [sample(index: 0, phase: .began)]
+        let began = try commitBegin(
+            [sample(index: 0, phase: .began)],
+            coordinator: &coordinator
         )
         var ordinals: [UInt64] = []
         try submitAll(
@@ -103,7 +164,7 @@ struct StrokeRenderCoordinatorTests {
         )
 
         #expect(throws: StrokeRenderCoordinatorError.invalidAuthoritativeSample) {
-            _ = try coordinator.append(actualSamples: [replaceable])
+            _ = try coordinator.prepareAppend(actualSamples: [replaceable])
         }
         #expect(coordinator.snapshot == before)
     }
@@ -111,8 +172,9 @@ struct StrokeRenderCoordinatorTests {
     @Test
     func preparedWorkRetiresOnlyAfterSuccessfulSubmission() throws {
         var coordinator = try makeCoordinator(capacity: 8)
-        _ = try coordinator.begin(
-            actualSamples: [sample(index: 0, phase: .began)]
+        _ = try commitBegin(
+            [sample(index: 0, phase: .began)],
+            coordinator: &coordinator
         )
         let preparedCandidate = try coordinator
             .prepareAuthoritativeFrame(maximumDabs: 8)
@@ -142,23 +204,27 @@ struct StrokeRenderCoordinatorTests {
         var single = try makeCoordinator(capacity: 1_024)
         var partitioned = try makeCoordinator(capacity: 1_024)
 
-        var singleWork = try single.begin(
-            actualSamples: [samples[0]]
+        var singleWork = try commitBegin(
+            [samples[0]],
+            coordinator: &single
         ).work
-        singleWork += try single.append(
-            actualSamples: Array(samples.dropFirst())
+        singleWork += try commitAppend(
+            Array(samples.dropFirst()),
+            coordinator: &single
         ).work
 
-        var partitionedWork = try partitioned.begin(
-            actualSamples: [samples[0]]
+        var partitionedWork = try commitBegin(
+            [samples[0]],
+            coordinator: &partitioned
         ).work
         let widths = [1, 7, 3, 19, 2, 31, 5, 11]
         var cursor = 1
         var widthIndex = 0
         while cursor < samples.count {
             let end = min(samples.count, cursor + widths[widthIndex % widths.count])
-            partitionedWork += try partitioned.append(
-                actualSamples: Array(samples[cursor..<end])
+            partitionedWork += try commitAppend(
+                Array(samples[cursor..<end]),
+                coordinator: &partitioned
             ).work
             cursor = end
             widthIndex += 1
@@ -175,13 +241,15 @@ struct StrokeRenderCoordinatorTests {
     func completedBodyIsReducedToCompactCommitMetadata() throws {
         var coordinator = try makeCoordinator(capacity: 32)
         var ordinals: [UInt64] = []
-        let began = try coordinator.begin(
-            actualSamples: [sample(index: 0, phase: .began)]
+        let began = try commitBegin(
+            [sample(index: 0, phase: .began)],
+            coordinator: &coordinator
         )
         try submitAll(began, coordinator: &coordinator, ordinals: &ordinals)
         for index in 1..<1_000 {
-            let emitted = try coordinator.append(
-                actualSamples: [sample(index: index, phase: .moved)]
+            let emitted = try commitAppend(
+                [sample(index: index, phase: .moved)],
+                coordinator: &coordinator
             )
             try submitAll(
                 emitted,
@@ -351,6 +419,35 @@ private func sample(index: Int, phase: StrokePhase) -> StrokeSample {
     )
 }
 
+private func queueWork(_ ordinals: Range<Int>) -> [AuthoritativeStrokeWork] {
+    ordinals.map { ordinal in
+        AuthoritativeStrokeWork(
+            dab: LogicalDab(
+                position: WorldPoint(x: Float(ordinal), y: 0),
+                brushToWorld: .identity,
+                radius: 1,
+                diameter: 2,
+                spacing: 1,
+                flow: 1,
+                strokeOpacity: 1,
+                rotation: 0,
+                scatter: .zero,
+                hardness: 1,
+                grainOffset: .zero,
+                grainScale: 1,
+                grainRotation: 0,
+                color: .black,
+                colorAdjustment: .identity,
+                materialFamily: .ink,
+                materialContribution: 1,
+                sourceDistance: Float(ordinal),
+                ordinal: UInt64(ordinal),
+                isPredicted: false
+            )
+        )
+    }
+}
+
 private func submitAll(
     _ emission: StrokeCoordinatorEmission,
     coordinator: inout StrokeRenderCoordinator,
@@ -363,6 +460,24 @@ private func submitAll(
         ordinals.append(contentsOf: frame.work.map(\.ordinal))
         try coordinator.markAuthoritativeFrameSubmitted(frame)
     }
+}
+
+private func commitBegin(
+    _ samples: [StrokeSample],
+    coordinator: inout StrokeRenderCoordinator
+) throws -> StrokeCoordinatorEmission {
+    let prepared = try coordinator.prepareBegin(actualSamples: samples)
+    try coordinator.commit(prepared)
+    return prepared.emission
+}
+
+private func commitAppend(
+    _ samples: [StrokeSample],
+    coordinator: inout StrokeRenderCoordinator
+) throws -> StrokeCoordinatorEmission {
+    let prepared = try coordinator.prepareAppend(actualSamples: samples)
+    try coordinator.commit(prepared)
+    return prepared.emission
 }
 
 private func canonicalCoverage(

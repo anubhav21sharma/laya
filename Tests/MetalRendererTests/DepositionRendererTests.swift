@@ -2778,6 +2778,85 @@ struct DepositionRendererTests {
             )
         )
     }
+
+    @Test
+    @MainActor
+    func nativeInkFailedSchedulerPreflightDoesNotAdvanceCoordinator()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        try setup.renderer.applyTiling(.squareRotation)
+        let token = RendererOperationToken(rawValue: 90_010)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 12, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        let coordinatorBefore = try #require(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+        )
+        let bufferBefore = try #require(setup.renderer.transientStrokeBuffer)
+        let arenaBefore = setup.renderer.harnessTransientDabArenaSnapshot
+        let constrainedBudget = try depositionFrameBudget(
+            maximumAuthoritativeInstances: 1,
+            maximumPendingAuthoritativeInstances: 1
+        )
+        let previousBudget = setup.renderer
+            .replaceDepositionFrameBudgetForHarness(constrainedBudget)
+        let previousScheduler = try #require(
+            setup.renderer.replaceActiveStrokeSchedulerForHarness(
+                constrainedBudget
+            )
+        )
+
+        #expect(
+            throws: MetalRendererError
+                .projectedInstanceCapacityExceeded(1)
+        ) {
+            try setup.renderer.appendStroke(
+                token: token,
+                sample: depositionSample(.moved, x: 24, y: 24)
+            )
+        }
+        let coordinatorAfterFailure = try #require(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+        )
+        #expect(coordinatorAfterFailure == coordinatorBefore)
+        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
+        #expect(setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore)
+        #expect(setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty)
+
+        setup.renderer.replaceDepositionFrameBudgetForHarness(previousBudget)
+        setup.renderer.restoreActiveStrokeSchedulerForHarness(previousScheduler)
+        if coordinatorAfterFailure == coordinatorBefore {
+            try setup.renderer.appendStroke(
+                token: token,
+                sample: depositionSample(.moved, x: 24, y: 24)
+            )
+            let recovered = try #require(
+                setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+            )
+            #expect(
+                recovered.commitMetadata.inputSampleCount
+                    == coordinatorBefore.commitMetadata.inputSampleCount + 1
+            )
+            #expect(!setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty)
+        }
+        try setup.renderer.cancelStroke(token: token)
+        #expect(setup.renderer.isIdle)
+        #expect(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+                == nil
+        )
+    }
 }
 
 private func requireSendableRenderState<T: Sendable>(_: T) {}

@@ -4,6 +4,24 @@ public enum StrokeRenderCoordinatorError: Error, Equatable, Sendable {
     case invalidLifecycle
     case invalidAuthoritativeSample
     case ordinalDiscontinuity(expected: UInt64, actual: UInt64)
+    case stalePreparedEmission(expectedRevision: UInt64, actualRevision: UInt64)
+    case revisionOverflow
+}
+
+/// Candidate authoritative state. Preparing is side-effect free; only
+/// `StrokeRenderCoordinator.commit(_:)` makes this candidate authoritative.
+public struct PreparedStrokeCoordinatorEmission: Sendable {
+    public var work: [AuthoritativeStrokeWork] { emission.work }
+
+    let emission: StrokeCoordinatorEmission
+    fileprivate let baseRevision: UInt64
+    fileprivate let generator: BrushStrokeGenerator
+    fileprivate let inputDeriver: BrushInputDeriver
+    fileprivate let commitMetadata: StrokeCommitMetadata
+    fileprivate let maximumReturnedDabCount: Int
+    fileprivate let hasBegun: Bool
+    fileprivate let hasFinished: Bool
+    fileprivate let isNoOp: Bool
 }
 
 /// Synchronous authoritative core introduced before Task 7 moves its ownership
@@ -33,6 +51,7 @@ public struct StrokeRenderCoordinator: Sendable {
     private var maximumReturnedDabCount = 0
     private var hasBegun = false
     private var hasFinished = false
+    private var revision: UInt64 = 0
 
     public init(
         program: BrushProgram,
@@ -54,9 +73,9 @@ public struct StrokeRenderCoordinator: Sendable {
         )
     }
 
-    public mutating func begin(
+    public func prepareBegin(
         actualSamples: [StrokeSample]
-    ) throws -> StrokeCoordinatorEmission {
+    ) throws -> PreparedStrokeCoordinatorEmission {
         guard !hasBegun, !hasFinished, !actualSamples.isEmpty,
               actualSamples[0].phase == .began
         else {
@@ -66,32 +85,50 @@ public struct StrokeRenderCoordinator: Sendable {
         where sample.phase != .moved {
             throw StrokeRenderCoordinatorError.invalidLifecycle
         }
-        let emission = try generate(
+        return try prepare(
             actualSamples,
-            firstOperation: .begin
+            firstOperation: .begin,
+            hasBegun: true,
+            hasFinished: false
         )
-        hasBegun = true
-        return emission
     }
 
-    public mutating func append(
+    public func prepareAppend(
         actualSamples: [StrokeSample]
-    ) throws -> StrokeCoordinatorEmission {
+    ) throws -> PreparedStrokeCoordinatorEmission {
         guard hasBegun, !hasFinished else {
             throw StrokeRenderCoordinatorError.invalidLifecycle
         }
         guard !actualSamples.isEmpty else {
-            return StrokeCoordinatorEmission(work: [], generatedSamples: [])
+            return PreparedStrokeCoordinatorEmission(
+                emission: StrokeCoordinatorEmission(
+                    work: [],
+                    generatedSamples: []
+                ),
+                baseRevision: revision,
+                generator: generator,
+                inputDeriver: inputDeriver,
+                commitMetadata: commitMetadata,
+                maximumReturnedDabCount: maximumReturnedDabCount,
+                hasBegun: hasBegun,
+                hasFinished: hasFinished,
+                isNoOp: true
+            )
         }
         guard actualSamples.allSatisfy({ $0.phase == .moved }) else {
             throw StrokeRenderCoordinatorError.invalidLifecycle
         }
-        return try generate(actualSamples, firstOperation: .append)
+        return try prepare(
+            actualSamples,
+            firstOperation: .append,
+            hasBegun: true,
+            hasFinished: false
+        )
     }
 
-    public mutating func finish(
+    public func prepareFinish(
         actualSamples: [StrokeSample]
-    ) throws -> StrokeCoordinatorEmission {
+    ) throws -> PreparedStrokeCoordinatorEmission {
         guard hasBegun, !hasFinished, !actualSamples.isEmpty,
               actualSamples.last?.phase == .ended
         else {
@@ -101,13 +138,37 @@ public struct StrokeRenderCoordinator: Sendable {
         where sample.phase != .moved {
             throw StrokeRenderCoordinatorError.invalidLifecycle
         }
-        let emission = try generate(
+        return try prepare(
             actualSamples,
-            firstOperation: actualSamples.count == 1 ? .finish : .append
+            firstOperation: actualSamples.count == 1 ? .finish : .append,
+            hasBegun: true,
+            hasFinished: true
         )
-        hasFinished = true
-        return emission
     }
+
+    public mutating func commit(
+        _ prepared: PreparedStrokeCoordinatorEmission
+    ) throws {
+        try validate(prepared)
+        guard !prepared.isNoOp else { return }
+        let (nextRevision, overflow) = revision.addingReportingOverflow(1)
+        guard !overflow else {
+            throw StrokeRenderCoordinatorError.revisionOverflow
+        }
+        try authoritativeQueue.preflightAppend(prepared.work)
+        try authoritativeQueue.append(prepared.work)
+        generator = prepared.generator
+        inputDeriver = prepared.inputDeriver
+        commitMetadata = prepared.commitMetadata
+        maximumReturnedDabCount = prepared.maximumReturnedDabCount
+        hasBegun = prepared.hasBegun
+        hasFinished = prepared.hasFinished
+        revision = nextRevision
+    }
+
+    public func abandon(
+        _: PreparedStrokeCoordinatorEmission
+    ) {}
 
     public mutating func prepareAuthoritativeFrame(
         maximumDabs: Int
@@ -137,6 +198,9 @@ public struct StrokeRenderCoordinator: Sendable {
         maximumReturnedDabCount = 0
         hasBegun = false
         hasFinished = false
+        let (nextRevision, overflow) = revision.addingReportingOverflow(1)
+        precondition(!overflow, "Stroke coordinator revision overflow")
+        revision = nextRevision
     }
 
     private enum Operation {
@@ -145,10 +209,12 @@ public struct StrokeRenderCoordinator: Sendable {
         case finish
     }
 
-    private mutating func generate(
+    private func prepare(
         _ samples: [StrokeSample],
-        firstOperation: Operation
-    ) throws -> StrokeCoordinatorEmission {
+        firstOperation: Operation,
+        hasBegun candidateHasBegun: Bool,
+        hasFinished candidateHasFinished: Bool
+    ) throws -> PreparedStrokeCoordinatorEmission {
         guard samples.allSatisfy({ sample in
             (sample.kind == .actual || sample.kind == .coalesced)
                 && sample.estimationUpdateIndex == nil
@@ -211,17 +277,38 @@ public struct StrokeRenderCoordinator: Sendable {
         }
 
         try authoritativeQueue.preflightAppend(work)
-        try authoritativeQueue.append(work)
-        generator = candidateGenerator
-        inputDeriver = candidateDeriver
-        commitMetadata.inputSampleCount += UInt64(samples.count)
-        commitMetadata.emittedDabCount += UInt64(work.count)
-        commitMetadata.lastEmittedOrdinal =
-            work.last?.ordinal ?? commitMetadata.lastEmittedOrdinal
-        maximumReturnedDabCount = max(maximumReturnedDabCount, work.count)
-        return StrokeCoordinatorEmission(
-            work: work,
-            generatedSamples: generatedSamples
+        var candidateMetadata = commitMetadata
+        candidateMetadata.inputSampleCount += UInt64(samples.count)
+        candidateMetadata.emittedDabCount += UInt64(work.count)
+        candidateMetadata.lastEmittedOrdinal =
+            work.last?.ordinal ?? candidateMetadata.lastEmittedOrdinal
+        return PreparedStrokeCoordinatorEmission(
+            emission: StrokeCoordinatorEmission(
+                work: work,
+                generatedSamples: generatedSamples
+            ),
+            baseRevision: revision,
+            generator: candidateGenerator,
+            inputDeriver: candidateDeriver,
+            commitMetadata: candidateMetadata,
+            maximumReturnedDabCount: max(
+                maximumReturnedDabCount,
+                work.count
+            ),
+            hasBegun: candidateHasBegun,
+            hasFinished: candidateHasFinished,
+            isNoOp: false
         )
+    }
+
+    private func validate(
+        _ prepared: PreparedStrokeCoordinatorEmission
+    ) throws {
+        guard prepared.baseRevision == revision else {
+            throw StrokeRenderCoordinatorError.stalePreparedEmission(
+                expectedRevision: revision,
+                actualRevision: prepared.baseRevision
+            )
+        }
     }
 }

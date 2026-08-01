@@ -1062,11 +1062,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         do {
             counters.newDabsThisEvent = 0
             if strokeRenderCoordinator != nil {
-                let emission = try strokeRenderCoordinator!.begin(
+                let prepared = try strokeRenderCoordinator!.prepareBegin(
                     actualSamples: [sample]
                 )
                 try ingestCoordinatorEmission(
-                    emission,
+                    prepared,
                     coordinator: &strokeRenderCoordinator!,
                     isFinishing: false
                 )
@@ -1301,11 +1301,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         if strokeRenderCoordinator != nil,
            isIncrementalCompatibilitySample(sample)
         {
-            let emission = try strokeRenderCoordinator!.append(
+            let prepared = try strokeRenderCoordinator!.prepareAppend(
                 actualSamples: [sample]
             )
             try ingestCoordinatorEmission(
-                emission,
+                prepared,
                 coordinator: &strokeRenderCoordinator!,
                 isFinishing: false
             )
@@ -1387,11 +1387,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         if strokeRenderCoordinator != nil,
            isIncrementalCompatibilitySample(sample)
         {
-            let emission = try strokeRenderCoordinator!.finish(
+            let prepared = try strokeRenderCoordinator!.prepareFinish(
                 actualSamples: [sample]
             )
             try ingestCoordinatorEmission(
-                emission,
+                prepared,
                 coordinator: &strokeRenderCoordinator!,
                 isFinishing: true
             )
@@ -3002,10 +3002,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     /// the mirrored legacy snapshots exist only for prediction and estimated-
     /// input fallback until Tasks 6 and 7 move those paths as well.
     private func ingestCoordinatorEmission(
-        _ emission: StrokeCoordinatorEmission,
+        _ prepared: PreparedStrokeCoordinatorEmission,
         coordinator: inout StrokeRenderCoordinator,
         isFinishing: Bool
     ) throws {
+        let emission = prepared.emission
         precondition(
             emission.generatedSamples.count == 1,
             "GridRenderer currently transfers one normalized event at a time"
@@ -3021,15 +3022,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 try emit(dab)
             }
         }
-        try ingestGeneratedSample(
-            generated.sample,
-            dabs: dabs,
-            generatorBeforeSample: generated.generatorBefore,
-            generatorSnapshot: generated.generatorAfter,
-            inputDeriverBeforeSample: generated.inputDeriverBefore,
-            isFinishing: isFinishing
-        )
+        do {
+            try ingestGeneratedSample(
+                generated.sample,
+                dabs: dabs,
+                generatorBeforeSample: generated.generatorBefore,
+                generatorSnapshot: generated.generatorAfter,
+                inputDeriverBeforeSample: generated.inputDeriverBefore,
+                isFinishing: isFinishing
+            )
+        } catch {
+            coordinator.abandon(prepared)
+            throw error
+        }
 
+        try coordinator.commit(prepared)
         var transferred: [AuthoritativeStrokeWork] = []
         transferred.reserveCapacity(emission.work.count)
         while let frame = try coordinator.prepareAuthoritativeFrame(
