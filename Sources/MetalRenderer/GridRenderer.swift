@@ -116,6 +116,22 @@ struct HarnessTilingMutationSnapshot: Equatable {
     let emittedHighWater: UInt64
 }
 
+struct StrokeRuntimeReplayEpochTracker {
+    private(set) var lastEpoch: UInt64 = 0
+
+    mutating func beginStroke(at epoch: UInt64) {
+        lastEpoch = epoch
+    }
+
+    mutating func consume(currentEpoch: UInt64) -> UInt64 {
+        let delta = currentEpoch >= lastEpoch
+            ? currentEpoch - lastEpoch
+            : currentEpoch
+        lastEpoch = currentEpoch
+        return delta
+    }
+}
+
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
     public let device: any MTLDevice
@@ -126,6 +142,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var onIdleStateChange: ((Bool) -> Void)?
     public var onOperationCompleted: ((RendererOperationCompletion) -> Void)?
     public var onLogicalDabsGenerated: ((LogicalDab) -> Void)?
+    public var onStrokeRuntimeSnapshot:
+        ((StrokeRuntimeTelemetrySnapshot) -> Void)?
+    public var onStrokeRuntimeSegmentMarker:
+        ((StrokeRuntimeSegmentMarker) -> Void)?
     #if DEBUG
     public var onInteractiveFramePresented: ((TimeInterval, Int) -> Void)?
     public var onInteractiveFrameMetrics: ((GPUFrameMetrics) -> Void)?
@@ -134,9 +154,41 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public internal(set) var counters = GridStructuralCounters()
     private var brushLabActualDabCount = 0
     private var brushLabPredictedDabCount = 0
+    private var strokeRuntimeController: StrokeRuntimeProductionController?
+    private var nextStrokeRuntimeFrameID: UInt64 = 1
+    private var pendingStrokeRuntimeFrameIDs: Set<UInt64> = []
+    private var strokeRuntimeReplayEpochTracker =
+        StrokeRuntimeReplayEpochTracker()
     public private(set) var interactiveGridVisibility = false
     public var isIdle: Bool {
         activeStroke == nil && pendingRasterOperation == nil
+    }
+    public var strokeRuntimeSnapshot: StrokeRuntimeTelemetrySnapshot? {
+        strokeRuntimeController?.snapshot
+    }
+    public var strokeRuntimeRecordedEvidence: StrokeRuntimeRecordedEvidence? {
+        strokeRuntimeController?.recordedEvidence
+    }
+
+    public func configureStrokeRuntimeTelemetry(
+        profile: StrokeRuntimeTraceProfile,
+        sessionID: UUID = UUID(),
+        windowCapacity: Int = 600
+    ) {
+        strokeRuntimeController = StrokeRuntimeProductionController(
+            sessionID: sessionID,
+            traceProfile: profile,
+            windowCapacity: windowCapacity
+        )
+        nextStrokeRuntimeFrameID = 1
+        pendingStrokeRuntimeFrameIDs.removeAll(keepingCapacity: true)
+        strokeRuntimeReplayEpochTracker.beginStroke(at: 0)
+        onStrokeRuntimeSnapshot?(strokeRuntimeController!.snapshot)
+    }
+
+    public func disableStrokeRuntimeTelemetry() {
+        strokeRuntimeController = nil
+        pendingStrokeRuntimeFrameIDs.removeAll(keepingCapacity: true)
     }
     public var hasActiveStroke: Bool {
         guard pendingRasterOperation == nil else { return false }
@@ -980,6 +1032,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             pendingTokenBearingFrameCount: 0,
             isFinishedTransiently: false
         )
+        beginStrokeRuntime(sample)
         do {
             counters.newDabsThisEvent = 0
             let inputBefore = brushInputDeriver
@@ -1005,6 +1058,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 isFinishing: false
             )
         } catch {
+            endStrokeRuntimeIfPossible()
             activeStroke = nil
             resetLiveState()
             throw error
@@ -1016,6 +1070,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         sample: StrokeSample
     ) throws {
         markBrushLabInputReceipt()
+        recordStrokeRuntimeInput(sample)
         if sample.kind == .predicted {
             try replacePredictedStrokeSuffix(
                 token: token,
@@ -1032,6 +1087,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) throws {
         guard !samples.isEmpty else { return }
         markBrushLabInputReceipt()
+        for sample in samples {
+            recordStrokeRuntimeInput(sample)
+        }
         var index = samples.startIndex
         while index < samples.endIndex {
             if samples[index].kind == .predicted {
@@ -1250,6 +1308,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 maximumRetainedBytes: maximumRetainedBytes
             )
         } catch {
+            endStrokeRuntimeIfPossible()
             discardPendingRevisionsIfPossible()
             activeStroke = nil
             resetLiveState()
@@ -1265,6 +1324,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         try requireCollectingStroke(token: token)
+        recordStrokeRuntimeInput(sample)
         counters.newDabsThisEvent = 0
         var previewDeriver = brushInputDeriver
         let inputBefore = previewDeriver
@@ -1324,6 +1384,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard sample.kind == .estimatedUpdate else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        recordStrokeRuntimeInput(sample)
         try requireEditableStroke(token: token)
         guard transientStrokeBuffer != nil else {
             throw MetalRendererError.invalidStrokeLifecycle
@@ -1463,6 +1524,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let wasIdle = isIdle
         defer { notifyIdleStateIfChanged(from: wasIdle) }
         try requireEditableStroke(token: token)
+        endStrokeRuntimeIfPossible()
         activeStroke = nil
         resetLiveState()
     }
@@ -2227,10 +2289,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         var nativeEncoding: NativeDepositionFrameEncoding?
         var submissions: [DabBufferSubmissionIdentity] = []
         var didFinalize = false
+        let runtimePrepareStarted = DispatchTime.now().uptimeNanoseconds
+        let runtimeFrameID = beginStrokeRuntimeFrame(
+            at: runtimePrepareStarted,
+            targetFrameDurationNanoseconds: 16_666_667
+        )
         let start = CFAbsoluteTimeGetCurrent()
         do {
             let encoding = try encodeScheduledDeposition(commandBuffer)
             nativeEncoding = encoding
+            recordStrokeRuntimePreparedFrame(
+                id: runtimeFrameID,
+                encoding: encoding
+            )
             submissions = try finalizeFrameEncoding(
                 encodedClear: encoding.encodedLiveClear,
                 encodedReplayClear: encoding.encodedReplayClear,
@@ -2246,6 +2317,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             let submittedAtNanoseconds =
                 DispatchTime.now().uptimeNanoseconds
+            recordStrokeRuntimeSubmittedFrame(
+                id: runtimeFrameID,
+                at: submittedAtNanoseconds
+            )
             commandBuffer.commit()
             let cpuMilliseconds = elapsedMilliseconds(since: start)
             commandBuffer.waitUntilCompleted()
@@ -2271,8 +2346,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 nativeEncoding: nativeEncoding
             )
             recordBrushLabCompletedFrame(frameMetrics)
+            recordStrokeRuntimeCompletedFrame(
+                id: runtimeFrameID,
+                commandBuffer: commandBuffer,
+                submittedAt: submittedAtNanoseconds,
+                completedAt: completedAtNanoseconds
+            )
             return frameMetrics
         } catch {
+            if let runtimeFrameID {
+                strokeRuntimeController?.discardFrame(id: runtimeFrameID)
+                pendingStrokeRuntimeFrameIDs.remove(runtimeFrameID)
+            }
             if !didFinalize {
                 if nativeEncoding != nil,
                    commandBuffer.status == .notEnqueued
@@ -2313,6 +2398,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw error
         }
 
+        let runtimePrepareStarted = DispatchTime.now().uptimeNanoseconds
+        let runtimeFrameID = beginStrokeRuntimeFrame(
+            at: runtimePrepareStarted,
+            targetFrameDurationNanoseconds: 16_666_667
+        )
         let start = CFAbsoluteTimeGetCurrent()
         let rasterCommit = try encodeCommit(
             commandBuffer,
@@ -2325,10 +2415,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             commandBuffer: commandBuffer,
             forceFailure: forceFailure
         )
+        recordStrokeRuntimePreparedFrame(
+            id: runtimeFrameID,
+            encoding: nil
+        )
         counters.renderedFramesThisStroke += 1
         let cpuMilliseconds = elapsedMilliseconds(since: start)
         let submittedAtNanoseconds =
             DispatchTime.now().uptimeNanoseconds
+        recordStrokeRuntimeSubmittedFrame(
+            id: runtimeFrameID,
+            at: submittedAtNanoseconds
+        )
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         let completedAtNanoseconds =
@@ -2341,6 +2439,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             completedAtNanoseconds: completedAtNanoseconds
         )
         recordBrushLabCompletedFrame(frameMetrics)
+        recordStrokeRuntimeCompletedFrame(
+            id: runtimeFrameID,
+            commandBuffer: commandBuffer,
+            submittedAt: submittedAtNanoseconds,
+            completedAt: completedAtNanoseconds
+        )
         return frameMetrics
     }
 
@@ -2385,6 +2489,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             failActiveOperationIfNeeded(.commandBufferUnavailable)
             return
         }
+        let targetFramesPerSecond = max(1, view.preferredFramesPerSecond)
+        let runtimeFrameID = beginStrokeRuntimeFrame(
+            at: DispatchTime.now().uptimeNanoseconds,
+            targetFrameDurationNanoseconds:
+                UInt64(1_000_000_000 / targetFramesPerSecond)
+        )
         #if DEBUG
         let cpuEncodeStart = CFAbsoluteTimeGetCurrent()
         #endif
@@ -2444,12 +2554,53 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 rasterCommit: rasterCommit,
                 commandBuffer: commandBuffer
             )
+            recordStrokeRuntimePreparedFrame(
+                id: runtimeFrameID,
+                encoding: nativeEncoding
+            )
+            let submittedAtNanoseconds =
+                DispatchTime.now().uptimeNanoseconds
+            recordStrokeRuntimeSubmittedFrame(
+                id: runtimeFrameID,
+                at: submittedAtNanoseconds
+            )
+            if runtimeFrameID != nil {
+                commandBuffer.addCompletedHandler { [weak self] completedBuffer in
+                    guard completedBuffer.status == .completed else { return }
+                    let gpuStarted = Self.nanoseconds(
+                        completedBuffer.gpuStartTime
+                    )
+                    let gpuFinished = Self.nanoseconds(
+                        completedBuffer.gpuEndTime
+                    )
+                    Task { @MainActor [weak self] in
+                        self?.recordStrokeRuntimeGPUFrame(
+                            id: runtimeFrameID,
+                            measuredStart: gpuStarted,
+                            measuredFinish: gpuFinished,
+                            submittedAt: submittedAtNanoseconds
+                        )
+                    }
+                }
+                drawable.addPresentedHandler { [weak self] presentedDrawable in
+                    let measured = Self.nanoseconds(
+                        presentedDrawable.presentedTime
+                    )
+                    let presentedAt = measured > 0
+                        ? measured
+                        : DispatchTime.now().uptimeNanoseconds
+                    Task { @MainActor [weak self] in
+                        self?.recordStrokeRuntimePresentedFrame(
+                            id: runtimeFrameID,
+                            at: presentedAt
+                        )
+                    }
+                }
+            }
             #if DEBUG
             let cpuEncodeMilliseconds = elapsedMilliseconds(
                 since: cpuEncodeStart
             )
-            let submittedAtNanoseconds =
-                DispatchTime.now().uptimeNanoseconds
             let eventToSubmitNanoseconds =
                 takeBrushLabEventToSubmitNanoseconds(
                     submittedAt: submittedAtNanoseconds
@@ -2489,7 +2640,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     self?.onInteractiveFrameMetrics?(frameMetrics)
                 }
             }
-            let targetFramesPerSecond = max(1, view.preferredFramesPerSecond)
             let fallbackPresentationTimestamp =
                 ProcessInfo.processInfo.systemUptime
             #if os(macOS)
@@ -2518,6 +2668,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             commandBuffer.commit()
         } catch let error as MetalRendererError {
+            if let runtimeFrameID {
+                strokeRuntimeController?.discardFrame(id: runtimeFrameID)
+                pendingStrokeRuntimeFrameIDs.remove(runtimeFrameID)
+            }
             if nativeEncoding != nil,
                commandBuffer.status == .notEnqueued
             {
@@ -2527,6 +2681,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             abandon(rasterCommit)
             failActiveOperationIfNeeded(error)
         } catch {
+            if let runtimeFrameID {
+                strokeRuntimeController?.discardFrame(id: runtimeFrameID)
+                pendingStrokeRuntimeFrameIDs.remove(runtimeFrameID)
+            }
             if nativeEncoding != nil,
                commandBuffer.status == .notEnqueued
             {
@@ -5234,6 +5392,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             let error = MetalRendererError.invalidRendererOperationToken
             finalizeCaptureTokens(commit.captureTokens, as: .failed)
             revisionStore.discard(commit.revisions)
+            endStrokeRuntimeIfPossible()
             activeStroke = nil
             resetLiveState()
             report(error)
@@ -5253,6 +5412,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 before: commit.revisions.before,
                 after: commit.revisions.after
             )
+            endStrokeRuntimeIfPossible()
             activeStroke = nil
             resetLiveState()
             onOperationCompleted?(.rasterSuccess(receipt))
@@ -5260,6 +5420,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         } catch let error as MetalRendererError {
             finalizeCaptureTokens(commit.captureTokens, as: .failed)
             discardSubmittedPairIfPossible(commit.revisions)
+            endStrokeRuntimeIfPossible()
             activeStroke = nil
             resetLiveState()
             report(error)
@@ -5271,6 +5432,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
             finalizeCaptureTokens(commit.captureTokens, as: .failed)
             discardSubmittedPairIfPossible(commit.revisions)
+            endStrokeRuntimeIfPossible()
             activeStroke = nil
             resetLiveState()
             report(rendererError)
@@ -5379,6 +5541,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let wasIdle = isIdle
         defer { notifyIdleStateIfChanged(from: wasIdle) }
         discardPendingRevisionsIfPossible()
+        endStrokeRuntimeIfPossible()
         activeStroke = nil
         resetLiveState()
         report(error)
@@ -5530,6 +5693,237 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     / conservativeFrameIntervalNanoseconds
             )
         }
+    }
+
+    private func beginStrokeRuntime(_ sample: StrokeSample) {
+        guard let controller = strokeRuntimeController else { return }
+        do {
+            let marker = try controller.beginStroke(strokeID: UUID())
+            strokeRuntimeReplayEpochTracker.beginStroke(
+                at: transientStrokeBuffer?.replayEpoch ?? 0
+            )
+            onStrokeRuntimeSegmentMarker?(marker)
+            onStrokeRuntimeSnapshot?(controller.snapshot)
+            recordStrokeRuntimeInput(sample)
+        } catch {
+            strokeRuntimeController = nil
+        }
+    }
+
+    private func recordStrokeRuntimeInput(_ sample: StrokeSample) {
+        guard let controller = strokeRuntimeController else { return }
+        let provenance: StrokeRuntimeInputProvenance = switch sample.kind {
+        case .actual: .actual
+        case .coalesced: .coalesced
+        case .predicted: .predicted
+        case .estimatedUpdate: .estimatedUpdate
+        }
+        controller.recordInput(
+            provenance,
+            at: DispatchTime.now().uptimeNanoseconds
+        )
+    }
+
+    private func beginStrokeRuntimeFrame(
+        at prepareStarted: UInt64,
+        targetFrameDurationNanoseconds: UInt64
+    ) -> UInt64? {
+        guard let controller = strokeRuntimeController else { return nil }
+        let id = nextStrokeRuntimeFrameID
+        nextStrokeRuntimeFrameID &+= 1
+        if nextStrokeRuntimeFrameID == 0 {
+            nextStrokeRuntimeFrameID = 1
+        }
+        do {
+            try controller.beginFrame(
+                id: id,
+                prepareStarted: prepareStarted,
+                targetFrameDurationNanoseconds:
+                    targetFrameDurationNanoseconds
+            )
+            pendingStrokeRuntimeFrameIDs.insert(id)
+            return id
+        } catch {
+            return nil
+        }
+    }
+
+    private func recordStrokeRuntimePreparedFrame(
+        id: UInt64?,
+        encoding: NativeDepositionFrameEncoding?
+    ) {
+        guard let id, let controller = strokeRuntimeController else { return }
+        let scheduler = activeStroke?.scheduler?.diagnosticSnapshot
+        let currentReplayEpoch = transientStrokeBuffer?.replayEpoch ?? 0
+        let replayDelta = strokeRuntimeReplayEpochTracker.consume(
+            currentEpoch: currentReplayEpoch
+        )
+        let authoritativeReplay = encoding?.predictedCount == 0
+            ? replayDelta : 0
+        let predictedReplay = (encoding?.predictedCount ?? 0) > 0
+            ? replayDelta : 0
+        let residentBytes = UInt64(max(
+            0,
+            revisionStore.residentBytes
+                + (activeDrawBrush?.residentByteCount ?? 0)
+                + (activeEraserBrush?.residentByteCount ?? 0)
+        ))
+        do {
+            try controller.recordPrepared(
+                id: id,
+                at: DispatchTime.now().uptimeNanoseconds,
+                newLogicalDabCount: UInt64(max(
+                    0,
+                    encoding?.logicalDabCount ?? 0
+                )),
+                newProjectedDabCount: UInt64(max(
+                    0,
+                    encoding?.instanceCount ?? 0
+                )),
+                authoritativeReplayCount: authoritativeReplay,
+                predictedReplayCount: predictedReplay,
+                authoritativeQueueDepth:
+                    scheduler?.authoritativePending ?? 0,
+                predictedQueueDepth: scheduler?.predictedPending ?? 0,
+                cacheHitCount: 0,
+                cacheMissCount: 0,
+                residentMemoryBytes: residentBytes
+            )
+        } catch {
+            controller.discardFrame(id: id)
+            pendingStrokeRuntimeFrameIDs.remove(id)
+        }
+    }
+
+    private func recordStrokeRuntimeSubmittedFrame(
+        id: UInt64?,
+        at timestamp: UInt64
+    ) {
+        guard let id, let controller = strokeRuntimeController else { return }
+        do {
+            try controller.recordSubmitted(id: id, at: timestamp)
+        } catch {
+            controller.discardFrame(id: id)
+            pendingStrokeRuntimeFrameIDs.remove(id)
+        }
+    }
+
+    private func recordStrokeRuntimeCompletedFrame(
+        id: UInt64?,
+        commandBuffer: any MTLCommandBuffer,
+        submittedAt: UInt64,
+        completedAt: UInt64,
+        presentedAt: UInt64? = nil
+    ) {
+        guard let id, let controller = strokeRuntimeController else { return }
+        let measuredGPUStart = Self.nanoseconds(commandBuffer.gpuStartTime)
+        let measuredGPUEnd = Self.nanoseconds(commandBuffer.gpuEndTime)
+        let gpuStarted = max(submittedAt, measuredGPUStart)
+        let gpuFinished = max(gpuStarted, measuredGPUEnd)
+        let presented = max(gpuFinished, presentedAt ?? completedAt)
+        do {
+            _ = try controller.recordGPU(
+                id: id,
+                started: gpuStarted,
+                finished: gpuFinished
+            )
+            if try controller.recordPresented(
+                id: id,
+                at: presented,
+                semantics: .offscreenCommandCompleted
+            ) {
+                pendingStrokeRuntimeFrameIDs.remove(id)
+                publishStrokeRuntimeSnapshotIfDue(controller)
+            }
+        } catch {
+            controller.discardFrame(id: id)
+            pendingStrokeRuntimeFrameIDs.remove(id)
+        }
+    }
+
+    private func recordStrokeRuntimeGPUFrame(
+        id: UInt64?,
+        measuredStart: UInt64,
+        measuredFinish: UInt64,
+        submittedAt: UInt64
+    ) {
+        guard let id, let controller = strokeRuntimeController else { return }
+        let gpuStarted = max(
+            submittedAt,
+            measuredStart
+        )
+        let gpuFinished = max(
+            gpuStarted,
+            measuredFinish
+        )
+        do {
+            if try controller.recordGPU(
+                id: id,
+                started: gpuStarted,
+                finished: gpuFinished
+            ) {
+                pendingStrokeRuntimeFrameIDs.remove(id)
+                publishStrokeRuntimeSnapshotIfDue(controller)
+            }
+        } catch {
+            controller.discardFrame(id: id)
+            pendingStrokeRuntimeFrameIDs.remove(id)
+        }
+    }
+
+    private func recordStrokeRuntimePresentedFrame(
+        id: UInt64?,
+        at timestamp: UInt64
+    ) {
+        guard let id, let controller = strokeRuntimeController else { return }
+        do {
+            if try controller.recordPresented(
+                id: id,
+                at: timestamp,
+                semantics: .drawablePresented
+            ) {
+                pendingStrokeRuntimeFrameIDs.remove(id)
+                publishStrokeRuntimeSnapshotIfDue(controller)
+            }
+        } catch {
+            controller.discardFrame(id: id)
+            pendingStrokeRuntimeFrameIDs.remove(id)
+        }
+    }
+
+    private func endStrokeRuntimeIfPossible() {
+        guard let controller = strokeRuntimeController else { return }
+        for id in pendingStrokeRuntimeFrameIDs.sorted() {
+            controller.discardFrame(id: id)
+        }
+        controller.discardPendingFrames()
+        pendingStrokeRuntimeFrameIDs.removeAll(keepingCapacity: true)
+        do {
+            let marker = try controller.endStroke()
+            onStrokeRuntimeSnapshot?(controller.snapshot)
+            onStrokeRuntimeSegmentMarker?(marker)
+        } catch {
+            if let marker = try? controller.endStroke() {
+                onStrokeRuntimeSnapshot?(controller.snapshot)
+                onStrokeRuntimeSegmentMarker?(marker)
+            }
+        }
+    }
+
+    private func publishStrokeRuntimeSnapshotIfDue(
+        _ controller: StrokeRuntimeProductionController
+    ) {
+        guard controller.shouldPublishLiveSnapshot else { return }
+        onStrokeRuntimeSnapshot?(controller.snapshot)
+    }
+
+    nonisolated private static func nanoseconds(
+        _ seconds: TimeInterval
+    ) -> UInt64 {
+        guard seconds.isFinite, seconds > 0 else { return 0 }
+        let value = seconds * 1_000_000_000
+        guard value < Double(UInt64.max) else { return .max }
+        return UInt64(value)
     }
 
     static func saturatingAdd(

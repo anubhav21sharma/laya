@@ -42,21 +42,48 @@ public enum BenchmarkStrokeRuntimeGateError:
     Error, Equatable, LocalizedError
 {
     case nonProductionTrace
+    case unattestedTrace
+    case invalidAttestation
+    case incompleteAttribution
+    case incompleteFrameEvidence(
+        begun: UInt64,
+        complete: UInt64,
+        discarded: UInt64
+    )
+    case unconsumedInputEvidence(UInt64)
+    case unsupportedPresentationSemantics(
+        StrokeRuntimePresentationSemantics
+    )
     case insufficientDuration(actual: UInt64, required: UInt64)
     case appendOnlyReplay(UInt64)
-    case monotonicBacklog([Int])
+    case insufficientQueueEvidence(actual: UInt64, required: UInt64)
+    case monotonicBacklog(run: UInt64)
     case eventToSubmitMissFraction(actual: Double, maximum: Double)
 
     public var errorDescription: String? {
         switch self {
         case .nonProductionTrace:
             "Runtime performance evidence did not originate from a production renderer trace."
+        case .unattestedTrace:
+            "Runtime performance evidence has no production-recorder attestation."
+        case .invalidAttestation:
+            "Runtime performance evidence is inconsistent with its recorder attestation."
+        case .incompleteAttribution:
+            "Runtime performance evidence is missing attributable input, frame, or timestamp data."
+        case let .incompleteFrameEvidence(begun, complete, discarded):
+            "Runtime frame evidence began \(begun), completed \(complete), and discarded \(discarded) frames."
+        case let .unconsumedInputEvidence(count):
+            "Runtime evidence ended with \(count) unconsumed input events."
+        case let .unsupportedPresentationSemantics(semantics):
+            "Runtime presentation evidence uses unsupported '\(semantics.rawValue)' semantics."
         case let .insufficientDuration(actual, required):
             "Runtime trace duration \(actual) ns is shorter than the required \(required) ns."
         case let .appendOnlyReplay(count):
             "Append-only runtime evidence recorded \(count) authoritative replays."
-        case let .monotonicBacklog(depths):
-            "Authoritative runtime backlog grows monotonically: \(depths)."
+        case let .insufficientQueueEvidence(actual, required):
+            "Runtime queue evidence has \(actual) observations; \(required) are required."
+        case let .monotonicBacklog(run):
+            "Authoritative runtime backlog grows monotonically for \(run) observations."
         case let .eventToSubmitMissFraction(actual, maximum):
             "Event-to-submit miss fraction \(actual) exceeds \(maximum)."
         }
@@ -67,17 +94,118 @@ public enum BenchmarkStrokeRuntimeGate {
     public static let maximumEventToSubmitMissFraction = 0.01
 
     public static func validate(
-        _ snapshot: StrokeRuntimeTelemetrySnapshot,
+        _ evidence: StrokeRuntimeRecordedEvidence,
         replayMode: StrokeRuntimeReplayMode
     ) throws {
+        let snapshot = evidence.report
         guard snapshot.traceProfile.isProduction else {
             throw BenchmarkStrokeRuntimeGateError.nonProductionTrace
         }
+        guard let attestation = snapshot.attestation else {
+            throw BenchmarkStrokeRuntimeGateError.unattestedTrace
+        }
+        guard attestation.origin == .productionRenderer else {
+            throw BenchmarkStrokeRuntimeGateError.unattestedTrace
+        }
+        guard attestation.traceProfile == snapshot.traceProfile,
+              attestation.completeFrameEventCount == snapshot.frameCount,
+              attestation.queueObservationCount == snapshot.frameCount,
+              let attributedFrameCount = snapshot.attributedFrameCount,
+              attestation.attributedFrameEventCount
+                == attributedFrameCount,
+              let segmentID = snapshot.segmentID,
+              let strokeID = snapshot.strokeID,
+              segmentID != strokeID,
+              let firstInput = attestation.firstInputTimestamp,
+              let lastPresentation = attestation.lastPresentationTimestamp,
+              let lastTimestamps = snapshot.lastTimestamps,
+              lastTimestamps.presented == lastPresentation,
+              lastPresentation >= firstInput,
+              snapshot.wallDurationNanoseconds
+                == lastPresentation - firstInput,
+              snapshot.observedDurationNanoseconds
+                == snapshot.wallDurationNanoseconds,
+              snapshot.logicalDurationNanoseconds
+                == snapshot.traceProfile.logicalDuration(
+                    forWallDuration: snapshot.wallDurationNanoseconds
+                )
+        else {
+            throw BenchmarkStrokeRuntimeGateError.invalidAttestation
+        }
+        guard let frameRecords = snapshot.frameRecords,
+              snapshot.traceOverflowCount == 0,
+              UInt64(frameRecords.count) == snapshot.frameCount,
+              frameRecords.last?.timestamps == snapshot.lastTimestamps,
+              frameRecords.allSatisfy({ $0.strokeID == strokeID })
+        else {
+            throw BenchmarkStrokeRuntimeGateError.incompleteFrameEvidence(
+                begun: attestation.begunFrameEventCount,
+                complete: UInt64(snapshot.frameRecords?.count ?? 0),
+                discarded: attestation.discardedFrameEventCount
+                    + (snapshot.traceOverflowCount ?? 0)
+            )
+        }
+        guard attestation.begunFrameEventCount
+                == attestation.completeFrameEventCount,
+              attestation.discardedFrameEventCount == 0
+        else {
+            throw BenchmarkStrokeRuntimeGateError.incompleteFrameEvidence(
+                begun: attestation.begunFrameEventCount,
+                complete: attestation.completeFrameEventCount,
+                discarded: attestation.discardedFrameEventCount
+            )
+        }
+        guard attestation.unconsumedInputEventCount == 0 else {
+            throw BenchmarkStrokeRuntimeGateError.unconsumedInputEvidence(
+                attestation.unconsumedInputEventCount
+            )
+        }
+        switch attestation.presentationSemantics {
+        case .drawablePresented, .offscreenCommandCompleted:
+            break
+        case .mixed, .unknown:
+            throw BenchmarkStrokeRuntimeGateError
+                .unsupportedPresentationSemantics(
+                    attestation.presentationSemantics
+                )
+        }
+        let attributedInputCount = [
+            snapshot.inputProvenance.actual,
+            snapshot.inputProvenance.coalesced,
+            snapshot.inputProvenance.predicted,
+            snapshot.inputProvenance.estimatedUpdate,
+        ].reduce(UInt64(0), Self.saturatingAdd)
+        let hasAttributedInput = snapshot.inputProvenance.actual > 0
+            || snapshot.inputProvenance.coalesced > 0
+            || snapshot.inputProvenance.predicted > 0
+            || snapshot.inputProvenance.estimatedUpdate > 0
+        guard hasAttributedInput,
+              snapshot.frameCount > 0,
+              attributedFrameCount > 0,
+              attributedFrameCount <= attributedInputCount,
+              snapshot.newLogicalDabCount > 0,
+              snapshot.newProjectedDabCount > 0,
+              snapshot.prepare.p95 > 0,
+              snapshot.eventToSubmit.p95 > 0,
+              snapshot.gpu.p95 > 0,
+              lastTimestamps.input <= lastTimestamps.prepareStarted,
+              lastTimestamps.prepareStarted
+                <= lastTimestamps.prepareFinished,
+              lastTimestamps.prepareFinished <= lastTimestamps.submitted,
+              lastTimestamps.submitted <= lastTimestamps.gpuStarted,
+              lastTimestamps.gpuStarted <= lastTimestamps.gpuFinished,
+              lastTimestamps.gpuFinished <= lastTimestamps.presented
+        else {
+            throw BenchmarkStrokeRuntimeGateError.incompleteAttribution
+        }
         let requiredDuration = snapshot.traceProfile
             .logicalDurationNanoseconds
-        guard snapshot.observedDurationNanoseconds >= requiredDuration else {
+        guard snapshot.logicalDurationNanoseconds >= requiredDuration,
+              snapshot.wallDurationNanoseconds
+                >= snapshot.traceProfile.requiredWallDurationNanoseconds
+        else {
             throw BenchmarkStrokeRuntimeGateError.insufficientDuration(
-                actual: snapshot.observedDurationNanoseconds,
+                actual: snapshot.logicalDurationNanoseconds,
                 required: requiredDuration
             )
         }
@@ -88,9 +216,16 @@ public enum BenchmarkStrokeRuntimeGate {
                 snapshot.authoritativeReplayCount
             )
         }
-        if growsMonotonically(snapshot.authoritativeQueueDepths) {
+        let requiredQueueObservations: UInt64 = 3
+        guard attestation.queueObservationCount >= requiredQueueObservations else {
+            throw BenchmarkStrokeRuntimeGateError.insufficientQueueEvidence(
+                actual: attestation.queueObservationCount,
+                required: requiredQueueObservations
+            )
+        }
+        if attestation.longestBacklogGrowthRun >= requiredQueueObservations {
             throw BenchmarkStrokeRuntimeGateError.monotonicBacklog(
-                snapshot.authoritativeQueueDepths
+                run: attestation.longestBacklogGrowthRun
             )
         }
         let missFraction = snapshot.eventToSubmitMissFraction
@@ -103,18 +238,14 @@ public enum BenchmarkStrokeRuntimeGate {
         }
     }
 
-    private static func growsMonotonically(_ depths: [Int]) -> Bool {
-        guard depths.count >= 3,
-              let first = depths.first,
-              let last = depths.last,
-              last > first
-        else {
-            return false
-        }
-        return zip(depths, depths.dropFirst()).allSatisfy { before, after in
-            after >= before
-        }
+    private static func saturatingAdd(
+        _ lhs: UInt64,
+        _ rhs: UInt64
+    ) -> UInt64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : sum
     }
+
 }
 
 public enum BenchmarkMetricError: Error, Equatable, LocalizedError {
@@ -381,7 +512,7 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     public let canonicalBGRA8Digest: String?
     public let inputSampleCount: Int?
     public let logicalDabCount: Int?
-    public let strokeRuntime: StrokeRuntimeTelemetrySnapshot?
+    public var strokeRuntime: StrokeRuntimeTelemetrySnapshot?
 
     public init(
         schemaVersion: Int,
@@ -534,13 +665,14 @@ public struct BenchmarkRecord: Codable, Equatable, Sendable {
     }
 
     public func validateStrokeRuntimePerformance(
+        using evidence: StrokeRuntimeRecordedEvidence,
         replayMode: StrokeRuntimeReplayMode
     ) throws {
-        guard let strokeRuntime else {
+        guard let strokeRuntime, strokeRuntime == evidence.report else {
             throw BenchmarkStrokeRuntimeGateError.nonProductionTrace
         }
         try BenchmarkStrokeRuntimeGate.validate(
-            strokeRuntime,
+            evidence,
             replayMode: replayMode
         )
     }

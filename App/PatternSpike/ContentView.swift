@@ -561,6 +561,8 @@ struct ContentView: View {
     ) {
         controller.renderer.onInteractiveFramePresented = nil
         controller.renderer.onInteractiveFrameMetrics = nil
+        controller.renderer.onStrokeRuntimeSnapshot = nil
+        controller.renderer.onStrokeRuntimeSegmentMarker = nil
         let monitor = debugPerformanceMonitor
         let logger = debugPerformanceLogger
         let gpuName = controller.renderer.device.name
@@ -573,13 +575,16 @@ struct ContentView: View {
             debugPerformanceLoggingActive = false
             let snapshot = monitor.snapshot
             let context = debugPerformanceContext(controller)
-            try? logger.record(
+            logger.record(
                 .sessionEnded,
                 snapshot: snapshot,
                 gpuName: gpuName,
                 context: context
             )
-            try? logger.flush()
+            controller.renderer.disableStrokeRuntimeTelemetry()
+            Task {
+                try? await logger.flush()
+            }
             return
         }
         let startsNewSession =
@@ -588,13 +593,41 @@ struct ContentView: View {
         debugPerformanceLoggingActive = true
         if startsNewSession {
             monitor.reset()
+            controller.renderer.onStrokeRuntimeSnapshot = { runtime in
+                monitor.recordStrokeRuntimeSnapshot(runtime)
+            }
+            controller.renderer.configureStrokeRuntimeTelemetry(
+                profile: .productionTenSeconds
+            )
             print("DEBUG PERF LOG \(logger.logURL.path)")
             let initialContext = debugPerformanceContext(controller)
-            try? logger.record(
+            logger.record(
                 .sessionStarted,
                 snapshot: monitor.snapshot,
                 gpuName: gpuName,
                 context: initialContext
+            )
+        }
+        controller.renderer.onStrokeRuntimeSnapshot = { runtime in
+            monitor.recordStrokeRuntimeSnapshot(runtime)
+            logger.record(
+                .sample,
+                snapshot: monitor.snapshot,
+                gpuName: gpuName,
+                context: debugPerformanceContext(controller)
+            )
+        }
+        controller.renderer.onStrokeRuntimeSegmentMarker = { marker in
+            guard let runtime = controller.renderer.strokeRuntimeSnapshot,
+                  runtime.sessionID == marker.sessionID,
+                  runtime.segmentID == marker.segmentID
+            else { return }
+            monitor.recordStrokeRuntimeSnapshot(runtime)
+            logger.record(
+                marker.kind == .segmentBegan ? .segmentBegan : .segmentEnded,
+                snapshot: monitor.snapshot,
+                gpuName: gpuName,
+                context: debugPerformanceContext(controller)
             )
         }
         controller.renderer.onInteractiveFrameMetrics = { metrics in
@@ -613,14 +646,6 @@ struct ContentView: View {
             ) else {
                 return
             }
-            let snapshot = monitor.snapshot
-            let context = debugPerformanceContext(controller)
-            try? logger.record(
-                .sample,
-                snapshot: snapshot,
-                gpuName: gpuName,
-                context: context
-            )
         }
     }
 

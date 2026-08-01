@@ -183,7 +183,7 @@ func debugPerformanceMonitorPublishesStrokeRuntimeContract() {
 
 @Test
 @MainActor
-func debugPerformanceLoggerWritesReviewableJSONLines() throws {
+func debugPerformanceLoggerWritesReviewableJSONLines() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -196,7 +196,8 @@ func debugPerformanceLoggerWritesReviewableJSONLines() throws {
         p95FrameMilliseconds: 17.1,
         missedFramePercentage: 0.5,
         targetFramesPerSecond: 60,
-        sampleCount: 42
+        sampleCount: 42,
+        strokeRuntime: debugRuntimeSnapshot()
     )
     let context = DebugPerformanceContext(
         brushID: "builtin.native-ink",
@@ -208,23 +209,23 @@ func debugPerformanceLoggerWritesReviewableJSONLines() throws {
         gridVisible: true
     )
 
-    try logger.record(
+    logger.record(
         .sessionStarted,
         snapshot: snapshot,
         gpuName: "Test GPU"
     )
-    try logger.record(
+    logger.record(
         .sample,
         snapshot: snapshot,
         gpuName: "Test GPU",
         context: context
     )
-    try logger.record(
+    logger.record(
         .sessionEnded,
         snapshot: snapshot,
         gpuName: "Test GPU"
     )
-    try logger.flush()
+    try await logger.flush()
 
     let data = try Data(contentsOf: logger.logURL)
     let decoder = JSONDecoder()
@@ -236,9 +237,9 @@ func debugPerformanceLoggerWritesReviewableJSONLines() throws {
         )
     }
     #expect(records.map(\.kind) == [
-        .segmentBegan,
+        .sessionStarted,
         .sample,
-        .segmentEnded,
+        .sessionEnded,
     ])
     #expect(records[0].segmentID != nil)
     #expect(records.allSatisfy { $0.segmentID == records[0].segmentID })
@@ -249,7 +250,7 @@ func debugPerformanceLoggerWritesReviewableJSONLines() throws {
 
 @Test
 @MainActor
-func debugPerformanceLoggerBuffersAttributedSegmentsUntilFlush() throws {
+func debugPerformanceLoggerBuffersAttributedSegmentsUntilFlush() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -264,37 +265,30 @@ func debugPerformanceLoggerBuffersAttributedSegmentsUntilFlush() throws {
     )!
     let logger = DebugPerformanceLogger(
         directory: directory,
-        filename: "buffered-test.jsonl",
-        sessionID: sessionID
+        filename: "buffered-test.jsonl"
     )
     let snapshot = DebugPerformanceSnapshot(
         strokeRuntime: debugRuntimeSnapshot()
     )
 
-    try logger.record(
+    logger.record(
         .segmentBegan,
         snapshot: snapshot,
-        gpuName: "Test GPU",
-        segmentID: segmentID,
-        strokeID: strokeID
+        gpuName: "Test GPU"
     )
-    try logger.record(
+    logger.record(
         .sample,
         snapshot: snapshot,
-        gpuName: "Test GPU",
-        segmentID: segmentID,
-        strokeID: strokeID
+        gpuName: "Test GPU"
     )
-    try logger.record(
+    logger.record(
         .segmentEnded,
         snapshot: snapshot,
-        gpuName: "Test GPU",
-        segmentID: segmentID,
-        strokeID: strokeID
+        gpuName: "Test GPU"
     )
 
     #expect(!FileManager.default.fileExists(atPath: logger.logURL.path))
-    try logger.flush()
+    try await logger.flush()
 
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = .iso8601
@@ -315,6 +309,130 @@ func debugPerformanceLoggerBuffersAttributedSegmentsUntilFlush() throws {
     #expect(records.allSatisfy { $0.segmentID == segmentID })
     #expect(records.allSatisfy { $0.strokeID == strokeID })
     #expect(records[1].snapshot.strokeRuntime == debugRuntimeSnapshot())
+}
+
+@Test
+@MainActor
+func debugPerformanceLoggerBoundsRecordsBeforeBackgroundEncoding()
+    async throws
+{
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let logger = DebugPerformanceLogger(
+        directory: directory,
+        filename: "bounded-test.jsonl",
+        pendingRecordCapacity: 2,
+        batchSize: 100
+    )
+    let snapshot = DebugPerformanceSnapshot(
+        strokeRuntime: debugRuntimeSnapshot()
+    )
+
+    for _ in 0..<5 {
+        logger.record(
+            .sample,
+            snapshot: snapshot,
+            gpuName: "Test GPU"
+        )
+    }
+    let diagnostics = await logger.diagnostics()
+
+    #expect(diagnostics.maximumBufferedRecordCount <= 2)
+    #expect(diagnostics.droppedRecordCount == 3)
+    #expect(!FileManager.default.fileExists(atPath: logger.logURL.path))
+    try await logger.flush()
+}
+
+@Test
+@MainActor
+func debugPerformanceLoggerKeepsSegmentBoundariesUnderSamplePressure()
+    async throws
+{
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let logger = DebugPerformanceLogger(
+        directory: directory,
+        filename: "boundary-pressure-test.jsonl",
+        pendingRecordCapacity: 2,
+        batchSize: 100
+    )
+    let snapshot = DebugPerformanceSnapshot(
+        strokeRuntime: debugRuntimeSnapshot()
+    )
+
+    logger.record(.segmentBegan, snapshot: snapshot, gpuName: "Test GPU")
+    for _ in 0..<3 {
+        logger.record(.sample, snapshot: snapshot, gpuName: "Test GPU")
+    }
+    logger.record(.segmentEnded, snapshot: snapshot, gpuName: "Test GPU")
+    try await logger.flush()
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let records = try Data(contentsOf: logger.logURL)
+        .split(separator: 0x0A)
+        .map {
+            try decoder.decode(
+                DebugPerformanceLogRecord.self,
+                from: Data($0)
+            )
+        }
+    let diagnostics = await logger.diagnostics()
+
+    #expect(records.map(\.kind) == [.segmentBegan, .segmentEnded])
+    #expect(records[0].segmentID == records[1].segmentID)
+    #expect(records[0].strokeID == records[1].strokeID)
+    #expect(diagnostics.maximumBufferedRecordCount <= 2)
+    #expect(diagnostics.droppedRecordCount == 3)
+}
+
+@Test
+@MainActor
+func debugPerformanceLoggerAcceptsNextSegmentDuringFlush() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let logger = DebugPerformanceLogger(
+        directory: directory,
+        filename: "flush-handoff-test.jsonl",
+        pendingRecordCapacity: 2,
+        batchSize: 100
+    )
+    let snapshot = DebugPerformanceSnapshot(
+        strokeRuntime: debugRuntimeSnapshot()
+    )
+
+    logger.record(.sessionEnded, snapshot: snapshot, gpuName: "Test GPU")
+    let firstFlush = Task { try await logger.flush() }
+    await Task.yield()
+    let accepted = logger.record(
+        .segmentBegan,
+        snapshot: snapshot,
+        gpuName: "Test GPU"
+    )
+    try await firstFlush.value
+    logger.record(.segmentEnded, snapshot: snapshot, gpuName: "Test GPU")
+    try await logger.flush()
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let records = try Data(contentsOf: logger.logURL)
+        .split(separator: 0x0A)
+        .map {
+            try decoder.decode(
+                DebugPerformanceLogRecord.self,
+                from: Data($0)
+            )
+        }
+
+    #expect(accepted)
+    #expect(records.map(\.kind) == [
+        .sessionEnded,
+        .segmentBegan,
+        .segmentEnded,
+    ])
 }
 
 private func debugRuntimeSnapshot() -> StrokeRuntimeTelemetrySnapshot {

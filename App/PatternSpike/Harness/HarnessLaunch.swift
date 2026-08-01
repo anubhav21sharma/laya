@@ -37,7 +37,7 @@ enum HarnessLaunch {
             case .deposition:
                 Task { @MainActor in
                     do {
-                        let result = try await DepositionHarnessRunner(
+                        let baseResult = try await DepositionHarnessRunner(
                             device: device,
                             productionAnchorDefinitions: [
                                 "deposition-airbrush":
@@ -70,6 +70,11 @@ enum HarnessLaunch {
                             outputDirectory: outputDirectory,
                             build: build
                         )
+                        let result = try attachRuntimeTrace(
+                            runtimeTraceProfile,
+                            device: device,
+                            to: baseResult
+                        )
                         try validateRuntimeTrace(
                             runtimeTraceProfile,
                             result: result
@@ -81,10 +86,15 @@ enum HarnessLaunch {
                 }
                 return
             case .sliceThree:
-                let result = try SliceThreeHarnessRunner(device: device).run(
+                let baseResult = try SliceThreeHarnessRunner(device: device).run(
                     scene: scene,
                     outputDirectory: outputDirectory,
                     build: build
+                )
+                let result = try attachRuntimeTrace(
+                    runtimeTraceProfile,
+                    device: device,
+                    to: baseResult
                 )
                 try validateRuntimeTrace(
                     runtimeTraceProfile,
@@ -92,10 +102,15 @@ enum HarnessLaunch {
                 )
                 pass(scene: scene, result: result)
             case .foundation:
-                let result = try HarnessRunner(device: device).run(
+                let baseResult = try HarnessRunner(device: device).run(
                     scene: scene,
                     outputDirectory: outputDirectory,
                     build: build
+                )
+                let result = try attachRuntimeTrace(
+                    runtimeTraceProfile,
+                    device: device,
+                    to: baseResult
                 )
                 try validateRuntimeTrace(
                     runtimeTraceProfile,
@@ -164,12 +179,146 @@ enum HarnessLaunch {
                 requested.rawValue
             )
         }
-        let replayMode = StrokeRuntimeReplayMode(
-            rawValue: result.benchmark.replayMode ?? "appendOnly"
-        ) ?? .appendOnly
+        guard runtime.attestation?.origin == .productionRenderer else {
+            throw HarnessLaunchError.missingProductionRuntimeTrace(
+                requested.rawValue
+            )
+        }
+    }
+
+    @MainActor
+    private static func attachRuntimeTrace(
+        _ requested: StrokeRuntimeTraceProfile?,
+        device: any MTLDevice,
+        to result: HarnessRunResult
+    ) throws -> HarnessRunResult {
+        guard let requested else { return result }
+        let runtime = try ProductionStrokeRuntimeTraceRunner(
+            device: device
+        ).run(profile: requested)
+        var benchmark = result.benchmark
+        benchmark.strokeRuntime = runtime
+        try BenchmarkRecord.encode(benchmark).write(
+            to: result.benchmarkURL,
+            options: .atomic
+        )
+        return HarnessRunResult(
+            imageURL: result.imageURL,
+            benchmarkURL: result.benchmarkURL,
+            benchmark: benchmark,
+            artifactURLs: result.artifactURLs
+        )
+    }
+}
+
+@MainActor
+private struct ProductionStrokeRuntimeTraceRunner {
+    let device: any MTLDevice
+
+    func run(
+        profile: StrokeRuntimeTraceProfile
+    ) throws -> StrokeRuntimeTelemetrySnapshot {
+        guard let library = device.makeDefaultLibrary() else {
+            throw MetalRendererError.defaultLibraryUnavailable
+        }
+        let renderer = try GridRenderer(
+            device: device,
+            library: library,
+            drawableSize: PatternSize(width: 512, height: 512),
+            configuration: try TilingCanvasConfiguration(
+                pixelSize: PixelSize(width: 512, height: 512),
+                tiling: .grid
+            )
+        )
+        try renderer.installNativeHarnessBrushes()
+        renderer.configureStrokeRuntimeTelemetry(
+            profile: profile,
+            windowCapacity: 4_096
+        )
+        let token = RendererOperationToken(rawValue: 0x5452_4143_45)
+        let style = try renderer.nativeHarnessStrokeStyle(
+            color: .black,
+            diameter: 20,
+            seed: token.rawValue
+        )
+        let started = DispatchTime.now().uptimeNanoseconds
+        try renderer.beginStroke(
+            token: token,
+            sample: sample(
+                x: 96,
+                y: 256,
+                timestamp: 0,
+                phase: .began
+            ),
+            style: style
+        )
+        _ = try renderer.flushPendingLiveForHarness()
+
+        var frame: UInt64 = 1
+        while DispatchTime.now().uptimeNanoseconds - started
+            < profile.requiredWallDurationNanoseconds
+        {
+            let phase = Float(frame % 320) / 319
+            let x = frame / 320 % 2 == 0
+                ? 96 + phase * 320
+                : 416 - phase * 320
+            try renderer.appendStroke(
+                token: token,
+                sample: sample(
+                    x: x,
+                    y: 256 + sin(Float(frame) * 0.05) * 48,
+                    timestamp: Double(frame) / 60,
+                    phase: .moved
+                )
+            )
+            _ = try renderer.flushPendingLiveForHarness()
+            frame &+= 1
+            usleep(16_000)
+        }
+
+        try renderer.requestStrokeCommit(
+            token: token,
+            sample: sample(
+                x: 416,
+                y: 256,
+                timestamp: Double(frame) / 60,
+                phase: .ended
+            ),
+            maximumRetainedBytes: 64 * 1_024 * 1_024
+        )
+        while renderer.brushLabDiagnosticSnapshot.deposition
+            .authoritativePending > 0
+        {
+            _ = try renderer.flushPendingLiveForHarness()
+        }
+        _ = try renderer.flushPendingLiveForHarness()
+        _ = try renderer.finishCommitForHarness()
+        guard let evidence = renderer.strokeRuntimeRecordedEvidence else {
+            throw HarnessLaunchError.missingProductionRuntimeTrace(
+                profile.rawValue
+            )
+        }
         try BenchmarkStrokeRuntimeGate.validate(
-            runtime,
-            replayMode: replayMode
+            evidence,
+            replayMode: .appendOnly
+        )
+        return evidence.report
+    }
+
+    private func sample(
+        x: Float,
+        y: Float,
+        timestamp: TimeInterval,
+        phase: StrokePhase
+    ) -> StrokeSample {
+        StrokeSample(
+            position: ScreenPoint(x: x, y: y),
+            pressure: 0.75,
+            timestamp: timestamp,
+            phase: phase,
+            source: .mouse,
+            kind: .actual,
+            capabilities: [.pressure]
         )
     }
 }

@@ -80,18 +80,24 @@ struct DebugPerformanceLogRecord: Codable, Equatable, Sendable {
 final class DebugPerformanceLogger {
     let logURL: URL
 
-    private let sessionID: UUID
-    private let segmentID: UUID
-    private var fileHandle: FileHandle?
-    private var pendingRecords: [Data] = []
-    private let encoder: JSONEncoder
+    private let sink: DebugPerformanceLogSink
+    private let pendingRecordCapacity: Int
+    private var mailbox: DebugPerformanceLogMailbox?
+    private var continuation: AsyncStream<Void>.Continuation?
+    private var consumerTask: Task<Void, Never>?
+    private var flushTask: Task<Void, Error>?
+    private var flushGeneration: UInt64 = 0
+    private var maximumMailboxRecordCount = 0
+    private var droppedMailboxRecordCount: UInt64 = 0
 
     init(
         directory: URL? = nil,
         filename: String? = nil,
-        sessionID: UUID = UUID(),
-        segmentID: UUID = UUID()
+        pendingRecordCapacity: Int = 256,
+        batchSize: Int = 32
     ) {
+        precondition(pendingRecordCapacity > 0)
+        precondition(batchSize > 0)
         let root = directory ?? Self.defaultDirectory()
         let generatedName = filename ?? (
             "brush-performance-"
@@ -104,87 +110,141 @@ final class DebugPerformanceLogger {
             generatedName,
             isDirectory: false
         )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        self.encoder = encoder
-        self.sessionID = sessionID
-        self.segmentID = segmentID
+        sink = DebugPerformanceLogSink(
+            logURL: logURL,
+            pendingRecordCapacity: pendingRecordCapacity,
+            batchSize: batchSize
+        )
+        self.pendingRecordCapacity = pendingRecordCapacity
+        startConsumer()
     }
 
+    deinit {
+        continuation?.finish()
+        consumerTask?.cancel()
+        flushTask?.cancel()
+    }
+
+    @discardableResult
     func record(
         _ kind: DebugPerformanceLogEventKind,
         snapshot: DebugPerformanceSnapshot,
         gpuName: String,
-        context: DebugPerformanceContext? = nil,
-        segmentID: UUID? = nil,
-        strokeID: UUID? = nil
-    ) throws {
-        let storedKind: DebugPerformanceLogEventKind = switch kind {
-        case .sessionStarted:
-            .segmentBegan
-        case .sessionEnded:
-            .segmentEnded
-        default:
-            kind
-        }
+        context: DebugPerformanceContext? = nil
+    ) -> Bool {
+        guard let runtime = snapshot.strokeRuntime else { return false }
         let record = DebugPerformanceLogRecord(
             schemaVersion: 1,
-            sessionID: sessionID,
+            sessionID: runtime.sessionID,
             timestamp: Date(),
-            kind: storedKind,
+            kind: kind,
             gpuName: gpuName,
-            segmentID: segmentID
-                ?? snapshot.strokeRuntime?.segmentID
-                ?? self.segmentID,
-            strokeID: strokeID ?? snapshot.strokeRuntime?.strokeID,
+            segmentID: runtime.segmentID,
+            strokeID: runtime.strokeID,
             context: context,
             snapshot: snapshot
         )
-        var data = try encoder.encode(record)
-        data.append(0x0A)
-        pendingRecords.append(data)
+        guard let mailbox, let continuation else {
+            droppedMailboxRecordCount &+= 1
+            return false
+        }
+        let result = mailbox.enqueue(record)
+        maximumMailboxRecordCount = max(
+            maximumMailboxRecordCount,
+            result.bufferedRecordCount
+        )
+        droppedMailboxRecordCount &+= result.droppedRecordCount
+        guard result.accepted else { return false }
+        switch continuation.yield(()) {
+        case .enqueued, .dropped:
+            return true
+        case .terminated:
+            return false
+        @unknown default:
+            return false
+        }
     }
 
-    func flush() throws {
-        guard !pendingRecords.isEmpty else {
-            try fileHandle?.synchronize()
+    func flush() async throws {
+        if let activeFlush = flushTask {
+            let generation = flushGeneration
+            do {
+                try await activeFlush.value
+                clearCompletedFlush(generation: generation)
+            } catch {
+                clearCompletedFlush(generation: generation)
+                throw error
+            }
+            // The active consumer is the bounded successor installed by the
+            // earlier flush. Close and drain it as this call's own boundary.
+            try await flush()
             return
         }
-        var payload = Data()
-        payload.reserveCapacity(
-            pendingRecords.reduce(0) { $0 + $1.count }
-        )
-        for record in pendingRecords {
-            payload.append(record)
+        let previousConsumer = consumerTask
+        continuation?.finish()
+        flushGeneration &+= 1
+        let generation = flushGeneration
+        let sink = sink
+        let task = Task {
+            await previousConsumer?.value
+            try await sink.flush()
         }
-        let handle = try writableHandle()
-        try handle.write(contentsOf: payload)
-        try handle.synchronize()
-        pendingRecords.removeAll(keepingCapacity: true)
+        flushTask = task
+        startConsumer(after: task)
+        do {
+            try await task.value
+            clearCompletedFlush(generation: generation)
+        } catch {
+            clearCompletedFlush(generation: generation)
+            throw error
+        }
     }
 
-    private func writableHandle() throws -> FileHandle {
-        if let fileHandle {
-            return fileHandle
-        }
-        let manager = FileManager.default
-        try manager.createDirectory(
-            at: logURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+    func diagnostics() async -> DebugPerformanceLogDiagnostics {
+        let mailboxMaximum = maximumMailboxRecordCount
+        let mailboxDropped = droppedMailboxRecordCount
+        let sinkDiagnostics = await sink.diagnostics
+        return DebugPerformanceLogDiagnostics(
+            maximumBufferedRecordCount: max(
+                mailboxMaximum,
+                sinkDiagnostics.maximumBufferedRecordCount
+            ),
+            droppedRecordCount:
+                mailboxDropped + sinkDiagnostics.droppedRecordCount
         )
-        if !manager.fileExists(atPath: logURL.path) {
-            guard manager.createFile(
-                atPath: logURL.path,
-                contents: nil
-            ) else {
-                throw CocoaError(.fileWriteUnknown)
+    }
+
+    private func startConsumer(
+        after predecessor: Task<Void, Error>? = nil
+    ) {
+        let mailbox = DebugPerformanceLogMailbox(
+            capacity: pendingRecordCapacity
+        )
+        let pair = AsyncStream.makeStream(
+            of: Void.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        self.mailbox = mailbox
+        continuation = pair.continuation
+        consumerTask = Task { [sink] in
+            if let predecessor {
+                _ = try? await predecessor.value
+            }
+            guard !Task.isCancelled else { return }
+            for await _ in pair.stream {
+                for record in mailbox.drain() {
+                    await sink.enqueue(record)
+                }
+            }
+            for record in mailbox.drain() {
+                await sink.enqueue(record)
             }
         }
-        let handle = try FileHandle(forWritingTo: logURL)
-        try handle.seekToEnd()
-        fileHandle = handle
-        return handle
+    }
+
+    private func clearCompletedFlush(generation: UInt64) {
+        guard flushGeneration == generation, flushTask != nil else { return }
+        flushTask = nil
     }
 
     private static func defaultDirectory() -> URL {
@@ -196,6 +256,185 @@ final class DebugPerformanceLogger {
         return library
             .appendingPathComponent("Logs", isDirectory: true)
             .appendingPathComponent("Pattern", isDirectory: true)
+    }
+}
+
+struct DebugPerformanceLogDiagnostics: Equatable, Sendable {
+    let maximumBufferedRecordCount: Int
+    let droppedRecordCount: UInt64
+}
+
+private final class DebugPerformanceLogMailbox: @unchecked Sendable {
+    struct EnqueueResult: Sendable {
+        let accepted: Bool
+        let bufferedRecordCount: Int
+        let droppedRecordCount: UInt64
+    }
+
+    private let capacity: Int
+    private let lock = NSLock()
+    private var records: [DebugPerformanceLogRecord] = []
+
+    init(capacity: Int) {
+        self.capacity = capacity
+        records.reserveCapacity(capacity)
+    }
+
+    func enqueue(
+        _ record: DebugPerformanceLogRecord
+    ) -> EnqueueResult {
+        lock.lock()
+        defer { lock.unlock() }
+        if records.count == capacity {
+            if record.kind == .sample {
+                return EnqueueResult(
+                    accepted: false,
+                    bufferedRecordCount: records.count,
+                    droppedRecordCount: 1
+                )
+            }
+            if let sampleIndex = records.firstIndex(
+                where: { $0.kind == .sample }
+            ) {
+                records.remove(at: sampleIndex)
+            } else {
+                records.removeFirst()
+            }
+            records.append(record)
+            return EnqueueResult(
+                accepted: true,
+                bufferedRecordCount: records.count,
+                droppedRecordCount: 1
+            )
+        }
+        records.append(record)
+        return EnqueueResult(
+            accepted: true,
+            bufferedRecordCount: records.count,
+            droppedRecordCount: 0
+        )
+    }
+
+    func drain() -> [DebugPerformanceLogRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        let drained = records
+        records.removeAll(keepingCapacity: true)
+        return drained
+    }
+}
+
+private actor DebugPerformanceLogSink {
+    nonisolated let logURL: URL
+
+    var diagnostics: DebugPerformanceLogDiagnostics {
+        DebugPerformanceLogDiagnostics(
+            maximumBufferedRecordCount: maximumBufferedRecordCount,
+            droppedRecordCount: droppedRecordCount
+        )
+    }
+
+    private let pendingRecordCapacity: Int
+    private let batchSize: Int
+    private var pendingRecords: [DebugPerformanceLogRecord] = []
+    private var maximumBufferedRecordCount = 0
+    private var droppedRecordCount: UInt64 = 0
+    private var periodicFlushScheduled = false
+    private var fileHandle: FileHandle?
+    private let encoder: JSONEncoder
+
+    init(
+        logURL: URL,
+        pendingRecordCapacity: Int,
+        batchSize: Int
+    ) {
+        self.logURL = logURL
+        self.pendingRecordCapacity = pendingRecordCapacity
+        self.batchSize = batchSize
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        self.encoder = encoder
+        pendingRecords.reserveCapacity(pendingRecordCapacity)
+    }
+
+    func enqueue(_ record: DebugPerformanceLogRecord) {
+        if pendingRecords.count == pendingRecordCapacity {
+            if record.kind == .sample {
+                droppedRecordCount &+= 1
+                return
+            }
+            if let sampleIndex = pendingRecords.firstIndex(
+                where: { $0.kind == .sample }
+            ) {
+                pendingRecords.remove(at: sampleIndex)
+            } else {
+                pendingRecords.removeFirst()
+            }
+            droppedRecordCount &+= 1
+        }
+        pendingRecords.append(record)
+        maximumBufferedRecordCount = max(
+            maximumBufferedRecordCount,
+            pendingRecords.count
+        )
+        if pendingRecords.count >= batchSize {
+            try? writePendingBatch(synchronize: false)
+        } else if !periodicFlushScheduled {
+            periodicFlushScheduled = true
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                flushPeriodically()
+            }
+        }
+    }
+
+    func flush() throws {
+        try writePendingBatch(synchronize: true)
+    }
+
+    private func flushPeriodically() {
+        periodicFlushScheduled = false
+        try? writePendingBatch(synchronize: false)
+    }
+
+    private func writePendingBatch(synchronize: Bool) throws {
+        guard !pendingRecords.isEmpty else {
+            if synchronize {
+                try fileHandle?.synchronize()
+            }
+            return
+        }
+        var payload = Data()
+        for record in pendingRecords {
+            var data = try encoder.encode(record)
+            data.append(0x0A)
+            payload.append(data)
+        }
+        let handle = try writableHandle()
+        try handle.write(contentsOf: payload)
+        if synchronize {
+            try handle.synchronize()
+        }
+        pendingRecords.removeAll(keepingCapacity: true)
+    }
+
+    private func writableHandle() throws -> FileHandle {
+        if let fileHandle { return fileHandle }
+        let manager = FileManager.default
+        try manager.createDirectory(
+            at: logURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if !manager.fileExists(atPath: logURL.path) {
+            guard manager.createFile(atPath: logURL.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+        }
+        let handle = try FileHandle(forWritingTo: logURL)
+        try handle.seekToEnd()
+        fileHandle = handle
+        return handle
     }
 }
 
