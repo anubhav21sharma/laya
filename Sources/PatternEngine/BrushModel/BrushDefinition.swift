@@ -82,17 +82,255 @@ public enum BrushDefinitionValidationError: Error, Equatable, Sendable { case in
 
 public struct BrushDefinition: Codable, Equatable, Sendable {
     public static let currentSchemaVersion: UInt16 = 1
-    public let id: BrushRecipeID; public let schemaVersion: UInt16; public let metadata: BrushMetadata; public let capabilities: [BrushCapabilityDeclaration]; public let resources: [BrushResourceReference]; public let coverage: BrushCoverageDefinition; public let placement: BrushPlacementDefinition; public let dynamics: BrushDynamicsDefinition; public let color: BrushColorBehaviorDefinition; public let material: BrushMaterialDefinition; public let stabilization: Float; public let taper: BrushTaperConfiguration; public let replayMode: BrushReplayMode; public let replayLimits: BrushReplayLimits?; public let seedPolicy: BrushSeedPolicy; public let limits: BrushDefinitionLimits; public let performanceIntent: BrushPerformanceIntent; public let compatibility: BrushCompatibilityMetadata
-    public init(id: BrushRecipeID, schemaVersion: UInt16 = BrushDefinition.currentSchemaVersion, metadata: BrushMetadata, capabilities: [BrushCapabilityDeclaration], resources: [BrushResourceReference], coverage: BrushCoverageDefinition, placement: BrushPlacementDefinition, dynamics: BrushDynamicsDefinition, color: BrushColorBehaviorDefinition, material: BrushMaterialDefinition, stabilization: Float, taper: BrushTaperConfiguration, replayMode: BrushReplayMode, replayLimits: BrushReplayLimits?, seedPolicy: BrushSeedPolicy, limits: BrushDefinitionLimits, performanceIntent: BrushPerformanceIntent, compatibility: BrushCompatibilityMetadata) throws {
-        try BrushDefinitionValidator.validate(id: id, schemaVersion: schemaVersion, metadata: metadata, capabilities: capabilities, resources: resources, coverage: coverage, placement: placement, dynamics: dynamics, color: color, material: material, stabilization: stabilization, taper: taper, replayMode: replayMode, replayLimits: replayLimits, seedPolicy: seedPolicy, limits: limits, performanceIntent: performanceIntent, compatibility: compatibility)
-        self.id = id; self.schemaVersion = schemaVersion; self.metadata = metadata; self.capabilities = capabilities; self.resources = resources; self.coverage = coverage; self.placement = placement; self.dynamics = dynamics; self.color = color; self.material = material; self.stabilization = stabilization; self.taper = taper; self.replayMode = replayMode; self.replayLimits = replayLimits; self.seedPolicy = seedPolicy; self.limits = limits; self.performanceIntent = performanceIntent; self.compatibility = compatibility
+
+    public let id: BrushRecipeID
+    public let schemaVersion: UInt16
+    public let metadata: BrushMetadata
+    public let capabilities: [BrushCapabilityDeclaration]
+    public let resources: [BrushResourceReference]
+    public let coverage: BrushCoverageDefinition
+    public let placement: BrushPlacementDefinition
+    public let dynamics: BrushDynamicsDefinition
+    public let color: BrushColorBehaviorDefinition
+    public let material: BrushMaterialDefinition
+    public let stabilization: Float
+    public let taper: BrushTaperConfiguration
+    public let replayMode: BrushReplayMode
+    public let replayLimits: BrushReplayLimits?
+    public let termination: BrushTerminationDefinition
+    public let seedPolicy: BrushSeedPolicy
+    public let limits: BrushDefinitionLimits
+    public let performanceIntent: BrushPerformanceIntent
+    public let compatibility: BrushCompatibilityMetadata
+
+    /// This marker is deliberately absent from public initializers and the
+    /// wire format. It is derived only by the schema-v1 decoder or installed
+    /// by `LegacyBrushRecipeAdapter`.
+    let hasLegacySchemaV1Termination: Bool
+
+    public init(
+        id: BrushRecipeID,
+        schemaVersion: UInt16 = BrushDefinition.currentSchemaVersion,
+        metadata: BrushMetadata,
+        capabilities: [BrushCapabilityDeclaration],
+        resources: [BrushResourceReference],
+        coverage: BrushCoverageDefinition,
+        placement: BrushPlacementDefinition,
+        dynamics: BrushDynamicsDefinition,
+        color: BrushColorBehaviorDefinition,
+        material: BrushMaterialDefinition,
+        stabilization: Float,
+        taper: BrushTaperConfiguration,
+        replayMode: BrushReplayMode,
+        replayLimits: BrushReplayLimits?,
+        termination: BrushTerminationDefinition = .cap,
+        seedPolicy: BrushSeedPolicy,
+        limits: BrushDefinitionLimits,
+        performanceIntent: BrushPerformanceIntent,
+        compatibility: BrushCompatibilityMetadata
+    ) throws {
+        try self.init(
+            legacySchemaV1Termination: false,
+            id: id,
+            schemaVersion: schemaVersion,
+            metadata: metadata,
+            capabilities: capabilities,
+            resources: resources,
+            coverage: coverage,
+            placement: placement,
+            dynamics: dynamics,
+            color: color,
+            material: material,
+            stabilization: stabilization,
+            taper: taper,
+            replayMode: replayMode,
+            replayLimits: replayLimits,
+            termination: termination,
+            seedPolicy: seedPolicy,
+            limits: limits,
+            performanceIntent: performanceIntent,
+            compatibility: compatibility
+        )
     }
-    private enum Keys: String, CodingKey { case id, schemaVersion, metadata, capabilities, resources, coverage, placement, dynamics, color, material, stabilization, taper, replayMode, replayLimits, seedPolicy, limits, performanceIntent, compatibility }
-    public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: Keys.self); try self.init(id: c.decode(BrushRecipeID.self, forKey: .id), schemaVersion: c.decode(UInt16.self, forKey: .schemaVersion), metadata: c.decode(BrushMetadata.self, forKey: .metadata), capabilities: c.decode([BrushCapabilityDeclaration].self, forKey: .capabilities), resources: c.decode([BrushResourceReference].self, forKey: .resources), coverage: c.decode(BrushCoverageDefinition.self, forKey: .coverage), placement: c.decode(BrushPlacementDefinition.self, forKey: .placement), dynamics: c.decode(BrushDynamicsDefinition.self, forKey: .dynamics), color: c.decode(BrushColorBehaviorDefinition.self, forKey: .color), material: c.decode(BrushMaterialDefinition.self, forKey: .material), stabilization: c.decode(Float.self, forKey: .stabilization), taper: c.decode(BrushTaperConfiguration.self, forKey: .taper), replayMode: c.decode(BrushReplayMode.self, forKey: .replayMode), replayLimits: c.decodeIfPresent(BrushReplayLimits.self, forKey: .replayLimits), seedPolicy: c.decode(BrushSeedPolicy.self, forKey: .seedPolicy), limits: c.decode(BrushDefinitionLimits.self, forKey: .limits), performanceIntent: c.decode(BrushPerformanceIntent.self, forKey: .performanceIntent), compatibility: c.decode(BrushCompatibilityMetadata.self, forKey: .compatibility)) }
+
+    init(
+        legacySchemaV1Termination: Bool,
+        id: BrushRecipeID,
+        schemaVersion: UInt16,
+        metadata: BrushMetadata,
+        capabilities: [BrushCapabilityDeclaration],
+        resources: [BrushResourceReference],
+        coverage: BrushCoverageDefinition,
+        placement: BrushPlacementDefinition,
+        dynamics: BrushDynamicsDefinition,
+        color: BrushColorBehaviorDefinition,
+        material: BrushMaterialDefinition,
+        stabilization: Float,
+        taper: BrushTaperConfiguration,
+        replayMode: BrushReplayMode,
+        replayLimits: BrushReplayLimits?,
+        termination: BrushTerminationDefinition,
+        seedPolicy: BrushSeedPolicy,
+        limits: BrushDefinitionLimits,
+        performanceIntent: BrushPerformanceIntent,
+        compatibility: BrushCompatibilityMetadata
+    ) throws {
+        try BrushDefinitionValidator.validate(
+            id: id,
+            schemaVersion: schemaVersion,
+            metadata: metadata,
+            capabilities: capabilities,
+            resources: resources,
+            coverage: coverage,
+            placement: placement,
+            dynamics: dynamics,
+            color: color,
+            material: material,
+            stabilization: stabilization,
+            taper: taper,
+            replayMode: replayMode,
+            replayLimits: replayLimits,
+            termination: termination,
+            seedPolicy: seedPolicy,
+            limits: limits,
+            performanceIntent: performanceIntent,
+            compatibility: compatibility
+        )
+        self.id = id
+        self.schemaVersion = schemaVersion
+        self.metadata = metadata
+        self.capabilities = capabilities
+        self.resources = resources
+        self.coverage = coverage
+        self.placement = placement
+        self.dynamics = dynamics
+        self.color = color
+        self.material = material
+        self.stabilization = stabilization
+        self.taper = taper
+        self.replayMode = replayMode
+        self.replayLimits = replayLimits
+        self.termination = termination
+        self.seedPolicy = seedPolicy
+        self.limits = limits
+        self.performanceIntent = performanceIntent
+        self.compatibility = compatibility
+        self.hasLegacySchemaV1Termination = legacySchemaV1Termination
+    }
+
+    private enum Keys: String, CodingKey {
+        case id, schemaVersion, metadata, capabilities, resources, coverage
+        case placement, dynamics, color, material, stabilization, taper
+        case replayMode, replayLimits, termination, seedPolicy, limits
+        case performanceIntent, compatibility
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Keys.self)
+        let schemaVersion = try container.decode(
+            UInt16.self,
+            forKey: .schemaVersion
+        )
+        let taper = try container.decode(
+            BrushTaperConfiguration.self,
+            forKey: .taper
+        )
+        let replayMode = try container.decode(
+            BrushReplayMode.self,
+            forKey: .replayMode
+        )
+        let hasEncodedTermination = container.contains(.termination)
+        try self.init(
+            legacySchemaV1Termination: LegacyBrushTerminationAdapter
+                .marksDecodedSchemaV1(
+                    schemaVersion: schemaVersion,
+                    hasEncodedTermination: hasEncodedTermination,
+                    taper: taper,
+                    replayMode: replayMode
+                ),
+            id: container.decode(BrushRecipeID.self, forKey: .id),
+            schemaVersion: schemaVersion,
+            metadata: container.decode(BrushMetadata.self, forKey: .metadata),
+            capabilities: container.decode(
+                [BrushCapabilityDeclaration].self,
+                forKey: .capabilities
+            ),
+            resources: container.decode(
+                [BrushResourceReference].self,
+                forKey: .resources
+            ),
+            coverage: container.decode(
+                BrushCoverageDefinition.self,
+                forKey: .coverage
+            ),
+            placement: container.decode(
+                BrushPlacementDefinition.self,
+                forKey: .placement
+            ),
+            dynamics: container.decode(
+                BrushDynamicsDefinition.self,
+                forKey: .dynamics
+            ),
+            color: container.decode(
+                BrushColorBehaviorDefinition.self,
+                forKey: .color
+            ),
+            material: container.decode(
+                BrushMaterialDefinition.self,
+                forKey: .material
+            ),
+            stabilization: container.decode(Float.self, forKey: .stabilization),
+            taper: taper,
+            replayMode: replayMode,
+            replayLimits: container.decodeIfPresent(
+                BrushReplayLimits.self,
+                forKey: .replayLimits
+            ),
+            termination: try container.decodeIfPresent(
+                BrushTerminationDefinition.self,
+                forKey: .termination
+            ) ?? .cap,
+            seedPolicy: container.decode(BrushSeedPolicy.self, forKey: .seedPolicy),
+            limits: container.decode(BrushDefinitionLimits.self, forKey: .limits),
+            performanceIntent: container.decode(
+                BrushPerformanceIntent.self,
+                forKey: .performanceIntent
+            ),
+            compatibility: container.decode(
+                BrushCompatibilityMetadata.self,
+                forKey: .compatibility
+            )
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Keys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(metadata, forKey: .metadata)
+        try container.encode(capabilities, forKey: .capabilities)
+        try container.encode(resources, forKey: .resources)
+        try container.encode(coverage, forKey: .coverage)
+        try container.encode(placement, forKey: .placement)
+        try container.encode(dynamics, forKey: .dynamics)
+        try container.encode(color, forKey: .color)
+        try container.encode(material, forKey: .material)
+        try container.encode(stabilization, forKey: .stabilization)
+        try container.encode(taper, forKey: .taper)
+        try container.encode(replayMode, forKey: .replayMode)
+        try container.encodeIfPresent(replayLimits, forKey: .replayLimits)
+        if !hasLegacySchemaV1Termination {
+            try container.encode(termination, forKey: .termination)
+        }
+        try container.encode(seedPolicy, forKey: .seedPolicy)
+        try container.encode(limits, forKey: .limits)
+        try container.encode(performanceIntent, forKey: .performanceIntent)
+        try container.encode(compatibility, forKey: .compatibility)
+    }
 }
 
 private enum BrushDefinitionValidator {
-    static func validate(id: BrushRecipeID, schemaVersion: UInt16, metadata: BrushMetadata, capabilities: [BrushCapabilityDeclaration], resources: [BrushResourceReference], coverage: BrushCoverageDefinition, placement: BrushPlacementDefinition, dynamics: BrushDynamicsDefinition, color: BrushColorBehaviorDefinition, material: BrushMaterialDefinition, stabilization: Float, taper: BrushTaperConfiguration, replayMode: BrushReplayMode, replayLimits: BrushReplayLimits?, seedPolicy: BrushSeedPolicy, limits: BrushDefinitionLimits, performanceIntent: BrushPerformanceIntent, compatibility: BrushCompatibilityMetadata) throws {
+    static func validate(id: BrushRecipeID, schemaVersion: UInt16, metadata: BrushMetadata, capabilities: [BrushCapabilityDeclaration], resources: [BrushResourceReference], coverage: BrushCoverageDefinition, placement: BrushPlacementDefinition, dynamics: BrushDynamicsDefinition, color: BrushColorBehaviorDefinition, material: BrushMaterialDefinition, stabilization: Float, taper: BrushTaperConfiguration, replayMode: BrushReplayMode, replayLimits: BrushReplayLimits?, termination: BrushTerminationDefinition, seedPolicy: BrushSeedPolicy, limits: BrushDefinitionLimits, performanceIntent: BrushPerformanceIntent, compatibility: BrushCompatibilityMetadata) throws {
         guard !id.rawValue.isEmpty, !metadata.displayName.isEmpty else { throw BrushDefinitionValidationError.invalidIdentity }
         guard schemaVersion == BrushDefinition.currentSchemaVersion else { throw BrushDefinitionValidationError.unsupportedSchema }
         try sortedUnique(capabilities.map(\.identifier), field: "capabilities")
@@ -109,6 +347,7 @@ private enum BrushDefinitionValidator {
         try finite(stabilization, "stabilization"); guard stabilization >= 0, stabilization < 1 else { throw BrushDefinitionValidationError.outOfRange(field: "stabilization") }
         try taperValidation(taper)
         try replayValidation(replayMode, replayLimits, taper.end)
+        try terminationValidation(termination)
         if case let .fixed(seed) = seedPolicy, seed == 0 { throw BrushDefinitionValidationError.outOfRange(field: "seedPolicy") }
     }
 
@@ -251,5 +490,35 @@ private enum BrushDefinitionValidator {
         }
     }
     static func taperValidation(_ taper: BrushTaperConfiguration) throws { for length in [taper.start, taper.end] { switch length { case .disabled: break; case let .worldPixels(value), let .diameterMultiples(value): try finite(value, "taper"); guard value > 0 else { throw BrushDefinitionValidationError.outOfRange(field: "taper") } } }; try range(taper.minimumSize, "taper.minimumSize"); try range(taper.minimumFlow, "taper.minimumFlow"); let supportedEffects = BrushTaperEffects.size.rawValue | BrushTaperEffects.flow.rawValue; guard taper.effects.rawValue & ~supportedEffects == 0 else { throw BrushDefinitionValidationError.outOfRange(field: "taper.effects") } }
+    static func terminationValidation(_ termination: BrushTerminationDefinition) throws {
+        switch termination {
+        case .cap:
+            return
+        case let .pressureRelease(maximumWorldLength):
+            try finite(maximumWorldLength, "termination.maximumWorldLength")
+            guard maximumWorldLength > 0 else {
+                throw BrushDefinitionValidationError.outOfRange(
+                    field: "termination.maximumWorldLength"
+                )
+            }
+        case let .boundedCorrection(
+            maximumSamples,
+            maximumWorldLength,
+            maximumDabs
+        ):
+            try finite(maximumWorldLength, "termination.maximumWorldLength")
+            let policy = BrushRecipePolicy.replayTailLimits
+            guard maximumSamples > 0,
+                  maximumSamples <= policy.maximumSamples,
+                  maximumWorldLength > 0,
+                  maximumDabs > 0,
+                  maximumDabs <= policy.maximumDabs
+            else {
+                throw BrushDefinitionValidationError.outOfRange(
+                    field: "termination.boundedCorrection"
+                )
+            }
+        }
+    }
     static func replayValidation(_ mode: BrushReplayMode, _ limits: BrushReplayLimits?, _ end: BrushTaperLength) throws { if mode == .appendOnly { guard limits == nil, { if case .disabled = end { return true }; return false }() else { throw BrushDefinitionValidationError.invalidReplay }; return }; guard let limits else { throw BrushDefinitionValidationError.invalidReplay }; let cap = mode == .replayTail ? BrushRecipePolicy.replayTailLimits : BrushRecipePolicy.wholeStrokeLimits; guard limits.maximumSamples > 0, limits.maximumSamples <= cap.maximumSamples, limits.maximumDabs > 0, limits.maximumDabs <= cap.maximumDabs, limits.maximumProjectedInstances > 0, limits.maximumProjectedInstances <= cap.maximumProjectedInstances else { throw BrushDefinitionValidationError.invalidReplay } }
 }

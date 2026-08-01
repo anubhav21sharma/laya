@@ -307,8 +307,9 @@ func knownTotalDistanceAppliesStartAndEndTaperDeterministically() throws {
         replayMode: .replayTail,
         replayLimits: BrushRecipePolicy.replayTailLimits
     )
+    let program = nativeTestProgram(recipe)
     var generator = BrushStrokeGenerator(
-        program: nativeTestProgram(recipe),
+        program: program,
         nominalDiameter: 20,
         color: .black,
         seed: 8
@@ -321,11 +322,11 @@ func knownTotalDistanceAppliesStartAndEndTaperDeterministically() throws {
         generatorSample(x: 12, timestamp: 1, phase: .ended)
     ) { dabs.append($0) }
     let tapered = dabs.map {
-        BrushDynamicsEngine().applyingKnownTotalDistance(
+        BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
             $0,
             totalDistance: 12,
             nominalDiameter: 20,
-            definition: nativeTestDefinition(recipe)
+            program: program
         )
     }
 
@@ -350,8 +351,9 @@ func clickAndShortStrokeTaperStayFiniteAndBounded() throws {
         replayMode: .replayTail,
         replayLimits: BrushRecipePolicy.replayTailLimits
     )
+    let program = nativeTestProgram(recipe)
     var generator = BrushStrokeGenerator(
-        program: nativeTestProgram(recipe),
+        program: program,
         nominalDiameter: 20,
         color: .black,
         seed: 9
@@ -364,11 +366,11 @@ func clickAndShortStrokeTaperStayFiniteAndBounded() throws {
         generatorSample(x: 3, timestamp: 1, phase: .ended)
     ) { dabs.append($0) }
     let click = try #require(dabs.first)
-    let tapered = BrushDynamicsEngine().applyingKnownTotalDistance(
+    let tapered = BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
         click,
         totalDistance: 0,
         nominalDiameter: 20,
-        definition: nativeTestDefinition(recipe)
+        program: program
     )
     #expect(tapered.diameter == 2)
     #expect(tapered.flow == 0.15)
@@ -601,8 +603,9 @@ func retroactiveTaperPreservesAppendedLogicalDabInputs() throws {
         replayMode: .replayTail,
         replayLimits: BrushRecipePolicy.replayTailLimits
     )
+    let program = nativeTestProgram(recipe)
     var generator = BrushStrokeGenerator(
-        program: nativeTestProgram(recipe),
+        program: program,
         nominalDiameter: 20,
         color: .black,
         seed: 91
@@ -615,11 +618,11 @@ func retroactiveTaperPreservesAppendedLogicalDabInputs() throws {
             generatorSample(x: 12, timestamp: 1, phase: .ended)
         ).dabs.last
     )
-    let tapered = BrushDynamicsEngine().applyingKnownTotalDistance(
+    let tapered = BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
         original,
         totalDistance: 12,
         nominalDiameter: 20,
-        definition: nativeTestDefinition(recipe)
+        program: program
     )
 
     #expect(tapered.materialInputs == original.materialInputs)

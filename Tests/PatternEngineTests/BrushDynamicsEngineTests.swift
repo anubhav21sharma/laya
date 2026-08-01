@@ -213,7 +213,7 @@ import Testing
     #expect(dab.spacing.isFinite)
 }
 
-@Test func endTaperRenormalizesAtRetainedReplayBoundaryAfterCapTruncation() throws {
+@Test func legacySchemaV1EndTaperKeepsItsFrozenRetainedBoundaryPixels() throws {
     let recipe = try BrushRecipe(
         id: BrushRecipeID("test.taper.retained-boundary"),
         taper: BrushTaperConfiguration(
@@ -231,6 +231,14 @@ import Testing
         )
     )
     let dynamics = BrushDynamicsEngine()
+    let program = nativeTestProgram(recipe)
+    #expect(
+        program.termination
+            == .legacySchemaV1EndTaper(
+                taper: recipe.taper,
+                replayLimits: try #require(recipe.replayLimits)
+            )
+    )
     var buffer = TransientStrokeBuffer(replayContract: recipe.replayContract)
     var lastUpdate = TransientStrokeBufferUpdate.noChange
     for (index, sourceDistance) in [Float(40), 60, 80, 100].enumerated() {
@@ -270,11 +278,11 @@ import Testing
     #expect(retained.map(\.sourceDistance) == [60, 80, 100])
 
     let tapered = retained.map {
-        dynamics.applyingKnownTotalDistance(
+        dynamics.applyingLegacySchemaV1EndTaper(
             $0,
             totalDistance: 100,
             nominalDiameter: 20,
-            definition: nativeTestDefinition(recipe),
+            program: program,
             retainedReplayStartDistance: retained.first?.sourceDistance
         )
     }

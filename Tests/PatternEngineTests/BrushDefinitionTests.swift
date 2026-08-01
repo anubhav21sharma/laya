@@ -197,6 +197,139 @@ func legacyRecipeRoundTripsExactly(_ fixture: AnchorRecipeFixture) throws {
     }
 }
 
+@Test
+func legacyEndTaperCanOnlyEnterAProgramThroughTheNamedAdapter() throws {
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("test.legacy-termination"),
+        taper: BrushTaperConfiguration(
+            start: .disabled,
+            end: .worldPixels(12),
+            minimumSize: 0.25,
+            minimumFlow: 0.5,
+            effects: [.size, .flow]
+        ),
+        replayMode: .replayTail,
+        replayLimits: BrushRecipePolicy.replayTailLimits
+    )
+    let adapted = try LegacyBrushRecipeAdapter.definition(
+        from: recipe,
+        displayName: "Legacy"
+    )
+    let legacyProgram = try BrushProgramCompiler.compile(adapted)
+
+    #expect(
+        legacyProgram.termination
+            == .legacySchemaV1EndTaper(
+                taper: recipe.taper,
+                replayLimits: BrushRecipePolicy.replayTailLimits
+            )
+    )
+
+    let rebuilt = try BrushDefinition(
+        id: adapted.id,
+        schemaVersion: adapted.schemaVersion,
+        metadata: adapted.metadata,
+        capabilities: adapted.capabilities,
+        resources: adapted.resources,
+        coverage: adapted.coverage,
+        placement: adapted.placement,
+        dynamics: adapted.dynamics,
+        color: adapted.color,
+        material: adapted.material,
+        stabilization: adapted.stabilization,
+        taper: adapted.taper,
+        replayMode: adapted.replayMode,
+        replayLimits: adapted.replayLimits,
+        termination: .cap,
+        seedPolicy: adapted.seedPolicy,
+        limits: adapted.limits,
+        performanceIntent: adapted.performanceIntent,
+        compatibility: adapted.compatibility
+    )
+
+    #expect(try BrushProgramCompiler.compile(rebuilt).termination == .cap)
+
+    let encoder = JSONEncoder()
+    let decoder = JSONDecoder()
+    let encodedLegacy = try encoder.encode(adapted)
+    let encodedNative = try encoder.encode(rebuilt)
+    let legacyObject = try #require(
+        JSONSerialization.jsonObject(with: encodedLegacy) as? [String: Any]
+    )
+    let nativeObject = try #require(
+        JSONSerialization.jsonObject(with: encodedNative) as? [String: Any]
+    )
+    #expect(legacyObject["termination"] == nil)
+    #expect(nativeObject["termination"] != nil)
+    #expect(
+        try BrushProgramCompiler.compile(
+            decoder.decode(BrushDefinition.self, from: encodedLegacy)
+        ).termination == legacyProgram.termination
+    )
+    #expect(
+        try BrushProgramCompiler.compile(
+            decoder.decode(BrushDefinition.self, from: encodedNative)
+        ).termination == .cap
+    )
+}
+
+@Test
+func legacyEndTaperPreservesItsDeclaredWholeStrokeReplayContract() throws {
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("test.legacy-whole-stroke-termination"),
+        taper: BrushTaperConfiguration(
+            start: .disabled,
+            end: .worldPixels(12),
+            minimumSize: 0.25,
+            minimumFlow: 0.5,
+            effects: [.size, .flow]
+        ),
+        replayMode: .boundedWholeStroke,
+        replayLimits: BrushRecipePolicy.wholeStrokeLimits
+    )
+    let definition = try LegacyBrushRecipeAdapter.definition(
+        from: recipe,
+        displayName: "Legacy Whole Stroke"
+    )
+
+    #expect(
+        try BrushProgramCompiler.compile(definition).replayContract
+            == BrushReplayContract(
+                mode: .boundedWholeStroke,
+                limits: BrushRecipePolicy.wholeStrokeLimits
+            )
+    )
+}
+
+@Test
+func legacyReplayWithoutEndTaperPreservesItsDeclaredContract() throws {
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("test.legacy-replay-without-taper"),
+        replayMode: .boundedWholeStroke,
+        replayLimits: BrushRecipePolicy.wholeStrokeLimits
+    )
+    let definition = try LegacyBrushRecipeAdapter.definition(
+        from: recipe,
+        displayName: "Legacy Replay"
+    )
+    let program = try BrushProgramCompiler.compile(definition)
+
+    #expect(
+        program.termination
+            == .legacySchemaV1Replay(
+                mode: .boundedWholeStroke,
+                replayLimits: BrushRecipePolicy.wholeStrokeLimits
+            )
+    )
+    #expect(
+        program.replayContract
+            == BrushReplayContract(
+                mode: .boundedWholeStroke,
+                limits: BrushRecipePolicy.wholeStrokeLimits
+            )
+    )
+}
+
 @Test func legacyBuiltInAssetsRoundTripThroughCanonicalResources() throws {
     let shapeRecipe = try BrushRecipe(id: BrushRecipeID("test.asset.shape"), shape: .asset("builtin.shape.chisel"))
     let grainRecipe = try BrushRecipe(id: BrushRecipeID("test.asset.grain"), grain: .asset("builtin.grain.paper"))

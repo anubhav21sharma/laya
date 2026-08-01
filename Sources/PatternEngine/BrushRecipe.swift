@@ -276,6 +276,88 @@ public struct BrushTaperConfiguration: Codable, Equatable, Sendable {
     )
 }
 
+/// Causal stroke-finalization semantics for native definitions. The legacy
+/// schema-v1 end taper is intentionally absent: only the compatibility adapter
+/// can compile that behavior.
+public enum BrushTerminationDefinition: Codable, Equatable, Sendable {
+    case cap
+    case pressureRelease(maximumWorldLength: Float)
+    case boundedCorrection(
+        maximumSamples: Int,
+        maximumWorldLength: Float,
+        maximumDabs: Int
+    )
+
+    private enum Keys: String, CodingKey {
+        case kind
+        case maximumSamples
+        case maximumWorldLength
+        case maximumDabs
+    }
+
+    private enum Kind: String, Codable {
+        case cap
+        case pressureRelease
+        case boundedCorrection
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Keys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .cap:
+            self = .cap
+        case .pressureRelease:
+            self = .pressureRelease(
+                maximumWorldLength: try container.decode(
+                    Float.self,
+                    forKey: .maximumWorldLength
+                )
+            )
+        case .boundedCorrection:
+            self = .boundedCorrection(
+                maximumSamples: try container.decode(
+                    Int.self,
+                    forKey: .maximumSamples
+                ),
+                maximumWorldLength: try container.decode(
+                    Float.self,
+                    forKey: .maximumWorldLength
+                ),
+                maximumDabs: try container.decode(
+                    Int.self,
+                    forKey: .maximumDabs
+                )
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Keys.self)
+        switch self {
+        case .cap:
+            try container.encode(Kind.cap, forKey: .kind)
+        case let .pressureRelease(maximumWorldLength):
+            try container.encode(Kind.pressureRelease, forKey: .kind)
+            try container.encode(
+                maximumWorldLength,
+                forKey: .maximumWorldLength
+            )
+        case let .boundedCorrection(
+            maximumSamples,
+            maximumWorldLength,
+            maximumDabs
+        ):
+            try container.encode(Kind.boundedCorrection, forKey: .kind)
+            try container.encode(maximumSamples, forKey: .maximumSamples)
+            try container.encode(
+                maximumWorldLength,
+                forKey: .maximumWorldLength
+            )
+            try container.encode(maximumDabs, forKey: .maximumDabs)
+        }
+    }
+}
+
 public enum BrushReplayMode: UInt8, Codable, Equatable, Sendable {
     case appendOnly
     case replayTail

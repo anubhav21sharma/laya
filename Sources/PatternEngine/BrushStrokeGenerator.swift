@@ -289,7 +289,10 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             sample: attributed,
             traveledDistance: 0,
             direction: 0,
-            totalDistance: sample.phase == .ended ? 0 : nil,
+            totalDistance: sample.phase == .ended
+                && program.termination.isLegacySchemaV1EndTaper
+                ? 0
+                : nil,
             isPredicted: sample.kind == .predicted
         )
         try emit(dab)
@@ -321,8 +324,11 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         emit: (DabAttributes) throws -> Void
     ) rethrows {
         let isPredicted = sample.kind == .predicted
-        let stabilized = stabilizer.process(sample)
-        let attributed = InterpolatedStrokeSample(stabilized)
+        let terminalSample = program.termination
+            .usesLegacySchemaV1EndpointFiltering
+            ? stabilizer.process(sample)
+            : sample
+        let attributed = InterpolatedStrokeSample(terminalSample)
         var updatedPath = path
         let endpoint = try updatedPath.finish(at: attributed) { segment in
             try consume(

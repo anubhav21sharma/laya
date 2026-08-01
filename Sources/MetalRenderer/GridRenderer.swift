@@ -2876,7 +2876,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
 
-        if isFinishing {
+        if isFinishing,
+           case .legacySchemaV1EndTaper =
+               activeStroke?.style.program.termination
+        {
             knownStrokeTotalDistance = max(
                 dabs.last?.attributes.sourceDistance ?? 0,
                 buffer.actualChunks.last?.dabs.last?
@@ -3271,14 +3274,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 }
                 for transientDab in chunk.dabs {
                     let attributes: DabAttributes
-                    if let totalDistance = knownStrokeTotalDistance {
+                    if let totalDistance = knownStrokeTotalDistance,
+                       case .legacySchemaV1EndTaper =
+                           activeStroke.style.program.termination
+                    {
                         attributes = BrushDynamicsEngine()
-                            .applyingKnownTotalDistance(
+                            .applyingLegacySchemaV1EndTaper(
                                 transientDab.attributes,
                                 totalDistance: totalDistance,
                                 nominalDiameter: activeStroke.style.diameter,
-                                definition:
-                                    activeStroke.style.program.definition,
+                                program: activeStroke.style.program,
                                 retainedReplayStartDistance:
                                     retainedReplayStartDistance
                             )

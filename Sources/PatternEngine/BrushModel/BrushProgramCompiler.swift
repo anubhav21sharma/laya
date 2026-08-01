@@ -53,10 +53,49 @@ public enum BrushProgramCompiler {
         let requestedBackend: BrushBackendKind = definition.material.interaction == .none
             ? .deposition
             : .canvasInteraction
+        let termination: BrushTerminationProgram
+        if definition.hasLegacySchemaV1Termination {
+            guard let replayLimits = definition.replayLimits else {
+                preconditionFailure(
+                    "Validated legacy end taper must carry replay limits"
+                )
+            }
+            if case .disabled = definition.taper.end {
+                termination = .legacySchemaV1Replay(
+                    mode: definition.replayMode,
+                    replayLimits: replayLimits
+                )
+            } else {
+                termination = .legacySchemaV1EndTaper(
+                    taper: definition.taper,
+                    replayLimits: replayLimits
+                )
+            }
+        } else {
+            termination = switch definition.termination {
+            case .cap:
+                .cap
+            case let .pressureRelease(maximumWorldLength):
+                .pressureRelease(
+                    maximumWorldLength: maximumWorldLength
+                )
+            case let .boundedCorrection(
+                maximumSamples,
+                maximumWorldLength,
+                maximumDabs
+            ):
+                .boundedCorrection(
+                    maximumSamples: maximumSamples,
+                    maximumWorldLength: maximumWorldLength,
+                    maximumDabs: maximumDabs
+                )
+            }
+        }
 
         return BrushProgram(
             definition: definition,
             dynamics: dynamics,
+            termination: termination,
             requiredCapabilities: requiredCapabilities,
             ignoredOptionalCapabilityIdentifiers: ignoredOptionalCapabilityIdentifiers,
             requestedBackend: requestedBackend

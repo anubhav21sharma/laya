@@ -62,7 +62,7 @@ func technicalInkReplayIsDeterministicAndDoesNotRequestInteraction() throws {
 }
 
 @Test
-func technicalInkReplayTailRetroactivelyTapersCompletedShortStroke() throws {
+func technicalInkCapLeavesCompletedStrokeBodyUnchanged() throws {
     let program = ProfessionalBrushCatalog.technicalInk.program
     var input = BrushInputDeriver()
     var generator = BrushStrokeGenerator(
@@ -88,31 +88,18 @@ func technicalInkReplayTailRetroactivelyTapersCompletedShortStroke() throws {
     let emitted = leading.dabs + authoritativeTail.dabs
     let totalDistance = try #require(emitted.last?.sourceDistance)
     let retapered: [LogicalDab] = emitted.map { dab in
-        BrushDynamicsEngine().applyingKnownTotalDistance(
+        BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
             dab,
             totalDistance: totalDistance,
             nominalDiameter: 40,
-            definition: program.definition
+            program: program
         )
     }
-    let originalLast = try #require(emitted.last)
-    let firstRetapered = try #require(retapered.first)
-    let lastRetapered = try #require(retapered.last)
-    let maximumDiameter = try #require(retapered.map(\.diameter).max())
-    let maximumFlow = try #require(retapered.map(\.flow).max())
-
-    #expect(program.replayContract.mode == .replayTail)
-    #expect(program.replayContract.limits == BrushRecipePolicy.replayTailLimits)
+    #expect(program.termination == .cap)
+    #expect(program.replayContract.mode == .appendOnly)
+    #expect(program.replayContract.limits == nil)
     #expect(authoritativeTail.dabs.last?.sourceDistance == totalDistance)
-    #expect(originalLast.diameter > lastRetapered.diameter)
-    #expect(abs(firstRetapered.diameter - 3.2) < 0.000_01)
-    #expect(abs(lastRetapered.diameter - 3.2) < 0.000_01)
-    #expect(abs(firstRetapered.flow - 0.225) < 0.000_01)
-    #expect(abs(lastRetapered.flow - 0.225) < 0.000_01)
-    #expect(abs(maximumDiameter - 8.352) < 0.000_01)
-    #expect(abs(maximumFlow - 0.3195) < 0.000_01)
-    #expect(retapered.map(\.ordinal) == emitted.map(\.ordinal))
-    #expect(retapered.map(\.randomValues) == emitted.map(\.randomValues))
+    #expect(retapered == emitted)
 }
 
 @Test
@@ -216,7 +203,7 @@ func graphiteSeededVariationIsDeterministicBoundedAndDryWithoutInteraction() {
 }
 
 @Test
-func graphiteMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
+func graphiteMouseFallbackAndCausalCapRemainFiniteAndUseful() throws {
     let mouse = graphitePencilDab(pressure: 0, capabilities: [])
     var input = BrushInputDeriver()
     var generator = BrushStrokeGenerator(
@@ -235,9 +222,9 @@ func graphiteMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
     let emitted = leading.dabs + tail.dabs
     let totalDistance = try #require(emitted.last?.sourceDistance)
     let retapered = emitted.map {
-        BrushDynamicsEngine().applyingKnownTotalDistance(
+        BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
             $0, totalDistance: totalDistance, nominalDiameter: 40,
-            definition: graphitePencilProgram().definition
+            program: graphitePencilProgram()
         )
     }
 
@@ -248,9 +235,9 @@ func graphiteMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
     #expect(abs(mouse.grainScale - 1.4) < 0.000_01)
     #expect([mouse.diameter, mouse.flow, mouse.spacing, mouse.hardness,
              mouse.grainScale].allSatisfy { $0.isFinite })
-    #expect(graphitePencilProgram().replayContract.mode == .replayTail)
-    #expect(retapered.last!.flow < emitted.last!.flow)
-    #expect(retapered.map(\.ordinal) == emitted.map(\.ordinal))
+    #expect(graphitePencilProgram().termination == .cap)
+    #expect(graphitePencilProgram().replayContract.mode == .appendOnly)
+    #expect(retapered == emitted)
 }
 
 @Test
@@ -382,7 +369,7 @@ func naturalCharcoalSeededVariationIsBoundedBroaderThanGraphiteAndDry() {
 }
 
 @Test
-func naturalCharcoalMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
+func naturalCharcoalMouseFallbackAndCausalCapRemainFiniteAndUseful() throws {
     let mouse = naturalCharcoalDab(pressure: 0, capabilities: [])
     var input = BrushInputDeriver()
     var generator = BrushStrokeGenerator(
@@ -401,9 +388,9 @@ func naturalCharcoalMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
     let emitted = leading.dabs + tail.dabs
     let totalDistance = try #require(emitted.last?.sourceDistance)
     let retapered = emitted.map {
-        BrushDynamicsEngine().applyingKnownTotalDistance(
+        BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
             $0, totalDistance: totalDistance, nominalDiameter: 40,
-            definition: naturalCharcoalProgram().definition
+            program: naturalCharcoalProgram()
         )
     }
 
@@ -414,13 +401,10 @@ func naturalCharcoalMouseFallbackAndReplayTailRemainFiniteAndUseful() throws {
     #expect(abs(mouse.grainScale - 0.8) < 0.000_01)
     #expect([mouse.diameter, mouse.flow, mouse.spacing, mouse.hardness,
              mouse.grainScale].allSatisfy { $0.isFinite })
-    #expect(naturalCharcoalProgram().replayContract.mode == .replayTail)
-    #expect(naturalCharcoalProgram().replayContract.limits == BrushRecipePolicy.replayTailLimits)
-    #expect(retapered.last!.diameter < emitted.last!.diameter)
-    #expect(abs(retapered.first!.diameter - 23.8) < 0.000_01)
-    #expect(abs(retapered.last!.diameter - 23.8) < 0.000_01)
-    #expect(retapered.map(\.ordinal) == emitted.map(\.ordinal))
-    #expect(retapered.map(\.randomValues) == emitted.map(\.randomValues))
+    #expect(naturalCharcoalProgram().termination == .cap)
+    #expect(naturalCharcoalProgram().replayContract.mode == .appendOnly)
+    #expect(naturalCharcoalProgram().replayContract.limits == nil)
+    #expect(retapered == emitted)
 }
 
 @Test
@@ -501,7 +485,7 @@ func chiselMarkerCompiledDabsFollowDirectionWithoutScatterAndKeepConstantSpacing
 }
 
 @Test
-func chiselMarkerReplayIsDeterministicTapersAndHasFiniteMouseFallback() throws {
+func chiselMarkerCapIsDeterministicAndHasFiniteMouseFallback() throws {
     let program = chiselMarkerProgram()
     let viewport = ViewportTransform(
         drawableSize: PatternSize(width: 128, height: 128),
@@ -529,22 +513,17 @@ func chiselMarkerReplayIsDeterministicTapersAndHasFiniteMouseFallback() throws {
     let emitted = leading.dabs + tail.dabs
     let totalDistance = try #require(emitted.last?.sourceDistance)
     let retapered = emitted.map {
-        BrushDynamicsEngine().applyingKnownTotalDistance(
+        BrushDynamicsEngine().applyingLegacySchemaV1EndTaper(
             $0, totalDistance: totalDistance, nominalDiameter: 40,
-            definition: program.definition
+            program: program
         )
     }
-    let lastOriginal = try #require(emitted.last)
-    let lastRetapered = try #require(retapered.last)
-
     #expect(!first.isEmpty)
     #expect(first == repeated)
-    #expect(program.replayContract.mode == .replayTail)
-    #expect(program.replayContract.limits == BrushRecipePolicy.replayTailLimits)
-    #expect(abs(lastRetapered.diameter / lastOriginal.diameter - 0.85) < 0.000_01)
-    #expect(abs(lastRetapered.flow / lastOriginal.flow - 0.85) < 0.000_01)
-    #expect(retapered.map(\.ordinal) == emitted.map(\.ordinal))
-    #expect(retapered.map(\.randomValues) == emitted.map(\.randomValues))
+    #expect(program.termination == .cap)
+    #expect(program.replayContract.mode == .appendOnly)
+    #expect(program.replayContract.limits == nil)
+    #expect(retapered == emitted)
     #expect(mouse.diameter == 40)
     #expect(mouse.flow == 0.56)
     #expect([mouse.diameter, mouse.flow, mouse.spacing, mouse.rotation].allSatisfy {

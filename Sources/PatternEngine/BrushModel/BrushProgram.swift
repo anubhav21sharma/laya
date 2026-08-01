@@ -53,18 +53,73 @@ public enum BrushBackendKind: String, Codable, Hashable, Sendable {
     case canvasInteraction
 }
 
+/// Immutable stroke-finalization program selected before input begins.
+/// Legacy cases are emitted only for definitions carrying the unforgeable
+/// compatibility marker installed by the legacy adapter/decoder.
+public enum BrushTerminationProgram: Equatable, Sendable {
+    case cap
+    case pressureRelease(maximumWorldLength: Float)
+    case boundedCorrection(
+        maximumSamples: Int,
+        maximumWorldLength: Float,
+        maximumDabs: Int
+    )
+    case legacySchemaV1EndTaper(
+        taper: BrushTaperConfiguration,
+        replayLimits: BrushReplayLimits
+    )
+    case legacySchemaV1Replay(
+        mode: BrushReplayMode,
+        replayLimits: BrushReplayLimits
+    )
+
+    var isLegacySchemaV1EndTaper: Bool {
+        if case .legacySchemaV1EndTaper = self { return true }
+        return false
+    }
+
+    var usesLegacySchemaV1EndpointFiltering: Bool {
+        switch self {
+        case .legacySchemaV1EndTaper, .legacySchemaV1Replay:
+            true
+        case .cap, .pressureRelease, .boundedCorrection:
+            false
+        }
+    }
+}
+
 public struct BrushProgram: Equatable, Sendable {
     public let definition: BrushDefinition
     public let dynamics: BrushDynamicsProgram
+    public let termination: BrushTerminationProgram
     public let requiredCapabilities: Set<BrushCapability>
     public let ignoredOptionalCapabilityIdentifiers: [String]
     public let requestedBackend: BrushBackendKind
 
     public var replayContract: BrushReplayContract {
-        BrushReplayContract(
-            mode: definition.replayMode,
-            limits: definition.replayLimits
-        )
+        switch termination {
+        case .cap, .pressureRelease:
+            BrushReplayContract(mode: .appendOnly, limits: nil)
+        case let .boundedCorrection(maximumSamples, _, maximumDabs):
+            BrushReplayContract(
+                mode: .replayTail,
+                limits: BrushReplayLimits(
+                    maximumSamples: maximumSamples,
+                    maximumDabs: maximumDabs,
+                    maximumProjectedInstances:
+                        definition.replayLimits?.maximumProjectedInstances
+                        ?? BrushRecipePolicy.replayTailLimits
+                            .maximumProjectedInstances
+                )
+            )
+        case let .legacySchemaV1EndTaper(_, replayLimits):
+            BrushReplayContract(
+                mode: definition.replayMode,
+                limits: replayLimits
+            )
+        case let .legacySchemaV1Replay(mode, replayLimits):
+            BrushReplayContract(mode: mode, limits: replayLimits)
+        }
     }
 }
 

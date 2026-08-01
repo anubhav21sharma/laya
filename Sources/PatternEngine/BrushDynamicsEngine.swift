@@ -340,7 +340,11 @@ public struct BrushDynamicsEngine: Sendable {
             dynamics.size, inputs: inputs, strokeSeed: strokeSeed,
             ordinal: context.ordinal, channel: .size
         )
-        let taperEnvelope = taperEnvelope(context: context, taper: definition.taper)
+        let taperEnvelope = taperEnvelope(
+            context: context,
+            taper: definition.taper,
+            includesEndTaper: program.termination.isLegacySchemaV1EndTaper
+        )
         let sizeTaper = definition.taper.effects.contains(.size)
             ? interpolate(from: definition.taper.minimumSize, to: 1, fraction: taperEnvelope)
             : 1
@@ -540,25 +544,31 @@ public struct BrushDynamicsEngine: Sendable {
         )
     }
 
-    /// Re-evaluates only the retroactive taper components once total length is
-    /// known, preserving every random channel and non-taper attribute.
-    public func applyingKnownTotalDistance(
+    /// Exact schema-v1 compatibility behavior. Native causal programs cannot
+    /// enter this path because only the legacy adapter can produce the
+    /// corresponding compiled termination case.
+    public func applyingLegacySchemaV1EndTaper(
         _ dab: DabAttributes,
         totalDistance: Float,
         nominalDiameter: Float,
-        definition: BrushDefinition,
+        program: BrushProgram,
         retainedReplayStartDistance: Float? = nil
     ) -> DabAttributes {
-        applyingKnownTotalDistance(
+        guard case let .legacySchemaV1EndTaper(taper, _) =
+            program.termination
+        else {
+            return dab
+        }
+        return applyingLegacySchemaV1EndTaper(
             dab,
             totalDistance: totalDistance,
             nominalDiameter: nominalDiameter,
-            taper: definition.taper,
+            taper: taper,
             retainedReplayStartDistance: retainedReplayStartDistance
         )
     }
 
-    private func applyingKnownTotalDistance(
+    private func applyingLegacySchemaV1EndTaper(
         _ dab: DabAttributes,
         totalDistance: Float,
         nominalDiameter: Float,
@@ -939,7 +949,8 @@ private extension BrushDynamicsEngine {
 
     func taperEnvelope(
         context: BrushStrokeContext,
-        taper: BrushTaperConfiguration
+        taper: BrushTaperConfiguration,
+        includesEndTaper: Bool
     ) -> Float {
         let start = envelope(
             distance: context.traveledDistance,
@@ -947,7 +958,7 @@ private extension BrushDynamicsEngine {
             nominalDiameter: context.nominalDiameter
         )
         let end: Float
-        if let totalDistance = context.totalDistance {
+        if includesEndTaper, let totalDistance = context.totalDistance {
             end = envelope(
                 distance: max(0, totalDistance - context.traveledDistance),
                 length: taper.end,

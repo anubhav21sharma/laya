@@ -1,6 +1,37 @@
 import Foundation
 import simd
 
+/// The only module-internal authority allowed to recover retained schema-v1
+/// replay and end-taper behavior. Public `BrushDefinition` initializers never
+/// install this marker.
+enum LegacyBrushTerminationAdapter {
+    static func marksLegacyTermination(
+        schemaVersion: UInt16,
+        taper: BrushTaperConfiguration,
+        replayMode: BrushReplayMode
+    ) -> Bool {
+        guard schemaVersion == 1 else { return false }
+        if case .disabled = taper.end {
+            return replayMode != .appendOnly
+        }
+        return true
+    }
+
+    static func marksDecodedSchemaV1(
+        schemaVersion: UInt16,
+        hasEncodedTermination: Bool,
+        taper: BrushTaperConfiguration,
+        replayMode: BrushReplayMode
+    ) -> Bool {
+        !hasEncodedTermination
+            && marksLegacyTermination(
+                schemaVersion: schemaVersion,
+                taper: taper,
+                replayMode: replayMode
+            )
+    }
+}
+
 /// Exact, temporary bridge for the built-in recipes. The neutral values below
 /// are deliberately explicit so a reverse conversion can reject semantic loss.
 public enum LegacyBrushRecipeAdapter {
@@ -32,14 +63,21 @@ public enum LegacyBrushRecipeAdapter {
         let dynamics = BrushDynamicsDefinition(
             size: map(recipe.sizeMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), flow: map(recipe.flowMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), opacity: constant(1), spacing: map(recipe.spacingMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), rotation: map(recipe.rotationMapping, disabled: 0, noPressureNeutral: recipe.noPressureNeutral), scatter: map(recipe.scatterMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), hardness: map(recipe.hardnessMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), grain: map(recipe.grainMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), offsetX: constantZero, offsetY: constantZero, hue: constantZero, saturation: constantZero, brightness: constantZero, secondaryColorMix: constantZero, noPressureNeutral: recipe.noPressureNeutral, randomization: recipe.randomization
         )
+        let hasLegacyTermination = LegacyBrushTerminationAdapter
+            .marksLegacyTermination(
+                schemaVersion: recipe.schemaVersion,
+                taper: recipe.taper,
+                replayMode: recipe.replayMode
+            )
         return try BrushDefinition(
+            legacySchemaV1Termination: hasLegacyTermination,
             id: recipe.id,
             schemaVersion: BrushDefinition.currentSchemaVersion,
             metadata: BrushMetadata(displayName: displayName),
             capabilities: [], resources: canonicalResources(shape: recipe.shape, grain: recipe.grain), coverage: coverage,
             placement: BrushPlacementDefinition(baseSpacingFraction: recipe.baseSpacingFraction, maximumSpacingFraction: recipe.maximumSpacingFraction, baseFlow: recipe.baseFlow, strokeOpacity: recipe.strokeOpacity, baseScatterFraction: recipe.baseScatterFraction, baseRotation: recipe.baseRotation, baseJitterFraction: 0, baseOffset: .zero),
             dynamics: dynamics, color: BrushColorBehaviorDefinition(baseAdjustment: recipe.colorAdjustment, perStampJitter: neutralJitter, perStrokeJitter: neutralJitter),
-            material: material(recipe.material), stabilization: recipe.stabilization, taper: recipe.taper, replayMode: recipe.replayMode, replayLimits: recipe.replayLimits, seedPolicy: .perStroke, limits: limits, performanceIntent: .realtime120, compatibility: neutralCompatibility
+            material: material(recipe.material), stabilization: recipe.stabilization, taper: recipe.taper, replayMode: recipe.replayMode, replayLimits: recipe.replayLimits, termination: .cap, seedPolicy: .perStroke, limits: limits, performanceIntent: .realtime120, compatibility: neutralCompatibility
         )
     }
 
