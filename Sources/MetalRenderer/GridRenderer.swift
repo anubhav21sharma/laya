@@ -3014,15 +3014,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard let generated = emission.generatedSamples.first else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        var projectionGenerator = generated.generatorBefore
-        let dabs = try prepareGeneratedDabs(
-            generator: &projectionGenerator
-        ) { _, emit in
-            for dab in generated.dabs {
-                try emit(dab)
-            }
-        }
+        try coordinator.reserveForDownstreamAcceptance(prepared)
         do {
+            var projectionGenerator = generated.generatorBefore
+            let dabs = try prepareGeneratedDabs(
+                generator: &projectionGenerator
+            ) { _, emit in
+                for dab in generated.dabs {
+                    try emit(dab)
+                }
+            }
             try ingestGeneratedSample(
                 generated.sample,
                 dabs: dabs,
@@ -3032,11 +3033,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 isFinishing: isFinishing
             )
         } catch {
-            coordinator.abandon(prepared)
+            try coordinator.abandon(prepared)
             throw error
         }
 
-        try coordinator.commit(prepared)
+        coordinator.finalizeAfterDownstreamAcceptance(prepared)
         var transferred: [AuthoritativeStrokeWork] = []
         transferred.reserveCapacity(emission.work.count)
         while let frame = try coordinator.prepareAuthoritativeFrame(

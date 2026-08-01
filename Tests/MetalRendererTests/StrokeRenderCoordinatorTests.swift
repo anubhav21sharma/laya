@@ -97,7 +97,7 @@ struct StrokeRenderCoordinatorTests {
         let prepared = try coordinator.prepareAppend(
             actualSamples: [sample(index: 3, phase: .moved)]
         )
-        coordinator.abandon(prepared)
+        try coordinator.abandon(prepared)
         #expect(coordinator.snapshot == before)
 
         let retry = try coordinator.prepareAppend(
@@ -111,6 +111,94 @@ struct StrokeRenderCoordinatorTests {
             ordinals: &ordinals
         )
         #expect(coordinator.snapshot.commitMetadata.inputSampleCount == 2)
+    }
+
+    @Test
+    func abandonedAndEmptyTransactionsAreConsumedExactlyOnce() throws {
+        var coordinator = try makeCoordinator(capacity: 8)
+        let began = try coordinator.prepareBegin(
+            actualSamples: [sample(index: 0, phase: .began)]
+        )
+        try coordinator.commit(began)
+        var ordinals: [UInt64] = []
+        try submitAll(
+            began.emission,
+            coordinator: &coordinator,
+            ordinals: &ordinals
+        )
+
+        let beforeAbandon = coordinator.snapshot
+        let abandoned = try coordinator.prepareAppend(
+            actualSamples: [sample(index: 3, phase: .moved)]
+        )
+        #expect(throws: StrokeRenderCoordinatorError.self) {
+            _ = try coordinator.prepareAppend(
+                actualSamples: [sample(index: 4, phase: .moved)]
+            )
+        }
+        try coordinator.abandon(abandoned)
+        #expect(coordinator.snapshot == beforeAbandon)
+        #expect(throws: StrokeRenderCoordinatorError.self) {
+            try coordinator.commit(abandoned)
+        }
+        #expect(throws: StrokeRenderCoordinatorError.self) {
+            try coordinator.abandon(abandoned)
+        }
+        #expect(coordinator.snapshot == beforeAbandon)
+
+        let empty = try coordinator.prepareAppend(actualSamples: [])
+        try coordinator.commit(empty)
+        let afterEmptyCommit = coordinator.snapshot
+        #expect(throws: StrokeRenderCoordinatorError.self) {
+            try coordinator.commit(empty)
+        }
+        #expect(afterEmptyCommit == coordinator.snapshot)
+    }
+
+    @Test
+    func preparedTransactionCannotCrossCoordinatorOrigin() throws {
+        var source = try makeCoordinator(capacity: 8)
+        var foreign = try makeCoordinator(capacity: 8)
+        let prepared = try source.prepareBegin(
+            actualSamples: [sample(index: 0, phase: .began)]
+        )
+        let foreignBefore = foreign.snapshot
+
+        #expect(throws: StrokeRenderCoordinatorError.self) {
+            try foreign.commit(prepared)
+        }
+        #expect(throws: StrokeRenderCoordinatorError.self) {
+            try foreign.abandon(prepared)
+        }
+        #expect(foreign.snapshot == foreignBefore)
+        try source.abandon(prepared)
+    }
+
+    @Test
+    func submissionInterleavingInvalidatesPreparedTransactionWithoutCountLoss()
+        throws
+    {
+        var coordinator = try makeCoordinator(capacity: 8)
+        let began = try coordinator.prepareBegin(
+            actualSamples: [sample(index: 0, phase: .began)]
+        )
+        try coordinator.commit(began)
+        let candidate = try coordinator.prepareAppend(
+            actualSamples: [sample(index: 3, phase: .moved)]
+        )
+        let frame = try #require(
+            try coordinator.prepareAuthoritativeFrame(maximumDabs: 8)
+        )
+        try coordinator.markAuthoritativeFrameSubmitted(frame)
+        let afterSubmission = coordinator.snapshot
+
+        #expect(throws: StrokeRenderCoordinatorError.self) {
+            try coordinator.commit(candidate)
+        }
+        #expect(coordinator.snapshot == afterSubmission)
+        #expect(afterSubmission.authoritativeSubmittedDabCount == 1)
+        #expect(afterSubmission.commitMetadata.submittedDabCount == 1)
+        #expect(afterSubmission.authoritativeQueueDepth == 0)
     }
 
     @Test

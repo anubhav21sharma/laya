@@ -1,19 +1,28 @@
+import Foundation
 import PatternEngine
 
 public enum StrokeRenderCoordinatorError: Error, Equatable, Sendable {
     case invalidLifecycle
     case invalidAuthoritativeSample
     case ordinalDiscontinuity(expected: UInt64, actual: UInt64)
+    case transactionAlreadyPrepared
+    case preparedEmissionOriginMismatch
+    case preparedEmissionAlreadyConsumed
+    case preparedEmissionTokenMismatch
+    case authoritativeFrameAlreadyPrepared
+    case transactionAlreadyReserved
+    case transactionTokenOverflow
     case stalePreparedEmission(expectedRevision: UInt64, actualRevision: UInt64)
-    case revisionOverflow
 }
 
-/// Candidate authoritative state. Preparing is side-effect free; only
-/// `StrokeRenderCoordinator.commit(_:)` makes this candidate authoritative.
+/// Candidate authoritative state. Preparation registers one coordinator-bound
+/// transaction; only a successful commit makes the candidate authoritative.
 public struct PreparedStrokeCoordinatorEmission: Sendable {
     public var work: [AuthoritativeStrokeWork] { emission.work }
 
     let emission: StrokeCoordinatorEmission
+    fileprivate let coordinatorIdentity: UUID
+    fileprivate let token: UInt64
     fileprivate let baseRevision: UInt64
     fileprivate let generator: BrushStrokeGenerator
     fileprivate let inputDeriver: BrushInputDeriver
@@ -21,7 +30,6 @@ public struct PreparedStrokeCoordinatorEmission: Sendable {
     fileprivate let maximumReturnedDabCount: Int
     fileprivate let hasBegun: Bool
     fileprivate let hasFinished: Bool
-    fileprivate let isNoOp: Bool
 }
 
 /// Synchronous authoritative core introduced before Task 7 moves its ownership
@@ -52,6 +60,15 @@ public struct StrokeRenderCoordinator: Sendable {
     private var hasBegun = false
     private var hasFinished = false
     private var revision: UInt64 = 0
+    private let coordinatorIdentity = UUID()
+    private var transactionState = TransactionState.idle
+    private var nextTransactionToken: UInt64 = 1
+
+    private enum TransactionState: Equatable, Sendable {
+        case idle
+        case prepared(token: UInt64, baseRevision: UInt64)
+        case reserved(token: UInt64, baseRevision: UInt64)
+    }
 
     public init(
         program: BrushProgram,
@@ -73,9 +90,10 @@ public struct StrokeRenderCoordinator: Sendable {
         )
     }
 
-    public func prepareBegin(
+    public mutating func prepareBegin(
         actualSamples: [StrokeSample]
     ) throws -> PreparedStrokeCoordinatorEmission {
+        try requireIdleTransaction()
         guard !hasBegun, !hasFinished, !actualSamples.isEmpty,
               actualSamples[0].phase == .began
         else {
@@ -93,26 +111,25 @@ public struct StrokeRenderCoordinator: Sendable {
         )
     }
 
-    public func prepareAppend(
+    public mutating func prepareAppend(
         actualSamples: [StrokeSample]
     ) throws -> PreparedStrokeCoordinatorEmission {
+        try requireIdleTransaction()
         guard hasBegun, !hasFinished else {
             throw StrokeRenderCoordinatorError.invalidLifecycle
         }
         guard !actualSamples.isEmpty else {
-            return PreparedStrokeCoordinatorEmission(
+            return try registerPreparedTransaction(
                 emission: StrokeCoordinatorEmission(
                     work: [],
                     generatedSamples: []
                 ),
-                baseRevision: revision,
                 generator: generator,
                 inputDeriver: inputDeriver,
                 commitMetadata: commitMetadata,
                 maximumReturnedDabCount: maximumReturnedDabCount,
                 hasBegun: hasBegun,
-                hasFinished: hasFinished,
-                isNoOp: true
+                hasFinished: hasFinished
             )
         }
         guard actualSamples.allSatisfy({ $0.phase == .moved }) else {
@@ -126,9 +143,10 @@ public struct StrokeRenderCoordinator: Sendable {
         )
     }
 
-    public func prepareFinish(
+    public mutating func prepareFinish(
         actualSamples: [StrokeSample]
     ) throws -> PreparedStrokeCoordinatorEmission {
+        try requireIdleTransaction()
         guard hasBegun, !hasFinished, !actualSamples.isEmpty,
               actualSamples.last?.phase == .ended
         else {
@@ -149,39 +167,83 @@ public struct StrokeRenderCoordinator: Sendable {
     public mutating func commit(
         _ prepared: PreparedStrokeCoordinatorEmission
     ) throws {
-        try validate(prepared)
-        guard !prepared.isNoOp else { return }
-        let (nextRevision, overflow) = revision.addingReportingOverflow(1)
-        guard !overflow else {
-            throw StrokeRenderCoordinatorError.revisionOverflow
+        try reserveForDownstreamAcceptance(prepared)
+        finalizeAfterDownstreamAcceptance(prepared)
+    }
+
+    /// Performs every check that can reject a coordinator candidate. Once this
+    /// succeeds, the renderer may transfer the work and then call the
+    /// nonthrowing finalizer.
+    mutating func reserveForDownstreamAcceptance(
+        _ prepared: PreparedStrokeCoordinatorEmission
+    ) throws {
+        try validatePreparedTransaction(prepared, expectedReservation: false)
+        guard !authoritativeQueue.hasPreparedFrame else {
+            throw StrokeRenderCoordinatorError.authoritativeFrameAlreadyPrepared
         }
         try authoritativeQueue.preflightAppend(prepared.work)
-        try authoritativeQueue.append(prepared.work)
+        transactionState = .reserved(
+            token: prepared.token,
+            baseRevision: prepared.baseRevision
+        )
+    }
+
+    /// Finalizes a prevalidated candidate after downstream ownership has been
+    /// accepted. No fallible work is permitted beyond this boundary.
+    mutating func finalizeAfterDownstreamAcceptance(
+        _ prepared: PreparedStrokeCoordinatorEmission
+    ) {
+        precondition(
+            prepared.coordinatorIdentity == coordinatorIdentity,
+            "Cannot finalize a foreign stroke coordinator transaction"
+        )
+        precondition(
+            transactionState == .reserved(
+                token: prepared.token,
+                baseRevision: prepared.baseRevision
+            ) && prepared.baseRevision == revision,
+            "Stroke coordinator transaction was not reserved"
+        )
+        authoritativeQueue.appendPrevalidated(prepared.work)
         generator = prepared.generator
         inputDeriver = prepared.inputDeriver
-        commitMetadata = prepared.commitMetadata
+        var currentMetadata = prepared.commitMetadata
+        currentMetadata.submittedDabCount = authoritativeQueue.submittedCount
+        commitMetadata = currentMetadata
         maximumReturnedDabCount = prepared.maximumReturnedDabCount
         hasBegun = prepared.hasBegun
         hasFinished = prepared.hasFinished
-        revision = nextRevision
+        transactionState = .idle
+        revision &+= 1
     }
 
-    public func abandon(
-        _: PreparedStrokeCoordinatorEmission
-    ) {}
+    public mutating func abandon(
+        _ prepared: PreparedStrokeCoordinatorEmission
+    ) throws {
+        try validatePreparedTransaction(prepared, expectedReservation: nil)
+        transactionState = .idle
+    }
 
     public mutating func prepareAuthoritativeFrame(
         maximumDabs: Int
     ) throws -> PreparedAuthoritativeStrokeFrame? {
-        try authoritativeQueue.prepare(maximumCount: maximumDabs)
+        if case .reserved = transactionState {
+            throw StrokeRenderCoordinatorError.transactionAlreadyReserved
+        }
+        return try authoritativeQueue.prepare(maximumCount: maximumDabs)
     }
 
     public mutating func markAuthoritativeFrameSubmitted(
         _ frame: PreparedAuthoritativeStrokeFrame
     ) throws {
+        if case .reserved = transactionState {
+            throw StrokeRenderCoordinatorError.transactionAlreadyReserved
+        }
         try authoritativeQueue.retire(frame)
         commitMetadata.submittedDabCount =
             authoritativeQueue.submittedCount
+        invalidatePreparedTransaction()
+        revision &+= 1
     }
 
     public mutating func abandonAuthoritativeFrame(
@@ -198,9 +260,8 @@ public struct StrokeRenderCoordinator: Sendable {
         maximumReturnedDabCount = 0
         hasBegun = false
         hasFinished = false
-        let (nextRevision, overflow) = revision.addingReportingOverflow(1)
-        precondition(!overflow, "Stroke coordinator revision overflow")
-        revision = nextRevision
+        transactionState = .idle
+        revision &+= 1
     }
 
     private enum Operation {
@@ -209,7 +270,7 @@ public struct StrokeRenderCoordinator: Sendable {
         case finish
     }
 
-    private func prepare(
+    private mutating func prepare(
         _ samples: [StrokeSample],
         firstOperation: Operation,
         hasBegun candidateHasBegun: Bool,
@@ -282,12 +343,11 @@ public struct StrokeRenderCoordinator: Sendable {
         candidateMetadata.emittedDabCount += UInt64(work.count)
         candidateMetadata.lastEmittedOrdinal =
             work.last?.ordinal ?? candidateMetadata.lastEmittedOrdinal
-        return PreparedStrokeCoordinatorEmission(
+        return try registerPreparedTransaction(
             emission: StrokeCoordinatorEmission(
                 work: work,
                 generatedSamples: generatedSamples
             ),
-            baseRevision: revision,
             generator: candidateGenerator,
             inputDeriver: candidateDeriver,
             commitMetadata: candidateMetadata,
@@ -296,19 +356,90 @@ public struct StrokeRenderCoordinator: Sendable {
                 work.count
             ),
             hasBegun: candidateHasBegun,
-            hasFinished: candidateHasFinished,
-            isNoOp: false
+            hasFinished: candidateHasFinished
         )
     }
 
-    private func validate(
-        _ prepared: PreparedStrokeCoordinatorEmission
+    private func requireIdleTransaction() throws {
+        guard case .idle = transactionState else {
+            throw StrokeRenderCoordinatorError.transactionAlreadyPrepared
+        }
+    }
+
+    private mutating func registerPreparedTransaction(
+        emission: StrokeCoordinatorEmission,
+        generator: BrushStrokeGenerator,
+        inputDeriver: BrushInputDeriver,
+        commitMetadata: StrokeCommitMetadata,
+        maximumReturnedDabCount: Int,
+        hasBegun: Bool,
+        hasFinished: Bool
+    ) throws -> PreparedStrokeCoordinatorEmission {
+        precondition(
+            transactionState == .idle,
+            "A stroke coordinator may issue only one transaction at a time"
+        )
+        let token = nextTransactionToken
+        let (successor, overflow) = token.addingReportingOverflow(1)
+        guard !overflow else {
+            throw StrokeRenderCoordinatorError.transactionTokenOverflow
+        }
+        nextTransactionToken = successor
+        transactionState = .prepared(token: token, baseRevision: revision)
+        return PreparedStrokeCoordinatorEmission(
+            emission: emission,
+            coordinatorIdentity: coordinatorIdentity,
+            token: token,
+            baseRevision: revision,
+            generator: generator,
+            inputDeriver: inputDeriver,
+            commitMetadata: commitMetadata,
+            maximumReturnedDabCount: maximumReturnedDabCount,
+            hasBegun: hasBegun,
+            hasFinished: hasFinished
+        )
+    }
+
+    private func validatePreparedTransaction(
+        _ prepared: PreparedStrokeCoordinatorEmission,
+        expectedReservation: Bool?
     ) throws {
+        guard prepared.coordinatorIdentity == coordinatorIdentity else {
+            throw StrokeRenderCoordinatorError.preparedEmissionOriginMismatch
+        }
         guard prepared.baseRevision == revision else {
             throw StrokeRenderCoordinatorError.stalePreparedEmission(
                 expectedRevision: revision,
                 actualRevision: prepared.baseRevision
             )
+        }
+        switch transactionState {
+        case .idle:
+            throw StrokeRenderCoordinatorError.preparedEmissionAlreadyConsumed
+        case let .prepared(token, baseRevision):
+            guard expectedReservation != true else {
+                throw StrokeRenderCoordinatorError.preparedEmissionTokenMismatch
+            }
+            guard token == prepared.token,
+                  baseRevision == prepared.baseRevision
+            else {
+                throw StrokeRenderCoordinatorError.preparedEmissionTokenMismatch
+            }
+        case let .reserved(token, baseRevision):
+            guard expectedReservation != false else {
+                throw StrokeRenderCoordinatorError.preparedEmissionTokenMismatch
+            }
+            guard token == prepared.token,
+                  baseRevision == prepared.baseRevision
+            else {
+                throw StrokeRenderCoordinatorError.preparedEmissionTokenMismatch
+            }
+        }
+    }
+
+    private mutating func invalidatePreparedTransaction() {
+        if case .prepared = transactionState {
+            transactionState = .idle
         }
     }
 }

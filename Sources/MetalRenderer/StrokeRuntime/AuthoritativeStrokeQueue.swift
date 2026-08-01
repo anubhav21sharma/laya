@@ -45,6 +45,7 @@ public struct AuthoritativeStrokeQueue: Sendable {
 
     public var availableCapacity: Int { capacity - count }
     public var isEmpty: Bool { count == 0 }
+    var hasPreparedFrame: Bool { preparedToken != nil }
 
     private var head = 0
     private var storage: ContiguousArray<AuthoritativeStrokeWork?>
@@ -92,12 +93,20 @@ public struct AuthoritativeStrokeQueue: Sendable {
         _ work: [AuthoritativeStrokeWork]
     ) throws {
         try preflightAppend(work)
+        appendPrevalidated(work)
+    }
+
+    /// Appends work whose capacity, ordinal continuity, and overflow were
+    /// checked by `preflightAppend(_:)` while the caller held exclusive state.
+    mutating func appendPrevalidated(
+        _ work: [AuthoritativeStrokeWork]
+    ) {
         guard !work.isEmpty else { return }
         for item in work {
             storage[(head + count) % capacity] = item
             count += 1
         }
-        nextExpectedOrdinal += UInt64(work.count)
+        nextExpectedOrdinal &+= UInt64(work.count)
         highWater = max(highWater, count)
     }
 
