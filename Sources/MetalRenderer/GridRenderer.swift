@@ -154,6 +154,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public internal(set) var counters = GridStructuralCounters()
     private var brushLabActualDabCount = 0
     private var brushLabPredictedDabCount = 0
+    private var deferredLogicalDabPublications: [LogicalDab] = []
+    private var logicalDabPublicationScopeDepth = 0
+    private var logicalDabPublicationScopeFailed = false
     private var strokeRuntimeController: StrokeRuntimeProductionController?
     private var nextStrokeRuntimeFrameID: UInt64 = 1
     private var pendingStrokeRuntimeFrameIDs: Set<UInt64> = []
@@ -1002,6 +1005,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard sample.phase == .began, isIdle else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        beginLogicalDabPublicationScope()
+        var publicationSucceeded = false
+        defer {
+            endLogicalDabPublicationScope(
+                operationSucceeded: publicationSucceeded
+            )
+        }
         let compiledBrush = try compiledBrush(for: style)
         instancePool.beginStrokeDiagnostics()
         resetBrushLabDepositionDiagnostics()
@@ -1070,6 +1080,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     coordinator: strokeRenderCoordinator!,
                     isFinishing: false
                 )
+                publicationSucceeded = true
                 return
             }
             let inputBefore = brushInputDeriver
@@ -1094,6 +1105,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 inputDeriverBeforeSample: inputBefore,
                 isFinishing: false
             )
+            publicationSucceeded = true
         } catch {
             endStrokeRuntimeIfPossible()
             activeStroke = nil
@@ -1106,6 +1118,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         sample: StrokeSample
     ) throws {
+        beginLogicalDabPublicationScope()
+        var publicationSucceeded = false
+        defer {
+            endLogicalDabPublicationScope(
+                operationSucceeded: publicationSucceeded
+            )
+        }
         markBrushLabInputReceipt()
         recordStrokeRuntimeInput(sample)
         if sample.kind == .predicted {
@@ -1116,6 +1135,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         } else {
             try appendAuthoritativeStroke(token: token, sample: sample)
         }
+        publicationSucceeded = true
     }
 
     public func appendStrokeBatch(
@@ -1123,6 +1143,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         samples: [StrokeSample]
     ) throws {
         guard !samples.isEmpty else { return }
+        beginLogicalDabPublicationScope()
+        var publicationSucceeded = false
+        defer {
+            endLogicalDabPublicationScope(
+                operationSucceeded: publicationSucceeded
+            )
+        }
         markBrushLabInputReceipt()
         for sample in samples {
             recordStrokeRuntimeInput(sample)
@@ -1148,6 +1175,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 index += 1
             }
         }
+        publicationSucceeded = true
     }
 
     private func replacePredictedStrokeSuffix<Samples: Collection>(
@@ -1283,7 +1311,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         counters.newDabsThisEvent = generatedDabCount
         counters.totalDabsThisStroke += generatedDabCount
-        publishPreparedLogicalDabs(
+        deferPreparedLogicalDabsForPublication(
             depositionInputScratch.preparedChunkRanges
         )
     }
@@ -1359,12 +1387,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard sample.phase == .ended else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        beginLogicalDabPublicationScope()
+        var publicationSucceeded = false
+        defer {
+            endLogicalDabPublicationScope(
+                operationSucceeded: publicationSucceeded
+            )
+        }
         try requireCollectingStroke(token: token)
         do {
             try finishStrokeTransient(token: token, sample: sample)
             try requestCompiledStrokeCommit(
                 maximumRetainedBytes: maximumRetainedBytes
             )
+            publicationSucceeded = true
         } catch {
             endStrokeRuntimeIfPossible()
             discardPendingRevisionsIfPossible()
@@ -1380,6 +1416,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) throws {
         guard sample.phase == .ended else {
             throw MetalRendererError.invalidStrokeLifecycle
+        }
+        beginLogicalDabPublicationScope()
+        var publicationSucceeded = false
+        defer {
+            endLogicalDabPublicationScope(
+                operationSucceeded: publicationSucceeded
+            )
         }
         try requireCollectingStroke(token: token)
         recordStrokeRuntimeInput(sample)
@@ -1398,6 +1441,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             predictedInputDeriver = nil
             predictedStrokeGenerator = nil
             activeStroke?.isFinishedTransiently = true
+            publicationSucceeded = true
             return
         }
         if strokeRenderCoordinator != nil {
@@ -1430,6 +1474,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         predictedInputDeriver = nil
         predictedStrokeGenerator = nil
         activeStroke?.isFinishedTransiently = true
+        publicationSucceeded = true
     }
 
     public func commitFinishedStroke(
@@ -1461,6 +1506,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard sample.kind == .estimatedUpdate else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        beginLogicalDabPublicationScope()
+        var publicationSucceeded = false
+        defer {
+            endLogicalDabPublicationScope(
+                operationSucceeded: publicationSucceeded
+            )
+        }
         recordStrokeRuntimeInput(sample)
         try requireEditableStroke(token: token)
         guard transientStrokeBuffer != nil else {
@@ -1482,6 +1534,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 #if DEBUG
                 print("Ignoring late or unknown estimated stroke update: \(error)")
                 #endif
+                publicationSucceeded = true
                 return
             default:
                 throw error
@@ -1592,9 +1645,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             $0 + $1.dabs.count
         }
         counters.totalDabsThisStroke += counters.newDabsThisEvent
-        publishPreparedLogicalDabs(
+        deferPreparedLogicalDabsForPublication(
             depositionInputScratch.preparedChunkRanges
         )
+        publicationSucceeded = true
     }
 
     public func cancelStroke(token: RendererOperationToken) throws {
@@ -2866,7 +2920,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
             counters.newDabsThisEvent += dabs.count
             counters.totalDabsThisStroke += dabs.count
-            publishLogicalDabs(dabs.lazy.map(\.attributes))
+            deferLogicalDabsForPublication(dabs.lazy.map(\.attributes))
             return
         }
 
@@ -2994,7 +3048,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         counters.newDabsThisEvent += dabs.count
         counters.totalDabsThisStroke += dabs.count
-        publishLogicalDabs(dabs.lazy.map(\.attributes))
+        deferLogicalDabsForPublication(dabs.lazy.map(\.attributes))
     }
 
     /// Transfers one compatibility-ink emission into the existing projection
@@ -3094,25 +3148,73 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
     #endif
 
-    private func publishLogicalDabs<Dabs: Collection>(
+    private func beginLogicalDabPublicationScope() {
+        precondition(
+            logicalDabPublicationScopeDepth < Int.max,
+            "Logical-dab publication scope depth overflowed"
+        )
+        logicalDabPublicationScopeDepth += 1
+    }
+
+    private func endLogicalDabPublicationScope(
+        operationSucceeded: Bool
+    ) {
+        precondition(
+            logicalDabPublicationScopeDepth > 0,
+            "Logical-dab publication scope was not open"
+        )
+        if !operationSucceeded {
+            logicalDabPublicationScopeFailed = true
+        }
+        logicalDabPublicationScopeDepth -= 1
+        guard logicalDabPublicationScopeDepth == 0 else { return }
+        defer { logicalDabPublicationScopeFailed = false }
+        guard !logicalDabPublicationScopeFailed else {
+            deferredLogicalDabPublications.removeAll(keepingCapacity: true)
+            return
+        }
+        drainDeferredLogicalDabPublications()
+    }
+
+    private func drainDeferredLogicalDabPublications() {
+        guard !deferredLogicalDabPublications.isEmpty else { return }
+        let dabs = deferredLogicalDabPublications
+        deferredLogicalDabPublications.removeAll(keepingCapacity: true)
+        guard let observer = onLogicalDabsGenerated else { return }
+        for dab in dabs {
+            observer(dab)
+        }
+    }
+
+    private func deferLogicalDabsForPublication<Dabs: Collection>(
         _ dabs: Dabs
     ) where Dabs.Element == LogicalDab {
         guard !dabs.isEmpty else { return }
-        let observer = onLogicalDabsGenerated
+        precondition(
+            logicalDabPublicationScopeDepth > 0,
+            "Logical dabs must be recorded inside an input-operation scope"
+        )
+        let shouldPublish = onLogicalDabsGenerated != nil
         for dab in dabs {
             if dab.isPredicted {
                 brushLabPredictedDabCount += 1
             } else {
                 brushLabActualDabCount += 1
             }
-            observer?(dab)
+            if shouldPublish {
+                deferredLogicalDabPublications.append(dab)
+            }
         }
     }
 
-    private func publishPreparedLogicalDabs<Ranges: Collection>(
+    private func deferPreparedLogicalDabsForPublication<Ranges: Collection>(
         _ ranges: Ranges
     ) where Ranges.Element == Range<Int> {
-        let observer = onLogicalDabsGenerated
+        precondition(
+            logicalDabPublicationScopeDepth > 0,
+            "Logical dabs must be recorded inside an input-operation scope"
+        )
+        let shouldPublish = onLogicalDabsGenerated != nil
         for range in ranges {
             for index in range {
                 let dab =
@@ -3122,7 +3224,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 } else {
                     brushLabActualDabCount += 1
                 }
-                observer?(dab)
+                if shouldPublish {
+                    deferredLogicalDabPublications.append(dab)
+                }
             }
         }
     }
@@ -5681,6 +5785,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func resetLiveState() {
+        deferredLogicalDabPublications.removeAll(keepingCapacity: true)
         strokeGenerator?.cancel()
         strokeGenerator = nil
         strokeRenderCoordinator?.cancel()

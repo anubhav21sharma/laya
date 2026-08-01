@@ -2922,6 +2922,124 @@ struct DepositionRendererTests {
         try setup.renderer.cancelStroke(token: token)
         #expect(setup.renderer.isIdle)
     }
+
+    @Test
+    @MainActor
+    func nativeInkAppendObserverCanSynchronouslyCancelAndRecover()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let token = RendererOperationToken(rawValue: 90_012)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 8, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+
+        var callbackCount = 0
+        var cancellationError: String?
+        setup.renderer.onLogicalDabsGenerated = { _ in
+            callbackCount += 1
+            guard callbackCount == 1 else { return }
+            do {
+                try setup.renderer.cancelStroke(token: token)
+            } catch {
+                cancellationError = String(describing: error)
+            }
+        }
+
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionSample(.moved, x: 40, y: 24)
+        )
+
+        #expect(callbackCount > 0)
+        #expect(cancellationError == nil)
+        #expect(setup.renderer.isIdle)
+        setup.renderer.onLogicalDabsGenerated = nil
+
+        let recoveryToken = RendererOperationToken(rawValue: 90_013)
+        try setup.renderer.beginStroke(
+            token: recoveryToken,
+            sample: depositionSample(.began, x: 12, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try setup.renderer.cancelStroke(token: recoveryToken)
+        #expect(setup.renderer.isIdle)
+    }
+
+    @Test
+    @MainActor
+    func nativeInkFinishObserverCanSynchronouslyCancelAndRecover()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let token = RendererOperationToken(rawValue: 90_014)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 8, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionSample(.moved, x: 20, y: 24)
+        )
+
+        var callbackCount = 0
+        var cancellationError: String?
+        setup.renderer.onLogicalDabsGenerated = { _ in
+            callbackCount += 1
+            guard callbackCount == 1 else { return }
+            do {
+                try setup.renderer.cancelStroke(token: token)
+            } catch {
+                cancellationError = String(describing: error)
+            }
+        }
+
+        try setup.renderer.finishStrokeTransient(
+            token: token,
+            sample: depositionSample(.ended, x: 52, y: 24)
+        )
+
+        #expect(callbackCount > 0)
+        #expect(cancellationError == nil)
+        #expect(setup.renderer.isIdle)
+        setup.renderer.onLogicalDabsGenerated = nil
+
+        let recoveryToken = RendererOperationToken(rawValue: 90_015)
+        try setup.renderer.beginStroke(
+            token: recoveryToken,
+            sample: depositionSample(.began, x: 12, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try setup.renderer.cancelStroke(token: recoveryToken)
+        #expect(setup.renderer.isIdle)
+    }
 }
 
 private func requireSendableRenderState<T: Sendable>(_: T) {}
