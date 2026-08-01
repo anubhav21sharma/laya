@@ -2857,6 +2857,71 @@ struct DepositionRendererTests {
                 == nil
         )
     }
+
+    @Test
+    @MainActor
+    func nativeInkFrameTokenBoundaryCannotFailAfterSchedulerAcceptance()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let token = RendererOperationToken(rawValue: 90_011)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 12, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        let before = try #require(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+        )
+        let scheduledBefore =
+            setup.renderer.harnessScheduledAuthoritativeRecords.count
+        _ = try #require(
+            setup.renderer.replaceCompatibilityInkFrameTokenForTesting(
+                .max
+            )
+        )
+
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionSample(.moved, x: 24, y: 24)
+        )
+
+        let after = try #require(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+        )
+        #expect(
+            after.commitMetadata.inputSampleCount
+                == before.commitMetadata.inputSampleCount + 1
+        )
+        #expect(after.authoritativeQueueDepth == 0)
+        #expect(
+            after.commitMetadata.submittedDabCount
+                == after.authoritativeSubmittedDabCount
+        )
+        #expect(
+            after.authoritativeSubmittedDabCount
+                > before.authoritativeSubmittedDabCount
+        )
+        let submittedDelta = after.authoritativeSubmittedDabCount
+            - before.authoritativeSubmittedDabCount
+        #expect(
+            after.authoritativeQueueHighWater >= Int(submittedDelta)
+        )
+        #expect(
+            setup.renderer.harnessScheduledAuthoritativeRecords.count
+                > scheduledBefore
+        )
+        try setup.renderer.cancelStroke(token: token)
+        #expect(setup.renderer.isIdle)
+    }
 }
 
 private func requireSendableRenderState<T: Sendable>(_: T) {}

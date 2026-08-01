@@ -1067,7 +1067,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 )
                 try ingestCoordinatorEmission(
                     prepared,
-                    coordinator: &strokeRenderCoordinator!,
+                    coordinator: strokeRenderCoordinator!,
                     isFinishing: false
                 )
                 return
@@ -1306,7 +1306,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
             try ingestCoordinatorEmission(
                 prepared,
-                coordinator: &strokeRenderCoordinator!,
+                coordinator: strokeRenderCoordinator!,
                 isFinishing: false
             )
             predictedInputDeriver = nil
@@ -1392,7 +1392,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
             try ingestCoordinatorEmission(
                 prepared,
-                coordinator: &strokeRenderCoordinator!,
+                coordinator: strokeRenderCoordinator!,
                 isFinishing: true
             )
             predictedInputDeriver = nil
@@ -3003,7 +3003,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     /// input fallback until Tasks 6 and 7 move those paths as well.
     private func ingestCoordinatorEmission(
         _ prepared: PreparedStrokeCoordinatorEmission,
-        coordinator: inout StrokeRenderCoordinator,
+        coordinator: StrokeRenderCoordinator,
         isFinishing: Bool
     ) throws {
         let emission = prepared.emission
@@ -3014,7 +3014,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard let generated = emission.generatedSamples.first else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        try coordinator.reserveForDownstreamAcceptance(prepared)
+        try coordinator.reserveForDownstreamAcceptance(
+            prepared,
+            retireAfterAcceptance: true
+        )
         do {
             var projectionGenerator = generated.generatorBefore
             let dabs = try prepareGeneratedDabs(
@@ -3037,19 +3040,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw error
         }
 
-        coordinator.finalizeAfterDownstreamAcceptance(prepared)
-        var transferred: [AuthoritativeStrokeWork] = []
-        transferred.reserveCapacity(emission.work.count)
-        while let frame = try coordinator.prepareAuthoritativeFrame(
-            maximumDabs: max(1, emission.work.count)
-        ) {
-            transferred.append(contentsOf: frame.work)
-            try coordinator.markAuthoritativeFrameSubmitted(frame)
-        }
-        precondition(
-            transferred == emission.work,
-            "Authoritative work transfer must preserve exact ordinal order"
-        )
+        coordinator.finalizeAndRetireAfterDownstreamAcceptance(prepared)
         strokeGenerator = coordinator.generatorSnapshot
         brushInputDeriver = coordinator.inputDeriverSnapshot
     }
@@ -3093,6 +3084,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         StrokeRenderSnapshot?
     {
         strokeRenderCoordinator?.snapshot
+    }
+
+    @discardableResult
+    func replaceCompatibilityInkFrameTokenForTesting(
+        _ token: UInt64
+    ) -> UInt64? {
+        strokeRenderCoordinator?.replaceNextFrameTokenForTesting(token)
     }
     #endif
 

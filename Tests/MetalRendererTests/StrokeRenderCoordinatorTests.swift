@@ -9,7 +9,7 @@ struct StrokeRenderCoordinatorTests {
     func everyOrdinalIsReturnedAndSubmittedExactlyOnce(
         eventCount: Int
     ) throws {
-        var coordinator = try makeCoordinator(
+        let coordinator = try makeCoordinator(
             capacity: eventCount == 100_000 ? 12_288 : 64
         )
         var submittedOrdinals: [UInt64] = []
@@ -17,23 +17,23 @@ struct StrokeRenderCoordinatorTests {
 
         let began = try commitBegin(
             [sample(index: 0, phase: .began)],
-            coordinator: &coordinator
+            coordinator: coordinator
         )
         try submitAll(
             began,
-            coordinator: &coordinator,
+            coordinator: coordinator,
             ordinals: &submittedOrdinals
         )
         if eventCount > 1 {
             for index in 1..<eventCount {
                 let emitted = try commitAppend(
                     [sample(index: index, phase: .moved)],
-                    coordinator: &coordinator
+                    coordinator: coordinator
                 )
                 #expect(emitted.work.count <= 4)
                 try submitAll(
                     emitted,
-                    coordinator: &coordinator,
+                    coordinator: coordinator,
                     ordinals: &submittedOrdinals
                 )
             }
@@ -56,10 +56,10 @@ struct StrokeRenderCoordinatorTests {
 
     @Test
     func capacityFailureIsTransactionalAndHighWaterIsBounded() throws {
-        var coordinator = try makeCoordinator(capacity: 1)
+        let coordinator = try makeCoordinator(capacity: 1)
         let first = try commitBegin(
             [sample(index: 0, phase: .began)],
-            coordinator: &coordinator
+            coordinator: coordinator
         )
         let before = coordinator.snapshot
 
@@ -73,7 +73,7 @@ struct StrokeRenderCoordinatorTests {
         var ordinals: [UInt64] = []
         try submitAll(
             first,
-            coordinator: &coordinator,
+            coordinator: coordinator,
             ordinals: &ordinals
         )
         #expect(coordinator.snapshot.authoritativeQueueHighWater == 1)
@@ -81,7 +81,7 @@ struct StrokeRenderCoordinatorTests {
 
     @Test
     func abandonedPreparedAppendLeavesExactStateAndRetryIsIdentical() throws {
-        var coordinator = try makeCoordinator(capacity: 8)
+        let coordinator = try makeCoordinator(capacity: 8)
         let began = try coordinator.prepareBegin(
             actualSamples: [sample(index: 0, phase: .began)]
         )
@@ -89,7 +89,7 @@ struct StrokeRenderCoordinatorTests {
         var ordinals: [UInt64] = []
         try submitAll(
             began.emission,
-            coordinator: &coordinator,
+            coordinator: coordinator,
             ordinals: &ordinals
         )
         let before = coordinator.snapshot
@@ -107,7 +107,7 @@ struct StrokeRenderCoordinatorTests {
         try coordinator.commit(retry)
         try submitAll(
             retry.emission,
-            coordinator: &coordinator,
+            coordinator: coordinator,
             ordinals: &ordinals
         )
         #expect(coordinator.snapshot.commitMetadata.inputSampleCount == 2)
@@ -115,7 +115,7 @@ struct StrokeRenderCoordinatorTests {
 
     @Test
     func abandonedAndEmptyTransactionsAreConsumedExactlyOnce() throws {
-        var coordinator = try makeCoordinator(capacity: 8)
+        let coordinator = try makeCoordinator(capacity: 8)
         let began = try coordinator.prepareBegin(
             actualSamples: [sample(index: 0, phase: .began)]
         )
@@ -123,7 +123,7 @@ struct StrokeRenderCoordinatorTests {
         var ordinals: [UInt64] = []
         try submitAll(
             began.emission,
-            coordinator: &coordinator,
+            coordinator: coordinator,
             ordinals: &ordinals
         )
 
@@ -157,8 +157,8 @@ struct StrokeRenderCoordinatorTests {
 
     @Test
     func preparedTransactionCannotCrossCoordinatorOrigin() throws {
-        var source = try makeCoordinator(capacity: 8)
-        var foreign = try makeCoordinator(capacity: 8)
+        let source = try makeCoordinator(capacity: 8)
+        let foreign = try makeCoordinator(capacity: 8)
         let prepared = try source.prepareBegin(
             actualSamples: [sample(index: 0, phase: .began)]
         )
@@ -175,10 +175,31 @@ struct StrokeRenderCoordinatorTests {
     }
 
     @Test
+    func copiedPreparedCoordinatorCannotConsumeTransactionTwice() throws {
+        let coordinator = try makeCoordinator(capacity: 8)
+        let prepared = try coordinator.prepareBegin(
+            actualSamples: [sample(index: 0, phase: .began)]
+        )
+        let commitAlias = coordinator
+        let abandonAlias = coordinator
+
+        try coordinator.commit(prepared)
+        let committed = coordinator.snapshot
+        #expect(throws: StrokeRenderCoordinatorError.self) {
+            try commitAlias.commit(prepared)
+        }
+        #expect(throws: StrokeRenderCoordinatorError.self) {
+            try abandonAlias.abandon(prepared)
+        }
+        #expect(commitAlias.snapshot == committed)
+        #expect(abandonAlias.snapshot == committed)
+    }
+
+    @Test
     func submissionInterleavingInvalidatesPreparedTransactionWithoutCountLoss()
         throws
     {
-        var coordinator = try makeCoordinator(capacity: 8)
+        let coordinator = try makeCoordinator(capacity: 8)
         let began = try coordinator.prepareBegin(
             actualSamples: [sample(index: 0, phase: .began)]
         )
@@ -226,15 +247,15 @@ struct StrokeRenderCoordinatorTests {
 
     @Test
     func replaceableActualInputIsRejectedTransactionally() throws {
-        var coordinator = try makeCoordinator(capacity: 8)
+        let coordinator = try makeCoordinator(capacity: 8)
         let began = try commitBegin(
             [sample(index: 0, phase: .began)],
-            coordinator: &coordinator
+            coordinator: coordinator
         )
         var ordinals: [UInt64] = []
         try submitAll(
             began,
-            coordinator: &coordinator,
+            coordinator: coordinator,
             ordinals: &ordinals
         )
         let before = coordinator.snapshot
@@ -259,10 +280,10 @@ struct StrokeRenderCoordinatorTests {
 
     @Test
     func preparedWorkRetiresOnlyAfterSuccessfulSubmission() throws {
-        var coordinator = try makeCoordinator(capacity: 8)
+        let coordinator = try makeCoordinator(capacity: 8)
         _ = try commitBegin(
             [sample(index: 0, phase: .began)],
-            coordinator: &coordinator
+            coordinator: coordinator
         )
         let preparedCandidate = try coordinator
             .prepareAuthoritativeFrame(maximumDabs: 8)
@@ -289,21 +310,21 @@ struct StrokeRenderCoordinatorTests {
         let samples = (0..<128).map {
             sample(index: $0, phase: $0 == 0 ? .began : .moved)
         }
-        var single = try makeCoordinator(capacity: 1_024)
-        var partitioned = try makeCoordinator(capacity: 1_024)
+        let single = try makeCoordinator(capacity: 1_024)
+        let partitioned = try makeCoordinator(capacity: 1_024)
 
         var singleWork = try commitBegin(
             [samples[0]],
-            coordinator: &single
+            coordinator: single
         ).work
         singleWork += try commitAppend(
             Array(samples.dropFirst()),
-            coordinator: &single
+            coordinator: single
         ).work
 
         var partitionedWork = try commitBegin(
             [samples[0]],
-            coordinator: &partitioned
+            coordinator: partitioned
         ).work
         let widths = [1, 7, 3, 19, 2, 31, 5, 11]
         var cursor = 1
@@ -312,7 +333,7 @@ struct StrokeRenderCoordinatorTests {
             let end = min(samples.count, cursor + widths[widthIndex % widths.count])
             partitionedWork += try commitAppend(
                 Array(samples[cursor..<end]),
-                coordinator: &partitioned
+                coordinator: partitioned
             ).work
             cursor = end
             widthIndex += 1
@@ -327,21 +348,21 @@ struct StrokeRenderCoordinatorTests {
 
     @Test
     func completedBodyIsReducedToCompactCommitMetadata() throws {
-        var coordinator = try makeCoordinator(capacity: 32)
+        let coordinator = try makeCoordinator(capacity: 32)
         var ordinals: [UInt64] = []
         let began = try commitBegin(
             [sample(index: 0, phase: .began)],
-            coordinator: &coordinator
+            coordinator: coordinator
         )
-        try submitAll(began, coordinator: &coordinator, ordinals: &ordinals)
+        try submitAll(began, coordinator: coordinator, ordinals: &ordinals)
         for index in 1..<1_000 {
             let emitted = try commitAppend(
                 [sample(index: index, phase: .moved)],
-                coordinator: &coordinator
+                coordinator: coordinator
             )
             try submitAll(
                 emitted,
-                coordinator: &coordinator,
+                coordinator: coordinator,
                 ordinals: &ordinals
             )
         }
@@ -538,7 +559,7 @@ private func queueWork(_ ordinals: Range<Int>) -> [AuthoritativeStrokeWork] {
 
 private func submitAll(
     _ emission: StrokeCoordinatorEmission,
-    coordinator: inout StrokeRenderCoordinator,
+    coordinator: StrokeRenderCoordinator,
     ordinals: inout [UInt64]
 ) throws {
     #expect(emission.work.map(\.ordinal) == emission.work.map(\.dab.ordinal))
@@ -552,7 +573,7 @@ private func submitAll(
 
 private func commitBegin(
     _ samples: [StrokeSample],
-    coordinator: inout StrokeRenderCoordinator
+    coordinator: StrokeRenderCoordinator
 ) throws -> StrokeCoordinatorEmission {
     let prepared = try coordinator.prepareBegin(actualSamples: samples)
     try coordinator.commit(prepared)
@@ -561,7 +582,7 @@ private func commitBegin(
 
 private func commitAppend(
     _ samples: [StrokeSample],
-    coordinator: inout StrokeRenderCoordinator
+    coordinator: StrokeRenderCoordinator
 ) throws -> StrokeCoordinatorEmission {
     let prepared = try coordinator.prepareAppend(actualSamples: samples)
     try coordinator.commit(prepared)

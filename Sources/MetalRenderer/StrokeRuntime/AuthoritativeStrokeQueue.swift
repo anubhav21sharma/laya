@@ -110,6 +110,21 @@ public struct AuthoritativeStrokeQueue: Sendable {
         highWater = max(highWater, count)
     }
 
+    /// Records high-water and submission accounting for work that downstream
+    /// already accepted. The caller preflighted the append while this queue was
+    /// empty, so no frame-token allocation or recoverable failure remains.
+    mutating func recordPrevalidatedTransfer(
+        _ work: [AuthoritativeStrokeWork]
+    ) {
+        precondition(
+            isEmpty && !hasPreparedFrame,
+            "Immediate authoritative transfer requires an empty queue"
+        )
+        highWater = max(highWater, work.count)
+        nextExpectedOrdinal &+= UInt64(work.count)
+        submittedCount &+= UInt64(work.count)
+    }
+
     public mutating func prepare(
         maximumCount: Int
     ) throws -> PreparedAuthoritativeStrokeFrame? {
@@ -191,4 +206,15 @@ public struct AuthoritativeStrokeQueue: Sendable {
         preparedToken = nil
         preparedCount = 0
     }
+
+    #if DEBUG
+    @discardableResult
+    mutating func replaceNextFrameTokenForTesting(
+        _ token: UInt64
+    ) -> UInt64 {
+        let previous = nextToken
+        nextToken = token
+        return previous
+    }
+    #endif
 }
