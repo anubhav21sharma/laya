@@ -94,6 +94,8 @@ public struct BrushTerminationEvaluator: Equatable, Sendable {
             return .replaceBoundedCorrection(
                 ordinalRange: correction.ordinalRange
             )
+        case .legacySchemaV1Cap:
+            return .appendCap
         case .legacySchemaV1EndTaper:
             return .replaceLegacySchemaV1EndTaper(
                 ordinalRange: correction.ordinalRange

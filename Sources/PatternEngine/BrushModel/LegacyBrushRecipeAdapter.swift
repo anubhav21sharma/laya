@@ -1,34 +1,14 @@
 import Foundation
 import simd
 
-/// The only module-internal authority allowed to recover retained schema-v1
-/// replay and end-taper behavior. Public `BrushDefinition` initializers never
-/// install this marker.
-enum LegacyBrushTerminationAdapter {
-    static func marksLegacyTermination(
-        schemaVersion: UInt16,
-        taper: BrushTaperConfiguration,
-        replayMode: BrushReplayMode
-    ) -> Bool {
-        guard schemaVersion == 1 else { return false }
-        if case .disabled = taper.end {
-            return replayMode != .appendOnly
-        }
-        return true
-    }
-
+/// The only module-internal authority allowed to mark a definition as an
+/// exact schema-v1 compatibility object. Public initializers never install it.
+enum LegacyBrushCompatibilityAdapter {
     static func marksDecodedSchemaV1(
         schemaVersion: UInt16,
-        hasEncodedTermination: Bool,
-        taper: BrushTaperConfiguration,
-        replayMode: BrushReplayMode
+        hasEncodedTermination: Bool
     ) -> Bool {
-        !hasEncodedTermination
-            && marksLegacyTermination(
-                schemaVersion: schemaVersion,
-                taper: taper,
-                replayMode: replayMode
-            )
+        schemaVersion == 1 && !hasEncodedTermination
     }
 }
 
@@ -63,14 +43,8 @@ public enum LegacyBrushRecipeAdapter {
         let dynamics = BrushDynamicsDefinition(
             size: map(recipe.sizeMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), flow: map(recipe.flowMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), opacity: constant(1), spacing: map(recipe.spacingMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), rotation: map(recipe.rotationMapping, disabled: 0, noPressureNeutral: recipe.noPressureNeutral), scatter: map(recipe.scatterMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), hardness: map(recipe.hardnessMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), grain: map(recipe.grainMapping, disabled: 1, noPressureNeutral: recipe.noPressureNeutral), offsetX: constantZero, offsetY: constantZero, hue: constantZero, saturation: constantZero, brightness: constantZero, secondaryColorMix: constantZero, noPressureNeutral: recipe.noPressureNeutral, randomization: recipe.randomization
         )
-        let hasLegacyTermination = LegacyBrushTerminationAdapter
-            .marksLegacyTermination(
-                schemaVersion: recipe.schemaVersion,
-                taper: recipe.taper,
-                replayMode: recipe.replayMode
-            )
         return try BrushDefinition(
-            legacySchemaV1Termination: hasLegacyTermination,
+            legacySchemaV1Compatibility: true,
             id: recipe.id,
             schemaVersion: BrushDefinition.currentSchemaVersion,
             metadata: BrushMetadata(displayName: displayName),
@@ -83,6 +57,16 @@ public enum LegacyBrushRecipeAdapter {
 
     public static func recipe(from definition: BrushDefinition) throws -> BrushRecipe {
         guard definition.schemaVersion == BrushDefinition.currentSchemaVersion, definition.capabilities.isEmpty, definition.coverage.shapes.count == 1, definition.coverage.grains.count <= 1, definition.coverage.shapes[0].combination == .replace, definition.coverage.shapes[0].scale == 1, definition.coverage.shapes[0].rotation == 0, definition.coverage.shapes[0].offset == .zero, definition.coverage.tipThreshold == 0, definition.coverage.antialiasing, definition.placement.baseJitterFraction == 0, definition.placement.baseOffset == .zero, isCanonicalConstant(definition.dynamics.opacity, value: 1), isCanonicalConstant(definition.dynamics.offsetX, value: 0), isCanonicalConstant(definition.dynamics.offsetY, value: 0), isCanonicalConstant(definition.dynamics.hue, value: 0), isCanonicalConstant(definition.dynamics.saturation, value: 0), isCanonicalConstant(definition.dynamics.brightness, value: 0), isCanonicalConstant(definition.dynamics.secondaryColorMix, value: 0), definition.color.perStampJitter == neutralJitter, definition.color.perStrokeJitter == neutralJitter, definition.material.interaction == .none, definition.material.interactionParameters == nil, definition.seedPolicy == .perStroke, definition.limits == limits, definition.performanceIntent == .realtime120, isLegacyCompatible(definition.compatibility) else { throw BrushDefinitionValidationError.semanticLoss("definition contains a native-only field") }
+        guard definition.hasLegacySchemaV1Compatibility else {
+            throw BrushDefinitionValidationError.semanticLoss(
+                "definition is not marked legacy-compatible"
+            )
+        }
+        guard definition.termination == .cap else {
+            throw BrushDefinitionValidationError.semanticLoss(
+                "definition contains native termination semantics"
+            )
+        }
         let grain: BrushGrainDescriptor
         let coordinateMode: BrushGrainCoordinateMode
         let grainTransform: BrushGrainTransform

@@ -2734,7 +2734,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         inputDeriverBeforeSample: BrushInputDeriver,
         isFinishing: Bool
     ) throws {
-        guard transientStrokeBuffer != nil else {
+        guard transientStrokeBuffer != nil,
+              let strokeExecution = activeStroke
+        else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let dabs = depositionInputScratch.preparedDabs[dabRange]
@@ -2799,6 +2801,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 chunk,
                 settledInto: &depositionInputScratch.settledChunks
             )
+        if isFinishing {
+            let correction = transientStrokeBuffer!
+                .terminationCorrection(
+                    appending: chunk,
+                    settledPrefixCount:
+                        depositionInputScratch.settledChunks.count
+                )
+            _ = try BrushTerminationEvaluator(
+                program: strokeExecution.style.program.termination
+            ).evaluate(correction)
+        }
         try preflightStrokeMutation(
             settledChunks: depositionInputScratch.settledChunks,
             replayProjectedInstanceCount: replayProjectedInstanceCount

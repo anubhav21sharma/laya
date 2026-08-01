@@ -387,10 +387,16 @@ public struct BrushReplayLimits: Codable, Equatable, Sendable {
 public struct BrushReplayContract: Equatable, Sendable {
     public let mode: BrushReplayMode
     public let limits: BrushReplayLimits?
+    public let maximumWorldLength: Float?
 
-    init(mode: BrushReplayMode, limits: BrushReplayLimits?) {
+    init(
+        mode: BrushReplayMode,
+        limits: BrushReplayLimits?,
+        maximumWorldLength: Float? = nil
+    ) {
         self.mode = mode
         self.limits = limits
+        self.maximumWorldLength = maximumWorldLength
     }
 }
 

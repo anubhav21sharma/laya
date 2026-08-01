@@ -8,6 +8,135 @@ import Testing
 @Suite("Compiled deposition renderer")
 struct DepositionRendererTests {
     @Test
+    @MainActor
+    func boundedCorrectionRejectsEveryPointerUpLimitBeforeMutation()
+        async throws
+    {
+        enum ExpectedLimit {
+            case samples
+            case worldLength
+            case dabs
+        }
+        let cases: [(
+            BrushTerminationDefinition,
+            ExpectedLimit,
+            endX: Float
+        )] = [
+            (
+                .boundedCorrection(
+                    maximumSamples: 1,
+                    maximumWorldLength: 1_000,
+                    maximumDabs: 2_048
+                ),
+                .samples,
+                endX: 40
+            ),
+            (
+                .boundedCorrection(
+                    maximumSamples: 256,
+                    maximumWorldLength: 1,
+                    maximumDabs: 2_048
+                ),
+                .worldLength,
+                endX: 40
+            ),
+            (
+                .boundedCorrection(
+                    maximumSamples: 256,
+                    maximumWorldLength: 1_000,
+                    maximumDabs: 1
+                ),
+                .dabs,
+                endX: 14
+            ),
+        ]
+
+        for (index, testCase) in cases.enumerated() {
+            guard let setup = try makeDepositionRendererSetup() else { return }
+            let definition = try nativeTerminationDefinition(
+                id: "brush.termination-limit-\(index)",
+                termination: testCase.0
+            )
+            let brush = try await setup.compileBrush(definition: definition)
+            try setup.renderer.activateDrawBrush(brush)
+            let before = depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            )
+            let token = RendererOperationToken(
+                rawValue: UInt64(8_100 + index)
+            )
+            try setup.renderer.beginStroke(
+                token: token,
+                sample: depositionEstimatedSample(
+                    .began,
+                    x: 12,
+                    index: 8_100 + index,
+                    expecting: [.pressure]
+                ),
+                style: depositionStyle(brush, compositeMode: .draw)
+            )
+            let bufferBefore = try #require(
+                setup.renderer.transientStrokeBuffer
+            )
+            let arenaBefore =
+                setup.renderer.harnessTransientDabArenaSnapshot
+            let authoritativeBefore =
+                setup.renderer.harnessScheduledAuthoritativeRecords
+            let predictedBefore =
+                setup.renderer.harnessScheduledPredictedRecords
+
+            var rejected = false
+            do {
+                try setup.renderer.finishStrokeTransient(
+                    token: token,
+                    sample: depositionSample(.ended, x: testCase.endX)
+                )
+                Issue.record(
+                    "Pointer-up correction exceeded its declared limit"
+                )
+            } catch let error as BrushTerminationEvaluationError {
+                rejected = true
+                switch (testCase.1, error) {
+                case let (.samples, .maximumSamplesExceeded(actual, maximum)):
+                    #expect(actual > maximum)
+                case let (
+                    .worldLength,
+                    .maximumWorldLengthExceeded(actual, maximum)
+                ):
+                    #expect(actual > maximum)
+                case let (.dabs, .maximumDabsExceeded(actual, maximum)):
+                    #expect(actual > maximum)
+                default:
+                    Issue.record("Wrong pointer-up limit error: \(error)")
+                }
+            }
+
+            if rejected {
+                #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
+                #expect(
+                    setup.renderer.harnessTransientDabArenaSnapshot
+                        == arenaBefore
+                )
+                #expect(
+                    setup.renderer.harnessScheduledAuthoritativeRecords
+                        == authoritativeBefore
+                )
+                #expect(
+                    setup.renderer.harnessScheduledPredictedRecords
+                        == predictedBefore
+                )
+                try setup.renderer.cancelStroke(token: token)
+                #expect(setup.renderer.isIdle)
+                #expect(
+                    depositionTextureBytes(
+                        try setup.renderer.copyCanonicalForHarness()
+                    ) == before
+                )
+            }
+        }
+    }
+
+    @Test
     func interactiveInputRouteContainsNoOwningSingleSampleOrDabTemporaries()
         throws
     {
@@ -2512,7 +2641,11 @@ private struct DepositionRendererSetup {
             from: recipe,
             displayName: recipe.id.rawValue
         )
-        return try await compiler.compileAndActivate(
+        return try await compileBrush(definition: definition)
+    }
+
+    func compileBrush(definition: BrushDefinition) async throws -> CompiledBrush {
+        try await compiler.compileAndActivate(
             package: BrushPackage(
                 manifest: BrushPackageManifest(resources: []),
                 definition: definition,
@@ -2520,6 +2653,37 @@ private struct DepositionRendererSetup {
             )
         )
     }
+}
+
+private func nativeTerminationDefinition(
+    id: String,
+    termination: BrushTerminationDefinition
+) throws -> BrushDefinition {
+    let base = try LegacyBrushRecipeAdapter.definition(
+        from: BrushRecipe(id: BrushRecipeID(id)),
+        displayName: id
+    )
+    return try BrushDefinition(
+        id: base.id,
+        schemaVersion: base.schemaVersion,
+        metadata: base.metadata,
+        capabilities: base.capabilities,
+        resources: base.resources,
+        coverage: base.coverage,
+        placement: base.placement,
+        dynamics: base.dynamics,
+        color: base.color,
+        material: base.material,
+        stabilization: base.stabilization,
+        taper: base.taper,
+        replayMode: base.replayMode,
+        replayLimits: base.replayLimits,
+        termination: termination,
+        seedPolicy: base.seedPolicy,
+        limits: base.limits,
+        performanceIntent: base.performanceIntent,
+        compatibility: base.compatibility
+    )
 }
 
 private func depositionFrameBudget(

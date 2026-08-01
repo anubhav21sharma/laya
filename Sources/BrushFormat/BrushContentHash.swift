@@ -8,7 +8,7 @@ import PatternEngine
 /// do not alter rendered output. Package equality still includes both through
 /// `BrushPackage.Equatable`.
 public enum BrushContentHash {
-    public static let schemaVersion: UInt16 = 1
+    public static let schemaVersion: UInt16 = 2
 
     public static func sha256Hex(of data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -80,6 +80,10 @@ public enum BrushContentHash {
         append(definition.taper, to: &writer)
         writer.u8(replayModeTag(definition.replayMode))
         append(definition.replayLimits, to: &writer)
+        append(
+            BrushProgramCompiler.compileTermination(definition),
+            to: &writer
+        )
         switch definition.seedPolicy {
         case .perStroke:
             writer.u8(0)
@@ -259,6 +263,38 @@ public enum BrushContentHash {
         writer.u8(taper.effects.rawValue)
     }
 
+    private static func append(
+        _ termination: BrushTerminationProgram,
+        to writer: inout CanonicalBrushWriter
+    ) {
+        switch termination {
+        case .cap:
+            writer.u8(0)
+        case let .pressureRelease(maximumWorldLength):
+            writer.u8(1)
+            writer.float(maximumWorldLength)
+        case let .boundedCorrection(
+            maximumSamples,
+            maximumWorldLength,
+            maximumDabs
+        ):
+            writer.u8(2)
+            writer.integer(maximumSamples)
+            writer.float(maximumWorldLength)
+            writer.integer(maximumDabs)
+        case .legacySchemaV1Cap:
+            writer.u8(3)
+        case let .legacySchemaV1EndTaper(taper, replayLimits):
+            writer.u8(4)
+            append(taper, to: &writer)
+            append(replayLimits, to: &writer)
+        case let .legacySchemaV1Replay(mode, replayLimits):
+            writer.u8(5)
+            writer.u8(replayModeTag(mode))
+            append(replayLimits, to: &writer)
+        }
+    }
+
     private static func append(_ length: BrushTaperLength, to writer: inout CanonicalBrushWriter) {
         switch length {
         case .disabled:
@@ -281,6 +317,15 @@ public enum BrushContentHash {
             return
         }
         writer.u8(1)
+        writer.integer(limits.maximumSamples)
+        writer.integer(limits.maximumDabs)
+        writer.integer(limits.maximumProjectedInstances)
+    }
+
+    private static func append(
+        _ limits: BrushReplayLimits,
+        to writer: inout CanonicalBrushWriter
+    ) {
         writer.integer(limits.maximumSamples)
         writer.integer(limits.maximumDabs)
         writer.integer(limits.maximumProjectedInstances)

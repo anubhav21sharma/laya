@@ -106,7 +106,7 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
     /// This marker is deliberately absent from public initializers and the
     /// wire format. It is derived only by the schema-v1 decoder or installed
     /// by `LegacyBrushRecipeAdapter`.
-    let hasLegacySchemaV1Termination: Bool
+    let hasLegacySchemaV1Compatibility: Bool
 
     public init(
         id: BrushRecipeID,
@@ -130,7 +130,7 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
         compatibility: BrushCompatibilityMetadata
     ) throws {
         try self.init(
-            legacySchemaV1Termination: false,
+            legacySchemaV1Compatibility: false,
             id: id,
             schemaVersion: schemaVersion,
             metadata: metadata,
@@ -154,7 +154,7 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
     }
 
     init(
-        legacySchemaV1Termination: Bool,
+        legacySchemaV1Compatibility: Bool,
         id: BrushRecipeID,
         schemaVersion: UInt16,
         metadata: BrushMetadata,
@@ -215,7 +215,8 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
         self.limits = limits
         self.performanceIntent = performanceIntent
         self.compatibility = compatibility
-        self.hasLegacySchemaV1Termination = legacySchemaV1Termination
+        self.hasLegacySchemaV1Compatibility =
+            legacySchemaV1Compatibility
     }
 
     private enum Keys: String, CodingKey {
@@ -240,13 +241,23 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
             forKey: .replayMode
         )
         let hasEncodedTermination = container.contains(.termination)
+        if hasEncodedTermination,
+           try container.decodeNil(forKey: .termination)
+        {
+            throw DecodingError.valueNotFound(
+                BrushTerminationDefinition.self,
+                DecodingError.Context(
+                    codingPath: container.codingPath + [Keys.termination],
+                    debugDescription:
+                        "Explicit null termination is not supported"
+                )
+            )
+        }
         try self.init(
-            legacySchemaV1Termination: LegacyBrushTerminationAdapter
+            legacySchemaV1Compatibility: LegacyBrushCompatibilityAdapter
                 .marksDecodedSchemaV1(
                     schemaVersion: schemaVersion,
-                    hasEncodedTermination: hasEncodedTermination,
-                    taper: taper,
-                    replayMode: replayMode
+                    hasEncodedTermination: hasEncodedTermination
                 ),
             id: container.decode(BrushRecipeID.self, forKey: .id),
             schemaVersion: schemaVersion,
@@ -319,7 +330,7 @@ public struct BrushDefinition: Codable, Equatable, Sendable {
         try container.encode(taper, forKey: .taper)
         try container.encode(replayMode, forKey: .replayMode)
         try container.encodeIfPresent(replayLimits, forKey: .replayLimits)
-        if !hasLegacySchemaV1Termination {
+        if !hasLegacySchemaV1Compatibility {
             try container.encode(termination, forKey: .termination)
         }
         try container.encode(seedPolicy, forKey: .seedPolicy)

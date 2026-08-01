@@ -53,44 +53,7 @@ public enum BrushProgramCompiler {
         let requestedBackend: BrushBackendKind = definition.material.interaction == .none
             ? .deposition
             : .canvasInteraction
-        let termination: BrushTerminationProgram
-        if definition.hasLegacySchemaV1Termination {
-            guard let replayLimits = definition.replayLimits else {
-                preconditionFailure(
-                    "Validated legacy end taper must carry replay limits"
-                )
-            }
-            if case .disabled = definition.taper.end {
-                termination = .legacySchemaV1Replay(
-                    mode: definition.replayMode,
-                    replayLimits: replayLimits
-                )
-            } else {
-                termination = .legacySchemaV1EndTaper(
-                    taper: definition.taper,
-                    replayLimits: replayLimits
-                )
-            }
-        } else {
-            termination = switch definition.termination {
-            case .cap:
-                .cap
-            case let .pressureRelease(maximumWorldLength):
-                .pressureRelease(
-                    maximumWorldLength: maximumWorldLength
-                )
-            case let .boundedCorrection(
-                maximumSamples,
-                maximumWorldLength,
-                maximumDabs
-            ):
-                .boundedCorrection(
-                    maximumSamples: maximumSamples,
-                    maximumWorldLength: maximumWorldLength,
-                    maximumDabs: maximumDabs
-                )
-            }
-        }
+        let termination = compileTermination(definition)
 
         return BrushProgram(
             definition: definition,
@@ -100,6 +63,55 @@ public enum BrushProgramCompiler {
             ignoredOptionalCapabilityIdentifiers: ignoredOptionalCapabilityIdentifiers,
             requestedBackend: requestedBackend
         )
+    }
+
+    package static func compileTermination(
+        _ definition: BrushDefinition
+    ) -> BrushTerminationProgram {
+        if definition.hasLegacySchemaV1Compatibility {
+            if case .disabled = definition.taper.end {
+                guard definition.replayMode != .appendOnly else {
+                    return .legacySchemaV1Cap
+                }
+                guard let replayLimits = definition.replayLimits else {
+                    preconditionFailure(
+                        "Validated legacy replay must carry replay limits"
+                    )
+                }
+                return .legacySchemaV1Replay(
+                    mode: definition.replayMode,
+                    replayLimits: replayLimits
+                )
+            }
+            guard let replayLimits = definition.replayLimits else {
+                preconditionFailure(
+                    "Validated legacy end taper must carry replay limits"
+                )
+            }
+            return .legacySchemaV1EndTaper(
+                taper: definition.taper,
+                replayLimits: replayLimits
+            )
+        }
+
+        return switch definition.termination {
+        case .cap:
+            .cap
+        case let .pressureRelease(maximumWorldLength):
+            .pressureRelease(
+                maximumWorldLength: maximumWorldLength
+            )
+        case let .boundedCorrection(
+            maximumSamples,
+            maximumWorldLength,
+            maximumDabs
+        ):
+            .boundedCorrection(
+                maximumSamples: maximumSamples,
+                maximumWorldLength: maximumWorldLength,
+                maximumDabs: maximumDabs
+            )
+        }
     }
 
     private static func compile(

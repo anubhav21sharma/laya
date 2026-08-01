@@ -62,7 +62,8 @@ import Testing
 @Test func semanticHashIgnoresJSONRepresentationButPinsSchema() throws {
     let package = try BrushFormatTestSupport.package()
     let expected = try package.contentHash
-    #expect(expected == "f1ffa12acfe6d34d53479591cb4454fe91724ef1dfbf75d703893b9a81a2ff6c")
+    #expect(BrushContentHash.schemaVersion == 2)
+    #expect(expected == "ed1f9b8e914d9dc597b45ba9b03baccf57194eb2179776f743bdd2d9d0a872fb")
     var entries = try BrushFormatTestSupport.archiveEntries(package)
     var definition = try replacingRootObjectOrder(in: entries["definition.json"]!)
     var spelling = String(decoding: definition, as: UTF8.self)
@@ -215,6 +216,47 @@ import Testing
         try BrushFormatTestSupport.package(resourceBytes: changedBytes).contentHash
             != baseline
     )
+}
+
+@Test func semanticHashTracksTerminationAndLegacyCompatibility() throws {
+    let base = try BrushFormatTestSupport.package()
+    func package(_ definition: BrushDefinition) throws -> BrushPackage {
+        try BrushPackage(
+            manifest: base.manifest,
+            definition: definition,
+            resourceData: base.resourceData
+        )
+    }
+
+    let cap = base
+    let pressure = try package(
+        BrushFormatTestSupport.definition(
+            termination: .pressureRelease(maximumWorldLength: 8)
+        )
+    )
+    let bounded = try package(
+        BrushFormatTestSupport.definition(
+            termination: .boundedCorrection(
+                maximumSamples: 3,
+                maximumWorldLength: 8,
+                maximumDabs: 5
+            )
+        )
+    )
+    #expect(
+        Set(try [cap.contentHash, pressure.contentHash, bounded.contentHash])
+            .count == 3
+    )
+
+    let legacyDefinition = try LegacyBrushRecipeAdapter.definition(
+        from: BrushRecipe(
+            id: BrushRecipeID("test.package"),
+            shape: .asset(BrushFormatTestSupport.shapeID)
+        ),
+        displayName: "Package Test"
+    )
+    let legacy = try package(legacyDefinition)
+    #expect(try legacy.contentHash != cap.contentHash)
 }
 
 @Test func semanticHashExcludesPreviewAndProvenanceMetadata() throws {

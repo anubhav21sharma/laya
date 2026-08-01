@@ -89,6 +89,18 @@ func boundedCorrectionRejectsEachIndependentLimit() throws {
 }
 
 @Test
+func boundedCorrectionReplayContractRetainsItsWorldLengthLimit() throws {
+    let program = try causalTerminationProgram(
+        .boundedCorrection(
+            maximumSamples: 3,
+            maximumWorldLength: 8,
+            maximumDabs: 5
+        )
+    )
+    #expect(program.replayContract.maximumWorldLength == 8)
+}
+
+@Test
 func capPointerUpPreservesBodyDabsAndReachesReleasePoint() throws {
     var generator = BrushStrokeGenerator(
         program: try causalTerminationProgram(.cap),

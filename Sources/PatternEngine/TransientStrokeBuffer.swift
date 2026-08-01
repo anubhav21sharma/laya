@@ -1258,6 +1258,69 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         return retainedProjected
     }
 
+    /// Measures the exact authoritative suffix that a previously previewed
+    /// append would retain for replacement. The supplied settled count must
+    /// come from `previewActualAppend(_:settledInto:)` for the same chunk.
+    package func terminationCorrection(
+        appending chunk: TransientStrokeChunk,
+        settledPrefixCount: Int
+    ) -> BrushTerminationCorrection {
+        precondition(
+            settledPrefixCount >= 0
+                && settledPrefixCount <= actualChunks.count + 1,
+            "Termination correction must use a matching append preview"
+        )
+        let settledActualCount = min(
+            settledPrefixCount,
+            actualChunks.count
+        )
+        let retainsAppendedChunk = settledPrefixCount <= actualChunks.count
+        let sampleCount = actualChunks.count - settledActualCount
+            + (retainsAppendedChunk ? 1 : 0)
+        var dabCount = 0
+        var firstDistance: Float?
+        var lastDistance: Float?
+        var firstOrdinal: UInt64?
+        var lastOrdinal: UInt64?
+
+        func measure(_ candidate: TransientStrokeChunk) {
+            for dab in candidate.dabs {
+                let attributes = dab.attributes
+                if firstDistance == nil {
+                    firstDistance = attributes.sourceDistance
+                    firstOrdinal = attributes.ordinal
+                }
+                lastDistance = attributes.sourceDistance
+                lastOrdinal = attributes.ordinal
+                let (next, overflow) = dabCount.addingReportingOverflow(1)
+                dabCount = overflow ? Int.max : next
+            }
+        }
+        for candidate in actualChunks.dropFirst(settledActualCount) {
+            measure(candidate)
+        }
+        if retainsAppendedChunk {
+            measure(chunk)
+        }
+
+        let ordinalRange: Range<UInt64>
+        if let firstOrdinal, let lastOrdinal {
+            let (upperBound, overflow) =
+                lastOrdinal.addingReportingOverflow(1)
+            ordinalRange = overflow
+                ? lastOrdinal..<lastOrdinal
+                : firstOrdinal..<upperBound
+        } else {
+            ordinalRange = 0..<0
+        }
+        return BrushTerminationCorrection(
+            sampleCount: sampleCount,
+            worldLength: (lastDistance ?? 0) - (firstDistance ?? 0),
+            dabCount: dabCount,
+            ordinalRange: ordinalRange
+        )
+    }
+
     /// Atomically replaces the predicted suffix. Actual chunks and their
     /// generator snapshot are never changed by prediction.
     @discardableResult

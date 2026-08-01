@@ -57,6 +57,57 @@ func legacyRecipeRoundTripsExactly(_ fixture: AnchorRecipeFixture) throws {
     #expect(definition.compatibility == BrushCompatibilityMetadata(nativeFeatureVersion: 1, sourceSettingKeys: [], requiredSemanticKeys: []))
 }
 
+@Test
+func reverseAdapterRequiresLegacyCompatibilityAndRejectsNativeTermination()
+    throws
+{
+    let fixture = AnchorRecipeFixtures.all[0]
+    let legacy = try LegacyBrushRecipeAdapter.definition(
+        from: fixture.recipe,
+        displayName: fixture.displayName
+    )
+    #expect(try LegacyBrushRecipeAdapter.recipe(from: legacy) == fixture.recipe)
+    #expect(
+        try BrushProgramCompiler.compile(legacy).termination
+            == .legacySchemaV1Cap
+    )
+
+    for termination in [
+        BrushTerminationDefinition.cap,
+        .pressureRelease(maximumWorldLength: 4),
+        .boundedCorrection(
+            maximumSamples: 3,
+            maximumWorldLength: 8,
+            maximumDabs: 5
+        ),
+    ] {
+        let native = try legacy.replacing(termination: termination)
+        #expect(
+            throws: BrushDefinitionValidationError.semanticLoss(
+                "definition is not marked legacy-compatible"
+            )
+        ) {
+            try LegacyBrushRecipeAdapter.recipe(from: native)
+        }
+    }
+}
+
+@Test func definitionDecodingRejectsExplicitNullTermination() throws {
+    let definition = try BrushDefinition.fixture()
+    let encoded = try JSONEncoder().encode(definition)
+    var object = try #require(
+        JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+    )
+    object["termination"] = NSNull()
+
+    #expect(throws: DecodingError.self) {
+        try JSONDecoder().decode(
+            BrushDefinition.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+    }
+}
+
 @Test func reverseAdapterRejectsEveryNativeOnlyDynamicsChannel() throws {
     let definition = try LegacyBrushRecipeAdapter.definition(from: AnchorRecipeFixtures.all[0].recipe, displayName: "Technical Ink")
     for dynamics in [
@@ -99,10 +150,23 @@ func legacyRecipeRoundTripsExactly(_ fixture: AnchorRecipeFixture) throws {
         requiredSemanticKeys: []
     )
 
+    let encoder = JSONEncoder()
+    var object = try #require(
+        JSONSerialization.jsonObject(
+            with: encoder.encode(definition)
+        ) as? [String: Any]
+    )
+    object["compatibility"] = try JSONSerialization.jsonObject(
+        with: encoder.encode(compatibility)
+    )
+    let decodedLegacy = try JSONDecoder().decode(
+        BrushDefinition.self,
+        from: JSONSerialization.data(withJSONObject: object)
+    )
+
     #expect(
-        try LegacyBrushRecipeAdapter.recipe(
-            from: definition.replacing(compatibility: compatibility)
-        ) == fixture.recipe
+        try LegacyBrushRecipeAdapter.recipe(from: decodedLegacy)
+            == fixture.recipe
     )
 }
 
@@ -568,7 +632,8 @@ private extension BrushDefinition {
         placement: BrushPlacementDefinition? = nil,
         limits: BrushDefinitionLimits? = nil,
         taper: BrushTaperConfiguration? = nil,
-        compatibility: BrushCompatibilityMetadata? = nil
+        compatibility: BrushCompatibilityMetadata? = nil,
+        termination: BrushTerminationDefinition? = nil
     ) throws -> BrushDefinition {
         try BrushDefinition(
             id: id, schemaVersion: schemaVersion, metadata: metadata,
@@ -578,6 +643,7 @@ private extension BrushDefinition {
             material: material ?? self.material,
             stabilization: stabilization, taper: taper ?? self.taper,
             replayMode: replayMode, replayLimits: replayLimits,
+            termination: termination ?? self.termination,
             seedPolicy: seedPolicy, limits: limits ?? self.limits,
             performanceIntent: performanceIntent,
             compatibility: compatibility ?? self.compatibility

@@ -64,6 +64,7 @@ public enum BrushTerminationProgram: Equatable, Sendable {
         maximumWorldLength: Float,
         maximumDabs: Int
     )
+    case legacySchemaV1Cap
     case legacySchemaV1EndTaper(
         taper: BrushTaperConfiguration,
         replayLimits: BrushReplayLimits
@@ -80,7 +81,8 @@ public enum BrushTerminationProgram: Equatable, Sendable {
 
     var usesLegacySchemaV1EndpointFiltering: Bool {
         switch self {
-        case .legacySchemaV1EndTaper, .legacySchemaV1Replay:
+        case .legacySchemaV1Cap, .legacySchemaV1EndTaper,
+             .legacySchemaV1Replay:
             true
         case .cap, .pressureRelease, .boundedCorrection:
             false
@@ -100,7 +102,11 @@ public struct BrushProgram: Equatable, Sendable {
         switch termination {
         case .cap, .pressureRelease:
             BrushReplayContract(mode: .appendOnly, limits: nil)
-        case let .boundedCorrection(maximumSamples, _, maximumDabs):
+        case let .boundedCorrection(
+            maximumSamples,
+            maximumWorldLength,
+            maximumDabs
+        ):
             BrushReplayContract(
                 mode: .replayTail,
                 limits: BrushReplayLimits(
@@ -110,8 +116,11 @@ public struct BrushProgram: Equatable, Sendable {
                         definition.replayLimits?.maximumProjectedInstances
                         ?? BrushRecipePolicy.replayTailLimits
                             .maximumProjectedInstances
-                )
+                ),
+                maximumWorldLength: maximumWorldLength
             )
+        case .legacySchemaV1Cap:
+            BrushReplayContract(mode: .appendOnly, limits: nil)
         case let .legacySchemaV1EndTaper(_, replayLimits):
             BrushReplayContract(
                 mode: definition.replayMode,

@@ -185,18 +185,83 @@ The fixture thresholds and diagnostic baseline policy were not changed.
 
 ## Sequencing notes and risks
 
-- Per parent sequencing direction, this task establishes the internal causal
-  model while `BrushDefinition.currentSchemaVersion` remains 1. Task 9 owns the
-  serialized schema-v2 bump, BrushFormat migration, canonical content hashing,
-  and package compatibility changes. Until Task 9, changing only a native
-  termination policy is not yet represented in `BrushContentHash`; no current
-  accepted product brush depends on such a persisted distinction.
-- `pressureRelease` and `boundedCorrection` are compiled and independently
-  policy-validated here. Current rebuilt dry presets use `.cap`; later runtime
-  coordination tasks can consume the other decisions without changing their
-  causal/limit contract.
+- `BrushDefinition.currentSchemaVersion` remains 1; Task 9 still owns the
+  serialized schema-v2 migration. Fix round 1 below independently versions the
+  internal renderer/cache identity so native termination changes cannot alias
+  before that migration.
+- `pressureRelease` remains append-only. `boundedCorrection` is now measured
+  and policy-gated on the actual pointer-up path before any suffix replacement.
+  Current rebuilt dry presets continue to use `.cap`.
 - Retained replay infrastructure intentionally remains for named schema-v1
   compatibility, prediction/estimated-update behavior, and bounded wet work.
   Stage B Tasks 5–7 replace and isolate those runtime responsibilities.
 - `.vscode/` and `brushes/procreate/1_FREE_Charcoal_Set.key` remain untracked
   and untouched.
+
+## Fix round 1 of 5 — enforce termination contracts
+
+Review found one critical and three important gaps. All four were reproduced
+with focused RED regressions before production changes.
+
+### Corrective implementation
+
+1. **Actual pointer-up gating.** `BrushReplayContract` now retains the declared
+   bounded-correction world length. After the transient buffer's pure append
+   preview, `GridRenderer` measures the exact retained authoritative suffix and
+   invokes `BrushTerminationEvaluator` before preflight, buffer mutation, replay
+   replacement, arena commit, or GPU work. Sample, world-length, and dab excess
+   therefore fail atomically with their typed evaluation errors.
+2. **Versioned renderer/cache identity.** `BrushContentHash.schemaVersion` is
+   now 2. The canonical writer includes the immutable compiled termination
+   program, including all native limits and every schema-v1 compatibility case.
+   Native cap, pressure release, bounded correction, and legacy cap no longer
+   alias in package render/cache identity.
+3. **Lossless reverse-adapter boundary.** Every definition produced by the
+   schema-v1 adapter, or decoded from a schema-v1 payload with no termination
+   field, carries an internal compatibility marker unavailable to public
+   initializers. Reverse conversion requires that marker and `.cap`; unmarked
+   native cap, pressure-release, and bounded-correction definitions are
+   rejected instead of silently losing semantics. Append-only schema-v1 input
+   compiles to an explicit `legacySchemaV1Cap` program so its endpoint behavior
+   and content identity remain distinct from native cap.
+4. **Strict JSON presence.** An absent termination field still enters the
+   schema-v1 compatibility path. An explicitly present JSON `null` now throws
+   `DecodingError.valueNotFound` and can no longer default silently to cap.
+
+### RED evidence
+
+```bash
+swift test --filter 'Brush(Definition|TerminationEvaluator)Tests'
+```
+
+Exit status: `1`; 30 tests reported exactly five issues: three unmarked native
+definitions reverse-converted, bounded correction lost its world-length
+contract, and explicit `termination:null` decoded successfully.
+
+```bash
+swift test --filter semanticHashTracksTerminationAndLegacyCompatibility
+```
+
+Exit status: `1`; cap, pressure release, and bounded correction shared one
+hash, and legacy append-only shared the native-cap hash.
+
+```bash
+swift test --filter boundedCorrectionRejectsEveryPointerUpLimitBeforeMutation
+```
+
+Exit status: `1`; real Metal pointer-up accepted excess samples, world length,
+and dabs.
+
+### GREEN evidence
+
+- Focused definition and termination command: 30/30 passed.
+- Adjacent compiler, generator, dynamics, and professional-brush command:
+  92/92 passed.
+- Renderer plus metamorphic command: 53/53 passed, including all three actual
+  pointer-up rejection paths and their unchanged buffer, arena, scheduler, and
+  canonical-raster assertions.
+- Brush package codec, I/O, and conversion-report command: 36/36 passed. The
+  pinned internal-v2 package hash is
+  `ed1f9b8e914d9dc597b45ba9b03baccf57194eb2179776f743bdd2d9d0a872fb`.
+- Actual Metal Technical Ink fast-release endpoint fixture: 1/1 passed.
+- `swift build` and `git diff --check` both exited 0.
