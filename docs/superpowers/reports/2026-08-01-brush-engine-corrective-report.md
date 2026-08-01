@@ -602,6 +602,21 @@ Product assets may be:
 Test fixtures remain small, deterministic, and synthetic, but cannot be used
 to claim product quality.
 
+The author-supplied
+`brushes/procreate/1_FREE_Charcoal_Set.brushset` is an approved real reference
+corpus, not a synthetic unit fixture. `C Charcoal`
+(`CC70504F-0D16-4D26-88A6-BF47BDA8ADE8`) is the primary Natural Charcoal
+fidelity target and `C Charcoal Soft`
+(`21AF8C6B-3FB1-4BF8-8F89-F5768271DA35`) is a secondary characterization
+target. Both use an active `Sub01` and refer to absent Source Library resources:
+`Haggard-Oval.png`, `Brush-Preset-Bonobo.png`, and
+`Brush-Artery-Charcoal-Corse.jpg`. Laya must parse the active component
+explicitly, preserve independent component behavior in a native composite dry
+brush, and supply project-owned replacements recorded as approximations. The
+two supplied high-resolution paper photographs are approved source material
+for owned grain creation. The `.brushset` and photographs stay on the offline
+tooling/test path and are never interpreted by the renderer.
+
 Every asset records:
 
 - source and license/provenance;
@@ -672,7 +687,15 @@ Design target:
 
 Implementation guidance:
 
-- start with one broad authored charcoal tip and one coarse substrate grain;
+- start with the approved `C Charcoal` parent plus active `Sub01`, using
+  Laya-owned replacements for the absent oval tip, fine paper grain, and coarse
+  charcoal grain; do not collapse the independent components into the current
+  procedural ellipse/noise fixture;
+- decode and report the source settings through the bounded offline converter;
+  do not copy Procreate keys or parsing into product runtime modules;
+- use the source QuickLook thumbnail as an independent characteristic reference
+  for coverage, width, texture spectrum, and edge character, not as an exact
+  pixel golden;
 - add a secondary envelope only if it improves the mark in isolation;
 - avoid multiplying multiple sparse masks at full strength;
 - calibrate base coverage before enabling dry breakup, scatter, or a second
@@ -961,6 +984,30 @@ Each candidate brush must pass the Brush Lab matrix for:
 The reviewer records an explicit pass/fail value and notes. An unset card is
 pending. Any required failed or pending card prevents product acceptance.
 
+Manual review is deliberately clustered after every corrective implementation
+stage and the complete automated performance round. It does not block starting
+the next brush. A manual failure reopens the affected implementation and its
+automated cluster; manual status is never inferred from automated metrics.
+
+### 14.6 Clustered execution cadence
+
+Focused red/green tests still accompany each behavior change. Heavier checks
+run at four checkpoints so engineering remains fast without repeating the
+previous false-positive completion:
+
+1. after incremental scheduling: endpoint, prediction, complexity, backlog,
+   and event-to-submit tests;
+2. after dynamics/resources/backends: sizing, cursor, typed input, resource,
+   color, memory, and UI-control tests;
+3. after all four dry brushes: exhaustive visibility, footprint, texture,
+   buildup, join, seam, symmetry, erase, negative-control, and nominal/large
+   performance tests;
+4. after integration: production-app, sustained-load, cache-churn,
+   memory-pressure, build, and regression tests.
+
+After the fourth checkpoint, run the entire performance matrix three times and
+repair every software failure before requesting the one final manual round.
+
 ## 15. Evidence Gate Redesign
 
 ### 15.1 Status vocabulary
@@ -1106,27 +1153,36 @@ work remains off the input path.
    available.
 4. Pass line, curve, endpoint, width, cursor, erase, symmetry, and performance
    gates.
-5. Complete manual review.
+5. Export the complete manual candidate card with status pending.
 
-Exit: Technical Ink alone is admitted as a product brush.
+Exit: Technical Ink is an automated-gate-passing candidate, not yet admitted.
 
 ### Phase 5: Rebuild Graphite
 
 1. Author contact and paper resources.
 2. Establish a visible neutral mark before adding secondary variation.
 3. Calibrate pressure buildup and tilt shading.
-4. Pass footprint, tonal, texture, performance, and manual gates.
+4. Pass footprint, tonal, texture, and performance gates; export pending manual
+   cards.
 
-Exit: Graphite alone is admitted.
+Exit: Graphite is an automated-gate-passing candidate, not yet admitted.
 
 ### Phase 6: Rebuild Charcoal
 
-1. Author broad porous contact and coarse grain resources.
-2. Establish visibility and tonal floors before breakup/scatter.
-3. Calibrate pressure, tilt, buildup, and edges.
-4. Pass visibility, footprint, texture, performance, and manual gates.
+1. Parse and convert the approved `C Charcoal` parent plus active `Sub01`
+   through the typed bounded offline mapper.
+2. Characterize `C Charcoal Soft` as a secondary target so tuning does not
+   overfit one preset.
+3. Admit Laya-owned tip and fine/coarse grain replacements, each reported as an
+   approximation for an absent Procreate built-in.
+4. Preserve independent component size, spacing, dynamics, resources, and
+   deterministic randomness in the native composite dry-brush model.
+5. Establish visibility and tonal floors before breakup/scatter.
+6. Calibrate pressure, tilt, buildup, and edges.
+7. Pass component-contribution, visibility, footprint, texture, and performance
+   gates; export pending manual cards.
 
-Exit: Charcoal alone is admitted.
+Exit: Charcoal is an automated-gate-passing candidate, not yet admitted.
 
 ### Phase 7: Rebuild Chisel Marker
 
@@ -1134,21 +1190,33 @@ Exit: Charcoal alone is admitted.
 2. Implement shortest-angle fan-corner interpolation and tangent filtering.
 3. Add a swept-ribbon fallback experiment if stamp joins remain unacceptable.
 4. Calibrate overlap and transparency.
-5. Pass curve, corner, contour, cursor, buildup, performance, and manual gates.
+5. Pass curve, corner, contour, cursor, buildup, and performance gates; export
+   pending manual cards.
 
-Exit: Chisel alone is admitted.
+Exit: Chisel is an automated-gate-passing candidate, not yet admitted.
 
-### Phase 8: Cross-family and physical acceptance
+### Phase 8: Cross-family automated integration
 
 1. Run the complete software matrix on macOS and iPad Simulator.
-2. Run controlled physical Mac and Wacom profiles when hardware is available.
-3. Run iPad 60 Hz and 120 Hz profiles when devices are available.
-4. Run sustained thermal, memory-pressure, suspend/resume, and input-to-photon
-   profiles.
-5. Complete every required manual card.
-6. Promote only passing brushes and tiers.
+2. Run production-app automation and sustained software load.
+3. Export the complete manual candidate cards without asking for review.
 
-Exit: Stage 5 can be called product-accepted.
+Exit: all implementation stages are green and manual remains pending.
+
+### Phase 9: Full performance and final manual acceptance
+
+1. Run the complete software performance matrix three times.
+2. Repair every functional, visual-metric, latency, backlog, memory, cache, or
+   production-control failure and repeat affected clusters.
+3. Complete every required manual card in one final user review round.
+4. Repair every manual failure and rerun relevant automated/performance gates.
+5. Run controlled physical Mac/Wacom/iPad profiles when hardware is available;
+   keep unavailable profiles pending.
+6. Promote only passing brushes and evidence-backed tiers.
+
+Exit: software performance and manual quality may be accepted for passing
+brushes. Physical-profile and final product acceptance remain pending until
+qualifying hardware evidence exists.
 
 ## 18. Suggested Code Ownership Changes
 
