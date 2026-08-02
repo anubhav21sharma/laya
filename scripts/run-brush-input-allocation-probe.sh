@@ -40,4 +40,6 @@ DYLD_INSERT_LIBRARIES="$probe" \
 DYLD_INSERT_LIBRARIES="$probe" \
   "$helper" --stabilizer-v2 "$repo_root"
 DYLD_INSERT_LIBRARIES="$probe" \
+  "$helper" --timed-emitter "$repo_root"
+DYLD_INSERT_LIBRARIES="$probe" \
   "$helper" --production "$repo_root"

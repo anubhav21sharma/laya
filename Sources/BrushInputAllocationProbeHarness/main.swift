@@ -118,6 +118,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case velocityFilterAllocations(total: UInt64)
     case directionCornerAllocations(total: UInt64)
     case stabilizerV2Allocations(total: UInt64)
+    case timedEmitterAllocations(normal: UInt64, hugeGap: UInt64)
     case offMainEstimatedAllocations(total: UInt64, maximum: UInt64)
     case offMainAllocationRegression(String)
     case productionAllocations(
@@ -144,6 +145,9 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
             "direction/corner path allocated \(total) times after warm-up"
         case let .stabilizerV2Allocations(total):
             "stabilizer v2 path allocated \(total) times after warm-up"
+        case let .timedEmitterAllocations(normal, hugeGap):
+            "timed emitter allocated after warm-up; normal=\(normal) "
+                + "hugeGap=\(hugeGap)"
         case let .offMainEstimatedAllocations(total, maximum):
             "off-main estimated correction allocated \(total) times; "
                 + "maximum single correction=\(maximum)"
@@ -199,6 +203,8 @@ private struct BrushInputAllocationProbeHarness {
                 try runDirectionCornerProbe(probe: probe)
             case "--stabilizer-v2":
                 try runStabilizerV2Probe(probe: probe)
+            case "--timed-emitter":
+                try runTimedEmitterProbe(probe: probe)
             case "--production":
                 try await runProduction(probe: probe, root: root)
             default:
@@ -346,6 +352,136 @@ private struct BrushInputAllocationProbeHarness {
         print(
             "ALLOCATOR PROBE STABILIZER V2 PASS allocations=0 "
                 + "checksum=\(checksum)"
+        )
+    }
+
+    private static func runTimedEmitterProbe(
+        probe: AllocatorProbe
+    ) throws {
+        var emitter = try TimedStrokeEmitter(timeInterval: 0.01)
+        var begin = try emitter.begin(at: timedEmitterPoint(
+            index: 0,
+            timestamp: 0,
+            sourceDistance: 0
+        ))
+        _ = begin.emitNextPage { _ in }
+        _ = try runTimedEmitterUpdates(
+            emitter: &emitter,
+            startingAt: 1,
+            count: 128
+        )
+
+        probe.arm()
+        let normalChecksum: UInt64
+        do {
+            normalChecksum = try runTimedEmitterUpdates(
+                emitter: &emitter,
+                startingAt: 129,
+                count: 1_000_000
+            )
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
+        let normalAllocations = probe.disarm()
+
+        var hugeEmitter = try TimedStrokeEmitter(timeInterval: 1.0 / 240)
+        var hugeBegin = try hugeEmitter.begin(at: timedEmitterPoint(
+            index: 0,
+            timestamp: 0,
+            sourceDistance: 0
+        ))
+        _ = hugeBegin.emitNextPage { _ in }
+        var warmCursor = try hugeEmitter.prediction(to: timedEmitterPoint(
+            index: 1,
+            timestamp: 10,
+            sourceDistance: 1,
+            kind: .predicted
+        ))!
+        _ = warmCursor.emitNextPage { _ in }
+
+        probe.arm()
+        var hugeChecksum: UInt64 = 0
+        let remaining: UInt64
+        do {
+            var cursor = try hugeEmitter.advance(to: timedEmitterPoint(
+                index: 2,
+                timestamp: 1_000_000,
+                sourceDistance: 2
+            ))!
+            _ = cursor.emitNextPage { candidate in
+                hugeChecksum &+= UInt64(bitPattern: candidate.timeKey)
+                hugeChecksum &+= UInt64(bitPattern: candidate.distanceKey)
+            }
+            remaining = cursor.remainingCandidateCount
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
+        let hugeGapAllocations = probe.disarm()
+
+        guard normalAllocations == 0, hugeGapAllocations == 0 else {
+            throw ProbeHarnessError.timedEmitterAllocations(
+                normal: normalAllocations,
+                hugeGap: hugeGapAllocations
+            )
+        }
+        print(
+            "ALLOCATOR PROBE TIMED EMITTER PASS normal=0 huge_gap=0 "
+                + "checksum=\(normalChecksum &+ hugeChecksum) "
+                + "remaining=\(remaining)"
+        )
+    }
+
+    @inline(never)
+    private static func runTimedEmitterUpdates(
+        emitter: inout TimedStrokeEmitter,
+        startingAt start: Int,
+        count: Int
+    ) throws -> UInt64 {
+        var checksum: UInt64 = 0
+        for index in start..<(start + count) {
+            guard var cursor = try emitter.advance(to: timedEmitterPoint(
+                index: index,
+                timestamp: Double(index) * 0.01,
+                sourceDistance: Double(index)
+            )) else {
+                continue
+            }
+            _ = cursor.emitNextPage { candidate in
+                checksum &+= UInt64(bitPattern: candidate.timeKey)
+                checksum &+= UInt64(bitPattern: candidate.distanceKey)
+                checksum &+= UInt64(candidate.sample.position.x.bitPattern)
+            }
+        }
+        return checksum
+    }
+
+    private static func timedEmitterPoint(
+        index: Int,
+        timestamp: TimeInterval,
+        sourceDistance: Double,
+        kind: StrokeSampleKind = .actual
+    ) -> TimedStrokePoint {
+        TimedStrokePoint(
+            sample: InterpolatedStrokeSample(
+                position: WorldPoint(
+                    x: Float(index & 1_023),
+                    y: Float((index >> 3) & 1_023)
+                ),
+                pressure: Float(index & 255) / 255,
+                timestamp: timestamp,
+                altitude: 0.5,
+                azimuth: 0.25,
+                roll: -0.25,
+                velocity: 100,
+                phase: index == 0 ? .began : .moved,
+                source: .pencil,
+                kind: kind,
+                capabilities: [.pressure, .altitude, .azimuth, .roll]
+            ),
+            sourceDistance: sourceDistance,
+            direction: Float(index & 255) * 0.01
         )
     }
 
