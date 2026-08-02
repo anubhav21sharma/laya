@@ -128,6 +128,34 @@ struct DepositionMetamorphicTests {
             #expect(actual == expected, "Prediction cadence \(cadence)")
         }
     }
+
+    @Test
+    @MainActor
+    func shorterAndLongerBatchedPredictionSuffixesLeaveCommittedBytesUnchanged()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try depositionHarnessTestLibrary(device: device)
+        let authoritative = predictionCadenceTrace()
+        let expected = try await committedPredictionCadenceBytes(
+            authoritative,
+            device: device,
+            library: library
+        )
+
+        for replacementLengths in [[4, 2, 5, 3], [2, 6, 3, 4]] {
+            let actual = try await committedBatchedPredictionCadenceBytes(
+                authoritative,
+                replacementLengths: replacementLengths,
+                device: device,
+                library: library
+            )
+            #expect(
+                actual == expected,
+                "Batched suffix lengths \(replacementLengths)"
+            )
+        }
+    }
 }
 
 private func predictionCadenceTrace() -> [StrokeSample] {
@@ -159,6 +187,91 @@ private func predictionCadenceSample(
 @MainActor
 private func committedPredictionCadenceBytes(
     _ trace: [StrokeSample],
+    device: any MTLDevice,
+    library: any MTLLibrary
+) async throws -> [UInt8] {
+    let first = try #require(trace.first)
+    let last = try #require(trace.last)
+    return try await committedPredictionCadenceBytes(
+        first: first,
+        last: last,
+        events: trace.dropFirst().dropLast().map { .single($0) },
+        device: device,
+        library: library
+    )
+}
+
+@MainActor
+private func committedBatchedPredictionCadenceBytes(
+    _ authoritative: [StrokeSample],
+    replacementLengths: [Int],
+    device: any MTLDevice,
+    library: any MTLLibrary
+) async throws -> [UInt8] {
+    let first = try #require(authoritative.first)
+    let last = try #require(authoritative.last)
+    var events: [PredictionCadenceEvent] = []
+    for (index, sample) in authoritative.enumerated().dropFirst().dropLast() {
+        events.append(.single(sample))
+        guard sample.phase == .moved,
+              index + 1 < authoritative.count else { continue }
+        let next = authoritative[index + 1]
+        for replacementLength in replacementLengths {
+            precondition(replacementLength > 1)
+            events.append(
+                .batch(
+                    predictionSuffix(
+                        from: sample,
+                        to: next,
+                        count: replacementLength
+                    )
+                )
+            )
+        }
+    }
+    return try await committedPredictionCadenceBytes(
+        first: first,
+        last: last,
+        events: events,
+        device: device,
+        library: library
+    )
+}
+
+private enum PredictionCadenceEvent {
+    case single(StrokeSample)
+    case batch([StrokeSample])
+}
+
+private func predictionSuffix(
+    from sample: StrokeSample,
+    to next: StrokeSample,
+    count: Int
+) -> [StrokeSample] {
+    (1...count).map { offset in
+        let fraction = Float(offset) / Float(count + 1)
+        return StrokeSample(
+            position: ScreenPoint(
+                x: sample.position.x
+                    + (next.position.x - sample.position.x) * fraction,
+                y: sample.position.y
+                    + (next.position.y - sample.position.y) * fraction
+            ),
+            pressure: sample.pressure,
+            timestamp: sample.timestamp
+                + (next.timestamp - sample.timestamp) * Double(fraction),
+            phase: .moved,
+            source: .pencil,
+            kind: .predicted
+        )
+    }
+}
+
+@MainActor
+private func committedPredictionCadenceBytes(
+    first: StrokeSample,
+    last: StrokeSample,
+    events: [PredictionCadenceEvent],
     device: any MTLDevice,
     library: any MTLLibrary
 ) async throws -> [UInt8] {
@@ -206,8 +319,6 @@ private func committedPredictionCadenceBytes(
     )
     try renderer.activateDrawBrush(brush)
     let token = RendererOperationToken(rawValue: 91)
-    let first = try #require(trace.first)
-    let last = try #require(trace.last)
     try renderer.beginStroke(
         token: token,
         sample: first,
@@ -221,8 +332,13 @@ private func committedPredictionCadenceBytes(
             seed: 7
         )
     )
-    for sample in trace.dropFirst().dropLast() {
-        try renderer.appendStroke(token: token, sample: sample)
+    for event in events {
+        switch event {
+        case let .single(sample):
+            try renderer.appendStroke(token: token, sample: sample)
+        case let .batch(samples):
+            try renderer.appendStrokeBatch(token: token, samples: samples)
+        }
         _ = try renderer.flushPendingLiveForHarness()
     }
     try renderer.requestStrokeCommit(

@@ -686,7 +686,7 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
-    func predictionSettlementPreflightFailureIsAtomicAndRetrySucceeds()
+    func predictionPressureTruncatesBeforeAuthoritativeSettlement()
         async throws
     {
         guard let setup = try makeDepositionRendererSetup() else { return }
@@ -717,58 +717,42 @@ struct DepositionRendererTests {
             maximumAuthoritativeInstances: 1,
             maximumPendingAuthoritativeInstances: 1
         )
-        let previousBudget = setup.renderer
+        _ = setup.renderer
             .replaceDepositionFrameBudgetForHarness(constrainedBudget)
-        let previousScheduler = try #require(
+        _ = try #require(
             setup.renderer.replaceActiveStrokeSchedulerForHarness(
                 constrainedBudget
             )
         )
         let authoritativeBefore =
             setup.renderer.harnessScheduledAuthoritativeRecords
-        let predictedBefore =
-            setup.renderer.harnessScheduledPredictedRecords
-
-        #expect(
-            throws: MetalRendererError
-                .projectedInstanceCapacityExceeded(1)
-        ) {
-            try setup.renderer.appendStroke(
-                token: token,
-                sample: depositionPredictedSample(x: 16)
-            )
-        }
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionPredictedSample(x: 16)
+        )
 
         #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
         #expect(
             setup.renderer.harnessTransientDabArenaSnapshot
-                == arenaBefore
+                .occupiedSlots.map(\.dab)
+                == arenaBefore.occupiedSlots.map(\.dab)
         )
         #expect(
             setup.renderer.harnessScheduledAuthoritativeRecords
                 == authoritativeBefore
         )
         #expect(
-            setup.renderer.harnessScheduledPredictedRecords
-                == predictedBefore
-        )
-
-        setup.renderer.replaceDepositionFrameBudgetForHarness(
-            previousBudget
-        )
-        setup.renderer.restoreActiveStrokeSchedulerForHarness(
-            previousScheduler
-        )
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: depositionPredictedSample(x: 16)
-        )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.predictedSampleCount == 1
-        )
-        #expect(
             !setup.renderer.harnessScheduledPredictedRecords.isEmpty
         )
+        #expect(
+            setup.renderer.harnessScheduledPredictedRecords
+                .allSatisfy { !$0.isPredicted }
+        )
+        #expect(
+            setup.renderer.predictionOverlay.snapshot.lastOverload
+                .contains(.normalizedSamples)
+        )
+
         try setup.renderer.cancelStroke(token: token)
     }
 

@@ -154,18 +154,28 @@ private struct BrushInputAllocationProbeHarness {
         )
 
         for index in 1...128 {
+            let usesEstimatedUpdate = index.isMultiple(of: 32)
             try renderer.appendStroke(
                 token: token,
-                sample: sample(
-                    .moved,
-                    x: Float(index % 96) * 0.5
-                )
+                sample: usesEstimatedUpdate
+                    ? unresolvedEstimatedSample(index: index)
+                    : sample(
+                        .moved,
+                        x: Float(index % 96) * 0.5
+                    )
             )
-            if index.isMultiple(of: 16) {
-                try renderer.appendStroke(
+            if usesEstimatedUpdate {
+                try renderer.applyEstimatedStrokeUpdate(
                     token: token,
-                    sample: predictedSample(
-                        x: Float((index + 1) % 96) * 0.5
+                    sample: estimatedUpdateSample(index: index)
+                )
+            }
+            if index.isMultiple(of: 16) {
+                try renderer.appendStrokeBatch(
+                    token: token,
+                    samples: predictedBatch(
+                        after: index,
+                        count: index.isMultiple(of: 64) ? 65 : 4
                     )
                 )
             }
@@ -178,10 +188,13 @@ private struct BrushInputAllocationProbeHarness {
         var firstAllocationCount: UInt64 = 0
         var maximumSingleCallCount: UInt64 = 0
         for index in 129...640 {
-            let authoritativeSample = sample(
-                .moved,
-                x: Float(index % 96) * 0.5
-            )
+            let usesEstimatedUpdate = index.isMultiple(of: 32)
+            let authoritativeSample = usesEstimatedUpdate
+                ? unresolvedEstimatedSample(index: index)
+                : sample(
+                    .moved,
+                    x: Float(index % 96) * 0.5
+                )
             probe.arm()
             do {
                 try renderer.appendStroke(
@@ -203,15 +216,44 @@ private struct BrushInputAllocationProbeHarness {
                 firstAllocationCount = authoritativeAllocations
             }
 
+            if usesEstimatedUpdate {
+                let update = estimatedUpdateSample(index: index)
+                probe.arm()
+                do {
+                    try renderer.applyEstimatedStrokeUpdate(
+                        token: token,
+                        sample: update
+                    )
+                } catch {
+                    _ = probe.disarm()
+                    throw error
+                }
+                let estimatedUpdateAllocations = probe.disarm()
+                allocationCount += estimatedUpdateAllocations
+                maximumSingleCallCount = max(
+                    maximumSingleCallCount,
+                    estimatedUpdateAllocations
+                )
+                if estimatedUpdateAllocations > 0,
+                   firstAllocationCount == 0
+                {
+                    firstAllocationIndex = index
+                    firstAllocationCount = estimatedUpdateAllocations
+                }
+            }
+
             if index.isMultiple(of: 16) {
-                let predicted = predictedSample(
-                    x: Float((index + 1) % 96) * 0.5
+                let predicted = predictedBatch(
+                    after: index,
+                    count: index.isMultiple(of: 64)
+                        ? 65
+                        : 2 + (index / 16) % 4
                 )
                 probe.arm()
                 do {
-                    try renderer.appendStroke(
+                    try renderer.appendStrokeBatch(
                         token: token,
-                        sample: predicted
+                        samples: predicted
                     )
                 } catch {
                     _ = probe.disarm()
@@ -344,6 +386,50 @@ private struct BrushInputAllocationProbeHarness {
             phase: .moved,
             source: .mouse,
             kind: .predicted
+        )
+    }
+
+    private static func predictedBatch(
+        after index: Int,
+        count: Int
+    ) -> [StrokeSample] {
+        (1...count).map { offset in
+            predictedSample(
+                x: Float((index + offset) % 96) * 0.5
+            )
+        }
+    }
+
+    private static func unresolvedEstimatedSample(index: Int) -> StrokeSample {
+        StrokeSample(
+            position: ScreenPoint(
+                x: Float(index % 96) * 0.5,
+                y: 32
+            ),
+            pressure: 0.5,
+            timestamp: TimeInterval(index),
+            phase: .moved,
+            source: .pencil,
+            capabilities: [.pressure],
+            estimationUpdateIndex: index,
+            estimatedProperties: [.pressure],
+            estimatedPropertiesExpectingUpdates: [.pressure]
+        )
+    }
+
+    private static func estimatedUpdateSample(index: Int) -> StrokeSample {
+        StrokeSample(
+            position: ScreenPoint(
+                x: Float(index % 96) * 0.5,
+                y: 32
+            ),
+            pressure: 0.55,
+            timestamp: TimeInterval(index),
+            phase: .moved,
+            source: .pencil,
+            kind: .estimatedUpdate,
+            capabilities: [.pressure],
+            estimationUpdateIndex: index
         )
     }
 }

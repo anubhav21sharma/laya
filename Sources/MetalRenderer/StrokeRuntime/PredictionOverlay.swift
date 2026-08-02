@@ -55,7 +55,8 @@ public struct PredictionOverlaySnapshot: Equatable, Sendable {
 public final class PredictionOverlay {
     nonisolated public static let maximumNormalizedSampleCount = 64
     nonisolated public static let maximumLogicalDabCount = 512
-    nonisolated public static let maximumRetainedDirtyRegionCount = 256
+    nonisolated public static let maximumRetainedDirtyRegionCount =
+        TransientStrokeBufferContract.visibleEpochProjectedInstanceCapacity
 
     public let pixelSize: PixelSize
     public let surface: ReplayLiveTile
@@ -157,25 +158,29 @@ public final class PredictionOverlay {
         provenance: PredictionProvenanceBoundary?,
         admission: PredictionOverlayAdmission,
         dirtyRegions: [PixelRect]
-    ) -> ReplayClearPlan {
-        planReplacementInPlace(
+    ) -> ReplayClearPlan? {
+        guard planReplacementInPlace(
             epoch: epoch,
             provenance: provenance,
             admission: admission,
             dirtyRegions: dirtyRegions
-        )
+        ) else { return nil }
         return surface.lastClearPlan!
     }
 
     /// Renderer hot-path variant. Both the submitted footprint and the next
     /// footprint are retained in preallocated storage.
+    @discardableResult
     func planReplacementInPlace(
         epoch: UInt64,
         provenance: PredictionProvenanceBoundary?,
         admission: PredictionOverlayAdmission,
         dirtyRegions: [PixelRect]
-    ) {
-        precondition(epoch > surface.visibleEpoch)
+    ) -> Bool {
+        guard epoch > surface.visibleEpoch,
+              !hasPlannedReplacement || epoch > plannedEpoch else {
+            return false
+        }
         precondition(
             admission.normalizedSampleCount
                 <= Self.maximumNormalizedSampleCount
@@ -183,24 +188,24 @@ public final class PredictionOverlay {
         precondition(
             admission.logicalDabCount <= Self.maximumLogicalDabCount
         )
-        surface.planReplacementInPlace(
+        guard surface.planReplacementInPlace(
             epoch: epoch,
             canonicalRegions: visibleDirtyRegions
-        )
+        ) else { return false }
         plannedDirtyRegions.removeAll(keepingCapacity: true)
-        if dirtyRegions.count > Self.maximumRetainedDirtyRegionCount {
-            plannedDirtyRegions.append(Self.fullRegion(pixelSize))
-        } else {
-            precondition(
-                plannedDirtyRegions.capacity >= dirtyRegions.count,
-                "Prediction dirty storage must be reserved before input."
-            )
-            plannedDirtyRegions.append(contentsOf: dirtyRegions)
-            PixelRegionSet.canonicalizeInPlace(
-                &plannedDirtyRegions,
-                clippedTo: pixelSize
-            )
-        }
+        precondition(
+            dirtyRegions.count <= Self.maximumRetainedDirtyRegionCount,
+            "Prediction dirty footprint exceeds the admitted replay bound."
+        )
+        precondition(
+            plannedDirtyRegions.capacity >= dirtyRegions.count,
+            "Prediction dirty storage must be reserved before input."
+        )
+        plannedDirtyRegions.append(contentsOf: dirtyRegions)
+        PixelRegionSet.canonicalizeInPlace(
+            &plannedDirtyRegions,
+            clippedTo: pixelSize
+        )
         plannedProvenance = provenance
         plannedAdmission = admission
         plannedEpoch = epoch
@@ -209,6 +214,7 @@ public final class PredictionOverlay {
         if admission.overloaded {
             overloadCount = Self.saturatingIncrement(overloadCount)
         }
+        return true
     }
 
     @discardableResult
@@ -217,13 +223,12 @@ public final class PredictionOverlay {
         epoch: UInt64
     ) -> Bool {
         guard currentProvenance == boundary else { return false }
-        planReplacementInPlace(
+        return planReplacementInPlace(
             epoch: epoch,
             provenance: nil,
             admission: Self.emptyAdmission,
             dirtyRegions: []
         )
-        return true
     }
 
     public func discard(epoch: UInt64) {
@@ -236,14 +241,13 @@ public final class PredictionOverlay {
     }
 
     public func markVisible(epoch: UInt64) {
-        surface.markVisible(epoch: epoch)
+        guard surface.markVisible(epoch: epoch) else { return }
         guard hasPlannedReplacement, epoch == plannedEpoch else { return }
         installPlannedReplacement()
     }
 
     public func markCleared(epoch: UInt64) {
-        surface.markCleared(epoch: epoch)
-        guard epoch >= surface.visibleEpoch else { return }
+        guard surface.markCleared(epoch: epoch) else { return }
         visibleDirtyRegions.removeAll(keepingCapacity: true)
         visibleProvenance = nil
         visibleAdmission = Self.emptyAdmission
@@ -291,15 +295,6 @@ public final class PredictionOverlay {
         projectedInstanceCount: 0,
         overload: []
     )
-
-    private static func fullRegion(_ size: PixelSize) -> PixelRect {
-        PixelRect(
-            minX: 0,
-            minY: 0,
-            maxX: size.width,
-            maxY: size.height
-        )!
-    }
 
     private static func saturatingIncrement(_ value: UInt64) -> UInt64 {
         value == .max ? .max : value + 1

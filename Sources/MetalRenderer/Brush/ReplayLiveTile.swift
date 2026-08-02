@@ -9,13 +9,15 @@ public enum ReplayClearPlan: Equatable, Sendable {
 /// Replacement-only live layer for predicted and retroactively tapered dabs.
 @MainActor
 public final class ReplayLiveTile {
-    public static let maximumRegionalRectangleCount = 32
+    public static let maximumRegionalRectangleCount =
+        TransientStrokeBufferContract.visibleEpochProjectedInstanceCapacity
 
     public let pixelSize: PixelSize
     public let texture: any MTLTexture
     public private(set) var visibleEpoch: UInt64 = 0
     public private(set) var isVisible = false
     private var hasPlannedClear = false
+    private var plannedEpoch: UInt64?
     private var usesFullTileClear = false
     private var plannedRegionalRectangles: [PixelRect] = []
 
@@ -64,53 +66,73 @@ public final class ReplayLiveTile {
         epoch: UInt64,
         prior: PixelRegionSet,
         replacement: PixelRegionSet
-    ) -> ReplayClearPlan {
-        precondition(epoch > visibleEpoch, "Replay epochs must be monotonic")
+    ) -> ReplayClearPlan? {
         let combined = PixelRegionSet(
             prior.rectangles + replacement.rectangles,
             clippedTo: pixelSize
         )
-        planReplacementInPlace(
+        guard planReplacementInPlace(
             epoch: epoch,
             canonicalRegions: combined.rectangles
-        )
+        ) else { return nil }
         return lastClearPlan!
     }
 
+    @discardableResult
     func planReplacementInPlace(
         epoch: UInt64,
         canonicalRegions: [PixelRect]
-    ) {
-        precondition(epoch > visibleEpoch, "Replay epochs must be monotonic")
+    ) -> Bool {
+        guard epoch > visibleEpoch,
+              plannedEpoch.map({ epoch > $0 }) ?? true else {
+            return false
+        }
         hasPlannedClear = true
+        plannedEpoch = epoch
         plannedRegionalRectangles.removeAll(keepingCapacity: true)
         usesFullTileClear =
             canonicalRegions.count > Self.maximumRegionalRectangleCount
-        guard !usesFullTileClear else { return }
+        guard !usesFullTileClear else { return true }
         precondition(
             plannedRegionalRectangles.capacity
                 >= canonicalRegions.count,
             "Replay clear storage must be reserved before interactive input."
         )
         plannedRegionalRectangles.append(contentsOf: canonicalRegions)
+        return true
     }
 
-    public func markVisible(epoch: UInt64) {
-        guard epoch >= visibleEpoch else { return }
+    @discardableResult
+    public func markVisible(epoch: UInt64) -> Bool {
+        if let plannedEpoch {
+            guard epoch == plannedEpoch else { return false }
+        } else {
+            guard epoch >= visibleEpoch else { return false }
+        }
+        plannedEpoch = nil
         visibleEpoch = epoch
         isVisible = true
+        return true
     }
 
-    public func markCleared(epoch: UInt64) {
-        guard epoch >= visibleEpoch else { return }
+    @discardableResult
+    public func markCleared(epoch: UInt64) -> Bool {
+        if let plannedEpoch {
+            guard epoch == plannedEpoch else { return false }
+        } else {
+            guard epoch >= visibleEpoch else { return false }
+        }
+        plannedEpoch = nil
         visibleEpoch = epoch
         isVisible = false
+        return true
     }
 
     public func reset() {
         visibleEpoch = 0
         isVisible = false
         hasPlannedClear = false
+        plannedEpoch = nil
         usesFullTileClear = false
         plannedRegionalRectangles.removeAll(keepingCapacity: true)
     }

@@ -1059,7 +1059,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 succeeded: operationSucceeded
             )
         }
-        guard sample.phase == .began, isIdle else {
+        guard sample.phase == .began,
+              sample.kind != .predicted,
+              sample.kind != .estimatedUpdate,
+              isIdle
+        else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let compiledBrush = try compiledBrush(for: style)
@@ -1251,14 +1255,46 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         try requireCollectingStroke(token: token)
         guard let authoritativeGenerator = strokeGenerator,
-              transientStrokeBuffer != nil
+              transientStrokeBuffer != nil,
+              let scheduler = activeStroke?.scheduler
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let limits = transientStrokeBuffer!.activeReplayLimits
+        let retainedActualProjectedCount =
+            transientStrokeBuffer!.actualChunks.reduce(0) {
+                $0 + $1.projectedInstanceCount
+            }
         let maximumPredictionSamples = min(
             PredictionOverlay.maximumNormalizedSampleCount,
-            limits.maximumSamples
+            max(
+                0,
+                limits.maximumSamples
+                    - transientStrokeBuffer!.actualSampleCount
+            )
+        )
+        let maximumPredictionDabs = min(
+            PredictionOverlay.maximumLogicalDabCount,
+            max(
+                0,
+                limits.maximumDabs
+                    - transientStrokeBuffer!.actualDabCount
+            )
+        )
+        let maximumPredictionProjectedInstances = min(
+            depositionFrameBudget.maximumPredictedInstances,
+            min(
+                max(
+                    0,
+                    limits.maximumProjectedInstances
+                        - retainedActualProjectedCount
+                ),
+                max(
+                    0,
+                    scheduler.predictedCapacity
+                        - retainedActualProjectedCount
+                )
+            )
         )
         var predictionOverload: PredictionOverloadReasons = []
         if samples.count > maximumPredictionSamples {
@@ -1308,18 +1344,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 limits: PredictionGenerationLimits(
                     maximumDabCount: max(
                         0,
-                        min(
-                            PredictionOverlay.maximumLogicalDabCount,
-                            limits.maximumDabs
-                        ) - generatedDabCount
+                        maximumPredictionDabs - generatedDabCount
                     ),
                     maximumProjectedInstanceCount: max(
                         0,
-                        min(
-                            depositionFrameBudget
-                                .maximumPredictedInstances,
-                            limits.maximumProjectedInstances
-                        ) - projectedInstanceCount
+                        maximumPredictionProjectedInstances
+                            - projectedInstanceCount
                     )
                 )
             ) { generator, emit in
@@ -1419,6 +1449,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         try requireCollectingStroke(token: token)
+        let predictionInvalidationBoundary = try
+            prevalidatedPredictionInvalidationBoundary()
         counters.newDabsThisEvent = 0
         if strokeRenderCoordinator != nil,
            isIncrementalCompatibilitySample(sample)
@@ -1435,8 +1467,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             predictedStrokeGenerator = nil
             return
         }
-        let predictionInvalidationBoundary = strokeRenderCoordinator?
-            .predictionProvenanceBoundary
         if strokeRenderCoordinator != nil {
             // Estimated properties need the existing bounded correction path.
             // The legacy generator mirrors coordinator state after every
@@ -1490,7 +1520,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 succeeded: operationSucceeded
             )
         }
-        guard sample.phase == .ended else {
+        guard sample.phase == .ended,
+              sample.kind != .predicted,
+              sample.kind != .estimatedUpdate
+        else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         try requireCollectingStroke(token: token)
@@ -1523,11 +1556,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 succeeded: operationSucceeded
             )
         }
-        guard sample.phase == .ended else {
+        guard sample.phase == .ended,
+              sample.kind != .predicted,
+              sample.kind != .estimatedUpdate
+        else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         try requireCollectingStroke(token: token)
         recordStrokeRuntimeInput(sample)
+        let predictionInvalidationBoundary = try
+            prevalidatedPredictionInvalidationBoundary()
         counters.newDabsThisEvent = 0
         if strokeRenderCoordinator != nil,
            isIncrementalCompatibilitySample(sample)
@@ -1546,8 +1584,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             operationSucceeded = true
             return
         }
-        let predictionInvalidationBoundary = strokeRenderCoordinator?
-            .predictionProvenanceBoundary
         if strokeRenderCoordinator != nil {
             strokeRenderCoordinator = nil
         }
@@ -1842,12 +1878,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 prepared
             )
         }
+        let estimatedPreview = try transientStrokeBuffer!
+            .previewEstimatedSuffix(
+                using: plan,
+                expectedSamples: depositionInputScratch.worldSamples,
+                with: depositionInputScratch.transientChunks,
+                settledInto: &depositionInputScratch.settledChunks
+            )
+        try preflightStrokeMutation(
+            settledChunks: depositionInputScratch.settledChunks,
+            replayProjectedInstanceCount:
+                estimatedPreview.retainedProjectedInstanceCount
+        )
         _ = try transientStrokeBuffer!.replaceEstimatedSuffix(
             using: plan,
             expectedSamples: depositionInputScratch.worldSamples,
             with: depositionInputScratch.transientChunks,
-            settledInto: &depositionInputScratch.settledChunks,
-            preflightSettled: preflightStrokeMutation
+            settledInto: &depositionInputScratch.settledChunks
         )
         try appendSettled(depositionInputScratch.settledChunks)
         switch plan.target {
@@ -3171,12 +3218,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        if let predictionInvalidationBoundary,
-           !predictionOverlay.canInvalidatePrediction(
-                from: predictionInvalidationBoundary
-           )
-        {
-            throw MetalRendererError.invalidStrokeLifecycle
+        if let predictionInvalidationBoundary {
+            precondition(
+                predictionOverlay.canInvalidatePrediction(
+                    from: predictionInvalidationBoundary
+                ),
+                "Prediction provenance changed after authoritative preflight."
+            )
         }
         let dabs = depositionInputScratch.preparedDabs[dabRange]
         let arenaTransaction = try transientDabArena.beginTransaction(
@@ -3417,6 +3465,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         brushInputDeriver = coordinator.inputDeriverSnapshot
     }
 
+    private func prevalidatedPredictionInvalidationBoundary() throws
+        -> PredictionProvenanceBoundary?
+    {
+        guard let coordinator = strokeRenderCoordinator else { return nil }
+        let boundary = coordinator.predictionProvenanceBoundary
+        guard predictionOverlay.canInvalidatePrediction(from: boundary) else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        return boundary
+    }
+
     private func shouldUseIncrementalCompatibilityInk(
         style: StrokeRenderStyle,
         sample: StrokeSample
@@ -3456,6 +3515,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         StrokeRenderSnapshot?
     {
         strokeRenderCoordinator?.snapshot
+    }
+
+    var compatibilityInkCoordinatorTransactionTokenForTesting: UInt64? {
+        strokeRenderCoordinator?.nextTransactionTokenForTesting
     }
 
     @discardableResult

@@ -30,19 +30,21 @@ func replayTilePlansRegionalReplacementAndRejectsStaleVisibility() throws {
             )
         )
     )
-    tile.markVisible(epoch: 2)
-    tile.markCleared(epoch: 1)
-    #expect(tile.visibleEpoch == 2)
+    #expect(!tile.markVisible(epoch: 2))
+    #expect(tile.visibleEpoch == 0)
+    #expect(tile.markVisible(epoch: 1))
+    #expect(!tile.markCleared(epoch: 0))
+    #expect(tile.visibleEpoch == 1)
     #expect(tile.isVisible)
 }
 
 @Test
 @MainActor
-func replayTileFallsBackToFullClearForUnsafeRegionCount() throws {
+func replayTileRetainsAdmittedRegionalClearBeyondThirtyTwo() throws {
     guard let device = MTLCreateSystemDefaultDevice() else { return }
     let size = PixelSize(width: 256, height: 256)
     let tile = try ReplayLiveTile(device: device, pixelSize: size)
-    let rectangles = (0...ReplayLiveTile.maximumRegionalRectangleCount).map {
+    let rectangles = (0..<40).map {
         PixelRect(
             minX: $0 * 4,
             minY: 0,
@@ -56,12 +58,7 @@ func replayTileFallsBackToFullClearForUnsafeRegionCount() throws {
         replacement: PixelRegionSet([], clippedTo: size)
     )
     #expect(
-        plan == .fullTile(
-            PixelRegionSet(
-                [PixelRect(minX: 0, minY: 0, maxX: 256, maxY: 256)!],
-                clippedTo: size
-            )
-        )
+        plan == .regional(PixelRegionSet(rectangles, clippedTo: size))
     )
 }
 

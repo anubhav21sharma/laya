@@ -285,6 +285,10 @@ public final class StrokeRenderCoordinator {
     }
 
     #if DEBUG
+    var nextTransactionTokenForTesting: UInt64 {
+        nextTransactionToken
+    }
+
     @discardableResult
     func replaceNextFrameTokenForTesting(
         _ token: UInt64

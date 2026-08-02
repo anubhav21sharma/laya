@@ -813,6 +813,12 @@ public struct BorrowedEstimatedStrokeUpdatePlan: Equatable, Sendable {
     }
 }
 
+package struct BorrowedEstimatedStrokeUpdatePreview: Sendable {
+    package let retainedSampleCount: Int
+    package let retainedDabCount: Int
+    package let retainedProjectedInstanceCount: Int
+}
+
 /// Renderer-facing result of one deterministic buffer mutation.
 public struct TransientStrokeBufferUpdate: Equatable, Sendable {
     public let settledPrefix: [TransientStrokeChunk]
@@ -2007,22 +2013,12 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
 
     /// Renderer hot-path estimated replacement. Both expected samples and
     /// settled chunks use caller-owned, pre-reserved storage.
-    @discardableResult
-    public mutating func replaceEstimatedSuffix<
-        Samples: Collection,
-        Chunks: Collection
-    >(
+    package func previewEstimatedSuffix(
         using plan: BorrowedEstimatedStrokeUpdatePlan,
-        expectedSamples: Samples,
-        with rebuiltChunks: Chunks,
-        settledInto settled: inout [TransientStrokeChunk],
-        preflightSettled:
-            (([TransientStrokeChunk], Int) throws -> Void)? = nil
-    ) throws -> TransientStrokeBufferMutation
-    where
-        Samples.Element == WorldStrokeSample,
-        Chunks.Element == TransientStrokeChunk
-    {
+        expectedSamples: [WorldStrokeSample],
+        with rebuiltChunks: [TransientStrokeChunk],
+        settledInto settled: inout [TransientStrokeChunk]
+    ) throws -> BorrowedEstimatedStrokeUpdatePreview {
         settled.removeAll(keepingCapacity: true)
         guard plan.sourceReplayEpoch == mutationVersion else {
             throw TransientStrokeBufferError.staleEstimatedUpdatePlan
@@ -2030,59 +2026,69 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         guard
             expectedSamples.count == plan.replacementSampleCount,
             rebuiltChunks.count == expectedSamples.count,
-            expectedSamples.first == plan.mergedSample,
-            zip(rebuiltChunks, expectedSamples).allSatisfy({
-                $0.0.sample == $0.1
-            })
+            expectedSamples.first == plan.mergedSample
         else {
             throw TransientStrokeBufferError.invalidEstimatedReplacement
+        }
+        var replacementIndex = expectedSamples.startIndex
+        while replacementIndex < expectedSamples.endIndex {
+            guard rebuiltChunks[replacementIndex].sample
+                    == expectedSamples[replacementIndex]
+            else {
+                throw TransientStrokeBufferError.invalidEstimatedReplacement
+            }
+            replacementIndex += 1
         }
 
         var retainedSamplesAfterReplacement = 0
         var retainedDabsAfterReplacement = 0
         var retainedProjectedAfterReplacement = 0
-        func accumulate(_ chunk: TransientStrokeChunk) {
-            retainedSamplesAfterReplacement = Self.saturatingAdd(
-                retainedSamplesAfterReplacement,
-                1
-            )
-            retainedDabsAfterReplacement = Self.saturatingAdd(
-                retainedDabsAfterReplacement,
-                chunk.dabs.count
-            )
-            retainedProjectedAfterReplacement = Self.saturatingAdd(
-                retainedProjectedAfterReplacement,
-                chunk.projectedInstanceCount
-            )
-        }
         var retainsActualChunk = mode != .appendOnly
-        func accumulateActual(_ chunk: TransientStrokeChunk) {
-            if !retainsActualChunk,
-               !chunk.sample.estimatedPropertiesExpectingUpdates.isEmpty
-            {
-                retainsActualChunk = true
-            }
-            if retainsActualChunk {
-                accumulate(chunk)
-            }
-        }
         switch plan.target {
         case .authoritative:
             for chunk in actualChunks[..<plan.replacedChunkIndex] {
-                accumulateActual(chunk)
+                Self.accumulateRetainedActual(
+                    chunk,
+                    retainsActualChunk: &retainsActualChunk,
+                    sampleCount: &retainedSamplesAfterReplacement,
+                    dabCount: &retainedDabsAfterReplacement,
+                    projectedCount: &retainedProjectedAfterReplacement
+                )
             }
             for chunk in rebuiltChunks {
-                accumulateActual(chunk)
+                Self.accumulateRetainedActual(
+                    chunk,
+                    retainsActualChunk: &retainsActualChunk,
+                    sampleCount: &retainedSamplesAfterReplacement,
+                    dabCount: &retainedDabsAfterReplacement,
+                    projectedCount: &retainedProjectedAfterReplacement
+                )
             }
         case .predicted:
             for chunk in actualChunks {
-                accumulateActual(chunk)
+                Self.accumulateRetainedActual(
+                    chunk,
+                    retainsActualChunk: &retainsActualChunk,
+                    sampleCount: &retainedSamplesAfterReplacement,
+                    dabCount: &retainedDabsAfterReplacement,
+                    projectedCount: &retainedProjectedAfterReplacement
+                )
             }
             for chunk in predictedChunks[..<plan.replacedChunkIndex] {
-                accumulate(chunk)
+                Self.accumulateRetained(
+                    chunk,
+                    sampleCount: &retainedSamplesAfterReplacement,
+                    dabCount: &retainedDabsAfterReplacement,
+                    projectedCount: &retainedProjectedAfterReplacement
+                )
             }
             for chunk in rebuiltChunks {
-                accumulate(chunk)
+                Self.accumulateRetained(
+                    chunk,
+                    sampleCount: &retainedSamplesAfterReplacement,
+                    dabCount: &retainedDabsAfterReplacement,
+                    projectedCount: &retainedProjectedAfterReplacement
+                )
             }
         }
         let limits = capacitiesForCurrentMode()
@@ -2103,31 +2109,52 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
 
         if mode == .appendOnly {
             var reachedUnresolved = false
-            func collectResolved(_ chunk: TransientStrokeChunk) {
-                guard !reachedUnresolved else { return }
-                if chunk.sample.estimatedPropertiesExpectingUpdates.isEmpty {
-                    settled.append(chunk)
-                } else {
-                    reachedUnresolved = true
-                }
-            }
             switch plan.target {
             case .authoritative:
                 for chunk in actualChunks[..<plan.replacedChunkIndex] {
-                    collectResolved(chunk)
+                    Self.collectResolvedAppendOnly(
+                        chunk,
+                        reachedUnresolved: &reachedUnresolved,
+                        into: &settled
+                    )
                 }
                 for chunk in rebuiltChunks {
-                    collectResolved(chunk)
+                    Self.collectResolvedAppendOnly(
+                        chunk,
+                        reachedUnresolved: &reachedUnresolved,
+                        into: &settled
+                    )
                 }
             case .predicted:
                 for chunk in actualChunks {
-                    collectResolved(chunk)
+                    Self.collectResolvedAppendOnly(
+                        chunk,
+                        reachedUnresolved: &reachedUnresolved,
+                        into: &settled
+                    )
                 }
             }
         }
-        try preflightSettled?(
-            settled,
-            retainedProjectedAfterReplacement
+        return BorrowedEstimatedStrokeUpdatePreview(
+            retainedSampleCount: retainedSamplesAfterReplacement,
+            retainedDabCount: retainedDabsAfterReplacement,
+            retainedProjectedInstanceCount:
+                retainedProjectedAfterReplacement
+        )
+    }
+
+    @discardableResult
+    public mutating func replaceEstimatedSuffix(
+        using plan: BorrowedEstimatedStrokeUpdatePlan,
+        expectedSamples: [WorldStrokeSample],
+        with rebuiltChunks: [TransientStrokeChunk],
+        settledInto settled: inout [TransientStrokeChunk]
+    ) throws -> TransientStrokeBufferMutation {
+        let preview = try previewEstimatedSuffix(
+            using: plan,
+            expectedSamples: expectedSamples,
+            with: rebuiltChunks,
+            settledInto: &settled
         )
         settled.removeAll(keepingCapacity: true)
 
@@ -2149,7 +2176,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             actualChunks.removeSubrange(plan.replacedChunkIndex...)
             actualChunks.append(contentsOf: rebuiltChunks)
             clearedPrediction = !predictedChunks.isEmpty
-            predictedChunks.removeAll(keepingCapacity: true)
+            if clearedPrediction {
+                predictedChunks.removeAll(keepingCapacity: true)
+            }
             predictedGeneratorSnapshot = nil
         case .predicted:
             guard
@@ -2179,10 +2208,10 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             promoteResolvedAppendOnlyPrefix(into: &settled)
         }
         precondition(
-            retainedSampleCount == retainedSamplesAfterReplacement
-                && retainedDabCount == retainedDabsAfterReplacement
+            retainedSampleCount == preview.retainedSampleCount
+                && retainedDabCount == preview.retainedDabCount
                 && visibleProjectedInstanceCount
-                    == retainedProjectedAfterReplacement,
+                    == preview.retainedProjectedInstanceCount,
             "Estimated replacement preflight diverged from mutation."
         )
 
@@ -2199,6 +2228,54 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             clearedPredictedSuffix: clearedPrediction,
             replayEpoch: replayEpoch
         )
+    }
+
+    private static func accumulateRetainedActual(
+        _ chunk: TransientStrokeChunk,
+        retainsActualChunk: inout Bool,
+        sampleCount: inout Int,
+        dabCount: inout Int,
+        projectedCount: inout Int
+    ) {
+        if !retainsActualChunk,
+           !chunk.sample.estimatedPropertiesExpectingUpdates.isEmpty
+        {
+            retainsActualChunk = true
+        }
+        guard retainsActualChunk else { return }
+        accumulateRetained(
+            chunk,
+            sampleCount: &sampleCount,
+            dabCount: &dabCount,
+            projectedCount: &projectedCount
+        )
+    }
+
+    private static func accumulateRetained(
+        _ chunk: TransientStrokeChunk,
+        sampleCount: inout Int,
+        dabCount: inout Int,
+        projectedCount: inout Int
+    ) {
+        sampleCount = saturatingAdd(sampleCount, 1)
+        dabCount = saturatingAdd(dabCount, chunk.dabs.count)
+        projectedCount = saturatingAdd(
+            projectedCount,
+            chunk.projectedInstanceCount
+        )
+    }
+
+    private static func collectResolvedAppendOnly(
+        _ chunk: TransientStrokeChunk,
+        reachedUnresolved: inout Bool,
+        into settled: inout [TransientStrokeChunk]
+    ) {
+        guard !reachedUnresolved else { return }
+        if chunk.sample.estimatedPropertiesExpectingUpdates.isEmpty {
+            settled.append(chunk)
+        } else {
+            reachedUnresolved = true
+        }
     }
 
     private func capacitiesForCurrentMode() -> BrushReplayLimits {
