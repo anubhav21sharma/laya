@@ -189,7 +189,8 @@ struct TimedStrokeEmitterTests {
         _ = try drain(&first)
         let authoritativeBeforePrediction = emitter
 
-        let predictionResult = try emitter.prediction(to: timedPoint(
+        var predictionEmitter = emitter
+        let predictionResult = try predictionEmitter.prediction(to: timedPoint(
             x: 3.5,
             timestamp: 10.35,
             sourceDistance: 3.5,
@@ -201,6 +202,7 @@ struct TimedStrokeEmitterTests {
         let predicted = try drain(&prediction)
 
         #expect(emitter == authoritativeBeforePrediction)
+        #expect(predictionEmitter != authoritativeBeforePrediction)
         #expect(predicted.map(\.timeKey) == [200_000_000, 300_000_000])
         #expect(predicted.allSatisfy { $0.provenance == .prediction })
         #expect(predicted.allSatisfy { $0.kind == .time })
@@ -216,6 +218,181 @@ struct TimedStrokeEmitterTests {
         let actual = try drain(&authoritative)
         #expect(actual.map(\.relativeStrokeTime) == [0.2])
         #expect(actual[0].provenance == .authoritative)
+    }
+
+    @Test
+    func successivePredictionPointsAdvanceOnlyTheCallerOwnedCopy() throws {
+        var authoritative = try TimedStrokeEmitter(timeInterval: 0.1)
+        _ = try authoritative.begin(at: timedPoint(
+            x: 0,
+            timestamp: 0,
+            sourceDistance: 0,
+            direction: 0,
+            phase: .began
+        ))
+        #expect(try authoritative.advance(to: timedPoint(
+            x: 0.5,
+            timestamp: 0.05,
+            sourceDistance: 0.5,
+            direction: 0.05,
+            phase: .moved
+        )) == nil)
+        let checkpoint = authoritative
+        var prediction = authoritative
+
+        let firstResult = try prediction.prediction(to: timedPoint(
+            x: 1.5,
+            timestamp: 0.15,
+            sourceDistance: 1.5,
+            direction: 0.15,
+            phase: .moved,
+            kind: .predicted
+        ))
+        var first = try #require(firstResult)
+        let firstCandidates = try drain(&first)
+        let secondResult = try prediction.prediction(to: timedPoint(
+            x: 2.5,
+            timestamp: 0.25,
+            sourceDistance: 2.5,
+            direction: 0.25,
+            phase: .moved,
+            kind: .predicted
+        ))
+        var second = try #require(secondResult)
+        let secondCandidates = try drain(&second)
+
+        #expect(firstCandidates.map(\.timeKey) == [100_000_000])
+        #expect(secondCandidates.map(\.timeKey) == [200_000_000])
+        #expect(firstCandidates[0].position == WorldPoint(x: 1, y: 0))
+        #expect(secondCandidates[0].position == WorldPoint(x: 2, y: 0))
+        #expect(authoritative == checkpoint)
+
+        let actualResult = try authoritative.advance(to: timedPoint(
+            x: 1.5,
+            timestamp: 0.15,
+            sourceDistance: 1.5,
+            direction: 0.15,
+            phase: .moved
+        ))
+        var actual = try #require(actualResult)
+        #expect(try drain(&actual).map(\.timeKey) == [100_000_000])
+    }
+
+    @Test
+    func predictionTraceIsIndependentOfInputPartitioning() throws {
+        let points = (1...8).map { index in
+            timedPoint(
+                x: Float(index),
+                timestamp: Double(index) * 0.07,
+                sourceDistance: Double(index),
+                direction: Float(index) * 0.1,
+                phase: .moved,
+                kind: .predicted
+            )
+        }
+        let whole = try emitPredictionTrace(points, partitionSizes: [8])
+        let split = try emitPredictionTrace(points, partitionSizes: [1, 3, 2, 2])
+        let singletons = try emitPredictionTrace(
+            points,
+            partitionSizes: Array(repeating: 1, count: 8)
+        )
+
+        expectEquivalentPredictionGeometry(split, whole)
+        expectEquivalentPredictionGeometry(singletons, whole)
+        #expect(whole.map(\.timeKey) == [
+            100_000_000, 200_000_000, 300_000_000, 400_000_000,
+            500_000_000,
+        ])
+    }
+
+    @Test
+    func largeAbsoluteOriginCannotEraseRelativeInterpolationProgress() throws {
+        let origin = TimeInterval(1 << 46)
+        let interval = 1.0 / 240
+        #expect(origin + interval == origin)
+        var emitter = try TimedStrokeEmitter(timeInterval: interval)
+        _ = try emitter.begin(at: timedPoint(
+            x: 0,
+            timestamp: origin,
+            sourceDistance: 0,
+            direction: 0,
+            phase: .began
+        ))
+        let result = try emitter.advance(to: timedPoint(
+            x: 15,
+            timestamp: origin + 0.0625,
+            sourceDistance: 15,
+            direction: 1.5,
+            phase: .moved
+        ))
+        var cursor = try #require(result)
+        let candidates = try drain(&cursor)
+
+        #expect(candidates.count == 15)
+        #expect(abs(candidates[0].position.x - 1) < 0.000_001)
+        #expect(abs(candidates[0].sourceDistance - 1) < 0.000_000_001)
+        #expect(abs(candidates[0].direction - 0.1) < 0.000_001)
+        #expect(candidates[0].relativeStrokeTime == interval)
+    }
+
+    @Test
+    func extremeFiniteContinuousEndpointsNeverProduceNonfiniteCandidates()
+        throws
+    {
+        let extreme = Float.greatestFiniteMagnitude
+        var emitter = try TimedStrokeEmitter(timeInterval: 1)
+        _ = try emitter.begin(at: timedPoint(
+            x: extreme,
+            y: -extreme,
+            pressure: extreme,
+            velocity: extreme,
+            timestamp: 0,
+            sourceDistance: 0,
+            direction: extreme,
+            phase: .began,
+            altitude: extreme,
+            azimuth: extreme,
+            roll: -extreme,
+            tangentialPressure: extreme
+        ))
+        let result = try emitter.advance(to: timedPoint(
+            x: -extreme,
+            y: extreme,
+            pressure: -extreme,
+            velocity: -extreme,
+            timestamp: 2,
+            sourceDistance: 2,
+            direction: -extreme,
+            phase: .moved,
+            altitude: -extreme,
+            azimuth: -extreme,
+            roll: extreme,
+            tangentialPressure: -extreme
+        ))
+        var cursor = try #require(result)
+        let candidates = try drain(&cursor)
+
+        #expect(candidates.count == 2)
+        for candidate in candidates {
+            #expect(candidate.position.x.isFinite)
+            #expect(candidate.position.y.isFinite)
+            #expect(candidate.sample.pressure.isFinite)
+            #expect(candidate.sample.velocity.isFinite)
+            #expect(candidate.sample.altitude?.isFinite == true)
+            #expect(candidate.sample.azimuth?.isFinite == true)
+            #expect(candidate.sample.roll?.isFinite == true)
+            #expect(candidate.sample.tangentialPressure?.isFinite == true)
+            #expect(candidate.direction.isFinite)
+            #expect(candidate.relativeStrokeTime.isFinite)
+            #expect(candidate.sourceDistance.isFinite)
+        }
+        #expect(abs(candidates[0].position.x) < 1)
+        #expect(abs(candidates[0].position.y) < 1)
+        #expect(abs(candidates[0].sample.pressure) < 1)
+        #expect(abs(candidates[0].sample.velocity) < 1)
+        #expect(abs(candidates[0].sample.altitude ?? .infinity) < 1)
+        #expect(abs(candidates[0].sample.tangentialPressure ?? .infinity) < 1)
+        #expect(abs(candidates[0].direction) < 1)
     }
 
     @Test
@@ -339,7 +516,7 @@ struct TimedStrokeEmitterTests {
         var cursor = try #require(result)
 
         var keys: [Int64] = []
-        let firstPage = cursor.emitNextPage { keys.append($0.timeKey) }
+        let firstPage = try cursor.emitNextPage { keys.append($0.timeKey) }
 
         #expect(firstPage.emittedCount == LogicalDabBatch.maximumDabCount)
         #expect(firstPage.hasMore)
@@ -372,10 +549,10 @@ struct TimedStrokeEmitterTests {
 
         var firstKeys: [Int64] = []
         var copiedKeys: [Int64] = []
-        let firstPage = firstCursor.emitNextPage {
+        let firstPage = try firstCursor.emitNextPage {
             firstKeys.append($0.timeKey)
         }
-        let copiedPage = copiedCursor.emitNextPage {
+        let copiedPage = try copiedCursor.emitNextPage {
             copiedKeys.append($0.timeKey)
         }
 
@@ -385,7 +562,7 @@ struct TimedStrokeEmitterTests {
         #expect(copiedKeys == firstKeys)
         #expect(emitter == emitterAfterAdvance)
         var suffixKeys: [Int64] = []
-        let suffixPage = firstCursor.emitNextPage {
+        let suffixPage = try firstCursor.emitNextPage {
             suffixKeys.append($0.timeKey)
         }
         #expect(suffixPage.emittedCount == 1)
@@ -438,7 +615,7 @@ struct TimedStrokeEmitterTests {
         }
         #expect(acceptedKeys == [100_000_000, 200_000_000, 300_000_000])
 
-        _ = cursor.emitNextPage { candidate in
+        _ = try cursor.emitNextPage { candidate in
             acceptedKeys.append(candidate.timeKey)
         }
         #expect(
@@ -698,7 +875,7 @@ private func drain(
 ) throws -> [StrokeEmissionCandidate] {
     var result: [StrokeEmissionCandidate] = []
     while !cursor.isComplete {
-        _ = cursor.emitNextPage { result.append($0) }
+        _ = try cursor.emitNextPage { result.append($0) }
     }
     return result
 }
@@ -730,10 +907,74 @@ private func emitTrace(
     return result
 }
 
+private func emitPredictionTrace(
+    _ points: [TimedStrokePoint],
+    partitionSizes: [Int]
+) throws -> [StrokeEmissionCandidate] {
+    var authoritative = try TimedStrokeEmitter(timeInterval: 0.1)
+    _ = try authoritative.begin(at: timedPoint(
+        x: 0,
+        timestamp: 0,
+        sourceDistance: 0,
+        direction: 0,
+        phase: .began
+    ))
+    var prediction = authoritative
+    var result: [StrokeEmissionCandidate] = []
+    var index = 0
+    for size in partitionSizes {
+        guard size > 0, index < points.count else { continue }
+        let endpointIndex = min(points.count - 1, index + size - 1)
+        if var cursor = try prediction.prediction(to: points[endpointIndex]) {
+            result += try drain(&cursor)
+        }
+        index = endpointIndex + 1
+    }
+    while index < points.count {
+        if var cursor = try prediction.prediction(to: points[index]) {
+            result += try drain(&cursor)
+        }
+        index += 1
+    }
+    return result
+}
+
+private func expectEquivalentPredictionGeometry(
+    _ actual: [StrokeEmissionCandidate],
+    _ expected: [StrokeEmissionCandidate]
+) {
+    #expect(actual.count == expected.count)
+    #expect(actual.map(\.timeKey) == expected.map(\.timeKey))
+    #expect(actual.map(\.distanceKey) == expected.map(\.distanceKey))
+    #expect(actual.map(\.kind) == expected.map(\.kind))
+    #expect(actual.map(\.provenance) == expected.map(\.provenance))
+    for (actualCandidate, expectedCandidate) in zip(actual, expected) {
+        #expect(
+            abs(actualCandidate.position.x - expectedCandidate.position.x)
+                < 0.000_001
+        )
+        #expect(
+            abs(actualCandidate.position.y - expectedCandidate.position.y)
+                < 0.000_001
+        )
+        #expect(
+            abs(
+                actualCandidate.sourceDistance
+                    - expectedCandidate.sourceDistance
+            ) < 0.000_000_001
+        )
+        #expect(
+            abs(actualCandidate.direction - expectedCandidate.direction)
+                < 0.000_001
+        )
+    }
+}
+
 private func timedPoint(
     x: Float,
     y: Float = 0,
     pressure: Float = 0.5,
+    velocity: Float = 12,
     timestamp: TimeInterval,
     sourceDistance: Double,
     direction: Float,
@@ -756,7 +997,7 @@ private func timedPoint(
             altitude: altitude,
             azimuth: azimuth,
             roll: roll,
-            velocity: 12,
+            velocity: velocity,
             phase: phase,
             source: .pencil,
             kind: kind,

@@ -119,6 +119,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case directionCornerAllocations(total: UInt64)
     case stabilizerV2Allocations(total: UInt64)
     case timedEmitterAllocations(normal: UInt64, hugeGap: UInt64)
+    case timedEmitterMissingCursor
     case offMainEstimatedAllocations(total: UInt64, maximum: UInt64)
     case offMainAllocationRegression(String)
     case productionAllocations(
@@ -148,6 +149,8 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
         case let .timedEmitterAllocations(normal, hugeGap):
             "timed emitter allocated after warm-up; normal=\(normal) "
                 + "hugeGap=\(hugeGap)"
+        case .timedEmitterMissingCursor:
+            "timed emitter did not produce the expected probe cursor"
         case let .offMainEstimatedAllocations(total, maximum):
             "off-main estimated correction allocated \(total) times; "
                 + "maximum single correction=\(maximum)"
@@ -364,7 +367,7 @@ private struct BrushInputAllocationProbeHarness {
             timestamp: 0,
             sourceDistance: 0
         ))
-        _ = begin.emitNextPage { _ in }
+        _ = try begin.emitNextPage { _ in }
         _ = try runTimedEmitterUpdates(
             emitter: &emitter,
             startingAt: 1,
@@ -391,25 +394,34 @@ private struct BrushInputAllocationProbeHarness {
             timestamp: 0,
             sourceDistance: 0
         ))
-        _ = hugeBegin.emitNextPage { _ in }
-        var warmCursor = try hugeEmitter.prediction(to: timedEmitterPoint(
-            index: 1,
-            timestamp: 10,
-            sourceDistance: 1,
-            kind: .predicted
-        ))!
-        _ = warmCursor.emitNextPage { _ in }
+        _ = try hugeBegin.emitNextPage { _ in }
+        var warmPredictionEmitter = hugeEmitter
+        guard var warmCursor = try warmPredictionEmitter.prediction(
+            to: timedEmitterPoint(
+                index: 1,
+                timestamp: 10,
+                sourceDistance: 1,
+                kind: .predicted
+            )
+        ) else {
+            throw ProbeHarnessError.timedEmitterMissingCursor
+        }
+        _ = try warmCursor.emitNextPage { _ in }
 
         probe.arm()
         var hugeChecksum: UInt64 = 0
         let remaining: UInt64
         do {
-            var cursor = try hugeEmitter.advance(to: timedEmitterPoint(
-                index: 2,
-                timestamp: 1_000_000,
-                sourceDistance: 2
-            ))!
-            _ = cursor.emitNextPage { candidate in
+            guard var cursor = try hugeEmitter.advance(
+                to: timedEmitterPoint(
+                    index: 2,
+                    timestamp: 1_000_000,
+                    sourceDistance: 2
+                )
+            ) else {
+                throw ProbeHarnessError.timedEmitterMissingCursor
+            }
+            _ = try cursor.emitNextPage { candidate in
                 hugeChecksum &+= UInt64(bitPattern: candidate.timeKey)
                 hugeChecksum &+= UInt64(bitPattern: candidate.distanceKey)
             }
@@ -448,7 +460,7 @@ private struct BrushInputAllocationProbeHarness {
             )) else {
                 continue
             }
-            _ = cursor.emitNextPage { candidate in
+            _ = try cursor.emitNextPage { candidate in
                 checksum &+= UInt64(bitPattern: candidate.timeKey)
                 checksum &+= UInt64(bitPattern: candidate.distanceKey)
                 checksum &+= UInt64(candidate.sample.position.x.bitPattern)

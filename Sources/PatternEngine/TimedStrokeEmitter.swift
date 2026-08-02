@@ -36,6 +36,8 @@ public struct TimedStrokeEmissionPage: Equatable, Sendable {
 public struct TimedStrokeEmissionCursor: Equatable, Sendable {
     private let originTimestamp: TimeInterval
     private let interval: TimeInterval
+    private let startRelativeTime: TimeInterval
+    private let endRelativeTime: TimeInterval
     private let start: TimedStrokePoint
     private let end: TimedStrokePoint
     private let provenance: StrokeEmissionProvenance
@@ -47,6 +49,8 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
     fileprivate init(
         originTimestamp: TimeInterval,
         interval: TimeInterval,
+        startRelativeTime: TimeInterval,
+        endRelativeTime: TimeInterval,
         start: TimedStrokePoint,
         end: TimedStrokePoint,
         provenance: StrokeEmissionProvenance,
@@ -57,6 +61,8 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
     ) {
         self.originTimestamp = originTimestamp
         self.interval = interval
+        self.startRelativeTime = startRelativeTime
+        self.endRelativeTime = endRelativeTime
         self.start = start
         self.end = end
         self.provenance = provenance
@@ -88,7 +94,7 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
     @discardableResult
     public mutating func emitNextPage(
         _ emit: (StrokeEmissionCandidate) throws -> Void
-    ) rethrows -> TimedStrokeEmissionPage {
+    ) throws -> TimedStrokeEmissionPage {
         var emittedCount = 0
         if let beginCandidate {
             try emit(beginCandidate)
@@ -99,7 +105,7 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
         while emittedCount < LogicalDabBatch.maximumDabCount,
               nextTickIndex <= finalTickIndex
         {
-            let candidate = timedCandidate(at: nextTickIndex)
+            let candidate = try timedCandidate(at: nextTickIndex)
             try emit(candidate)
             nextTickIndex += 1
             emittedCount += 1
@@ -119,36 +125,47 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
     }
 
     private func timedCandidate(at tickIndex: Int64)
-        -> StrokeEmissionCandidate
+        throws -> StrokeEmissionCandidate
     {
         let relativeTime = Double(tickIndex) * interval
-        let timestamp = originTimestamp + relativeTime
-        let duration = end.sample.timestamp - start.sample.timestamp
+        let duration = endRelativeTime - startRelativeTime
         let doubleFraction = min(
             1,
-            max(0, (timestamp - start.sample.timestamp) / duration)
+            max(0, (relativeTime - startRelativeTime) / duration)
         )
-        let fraction = Float(doubleFraction)
-        let interpolatedSample = AttributedStrokePathSegment(
-            start: start.sample,
-            end: end.sample
-        ).sample(at: fraction)
-        let sample = Self.replacingTimestamp(
-            of: interpolatedSample,
-            with: timestamp
+        let sample = Self.interpolatedSample(
+            from: start.sample,
+            to: end.sample,
+            fraction: doubleFraction,
+            timestamp: originTimestamp + relativeTime
         )
-        let sourceDistance = start.sourceDistance
-            + (end.sourceDistance - start.sourceDistance) * doubleFraction
-        let direction = start.direction
-            + (end.direction - start.direction) * fraction
+        let sourceDistance = Self.stableLinear(
+            start.sourceDistance,
+            end.sourceDistance,
+            fraction: doubleFraction
+        )
+        let direction = Self.stableLinear(
+            start.direction,
+            end.direction,
+            fraction: doubleFraction
+        )
+        guard Self.isFinite(sample),
+              sourceDistance.isFinite,
+              direction.isFinite
+        else {
+            throw TimedStrokeEmitterError.invalidPoint
+        }
         return StrokeEmissionCandidate(
             sample: sample,
             relativeStrokeTime: relativeTime,
             sourceDistance: sourceDistance,
             direction: direction,
             provenance: provenance,
-            timeKey: Self.canonicalKey(relativeTime, scale: 1_000_000_000),
-            distanceKey: Self.canonicalKey(
+            timeKey: try Self.canonicalKey(
+                relativeTime,
+                scale: 1_000_000_000
+            ),
+            distanceKey: try Self.canonicalKey(
                 sourceDistance,
                 scale: 1_000_000
             ),
@@ -157,9 +174,87 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
         )
     }
 
-    private static func canonicalKey(_ value: Double, scale: Double) -> Int64 {
-        let rounded = (value * scale).rounded(.toNearestOrEven)
-        return Int64(exactly: rounded)!
+    private static func canonicalKey(
+        _ value: Double,
+        scale: Double
+    ) throws -> Int64 {
+        let scaled = value * scale
+        guard scaled.isFinite,
+              let key = Int64(exactly: scaled.rounded(.toNearestOrEven))
+        else {
+            throw TimedStrokeEmitterError.canonicalKeyOverflow
+        }
+        return key
+    }
+
+    private static func interpolatedSample(
+        from start: InterpolatedStrokeSample,
+        to end: InterpolatedStrokeSample,
+        fraction: Double,
+        timestamp: TimeInterval
+    ) -> InterpolatedStrokeSample {
+        let clamped = min(1, max(0, fraction))
+        if clamped == 0 {
+            return replacingTimestamp(of: start, with: timestamp)
+        }
+        if clamped == 1 {
+            return replacingTimestamp(of: end, with: timestamp)
+        }
+        let discrete = clamped < 0.5 ? start : end
+        return InterpolatedStrokeSample(
+            position: WorldPoint(
+                x: stableLinear(
+                    start.position.x,
+                    end.position.x,
+                    fraction: clamped
+                ),
+                y: stableLinear(
+                    start.position.y,
+                    end.position.y,
+                    fraction: clamped
+                )
+            ),
+            pressure: stableLinear(
+                start.pressure,
+                end.pressure,
+                fraction: clamped
+            ),
+            timestamp: timestamp,
+            altitude: optionalLinear(
+                start.altitude,
+                end.altitude,
+                fraction: clamped
+            ),
+            azimuth: optionalAngle(
+                start.azimuth,
+                end.azimuth,
+                fraction: clamped
+            ),
+            roll: optionalAngle(
+                start.roll,
+                end.roll,
+                fraction: clamped
+            ),
+            velocity: stableLinear(
+                start.velocity,
+                end.velocity,
+                fraction: clamped
+            ),
+            phase: discrete.phase,
+            source: discrete.source,
+            kind: discrete.kind,
+            capabilities: discrete.capabilities,
+            tangentialPressure: optionalLinear(
+                start.tangentialPressure,
+                end.tangentialPressure,
+                fraction: clamped
+            ),
+            deviceIdentifier: discrete.deviceIdentifier,
+            estimationUpdateIndex: discrete.estimationUpdateIndex,
+            estimatedProperties: discrete.estimatedProperties,
+            estimatedPropertiesExpectingUpdates:
+                discrete.estimatedPropertiesExpectingUpdates
+        )
     }
 
     private static func replacingTimestamp(
@@ -186,6 +281,82 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
                 sample.estimatedPropertiesExpectingUpdates
         )
     }
+
+    private static func optionalLinear(
+        _ start: Float?,
+        _ end: Float?,
+        fraction: Double
+    ) -> Float? {
+        guard let start, let end else { return nil }
+        return stableLinear(start, end, fraction: fraction)
+    }
+
+    private static func optionalAngle(
+        _ start: Float?,
+        _ end: Float?,
+        fraction: Double
+    ) -> Float? {
+        guard let start, let end else { return nil }
+        let fullTurn = 2 * Double.pi
+        let normalizedStart = normalizedAngle(Double(start), fullTurn: fullTurn)
+        let normalizedEnd = normalizedAngle(Double(end), fullTurn: fullTurn)
+        var delta = (normalizedEnd - normalizedStart).truncatingRemainder(
+            dividingBy: fullTurn
+        )
+        if delta > Double.pi {
+            delta -= fullTurn
+        } else if delta < -Double.pi {
+            delta += fullTurn
+        }
+        return Float(normalizedAngle(
+            normalizedStart + delta * fraction,
+            fullTurn: fullTurn
+        ))
+    }
+
+    private static func normalizedAngle(
+        _ value: Double,
+        fullTurn: Double
+    ) -> Double {
+        var result = value.truncatingRemainder(dividingBy: fullTurn)
+        if result > Double.pi {
+            result -= fullTurn
+        } else if result < -Double.pi {
+            result += fullTurn
+        }
+        return result
+    }
+
+    private static func stableLinear(
+        _ start: Float,
+        _ end: Float,
+        fraction: Double
+    ) -> Float {
+        Float(stableLinear(Double(start), Double(end), fraction: fraction))
+    }
+
+    private static func stableLinear(
+        _ start: Double,
+        _ end: Double,
+        fraction: Double
+    ) -> Double {
+        if start.sign == end.sign {
+            return start + (end - start) * fraction
+        }
+        return start * (1 - fraction) + end * fraction
+    }
+
+    private static func isFinite(_ sample: InterpolatedStrokeSample) -> Bool {
+        sample.position.x.isFinite
+            && sample.position.y.isFinite
+            && sample.pressure.isFinite
+            && sample.timestamp.isFinite
+            && sample.velocity.isFinite
+            && sample.altitude?.isFinite != false
+            && sample.azimuth?.isFinite != false
+            && sample.roll?.isFinite != false
+            && sample.tangentialPressure?.isFinite != false
+    }
 }
 
 /// Pure, sample-driven recorded-time candidate state.
@@ -194,6 +365,7 @@ public struct TimedStrokeEmitter: Equatable, Sendable {
 
     private var originTimestamp: TimeInterval?
     private var previous: TimedStrokePoint?
+    private var previousRelativeTime: TimeInterval?
     private var nextTickIndex: Int64
 
     public init(timeInterval: TimeInterval) throws {
@@ -206,6 +378,7 @@ public struct TimedStrokeEmitter: Equatable, Sendable {
         self.timeInterval = timeInterval
         originTimestamp = nil
         previous = nil
+        previousRelativeTime = nil
         nextTickIndex = 1
     }
 
@@ -234,10 +407,13 @@ public struct TimedStrokeEmitter: Equatable, Sendable {
         )
         originTimestamp = point.sample.timestamp
         previous = point
+        previousRelativeTime = 0
         nextTickIndex = 1
         return TimedStrokeEmissionCursor(
             originTimestamp: point.sample.timestamp,
             interval: timeInterval,
+            startRelativeTime: 0,
+            endRelativeTime: 0,
             start: point,
             end: point,
             provenance: .authoritative,
@@ -251,7 +427,7 @@ public struct TimedStrokeEmitter: Equatable, Sendable {
     public mutating func advance(
         to point: TimedStrokePoint
     ) throws -> TimedStrokeEmissionCursor? {
-        guard let originTimestamp, let previous else {
+        guard let originTimestamp, let previous, let previousRelativeTime else {
             throw TimedStrokeEmitterError.strokeNotActive
         }
         guard point.sample.timestamp.isFinite,
@@ -283,11 +459,14 @@ public struct TimedStrokeEmitter: Equatable, Sendable {
         }
 
         self.previous = point
+        self.previousRelativeTime = relativeTime
         nextTickIndex = nextIndex
         guard finalTickIndex >= firstTickIndex else { return nil }
         return TimedStrokeEmissionCursor(
             originTimestamp: originTimestamp,
             interval: timeInterval,
+            startRelativeTime: previousRelativeTime,
+            endRelativeTime: relativeTime,
             start: previous,
             end: point,
             provenance: .authoritative,
@@ -299,10 +478,10 @@ public struct TimedStrokeEmitter: Equatable, Sendable {
     }
 
     /// Evaluates speculative ticks from a value copy of authoritative state.
-    public func prediction(
+    public mutating func prediction(
         to point: TimedStrokePoint
     ) throws -> TimedStrokeEmissionCursor? {
-        guard let originTimestamp, let previous else {
+        guard let originTimestamp, let previous, let previousRelativeTime else {
             throw TimedStrokeEmitterError.strokeNotActive
         }
         guard point.sample.timestamp.isFinite,
@@ -323,17 +502,28 @@ public struct TimedStrokeEmitter: Equatable, Sendable {
             through: relativeTime,
             interval: timeInterval
         )
-        guard finalTickIndex >= nextTickIndex else { return nil }
-        _ = try Self.indexAfter(finalTickIndex)
+        let firstTickIndex = nextTickIndex
+        let nextIndex: Int64
+        if finalTickIndex >= firstTickIndex {
+            nextIndex = try Self.indexAfter(finalTickIndex)
+        } else {
+            nextIndex = firstTickIndex
+        }
+        self.previous = point
+        self.previousRelativeTime = relativeTime
+        nextTickIndex = nextIndex
+        guard finalTickIndex >= firstTickIndex else { return nil }
         return TimedStrokeEmissionCursor(
             originTimestamp: originTimestamp,
             interval: timeInterval,
+            startRelativeTime: previousRelativeTime,
+            endRelativeTime: relativeTime,
             start: previous,
             end: point,
             provenance: .prediction,
             beginCandidate: nil,
             finishCandidate: nil,
-            nextTickIndex: nextTickIndex,
+            nextTickIndex: firstTickIndex,
             finalTickIndex: finalTickIndex
         )
     }
@@ -344,7 +534,7 @@ public struct TimedStrokeEmitter: Equatable, Sendable {
         at point: TimedStrokePoint,
         endpointAlreadySupplied: Bool = false
     ) throws -> TimedStrokeEmissionCursor {
-        guard let originTimestamp, let previous else {
+        guard let originTimestamp, let previous, let previousRelativeTime else {
             throw TimedStrokeEmitterError.strokeNotActive
         }
         try Self.validate(point)
@@ -385,6 +575,8 @@ public struct TimedStrokeEmitter: Equatable, Sendable {
         let cursor = TimedStrokeEmissionCursor(
             originTimestamp: originTimestamp,
             interval: timeInterval,
+            startRelativeTime: previousRelativeTime,
+            endRelativeTime: relativeTime,
             start: previous,
             end: point,
             provenance: .authoritative,
@@ -400,6 +592,7 @@ public struct TimedStrokeEmitter: Equatable, Sendable {
     public mutating func reset() {
         originTimestamp = nil
         previous = nil
+        previousRelativeTime = nil
         nextTickIndex = 1
     }
 
