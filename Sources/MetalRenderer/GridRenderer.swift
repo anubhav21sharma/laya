@@ -1016,6 +1016,46 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    private func validateStrokeBeginSample(
+        _ sample: StrokeSample
+    ) throws {
+        guard sample.phase == .began,
+              sample.kind == .actual || sample.kind == .coalesced
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+    }
+
+    private func validateStrokeAppendSample(
+        _ sample: StrokeSample
+    ) throws {
+        guard sample.phase == .moved,
+              sample.kind != .estimatedUpdate
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+    }
+
+    private func validateStrokeFinishSample(
+        _ sample: StrokeSample
+    ) throws {
+        guard sample.phase == .ended,
+              sample.kind == .actual || sample.kind == .coalesced
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+    }
+
+    private func validateEstimatedStrokeUpdateSample(
+        _ sample: StrokeSample
+    ) throws {
+        guard sample.phase == .moved,
+              sample.kind == .estimatedUpdate
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+    }
+
     private func compiledBrush(
         for style: StrokeRenderStyle
     ) throws -> CompiledBrush {
@@ -1049,6 +1089,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         sample: StrokeSample,
         style: StrokeRenderStyle
     ) throws {
+        try validateStrokeBeginSample(sample)
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         let wasIdle = isIdle
@@ -1059,11 +1100,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 succeeded: operationSucceeded
             )
         }
-        guard sample.phase == .began,
-              sample.kind != .predicted,
-              sample.kind != .estimatedUpdate,
-              isIdle
-        else {
+        guard isIdle else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let compiledBrush = try compiledBrush(for: style)
@@ -1176,6 +1213,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         sample: StrokeSample
     ) throws {
+        try validateStrokeAppendSample(sample)
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         defer {
@@ -1202,6 +1240,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         samples: [StrokeSample]
     ) throws {
         guard !samples.isEmpty else { return }
+        for sample in samples {
+            try validateStrokeAppendSample(sample)
+        }
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         defer {
@@ -1510,6 +1551,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         sample: StrokeSample,
         maximumRetainedBytes: Int
     ) throws {
+        try validateStrokeFinishSample(sample)
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         let wasIdle = isIdle
@@ -1519,12 +1561,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 ownsEventOperation,
                 succeeded: operationSucceeded
             )
-        }
-        guard sample.phase == .ended,
-              sample.kind != .predicted,
-              sample.kind != .estimatedUpdate
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
         }
         try requireCollectingStroke(token: token)
         do {
@@ -1548,6 +1584,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         sample: StrokeSample
     ) throws {
+        try validateStrokeFinishSample(sample)
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         defer {
@@ -1555,12 +1592,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 ownsEventOperation,
                 succeeded: operationSucceeded
             )
-        }
-        guard sample.phase == .ended,
-              sample.kind != .predicted,
-              sample.kind != .estimatedUpdate
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
         }
         try requireCollectingStroke(token: token)
         recordStrokeRuntimeInput(sample)
@@ -1657,6 +1688,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         token: RendererOperationToken,
         sample: StrokeSample
     ) throws {
+        try validateEstimatedStrokeUpdateSample(sample)
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         defer {
@@ -1665,12 +1697,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 succeeded: operationSucceeded
             )
         }
-        guard sample.kind == .estimatedUpdate else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
         recordStrokeRuntimeInput(sample)
         try requireEditableStroke(token: token)
-        guard transientStrokeBuffer != nil else {
+        guard transientStrokeBuffer != nil,
+              let scheduler = activeStroke?.scheduler
+        else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         var updateDeriver = brushInputDeriver
@@ -1743,6 +1774,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 depositionFrameBudget.maximumPredictedInstances
                     - retainedPredictionPrefixProjectedCount,
                 replayLimits.maximumProjectedInstances
+                    - retainedActualProjectedCount
+                    - retainedPredictionPrefixProjectedCount,
+                scheduler.predictedCapacity
                     - retainedActualProjectedCount
                     - retainedPredictionPrefixProjectedCount
             )
@@ -3519,6 +3553,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     var compatibilityInkCoordinatorTransactionTokenForTesting: UInt64? {
         strokeRenderCoordinator?.nextTransactionTokenForTesting
+    }
+
+    var brushLabInputReceiptPendingForTesting: Bool {
+        brushLabPendingInputReceiptNanoseconds != nil
+    }
+
+    var rendererEventDiagnosticsForTesting:
+        RendererEventDispatcher.Diagnostics
+    {
+        rendererEventDispatcher.diagnostics
     }
 
     @discardableResult

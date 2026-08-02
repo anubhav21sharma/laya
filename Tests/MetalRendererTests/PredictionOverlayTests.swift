@@ -150,6 +150,151 @@ struct PredictionOverlayTests {
         try setup.renderer.cancelStroke(token: token)
     }
 
+    @Test(arguments: [StrokeSampleKind.predicted, .estimatedUpdate])
+    @MainActor
+    func invalidAppendEndpointKindsRejectWithoutAnyInputSideEffect(
+        kind: StrokeSampleKind
+    ) async throws {
+        for (offset, phase) in [StrokePhase.began, .ended].enumerated() {
+            guard let setup = try predictionRendererSetup() else { return }
+            let brush = try await setup.compileNativeInk()
+            try setup.renderer.activateDrawBrush(brush)
+            setup.renderer.configureStrokeRuntimeTelemetry(
+                profile: .syntheticTest
+            )
+            let token = RendererOperationToken(
+                rawValue: UInt64(720 + offset)
+                    + (kind == .predicted ? 0 : 10)
+            )
+            try setup.renderer.beginStroke(
+                token: token,
+                sample: predictionInputSample(
+                    x: 8,
+                    timestamp: 0,
+                    phase: .began
+                ),
+                style: predictionStyle(brush)
+            )
+            _ = setup.renderer.takeBrushLabEventToSubmitNanoseconds(
+                submittedAt: UInt64.max
+            )
+            let before = predictionMutationSnapshot(setup.renderer)
+
+            #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
+                try setup.renderer.appendStroke(
+                    token: token,
+                    sample: predictionInvalidLifecycleSample(
+                        x: 12,
+                        timestamp: 0.01,
+                        phase: phase,
+                        kind: kind
+                    )
+                )
+            }
+
+            #expect(predictionMutationSnapshot(setup.renderer) == before)
+            try setup.renderer.cancelStroke(token: token)
+        }
+    }
+
+    @Test
+    @MainActor
+    func mixedBatchWithInvalidLaterSampleRejectsWithoutValidPrefixMutation()
+        async throws
+    {
+        guard let setup = try predictionRendererSetup() else { return }
+        let brush = try await setup.compileNativeInk()
+        try setup.renderer.activateDrawBrush(brush)
+        setup.renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
+        let token = RendererOperationToken(rawValue: 740)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: predictionInputSample(
+                x: 8,
+                timestamp: 0,
+                phase: .began
+            ),
+            style: predictionStyle(brush)
+        )
+        _ = setup.renderer.takeBrushLabEventToSubmitNanoseconds(
+            submittedAt: UInt64.max
+        )
+        let before = predictionMutationSnapshot(setup.renderer)
+
+        #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
+            try setup.renderer.appendStrokeBatch(
+                token: token,
+                samples: [
+                    predictionInputSample(
+                        x: 12,
+                        timestamp: 0.01,
+                        phase: .moved
+                    ),
+                    predictionInvalidLifecycleSample(
+                        x: 14,
+                        timestamp: 0.02,
+                        phase: .ended,
+                        kind: .predicted
+                    ),
+                ]
+            )
+        }
+
+        #expect(predictionMutationSnapshot(setup.renderer) == before)
+        try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test(arguments: [StrokePhase.began, .ended])
+    @MainActor
+    func estimatedUpdateEndpointPhaseRejectsWithoutAnyInputSideEffect(
+        phase: StrokePhase
+    ) async throws {
+        guard let setup = try predictionRendererSetup() else { return }
+        let brush = try await setup.compileNativeInk()
+        try setup.renderer.activateDrawBrush(brush)
+        setup.renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
+        let token = RendererOperationToken(
+            rawValue: phase == .began ? 741 : 742
+        )
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: predictionInputSample(
+                x: 8,
+                timestamp: 0,
+                phase: .began
+            ),
+            style: predictionStyle(brush)
+        )
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: predictionEstimatedSample(
+                x: 9,
+                timestamp: 0.001,
+                index: 123
+            )
+        )
+        _ = setup.renderer.takeBrushLabEventToSubmitNanoseconds(
+            submittedAt: UInt64.max
+        )
+        let before = predictionMutationSnapshot(setup.renderer)
+
+        #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
+            try setup.renderer.applyEstimatedStrokeUpdate(
+                token: token,
+                sample: predictionInvalidLifecycleSample(
+                    x: 12,
+                    timestamp: 0.01,
+                    phase: phase,
+                    kind: .estimatedUpdate,
+                    estimationUpdateIndex: 123
+                )
+            )
+        }
+
+        #expect(predictionMutationSnapshot(setup.renderer) == before)
+        try setup.renderer.cancelStroke(token: token)
+    }
+
     @Test
     func admissionTruncatesEachPredictionDimensionAndRecordsEveryOverload() {
         let admission = PredictionOverlay.admit(
@@ -905,6 +1050,89 @@ struct PredictionOverlayTests {
 
     @Test
     @MainActor
+    func predictedEstimatedReplaySubtractsPendingCorrectionCapacity()
+        async throws
+    {
+        guard let setup = try predictionRendererSetup() else { return }
+        let brush = try await setup.compileNativeInk()
+        try setup.renderer.activateDrawBrush(brush)
+        let token = RendererOperationToken(rawValue: 716)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: predictionUnresolvedActualBegan(index: 121),
+            style: predictionStyle(brush)
+        )
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: predictionEstimatedSample(
+                x: 9,
+                timestamp: 0.001,
+                index: 122
+            )
+        )
+        let actualBefore = try #require(
+            setup.renderer.transientStrokeBuffer?.actualChunks
+        )
+        let correctionCount = setup.renderer
+            .harnessScheduledPredictedRecords
+            .filter { !$0.isPredicted }
+            .count
+        #expect(correctionCount > 0)
+        let constrained = try predictionBudget(
+            predictedPerFrame: 1,
+            authoritativeCapacity: 64,
+            predictedCapacity: correctionCount
+        )
+        _ = setup.renderer.replaceDepositionFrameBudgetForHarness(
+            constrained
+        )
+        _ = try #require(
+            setup.renderer.replaceActiveStrokeSchedulerForHarness(
+                constrained
+            )
+        )
+        let authoritativeBefore =
+            setup.renderer.harnessScheduledAuthoritativeRecords
+
+        try setup.renderer.applyEstimatedStrokeUpdate(
+            token: token,
+            sample: predictionEstimatedUpdateSample(
+                x: 10_000,
+                timestamp: 1,
+                index: 122
+            )
+        )
+
+        #expect(
+            setup.renderer.transientStrokeBuffer?.actualChunks
+                == actualBefore
+        )
+        #expect(
+            setup.renderer.harnessScheduledAuthoritativeRecords
+                == authoritativeBefore
+        )
+        #expect(
+            setup.renderer.harnessScheduledPredictedRecords.count
+                == correctionCount
+        )
+        #expect(
+            setup.renderer.harnessScheduledPredictedRecords
+                .allSatisfy { !$0.isPredicted }
+        )
+        #expect(
+            setup.renderer.transientStrokeBuffer?.predictedDabCount == 0
+        )
+        #expect(
+            setup.renderer.predictionOverlay.snapshot.lastOverload
+                .contains(.projectedInstances)
+        )
+        #expect(setup.renderer.activeStroke?.token == token)
+        #expect(setup.renderer.activeStroke?.isFinishedTransiently == false)
+        try setup.renderer.cancelStroke(token: token)
+    }
+
+    @Test
+    @MainActor
     func rendererRejectsMismatchedPredictionInvalidationAtomically()
         async throws
     {
@@ -1191,6 +1419,43 @@ private struct PredictionRendererSetup {
     }
 }
 
+private struct PredictionMutationSnapshot: Equatable {
+    let receiptPending: Bool
+    let runtimeInputProvenance: StrokeRuntimeInputProvenanceCounts?
+    let eventDiagnostics: RendererEventDispatcher.Diagnostics
+    let coordinator: StrokeRenderSnapshot?
+    let coordinatorTransactionToken: UInt64?
+    let buffer: TransientStrokeBuffer?
+    let authoritative: [ProjectedDepositionRecord]
+    let predicted: [ProjectedDepositionRecord]
+    let overlay: PredictionOverlaySnapshot
+    let activeToken: RendererOperationToken?
+    let isFinishedTransiently: Bool?
+}
+
+@MainActor
+private func predictionMutationSnapshot(
+    _ renderer: GridRenderer
+) -> PredictionMutationSnapshot {
+    PredictionMutationSnapshot(
+        receiptPending: renderer.brushLabInputReceiptPendingForTesting,
+        runtimeInputProvenance:
+            renderer.strokeRuntimeSnapshot?.inputProvenance,
+        eventDiagnostics: renderer.rendererEventDiagnosticsForTesting,
+        coordinator:
+            renderer.compatibilityInkCoordinatorSnapshotForTesting,
+        coordinatorTransactionToken:
+            renderer.compatibilityInkCoordinatorTransactionTokenForTesting,
+        buffer: renderer.transientStrokeBuffer,
+        authoritative: renderer.harnessScheduledAuthoritativeRecords,
+        predicted: renderer.harnessScheduledPredictedRecords,
+        overlay: renderer.predictionOverlay.snapshot,
+        activeToken: renderer.activeStroke?.token,
+        isFinishedTransiently:
+            renderer.activeStroke?.isFinishedTransiently
+    )
+}
+
 @MainActor
 private func predictionRendererSetup() throws -> PredictionRendererSetup? {
     guard let device = MTLCreateSystemDefaultDevice(),
@@ -1271,7 +1536,8 @@ private func predictionInvalidLifecycleSample(
     x: Float,
     timestamp: TimeInterval,
     phase: StrokePhase,
-    kind: StrokeSampleKind
+    kind: StrokeSampleKind,
+    estimationUpdateIndex: Int = 120
 ) -> StrokeSample {
     StrokeSample(
         position: ScreenPoint(x: x, y: 32),
@@ -1281,7 +1547,8 @@ private func predictionInvalidLifecycleSample(
         source: .pencil,
         kind: kind,
         capabilities: [.pressure],
-        estimationUpdateIndex: kind == .estimatedUpdate ? 120 : nil
+        estimationUpdateIndex:
+            kind == .estimatedUpdate ? estimationUpdateIndex : nil
     )
 }
 
