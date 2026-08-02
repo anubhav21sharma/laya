@@ -125,10 +125,17 @@ struct StrokeVelocityFilterTests {
 
         let nextIndex = StrokeVelocityFilter.segmentCapacity + 1
         let nextTime = Double(nextIndex) * StrokeVelocityFilter.minimumDeltaTime
-        let velocity = filter.update(to: point(Float(nextIndex)), time: nextTime)
+        let velocity = filter.update(
+            to: point(Float(nextIndex + 1)),
+            time: nextTime
+        )
 
         #expect(filter.snapshot.segmentCount == StrokeVelocityFilter.segmentCapacity)
-        expect(velocity, equals: Float(1) / Float(StrokeVelocityFilter.minimumDeltaTime))
+        expect(
+            velocity,
+            equals: Float(1_625),
+            tolerance: 0.01
+        )
         #expect(filter.capacityFallbackEvictionCountForTesting == 0)
     }
 
