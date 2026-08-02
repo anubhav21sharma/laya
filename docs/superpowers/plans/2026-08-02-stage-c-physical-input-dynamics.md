@@ -381,7 +381,7 @@ fixtures lock v1/hash-schema-2 and v2/hash-schema-3 field order and digests.
 
 **Files:**
 
-- Create `Scripts/verify-swift-testing-baseline.sh`.
+- Create `scripts/verify-swift-testing-baseline.sh`.
 - Create `Tests/Baselines/stage-b-known-issues.txt`.
 - Create `Tests/Baselines/README.md` documenting the normalization contract.
 
@@ -404,7 +404,7 @@ swift test 2>&1 | tee /tmp/stage-c-preimplementation-swift-test.log
 status=${PIPESTATUS[0]}
 set -e
 test "$status" -ne 0
-Scripts/verify-swift-testing-baseline.sh \
+scripts/verify-swift-testing-baseline.sh \
   /tmp/stage-c-preimplementation-swift-test.log \
   Tests/Baselines/stage-b-known-issues.txt
 ```
@@ -865,7 +865,7 @@ swift test 2>&1 | tee /tmp/stage-c-final-swift-test.log
 status=${PIPESTATUS[0]}
 set -e
 test "$status" -ne 0
-Scripts/verify-swift-testing-baseline.sh \
+scripts/verify-swift-testing-baseline.sh \
   /tmp/stage-c-final-swift-test.log \
   Tests/Baselines/stage-b-known-issues.txt
 ```
