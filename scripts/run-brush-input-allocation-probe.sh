@@ -34,4 +34,6 @@ xcrun clang \
 DYLD_INSERT_LIBRARIES="$probe" \
   "$helper" --self-test "$repo_root"
 DYLD_INSERT_LIBRARIES="$probe" \
+  "$helper" --velocity-filter "$repo_root"
+DYLD_INSERT_LIBRARIES="$probe" \
   "$helper" --production "$repo_root"

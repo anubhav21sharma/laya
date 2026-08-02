@@ -115,6 +115,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case metalUnavailable
     case probeUnavailable
     case selfTestMissedAllocation
+    case velocityFilterAllocations(total: UInt64)
     case offMainEstimatedAllocations(total: UInt64, maximum: UInt64)
     case offMainAllocationRegression(String)
     case productionAllocations(
@@ -135,6 +136,8 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
             "allocator probe symbols are unavailable"
         case .selfTestMissedAllocation:
             "allocator probe missed the deliberate Array allocation"
+        case let .velocityFilterAllocations(total):
+            "velocity filter allocated \(total) times after warm-up"
         case let .offMainEstimatedAllocations(total, maximum):
             "off-main estimated correction allocated \(total) times; "
                 + "maximum single correction=\(maximum)"
@@ -184,6 +187,8 @@ private struct BrushInputAllocationProbeHarness {
             switch mode {
             case "--self-test":
                 try runSelfTest(probe: probe)
+            case "--velocity-filter":
+                try runVelocityFilterProbe(probe: probe)
             case "--production":
                 try await runProduction(probe: probe, root: root)
             default:
@@ -215,6 +220,54 @@ private struct BrushInputAllocationProbeHarness {
         print(
             "ALLOCATOR PROBE SELF-TEST PASS allocations=\(allocations)"
         )
+    }
+
+    private static func runVelocityFilterProbe(
+        probe: AllocatorProbe
+    ) throws {
+        var filter = StrokeVelocityFilter()
+        _ = filter.begin(at: WorldPoint(x: 0, y: 0), time: 0)
+        _ = runVelocityFilterUpdates(
+            filter: &filter,
+            startingAt: 1,
+            count: 128
+        )
+
+        probe.arm()
+        let checksum = runVelocityFilterUpdates(
+            filter: &filter,
+            startingAt: 129,
+            count: 1_000_000
+        )
+        let allocations = probe.disarm()
+
+        guard allocations == 0 else {
+            throw ProbeHarnessError.velocityFilterAllocations(
+                total: allocations
+            )
+        }
+        print(
+            "ALLOCATOR PROBE VELOCITY FILTER PASS allocations=0 "
+                + "checksum=\(checksum)"
+        )
+    }
+
+    @inline(never)
+    private static func runVelocityFilterUpdates(
+        filter: inout StrokeVelocityFilter,
+        startingAt start: Int,
+        count: Int
+    ) -> UInt64 {
+        var checksum: UInt64 = 0
+        for index in start..<(start + count) {
+            let time = Double(index) * StrokeVelocityFilter.minimumDeltaTime
+            let velocity = filter.update(
+                to: WorldPoint(x: Float(index), y: 0),
+                time: time
+            )
+            checksum &+= UInt64(velocity.bitPattern)
+        }
+        return checksum
     }
 
     @MainActor

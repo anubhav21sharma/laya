@@ -1,6 +1,5 @@
-import Darwin
 import Foundation
-import PatternEngine
+@testable import PatternEngine
 import Testing
 
 @Suite("StrokeVelocityFilter")
@@ -38,6 +37,28 @@ struct StrokeVelocityFilterTests {
         let velocity = filter.update(to: point(7), time: 0.05)
 
         expect(velocity, equals: 150)
+    }
+
+    @Test
+    func largeTimestampBoundaryRetainsARealFractionalCrossing() {
+        let base = 1_000_000_000_000.0
+        let firstEnd = base + 0.010009765625
+        let current = base + 0.049072265625
+        let windowStart = current - StrokeVelocityFilter.windowDuration
+        let crossingDuration = firstEnd - windowStart
+        let secondDuration = current - firstEnd
+        var filter = StrokeVelocityFilter()
+        _ = filter.begin(at: point(0), time: base)
+        _ = filter.update(to: point(0), time: firstEnd)
+
+        let velocity = filter.update(to: point(3.90625), time: current)
+        let expected = Float(
+            100 * secondDuration / (crossingDuration + secondDuration)
+        )
+
+        #expect(crossingDuration == 0.0009765625)
+        expect(velocity, equals: expected)
+        #expect(filter.snapshot.segmentCount == 2)
     }
 
     @Test
@@ -87,6 +108,28 @@ struct StrokeVelocityFilterTests {
         expect(raw.snapshot.velocity, equals: equivalent.snapshot.velocity)
         #expect(raw.snapshot.segmentCount == equivalent.snapshot.segmentCount)
         #expect(raw.snapshot.segmentCount <= StrokeVelocityFilter.segmentCapacity)
+    }
+
+    @Test
+    func fullRingEvictsOnlyTheSegmentAtTheNextWindowBoundary() {
+        var filter = StrokeVelocityFilter()
+        _ = filter.begin(at: point(0), time: 0)
+        for index in 1...StrokeVelocityFilter.segmentCapacity {
+            let time = Double(index) * StrokeVelocityFilter.minimumDeltaTime
+            _ = filter.update(to: point(Float(index)), time: time)
+        }
+        #expect(
+            filter.snapshot.segmentCount == StrokeVelocityFilter.segmentCapacity
+        )
+        #expect(filter.capacityFallbackEvictionCountForTesting == 0)
+
+        let nextIndex = StrokeVelocityFilter.segmentCapacity + 1
+        let nextTime = Double(nextIndex) * StrokeVelocityFilter.minimumDeltaTime
+        let velocity = filter.update(to: point(Float(nextIndex)), time: nextTime)
+
+        #expect(filter.snapshot.segmentCount == StrokeVelocityFilter.segmentCapacity)
+        expect(velocity, equals: Float(1) / Float(StrokeVelocityFilter.minimumDeltaTime))
+        #expect(filter.capacityFallbackEvictionCountForTesting == 0)
     }
 
     @Test
@@ -157,7 +200,7 @@ struct StrokeVelocityFilterTests {
     }
 
     @Test
-    func millionUpdatesAfterWarmupDoNotGrowTheDefaultHeap() {
+    func millionUpdatesAfterWarmupKeepTheInlineRingBounded() {
         var filter = StrokeVelocityFilter()
         _ = filter.begin(at: point(0), time: 0)
         for index in 1...128 {
@@ -165,14 +208,10 @@ struct StrokeVelocityFilterTests {
             _ = filter.update(to: point(Float(index)), time: time)
         }
 
-        let heapBefore = defaultHeapBytes()
         for index in 129...1_000_128 {
             let time = Double(index) * StrokeVelocityFilter.minimumDeltaTime
             _ = filter.update(to: point(Float(index)), time: time)
         }
-        let heapAfter = defaultHeapBytes()
-
-        #expect(heapAfter == heapBefore)
         #expect(filter.snapshot.segmentCount <= StrokeVelocityFilter.segmentCapacity)
     }
 }
@@ -187,10 +226,4 @@ private func expect(
     tolerance: Float = 0.001
 ) {
     #expect(abs(actual - expected) <= tolerance)
-}
-
-private func defaultHeapBytes() -> Int {
-    var statistics = malloc_statistics_t()
-    malloc_zone_statistics(malloc_default_zone(), &statistics)
-    return Int(statistics.size_allocated)
 }
