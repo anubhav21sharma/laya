@@ -20,6 +20,8 @@ public enum StrokeRenderCoordinatorError: Error, Equatable, Sendable {
 /// transaction; only a successful commit makes the candidate authoritative.
 public struct PreparedStrokeCoordinatorEmission: Sendable {
     public var work: [AuthoritativeStrokeWork] { emission.work }
+    public let predictionProvenanceBoundary:
+        PredictionProvenanceBoundary
 
     let emission: StrokeCoordinatorEmission
     fileprivate let coordinatorIdentity: UUID
@@ -53,6 +55,14 @@ public final class StrokeRenderCoordinator {
 
     var generatorSnapshot: BrushStrokeGenerator { generator }
     var inputDeriverSnapshot: BrushInputDeriver { inputDeriver }
+    public var predictionProvenanceBoundary:
+        PredictionProvenanceBoundary
+    {
+        PredictionProvenanceBoundary(
+            coordinatorRevision: revision,
+            nextAuthoritativeOrdinal: generator.emittedDabCount
+        )
+    }
 
     private var generator: BrushStrokeGenerator
     private var inputDeriver = BrushInputDeriver()
@@ -406,6 +416,8 @@ public final class StrokeRenderCoordinator {
         nextTransactionToken = successor
         transactionState = .prepared(token: token, baseRevision: revision)
         return PreparedStrokeCoordinatorEmission(
+            predictionProvenanceBoundary:
+                predictionProvenanceBoundary,
             emission: emission,
             coordinatorIdentity: coordinatorIdentity,
             token: token,

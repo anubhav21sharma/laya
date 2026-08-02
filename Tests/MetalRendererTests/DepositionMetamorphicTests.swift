@@ -1,6 +1,8 @@
+import BrushFormat
 import Foundation
 import Metal
 @testable import MetalRenderer
+import PatternEngine
 import Testing
 
 @Suite("Native deposition canonical metamorphic evidence", .serialized)
@@ -66,6 +68,182 @@ struct DepositionMetamorphicTests {
             #expect(evidence.invariantResults[invariant] == true)
         }
     }
+
+    @Test
+    @MainActor
+    func arbitraryPredictionReplacementCadenceLeavesCommittedBytesUnchanged()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try depositionHarnessTestLibrary(device: device)
+        let authoritative = predictionCadenceTrace()
+        let expected = try await committedPredictionCadenceBytes(
+            authoritative,
+            device: device,
+            library: library
+        )
+
+        for cadence in [1, 2, 3, 5] {
+            var trace: [StrokeSample] = []
+            trace.reserveCapacity(authoritative.count * (cadence + 1))
+            for (index, sample) in authoritative.enumerated() {
+                if sample.phase != .ended {
+                    trace.append(sample)
+                }
+                guard sample.phase == .moved,
+                      index + 1 < authoritative.count
+                else {
+                    if sample.phase == .ended { trace.append(sample) }
+                    continue
+                }
+                let next = authoritative[index + 1]
+                for replacement in 1...cadence {
+                    let fraction = Float(replacement) / Float(cadence + 1)
+                    trace.append(
+                        StrokeSample(
+                            position: ScreenPoint(
+                                x: sample.position.x
+                                    + (next.position.x - sample.position.x)
+                                        * fraction,
+                                y: sample.position.y
+                                    + (next.position.y - sample.position.y)
+                                        * fraction
+                            ),
+                            pressure: sample.pressure,
+                            timestamp: sample.timestamp
+                                + (next.timestamp - sample.timestamp)
+                                    * Double(fraction),
+                            phase: .moved,
+                            source: .pencil,
+                            kind: .predicted
+                        )
+                    )
+                }
+            }
+            let actual = try await committedPredictionCadenceBytes(
+                trace,
+                device: device,
+                library: library
+            )
+            #expect(actual == expected, "Prediction cadence \(cadence)")
+        }
+    }
+}
+
+private func predictionCadenceTrace() -> [StrokeSample] {
+    [
+        predictionCadenceSample(x: 16, timestamp: 0, phase: .began),
+        predictionCadenceSample(x: 25, timestamp: 0.01, phase: .moved),
+        predictionCadenceSample(x: 34, timestamp: 0.02, phase: .moved),
+        predictionCadenceSample(x: 43, timestamp: 0.03, phase: .moved),
+        predictionCadenceSample(x: 52, timestamp: 0.04, phase: .moved),
+        predictionCadenceSample(x: 52, timestamp: 0.05, phase: .ended),
+    ]
+}
+
+private func predictionCadenceSample(
+    x: Float,
+    timestamp: TimeInterval,
+    phase: StrokePhase
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x, y: 32),
+        pressure: 0.65,
+        timestamp: timestamp,
+        phase: phase,
+        source: .pencil,
+        capabilities: [.pressure]
+    )
+}
+
+@MainActor
+private func committedPredictionCadenceBytes(
+    _ trace: [StrokeSample],
+    device: any MTLDevice,
+    library: any MTLLibrary
+) async throws -> [UInt8] {
+    let queue = try #require(device.makeCommandQueue())
+    let renderer = try GridRenderer(
+        device: device,
+        library: library,
+        drawableSize: PatternSize(width: 64, height: 64),
+        configuration: TilingCanvasConfiguration(
+            pixelSize: PixelSize(width: 64, height: 64),
+            tiling: .grid
+        )
+    )
+    let profile = try BrushDeviceProfile(
+        registryID: device.registryID,
+        recommendedWorkingSetBytes: 1_024 * 1_024 * 1_024,
+        maximumWorkingTextureDimension: 4_096,
+        brushCacheBudgetBytes: 64 * 1_024 * 1_024,
+        targetFramesPerSecond: 120
+    )
+    let compiler = BrushCompiler(
+        device: device,
+        commandQueue: queue,
+        profile: profile,
+        pipelinePreparing: DepositionPipelineLibrary(
+            device: device,
+            library: library
+        ),
+        testHooks: .none
+    )
+    let recipe = try BrushRecipe(
+        id: BrushRecipeID("builtin.native-ink"),
+        replayMode: .appendOnly
+    )
+    let definition = try LegacyBrushRecipeAdapter.definition(
+        from: recipe,
+        displayName: "Prediction Cadence"
+    )
+    let brush = try await compiler.compileAndActivate(
+        package: BrushPackage(
+            manifest: BrushPackageManifest(resources: []),
+            definition: definition,
+            resourceData: [:]
+        )
+    )
+    try renderer.activateDrawBrush(brush)
+    let token = RendererOperationToken(rawValue: 91)
+    let first = try #require(trace.first)
+    let last = try #require(trace.last)
+    try renderer.beginStroke(
+        token: token,
+        sample: first,
+        style: StrokeRenderStyle(
+            color: .black,
+            diameter: 12,
+            compositeMode: .draw,
+            eraserStrength: 1,
+            program: brush.program,
+            renderIdentity: brush.renderIdentity,
+            seed: 7
+        )
+    )
+    for sample in trace.dropFirst().dropLast() {
+        try renderer.appendStroke(token: token, sample: sample)
+        _ = try renderer.flushPendingLiveForHarness()
+    }
+    try renderer.requestStrokeCommit(
+        token: token,
+        sample: last,
+        maximumRetainedBytes: 1_000_000
+    )
+    _ = try renderer.finishCommitForHarness()
+    let texture = try renderer.copyCanonicalForHarness()
+    let bytesPerRow = texture.width * 4
+    var bytes = [UInt8](
+        repeating: 0,
+        count: bytesPerRow * texture.height
+    )
+    texture.getBytes(
+        &bytes,
+        bytesPerRow: bytesPerRow,
+        from: MTLRegionMake2D(0, 0, texture.width, texture.height),
+        mipmapLevel: 0
+    )
+    return bytes
 }
 
 struct MetamorphicScene: Sendable, CustomTestStringConvertible {

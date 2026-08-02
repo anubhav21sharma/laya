@@ -386,6 +386,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    private struct PredictionGenerationLimits {
+        let maximumDabCount: Int
+        let maximumProjectedInstanceCount: Int
+    }
+
+    private struct PreparedPredictionDabs {
+        let range: Range<Int>
+        let overload: PredictionOverloadReasons
+    }
+
+    private struct PredictionGenerationLimitReached: Error {
+        let reason: PredictionOverloadReasons
+    }
+
     /// Renderer-owned collection storage used by the synchronous input and
     /// frame-drain paths. Every buffer is reserved before a stroke can arm the
     /// allocation audit; hot-path reuse clears logical contents while keeping
@@ -465,7 +479,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let tileSize: PatternSize
         let canonical: CanonicalRaster
         let liveTile: PersistentLiveTile
-        let replayTile: ReplayLiveTile
+        let predictionOverlay: PredictionOverlay
     }
 
     struct PreparedRasterReplacement {
@@ -587,7 +601,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     var tileSize: PatternSize { resources.tileSize }
     var canonical: CanonicalRaster { resources.canonical }
     var liveTile: PersistentLiveTile { resources.liveTile }
-    var replayTile: ReplayLiveTile { resources.replayTile }
+    var predictionOverlay: PredictionOverlay {
+        resources.predictionOverlay
+    }
+    var replayTile: ReplayLiveTile { predictionOverlay.surface }
     var tilingStrategy: TilingStrategy
     var activeStroke: ActiveStrokeExecution?
     var pendingRasterOperation: PendingRasterOperation?
@@ -1239,16 +1256,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let limits = transientStrokeBuffer!.activeReplayLimits
-        guard samples.count <= limits.maximumSamples else {
-            throw MetalRendererError.strokeSampleCapacityExceeded(
-                limits.maximumSamples
-            )
+        let maximumPredictionSamples = min(
+            PredictionOverlay.maximumNormalizedSampleCount,
+            limits.maximumSamples
+        )
+        var predictionOverload: PredictionOverloadReasons = []
+        if samples.count > maximumPredictionSamples {
+            predictionOverload.insert(.normalizedSamples)
         }
 
         var previewDeriver = brushInputDeriver
         var previewGenerator = authoritativeGenerator
         var generatedDabCount = 0
         var projectedInstanceCount = 0
+        var predictionWasTruncated = false
         depositionInputScratch.transientChunks.removeAll(
             keepingCapacity: true
         )
@@ -1269,18 +1290,45 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         defer { arenaTransaction.rollback() }
 
+        var admittedSampleCount = 0
         for sample in samples {
+            guard admittedSampleCount < maximumPredictionSamples else {
+                break
+            }
+            admittedSampleCount += 1
             let inputBefore = previewDeriver
             let generatorBefore = previewGenerator
             let worldSample = previewDeriver.deriveAdvancingPrediction(
                 sample,
                 viewport: viewport
             )
-            let prepared = try prepareGeneratedDabs(
+            let preparedPrediction = try prepareBoundedPredictedDabs(
                 generator: &previewGenerator,
-                resetScratch: false
+                resetScratch: false,
+                limits: PredictionGenerationLimits(
+                    maximumDabCount: max(
+                        0,
+                        min(
+                            PredictionOverlay.maximumLogicalDabCount,
+                            limits.maximumDabs
+                        ) - generatedDabCount
+                    ),
+                    maximumProjectedInstanceCount: max(
+                        0,
+                        min(
+                            depositionFrameBudget
+                                .maximumPredictedInstances,
+                            limits.maximumProjectedInstances
+                        ) - projectedInstanceCount
+                    )
+                )
             ) { generator, emit in
                 try generator.append(worldSample, emit: emit)
+            }
+            let prepared = preparedPrediction.range
+            predictionOverload.formUnion(preparedPrediction.overload)
+            if preparedPrediction.overload.isEmpty == false {
+                predictionWasTruncated = true
             }
             let (nextCount, overflow) = generatedDabCount
                 .addingReportingOverflow(prepared.count)
@@ -1320,6 +1368,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             depositionInputScratch.preparedChunkRanges.append(
                 prepared
             )
+            if predictionWasTruncated { break }
         }
 
         depositionInputScratch.settledChunks.removeAll(
@@ -1342,7 +1391,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try appendSettled(depositionInputScratch.settledChunks)
         try rebuildReplayLayer(
             preparedPredictedSuffixCount:
-                depositionInputScratch.preparedChunkRanges.count
+                depositionInputScratch.preparedChunkRanges.count,
+            predictionProvenance:
+                strokeRenderCoordinator?
+                    .predictionProvenanceBoundary,
+            predictionOverload: predictionOverload
         )
         predictedInputDeriver = previewDeriver
         predictedStrokeGenerator = previewGenerator
@@ -1382,6 +1435,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             predictedStrokeGenerator = nil
             return
         }
+        let predictionInvalidationBoundary = strokeRenderCoordinator?
+            .predictionProvenanceBoundary
         if strokeRenderCoordinator != nil {
             // Estimated properties need the existing bounded correction path.
             // The legacy generator mirrors coordinator state after every
@@ -1410,7 +1465,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             generatorBeforeSample: generatorBefore,
             generatorSnapshot: generator,
             inputDeriverBeforeSample: inputBefore,
-            isFinishing: false
+            isFinishing: false,
+            predictionInvalidationBoundary:
+                predictionInvalidationBoundary
         )
         brushInputDeriver = previewDeriver
         strokeGenerator = generator
@@ -1489,6 +1546,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             operationSucceeded = true
             return
         }
+        let predictionInvalidationBoundary = strokeRenderCoordinator?
+            .predictionProvenanceBoundary
         if strokeRenderCoordinator != nil {
             strokeRenderCoordinator = nil
         }
@@ -1512,7 +1571,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             generatorBeforeSample: generatorBefore,
             generatorSnapshot: generator,
             inputDeriverBeforeSample: inputBefore,
-            isFinishing: true
+            isFinishing: true,
+            predictionInvalidationBoundary:
+                predictionInvalidationBoundary
         )
         brushInputDeriver = previewDeriver
         strokeGenerator = generator
@@ -1601,6 +1662,65 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard var generator = plan.generatorBeforeReplacement else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
+        let isPredictedReplay = plan.target == .predicted
+        let predictionProvenance = isPredictedReplay
+            ? strokeRenderCoordinator?.predictionProvenanceBoundary
+            : nil
+        if let predictionProvenance,
+           !predictionOverlay.canInvalidatePrediction(
+                from: predictionProvenance
+           )
+        {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let replayLimits = transientStrokeBuffer!.activeReplayLimits
+        let retainedPredictionPrefix = isPredictedReplay
+            ? transientStrokeBuffer!.predictedChunks[
+                ..<plan.replacedChunkIndex
+            ]
+            : transientStrokeBuffer!.predictedChunks[..<0]
+        let retainedPredictionPrefixDabCount =
+            retainedPredictionPrefix.reduce(0) {
+                $0 + $1.dabs.count
+            }
+        let retainedPredictionPrefixProjectedCount =
+            retainedPredictionPrefix.reduce(0) {
+                $0 + $1.projectedInstanceCount
+            }
+        let retainedActualProjectedCount =
+            transientStrokeBuffer!.actualChunks.reduce(0) {
+                $0 + $1.projectedInstanceCount
+            }
+        let maximumReplacementDabCount = max(
+            0,
+            min(
+                PredictionOverlay.maximumLogicalDabCount
+                    - retainedPredictionPrefixDabCount,
+                replayLimits.maximumDabs
+                    - transientStrokeBuffer!.actualDabCount
+                    - retainedPredictionPrefixDabCount
+            )
+        )
+        let maximumReplacementProjectedCount = max(
+            0,
+            min(
+                depositionFrameBudget.maximumPredictedInstances
+                    - retainedPredictionPrefixProjectedCount,
+                replayLimits.maximumProjectedInstances
+                    - retainedActualProjectedCount
+                    - retainedPredictionPrefixProjectedCount
+            )
+        )
+        var generatedPredictionDabCount = 0
+        var generatedPredictionProjectedCount = 0
+        var predictionWasTruncated = false
+        var predictionOverload: PredictionOverloadReasons = []
+        if isPredictedReplay,
+           transientStrokeBuffer!.predictedSampleCount
+            > PredictionOverlay.maximumNormalizedSampleCount
+        {
+            predictionOverload.insert(.normalizedSamples)
+        }
         var deriver = plan.inputDeriverBeforeReplacement
             ?? (plan.target == .predicted
                 ? brushInputDeriver
@@ -1633,20 +1753,76 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 "Estimated update plan and replay derivation diverged."
             )
             let generatorBefore = generator
-            let prepared = try prepareGeneratedDabs(
-                generator: &generator,
-                resetScratch: false
-            ) {
-                generator, emit in
-                switch replayedSample.phase {
-                case .began:
-                    try generator.begin(replayedSample, emit: emit)
-                case .moved:
-                    try generator.append(replayedSample, emit: emit)
-                case .ended:
-                    try generator.finish(replayedSample, emit: emit)
-                case .cancelled:
-                    throw MetalRendererError.invalidStrokeLifecycle
+            let preparedPrediction: PreparedPredictionDabs
+            if isPredictedReplay, !predictionWasTruncated {
+                preparedPrediction = try prepareBoundedPredictedDabs(
+                    generator: &generator,
+                    resetScratch: false,
+                    limits: PredictionGenerationLimits(
+                        maximumDabCount: max(
+                            0,
+                            maximumReplacementDabCount
+                                - generatedPredictionDabCount
+                        ),
+                        maximumProjectedInstanceCount: max(
+                            0,
+                            maximumReplacementProjectedCount
+                                - generatedPredictionProjectedCount
+                        )
+                    )
+                ) { generator, emit in
+                    switch replayedSample.phase {
+                    case .began:
+                        try generator.begin(replayedSample, emit: emit)
+                    case .moved:
+                        try generator.append(replayedSample, emit: emit)
+                    case .ended:
+                        try generator.finish(replayedSample, emit: emit)
+                    case .cancelled:
+                        throw MetalRendererError.invalidStrokeLifecycle
+                    }
+                }
+            } else if isPredictedReplay {
+                let end = depositionInputScratch.preparedDabs.endIndex
+                preparedPrediction = PreparedPredictionDabs(
+                    range: end..<end,
+                    overload: []
+                )
+            } else {
+                preparedPrediction = PreparedPredictionDabs(
+                    range: try prepareGeneratedDabs(
+                        generator: &generator,
+                        resetScratch: false
+                    ) { generator, emit in
+                        switch replayedSample.phase {
+                        case .began:
+                            try generator.begin(replayedSample, emit: emit)
+                        case .moved:
+                            try generator.append(
+                                replayedSample,
+                                emit: emit
+                            )
+                        case .ended:
+                            try generator.finish(replayedSample, emit: emit)
+                        case .cancelled:
+                            throw MetalRendererError.invalidStrokeLifecycle
+                        }
+                    },
+                    overload: []
+                )
+            }
+            let prepared = preparedPrediction.range
+            if isPredictedReplay {
+                predictionOverload.formUnion(
+                    preparedPrediction.overload
+                )
+                if !preparedPrediction.overload.isEmpty {
+                    predictionWasTruncated = true
+                }
+                generatedPredictionDabCount += prepared.count
+                generatedPredictionProjectedCount += prepared.reduce(0) {
+                    $0 + depositionInputScratch.preparedDabs[$1]
+                        .projectedRange.count
                 }
             }
             depositionInputScratch.transientChunks.append(
@@ -1689,7 +1865,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         case .predicted:
             try rebuildReplayLayer(
                 preparedPredictedSuffixCount:
-                    depositionInputScratch.preparedChunkRanges.count
+                    depositionInputScratch.preparedChunkRanges.count,
+                predictionProvenance: predictionProvenance,
+                predictionOverload: predictionOverload
             )
             predictedStrokeGenerator = generator
             predictedInputDeriver = deriver
@@ -1855,7 +2033,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 label: "Resize Restore Live Clear"
             )
             try encodeTransparentClear(
-                of: replacement.resources.replayTile.texture,
+                of: replacement.resources.predictionOverlay.surface.texture,
                 on: commandBuffer,
                 label: "Resize Restore Replay Clear"
             )
@@ -1989,7 +2167,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 label: "Resize Live Clear"
             )
             try encodeTransparentClear(
-                of: replacement.resources.replayTile.texture,
+                of: replacement.resources.predictionOverlay.surface.texture,
                 on: commandBuffer,
                 label: "Resize Replay Clear"
             )
@@ -2258,11 +2436,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let promotedPredictionCount = scheduler.predictedCount
+        let replayPreparation: ReplayCommitPreparation
         do {
-            try scheduler.promotePredictionToAuthoritative()
+            replayPreparation = try scheduler.prepareReplayForCommit()
         } catch let error as FrameSchedulerError {
             throw rendererError(for: error)
+        }
+        let promotedPredictionCount = replayPreparation
+            .promotedNonPredictedInstanceCount
+        if replayPreparation.discardedPredictedInstanceCount > 0 {
+            let epoch = takeReplayEpoch()
+            predictionOverlay.discard(epoch: epoch)
+            replayStroke.beginReplacementEpoch(epoch)
+            needsReplayClear = true
         }
         let (scheduledHighWater, overflow) =
             scheduledAuthoritativeIdentityHighWater.addingReportingOverflow(
@@ -2976,11 +3162,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         generatorBeforeSample: BrushStrokeGenerator?,
         generatorSnapshot: BrushStrokeGenerator,
         inputDeriverBeforeSample: BrushInputDeriver,
-        isFinishing: Bool
+        isFinishing: Bool,
+        predictionInvalidationBoundary:
+            PredictionProvenanceBoundary? = nil
     ) throws {
         guard transientStrokeBuffer != nil,
               let strokeExecution = activeStroke
         else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        if let predictionInvalidationBoundary,
+           !predictionOverlay.canInvalidatePrediction(
+                from: predictionInvalidationBoundary
+           )
+        {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let dabs = depositionInputScratch.preparedDabs[dabRange]
@@ -3093,6 +3288,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             update.rejection == nil,
             "Renderer must handle every transient buffer rejection"
         )
+        if update.clearedPredictedSuffix {
+            _ = activeStroke?.scheduler?.discardTruePrediction()
+        }
         let buffer = transientStrokeBuffer!
         if buffer.mode == .appendOnly,
            depositionInputScratch.settledChunks.count == 1,
@@ -3148,10 +3346,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             || !buffer.predictedChunks.isEmpty
         {
             if buffer.mode == .appendOnly || isFinishing {
-                try rebuildReplayLayer()
+                try rebuildReplayLayer(
+                    predictionInvalidationBoundary:
+                        predictionInvalidationBoundary
+                )
             } else {
                 try rebuildReplayLayer(
-                    preparedActualSingle: dabRange
+                    preparedActualSingle: dabRange,
+                    predictionInvalidationBoundary:
+                        predictionInvalidationBoundary
                 )
             }
         }
@@ -3200,7 +3403,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 generatorBeforeSample: generated.generatorBefore,
                 generatorSnapshot: generated.generatorAfter,
                 inputDeriverBeforeSample: generated.inputDeriverBefore,
-                isFinishing: isFinishing
+                isFinishing: isFinishing,
+                predictionInvalidationBoundary:
+                    prepared.predictionProvenanceBoundary
             )
         } catch {
             try coordinator.abandon(prepared)
@@ -3512,6 +3717,42 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             (DabAttributes) throws -> Void
         ) throws -> Void
     ) throws -> Range<Int> {
+        try prepareGeneratedDabs(
+            generator: &generator,
+            resetScratch: resetScratch,
+            predictionLimits: nil,
+            generate: generate
+        ).range
+    }
+
+    private func prepareBoundedPredictedDabs(
+        generator: inout BrushStrokeGenerator,
+        resetScratch: Bool,
+        limits: PredictionGenerationLimits,
+        generate: (
+            inout BrushStrokeGenerator,
+            (DabAttributes) throws -> Void
+        ) throws -> Void
+    ) throws -> PreparedPredictionDabs {
+        precondition(limits.maximumDabCount >= 0)
+        precondition(limits.maximumProjectedInstanceCount >= 0)
+        return try prepareGeneratedDabs(
+            generator: &generator,
+            resetScratch: resetScratch,
+            predictionLimits: limits,
+            generate: generate
+        )
+    }
+
+    private func prepareGeneratedDabs(
+        generator: inout BrushStrokeGenerator,
+        resetScratch: Bool,
+        predictionLimits: PredictionGenerationLimits?,
+        generate: (
+            inout BrushStrokeGenerator,
+            (DabAttributes) throws -> Void
+        ) throws -> Void
+    ) throws -> PreparedPredictionDabs {
         let globalMaximumDabs = TransientStrokeBufferContract
             .wholeStrokeDabCapacity
         let globalMaximumProjected = TransientStrokeBufferContract
@@ -3559,43 +3800,80 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             "Generated-dab scratch must be reserved before interactive input."
         )
         var projectedCount = 0
-        try generate(&generator) { dab in
-            guard depositionInputScratch.preparedDabs.count
-                < maximumDabs
-            else {
-                throw MetalRendererError.generatedDabCapacityExceeded(
-                    maximumDabs
+        var overload: PredictionOverloadReasons = []
+        do {
+            try generate(&generator) { dab in
+                let preparedCount = depositionInputScratch
+                    .preparedDabs.count - preparedStart
+                if let predictionLimits,
+                   preparedCount >= predictionLimits.maximumDabCount
+                {
+                    throw PredictionGenerationLimitReached(
+                        reason: .logicalDabs
+                    )
+                }
+                guard depositionInputScratch.preparedDabs.count
+                    < maximumDabs
+                else {
+                    throw MetalRendererError.generatedDabCapacityExceeded(
+                        maximumDabs
+                    )
+                }
+                let projectedStart = depositionInputScratch
+                    .projectedArena.count
+                do {
+                    try appendProjectedRecords(
+                        for: dab,
+                        to: &depositionInputScratch.projectedArena
+                    )
+                } catch {
+                    depositionInputScratch.projectedArena.removeSubrange(
+                        projectedStart..<depositionInputScratch
+                            .projectedArena.count
+                    )
+                    throw error
+                }
+                let projectedRange = projectedStart
+                    ..< depositionInputScratch.projectedArena.count
+                let (nextCount, overflow) = projectedCount
+                    .addingReportingOverflow(projectedRange.count)
+                if let predictionLimits,
+                   (overflow
+                        || nextCount > predictionLimits
+                            .maximumProjectedInstanceCount)
+                {
+                    depositionInputScratch.projectedArena.removeSubrange(
+                        projectedRange
+                    )
+                    throw PredictionGenerationLimitReached(
+                        reason: .projectedInstances
+                    )
+                }
+                guard !overflow, nextCount <= maximumProjected else {
+                    depositionInputScratch.projectedArena.removeSubrange(
+                        projectedRange
+                    )
+                    throw MetalRendererError
+                        .projectedInstanceCapacityExceeded(
+                            maximumProjected
+                        )
+                }
+                projectedCount = nextCount
+                depositionInputScratch.preparedDabs.append(
+                    PreparedGeneratedDab(
+                        attributes: dab,
+                        projectedRange: projectedRange
+                    )
+                )
+                depositionInputScratch.transientDabs.append(
+                    TransientStrokeDab(
+                        attributes: dab,
+                        projectedInstanceCount: projectedRange.count
+                    )
                 )
             }
-            let projectedStart =
-                depositionInputScratch.projectedArena.count
-            try appendProjectedRecords(
-                for: dab,
-                to: &depositionInputScratch.projectedArena
-            )
-            let projectedRange = projectedStart
-                ..< depositionInputScratch.projectedArena.count
-            let (nextCount, overflow) = projectedCount.addingReportingOverflow(
-                projectedRange.count
-            )
-            guard !overflow, nextCount <= maximumProjected else {
-                throw MetalRendererError.projectedInstanceCapacityExceeded(
-                    maximumProjected
-                )
-            }
-            projectedCount = nextCount
-            depositionInputScratch.preparedDabs.append(
-                PreparedGeneratedDab(
-                    attributes: dab,
-                    projectedRange: projectedRange
-                )
-            )
-            depositionInputScratch.transientDabs.append(
-                TransientStrokeDab(
-                    attributes: dab,
-                    projectedInstanceCount: projectedRange.count
-                )
-            )
+        } catch let limit as PredictionGenerationLimitReached {
+            overload.insert(limit.reason)
         }
         recordScratchAllocationIfNeeded(
             capacityBefore: capacityBefore,
@@ -3615,16 +3893,27 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         inputPathStorageAudit.recordGeneratedDabs(
             depositionInputScratch.preparedDabs.capacity
         )
-        return preparedStart
-            ..< depositionInputScratch.preparedDabs.count
+        return PreparedPredictionDabs(
+            range: preparedStart
+                ..< depositionInputScratch.preparedDabs.count,
+            overload: overload
+        )
     }
 
     private func rebuildReplayLayer(
         preparedActualSuffixCount: Int = 0,
         preparedPredictedSuffixCount: Int = 0,
         preparedActualSingle: Range<Int>? = nil,
-        preparedPredictedSingle: Range<Int>? = nil
+        preparedPredictedSingle: Range<Int>? = nil,
+        predictionProvenance: PredictionProvenanceBoundary? = nil,
+        predictionInvalidationBoundary:
+            PredictionProvenanceBoundary? = nil,
+        predictionOverload: PredictionOverloadReasons = []
     ) throws {
+        precondition(
+            predictionProvenance == nil
+                || predictionInvalidationBoundary == nil
+        )
         guard let buffer = transientStrokeBuffer,
               let activeStroke
         else {
@@ -3639,10 +3928,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             depositionInputScratch.replayDirtyRegions.capacity
         depositionInputScratch.replayDirtyRegions.removeAll(
             keepingCapacity: true
-        )
-        replayStroke.appendDirtyRegions(
-            clippedTo: storagePixelSize,
-            into: &depositionInputScratch.replayDirtyRegions
         )
         let replacementCapacityBefore =
             depositionInputScratch.replayRecords.capacity
@@ -3757,30 +4042,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     .visibleEpochProjectedInstanceCapacity
             )
         }
-        for record in depositionInputScratch.replayRecords {
-            depositionInputScratch.replayDirtyRegions.append(
-                record.dirtyRect
-            )
-        }
-        PixelRegionSet.canonicalizeInPlace(
-            &depositionInputScratch.replayDirtyRegions,
-            clippedTo: storagePixelSize
-        )
-        recordScratchAllocationIfNeeded(
-            capacityBefore: regionCapacityBefore,
-            capacityAfter:
-                depositionInputScratch.replayDirtyRegions.capacity
-        )
         try replaceCompiledReplay(
             depositionInputScratch.replayRecords,
-            clearRegions:
-                depositionInputScratch.replayDirtyRegions
+            dirtyRegionCapacityBefore: regionCapacityBefore,
+            predictionProvenance: predictionProvenance,
+            predictionInvalidationBoundary:
+                predictionInvalidationBoundary,
+            predictionOverload: predictionOverload
         )
     }
 
     private func replaceCompiledReplay(
         _ records: [ProjectedDabRecord],
-        clearRegions: [PixelRect]
+        dirtyRegionCapacityBefore: Int,
+        predictionProvenance: PredictionProvenanceBoundary?,
+        predictionInvalidationBoundary:
+            PredictionProvenanceBoundary?,
+        predictionOverload: PredictionOverloadReasons
     ) throws {
         guard let scheduler = activeStroke?.scheduler
         else {
@@ -3806,8 +4084,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             capacityAfter:
                 depositionInputScratch.depositionRecords.capacity
         )
+        let replacement: PredictionReplacementResult
         do {
-            try scheduler.replacePrediction(
+            replacement = try scheduler.replacePrediction(
                 depositionInputScratch.depositionRecords
             )
         } catch let error as FrameSchedulerError {
@@ -3815,15 +4094,100 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
 
         let epoch = takeReplayEpoch()
-        replayTile.planReplacementInPlace(
-            epoch: epoch,
-            canonicalRegions: clearRegions
-        )
-        replayStroke.beginReplacementEpoch(epoch)
-        for record in records {
-            replayStroke.recordDirtyRegion(record.dirtyRect)
+        var overload = predictionOverload
+        if replacement.overloaded {
+            overload.insert(.projectedInstances)
         }
-        counters.totalInstancesThisStroke += records.count
+        let predictedSampleCount = transientStrokeBuffer?
+            .predictedSampleCount ?? 0
+        let predictedDabCount = transientStrokeBuffer?
+            .predictedDabCount ?? 0
+        let predictedInstanceCount = depositionInputScratch
+            .depositionRecords.reduce(0) {
+                $0 + ($1.isPredicted ? 1 : 0)
+            }
+        if predictedInstanceCount
+            > depositionFrameBudget.maximumPredictedInstances
+        {
+            overload.insert(.projectedInstances)
+        }
+        depositionInputScratch.replayDirtyRegions.removeAll(
+            keepingCapacity: true
+        )
+        var retainedPredictedCount = 0
+        for record in records {
+            if record.depositionRecord.isPredicted {
+                guard retainedPredictedCount
+                    < replacement.acceptedPredictedInstanceCount
+                else {
+                    continue
+                }
+                retainedPredictedCount += 1
+            }
+            depositionInputScratch.replayDirtyRegions.append(
+                record.dirtyRect
+            )
+        }
+        PixelRegionSet.canonicalizeInPlace(
+            &depositionInputScratch.replayDirtyRegions,
+            clippedTo: storagePixelSize
+        )
+        recordScratchAllocationIfNeeded(
+            capacityBefore: dirtyRegionCapacityBefore,
+            capacityAfter:
+                depositionInputScratch.replayDirtyRegions.capacity
+        )
+        let admission = PredictionOverlayAdmission(
+            normalizedSampleCount: min(
+                predictedSampleCount,
+                PredictionOverlay.maximumNormalizedSampleCount
+            ),
+            logicalDabCount: min(
+                predictedDabCount,
+                PredictionOverlay.maximumLogicalDabCount
+            ),
+            projectedInstanceCount:
+                replacement.acceptedPredictedInstanceCount,
+            overload: overload
+        )
+        if let predictionInvalidationBoundary,
+           predictionOverlay.hasPrediction(
+                from: predictionInvalidationBoundary
+           ),
+           depositionInputScratch.replayDirtyRegions.isEmpty
+        {
+            precondition(
+                predictionOverlay.invalidatePrediction(
+                    from: predictionInvalidationBoundary,
+                    epoch: epoch
+                ),
+                "Validated prediction provenance must remain current."
+            )
+        } else {
+            predictionOverlay.planReplacementInPlace(
+                epoch: epoch,
+                provenance: predictionProvenance,
+                admission: admission,
+                dirtyRegions:
+                    depositionInputScratch.replayDirtyRegions
+            )
+        }
+        replayStroke.beginReplacementEpoch(epoch)
+        retainedPredictedCount = 0
+        var acceptedRecordCount = 0
+        for record in records {
+            if record.depositionRecord.isPredicted {
+                guard retainedPredictedCount
+                    < replacement.acceptedPredictedInstanceCount
+                else {
+                    continue
+                }
+                retainedPredictedCount += 1
+            }
+            replayStroke.recordDirtyRegion(record.dirtyRect)
+            acceptedRecordCount += 1
+        }
+        counters.totalInstancesThisStroke += acceptedRecordCount
         needsReplayClear = true
         recordBrushLabScheduler(scheduler)
     }
@@ -4230,7 +4594,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             device: device,
             pixelSize: pixelSize
         )
-        let replayTile = try ReplayLiveTile(
+        let predictionOverlay = try PredictionOverlay(
             device: device,
             pixelSize: pixelSize
         )
@@ -4243,7 +4607,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             ),
             canonical: canonical,
             liveTile: liveTile,
-            replayTile: replayTile
+            predictionOverlay: predictionOverlay
         )
     }
 
@@ -4504,7 +4868,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         liveTile.markCleared()
-        replayTile.markCleared(epoch: 0)
+        predictionOverlay.markCleared(epoch: 0)
         needsLiveClear = false
         needsReplayClear = false
     }
@@ -5359,7 +5723,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             needsLiveClear = false
         }
         if encodedReplayClear {
-            replayTile.markCleared(
+            predictionOverlay.markCleared(
                 epoch: nativeEncoding?.replayEpoch
                     ?? replayStroke.renderEpoch
             )
@@ -5405,14 +5769,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             .map(\.replayEpoch)
             .max()
         {
-            replayTile.markVisible(epoch: epoch)
+            predictionOverlay.markVisible(epoch: epoch)
         }
         if let nativeEncoding {
             if nativeEncoding.authoritativeCount > 0 {
                 liveTile.markStamped()
             }
             if nativeEncoding.predictedCount > 0 {
-                replayTile.markVisible(epoch: nativeEncoding.replayEpoch)
+                predictionOverlay.markVisible(
+                    epoch: nativeEncoding.replayEpoch
+                )
             }
         }
 
@@ -5705,7 +6071,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let canvasSizeChanged =
             replacement.resources.canvasPixelSize != resources.canvasPixelSize
         replacement.resources.liveTile.markCleared()
-        replacement.resources.replayTile.markCleared(epoch: 0)
+        replacement.resources.predictionOverlay.markCleared(epoch: 0)
         resources = replacement.resources
         tilingStrategy = replacement.strategy
         radialPageTableTexture = replacement.radialPageTableTexture
@@ -5999,7 +6365,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         brushInputDeriver.reset()
         predictedInputDeriver = nil
         liveTile.hide()
-        replayTile.reset()
+        predictionOverlay.reset()
         completedUploadRanges.removeAll(keepingCapacity: true)
         liveStroke.reset()
         replayStroke.reset()

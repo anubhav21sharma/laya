@@ -5,6 +5,12 @@ struct ScheduledDepositionFrame: Equatable, Sendable {
     let predictedRemaining: Int
 }
 
+extension ProjectedDepositionRecord {
+    var isPredicted: Bool {
+        instance.identity.w & DepositionIdentityFlags.predicted != 0
+    }
+}
+
 struct FrameSchedulerDiagnosticSnapshot: Equatable, Sendable {
     let authoritativePending: Int
     let predictedPending: Int
@@ -12,6 +18,20 @@ struct FrameSchedulerDiagnosticSnapshot: Equatable, Sendable {
     let predictedHighWater: Int
     let authoritativeStorageCapacity: Int
     let predictedStorageCapacity: Int
+    let predictionOverloadCount: UInt64
+    let droppedPredictedInstanceCount: UInt64
+}
+
+struct PredictionReplacementResult: Equatable, Sendable {
+    let acceptedPredictedInstanceCount: Int
+    let droppedPredictedInstanceCount: Int
+
+    var overloaded: Bool { droppedPredictedInstanceCount > 0 }
+}
+
+struct ReplayCommitPreparation: Equatable, Sendable {
+    let promotedNonPredictedInstanceCount: Int
+    let discardedPredictedInstanceCount: Int
 }
 
 enum FrameSchedulerError: Error, Equatable, Sendable {
@@ -33,7 +53,10 @@ final class FrameScheduler: @unchecked Sendable {
             authoritativeStorageCapacity:
                 authoritativeQueue.storageCapacity,
             predictedStorageCapacity:
-                predictionQueue.storageCapacity
+                predictionQueue.storageCapacity,
+            predictionOverloadCount: predictionOverloadCount,
+            droppedPredictedInstanceCount:
+                droppedPredictedInstanceCount
         )
     }
 
@@ -68,8 +91,11 @@ final class FrameScheduler: @unchecked Sendable {
     private var authoritativeQueue: BoundedDepositionQueue
     private var predictionQueue: BoundedDepositionQueue
     private var predictionCandidate: BoundedDepositionQueue
+    private let predictedInstanceBudget: Int
     private var authoritativeHighWater = 0
     private var predictedHighWater = 0
+    private var predictionOverloadCount: UInt64 = 0
+    private var droppedPredictedInstanceCount: UInt64 = 0
 
     init(budget: DepositionFrameBudget) {
         authoritativeQueue = BoundedDepositionQueue(
@@ -81,6 +107,7 @@ final class FrameScheduler: @unchecked Sendable {
         predictionCandidate = BoundedDepositionQueue(
             capacity: budget.maximumPendingPredictedInstances
         )
+        predictedInstanceBudget = budget.maximumPredictedInstances
     }
 
     func enqueueAuthoritative(
@@ -100,22 +127,63 @@ final class FrameScheduler: @unchecked Sendable {
         )
     }
 
+    @discardableResult
     func replacePrediction(
         _ records: [ProjectedDepositionRecord]
-    ) throws {
-        guard records.count <= predictionQueue.capacity else {
+    ) throws -> PredictionReplacementResult {
+        var nonPredictedCount = 0
+        var requestedPredictedCount = 0
+        for record in records {
+            if record.isPredicted {
+                requestedPredictedCount += 1
+            } else {
+                nonPredictedCount += 1
+            }
+        }
+        guard nonPredictedCount <= predictionQueue.capacity else {
             throw FrameSchedulerError.predictedCapacityExceeded(
-                actual: records.count,
+                actual: nonPredictedCount,
                 maximum: predictionQueue.capacity
             )
         }
 
+        let acceptedPredictedCount = min(
+            requestedPredictedCount,
+            min(
+                predictedInstanceBudget,
+                predictionQueue.capacity - nonPredictedCount
+            )
+        )
+        let droppedCount =
+            requestedPredictedCount - acceptedPredictedCount
         predictionCandidate.reset()
-        predictionCandidate.append(records)
+        var retainedPredictedCount = 0
+        for record in records {
+            if record.isPredicted {
+                guard retainedPredictedCount < acceptedPredictedCount else {
+                    continue
+                }
+                retainedPredictedCount += 1
+            }
+            predictionCandidate.append(record)
+        }
         swap(&predictionQueue, &predictionCandidate)
         predictedHighWater = max(
             predictedHighWater,
             predictionQueue.count
+        )
+        if droppedCount > 0 {
+            predictionOverloadCount = Self.saturatingIncrement(
+                predictionOverloadCount
+            )
+            droppedPredictedInstanceCount = Self.saturatingAdd(
+                droppedPredictedInstanceCount,
+                UInt64(droppedCount)
+            )
+        }
+        return PredictionReplacementResult(
+            acceptedPredictedInstanceCount: acceptedPredictedCount,
+            droppedPredictedInstanceCount: droppedCount
         )
     }
 
@@ -190,22 +258,47 @@ final class FrameScheduler: @unchecked Sendable {
         predictionQueue.reset()
     }
 
-    func promotePredictionToAuthoritative() throws {
-        guard predictionQueue.count
-            <= authoritativeQueue.availableCapacity
+    @discardableResult
+    func discardTruePrediction() -> Int {
+        let predictedCount = predictionQueue.count { $0.isPredicted }
+        guard predictedCount > 0 else { return 0 }
+        predictionCandidate.reset()
+        predictionQueue.forEach { record in
+            if !record.isPredicted {
+                predictionCandidate.append(record)
+            }
+        }
+        swap(&predictionQueue, &predictionCandidate)
+        return predictedCount
+    }
+
+    func prepareReplayForCommit() throws -> ReplayCommitPreparation {
+        let nonPredictedCount = predictionQueue.count {
+            !$0.isPredicted
+        }
+        let predictedCount = predictionQueue.count - nonPredictedCount
+        guard nonPredictedCount <= authoritativeQueue.availableCapacity
         else {
             throw FrameSchedulerError.authoritativeCapacityExceeded(
                 current: authoritativeQueue.count,
-                incoming: predictionQueue.count,
+                incoming: nonPredictedCount,
                 maximum: authoritativeQueue.capacity
             )
         }
-        authoritativeQueue.append(contentsOf: predictionQueue)
+        predictionQueue.forEach { record in
+            if !record.isPredicted {
+                authoritativeQueue.append(record)
+            }
+        }
         authoritativeHighWater = max(
             authoritativeHighWater,
             authoritativeQueue.count
         )
         predictionQueue.reset()
+        return ReplayCommitPreparation(
+            promotedNonPredictedInstanceCount: nonPredictedCount,
+            discardedPredictedInstanceCount: predictedCount
+        )
     }
 
     func reset() {
@@ -214,6 +307,20 @@ final class FrameScheduler: @unchecked Sendable {
         predictionCandidate.reset()
         authoritativeHighWater = 0
         predictedHighWater = 0
+        predictionOverloadCount = 0
+        droppedPredictedInstanceCount = 0
+    }
+
+    private static func saturatingIncrement(_ value: UInt64) -> UInt64 {
+        value == .max ? .max : value + 1
+    }
+
+    private static func saturatingAdd(
+        _ lhs: UInt64,
+        _ rhs: UInt64
+    ) -> UInt64 {
+        let (value, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : value
     }
 }
 
@@ -257,10 +364,15 @@ private struct BoundedDepositionQueue: Sendable {
     mutating func append(_ records: [ProjectedDepositionRecord]) {
         precondition(records.count <= availableCapacity)
         for record in records {
-            let index = (head + count) % capacity
-            storage[index] = record
-            count += 1
+            append(record)
         }
+    }
+
+    mutating func append(_ record: ProjectedDepositionRecord) {
+        precondition(availableCapacity > 0)
+        let index = (head + count) % capacity
+        storage[index] = record
+        count += 1
     }
 
     mutating func append(contentsOf source: BoundedDepositionQueue) {
@@ -278,6 +390,27 @@ private struct BoundedDepositionQueue: Sendable {
             storage[index] = record
             count += 1
         }
+    }
+
+    func forEach(_ body: (ProjectedDepositionRecord) -> Void) {
+        for offset in 0..<count {
+            guard let record = storage[(head + offset) % capacity] else {
+                preconditionFailure(
+                    "Bounded deposition queue lost an occupied record"
+                )
+            }
+            body(record)
+        }
+    }
+
+    func count(
+        where predicate: (ProjectedDepositionRecord) -> Bool
+    ) -> Int {
+        var result = 0
+        forEach { record in
+            if predicate(record) { result += 1 }
+        }
+        return result
     }
 
     func copyPrefix(
