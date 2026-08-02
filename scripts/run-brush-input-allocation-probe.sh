@@ -36,4 +36,6 @@ DYLD_INSERT_LIBRARIES="$probe" \
 DYLD_INSERT_LIBRARIES="$probe" \
   "$helper" --velocity-filter "$repo_root"
 DYLD_INSERT_LIBRARIES="$probe" \
+  "$helper" --direction-corner "$repo_root"
+DYLD_INSERT_LIBRARIES="$probe" \
   "$helper" --production "$repo_root"

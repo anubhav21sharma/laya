@@ -116,6 +116,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case probeUnavailable
     case selfTestMissedAllocation
     case velocityFilterAllocations(total: UInt64)
+    case directionCornerAllocations(total: UInt64)
     case offMainEstimatedAllocations(total: UInt64, maximum: UInt64)
     case offMainAllocationRegression(String)
     case productionAllocations(
@@ -129,7 +130,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .invalidArguments:
-            "expected --self-test or --production and a repository root"
+            "expected a supported probe mode and a repository root"
         case .metalUnavailable:
             "the production allocation route requires a Metal device"
         case .probeUnavailable:
@@ -138,6 +139,8 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
             "allocator probe missed the deliberate Array allocation"
         case let .velocityFilterAllocations(total):
             "velocity filter allocated \(total) times after warm-up"
+        case let .directionCornerAllocations(total):
+            "direction/corner path allocated \(total) times after warm-up"
         case let .offMainEstimatedAllocations(total, maximum):
             "off-main estimated correction allocated \(total) times; "
                 + "maximum single correction=\(maximum)"
@@ -189,6 +192,8 @@ private struct BrushInputAllocationProbeHarness {
                 try runSelfTest(probe: probe)
             case "--velocity-filter":
                 try runVelocityFilterProbe(probe: probe)
+            case "--direction-corner":
+                try runDirectionCornerProbe(probe: probe)
             case "--production":
                 try await runProduction(probe: probe, root: root)
             default:
@@ -250,6 +255,115 @@ private struct BrushInputAllocationProbeHarness {
             "ALLOCATOR PROBE VELOCITY FILTER PASS allocations=0 "
                 + "checksum=\(checksum)"
         )
+    }
+
+    private static func runDirectionCornerProbe(
+        probe: AllocatorProbe
+    ) throws {
+        var tracker = BrushDirectionTracker()
+        var position = WorldPoint(x: 0, y: 0)
+        tracker.begin(at: position)
+        let emitter = try BrushCornerEmitter(maximumAngularStep: .pi / 4)
+        var output = StrokeEmissionCandidateBuffer()
+        var nextCornerSequence: UInt64 = 0
+        _ = try runDirectionCornerUpdates(
+            tracker: &tracker,
+            emitter: emitter,
+            output: &output,
+            position: &position,
+            nextCornerSequence: &nextCornerSequence,
+            startingAt: 0,
+            count: 128
+        )
+
+        probe.arm()
+        let checksum = try runDirectionCornerUpdates(
+            tracker: &tracker,
+            emitter: emitter,
+            output: &output,
+            position: &position,
+            nextCornerSequence: &nextCornerSequence,
+            startingAt: 128,
+            count: 1_000_000
+        )
+        let allocations = probe.disarm()
+
+        guard allocations == 0 else {
+            throw ProbeHarnessError.directionCornerAllocations(
+                total: allocations
+            )
+        }
+        print(
+            "ALLOCATOR PROBE DIRECTION/CORNER PASS allocations=0 "
+                + "checksum=\(checksum)"
+        )
+    }
+
+    @inline(never)
+    private static func runDirectionCornerUpdates(
+        tracker: inout BrushDirectionTracker,
+        emitter: BrushCornerEmitter,
+        output: inout StrokeEmissionCandidateBuffer,
+        position: inout WorldPoint,
+        nextCornerSequence: inout UInt64,
+        startingAt start: Int,
+        count: Int
+    ) throws -> UInt64 {
+        var checksum: UInt64 = 0
+        for index in start..<(start + count) {
+            switch index & 3 {
+            case 0: position.x += 1
+            case 1: position.y += 1
+            case 2: position.x -= 1
+            default: position.y -= 1
+            }
+
+            let update = tracker.update(to: position)
+            guard
+                let direction = update.direction,
+                let signedTurn = update.signedTurn
+            else {
+                continue
+            }
+            let sample = InterpolatedStrokeSample(
+                position: position,
+                pressure: 0.5,
+                timestamp: Double(index) * 0.001,
+                altitude: nil,
+                azimuth: nil,
+                roll: nil,
+                velocity: 1_000,
+                phase: .moved,
+                source: .pencil,
+                kind: .actual,
+                capabilities: [.pressure]
+            )
+            let vertex = StrokeEmissionCandidate(
+                sample: sample,
+                relativeStrokeTime: Double(index) * 0.001,
+                sourceDistance: Double(index),
+                direction: direction,
+                provenance: .authoritative,
+                timeKey: Int64(index) * 1_000_000,
+                distanceKey: Int64(index) * 1_000_000,
+                kind: .distance,
+                cornerSequence: 0
+            )
+            output.reset()
+            try emitter.emit(
+                from: direction - signedTurn,
+                signedTurn: signedTurn,
+                vertex: vertex,
+                into: &output,
+                nextCornerSequence: &nextCornerSequence
+            )
+            checksum &+= UInt64(direction.bitPattern)
+            checksum &+= UInt64(output.count)
+            if !output.isEmpty {
+                checksum &+= output[0].cornerSequence
+            }
+        }
+        return checksum
     }
 
     @inline(never)
