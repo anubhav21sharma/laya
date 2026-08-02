@@ -2039,6 +2039,32 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             }
             replacementIndex += 1
         }
+        switch plan.target {
+        case .authoritative:
+            guard
+                plan.replacedChunkIndex < actualChunks.count,
+                actualChunks[plan.replacedChunkIndex]
+                    .sample.estimationUpdateIndex
+                    == plan.mergedSample.estimationUpdateIndex,
+                rebuiltChunks.allSatisfy({
+                    $0.sample.kind != .predicted
+                })
+            else {
+                throw TransientStrokeBufferError.invalidEstimatedReplacement
+            }
+        case .predicted:
+            guard
+                plan.replacedChunkIndex < predictedChunks.count,
+                predictedChunks[plan.replacedChunkIndex]
+                    .sample.estimationUpdateIndex
+                    == plan.mergedSample.estimationUpdateIndex,
+                rebuiltChunks.allSatisfy({
+                    $0.sample.kind == .predicted
+                })
+            else {
+                throw TransientStrokeBufferError.invalidEstimatedReplacement
+            }
+        }
 
         var retainedSamplesAfterReplacement = 0
         var retainedDabsAfterReplacement = 0
@@ -2143,6 +2169,42 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         )
     }
 
+    /// Produces the exact post-replacement retained chunk sets in caller-owned
+    /// storage. The actor can project and preflight these immutable values
+    /// before committing the already-validated mutation in place.
+    package func previewEstimatedSuffix(
+        using plan: BorrowedEstimatedStrokeUpdatePlan,
+        expectedSamples: [WorldStrokeSample],
+        with rebuiltChunks: [TransientStrokeChunk],
+        settledInto settled: inout [TransientStrokeChunk],
+        retainedActualInto retainedActual: inout [TransientStrokeChunk],
+        retainedPredictedInto retainedPredicted:
+            inout [TransientStrokeChunk]
+    ) throws -> BorrowedEstimatedStrokeUpdatePreview {
+        let preview = try previewEstimatedSuffix(
+            using: plan,
+            expectedSamples: expectedSamples,
+            with: rebuiltChunks,
+            settledInto: &settled
+        )
+        retainedActual.removeAll(keepingCapacity: true)
+        retainedPredicted.removeAll(keepingCapacity: true)
+        switch plan.target {
+        case .authoritative:
+            retainedActual.append(
+                contentsOf: actualChunks[..<plan.replacedChunkIndex]
+            )
+            retainedActual.append(contentsOf: rebuiltChunks)
+        case .predicted:
+            retainedActual.append(contentsOf: actualChunks)
+            retainedPredicted.append(
+                contentsOf: predictedChunks[..<plan.replacedChunkIndex]
+            )
+            retainedPredicted.append(contentsOf: rebuiltChunks)
+        }
+        return preview
+    }
+
     @discardableResult
     public mutating func replaceEstimatedSuffix(
         using plan: BorrowedEstimatedStrokeUpdatePlan,
@@ -2156,23 +2218,29 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             with: rebuiltChunks,
             settledInto: &settled
         )
+        return replaceEstimatedSuffixPrevalidated(
+            using: plan,
+            with: rebuiltChunks,
+            preview: preview,
+            settledInto: &settled
+        )
+    }
+
+    /// Nonthrowing commit paired with a successful immutable preview of the
+    /// same mutation version and rebuilt chunks.
+    package mutating func replaceEstimatedSuffixPrevalidated(
+        using plan: BorrowedEstimatedStrokeUpdatePlan,
+        with rebuiltChunks: [TransientStrokeChunk],
+        preview: BorrowedEstimatedStrokeUpdatePreview,
+        settledInto settled: inout [TransientStrokeChunk]
+    ) -> TransientStrokeBufferMutation {
+        precondition(plan.sourceReplayEpoch == mutationVersion)
         settled.removeAll(keepingCapacity: true)
 
         let clearedPrediction: Bool
         switch plan.target {
         case .authoritative:
-            guard
-                plan.replacedChunkIndex < actualChunks.count,
-                actualChunks[plan.replacedChunkIndex]
-                    .sample.estimationUpdateIndex
-                    == plan.mergedSample.estimationUpdateIndex,
-                rebuiltChunks.allSatisfy({
-                    $0.sample.kind != .predicted
-                })
-            else {
-                throw TransientStrokeBufferError
-                    .invalidEstimatedReplacement
-            }
+            precondition(plan.replacedChunkIndex < actualChunks.count)
             actualChunks.removeSubrange(plan.replacedChunkIndex...)
             actualChunks.append(contentsOf: rebuiltChunks)
             clearedPrediction = !predictedChunks.isEmpty
@@ -2181,18 +2249,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             }
             predictedGeneratorSnapshot = nil
         case .predicted:
-            guard
-                plan.replacedChunkIndex < predictedChunks.count,
-                predictedChunks[plan.replacedChunkIndex]
-                    .sample.estimationUpdateIndex
-                    == plan.mergedSample.estimationUpdateIndex,
-                rebuiltChunks.allSatisfy({
-                    $0.sample.kind == .predicted
-                })
-            else {
-                throw TransientStrokeBufferError
-                    .invalidEstimatedReplacement
-            }
+            precondition(plan.replacedChunkIndex < predictedChunks.count)
             predictedChunks.removeSubrange(plan.replacedChunkIndex...)
             predictedChunks.append(contentsOf: rebuiltChunks)
             clearedPrediction = false

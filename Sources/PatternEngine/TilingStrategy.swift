@@ -294,7 +294,7 @@ public struct TilingStrategy: Equatable, Sendable {
         }
         switch compiledSymmetry.family {
         case .rectangular:
-            RectangularSymmetryKernel(
+            try! RectangularSymmetryKernel(
                 compiled: compiledSymmetry
             ).populateImages(
                 intersecting: worldBounds,
@@ -302,20 +302,71 @@ public struct TilingStrategy: Equatable, Sendable {
                 result: &scratch.images
             )
         case .triangular:
-            TriangularSymmetryKernel(
+            try! TriangularSymmetryKernel(
                 compiled: compiledSymmetry
             ).populateImages(
                 intersecting: worldBounds,
                 result: &scratch.images
             )
         case .radial:
-            RadialSymmetryKernel(
+            try! RadialSymmetryKernel(
                 compiled: compiledSymmetry
             ).populateImages(
                 intersecting: worldBounds,
                 polygonA: &scratch.polygonA,
                 polygonB: &scratch.polygonB,
                 result: &scratch.images
+            )
+        }
+    }
+
+    func populateImages(
+        intersecting worldBounds: AxisAlignedRect,
+        scratch: TilingProjectionScratch,
+        maximumImageCount: Int
+    ) throws {
+        precondition(maximumImageCount > 0)
+        precondition(
+            worldBounds.minimum.x.isFinite
+                && worldBounds.minimum.y.isFinite
+                && worldBounds.maximum.x.isFinite
+                && worldBounds.maximum.y.isFinite,
+            "TilingStrategy bounds must be finite"
+        )
+        scratch.images.removeAll(keepingCapacity: true)
+        guard
+            worldBounds.maximum.x > worldBounds.minimum.x,
+            worldBounds.maximum.y > worldBounds.minimum.y
+        else {
+            return
+        }
+        switch compiledSymmetry.family {
+        case .rectangular:
+            try RectangularSymmetryKernel(
+                compiled: compiledSymmetry
+            ).populateImages(
+                intersecting: worldBounds,
+                cells: &scratch.cells,
+                result: &scratch.images,
+                maximumImageCount: maximumImageCount
+            )
+        case .triangular:
+            try TriangularSymmetryKernel(
+                compiled: compiledSymmetry
+            ).populateImages(
+                intersecting: worldBounds,
+                result: &scratch.images,
+                maximumImageCount: maximumImageCount
+            )
+        case .radial:
+            try RadialSymmetryKernel(
+                compiled: compiledSymmetry
+            ).populateImages(
+                intersecting: worldBounds,
+                polygonA: &scratch.polygonA,
+                polygonB: &scratch.polygonB,
+                result: &scratch.images,
+                maximumImageCount: maximumImageCount
             )
         }
     }

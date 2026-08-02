@@ -938,6 +938,47 @@ func brushInputBatchPolicyIsStableAndKeepsLifecycleOffEarlierSamples() {
             terminalPhase: .ended
         ) == .ended
     )
+    #expect(
+        BrushInputBatchPolicy.phase(
+            at: 0,
+            count: 3,
+            terminalPhase: .began
+        ) == .began
+    )
+    #expect(
+        BrushInputBatchPolicy.phase(
+            at: 1,
+            count: 3,
+            terminalPhase: .began
+        ) == .moved
+    )
+    #expect(
+        BrushInputBatchPolicy.phase(
+            at: 2,
+            count: 3,
+            terminalPhase: .began
+        ) == .moved
+    )
+
+    let submittedPredictions = Array(0..<100_000)
+    let predictionBatch = BrushInputBatchPolicy.predictionBatch(
+        submittedPredictions,
+        maximumCount: PredictionOverlay.maximumNormalizedSampleCount
+    )
+    var trackingCallCount = 0
+    for _ in predictionBatch.admitted {
+        trackingCallCount += 1
+    }
+    var transformationCallCount = 0
+    let transformed = predictionBatch.admitted.map { value in
+        transformationCallCount += 1
+        return value
+    }
+    #expect(predictionBatch.submittedCount == 100_000)
+    #expect(predictionBatch.admitted.count == 64)
+    #expect(trackingCallCount == 64)
+    #expect(transformationCallCount == 64)
+    #expect(transformed == Array(0..<64))
 }
 
 @Test

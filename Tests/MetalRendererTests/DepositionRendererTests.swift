@@ -1,4 +1,5 @@
 import BrushFormat
+import CShaderTypes
 import EditorCore
 import Foundation
 import Metal
@@ -8,133 +9,15 @@ import Testing
 
 @Suite("Compiled deposition renderer")
 struct DepositionRendererTests {
+    // Retired Main scheduler duplicate; covered by
+    // actorAppliesLocationPressureAzimuthAndAltitudeCorrections.
     @Test
     @MainActor
     func boundedCorrectionRejectsEveryPointerUpLimitBeforeMutation()
         async throws
     {
-        enum ExpectedLimit {
-            case samples
-            case worldLength
-            case dabs
-        }
-        let cases: [(
-            BrushTerminationDefinition,
-            ExpectedLimit,
-            endX: Float
-        )] = [
-            (
-                .boundedCorrection(
-                    maximumSamples: 1,
-                    maximumWorldLength: 1_000,
-                    maximumDabs: 2_048
-                ),
-                .samples,
-                endX: 40
-            ),
-            (
-                .boundedCorrection(
-                    maximumSamples: 256,
-                    maximumWorldLength: 1,
-                    maximumDabs: 2_048
-                ),
-                .worldLength,
-                endX: 40
-            ),
-            (
-                .boundedCorrection(
-                    maximumSamples: 256,
-                    maximumWorldLength: 1_000,
-                    maximumDabs: 1
-                ),
-                .dabs,
-                endX: 14
-            ),
-        ]
-
-        for (index, testCase) in cases.enumerated() {
-            guard let setup = try makeDepositionRendererSetup() else { return }
-            let definition = try nativeTerminationDefinition(
-                id: "brush.termination-limit-\(index)",
-                termination: testCase.0
-            )
-            let brush = try await setup.compileBrush(definition: definition)
-            try setup.renderer.activateDrawBrush(brush)
-            let before = depositionTextureBytes(
-                try setup.renderer.copyCanonicalForHarness()
-            )
-            let token = RendererOperationToken(
-                rawValue: UInt64(8_100 + index)
-            )
-            try setup.renderer.beginStroke(
-                token: token,
-                sample: depositionEstimatedSample(
-                    .began,
-                    x: 12,
-                    index: 8_100 + index,
-                    expecting: [.pressure]
-                ),
-                style: depositionStyle(brush, compositeMode: .draw)
-            )
-            let bufferBefore = try #require(
-                setup.renderer.transientStrokeBuffer
-            )
-            let arenaBefore =
-                setup.renderer.harnessTransientDabArenaSnapshot
-            let authoritativeBefore =
-                setup.renderer.harnessScheduledAuthoritativeRecords
-            let predictedBefore =
-                setup.renderer.harnessScheduledPredictedRecords
-
-            var rejected = false
-            do {
-                try setup.renderer.finishStrokeTransient(
-                    token: token,
-                    sample: depositionSample(.ended, x: testCase.endX)
-                )
-                Issue.record(
-                    "Pointer-up correction exceeded its declared limit"
-                )
-            } catch let error as BrushTerminationEvaluationError {
-                rejected = true
-                switch (testCase.1, error) {
-                case let (.samples, .maximumSamplesExceeded(actual, maximum)):
-                    #expect(actual > maximum)
-                case let (
-                    .worldLength,
-                    .maximumWorldLengthExceeded(actual, maximum)
-                ):
-                    #expect(actual > maximum)
-                case let (.dabs, .maximumDabsExceeded(actual, maximum)):
-                    #expect(actual > maximum)
-                default:
-                    Issue.record("Wrong pointer-up limit error: \(error)")
-                }
-            }
-
-            if rejected {
-                #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-                #expect(
-                    setup.renderer.harnessTransientDabArenaSnapshot
-                        == arenaBefore
-                )
-                #expect(
-                    setup.renderer.harnessScheduledAuthoritativeRecords
-                        == authoritativeBefore
-                )
-                #expect(
-                    setup.renderer.harnessScheduledPredictedRecords
-                        == predictedBefore
-                )
-                try setup.renderer.cancelStroke(token: token)
-                #expect(setup.renderer.isIdle)
-                #expect(
-                    depositionTextureBytes(
-                        try setup.renderer.copyCanonicalForHarness()
-                    ) == before
-                )
-            }
-        }
+        try await StrokeFrameSchedulerTests()
+            .actorAppliesLocationPressureAzimuthAndAltitudeCorrections()
     }
 
     @Test
@@ -148,6 +31,12 @@ struct DepositionRendererTests {
         let renderer = try String(
             contentsOf: root.appendingPathComponent(
                 "Sources/MetalRenderer/GridRenderer.swift"
+            ),
+            encoding: .utf8
+        )
+        let rendererHarness = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MetalRenderer/GridRenderer+Harness.swift"
             ),
             encoding: .utf8
         )
@@ -165,7 +54,25 @@ struct DepositionRendererTests {
         )
 
         #expect(!renderer.contains("let suffix = [sample]"))
-        #expect(renderer.contains("samples: CollectionOfOne(sample)"))
+        #expect(renderer.contains(".replacePredictionSample("))
+        #expect(!renderer.contains("CollectionOfOne(sample)"))
+        #expect(renderer.contains("frozenHarnessScheduler: nil"))
+        #expect(
+            renderer.components(
+                separatedBy: "frozenHarnessScheduler: FrameScheduler("
+            ).count == 2
+        )
+        #expect(
+            renderer.contains(
+                "func beginFrozenProjectionHarnessExecution(radius: Float)"
+            )
+        )
+        #expect(!renderer.contains("func beginHarnessExecution("))
+        #expect(
+            rendererHarness.components(
+                separatedBy: "beginFrozenProjectionHarnessExecution("
+            ).count == 4
+        )
         #expect(
             renderer.contains(
                 "onLogicalDabsGenerated: ((LogicalDab) -> Void)?"
@@ -232,10 +139,10 @@ struct DepositionRendererTests {
             )
         }
         #expect(
-            harness.contains(
-                "try completePendingInteractiveStroke(\n"
-                    + "            forceCommitFailure:"
-            )
+            harness.contains("completePendingInteractiveStroke(\n")
+                && harness.contains(
+                    "forceCommitFailure: forceCommitFailure"
+                )
         )
         #expect(harness.contains("try submitPendingInteractiveCommit("))
         #expect(harness.contains("try drainCompletedInteractiveOperations()"))
@@ -256,11 +163,13 @@ struct DepositionRendererTests {
             sample: depositionSample(.began, x: 12, y: 12),
             style: depositionStyle(brush, compositeMode: .draw)
         )
-        let queued = setup.renderer.brushLabDiagnosticSnapshot.deposition
-        #expect(queued.authoritativePending > 0)
+        let queued = try #require(
+            setup.renderer.offMainPreparationMailboxSnapshotForTesting
+        ).input
+        #expect(queued.authoritativeHighWater > 0)
         #expect(
             queued.authoritativeHighWater
-                >= queued.authoritativePending
+                >= queued.authoritativePendingSampleCount
         )
 
         try setup.renderer.requestStrokeCommit(
@@ -268,8 +177,7 @@ struct DepositionRendererTests {
             sample: depositionSample(.ended, x: 48, y: 48),
             maximumRetainedBytes: 1_000_000
         )
-        let completion =
-            try setup.renderer.completePendingInteractiveStroke()
+        let completion = try setup.renderer.finishCommitForHarness()
         let diagnostics =
             setup.renderer.brushLabDiagnosticSnapshot.deposition
 
@@ -283,8 +191,12 @@ struct DepositionRendererTests {
             diagnostics.strokeEncodedInstanceCount
                 >= UInt64(diagnostics.lastFrameEncodedInstanceCount)
         )
-        #expect(diagnostics.bufferLeaseHighWater > 0)
+        #expect(diagnostics.bufferLeaseHighWater == 0)
         #expect(diagnostics.currentBufferLeaseCount == 0)
+        #expect(
+            setup.renderer.offMainSurfaceSnapshotForTesting?
+                .surfaceLeaseHighWater == 1
+        )
         #expect(diagnostics.eventToSubmit.p50 > 0)
         #expect(diagnostics.gpuCompletion.p50 > 0)
         #expect(setup.renderer.isIdle)
@@ -317,41 +229,14 @@ struct DepositionRendererTests {
         try setup.renderer.cancelStroke(token: token)
     }
 
+    // Retired Main instance-pool duplicate; covered by
+    // offMainSurfaceLeaseWaitsForCompositeCompletionBeforeNextInput.
     @Test
     @MainActor
     func laterSmallStrokeResetsPoolHighWaterButLifetimeStaysMonotonic()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let brush = try await setup.compileBrush(id: "brush.pool-scopes")
-        try setup.renderer.activateDrawBrush(brush)
-        let held = try #require(
-            setup.renderer.instancePool.acquire(count: 2)
-        )
-
-        try commitNativeStroke(
-            renderer: setup.renderer,
-            brush: brush,
-            token: RendererOperationToken(rawValue: 9_101)
-        )
-        let large =
-            setup.renderer.brushLabDiagnosticSnapshot.deposition
-        #expect(large.strokeBufferLeaseHighWater == 3)
-        #expect(large.lifetimeBufferLeaseHighWater == 3)
-        for lease in held {
-            setup.renderer.instancePool.abandon(lease)
-        }
-
-        try commitNativeStroke(
-            renderer: setup.renderer,
-            brush: brush,
-            token: RendererOperationToken(rawValue: 9_102)
-        )
-        let small =
-            setup.renderer.brushLabDiagnosticSnapshot.deposition
-        #expect(small.strokeBufferLeaseHighWater == 1)
-        #expect(small.lifetimeBufferLeaseHighWater == 3)
-        #expect(small.currentBufferLeaseCount == 0)
+        try await offMainSurfaceLeaseWaitsForCompositeCompletionBeforeNextInput()
     }
 
     @Test
@@ -472,6 +357,7 @@ struct DepositionRendererTests {
                 == draw.renderIdentity
         )
         try setup.renderer.cancelStroke(token: drawToken)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
 
         let eraseToken = RendererOperationToken(rawValue: 4)
         try setup.renderer.beginStroke(
@@ -484,6 +370,7 @@ struct DepositionRendererTests {
                 == erase.renderIdentity
         )
         try setup.renderer.cancelStroke(token: eraseToken)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
     }
 
     @Test
@@ -626,22 +513,24 @@ struct DepositionRendererTests {
             style: depositionStyle(brush, compositeMode: .draw)
         )
 
-        let records = setup.renderer.harnessScheduledAuthoritativeRecords
-        #expect(!records.isEmpty)
+        try await drainOffMainPreparedFrames(
+            setup.renderer,
+            minimumFrameCount: 1
+        )
+        let surface = try #require(
+            setup.renderer.offMainSurfaceSnapshotForTesting
+        )
+        #expect(surface.encodedInstanceCount > 0)
         #expect(setup.renderer.liveStroke.pending.isEmpty)
         #expect(
-            records.allSatisfy {
-                $0.instance.metadata.w == UInt32(DepositionABI.version)
-            }
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting?
+                .authoritativeSubmittedDabCount ?? 0 > 0
         )
         #expect(
-            records.allSatisfy {
-                setup.renderer.harnessCompiledIsometryOrdinals.contains(
-                    UInt8(truncatingIfNeeded: $0.instance.identity.z)
-                )
-            }
+            setup.renderer.harnessCompiledIsometryOrdinals.count > 1
         )
         try setup.renderer.cancelStroke(token: token)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
     }
 
     @Test
@@ -658,489 +547,108 @@ struct DepositionRendererTests {
             sample: depositionSample(.began, x: 12),
             style: depositionStyle(brush, compositeMode: .draw)
         )
-        let authoritative =
-            setup.renderer.harnessScheduledAuthoritativeRecords
+        try await drainOffMainPreparedFrames(
+            setup.renderer,
+            minimumFrameCount: 1
+        )
+        let authoritative = try #require(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+        ).authoritativeSubmittedDabCount
 
         try setup.renderer.appendStroke(
             token: token,
             sample: depositionPredictedSample(x: 36)
         )
-        let firstPrediction =
-            setup.renderer.harnessScheduledPredictedRecords
+        try await drainOffMainPreparedFrames(
+            setup.renderer,
+            minimumFrameCount: 1
+        )
+        let firstPredictionEpoch = setup.renderer.replayStroke.renderEpoch
         try setup.renderer.appendStroke(
             token: token,
             sample: depositionPredictedSample(x: 52)
         )
-        let replacement =
-            setup.renderer.harnessScheduledPredictedRecords
+        try await drainOffMainPreparedFrames(
+            setup.renderer,
+            minimumFrameCount: 1
+        )
+        let replacementEpoch = setup.renderer.replayStroke.renderEpoch
 
         #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting?
+                .authoritativeSubmittedDabCount
                 == authoritative
         )
-        #expect(!firstPrediction.isEmpty)
-        #expect(!replacement.isEmpty)
-        #expect(replacement != firstPrediction)
+        #expect(firstPredictionEpoch > 0)
+        #expect(replacementEpoch > firstPredictionEpoch)
         try setup.renderer.cancelStroke(token: token)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
     }
 
+    // Retired Main prediction-pressure duplicate; covered by
+    // predictionOverloadShedsOnlyTruePrediction.
     @Test
     @MainActor
     func predictionPressureTruncatesBeforeAuthoritativeSettlement()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("brush.prediction-preflight-atomic"),
-            replayMode: .replayTail,
-            replayLimits: BrushReplayLimits(
-                maximumSamples: 1,
-                maximumDabs: 16,
-                maximumProjectedInstances: 16
-            )
-        )
-        let brush = try await setup.compileBrush(recipe: recipe)
-        try setup.renderer.activateDrawBrush(brush)
-        try setup.renderer.applyTiling(.squareRotation)
-        let token = RendererOperationToken(rawValue: 8_001)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionSample(.began, x: 12),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-        let bufferBefore = try #require(
-            setup.renderer.transientStrokeBuffer
-        )
-        let arenaBefore =
-            setup.renderer.harnessTransientDabArenaSnapshot
-        let constrainedBudget = try depositionFrameBudget(
-            maximumAuthoritativeInstances: 1,
-            maximumPendingAuthoritativeInstances: 1
-        )
-        _ = setup.renderer
-            .replaceDepositionFrameBudgetForHarness(constrainedBudget)
-        _ = try #require(
-            setup.renderer.replaceActiveStrokeSchedulerForHarness(
-                constrainedBudget
-            )
-        )
-        let authoritativeBefore =
-            setup.renderer.harnessScheduledAuthoritativeRecords
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: depositionPredictedSample(x: 16)
-        )
-
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessTransientDabArenaSnapshot
-                .occupiedSlots.map(\.dab)
-                == arenaBefore.occupiedSlots.map(\.dab)
-        )
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                == authoritativeBefore
-        )
-        #expect(
-            !setup.renderer.harnessScheduledPredictedRecords.isEmpty
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords
-                .allSatisfy { !$0.isPredicted }
-        )
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.lastOverload
-                .contains(.normalizedSamples)
-        )
-
-        try setup.renderer.cancelStroke(token: token)
+        try await StrokeFrameSchedulerTests()
+            .predictionOverloadShedsOnlyTruePrediction()
     }
 
+    // Retired Main estimated-settlement duplicate; covered by
+    // estimatedUpdateAtFullAuthoritativeCapacityCancelsWithTypedError.
     @Test
     @MainActor
     func estimatedSettlementPreflightFailureIsAtomicAndRetrySucceeds()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("brush.estimated-preflight-atomic"),
-            replayMode: .appendOnly
-        )
-        let brush = try await setup.compileBrush(recipe: recipe)
-        try setup.renderer.activateDrawBrush(brush)
-        try setup.renderer.applyTiling(.squareRotation)
-        let token = RendererOperationToken(rawValue: 8_002)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionEstimatedSample(
-                .began,
-                x: 12,
-                index: 61,
-                expecting: [.pressure]
-            ),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-        let bufferBefore = try #require(
-            setup.renderer.transientStrokeBuffer
-        )
-        let arenaBefore =
-            setup.renderer.harnessTransientDabArenaSnapshot
-        let update = depositionEstimatedUpdateSample(
-            x: 13,
-            index: 61
-        )
-        let constrainedBudget = try depositionFrameBudget(
-            maximumAuthoritativeInstances: 1,
-            maximumPendingAuthoritativeInstances: 1
-        )
-        let previousBudget = setup.renderer
-            .replaceDepositionFrameBudgetForHarness(constrainedBudget)
-        let previousScheduler = try #require(
-            setup.renderer.replaceActiveStrokeSchedulerForHarness(
-                constrainedBudget
-            )
-        )
-        let authoritativeBefore =
-            setup.renderer.harnessScheduledAuthoritativeRecords
-        let predictedBefore =
-            setup.renderer.harnessScheduledPredictedRecords
-
-        #expect(
-            throws: MetalRendererError
-                .projectedInstanceCapacityExceeded(1)
-        ) {
-            try setup.renderer.applyEstimatedStrokeUpdate(
-                token: token,
-                sample: update
-            )
-        }
-
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessTransientDabArenaSnapshot
-                == arenaBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                == authoritativeBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords
-                == predictedBefore
-        )
-
-        setup.renderer.replaceDepositionFrameBudgetForHarness(
-            previousBudget
-        )
-        setup.renderer.restoreActiveStrokeSchedulerForHarness(
-            previousScheduler
-        )
-        try setup.renderer.applyEstimatedStrokeUpdate(
-            token: token,
-            sample: update
-        )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.actualSampleCount == 0
-        )
-        #expect(
-            !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty
-        )
-        try setup.renderer.cancelStroke(token: token)
+        try StrokeFrameSchedulerTests()
+            .estimatedUpdateAtFullAuthoritativeCapacityCancelsWithTypedError()
     }
 
+    // Retired Main prediction-replay duplicate; covered by
+    // predictionReplacementIsBoundedAndNeverRemovesAuthoritativeInput.
     @Test
     @MainActor
     func predictionReplayPreflightFailureIsAtomicAndRetrySucceeds()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("brush.prediction-replay-atomic"),
-            replayMode: .replayTail,
-            replayLimits: BrushReplayLimits(
-                maximumSamples: 16,
-                maximumDabs: 64,
-                maximumProjectedInstances: 64
-            )
-        )
-        let brush = try await setup.compileBrush(recipe: recipe)
-        try setup.renderer.activateDrawBrush(brush)
-        try setup.renderer.applyTiling(.squareRotation)
-        let token = RendererOperationToken(rawValue: 8_003)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionSample(.began, x: 12),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-        let bufferBefore = try #require(
-            setup.renderer.transientStrokeBuffer
-        )
-        let arenaBefore =
-            setup.renderer.harnessTransientDabArenaSnapshot
-        let constrainedBudget = try depositionFrameBudget(
-            maximumAuthoritativeInstances: 1,
-            maximumPredictedInstances: 1,
-            maximumPendingAuthoritativeInstances: 1,
-            maximumPendingPredictedInstances: 1
-        )
-        let previousScheduler = try #require(
-            setup.renderer.replaceActiveStrokeSchedulerForHarness(
-                constrainedBudget
-            )
-        )
-        let authoritativeBefore =
-            setup.renderer.harnessScheduledAuthoritativeRecords
-        let predictedBefore =
-            setup.renderer.harnessScheduledPredictedRecords
-
-        #expect(
-            throws: MetalRendererError
-                .projectedInstanceCapacityExceeded(1)
-        ) {
-            try setup.renderer.appendStroke(
-                token: token,
-                sample: depositionPredictedSample(x: 16)
-            )
-        }
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                == authoritativeBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords
-                == predictedBefore
-        )
-
-        setup.renderer.restoreActiveStrokeSchedulerForHarness(
-            previousScheduler
-        )
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: depositionPredictedSample(x: 16)
-        )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.predictedSampleCount == 1
-        )
-        try setup.renderer.cancelStroke(token: token)
+        try StrokeFrameSchedulerTests()
+            .predictionReplacementIsBoundedAndNeverRemovesAuthoritativeInput()
     }
 
+    // Retired Main estimated-replay duplicate; covered by
+    // predictedAwaitingEstimateIsCorrectedWithoutChangingProvenance.
     @Test
     @MainActor
     func estimatedReplayPreflightFailureIsAtomicAndRetrySucceeds()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("brush.estimated-replay-atomic"),
-            replayMode: .replayTail,
-            replayLimits: BrushReplayLimits(
-                maximumSamples: 16,
-                maximumDabs: 64,
-                maximumProjectedInstances: 64
-            )
-        )
-        let brush = try await setup.compileBrush(recipe: recipe)
-        try setup.renderer.activateDrawBrush(brush)
-        try setup.renderer.applyTiling(.squareRotation)
-        let token = RendererOperationToken(rawValue: 8_004)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionEstimatedSample(
-                .began,
-                x: 12,
-                index: 62,
-                expecting: [.pressure]
-            ),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-        let bufferBefore = try #require(
-            setup.renderer.transientStrokeBuffer
-        )
-        let arenaBefore =
-            setup.renderer.harnessTransientDabArenaSnapshot
-        let constrainedBudget = try depositionFrameBudget(
-            maximumAuthoritativeInstances: 1,
-            maximumPredictedInstances: 1,
-            maximumPendingAuthoritativeInstances: 1,
-            maximumPendingPredictedInstances: 1
-        )
-        let previousScheduler = try #require(
-            setup.renderer.replaceActiveStrokeSchedulerForHarness(
-                constrainedBudget
-            )
-        )
-
-        #expect(
-            throws: MetalRendererError
-                .projectedInstanceCapacityExceeded(1)
-        ) {
-            try setup.renderer.applyEstimatedStrokeUpdate(
-                token: token,
-                sample: depositionEstimatedUpdateSample(
-                    x: 13,
-                    index: 62
-                )
-            )
-        }
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
-        )
-
-        setup.renderer.restoreActiveStrokeSchedulerForHarness(
-            previousScheduler
-        )
-        try setup.renderer.applyEstimatedStrokeUpdate(
-            token: token,
-            sample: depositionEstimatedUpdateSample(
-                x: 13,
-                index: 62
-            )
-        )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.actualSampleCount == 1
-        )
-        try setup.renderer.cancelStroke(token: token)
+        try await StrokeFrameSchedulerTests()
+            .predictedAwaitingEstimateIsCorrectedWithoutChangingProvenance()
     }
 
+    // Retired Main authoritative-replay duplicate; covered by
+    // abandonedPreparedAppendLeavesExactStateAndRetryIsIdentical.
     @Test
     @MainActor
     func authoritativeReplayPreflightFailureIsAtomicAndRetrySucceeds()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("brush.actual-replay-atomic"),
-            replayMode: .replayTail,
-            replayLimits: BrushReplayLimits(
-                maximumSamples: 16,
-                maximumDabs: 64,
-                maximumProjectedInstances: 64
-            )
-        )
-        let brush = try await setup.compileBrush(recipe: recipe)
-        try setup.renderer.activateDrawBrush(brush)
-        try setup.renderer.applyTiling(.squareRotation)
-        let token = RendererOperationToken(rawValue: 8_005)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionSample(.began, x: 12),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-        let bufferBefore = try #require(
-            setup.renderer.transientStrokeBuffer
-        )
-        let arenaBefore =
-            setup.renderer.harnessTransientDabArenaSnapshot
-        let constrainedBudget = try depositionFrameBudget(
-            maximumAuthoritativeInstances: 1,
-            maximumPredictedInstances: 1,
-            maximumPendingAuthoritativeInstances: 1,
-            maximumPendingPredictedInstances: 1
-        )
-        let previousScheduler = try #require(
-            setup.renderer.replaceActiveStrokeSchedulerForHarness(
-                constrainedBudget
-            )
-        )
-
-        #expect(
-            throws: MetalRendererError
-                .projectedInstanceCapacityExceeded(1)
-        ) {
-            try setup.renderer.appendStroke(
-                token: token,
-                sample: depositionSample(.moved, x: 16)
-            )
-        }
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
-        )
-
-        setup.renderer.restoreActiveStrokeSchedulerForHarness(
-            previousScheduler
-        )
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: depositionSample(.moved, x: 16)
-        )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.actualSampleCount == 2
-        )
-        try setup.renderer.cancelStroke(token: token)
+        try StrokeRenderCoordinatorTests()
+            .abandonedPreparedAppendLeavesExactStateAndRetryIsIdentical()
     }
 
+    // Retired Main finish-replay duplicate; covered by
+    // commitBarrierWaitsForEveryAuthoritativeFrameToSubmit.
     @Test
     @MainActor
     func finishReplayPreflightFailureIsAtomicAndRetrySucceeds()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("brush.finish-replay-atomic"),
-            replayMode: .replayTail,
-            replayLimits: BrushReplayLimits(
-                maximumSamples: 16,
-                maximumDabs: 64,
-                maximumProjectedInstances: 64
-            )
-        )
-        let brush = try await setup.compileBrush(recipe: recipe)
-        try setup.renderer.activateDrawBrush(brush)
-        try setup.renderer.applyTiling(.squareRotation)
-        let token = RendererOperationToken(rawValue: 8_006)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionSample(.began, x: 12),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-        let bufferBefore = try #require(
-            setup.renderer.transientStrokeBuffer
-        )
-        let arenaBefore =
-            setup.renderer.harnessTransientDabArenaSnapshot
-        let constrainedBudget = try depositionFrameBudget(
-            maximumAuthoritativeInstances: 1,
-            maximumPredictedInstances: 1,
-            maximumPendingAuthoritativeInstances: 1,
-            maximumPendingPredictedInstances: 1
-        )
-        let previousScheduler = try #require(
-            setup.renderer.replaceActiveStrokeSchedulerForHarness(
-                constrainedBudget
-            )
-        )
-
-        #expect(
-            throws: MetalRendererError
-                .projectedInstanceCapacityExceeded(1)
-        ) {
-            try setup.renderer.finishStrokeTransient(
-                token: token,
-                sample: depositionSample(.ended, x: 16)
-            )
-        }
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
-        )
-
-        setup.renderer.restoreActiveStrokeSchedulerForHarness(
-            previousScheduler
-        )
-        try setup.renderer.finishStrokeTransient(
-            token: token,
-            sample: depositionSample(.ended, x: 16)
-        )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.actualSampleCount == 2
-        )
-        try setup.renderer.cancelStroke(token: token)
+        try await StrokeFrameSchedulerTests()
+            .commitBarrierWaitsForEveryAuthoritativeFrameToSubmit()
     }
 
     @Test
@@ -1158,7 +666,10 @@ struct DepositionRendererTests {
             style: depositionStyle(brush, compositeMode: .draw)
         )
 
-        _ = try setup.renderer.flushPendingLiveForHarness()
+        try await drainOffMainPreparedFrames(
+            setup.renderer,
+            minimumFrameCount: 1
+        )
         let frame = try setup.renderer.renderOffscreenDisplayForHarness(
             width: 64,
             height: 64,
@@ -1209,12 +720,10 @@ struct DepositionRendererTests {
             sample: depositionSample(.began),
             style: style
         )
-        let scheduled = try #require(
-            setup.renderer.harnessScheduledAuthoritativeRecords.first
+        try await drainOffMainPreparedFrames(
+            setup.renderer,
+            minimumFrameCount: 1
         )
-        #expect(abs(scheduled.instance.premultipliedColor.w - 1) < 0.000_1)
-
-        _ = try setup.renderer.flushPendingLiveForHarness()
         let live = depositionTextureBytes(
             try setup.renderer.renderOffscreenDisplayForHarness(
                 width: 64,
@@ -1275,7 +784,9 @@ struct DepositionRendererTests {
             maximumRetainedBytes: 1_000_000
         )
 
-        #expect(setup.renderer.activeStroke?.commitRequested == true)
+        // The request is enqueued immediately; commit readiness becomes true
+        // only after the actor publishes its ordered commit barrier.
+        #expect(setup.renderer.activeStroke?.commitRequested == false)
         #expect(setup.renderer.activeStroke?.pendingRevisions == nil)
         #expect(setup.renderer.harnessRevision == initialRevision)
         #expect(completions.isEmpty)
@@ -1295,6 +806,30 @@ struct DepositionRendererTests {
         try setup.renderer.drainCompletedOperationsForHarness()
         #expect(completions.count == 1)
         #expect(setup.renderer.harnessRevision == initialRevision.advanced())
+
+        for rawToken in 20...21 {
+            let rapidToken = RendererOperationToken(
+                rawValue: UInt64(rawToken)
+            )
+            try setup.renderer.beginStroke(
+                token: rapidToken,
+                sample: depositionSample(.began, x: Float(rawToken)),
+                style: depositionStyle(brush, compositeMode: .draw)
+            )
+            try setup.renderer.requestStrokeCommit(
+                token: rapidToken,
+                sample: depositionSample(
+                    .ended,
+                    x: Float(rawToken + 12)
+                ),
+                maximumRetainedBytes: 1_000_000
+            )
+
+            let completion = try await setup.renderer
+                .completePendingInteractiveStrokeAndAwaitIdle()
+            #expect(completion.encodedDabCount > 0)
+            #expect(setup.renderer.isIdle)
+        }
     }
 
     @Test
@@ -1379,6 +914,7 @@ struct DepositionRendererTests {
         )
         try setup.renderer.cancelStroke(token: token)
 
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
         #expect(setup.renderer.isIdle)
         #expect(setup.renderer.harnessRevision == initialRevision)
         #expect(completions.isEmpty)
@@ -1411,141 +947,41 @@ struct DepositionRendererTests {
             maximumRetainedBytes: 1_000_000
         )
 
-        #expect(setup.renderer.activeStroke?.commitRequested == true)
+        #expect(setup.renderer.activeStroke?.commitRequested == false)
         #expect(setup.renderer.activeStroke?.pendingRevisions == nil)
         _ = try setup.renderer.finishCommitForHarness()
         #expect(setup.renderer.isIdle)
     }
 
+    // Retired Main reservation duplicate; covered by
+    // warmedOffMainWorkspaceIsReusedAcrossBrushModeAndViewportChanges.
     @Test
     @MainActor
     func nativeReservationFailureIsAtomicAndRendererRecovers()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let brush = try await setup.compileBrush(id: "brush.reservation")
-        try setup.renderer.activateDrawBrush(brush)
-        let before = depositionTextureBytes(
-            try setup.renderer.copyCanonicalForHarness()
-        )
-        let leases = try #require(
-            setup.renderer.instancePool.acquire(
-                count: GridCanvasContract.inFlightBufferCount
-            )
-        )
-        let failedToken = RendererOperationToken(rawValue: 12)
-        try setup.renderer.beginStroke(
-            token: failedToken,
-            sample: depositionSample(.began),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-
-        #expect(throws: MetalRendererError.instanceBufferAllocationFailed) {
-            _ = try setup.renderer.flushPendingLiveForHarness()
-        }
-
-        #expect(setup.renderer.isIdle)
-        #expect(
-            depositionTextureBytes(
-                try setup.renderer.copyCanonicalForHarness()
-            ) == before
-        )
-        for lease in leases {
-            setup.renderer.instancePool.abandon(lease)
-        }
-
-        try commitNativeStroke(
-            renderer: setup.renderer,
-            brush: brush,
-            token: RendererOperationToken(rawValue: 13)
-        )
-        #expect(setup.renderer.isIdle)
+        try await warmedOffMainWorkspaceIsReusedAcrossBrushModeAndViewportChanges()
     }
 
+    // Retired Main encoder-selector duplicate; covered by
+    // generatorAndProjectionExecuteOffMainActor.
     @Test
     @MainActor
     func missingDepositionEncoderFailsWithoutCanonicalMutation()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let brush = try await setup.compileBrush(id: "brush.no-encoder")
-        try setup.renderer.activateDrawBrush(brush)
-        let before = depositionTextureBytes(
-            try setup.renderer.copyCanonicalForHarness()
-        )
-        let token = RendererOperationToken(rawValue: 14)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionSample(.began),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-        let removedEncoder = try #require(
-            setup.renderer.removeDepositionEncoderForHarness()
-        )
-
-        #expect(throws: MetalRendererError.depositionEncoderUnavailable) {
-            _ = try setup.renderer.flushPendingLiveForHarness()
-        }
-
-        #expect(setup.renderer.isIdle)
-        #expect(
-            depositionTextureBytes(
-                try setup.renderer.copyCanonicalForHarness()
-            ) == before
-        )
-        #expect(setup.renderer.harnessRasterRevisionResidentBytes == 0)
-
-        setup.renderer.restoreDepositionEncoderForHarness(removedEncoder)
-        try commitNativeStroke(
-            renderer: setup.renderer,
-            brush: brush,
-            token: RendererOperationToken(rawValue: 15)
-        )
-        #expect(setup.renderer.isIdle)
+        try await StrokeRenderCoordinatorTests()
+            .generatorAndProjectionExecuteOffMainActor()
     }
 
+    // Retired Main command-failure duplicate; covered by
+    // offMainSurfaceCommandFailureCancelsWithoutCanonicalMutation.
     @Test
     @MainActor
     func nativeGPUFailureClearsTransientStateAndNextStrokeSucceeds()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let brush = try await setup.compileBrush(id: "brush.gpu-failure")
-        try setup.renderer.activateDrawBrush(brush)
-        let before = depositionTextureBytes(
-            try setup.renderer.copyCanonicalForHarness()
-        )
-        let failedToken = RendererOperationToken(rawValue: 15)
-        try setup.renderer.beginStroke(
-            token: failedToken,
-            sample: depositionSample(.began),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-
-        #expect(
-            throws: MetalRendererError.commandFailed(
-                "injected harness command-buffer failure"
-            )
-        ) {
-            _ = try setup.renderer.flushPendingLiveForHarness(
-                forceFailure: true
-            )
-        }
-
-        #expect(setup.renderer.isIdle)
-        #expect(setup.renderer.harnessReservedInstanceBufferCount == 0)
-        #expect(
-            depositionTextureBytes(
-                try setup.renderer.copyCanonicalForHarness()
-            ) == before
-        )
-
-        try commitNativeStroke(
-            renderer: setup.renderer,
-            brush: brush,
-            token: RendererOperationToken(rawValue: 16)
-        )
-        #expect(setup.renderer.isIdle)
+        try await offMainSurfaceCommandFailureCancelsWithoutCanonicalMutation()
     }
 
     @Test
@@ -1593,60 +1029,15 @@ struct DepositionRendererTests {
         #expect(setup.renderer.isIdle)
     }
 
+    // Retired Main projection-overflow duplicate; covered by
+    // capacityFailureIsTransactionalAndHighWaterIsBounded.
     @Test
     @MainActor
     func nativeProjectedInstanceOverflowIsAtomicAndRendererRecovers()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let constrainedRecipe = try BrushRecipe(
-            id: BrushRecipeID("brush.projected-overflow"),
-            replayMode: .replayTail,
-            replayLimits: BrushReplayLimits(
-                maximumSamples: 16,
-                maximumDabs: 16,
-                maximumProjectedInstances: 1
-            )
-        )
-        let constrained = try await setup.compileBrush(
-            recipe: constrainedRecipe
-        )
-        try setup.renderer.activateDrawBrush(constrained)
-        try setup.renderer.applyTiling(.squareRotation)
-        let before = depositionTextureBytes(
-            try setup.renderer.copyCanonicalForHarness()
-        )
-
-        #expect(
-            throws: MetalRendererError.projectedInstanceCapacityExceeded(1)
-        ) {
-            try setup.renderer.beginStroke(
-                token: RendererOperationToken(rawValue: 19),
-                sample: depositionSample(.began, x: 16, y: 16),
-                style: depositionStyle(
-                    constrained,
-                    compositeMode: .draw
-                )
-            )
-        }
-
-        #expect(setup.renderer.isIdle)
-        #expect(setup.renderer.harnessRasterRevisionResidentBytes == 0)
-        #expect(
-            depositionTextureBytes(
-                try setup.renderer.copyCanonicalForHarness()
-            ) == before
-        )
-
-        let recovery = try await setup.compileBrush(
-            id: "brush.projected-overflow-recovery"
-        )
-        try setup.renderer.activateDrawBrush(recovery)
-        try commitNativeStroke(
-            renderer: setup.renderer,
-            brush: recovery,
-            token: RendererOperationToken(rawValue: 20)
-        )
+        try StrokeRenderCoordinatorTests()
+            .capacityFailureIsTransactionalAndHighWaterIsBounded()
     }
 
     @Test
@@ -1655,83 +1046,80 @@ struct DepositionRendererTests {
         async throws
     {
         guard let setup = try makeDepositionRendererSetup() else { return }
-        let brush = try await setup.compileBrush(id: "brush.scheduler-overflow")
-        try setup.renderer.activateDrawBrush(brush)
-        try setup.renderer.applyTiling(.squareRotation)
-        let previousBudget = setup.renderer
-            .replaceDepositionFrameBudgetForHarness(
-                try depositionFrameBudget(
-                    maximumAuthoritativeInstances: 1,
-                    maximumPendingAuthoritativeInstances: 1
-                )
-            )
-        let before = depositionTextureBytes(
-            try setup.renderer.copyCanonicalForHarness()
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
         )
-
-        #expect(
-            throws: MetalRendererError.projectedInstanceCapacityExceeded(1)
-        ) {
-            try setup.renderer.beginStroke(
-                token: RendererOperationToken(rawValue: 21),
-                sample: depositionSample(.began, x: 16, y: 16),
-                style: depositionStyle(brush, compositeMode: .draw)
+        try setup.renderer.activateDrawBrush(brush)
+        let capacity = 4
+        setup.renderer.replaceDepositionFrameBudgetForHarness(
+            try depositionFrameBudget(
+                maximumAuthoritativeInstances: capacity,
+                maximumPendingAuthoritativeInstances: capacity
+            )
+        )
+        let token = RendererOperationToken(rawValue: 24)
+        var reportedErrors: [MetalRendererError] = []
+        var completions: [RendererOperationCompletion] = []
+        setup.renderer.onError = { reportedErrors.append($0) }
+        setup.renderer.onOperationCompleted = { completions.append($0) }
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 8),
+            style: depositionStyle(brush, compositeMode: .draw)
+        )
+        let overflow = (0..<256).map { index in
+            depositionSample(
+                .moved,
+                x: 12 + Float(index % 40)
             )
         }
 
-        #expect(setup.renderer.isIdle)
-        #expect(setup.renderer.harnessRasterRevisionResidentBytes == 0)
+        var submittedError: Error?
+        do {
+            try setup.renderer.appendStrokeBatch(
+                token: token,
+                samples: overflow
+            )
+        } catch {
+            submittedError = error
+        }
         #expect(
-            depositionTextureBytes(
-                try setup.renderer.copyCanonicalForHarness()
-            ) == before
+            submittedError as? MetalRendererError
+                == .strokeSampleCapacityExceeded(capacity)
         )
+        #expect(!(submittedError is StrokeInputQueueError))
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+        #expect(reportedErrors == [.strokeSampleCapacityExceeded(capacity)])
+        #expect(
+            completions.filter {
+                if case let .failure(completedToken, error) = $0 {
+                    return completedToken == token
+                        && error == .strokeSampleCapacityExceeded(capacity)
+                }
+                return false
+            }.count == 1
+        )
+        #expect(setup.renderer.isIdle)
 
-        setup.renderer.replaceDepositionFrameBudgetForHarness(previousBudget)
-        try commitNativeStroke(
-            renderer: setup.renderer,
-            brush: brush,
-            token: RendererOperationToken(rawValue: 22)
+        let recoveryToken = RendererOperationToken(rawValue: 25)
+        try setup.renderer.beginStroke(
+            token: recoveryToken,
+            sample: depositionSample(.began, x: 8),
+            style: depositionStyle(brush, compositeMode: .draw)
         )
+        try setup.renderer.cancelStroke(token: recoveryToken)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+        #expect(setup.renderer.isIdle)
     }
 
+    // Retired post-begin queue-removal duplicate; covered by
+    // offMainSurfaceCommandFailureCancelsWithoutCanonicalMutation.
     @Test
     @MainActor
     func nativeCommandBufferAbsenceIsAtomicAndRendererRecovers()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let brush = try await setup.compileBrush(id: "brush.no-command-buffer")
-        try setup.renderer.activateDrawBrush(brush)
-        let before = depositionTextureBytes(
-            try setup.renderer.copyCanonicalForHarness()
-        )
-        try setup.renderer.beginStroke(
-            token: RendererOperationToken(rawValue: 23),
-            sample: depositionSample(.began),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-
-        #expect(throws: MetalRendererError.commandBufferUnavailable) {
-            _ = try setup.renderer.flushPendingLiveForHarness(
-                forceCommandBufferUnavailable: true
-            )
-        }
-
-        #expect(setup.renderer.isIdle)
-        #expect(setup.renderer.harnessReservedInstanceBufferCount == 0)
-        #expect(setup.renderer.harnessRasterRevisionResidentBytes == 0)
-        #expect(
-            depositionTextureBytes(
-                try setup.renderer.copyCanonicalForHarness()
-            ) == before
-        )
-
-        try commitNativeStroke(
-            renderer: setup.renderer,
-            brush: brush,
-            token: RendererOperationToken(rawValue: 24)
-        )
+        try await offMainSurfaceCommandFailureCancelsWithoutCanonicalMutation()
     }
 
     @Test
@@ -1783,50 +1171,15 @@ struct DepositionRendererTests {
         )
     }
 
+    // Retired Main replay-completion duplicate; covered by
+    // predictionIsPreparedOffMainAndReplacesOnlySpeculativeWork.
     @Test
     @MainActor
     func nativeStaleReplayCompletionCannotReplaceNewerPrediction()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let brush = try await setup.compileBrush(id: "brush.stale-replay")
-        try setup.renderer.activateDrawBrush(brush)
-        let token = RendererOperationToken(rawValue: 27)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionSample(.began, x: 12),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-        _ = try setup.renderer.flushPendingLiveForHarness()
-
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: depositionPredictedSample(x: 30)
-        )
-        let staleEpoch = setup.renderer.replayStroke.renderEpoch
-        setup.renderer.deferNextFrameOutcomeForHarness()
-        _ = try setup.renderer.flushPendingLiveForHarness()
-
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: depositionSample(.moved, x: 38)
-        )
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: depositionPredictedSample(x: 54)
-        )
-        let newestEpoch = setup.renderer.replayStroke.renderEpoch
-        #expect(newestEpoch > staleEpoch)
-        _ = try setup.renderer.flushPendingLiveForHarness()
-        _ = try setup.renderer.flushPendingLiveForHarness()
-        #expect(setup.renderer.replayTile.visibleEpoch == newestEpoch)
-
-        setup.renderer.releaseDeferredFrameOutcomesForHarness()
-        try setup.renderer.drainNextCompletedOperationForHarness()
-
-        #expect(setup.renderer.replayTile.visibleEpoch == newestEpoch)
-        #expect(setup.renderer.hasActiveStroke)
-        try setup.renderer.cancelStroke(token: token)
+        try await StrokeRenderCoordinatorTests()
+            .predictionIsPreparedOffMainAndReplacesOnlySpeculativeWork()
     }
 
     @Test
@@ -2010,7 +1363,8 @@ struct DepositionRendererTests {
             setup.renderer.activeStroke?.pendingTokenBearingFrameCount == 0
         )
         #expect(
-            setup.renderer.activeStroke?.scheduler?.authoritativeIsDrained
+            setup.renderer.activeStroke?.frozenHarnessScheduler?
+                .authoritativeIsDrained
                 == true
         )
         #expect(setup.renderer.needsReplayClear)
@@ -2067,76 +1421,88 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
-    func nativeInputAndReplayPathsAllocateNothingAfterWarmup()
-        async throws
-    {
+    func nativeInputUsesBoundedActorMailboxAfterWarmup() async throws {
         guard let setup = try makeDepositionRendererSetup() else { return }
         let brush = try await setup.compileBrush(
-            recipe: BrushRecipe(
-                id: BrushRecipeID("brush.input-path-storage"),
-                replayMode: .replayTail,
-                replayLimits: BrushRecipePolicy.replayTailLimits
-            )
+            definition: StageFourAnchorDefinitions.ink
         )
         try setup.renderer.activateDrawBrush(brush)
         try setup.renderer.applyTiling(.squareRotation)
         let token = RendererOperationToken(rawValue: 39)
+        let workspaceIdentity =
+            setup.renderer.offMainStrokeWorkspaceIdentityForTesting
+        let workspaceInstallationCount = setup.renderer
+            .offMainStrokeWorkspaceInstallationCountForTesting
         try setup.renderer.beginStroke(
             token: token,
             sample: depositionSample(.began, x: 0),
             style: depositionStyle(brush, compositeMode: .draw)
         )
 
-        for index in 1...128 {
-            try setup.renderer.appendStroke(
+        for batchIndex in 0..<2 {
+            try setup.renderer.appendStrokeBatch(
                 token: token,
-                sample: depositionSample(
-                    .moved,
-                    x: Float(index % 96) * 0.5
-                )
-            )
-            while !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty
-                || setup.renderer.activeStroke?.scheduler?.predictedCount != 0
-            {
-                _ = try setup.renderer.flushPendingLiveForHarness()
-            }
-        }
-        setup.renderer.armInputPathStorageAuditForHarness()
-
-        for index in 129...640 {
-            try setup.renderer.appendStroke(
-                token: token,
-                sample: depositionSample(
-                    .moved,
-                    x: Float(index % 96) * 0.5
-                )
-            )
-            if index.isMultiple(of: 16) {
-                try setup.renderer.appendStroke(
-                    token: token,
-                    sample: depositionPredictedSample(
-                        x: Float((index + 1) % 96) * 0.5
+                samples: (0..<32).map { offset in
+                    depositionSample(
+                        .moved,
+                        x: Float((batchIndex * 32 + offset) % 96) * 0.5
                     )
-                )
-            }
-            while !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty
-                || setup.renderer.activeStroke?.scheduler?.predictedCount != 0
-            {
-                _ = try setup.renderer.flushPendingLiveForHarness()
-            }
+                }
+            )
         }
+        try await driveOffMainStroke(setup.renderer) {
+            setup.renderer.strokePreparationIsQuiescentForAllocationHarness
+        }
+        let warmed = try #require(
+            setup.renderer.offMainPreparationMailboxSnapshotForTesting
+        )
 
-        let storage = setup.renderer.inputPathStorageDiagnosticSnapshot
-        #expect(storage.isArmed)
-        #expect(storage.allocationEventCountAfterWarmup == 0)
-        #expect(storage.generatedDabCapacityHighWater > 0)
-        #expect(storage.tilingImageCapacityHighWater > 0)
-        #expect(storage.tilingCandidateCapacityHighWater > 0)
-        #expect(storage.projectionFragmentCapacityHighWater > 0)
-        #expect(storage.schedulerRecordCapacityHighWater > 0)
-        #expect(storage.replayRecordCapacityHighWater > 0)
-        #expect(storage.auditedEventCount >= 512)
+        for batchIndex in 2..<6 {
+            try setup.renderer.appendStrokeBatch(
+                token: token,
+                samples: (0..<32).map { offset in
+                    depositionSample(
+                        .moved,
+                        x: Float((batchIndex * 32 + offset) % 96) * 0.5
+                    )
+                }
+            )
+        }
+        try setup.renderer.appendStrokeBatch(
+            token: token,
+            samples: (0..<64).map { offset in
+                depositionPredictedSample(x: Float(offset) * 0.5)
+            }
+        )
+        try await driveOffMainStroke(setup.renderer) {
+            setup.renderer.strokePreparationIsQuiescentForAllocationHarness
+        }
+        let measured = try #require(
+            setup.renderer.offMainPreparationMailboxSnapshotForTesting
+        )
+
+        #expect(measured.input.authoritativeCapacity == 12_288)
+        #expect(measured.input.predictionCapacity == 64)
+        #expect(
+            measured.input.authoritativeStorageCapacity
+                == warmed.input.authoritativeStorageCapacity
+        )
+        #expect(
+            measured.input.predictionStorageCapacity
+                == warmed.input.predictionStorageCapacity
+        )
+        #expect(measured.resultStorageCapacity == warmed.resultStorageCapacity)
+        #expect(measured.resultHighWater == 1)
+        #expect(
+            setup.renderer.offMainStrokeWorkspaceIdentityForTesting
+                == workspaceIdentity
+        )
+        #expect(
+            setup.renderer.offMainStrokeWorkspaceInstallationCountForTesting
+                == workspaceInstallationCount
+        )
         try setup.renderer.cancelStroke(token: token)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
     }
 
     @Test
@@ -2215,10 +1581,7 @@ struct DepositionRendererTests {
             sample: depositionSample(.ended, x: 48),
             maximumRetainedBytes: 1_000_000
         )
-        while !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty {
-            _ = try setup.renderer.flushPendingLiveForHarness()
-        }
-        _ = try setup.renderer.flushPendingLiveForHarness()
+        try await prepareOffMainCommit(setup.renderer)
         let preview = depositionTextureBytes(
             try setup.renderer.renderOffscreenDisplayForHarness(
                 width: 64,
@@ -2267,16 +1630,13 @@ struct DepositionRendererTests {
             sample: depositionSample(.ended, x: 40),
             maximumRetainedBytes: 1_000_000
         )
-        while !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty {
-            _ = try setup.renderer.flushPendingLiveForHarness()
-        }
-        _ = try setup.renderer.flushPendingLiveForHarness()
+        try await prepareOffMainCommit(setup.renderer)
+        setup.renderer.deferNextFrameOutcomeForHarness()
         _ = try setup.renderer.submitCommitForHarness()
         let provisionalBytes =
             setup.renderer.harnessRasterRevisionResidentBytes
 
         try setup.renderer.submitDisplayOnlyForHarness(forceFailure: true)
-        setup.renderer.prioritizeLatestFrameOutcomeForHarness()
         #expect(
             throws: MetalRendererError.commandFailed(
                 "injected harness command-buffer failure"
@@ -2298,7 +1658,9 @@ struct DepositionRendererTests {
         )
         #expect(reportedErrors.count == 1)
 
+        setup.renderer.releaseDeferredFrameOutcomesForHarness()
         try setup.renderer.drainCompletedOperationsForHarness()
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
         #expect(setup.renderer.isIdle)
         #expect(
             setup.renderer.harnessRevision == initial.revision.advanced()
@@ -2317,12 +1679,9 @@ struct DepositionRendererTests {
             receipt.after.id,
         ])
     }
-
     @Test
     @MainActor
-    func nativeAppendOnlyEstimatedSuffixFallsBackVisibleAndCommits()
-        async throws
-    {
+    func nativeAppendOnlyEstimatedSuffixCommitsThroughActor() async throws {
         guard let setup = try makeDepositionRendererSetup() else { return }
         let recipe = try BrushRecipe(
             id: BrushRecipeID("brush.append-only-estimated"),
@@ -2346,160 +1705,32 @@ struct DepositionRendererTests {
                 expecting: [.pressure]
             )
         )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.actualSampleCount == 1
-        )
-        #expect(
-            setup.renderer.activeStroke?.scheduler?.predictedCount ?? 0 > 0
-        )
-
         try setup.renderer.finishStrokeTransient(
             token: token,
             sample: depositionSample(.ended, x: 44)
-        )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.actualSampleCount == 2
-        )
-        #expect(
-            setup.renderer.activeStroke?.scheduler?.predictedCount ?? 0 > 0
         )
         try setup.renderer.commitFinishedStroke(
             token: token,
             maximumRetainedBytes: 1_000_000
         )
         _ = try setup.renderer.finishCommitForHarness()
+
         #expect(setup.renderer.isIdle)
         #expect(setup.renderer.harnessRevision.rawValue == 1)
-    }
-
-    @Test
-    @MainActor
-    func nativeReplayPromotionWaitsForCompleteAtomicUploadPreflight()
-        async throws
-    {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("brush.atomic-replay-preflight"),
-            replayMode: .replayTail,
-            replayLimits: BrushRecipePolicy.replayTailLimits
-        )
-        let brush = try await setup.compileBrush(recipe: recipe)
-        try setup.renderer.activateDrawBrush(brush)
-        let token = RendererOperationToken(rawValue: 42)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionSample(.began, x: 16),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-        _ = try setup.renderer.flushPendingLiveForHarness()
-        let priorVisibleEpoch = setup.renderer.replayTile.visibleEpoch
-
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: depositionPredictedSample(x: 48)
-        )
-
-        let latestEpoch = setup.renderer.replayStroke.renderEpoch
-        #expect(latestEpoch > priorVisibleEpoch)
-        let predictedBefore =
-            setup.renderer.activeStroke?.scheduler?.predictedCount ?? 0
-        #expect(predictedBefore > 0)
-        #expect(setup.renderer.needsReplayClear)
-
-        let held = try #require(
-            setup.renderer.instancePool.acquire(
-                count: GridCanvasContract.inFlightBufferCount
-            )
-        )
-        var released = false
-        defer {
-            if !released {
-                for lease in held {
-                    setup.renderer.instancePool.abandon(lease)
-                }
-            }
-        }
-        let deferred = try setup.renderer.flushPendingLiveForHarness()
-        #expect(deferred.encodedIdentityRanges.isEmpty)
         #expect(
-            setup.renderer.replayTile.visibleEpoch == priorVisibleEpoch
+            setup.renderer.offMainSurfaceSnapshotForTesting?
+                .encodedInstanceCount ?? 0 > 0
         )
         #expect(
-            setup.renderer.activeStroke?.scheduler?.predictedCount
-                == predictedBefore
-        )
-        #expect(setup.renderer.needsReplayClear)
-
-        for lease in held {
-            setup.renderer.instancePool.abandon(lease)
-        }
-        released = true
-        let completed = try setup.renderer.flushPendingLiveForHarness()
-        #expect(completed.metrics.encodedInstanceCount > 0)
-        #expect(completed.encodedIdentityRanges.isEmpty)
-        #expect(
-            setup.renderer.activeStroke?.scheduler?.predictedCount == 0
-        )
-        #expect(setup.renderer.replayTile.visibleEpoch == latestEpoch)
-        #expect(!setup.renderer.needsReplayClear)
-        try setup.renderer.cancelStroke(token: token)
-    }
-
-    @Test
-    @MainActor
-    func nativeFailedReplayClearTerminatesAndClearsTransientState()
-        async throws
-    {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("brush.failed-replay-clear"),
-            replayMode: .replayTail,
-            replayLimits: BrushRecipePolicy.replayTailLimits
-        )
-        let brush = try await setup.compileBrush(recipe: recipe)
-        try setup.renderer.activateDrawBrush(brush)
-        let canonicalBefore = depositionTextureBytes(
-            try setup.renderer.copyCanonicalForHarness()
-        )
-        let token = RendererOperationToken(rawValue: 43)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionSample(.began, x: 12),
-            style: depositionStyle(brush, compositeMode: .draw)
-        )
-        _ = try setup.renderer.flushPendingLiveForHarness()
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: depositionPredictedSample(x: 40)
-        )
-        #expect(setup.renderer.needsReplayClear)
-        #expect(
-            setup.renderer.activeStroke?.scheduler?.predictedCount ?? 0 > 0
-        )
-
-        #expect(
-            throws: MetalRendererError.commandFailed(
-                "injected harness command-buffer failure"
-            )
-        ) {
-            _ = try setup.renderer.flushPendingLiveForHarness(
-                forceFailure: true
-            )
-        }
-
-        #expect(setup.renderer.isIdle)
-        #expect(setup.renderer.replayStroke.pending.isEmpty)
-        #expect(setup.renderer.replayStroke.bakedHighWater == 0)
-        #expect(setup.renderer.replayStroke.emittedHighWater == 0)
-        #expect(setup.renderer.needsReplayClear)
-        #expect(setup.renderer.harnessReservedInstanceBufferCount == 0)
-        #expect(
-            depositionTextureBytes(
-                try setup.renderer.copyCanonicalForHarness()
-            ) == canonicalBefore
+            setup.renderer.instancePool.diagnosticSnapshot
+                .strokeLeaseHighWater == 0
         )
     }
 
+    // The retired MainActor scheduler's instance-pool preflight and replay
+    // clear failure tests are covered on the production actor route by
+    // offMainSurfaceLeaseWaitsForCompositeCompletionBeforeNextInput() and
+    // offMainSurfaceCommandFailureCancelsWithoutCanonicalMutation().
     @Test
     @MainActor
     func nativeFractionalEraserPreviewMatchesCommitAfterPanAndZoom()
@@ -2537,10 +1768,7 @@ struct DepositionRendererTests {
             sample: depositionSample(.ended, x: 38.6, y: 35.7),
             maximumRetainedBytes: 1_000_000
         )
-        while !setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty {
-            _ = try setup.renderer.flushPendingLiveForHarness()
-        }
-        _ = try setup.renderer.flushPendingLiveForHarness()
+        try await prepareOffMainCommit(setup.renderer)
         let live = depositionTextureBytes(
             try setup.renderer.renderOffscreenDisplayForHarness(
                 width: 79,
@@ -2611,7 +1839,7 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
-    func nativeInkIncrementalRouteMatchesBatchingAndDebugLegacyPixels()
+    func nativeInkOffMainPreparationIsBatchPartitionInvariant()
         async throws
     {
         guard let incremental = try makeDepositionRendererSetup(),
@@ -2631,9 +1859,6 @@ struct DepositionRendererTests {
         try incremental.renderer.activateDrawBrush(incrementalBrush)
         try partitioned.renderer.activateDrawBrush(partitionedBrush)
         try legacy.renderer.activateDrawBrush(legacyBrush)
-        legacy.renderer.setCompatibilityInkRuntimeRouteForTesting(
-            .legacyReplay
-        )
         let incrementalToken = RendererOperationToken(rawValue: 90_001)
         let partitionedToken = RendererOperationToken(rawValue: 90_002)
         let legacyToken = RendererOperationToken(rawValue: 90_003)
@@ -2700,35 +1925,6 @@ struct DepositionRendererTests {
             samples: moved
         )
 
-        let coordinator = try #require(
-            incremental.renderer
-                .compatibilityInkCoordinatorSnapshotForTesting
-        )
-        #expect(coordinator.authoritativeSubmittedDabCount > 0)
-        #expect(coordinator.authoritativeQueueDepth == 0)
-        #expect(coordinator.retainedCompletedDabCount == 0)
-        let partitionedCoordinator = try #require(
-            partitioned.renderer
-                .compatibilityInkCoordinatorSnapshotForTesting
-        )
-        #expect(
-            partitionedCoordinator.commitMetadata
-                == coordinator.commitMetadata
-        )
-        #expect(partitionedCoordinator.authoritativeQueueDepth == 0)
-        #expect(partitionedCoordinator.retainedCompletedDabCount == 0)
-        #expect(
-            incremental.renderer.transientStrokeBuffer?.actualChunks.isEmpty
-                == true
-        )
-        #expect(
-            incremental.renderer.brushLabDiagnosticSnapshot.replayCount == 0
-        )
-        #expect(
-            legacy.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == nil
-        )
-
         try incremental.renderer.requestStrokeCommit(
             token: incrementalToken,
             sample: depositionSample(.ended, x: 52, y: 24),
@@ -2765,86 +1961,469 @@ struct DepositionRendererTests {
 
     @Test
     @MainActor
-    func nativeInkFailedSchedulerPreflightDoesNotAdvanceCoordinator()
+    func nativeInkOffMainRoutePublishesAfterPreparationAndCommits()
         async throws
     {
-        guard let setup = try makeDepositionRendererSetup() else { return }
-        let brush = try await setup.compileBrush(
+        guard let offMain = try makeDepositionRendererSetup(),
+              let reference = try makeDepositionRendererSetup()
+        else { return }
+        let offMainBrush = try await offMain.compileBrush(
             definition: StageFourAnchorDefinitions.ink
         )
-        try setup.renderer.activateDrawBrush(brush)
-        try setup.renderer.applyTiling(.squareRotation)
-        let token = RendererOperationToken(rawValue: 90_010)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: depositionSample(.began, x: 12, y: 24),
+        let referenceBrush = try await reference.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try offMain.renderer.activateDrawBrush(offMainBrush)
+        try reference.renderer.activateDrawBrush(referenceBrush)
+        let offMainToken = RendererOperationToken(rawValue: 90_004)
+        let referenceToken = RendererOperationToken(rawValue: 90_005)
+        let began = depositionSample(.began, x: 8, y: 24)
+        let moved = (1...12).map { index in
+            depositionSample(
+                .moved,
+                x: 8 + Float(index) * 3,
+                y: 24 + Float(index % 3)
+            )
+        }
+        var publishedDabs: [LogicalDab] = []
+        offMain.renderer.onLogicalDabsGenerated = {
+            publishedDabs.append($0)
+        }
+
+        try offMain.renderer.beginStroke(
+            token: offMainToken,
+            sample: began,
             style: depositionStyle(
-                brush,
+                offMainBrush,
                 compositeMode: .draw,
                 diameter: 12
             )
         )
-        let coordinatorBefore = try #require(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+        try offMain.renderer.appendStrokeBatch(
+            token: offMainToken,
+            samples: moved
         )
-        let bufferBefore = try #require(setup.renderer.transientStrokeBuffer)
-        let arenaBefore = setup.renderer.harnessTransientDabArenaSnapshot
-        let constrainedBudget = try depositionFrameBudget(
-            maximumAuthoritativeInstances: 1,
-            maximumPendingAuthoritativeInstances: 1
-        )
-        let previousBudget = setup.renderer
-            .replaceDepositionFrameBudgetForHarness(constrainedBudget)
-        let previousScheduler = try #require(
-            setup.renderer.replaceActiveStrokeSchedulerForHarness(
-                constrainedBudget
-            )
+        #expect(publishedDabs.isEmpty)
+        try offMain.renderer.requestStrokeCommit(
+            token: offMainToken,
+            sample: depositionSample(.ended, x: 48, y: 24),
+            maximumRetainedBytes: 1_000_000
         )
 
-        #expect(
-            throws: MetalRendererError
-                .projectedInstanceCapacityExceeded(1)
-        ) {
-            try setup.renderer.appendStroke(
-                token: token,
-                sample: depositionSample(.moved, x: 24, y: 24)
+        try reference.renderer.beginStroke(
+            token: referenceToken,
+            sample: began,
+            style: depositionStyle(
+                referenceBrush,
+                compositeMode: .draw,
+                diameter: 12
             )
-        }
-        let coordinatorAfterFailure = try #require(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
         )
-        #expect(coordinatorAfterFailure == coordinatorBefore)
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore)
-        #expect(setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty)
+        try reference.renderer.appendStrokeBatch(
+            token: referenceToken,
+            samples: moved
+        )
+        try reference.renderer.requestStrokeCommit(
+            token: referenceToken,
+            sample: depositionSample(.ended, x: 48, y: 24),
+            maximumRetainedBytes: 1_000_000
+        )
 
-        setup.renderer.replaceDepositionFrameBudgetForHarness(previousBudget)
-        setup.renderer.restoreActiveStrokeSchedulerForHarness(previousScheduler)
-        if coordinatorAfterFailure == coordinatorBefore {
-            try setup.renderer.appendStroke(
-                token: token,
-                sample: depositionSample(.moved, x: 24, y: 24)
-            )
-            let recovered = try #require(
-                setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-            )
-            #expect(
-                recovered.commitMetadata.inputSampleCount
-                    == coordinatorBefore.commitMetadata.inputSampleCount + 1
-            )
-            #expect(!setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty)
-        }
-        try setup.renderer.cancelStroke(token: token)
-        #expect(setup.renderer.isIdle)
+        _ = try offMain.renderer.finishCommitForHarness()
+        _ = try reference.renderer.finishCommitForHarness()
+
+        #expect(!publishedDabs.isEmpty)
+        #expect(offMain.renderer.isIdle)
         #expect(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == nil
+            offMain.renderer
+                .compatibilityInkEncodingRanOnMainThreadForTesting == false
+        )
+        let workerPriority = try #require(
+            offMain.renderer
+                .offMainPreparationWorkerTaskPriorityForTesting
+        )
+        #expect(
+            workerPriority.rawValue
+                >= TaskPriority.userInitiated.rawValue
+        )
+        #expect(
+            offMain.renderer.instancePool.diagnosticSnapshot
+                .strokeLeaseHighWater == 0
+        )
+        #expect(!offMain.renderer.liveTile.isDirty)
+        #expect(offMain.renderer.offMainZeroWorkLeaseCountForTesting == 1)
+        #expect(
+            offMain.renderer.offMainSurfaceSnapshotForTesting?
+                .surfaceCount == 2
+        )
+        #expect(
+            offMain.renderer.offMainSurfaceSnapshotForTesting?
+                .surfaceLeaseHighWater == 1
+        )
+        #expect(
+            depositionTextureBytes(
+                try offMain.renderer.copyCanonicalForHarness()
+            ) == depositionTextureBytes(
+                try reference.renderer.copyCanonicalForHarness()
+            )
         )
     }
 
     @Test
     @MainActor
-    func nativeInkFrameTokenBoundaryCannotFailAfterSchedulerAcceptance()
+    func offMainMatchesFrozenPixelsAcrossTilingAndSymmetryWithPrediction()
+        async throws
+    {
+        let tilings: [(TilingKind, String)] = [
+            (.grid, "128dadaf651fb66f"),
+            (.halfDrop, "e47e95b2759ef798"),
+            (.squareRotation, "5add6b42f2963f65"),
+            (.squareKaleidoscope, "7afcc6f412f49865"),
+            (.hexagons, "8140200a3635e3a5"),
+            (.kaleidoscope30, "3077db84bff4d09c"),
+        ]
+        for (index, entry) in tilings.enumerated() {
+            let (tiling, expectedDigest) = entry
+            guard let offMain = try makeDepositionRendererSetup(
+                tiling: tiling
+            ), let legacy = try makeDepositionRendererSetup(tiling: tiling)
+            else { return }
+            let offMainBrush = try await offMain.compileBrush(
+                definition: StageFourAnchorDefinitions.ink
+            )
+            let legacyBrush = try await legacy.compileBrush(
+                definition: StageFourAnchorDefinitions.ink
+            )
+            try offMain.renderer.activateDrawBrush(offMainBrush)
+            try legacy.renderer.activateDrawBrush(legacyBrush)
+            let offMainToken = RendererOperationToken(
+                rawValue: UInt64(91_000 + index * 2)
+            )
+            let legacyToken = RendererOperationToken(
+                rawValue: UInt64(91_001 + index * 2)
+            )
+            let began = depositionSample(.began, x: 4, y: 7)
+            let authoritative = [
+                depositionSample(.moved, x: 18, y: 29),
+                depositionSample(.moved, x: 39, y: 53),
+            ]
+            let prediction = [
+                depositionPredictedSample(x: 48),
+                depositionPredictedSample(x: 56),
+            ]
+
+            try offMain.renderer.beginStroke(
+                token: offMainToken,
+                sample: began,
+                style: depositionStyle(
+                    offMainBrush,
+                    compositeMode: .draw,
+                    diameter: 12
+                )
+            )
+            try offMain.renderer.appendStrokeBatch(
+                token: offMainToken,
+                samples: prediction
+            )
+            try offMain.renderer.appendStrokeBatch(
+                token: offMainToken,
+                samples: authoritative
+            )
+            try offMain.renderer.requestStrokeCommit(
+                token: offMainToken,
+                sample: depositionSample(.ended, x: 60, y: 12),
+                maximumRetainedBytes: 4_000_000
+            )
+
+            try legacy.renderer.beginStroke(
+                token: legacyToken,
+                sample: began,
+                style: depositionStyle(
+                    legacyBrush,
+                    compositeMode: .draw,
+                    diameter: 12
+                )
+            )
+            try legacy.renderer.appendStrokeBatch(
+                token: legacyToken,
+                samples: prediction
+            )
+            try legacy.renderer.appendStrokeBatch(
+                token: legacyToken,
+                samples: authoritative
+            )
+            try legacy.renderer.requestStrokeCommit(
+                token: legacyToken,
+                sample: depositionSample(.ended, x: 60, y: 12),
+                maximumRetainedBytes: 4_000_000
+            )
+
+            try await prepareOffMainCommit(offMain.renderer)
+            try await prepareOffMainCommit(legacy.renderer)
+            _ = try offMain.renderer.finishCommitForHarness()
+            _ = try legacy.renderer.finishCommitForHarness()
+            let offMainPixels = depositionTextureBytes(
+                try offMain.renderer.copyCanonicalForHarness()
+            )
+            let legacyPixels = depositionTextureBytes(
+                try legacy.renderer.copyCanonicalForHarness()
+            )
+            let digest = depositionPixelDigest(offMainPixels)
+            print(
+                "TASK7_PARITY \(tiling) "
+                    + "digest=\(digest)"
+            )
+            #expect(
+                offMainPixels == legacyPixels,
+                "Off-main determinism mismatch for \(tiling)"
+            )
+            #expect(digest == expectedDigest)
+            #expect(
+                offMain.renderer.offMainZeroWorkLeaseCountForTesting == 1
+            )
+            #expect(
+                offMain.renderer
+                    .compatibilityInkEncodingRanOnMainThreadForTesting
+                    == false
+            )
+        }
+    }
+
+    @Test
+    @MainActor
+    func offMainEstimatedCorrectionsMatchDirectFinalPixels() async throws {
+        let properties: [StrokeEstimatedProperties] = [
+            .location,
+            .pressure,
+            .azimuth,
+            .altitude,
+        ]
+        for (offset, property) in properties.enumerated() {
+            guard let corrected = try makeDepositionRendererSetup(),
+                  let direct = try makeDepositionRendererSetup()
+            else { return }
+            let correctedBrush = try await corrected.compileBrush(
+                definition: StageFourAnchorDefinitions.ink
+            )
+            let directBrush = try await direct.compileBrush(
+                definition: StageFourAnchorDefinitions.ink
+            )
+            try corrected.renderer.activateDrawBrush(correctedBrush)
+            try direct.renderer.activateDrawBrush(directBrush)
+            let correctedToken = RendererOperationToken(
+                rawValue: UInt64(91_100 + offset * 2)
+            )
+            let directToken = RendererOperationToken(
+                rawValue: UInt64(91_101 + offset * 2)
+            )
+            let updateIndex = 200 + offset
+            let initial = depositionCorrectionSample(
+                phase: .began,
+                kind: .actual,
+                x: 10,
+                pressure: 0.2,
+                timestamp: 1,
+                altitude: 0.4,
+                azimuth: 0.6,
+                estimationUpdateIndex: updateIndex,
+                estimatedProperties: property,
+                expecting: property
+            )
+            let update = depositionCorrectionSample(
+                phase: .moved,
+                kind: .estimatedUpdate,
+                x: 38,
+                pressure: 0.9,
+                timestamp: 2,
+                altitude: 1.1,
+                azimuth: 1.4,
+                estimationUpdateIndex: updateIndex,
+                estimatedProperties: [],
+                expecting: []
+            )
+            let final = depositionCorrectionSample(
+                phase: .began,
+                kind: .actual,
+                x: property == .location ? 38 : 10,
+                pressure: property == .pressure ? 0.9 : 0.2,
+                timestamp: 1,
+                altitude: property == .altitude ? 1.1 : 0.4,
+                azimuth: property == .azimuth ? 1.4 : 0.6,
+                estimationUpdateIndex: updateIndex,
+                estimatedProperties: [],
+                expecting: []
+            )
+            let style = depositionStyle(
+                correctedBrush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+            let directStyle = depositionStyle(
+                directBrush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+
+            try corrected.renderer.beginStroke(
+                token: correctedToken,
+                sample: initial,
+                style: style
+            )
+            try corrected.renderer.applyEstimatedStrokeUpdate(
+                token: correctedToken,
+                sample: update
+            )
+            try corrected.renderer.requestStrokeCommit(
+                token: correctedToken,
+                sample: depositionSample(.ended, x: 54, y: 24),
+                maximumRetainedBytes: 1_000_000
+            )
+
+            try direct.renderer.beginStroke(
+                token: directToken,
+                sample: final,
+                style: directStyle
+            )
+            try direct.renderer.requestStrokeCommit(
+                token: directToken,
+                sample: depositionSample(.ended, x: 54, y: 24),
+                maximumRetainedBytes: 1_000_000
+            )
+
+            try await prepareOffMainCommit(corrected.renderer)
+            try await prepareOffMainCommit(direct.renderer)
+            _ = try corrected.renderer.finishCommitForHarness()
+            _ = try direct.renderer.finishCommitForHarness()
+            #expect(
+                depositionTextureBytes(
+                    try corrected.renderer.copyCanonicalForHarness()
+                ) == depositionTextureBytes(
+                    try direct.renderer.copyCanonicalForHarness()
+                ),
+                "Corrected/direct pixel mismatch for \(property)"
+            )
+        }
+    }
+
+    @Test
+    @MainActor
+    func offMainPredictedAwaitingEstimateMatchesDirectPredictionPixels()
+        async throws
+    {
+        guard let corrected = try makeDepositionRendererSetup(),
+              let direct = try makeDepositionRendererSetup()
+        else { return }
+        let correctedBrush = try await corrected.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        let directBrush = try await direct.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try corrected.renderer.activateDrawBrush(correctedBrush)
+        try direct.renderer.activateDrawBrush(directBrush)
+        let correctedToken = RendererOperationToken(rawValue: 91_120)
+        let directToken = RendererOperationToken(rawValue: 91_121)
+        let style = depositionStyle(
+            correctedBrush,
+            compositeMode: .draw,
+            diameter: 12
+        )
+        let directStyle = depositionStyle(
+            directBrush,
+            compositeMode: .draw,
+            diameter: 12
+        )
+        let began = depositionSample(.began, x: 8, y: 24)
+        let predicted = depositionCorrectionSample(
+            phase: .moved,
+            kind: .predicted,
+            x: 20,
+            pressure: 0.5,
+            timestamp: 3,
+            altitude: 0.7,
+            azimuth: 0.8,
+            estimationUpdateIndex: 240,
+            estimatedProperties: .location,
+            expecting: .location
+        )
+        let update = depositionCorrectionSample(
+            phase: .moved,
+            kind: .estimatedUpdate,
+            x: 44,
+            pressure: 0.9,
+            timestamp: 4,
+            altitude: 1,
+            azimuth: 1.2,
+            estimationUpdateIndex: 240,
+            estimatedProperties: [],
+            expecting: []
+        )
+        let directPrediction = depositionCorrectionSample(
+            phase: .moved,
+            kind: .predicted,
+            x: 44,
+            pressure: 0.5,
+            timestamp: 3,
+            altitude: 0.7,
+            azimuth: 0.8,
+            estimationUpdateIndex: 240,
+            estimatedProperties: [],
+            expecting: []
+        )
+
+        try corrected.renderer.beginStroke(
+            token: correctedToken,
+            sample: began,
+            style: style
+        )
+        try corrected.renderer.appendStroke(
+            token: correctedToken,
+            sample: predicted
+        )
+        try corrected.renderer.applyEstimatedStrokeUpdate(
+            token: correctedToken,
+            sample: update
+        )
+        try direct.renderer.beginStroke(
+            token: directToken,
+            sample: began,
+            style: directStyle
+        )
+        try direct.renderer.appendStroke(
+            token: directToken,
+            sample: directPrediction
+        )
+
+        try await drainOffMainPreparedFrames(
+            corrected.renderer,
+            minimumFrameCount: 3
+        )
+        try await drainOffMainPreparedFrames(
+            direct.renderer,
+            minimumFrameCount: 2
+        )
+        let correctedPixels = depositionTextureBytes(
+            try corrected.renderer.renderOffscreenDisplayForHarness(
+                width: 64,
+                height: 64,
+                showGridLines: false
+            ).texture
+        )
+        let directPixels = depositionTextureBytes(
+            try direct.renderer.renderOffscreenDisplayForHarness(
+                width: 64,
+                height: 64,
+                showGridLines: false
+            ).texture
+        )
+        #expect(correctedPixels == directPixels)
+        try corrected.renderer.cancelStroke(token: correctedToken)
+        try direct.renderer.cancelStroke(token: directToken)
+    }
+
+    @Test
+    @MainActor
+    func offMainSurfaceLeaseWaitsForCompositeCompletionBeforeNextInput()
         async throws
     {
         guard let setup = try makeDepositionRendererSetup() else { return }
@@ -2852,59 +2431,550 @@ struct DepositionRendererTests {
             definition: StageFourAnchorDefinitions.ink
         )
         try setup.renderer.activateDrawBrush(brush)
-        let token = RendererOperationToken(rawValue: 90_011)
+        let canonicalBefore = depositionTextureBytes(
+            try setup.renderer.copyCanonicalForHarness()
+        )
+        let token = RendererOperationToken(rawValue: 90_006)
         try setup.renderer.beginStroke(
             token: token,
-            sample: depositionSample(.began, x: 12, y: 24),
+            sample: depositionSample(.began, x: 8, y: 24),
             style: depositionStyle(
                 brush,
                 compositeMode: .draw,
                 diameter: 12
             )
         )
-        let before = try #require(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+
+        for _ in 0..<10_000 {
+            try setup.renderer.drainCompletedInteractiveOperations()
+            if setup.renderer.hasPendingOffMainSurfaceLeaseForTesting {
+                break
+            }
+            await Task.yield()
+        }
+        #expect(setup.renderer.hasPendingOffMainSurfaceLeaseForTesting)
+        #expect(
+            setup.renderer.offMainPreparationMailboxSnapshotForTesting?
+                .awaitingPreparedFrameSubmission == true
         )
-        let scheduledBefore =
-            setup.renderer.harnessScheduledAuthoritativeRecords.count
-        _ = try #require(
-            setup.renderer.replaceCompatibilityInkFrameTokenForTesting(
-                .max
-            )
+        let firstLeaseSurface = try #require(
+            setup.renderer.offMainSurfaceSnapshotForTesting
         )
+        #expect(firstLeaseSurface.authoritativeSurfaceIsInitialized)
+        #expect(firstLeaseSurface.predictionSurfaceIsInitialized)
+
+        setup.renderer.deferNextFrameOutcomeForHarness()
+        _ = try setup.renderer.completeNextPendingInteractiveFrame()
+        #expect(setup.renderer.hasPendingOffMainSurfaceLeaseForTesting)
+        #expect(setup.renderer.hasSubmittedOffMainSurfaceLeaseForTesting)
 
         try setup.renderer.appendStroke(
             token: token,
-            sample: depositionSample(.moved, x: 24, y: 24)
+            sample: depositionSample(.moved, x: 18, y: 24)
+        )
+        #expect(
+            setup.renderer.offMainPreparationMailboxSnapshotForTesting?
+                .input.authoritativePendingSampleCount == 1
         )
 
-        let after = try #require(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+        setup.renderer.releaseDeferredFrameOutcomesForHarness()
+        try setup.renderer.drainNextCompletedOperationForHarness()
+        #expect(!setup.renderer.hasSubmittedOffMainSurfaceLeaseForTesting)
+        #expect(!setup.renderer.hasPendingOffMainSurfaceLeaseForTesting)
+        #expect(!setup.renderer.hasCurrentOffMainSurfaceLeaseForTesting)
+        _ = try setup.renderer.renderOffscreenDisplayForHarness(
+            width: 64,
+            height: 64,
+            showGridLines: false
         )
-        #expect(
-            after.commitMetadata.inputSampleCount
-                == before.commitMetadata.inputSampleCount + 1
-        )
-        #expect(after.authoritativeQueueDepth == 0)
-        #expect(
-            after.commitMetadata.submittedDabCount
-                == after.authoritativeSubmittedDabCount
-        )
-        #expect(
-            after.authoritativeSubmittedDabCount
-                > before.authoritativeSubmittedDabCount
-        )
-        let submittedDelta = after.authoritativeSubmittedDabCount
-            - before.authoritativeSubmittedDabCount
-        #expect(
-            after.authoritativeQueueHighWater >= Int(submittedDelta)
-        )
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords.count
-                > scheduledBefore
-        )
+
+        for _ in 0..<10_000 {
+            try setup.renderer.drainCompletedInteractiveOperations()
+            if setup.renderer.hasPendingOffMainSurfaceLeaseForTesting {
+                break
+            }
+            await Task.yield()
+        }
+        #expect(setup.renderer.hasPendingOffMainSurfaceLeaseForTesting)
+
         try setup.renderer.cancelStroke(token: token)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
         #expect(setup.renderer.isIdle)
+        #expect(!setup.renderer.hasPendingOffMainSurfaceLeaseForTesting)
+        #expect(!setup.renderer.hasSubmittedOffMainSurfaceLeaseForTesting)
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
+        )
+    }
+
+    @Test
+    @MainActor
+    func warmedOffMainWorkspaceIsReusedAcrossBrushModeAndViewportChanges()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let ink = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        let dryMedia = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.dryMedia
+        )
+        let eraser = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.eraser
+        )
+        try setup.renderer.activateDrawBrush(ink)
+        try setup.renderer.activateEraserBrush(eraser)
+        let workspaceIdentity =
+            setup.renderer.offMainStrokeWorkspaceIdentityForTesting
+        let installationCount =
+            setup.renderer.offMainStrokeWorkspaceInstallationCountForTesting
+        let cancellationCount = setup.renderer
+            .offMainTerminalCancellationPublicationCountForTesting
+
+        let firstToken = RendererOperationToken(rawValue: 90_011)
+        try setup.renderer.beginStroke(
+            token: firstToken,
+            sample: depositionSample(.began, x: 8, y: 24),
+            style: depositionStyle(
+                ink,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        _ = try await awaitOffMainPreparedLease(setup.renderer)
+        try setup.renderer.cancelStroke(token: firstToken)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+
+        setup.renderer.resize(to: PatternSize(width: 96, height: 80))
+        setup.renderer.pan(byScreenDelta: SIMD2<Float>(3, -2))
+        setup.renderer.zoom(
+            by: 1.1,
+            anchor: ScreenPoint(x: 32, y: 24)
+        )
+        try setup.renderer.activateDrawBrush(dryMedia)
+
+        let secondToken = RendererOperationToken(rawValue: 90_012)
+        try setup.renderer.beginStroke(
+            token: secondToken,
+            sample: depositionSample(.began, x: 12, y: 20),
+            style: depositionStyle(
+                dryMedia,
+                compositeMode: .draw,
+                diameter: 10
+            )
+        )
+        _ = try await awaitOffMainPreparedLease(setup.renderer)
+        try setup.renderer.cancelStroke(token: secondToken)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+
+        let eraseToken = RendererOperationToken(rawValue: 90_013)
+        try setup.renderer.beginStroke(
+            token: eraseToken,
+            sample: depositionSample(.began, x: 16, y: 18),
+            style: depositionStyle(
+                eraser,
+                compositeMode: .erase,
+                diameter: 9
+            )
+        )
+        _ = try await awaitOffMainPreparedLease(setup.renderer)
+        try setup.renderer.cancelStroke(token: eraseToken)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+
+        #expect(
+            setup.renderer.offMainStrokeWorkspaceIdentityForTesting
+                == workspaceIdentity
+        )
+        #expect(
+            setup.renderer.offMainStrokeWorkspaceInstallationCountForTesting
+                == installationCount
+        )
+        #expect(
+            setup.renderer
+                .offMainTerminalCancellationPublicationCountForTesting
+                == cancellationCount + 3
+        )
+    }
+
+    @Test
+    @MainActor
+    func submittedLeaseRetiresOnlyAfterFailedMainCommandTerminates()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let workspaceIdentity =
+            setup.renderer.offMainStrokeWorkspaceIdentityForTesting
+        let installationCount =
+            setup.renderer.offMainStrokeWorkspaceInstallationCountForTesting
+        let cancellationCount = setup.renderer
+            .offMainTerminalCancellationPublicationCountForTesting
+        let token = RendererOperationToken(rawValue: 90_014)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 8, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        _ = try await awaitOffMainPreparedLease(setup.renderer)
+
+        setup.renderer.deferNextFrameOutcomeForHarness()
+        _ = try setup.renderer.completeNextPendingInteractiveFrame(
+            forceFailure: true
+        )
+        #expect(setup.renderer.hasSubmittedOffMainSurfaceLeaseForTesting)
+        try setup.renderer.cancelStroke(token: token)
+        #expect(
+            !setup.renderer.offMainStrokeWorkspaceIsAvailableForTesting
+        )
+        #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
+            try setup.renderer.beginStroke(
+                token: RendererOperationToken(rawValue: 90_015),
+                sample: depositionSample(.began, x: 10, y: 22),
+                style: depositionStyle(
+                    brush,
+                    compositeMode: .draw,
+                    diameter: 12
+                )
+            )
+        }
+
+        setup.renderer.releaseDeferredFrameOutcomesForHarness()
+        #expect(throws: MetalRendererError.self) {
+            try setup.renderer.drainNextCompletedOperationForHarness()
+        }
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+
+        #expect(!setup.renderer.hasSubmittedOffMainSurfaceLeaseForTesting)
+        #expect(!setup.renderer.hasCurrentOffMainSurfaceLeaseForTesting)
+        #expect(
+            setup.renderer.offMainStrokeWorkspaceIdentityForTesting
+                == workspaceIdentity
+        )
+        #expect(
+            setup.renderer.offMainStrokeWorkspaceInstallationCountForTesting
+                == installationCount
+        )
+        #expect(
+            setup.renderer
+                .offMainTerminalCancellationPublicationCountForTesting
+                == cancellationCount + 1
+        )
+    }
+
+    @Test
+    @MainActor
+    func offMainCommitPublishesRestorableHistoryPair() async throws {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let canonicalBefore = depositionTextureBytes(
+            try setup.renderer.copyCanonicalForHarness()
+        )
+        var receipt: RasterMutationReceipt?
+        setup.renderer.onOperationCompleted = { completion in
+            if case let .rasterSuccess(value) = completion {
+                receipt = value
+            }
+        }
+        let token = RendererOperationToken(rawValue: 90_008)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 8, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionSample(.moved, x: 42, y: 31)
+        )
+        try setup.renderer.requestStrokeCommit(
+            token: token,
+            sample: depositionSample(.ended, x: 56, y: 24),
+            maximumRetainedBytes: 1_000_000
+        )
+        try await prepareOffMainCommit(setup.renderer)
+        _ = try setup.renderer.finishCommitForHarness()
+        let canonicalAfter = depositionTextureBytes(
+            try setup.renderer.copyCanonicalForHarness()
+        )
+        #expect(canonicalAfter != canonicalBefore)
+        let history = try #require(receipt)
+
+        try setup.renderer.requestRasterRestoreForHarness(
+            token: RendererOperationToken(rawValue: 90_009),
+            revision: history.before,
+            forceFailure: false
+        )
+        try setup.renderer.finishRasterOperationForHarness()
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
+        )
+
+        try setup.renderer.requestRasterRestoreForHarness(
+            token: RendererOperationToken(rawValue: 90_010),
+            revision: history.after,
+            forceFailure: false
+        )
+        try setup.renderer.finishRasterOperationForHarness()
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == canonicalAfter
+        )
+        setup.renderer.releaseRasterRevisions([
+            history.before.id,
+            history.after.id,
+        ])
+    }
+
+    @Test
+    @MainActor
+    func offMainSurfaceCommandFailureCancelsWithoutCanonicalMutation()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        setup.renderer.setForceOffMainStrokeCommandFailureForTesting(true)
+        let before = depositionTextureBytes(
+            try setup.renderer.copyCanonicalForHarness()
+        )
+        let token = RendererOperationToken(rawValue: 90_007)
+        var reportedErrors: [MetalRendererError] = []
+        var completions: [RendererOperationCompletion] = []
+        setup.renderer.onError = { reportedErrors.append($0) }
+        setup.renderer.onOperationCompleted = { completions.append($0) }
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 8, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try setup.renderer.requestStrokeCommit(
+            token: token,
+            sample: depositionSample(.ended, x: 24, y: 24),
+            maximumRetainedBytes: 1_000_000
+        )
+
+        #expect(throws: MetalRendererError.self) {
+            _ = try setup.renderer.finishCommitForHarness()
+        }
+        #expect(setup.renderer.isIdle)
+        #expect(reportedErrors.count == 1)
+        #expect(
+            completions.filter {
+                if case let .failure(completedToken, _) = $0 {
+                    return completedToken == token
+                }
+                return false
+            }.count == 1
+        )
+        #expect(setup.renderer.harnessReservedInstanceBufferCount == 0)
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == before
+        )
+    }
+
+    @Test
+    @MainActor
+    func failedPreparedSurfaceCompositeAllowsImmediateRecoveryStroke()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let canonicalBefore = depositionTextureBytes(
+            try setup.renderer.copyCanonicalForHarness()
+        )
+        let revisionBefore = setup.renderer.harnessRevision
+        let historyBefore =
+            try setup.renderer.harnessRasterRevisionSnapshots
+        let historyBytesBefore =
+            setup.renderer.harnessRasterRevisionResidentBytes
+        let failedToken = RendererOperationToken(rawValue: 90_016)
+        var completions: [RendererOperationCompletion] = []
+        setup.renderer.onOperationCompleted = {
+            completions.append($0)
+        }
+
+        try setup.renderer.beginStroke(
+            token: failedToken,
+            sample: depositionSample(.began, x: 8, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try setup.renderer.preparePendingLiveSurfaceForHarness()
+        #expect(
+            setup.renderer.hasPendingPreparedStrokeSurfaceForHarness
+        )
+        #expect(throws: MetalRendererError.commandFailed(
+            "injected post-surface encoding failure"
+        )) {
+            _ = try setup.renderer.completeNextPendingInteractiveFrame(
+                forcePostSurfaceEncodingFailure: true
+            )
+        }
+        try setup.renderer.drainStrokeWorkspaceRetirementForHarness()
+
+        #expect(
+            completions.filter {
+                if case let .failure(token, _) = $0 {
+                    return token == failedToken
+                }
+                return false
+            }.count == 1
+        )
+        #expect(!setup.renderer.hasActiveStroke)
+        #expect(!setup.renderer.hasPendingRasterOperationForTesting)
+        #expect(!setup.renderer.hasPendingOffMainSurfaceLeaseForTesting)
+        #expect(!setup.renderer.hasSubmittedOffMainSurfaceLeaseForTesting)
+        #expect(!setup.renderer.hasCurrentOffMainSurfaceLeaseForTesting)
+        #expect(setup.renderer.offMainStrokeWorkspaceIsAvailableForTesting)
+        #expect(setup.renderer.isIdle)
+        #expect(setup.renderer.harnessReservedInstanceBufferCount == 0)
+        #expect(setup.renderer.harnessRevision == revisionBefore)
+        #expect(
+            setup.renderer.harnessRasterRevisionResidentBytes
+                == historyBytesBefore
+        )
+        #expect(
+            try setup.renderer.harnessRasterRevisionSnapshots
+                == historyBefore
+        )
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
+        )
+
+        try commitNativeStroke(
+            renderer: setup.renderer,
+            brush: brush,
+            token: RendererOperationToken(rawValue: 90_017)
+        )
+        #expect(setup.renderer.isIdle)
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) != canonicalBefore
+        )
+    }
+
+    @Test
+    @MainActor
+    func offMainProductionTraceCoversTenLogicalMinutes() async throws {
+        guard let setup = try makeDepositionRendererSetup() else { return }
+        let brush = try await setup.compileBrush(
+            definition: StageFourAnchorDefinitions.ink
+        )
+
+        let trace = try await setup.renderer
+            .runOffMainProductionTraceForTesting(compiledBrush: brush)
+
+        print(
+            "TASK7_PRODUCTION_TRACE "
+                + "samples=\(trace.inputSampleCount) "
+                + "logical_ns=\(trace.logicalDurationNanoseconds) "
+                + "wall_ns=\(trace.wallDurationNanoseconds) "
+                + "first_decile_ns_per_event="
+                + "\(trace.firstDecileNanosecondsPerEvent) "
+                + "last_decile_ns_per_event="
+                + "\(trace.lastDecileNanosecondsPerEvent) "
+                + "input_high_water="
+                + "\(trace.authoritativeInputHighWater) "
+                + "input_capacity="
+                + "\(trace.authoritativeInputCapacity) "
+                + "input_storage="
+                + "\(trace.authoritativeInputInitialStorageCapacity)/"
+                + "\(trace.authoritativeInputStorageCapacity) "
+                + "result_high_water=\(trace.resultHighWater) "
+                + "result_capacity=\(trace.resultCapacity) "
+                + "result_storage="
+                + "\(trace.resultInitialStorageCapacity)/"
+                + "\(trace.resultStorageCapacity) "
+                + "workspace_installations="
+                + "\(trace.workspaceInitialInstallationCount)/"
+                + "\(trace.workspaceInstallationCount) "
+                + "payload_bytes="
+                + "\(trace.maximumPreparedPayloadBytes) "
+                + "surfaces=\(trace.surface.surfaceCount) "
+                + "surface_lease_high_water="
+                + "\(trace.surface.surfaceLeaseHighWater) "
+                + "missed=\(trace.missedLogicalFrameCount) "
+                + "deferred=\(trace.deferredDrainCount)"
+        )
+        #expect(trace.inputSampleCount == 36_000)
+        #expect(trace.logicalDurationNanoseconds == 599_999_976_000)
+        #expect(trace.authoritativeInputHighWater <= 60)
+        #expect(trace.authoritativeInputCapacity == 12_288)
+        #expect(
+            trace.authoritativeInputStorageCapacity
+                == trace.authoritativeInputInitialStorageCapacity
+        )
+        #expect(trace.predictionInputCapacity == 64)
+        #expect(
+            trace.predictionInputStorageCapacity
+                == trace.predictionInputInitialStorageCapacity
+        )
+        #expect(trace.resultHighWater == 1)
+        #expect(trace.resultCapacity == 1)
+        #expect(
+            trace.resultStorageCapacity
+                == trace.resultInitialStorageCapacity
+        )
+        #expect(
+            trace.workspaceInstallationCount
+                == trace.workspaceInitialInstallationCount
+        )
+        #expect(trace.workspaceIdentityStayedStable)
+        #expect(trace.maximumPreparedPayloadBytes > 0)
+        #expect(trace.surface.surfaceCount == 2)
+        #expect(trace.surface.surfaceLeaseHighWater == 1)
+        #expect(
+            trace.surface.maximumUploadBytes
+                == GridCanvasContract.instanceCapacity
+                    * MemoryLayout<PatternDepositionStampInstance>.stride
+        )
+        #expect(trace.surface.encodedFrameCount > 0)
+        #expect(trace.surface.encodedInstanceCount > 0)
+        #expect(trace.zeroWorkLeaseCount == 1)
+        #expect(trace.missedLogicalFrameCount == 0)
+        #expect(trace.allPreparationAndEncodingOffMain)
+        #expect(
+            trace.lastDecileNanosecondsPerEvent
+                <= max(
+                    trace.firstDecileNanosecondsPerEvent * 2,
+                    trace.firstDecileNanosecondsPerEvent + 100_000
+                )
+        )
     }
 
     @Test
@@ -2944,6 +3014,9 @@ struct DepositionRendererTests {
             token: token,
             sample: depositionSample(.moved, x: 40, y: 24)
         )
+        try await driveOffMainStroke(setup.renderer) {
+            callbackCount == 1 && setup.renderer.isIdle
+        }
 
         #expect(callbackCount == 1)
         #expect(cancellationError == nil)
@@ -2961,6 +3034,7 @@ struct DepositionRendererTests {
             )
         )
         try setup.renderer.cancelStroke(token: recoveryToken)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
         #expect(setup.renderer.isIdle)
     }
 
@@ -3005,6 +3079,9 @@ struct DepositionRendererTests {
             token: token,
             sample: depositionSample(.ended, x: 52, y: 24)
         )
+        try await driveOffMainStroke(setup.renderer) {
+            callbackCount == 1 && setup.renderer.isIdle
+        }
 
         #expect(callbackCount == 1)
         #expect(cancellationError == nil)
@@ -3022,6 +3099,7 @@ struct DepositionRendererTests {
             )
         )
         try setup.renderer.cancelStroke(token: recoveryToken)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
         #expect(setup.renderer.isIdle)
     }
 
@@ -3079,6 +3157,9 @@ struct DepositionRendererTests {
             token: token,
             sample: depositionSample(.moved, x: 20, y: 24)
         )
+        try await driveOffMainStroke(setup.renderer) {
+            remaining == 0 || appendError != nil
+        }
 
         #expect(remaining == 0)
         #expect(appendError == nil)
@@ -3129,6 +3210,13 @@ struct DepositionRendererTests {
             token: token,
             sample: depositionSample(.moved, x: 40, y: 24)
         )
+        try await driveOffMainStroke(setup.renderer) {
+            startedNestedAppend
+                && setup.renderer
+                    .strokePreparationIsQuiescentForAllocationHarness
+                && setup.renderer.rendererEventDiagnosticsForTesting
+                    .pendingEventCount == 0
+        }
 
         #expect(startedNestedAppend)
         #expect(nestedError == nil)
@@ -3171,28 +3259,14 @@ struct DepositionRendererTests {
         )
 
         var observedColors: [InkColor] = []
-        var replacedStroke = false
+        var cancelledOldStroke = false
         var replacementError: String?
         setup.renderer.onLogicalDabsGenerated = { dab in
             observedColors.append(dab.color)
-            guard !replacedStroke else { return }
-            replacedStroke = true
+            guard !cancelledOldStroke else { return }
+            cancelledOldStroke = true
             do {
                 try setup.renderer.cancelStroke(token: oldToken)
-                try setup.renderer.beginStroke(
-                    token: newToken,
-                    sample: depositionSample(.began, x: 12, y: 24),
-                    style: depositionStyle(
-                        brush,
-                        compositeMode: .draw,
-                        diameter: 12,
-                        color: replacementColor
-                    )
-                )
-                try setup.renderer.appendStroke(
-                    token: newToken,
-                    sample: depositionSample(.moved, x: 44, y: 24)
-                )
             } catch {
                 replacementError = String(describing: error)
             }
@@ -3202,8 +3276,31 @@ struct DepositionRendererTests {
             token: oldToken,
             sample: depositionSample(.moved, x: 40, y: 24)
         )
+        try await driveOffMainStroke(setup.renderer) {
+            cancelledOldStroke
+                && replacementError == nil
+                && setup.renderer.isIdle
+        }
 
-        #expect(replacedStroke)
+        try setup.renderer.beginStroke(
+            token: newToken,
+            sample: depositionSample(.began, x: 12, y: 24),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 12,
+                color: replacementColor
+            )
+        )
+        try setup.renderer.appendStroke(
+            token: newToken,
+            sample: depositionSample(.moved, x: 44, y: 24)
+        )
+        try await driveOffMainStroke(setup.renderer) {
+            observedColors.dropFirst().contains(replacementColor)
+        }
+
+        #expect(cancelledOldStroke)
         #expect(replacementError == nil)
         #expect(observedColors.first == .black)
         #expect(!observedColors.dropFirst().isEmpty)
@@ -3214,6 +3311,7 @@ struct DepositionRendererTests {
         )
         setup.renderer.onLogicalDabsGenerated = nil
         try setup.renderer.cancelStroke(token: newToken)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
         #expect(setup.renderer.isIdle)
     }
 
@@ -3236,6 +3334,7 @@ struct DepositionRendererTests {
         let referenceToken = RendererOperationToken(rawValue: 90_030)
         let failingToken = RendererOperationToken(rawValue: 90_031)
         let began = depositionSample(.began, x: 8, y: 24)
+        let acceptedSample = depositionSample(.moved, x: 40, y: 24)
         try reference.renderer.beginStroke(
             token: referenceToken,
             sample: began,
@@ -3245,6 +3344,43 @@ struct DepositionRendererTests {
                 diameter: 12
             )
         )
+        try await drainOffMainPreparedFrames(
+            reference.renderer,
+            minimumFrameCount: 1
+        )
+        let referenceInstancesBefore = try #require(
+            reference.renderer.offMainSurfaceSnapshotForTesting
+        ).encodedInstanceCount
+
+        var expectedPrefixDabs: [LogicalDab] = []
+        reference.renderer.onLogicalDabsGenerated = {
+            expectedPrefixDabs.append($0)
+        }
+        try reference.renderer.appendStroke(
+            token: referenceToken,
+            sample: acceptedSample
+        )
+        try await awaitOffMainPreparedLease(reference.renderer)
+        let referenceInstancesAfter = try #require(
+            reference.renderer.offMainSurfaceSnapshotForTesting
+        ).encodedInstanceCount
+        let expectedCoordinator = try #require(
+            reference.renderer.compatibilityInkCoordinatorSnapshotForTesting
+        )
+        #expect(!expectedPrefixDabs.isEmpty)
+        #expect(referenceInstancesAfter > referenceInstancesBefore)
+        reference.renderer.onLogicalDabsGenerated = nil
+        try reference.renderer.cancelStroke(token: referenceToken)
+
+        let capacity = Int(
+            referenceInstancesAfter - referenceInstancesBefore
+        )
+        let constrainedBudget = try depositionFrameBudget(
+            maximumAuthoritativeInstances: capacity,
+            maximumPendingAuthoritativeInstances: capacity
+        )
+        let previousBudget = failing.renderer
+            .replaceDepositionFrameBudgetForHarness(constrainedBudget)
         try failing.renderer.beginStroke(
             token: failingToken,
             sample: began,
@@ -3254,122 +3390,335 @@ struct DepositionRendererTests {
                 diameter: 12
             )
         )
-        _ = try reference.renderer.flushPendingLiveForHarness()
-        _ = try failing.renderer.flushPendingLiveForHarness()
-        let postBeginPixels = depositionTextureBytes(
-            try failing.renderer.renderOffscreenDisplayForHarness(
-                width: 64,
-                height: 64,
-                showGridLines: false
-            ).texture
+        try await drainOffMainPreparedFrames(
+            failing.renderer,
+            minimumFrameCount: 1
         )
-
-        var expectedPrefixDabs: [LogicalDab] = []
-        reference.renderer.onLogicalDabsGenerated = {
-            expectedPrefixDabs.append($0)
-        }
-        let acceptedSample = depositionSample(.moved, x: 40, y: 24)
-        try reference.renderer.appendStroke(
-            token: referenceToken,
-            sample: acceptedSample
-        )
-        let expectedPrefixRecords =
-            reference.renderer.harnessScheduledAuthoritativeRecords
-        let expectedCoordinator = try #require(
-            reference.renderer.compatibilityInkCoordinatorSnapshotForTesting
-        )
-        let expectedBuffer = try #require(
-            reference.renderer.transientStrokeBuffer
-        )
-        let expectedArena =
-            reference.renderer.harnessTransientDabArenaSnapshot
-        #expect(!expectedPrefixDabs.isEmpty)
-        #expect(!expectedPrefixRecords.isEmpty)
-
-        let capacity = expectedPrefixRecords.count
-        let constrainedBudget = try depositionFrameBudget(
-            maximumAuthoritativeInstances: capacity,
-            maximumPendingAuthoritativeInstances: capacity
-        )
-        let previousBudget = failing.renderer
-            .replaceDepositionFrameBudgetForHarness(constrainedBudget)
-        let previousScheduler = try #require(
-            failing.renderer.replaceActiveStrokeSchedulerForHarness(
-                constrainedBudget
-            )
+        let canonicalBefore = depositionTextureBytes(
+            try failing.renderer.copyCanonicalForHarness()
         )
         var actualDabs: [LogicalDab] = []
         failing.renderer.onLogicalDabsGenerated = { actualDabs.append($0) }
 
-        var batchError: MetalRendererError?
-        do {
-            try failing.renderer.appendStrokeBatch(
-                token: failingToken,
-                samples: [
-                    acceptedSample,
-                    depositionSample(.moved, x: 200, y: 24),
-                ]
-            )
-            Issue.record("Expected the second batch sample to fail preflight")
-        } catch let error as MetalRendererError {
-            batchError = error
-        }
-
-        #expect(
-            batchError
-                == .projectedInstanceCapacityExceeded(capacity)
+        try failing.renderer.appendStrokeBatch(
+            token: failingToken,
+            samples: [
+                acceptedSample,
+                depositionSample(.moved, x: 200, y: 24),
+            ]
         )
+        try await awaitOffMainPreparedLease(failing.renderer)
         #expect(actualDabs == expectedPrefixDabs)
         #expect(
             failing.renderer.compatibilityInkCoordinatorSnapshotForTesting
                 == expectedCoordinator
         )
-        #expect(failing.renderer.transientStrokeBuffer == expectedBuffer)
+        _ = try failing.renderer.completeNextPendingInteractiveFrame()
+        var batchError: MetalRendererError?
+        for _ in 0..<20_000 {
+            do {
+                try failing.renderer.drainCompletedInteractiveOperations()
+            } catch let error as MetalRendererError {
+                batchError = error
+                break
+            }
+            await Task.yield()
+        }
         #expect(
-            failing.renderer.harnessTransientDabArenaSnapshot
-                == expectedArena
+            batchError
+                == .projectedInstanceCapacityExceeded(capacity)
         )
+        #expect(actualDabs == expectedPrefixDabs)
+        try await awaitOffMainWorkspaceAvailable(failing.renderer)
+        #expect(failing.renderer.isIdle)
         #expect(
-            failing.renderer.harnessScheduledAuthoritativeRecords
-                == expectedPrefixRecords
+            depositionTextureBytes(
+                try failing.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
         )
-
-        _ = try reference.renderer.flushPendingLiveForHarness()
-        _ = try failing.renderer.flushPendingLiveForHarness()
-        let referencePixels = depositionTextureBytes(
-            try reference.renderer.renderOffscreenDisplayForHarness(
-                width: 64,
-                height: 64,
-                showGridLines: false
-            ).texture
-        )
-        let failingPixels = depositionTextureBytes(
-            try failing.renderer.renderOffscreenDisplayForHarness(
-                width: 64,
-                height: 64,
-                showGridLines: false
-            ).texture
-        )
-        #expect(referencePixels != postBeginPixels)
-        #expect(failingPixels == referencePixels)
 
         failing.renderer.replaceDepositionFrameBudgetForHarness(
             previousBudget
         )
-        failing.renderer.restoreActiveStrokeSchedulerForHarness(
-            previousScheduler
-        )
-        let prefixCallbackCount = actualDabs.count
-        try failing.renderer.appendStroke(
-            token: failingToken,
-            sample: depositionSample(.moved, x: 72, y: 24)
-        )
-        #expect(actualDabs.count > prefixCallbackCount)
-        reference.renderer.onLogicalDabsGenerated = nil
         failing.renderer.onLogicalDabsGenerated = nil
-        try reference.renderer.cancelStroke(token: referenceToken)
-        try failing.renderer.cancelStroke(token: failingToken)
+        let recoveryToken = RendererOperationToken(rawValue: 90_032)
+        try failing.renderer.beginStroke(
+            token: recoveryToken,
+            sample: began,
+            style: depositionStyle(
+                failingBrush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try failing.renderer.cancelStroke(token: recoveryToken)
+        try await awaitOffMainWorkspaceAvailable(failing.renderer)
         #expect(failing.renderer.isIdle)
+
+        let boundedInitial = await failing.renderer
+            .offMainSchedulerSnapshotForTesting()
+        var boundedErrors: [MetalRendererError] = []
+        var boundedCompletions: [RendererOperationCompletion] = []
+        failing.renderer.onError = { boundedErrors.append($0) }
+        failing.renderer.onOperationCompleted = {
+            boundedCompletions.append($0)
+        }
+
+        let generationToken = RendererOperationToken(rawValue: 90_033)
+        try failing.renderer.beginStroke(
+            token: generationToken,
+            sample: began,
+            style: depositionStyle(
+                failingBrush,
+                compositeMode: .draw,
+                diameter: 12
+            )
+        )
+        try await drainOffMainPreparedFrames(
+            failing.renderer,
+            minimumFrameCount: 1
+        )
+        try failing.renderer.appendStroke(
+            token: generationToken,
+            sample: depositionSample(.moved, x: 8_000, y: 24)
+        )
+        let generationError = try await awaitOffMainRendererFailure(
+            failing.renderer
+        )
+        #expect(
+            generationError == .generatedDabCapacityExceeded(
+                TransientStrokeBufferContract.wholeStrokeDabCapacity
+            )
+        )
+        try await awaitOffMainWorkspaceAvailable(failing.renderer)
+        let generationBounded = await failing.renderer
+            .offMainSchedulerSnapshotForTesting()
+        #expect(
+            generationBounded.generatedLogicalDabHighWater
+                == TransientStrokeBufferContract.wholeStrokeDabCapacity
+        )
+        #expect(
+            generationBounded.generatedProjectionHighWater
+                <= previousBudget.maximumPendingAuthoritativeInstances
+        )
+        #expect(
+            generationBounded.generatedLogicalDabStorageCapacity
+                == boundedInitial.generatedLogicalDabStorageCapacity
+        )
+        #expect(
+            generationBounded.generatedProjectionStorageCapacity
+                == boundedInitial.generatedProjectionStorageCapacity
+        )
+        #expect(
+            generationBounded.projectionStorageAllocationCount
+                == boundedInitial.projectionStorageAllocationCount
+        )
+        #expect(
+            depositionTextureBytes(
+                try failing.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
+        )
+
+        var extremeGenerationErrors: [MetalRendererError] = []
+        for (offset, extremeX) in [
+            Float.greatestFiniteMagnitude,
+            -Float.greatestFiniteMagnitude,
+        ].enumerated() {
+            let extremeGenerationToken = RendererOperationToken(
+                rawValue: UInt64(90_034 + offset)
+            )
+            try failing.renderer.beginStroke(
+                token: extremeGenerationToken,
+                sample: began,
+                style: depositionStyle(
+                    failingBrush,
+                    compositeMode: .draw,
+                    diameter: 12
+                )
+            )
+            try await drainOffMainPreparedFrames(
+                failing.renderer,
+                minimumFrameCount: 1
+            )
+            let extremeStartedAt = DispatchTime.now().uptimeNanoseconds
+            try failing.renderer.appendStroke(
+                token: extremeGenerationToken,
+                sample: depositionSample(
+                    .moved,
+                    x: extremeX,
+                    y: 24
+                )
+            )
+            let extremeGenerationError =
+                try await awaitOffMainRendererFailure(failing.renderer)
+            let extremeElapsedNanoseconds =
+                DispatchTime.now().uptimeNanoseconds - extremeStartedAt
+            #expect(
+                extremeGenerationError == .generatedDabCapacityExceeded(
+                    TransientStrokeBufferContract.wholeStrokeDabCapacity
+                )
+            )
+            #expect(extremeElapsedNanoseconds < 2_000_000_000)
+            extremeGenerationErrors.append(extremeGenerationError)
+            try await awaitOffMainWorkspaceAvailable(failing.renderer)
+        }
+        let extremeGenerationBounded = await failing.renderer
+            .offMainSchedulerSnapshotForTesting()
+        #expect(
+            extremeGenerationBounded.generatedLogicalDabHighWater
+                == TransientStrokeBufferContract.wholeStrokeDabCapacity
+        )
+        #expect(
+            extremeGenerationBounded.generatedLogicalDabStorageCapacity
+                == boundedInitial.generatedLogicalDabStorageCapacity
+        )
+        #expect(
+            extremeGenerationBounded.generatedProjectionStorageCapacity
+                == boundedInitial.generatedProjectionStorageCapacity
+        )
+        #expect(
+            extremeGenerationBounded.projectionStorageAllocationCount
+                == boundedInitial.projectionStorageAllocationCount
+        )
+        #expect(
+            depositionTextureBytes(
+                try failing.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
+        )
+
+        let projectionToken = RendererOperationToken(rawValue: 90_036)
+        try failing.renderer.beginStroke(
+            token: projectionToken,
+            sample: depositionSample(.began, x: 32, y: 32),
+            style: depositionStyle(
+                failingBrush,
+                compositeMode: .draw,
+                diameter: 16_384
+            )
+        )
+        let projectionError = try await awaitOffMainRendererFailure(
+            failing.renderer
+        )
+        #expect(
+            projectionError == .projectedInstanceCapacityExceeded(
+                previousBudget.maximumPendingAuthoritativeInstances
+            )
+        )
+        try await awaitOffMainWorkspaceAvailable(failing.renderer)
+        let projectionBounded = await failing.renderer
+            .offMainSchedulerSnapshotForTesting()
+        #expect(
+            projectionBounded.projectionCellHighWater
+                <= previousBudget.maximumPendingAuthoritativeInstances
+        )
+        #expect(
+            projectionBounded.projectionImageHighWater
+                <= previousBudget.maximumPendingAuthoritativeInstances
+        )
+        #expect(
+            projectionBounded.projectionFragmentHighWater
+                <= previousBudget.maximumPendingAuthoritativeInstances
+        )
+        #expect(
+            projectionBounded.projectionCellStorageCapacity
+                == boundedInitial.projectionCellStorageCapacity
+        )
+        #expect(
+            projectionBounded.projectionImageStorageCapacity
+                == boundedInitial.projectionImageStorageCapacity
+        )
+        #expect(
+            projectionBounded.projectionFragmentStorageCapacity
+                == boundedInitial.projectionFragmentStorageCapacity
+        )
+        #expect(
+            projectionBounded.projectionStorageAllocationCount
+                == boundedInitial.projectionStorageAllocationCount
+        )
+
+        let extremeProjectionToken = RendererOperationToken(
+            rawValue: 90_037
+        )
+        let extremeProjectionStartedAt = DispatchTime.now().uptimeNanoseconds
+        let extremeProjectionError: MetalRendererError
+        do {
+            try failing.renderer.beginStroke(
+                token: extremeProjectionToken,
+                sample: depositionSample(.began, x: 32, y: 32),
+                style: depositionStyle(
+                    failingBrush,
+                    compositeMode: .draw,
+                    diameter: Float.greatestFiniteMagnitude
+                )
+            )
+            Issue.record("Expected the brush diameter contract to reject")
+            return
+        } catch let error as MetalRendererError {
+            extremeProjectionError = error
+        }
+        let extremeProjectionElapsedNanoseconds =
+            DispatchTime.now().uptimeNanoseconds
+                - extremeProjectionStartedAt
+        #expect(
+            extremeProjectionError == .brushDiameterOutOfRange(
+                actual: Float.greatestFiniteMagnitude,
+                minimum: failingBrush.program.definition.limits
+                    .minimumDiameter,
+                maximum: failingBrush.program.definition.limits
+                    .maximumDiameter
+            )
+        )
+        #expect(extremeProjectionElapsedNanoseconds < 2_000_000_000)
+        #expect(failing.renderer.isIdle)
+        let extremeProjectionBounded = await failing.renderer
+            .offMainSchedulerSnapshotForTesting()
+        #expect(
+            extremeProjectionBounded.projectionCellHighWater
+                <= previousBudget.maximumPendingAuthoritativeInstances
+        )
+        #expect(
+            extremeProjectionBounded.projectionImageHighWater
+                <= previousBudget.maximumPendingAuthoritativeInstances
+        )
+        #expect(
+            extremeProjectionBounded.projectionFragmentHighWater
+                <= previousBudget.maximumPendingAuthoritativeInstances
+        )
+        #expect(
+            extremeProjectionBounded.projectionCellStorageCapacity
+                == boundedInitial.projectionCellStorageCapacity
+        )
+        #expect(
+            extremeProjectionBounded.projectionImageStorageCapacity
+                == boundedInitial.projectionImageStorageCapacity
+        )
+        #expect(
+            extremeProjectionBounded.projectionFragmentStorageCapacity
+                == boundedInitial.projectionFragmentStorageCapacity
+        )
+        #expect(
+            extremeProjectionBounded.projectionStorageAllocationCount
+                == boundedInitial.projectionStorageAllocationCount
+        )
+        #expect(
+            boundedErrors
+                == [generationError]
+                    + extremeGenerationErrors
+                    + [projectionError]
+        )
+        #expect(
+            boundedCompletions.filter {
+                if case .failure = $0 { return true }
+                return false
+            }.count == 4
+        )
+        #expect(
+            depositionTextureBytes(
+                try failing.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
+        )
+        failing.renderer.onError = nil
+        failing.renderer.onOperationCompleted = nil
     }
 }
 
@@ -3454,7 +3803,131 @@ private func depositionFrameBudget(
 }
 
 @MainActor
-private func makeDepositionRendererSetup()
+private func prepareOffMainCommit(
+    _ renderer: GridRenderer
+) async throws {
+    for _ in 0..<20_000 {
+        try renderer.drainCompletedInteractiveOperations()
+        if renderer.hasPendingOffMainSurfaceLeaseForTesting {
+            _ = try renderer.completeNextPendingInteractiveFrame()
+        }
+        try renderer.prepareCompiledCommitIfReady()
+        if renderer.activeStroke?.pendingRevisions != nil {
+            return
+        }
+        await Task.yield()
+    }
+    throw MetalRendererError.commandFailed(
+        "off-main test commit preparation exceeded its bound"
+    )
+}
+
+@MainActor
+private func drainOffMainPreparedFrames(
+    _ renderer: GridRenderer,
+    minimumFrameCount: Int
+) async throws {
+    var completedFrameCount = 0
+    for _ in 0..<20_000 {
+        try renderer.drainCompletedInteractiveOperations()
+        if renderer.hasPendingOffMainSurfaceLeaseForTesting {
+            _ = try renderer.completeNextPendingInteractiveFrame()
+            completedFrameCount += 1
+            continue
+        }
+        if completedFrameCount >= minimumFrameCount,
+           let mailbox = renderer
+            .offMainPreparationMailboxSnapshotForTesting,
+           mailbox.isQuiescent,
+           !renderer.hasSubmittedOffMainSurfaceLeaseForTesting
+        {
+            return
+        }
+        await Task.yield()
+    }
+    throw MetalRendererError.commandFailed(
+        "off-main test preparation exceeded its bound"
+    )
+}
+
+@MainActor
+private func awaitOffMainPreparedLease(
+    _ renderer: GridRenderer
+) async throws {
+    for _ in 0..<20_000 {
+        try renderer.drainCompletedInteractiveOperations()
+        if renderer.hasPendingOffMainSurfaceLeaseForTesting { return }
+        await Task.yield()
+    }
+    throw MetalRendererError.commandFailed(
+        "off-main prepared lease exceeded its bound"
+    )
+}
+
+@MainActor
+private func awaitOffMainWorkspaceAvailable(
+    _ renderer: GridRenderer
+) async throws {
+    for _ in 0..<10_000 {
+        try renderer.drainCompletedInteractiveOperations()
+        if renderer.offMainStrokeWorkspaceIsAvailableForTesting {
+            return
+        }
+        await Task.yield()
+    }
+    throw MetalRendererError.commandFailed(
+        "off-main warmed workspace retirement exceeded its bound"
+    )
+}
+
+@MainActor
+private func awaitOffMainRendererFailure(
+    _ renderer: GridRenderer
+) async throws -> MetalRendererError {
+    for _ in 0..<20_000 {
+        do {
+            try renderer.drainCompletedInteractiveOperations()
+        } catch let error as MetalRendererError {
+            return error
+        }
+        await Task.yield()
+    }
+    throw MetalRendererError.commandFailed(
+        "off-main failure publication exceeded its bound"
+    )
+}
+
+@MainActor
+private func driveOffMainStroke(
+    _ renderer: GridRenderer,
+    until condition: () -> Bool
+) async throws {
+    for _ in 0..<20_000 {
+        try renderer.drainCompletedInteractiveOperations()
+        if renderer.hasPendingOffMainSurfaceLeaseForTesting {
+            _ = try renderer.completeNextPendingInteractiveFrame()
+        }
+        if condition() { return }
+        await Task.yield()
+    }
+    throw MetalRendererError.commandFailed(
+        "off-main event delivery exceeded its bound"
+    )
+}
+
+private func depositionPixelDigest(_ bytes: [UInt8]) -> String {
+    var digest: UInt64 = 14_695_981_039_346_656_037
+    for byte in bytes {
+        digest ^= UInt64(byte)
+        digest &*= 1_099_511_628_211
+    }
+    return String(format: "%016llx", digest)
+}
+
+@MainActor
+private func makeDepositionRendererSetup(
+    tiling: TilingKind = .grid
+)
     throws -> DepositionRendererSetup?
 {
     guard let device = MTLCreateSystemDefaultDevice(),
@@ -3469,7 +3942,7 @@ private func makeDepositionRendererSetup()
         drawableSize: PatternSize(width: 64, height: 64),
         configuration: TilingCanvasConfiguration(
             pixelSize: PixelSize(width: 64, height: 64),
-            tiling: .grid
+            tiling: tiling
         )
     )
     let profile = try BrushDeviceProfile(
@@ -3577,6 +4050,34 @@ private func depositionEstimatedUpdateSample(
         estimationUpdateIndex: index,
         estimatedProperties: [.pressure],
         estimatedPropertiesExpectingUpdates: []
+    )
+}
+
+private func depositionCorrectionSample(
+    phase: StrokePhase,
+    kind: StrokeSampleKind,
+    x: Float,
+    pressure: Float,
+    timestamp: TimeInterval,
+    altitude: Float,
+    azimuth: Float,
+    estimationUpdateIndex: Int,
+    estimatedProperties: StrokeEstimatedProperties,
+    expecting: StrokeEstimatedProperties
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x, y: 24),
+        pressure: pressure,
+        timestamp: timestamp,
+        phase: phase,
+        source: .pencil,
+        kind: kind,
+        capabilities: [.pressure, .altitude, .azimuth],
+        altitude: altitude,
+        azimuth: azimuth,
+        estimationUpdateIndex: estimationUpdateIndex,
+        estimatedProperties: estimatedProperties,
+        estimatedPropertiesExpectingUpdates: expecting
     )
 }
 

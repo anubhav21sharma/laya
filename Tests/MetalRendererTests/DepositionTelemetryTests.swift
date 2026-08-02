@@ -72,6 +72,30 @@ struct DepositionTelemetryTests {
     }
 
     @Test
+    func missingInputReceiptDoesNotDiluteEventLatencyWindow() {
+        var telemetry = DepositionTelemetry(windowCapacity: 4)
+
+        telemetry.recordTimings(
+            eventToSubmitNanoseconds: 25,
+            cpuPreparationNanoseconds: 10,
+            gpuEncodingNanoseconds: 11,
+            gpuCompletionNanoseconds: 12
+        )
+        telemetry.recordTimings(
+            eventToSubmitNanoseconds: 0,
+            cpuPreparationNanoseconds: 20,
+            gpuEncodingNanoseconds: 21,
+            gpuCompletionNanoseconds: 22
+        )
+
+        #expect(
+            telemetry.timings.eventToSubmit
+                == percentiles(25, 25, 25)
+        )
+        #expect(telemetry.snapshot.submittedFrameCount == 2)
+    }
+
+    @Test
     func resetClearsCountersAndWindowsWithoutChangingCapacity() {
         var telemetry = DepositionTelemetry(windowCapacity: 3)
         telemetry.recordBacklog(authoritative: 2, predicted: 1)

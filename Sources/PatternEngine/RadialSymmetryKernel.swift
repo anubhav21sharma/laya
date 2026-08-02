@@ -50,7 +50,7 @@ struct RadialSymmetryKernel: Equatable, Sendable {
         var polygonA: [SIMD2<Float>] = []
         var polygonB: [SIMD2<Float>] = []
         var result: [TilingImage] = []
-        populateImages(
+        try! populateImages(
             intersecting: worldBounds,
             polygonA: &polygonA,
             polygonB: &polygonB,
@@ -63,8 +63,9 @@ struct RadialSymmetryKernel: Equatable, Sendable {
         intersecting worldBounds: AxisAlignedRect,
         polygonA: inout [SIMD2<Float>],
         polygonB: inout [SIMD2<Float>],
-        result: inout [TilingImage]
-    ) {
+        result: inout [TilingImage],
+        maximumImageCount: Int? = nil
+    ) throws {
         result.removeAll(keepingCapacity: true)
         let canvasBounds = AxisAlignedRect(
             minimum: .zero,
@@ -82,13 +83,14 @@ struct RadialSymmetryKernel: Equatable, Sendable {
                 scratch: &polygonB,
                 to: worldBounds
             )
-            radialAppendTriangulatedImages(
+            try radialAppendTriangulatedImages(
                 polygon: &polygonA,
                 cell: CellIndex(column: 0, row: 0),
                 ordinal: 0,
                 worldToCanonical: .identity,
                 operation: .identity,
-                result: &result
+                result: &result,
+                maximumImageCount: maximumImageCount
             )
             return
         }
@@ -128,7 +130,7 @@ struct RadialSymmetryKernel: Equatable, Sendable {
                 let worldToAtlas = image.localToCanonical.concatenating(
                     layout.logicalToAtlas(for: page)
                 )
-                radialAppendTriangulatedImages(
+                try radialAppendTriangulatedImages(
                     polygon: &polygonA,
                     cell: CellIndex(
                         column: page.coordinate.x,
@@ -137,7 +139,8 @@ struct RadialSymmetryKernel: Equatable, Sendable {
                     ordinal: image.ordinal,
                     worldToCanonical: worldToAtlas,
                     operation: image.operation,
-                    result: &result
+                    result: &result,
+                    maximumImageCount: maximumImageCount
                 )
             }
         }
@@ -300,8 +303,9 @@ private func radialAppendTriangulatedImages(
     ordinal: UInt8,
     worldToCanonical: Affine2D,
     operation: CompiledGroupOperation,
-    result: inout [TilingImage]
-) {
+    result: inout [TilingImage],
+    maximumImageCount: Int?
+) throws {
     guard polygon.count >= 3 else { return }
     if radialSignedArea(polygon) < 0 {
         polygon.reverse()
@@ -314,6 +318,11 @@ private func radialAppendTriangulatedImages(
             (point1.x - origin.x) * (point2.y - origin.y)
                 - (point1.y - origin.y) * (point2.x - origin.x)
         guard abs(twiceArea * 0.5) > 0.0001 else { continue }
+        if let maximumImageCount, result.count >= maximumImageCount {
+            throw TilingProjectionError.fragmentCapacityExceeded(
+                maximum: maximumImageCount
+            )
+        }
         result.append(
             TilingImage(
                 cell: cell,

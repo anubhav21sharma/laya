@@ -40,14 +40,15 @@ struct TriangularSymmetryKernel: Equatable, Sendable {
         intersecting worldBounds: AxisAlignedRect
     ) -> [TilingImage] {
         var result: [TilingImage] = []
-        populateImages(intersecting: worldBounds, result: &result)
+        try! populateImages(intersecting: worldBounds, result: &result)
         return result
     }
 
     func populateImages(
         intersecting worldBounds: AxisAlignedRect,
-        result: inout [TilingImage]
-    ) {
+        result: inout [TilingImage],
+        maximumImageCount: Int? = nil
+    ) throws {
         result.removeAll(keepingCapacity: true)
         for image in compiled.images {
             let worldToTransformedRaster =
@@ -130,6 +131,14 @@ struct TriangularSymmetryKernel: Equatable, Sendable {
                         yAxis: SIMD2(0, 1),
                         translation: -targetOrigin
                     )
+                    if let maximumImageCount,
+                       result.count >= maximumImageCount
+                    {
+                        throw TilingProjectionError
+                            .fragmentCapacityExceeded(
+                                maximum: maximumImageCount
+                            )
+                    }
                     result.append(
                         TilingImage(
                             cell: CellIndex(

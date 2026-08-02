@@ -247,18 +247,46 @@ extension GridRenderer {
         forceFailure: Bool = false,
         forceCommandBufferUnavailable: Bool = false
     ) throws -> HarnessLiveFlushResult {
+        let progressWaiter =
+            installStrokePreparationProgressWaiterForHarness()
+        defer {
+            if let progressWaiter {
+                removeStrokePreparationProgressWaiterForHarness(
+                    progressWaiter
+                )
+            }
+        }
+        let deadline = Date(timeIntervalSinceNow: 5)
+        if let progressWaiter,
+           !hasPendingPreparedStrokeSurfaceForHarness,
+           !strokePreparationIsQuiescentForAllocationHarness
+        {
+            try waitForPendingLiveSurfaceForHarness(
+                progressWaiter: progressWaiter,
+                deadline: deadline
+            )
+        }
+        let submittedPreparedSurface =
+            hasPendingPreparedStrokeSurfaceForHarness
         let frameMetrics = try completeNextPendingInteractiveFrame(
             forceFailure: forceFailure,
             forceCommandBufferUnavailable:
                 forceCommandBufferUnavailable
         )
+        if submittedPreparedSurface, let progressWaiter {
+            try waitForPreparedSurfaceRetirementForHarness(
+                progressWaiter: progressWaiter,
+                deadline: deadline
+            )
+        }
         return HarnessLiveFlushResult(
             metrics: frameMetrics,
             emittedHighWater: scheduledAuthoritativeIdentityHighWater,
             encodedIdentityRanges:
                 lastEncodedAuthoritativeIdentityRange.map { [$0] } ?? [],
             authoritativeBacklogRemaining:
-                activeStroke?.scheduler?.authoritativeCount ?? 0,
+                activeStroke?.frozenHarnessScheduler?
+                    .authoritativeCount ?? 0,
             replayRetention: HarnessReplayRetentionSnapshot(
                 retainedDabCount:
                     transientStrokeBuffer?.retainedDabCount ?? 0,
@@ -266,6 +294,86 @@ extension GridRenderer {
                     transientStrokeBuffer?
                         .visibleProjectedInstanceCount ?? 0
             )
+        )
+    }
+
+    /// Waits until the actor publishes a surface lease, but deliberately does
+    /// not submit it. Failure harnesses use this boundary to inject a failure
+    /// into a command buffer that actually owns stroke work.
+    func preparePendingLiveSurfaceForHarness() throws {
+        guard let progressWaiter =
+                installStrokePreparationProgressWaiterForHarness()
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        defer {
+            removeStrokePreparationProgressWaiterForHarness(progressWaiter)
+        }
+        let deadline = Date(timeIntervalSinceNow: 5)
+        try waitForPendingLiveSurfaceForHarness(
+            progressWaiter: progressWaiter,
+            deadline: deadline
+        )
+    }
+
+    private func waitForPendingLiveSurfaceForHarness(
+        progressWaiter: StrokePreparationProgressRegistration,
+        deadline: Date
+    ) throws {
+        while true {
+            let observedRevision = progressWaiter.currentRevision
+            try drainCompletedInteractiveOperations()
+            if hasPendingPreparedStrokeSurfaceForHarness {
+                return
+            }
+            guard activeStroke != nil else {
+                throw lastError ?? MetalRendererError.invalidStrokeLifecycle
+            }
+            if progressWaiter.currentRevision != observedRevision {
+                continue
+            }
+            guard progressWaiter.waitForProgress(
+                after: observedRevision,
+                until: deadline
+            ) else {
+                break
+            }
+        }
+        throw MetalRendererError.commandFailed(
+            "stroke surface preparation exceeded its harness bound"
+        )
+    }
+
+    /// The GPU completion transfers a prepared surface back to the actor, but
+    /// the acknowledgement itself is processed independently. Do not let a
+    /// synchronous harness caller start measuring or enqueueing the next event
+    /// while that prior actor operation is still running. A newly published
+    /// surface is also a stable boundary: the actor cannot mutate it again
+    /// until Main submits and acknowledges it on the next flush.
+    private func waitForPreparedSurfaceRetirementForHarness(
+        progressWaiter: StrokePreparationProgressRegistration,
+        deadline: Date
+    ) throws {
+        while true {
+            let observedRevision = progressWaiter.currentRevision
+            try drainCompletedInteractiveOperations()
+            if strokePreparationIsQuiescentForAllocationHarness
+                || hasPendingPreparedStrokeSurfaceForHarness
+            {
+                return
+            }
+            if progressWaiter.currentRevision != observedRevision {
+                continue
+            }
+            guard progressWaiter.waitForProgress(
+                after: observedRevision,
+                until: deadline
+            ) else {
+                break
+            }
+        }
+        throw MetalRendererError.commandFailed(
+            "stroke surface retirement exceeded its harness bound"
         )
     }
 
@@ -318,7 +426,7 @@ extension GridRenderer {
             into: texture,
             commandBuffer: commandBuffer,
             showGridLines: showGridLines,
-            liveVisible: liveTile.isVisible || replayTile.isVisible
+            liveVisible: compositeLiveIsVisible
         )
         let cpuMilliseconds = elapsedMilliseconds(since: start)
         commandBuffer.commit()
@@ -529,8 +637,86 @@ extension GridRenderer {
     public func finishCommitForHarness(
         forceCommitFailure: Bool = false
     ) throws -> GPUFrameMetrics {
-        try completePendingInteractiveStroke(
-            forceCommitFailure: forceCommitFailure
+        do {
+            let metrics = try completePendingInteractiveStroke(
+                forceCommitFailure: forceCommitFailure
+            )
+            try drainStrokeWorkspaceRetirementForHarness()
+            return metrics
+        } catch {
+            // A terminal failure also retires the borrowed actor workspace.
+            // Keep the original failure as the observable result, but finish
+            // the harness-only drain so a recovery stroke can start.
+            try? drainStrokeWorkspaceRetirementForHarness()
+            throw error
+        }
+    }
+
+    /// Drains actor-prepared surface leases up to the commit barrier without
+    /// submitting the raster commit. Capture harnesses use this to snapshot
+    /// the complete live surface before comparing it with committed output.
+    func preparePendingCommitForHarness() throws {
+        guard let progressWaiter =
+                installStrokePreparationProgressWaiterForHarness()
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        defer {
+            removeStrokePreparationProgressWaiterForHarness(progressWaiter)
+        }
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while true {
+            let observedRevision = progressWaiter.currentRevision
+            try advanceStrokePreparationForAllocationHarness()
+            try prepareCompiledCommitIfReady()
+            if activeStroke?.pendingRevisions != nil {
+                return
+            }
+            if progressWaiter.currentRevision != observedRevision {
+                continue
+            }
+            guard progressWaiter.waitForProgress(
+                after: observedRevision,
+                until: deadline
+            ) else {
+                break
+            }
+        }
+        throw MetalRendererError.commandFailed(
+            "stroke commit preparation exceeded its harness bound"
+        )
+    }
+
+    /// Drains all currently accepted actor input while leaving the stroke
+    /// editable. This is an explicit capture boundary, not an interactive API.
+    func drainPreparedStrokeInputForHarness() throws {
+        guard let progressWaiter =
+                installStrokePreparationProgressWaiterForHarness()
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        defer {
+            removeStrokePreparationProgressWaiterForHarness(progressWaiter)
+        }
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while true {
+            let observedRevision = progressWaiter.currentRevision
+            try advanceStrokePreparationForAllocationHarness()
+            if strokePreparationIsQuiescentForAllocationHarness {
+                return
+            }
+            if progressWaiter.currentRevision != observedRevision {
+                continue
+            }
+            guard progressWaiter.waitForProgress(
+                after: observedRevision,
+                until: deadline
+            ) else {
+                break
+            }
+        }
+        throw MetalRendererError.commandFailed(
+            "stroke input preparation exceeded its harness bound"
         )
     }
 
@@ -742,6 +928,91 @@ extension GridRenderer {
         )
     }
 
+    struct HarnessOffMainDepositionSnapshot: Equatable, Sendable {
+        let logicalDabCount: Int
+        let projectedInstanceCount: Int
+        let authoritativeBacklog: Int
+        let authoritativeBacklogHighWater: Int
+        let encodedInstanceCount: UInt64
+        let surfaceLeaseHighWater: Int
+    }
+
+    var harnessOffMainDepositionSnapshot:
+        HarnessOffMainDepositionSnapshot?
+    {
+        guard let surface = offMainSurfaceSnapshotForHarness,
+              let projectedInstanceCount = Int(
+                  exactly: surface.encodedInstanceCount
+              )
+        else {
+            return nil
+        }
+        let coordinator = offMainCoordinatorSnapshotForHarness
+        let logicalDabCount = coordinator.flatMap {
+            Int(exactly: $0.commitMetadata.emittedDabCount)
+        } ?? counters.totalDabsThisStroke
+        return HarnessOffMainDepositionSnapshot(
+            logicalDabCount: logicalDabCount,
+            projectedInstanceCount: projectedInstanceCount,
+            authoritativeBacklog:
+                coordinator?.authoritativeQueueDepth ?? 0,
+            authoritativeBacklogHighWater:
+                max(
+                    coordinator?.authoritativeQueueHighWater ?? 0,
+                    logicalDabCount > 0 ? 1 : 0
+                ),
+            encodedInstanceCount: surface.encodedInstanceCount,
+            surfaceLeaseHighWater: surface.surfaceLeaseHighWater
+        )
+    }
+
+    /// Deterministic evidence oracle for records already generated and
+    /// encoded by the production actor. This never activates the retired
+    /// MainActor scheduler or participates in interactive stroke execution.
+    func projectLogicalDabsForHarness(
+        _ dabs: [LogicalDab]
+    ) throws -> [ProjectedDepositionRecord] {
+        var records: [ProjectedDepositionRecord] = []
+        records.reserveCapacity(dabs.count)
+        for dab in dabs where !dab.isPredicted {
+            let fragments = TilingProjection.fragments(
+                for: StampFootprint(
+                    brushToWorld: dab.brushToWorld,
+                    localBounds: AxisAlignedRect(
+                        minimum: SIMD2(-1, -1),
+                        maximum: SIMD2(1, 1)
+                    ),
+                    coverageSymmetry: .oriented
+                ),
+                using: tilingStrategy
+            )
+            for fragment in fragments {
+                let radialPage: RadialPageCoordinate? =
+                    tilingStrategy.compiledSymmetry.domain.finite?
+                        .radial.layout == nil
+                        ? nil
+                        : RadialPageCoordinate(
+                            x: fragment.cell.column,
+                            y: fragment.cell.row
+                        )
+                records.append(
+                    ProjectedDepositionRecord(
+                        identity: dab.ordinal,
+                        instance: try PatternDepositionStampInstance(
+                            fragment: fragment,
+                            dab: dab,
+                            logicalOrdinal: dab.ordinal,
+                            isometryOrdinal:
+                                compiledIsometryOrdinal(for: fragment)
+                        ),
+                        radialPage: radialPage
+                    )
+                )
+            }
+        }
+        return records
+    }
+
     public var harnessCounters: GridStructuralCounters { counters }
     var harnessRevision: RasterRevision { canonical.revision }
     var harnessTiling: TilingKind { tilingStrategy.kind }
@@ -781,10 +1052,10 @@ extension GridRenderer {
     var harnessScheduledAuthoritativeRecords:
         [ProjectedDepositionRecord]
     {
-        activeStroke?.scheduler?.authoritativeRecords ?? []
+        activeStroke?.frozenHarnessScheduler?.authoritativeRecords ?? []
     }
     var harnessScheduledPredictedRecords: [ProjectedDepositionRecord] {
-        activeStroke?.scheduler?.predictedRecords ?? []
+        activeStroke?.frozenHarnessScheduler?.predictedRecords ?? []
     }
     var harnessTransientDabArenaSnapshot:
         TransientStrokeDabArena.DiagnosticSnapshot
@@ -807,25 +1078,28 @@ extension GridRenderer {
     ) -> DepositionFrameBudget {
         let previous = depositionFrameBudget
         depositionFrameBudget = budget
+        replaceAvailableStrokePreparationWorkspaceForHarness(
+            budget: budget
+        )
         return previous
     }
     @discardableResult
     func replaceActiveStrokeSchedulerForHarness(
         _ budget: DepositionFrameBudget
     ) -> FrameScheduler? {
-        guard let previous = activeStroke?.scheduler else {
+        guard let previous = activeStroke?.frozenHarnessScheduler else {
             return nil
         }
-        activeStroke?.scheduler = FrameScheduler(budget: budget)
+        activeStroke?.frozenHarnessScheduler = FrameScheduler(budget: budget)
         return previous
     }
     func restoreActiveStrokeSchedulerForHarness(
         _ scheduler: FrameScheduler
     ) {
-        activeStroke?.scheduler = scheduler
+        activeStroke?.frozenHarnessScheduler = scheduler
     }
     var harnessPendingInstanceColors: [SIMD4<Float>] {
-        activeStroke?.scheduler?.authoritativeRecords.map(
+        activeStroke?.frozenHarnessScheduler?.authoritativeRecords.map(
             \.instance.premultipliedColor
         ) ?? []
     }
@@ -846,7 +1120,9 @@ extension GridRenderer {
     }
 
     func injectFiveHundredInteriorDabsIntoOneFrame() throws {
-        try beginHarnessExecution(radius: GridCanvasContract.brushRadius)
+        try beginFrozenProjectionHarnessExecution(
+            radius: GridCanvasContract.brushRadius
+        )
         counters = GridStructuralCounters()
         counters.newDabsThisEvent = 500
         counters.totalDabsThisStroke = 500
@@ -869,7 +1145,7 @@ extension GridRenderer {
         radius requestedRadius: Float = GridCanvasContract.brushRadius,
         coverageSymmetry: FootprintCoverageSymmetry = .halfTurnInvariant
     ) throws -> [CellFragment] {
-        try beginHarnessExecution(radius: requestedRadius)
+        try beginFrozenProjectionHarnessExecution(radius: requestedRadius)
         counters = GridStructuralCounters()
         counters.newDabsThisEvent = 1
         counters.totalDabsThisStroke = 1
@@ -878,7 +1154,9 @@ extension GridRenderer {
             requestedRadius: requestedRadius,
             coverageSymmetry: coverageSymmetry
         )
-        try prepareCurrentStrokeCommit(maximumRetainedBytes: Int.max)
+        try prepareFrozenProjectionHarnessCommit(
+            maximumRetainedBytes: Int.max
+        )
         return fragments
     }
 
@@ -886,7 +1164,9 @@ extension GridRenderer {
     func beginFixedProjectedStrokeForHarness(
         at world: WorldPoint
     ) throws -> [CellFragment] {
-        try beginHarnessExecution(radius: GridCanvasContract.brushRadius)
+        try beginFrozenProjectionHarnessExecution(
+            radius: GridCanvasContract.brushRadius
+        )
         counters = GridStructuralCounters()
         counters.newDabsThisEvent = 1
         counters.totalDabsThisStroke = 1
@@ -910,6 +1190,8 @@ extension GridRenderer {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         counters.newDabsThisEvent = 0
-        try prepareCurrentStrokeCommit(maximumRetainedBytes: Int.max)
+        try prepareFrozenProjectionHarnessCommit(
+            maximumRetainedBytes: Int.max
+        )
     }
 }

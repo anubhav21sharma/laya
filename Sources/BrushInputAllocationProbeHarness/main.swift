@@ -5,7 +5,7 @@ import Metal
 import MetalRenderer
 import PatternEngine
 
-private struct AllocatorProbe {
+private struct AllocatorProbe: @unchecked Sendable {
     typealias ArmFunction = @convention(c) () -> Void
     typealias DisarmFunction = @convention(c) () -> UInt64
 
@@ -31,11 +31,92 @@ private struct AllocatorProbe {
     }
 }
 
+private final class ActorAllocationMeasurements: @unchecked Sendable {
+    struct Snapshot {
+        let eventCount: Int
+        let allocationCount: UInt64
+        let maximumSingleEventCount: UInt64
+        let firstHalfAllocationCount: UInt64
+        let lastHalfAllocationCount: UInt64
+    }
+
+    private let lock = NSLock()
+    private var authoritativeCPU: [UInt64] = []
+    private var predictionCPU: [UInt64] = []
+    private var estimatedCPU: [UInt64] = []
+    private var batchPackaging: [UInt64] = []
+    private var privateSurfaceEncoding: [UInt64] = []
+
+    init() {
+        authoritativeCPU.reserveCapacity(256)
+        predictionCPU.reserveCapacity(256)
+        estimatedCPU.reserveCapacity(256)
+        batchPackaging.reserveCapacity(512)
+        privateSurfaceEncoding.reserveCapacity(512)
+    }
+
+    func record(
+        _ stage: StrokePreparationAllocationProbeStage,
+        count: UInt64
+    ) {
+        lock.lock()
+        switch stage {
+        case .authoritativeCPU:
+            authoritativeCPU.append(count)
+        case .predictionCPU:
+            predictionCPU.append(count)
+        case .estimatedCPU:
+            estimatedCPU.append(count)
+        case .batchPackaging:
+            batchPackaging.append(count)
+        case .privateSurfaceEncoding:
+            privateSurfaceEncoding.append(count)
+        }
+        lock.unlock()
+    }
+
+    func snapshot(
+        for stage: StrokePreparationAllocationProbeStage
+    ) -> Snapshot {
+        lock.lock()
+        let counts = switch stage {
+        case .authoritativeCPU: authoritativeCPU
+        case .predictionCPU: predictionCPU
+        case .estimatedCPU: estimatedCPU
+        case .batchPackaging: batchPackaging
+        case .privateSurfaceEncoding: privateSurfaceEncoding
+        }
+        let result = Snapshot(
+            eventCount: counts.count,
+            allocationCount: counts.reduce(0, +),
+            maximumSingleEventCount: counts.max() ?? 0,
+            firstHalfAllocationCount:
+                counts.prefix(counts.count / 2).reduce(0, +),
+            lastHalfAllocationCount:
+                counts.suffix(counts.count / 2).reduce(0, +)
+        )
+        lock.unlock()
+        return result
+    }
+
+    func reset() {
+        lock.lock()
+        authoritativeCPU.removeAll(keepingCapacity: true)
+        predictionCPU.removeAll(keepingCapacity: true)
+        estimatedCPU.removeAll(keepingCapacity: true)
+        batchPackaging.removeAll(keepingCapacity: true)
+        privateSurfaceEncoding.removeAll(keepingCapacity: true)
+        lock.unlock()
+    }
+}
+
 private enum ProbeHarnessError: Error, CustomStringConvertible {
     case invalidArguments
     case metalUnavailable
     case probeUnavailable
     case selfTestMissedAllocation
+    case offMainEstimatedAllocations(total: UInt64, maximum: UInt64)
+    case offMainAllocationRegression(String)
     case productionAllocations(
         total: UInt64,
         firstIndex: Int,
@@ -54,6 +135,11 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
             "allocator probe symbols are unavailable"
         case .selfTestMissedAllocation:
             "allocator probe missed the deliberate Array allocation"
+        case let .offMainEstimatedAllocations(total, maximum):
+            "off-main estimated correction allocated \(total) times; "
+                + "maximum single correction=\(maximum)"
+        case let .offMainAllocationRegression(detail):
+            "off-main allocation regression: \(detail)"
         case let .productionAllocations(
             total,
             firstIndex,
@@ -284,13 +370,289 @@ private struct BrushInputAllocationProbeHarness {
                 maximumSingleCallCount: maximumSingleCallCount
             )
         }
+        try await runOffMainEstimatedCorrectionProbe(
+            probe: probe,
+            root: root
+        )
         print(
             "ALLOCATOR PROBE PRODUCTION PASS allocations=\(allocationCount)"
         )
     }
 
     @MainActor
-    private static func makeRendererSetup(root: URL) async throws
+    private static func runOffMainEstimatedCorrectionProbe(
+        probe: AllocatorProbe,
+        root: URL
+    ) async throws {
+        let setup = try await makeRendererSetup(
+            root: root,
+            usesOffMainNativeInk: true
+        )
+        let renderer = setup.renderer
+        let warmedWorkspaceIdentity =
+            renderer.offMainStrokeWorkspaceIdentityForTesting
+        let warmedWorkspaceInstallationCount = renderer
+            .offMainStrokeWorkspaceInstallationCountForTesting
+        let measurements = ActorAllocationMeasurements()
+        renderer.setStrokePreparationAllocationProbeForHarness(
+            StrokePreparationAllocationProbe(
+                identity: 1,
+                arm: { probe.arm() },
+                disarm: { probe.disarm() },
+                record: { stage, count in
+                    measurements.record(stage, count: count)
+                }
+            )
+        )
+        let token = RendererOperationToken(rawValue: 2)
+        try renderer.beginStroke(
+            token: token,
+            sample: sample(.began, x: 0),
+            style: StrokeRenderStyle(
+                color: .black,
+                diameter: 20,
+                compositeMode: .draw,
+                eraserStrength: 1,
+                program: setup.brush.program,
+                renderIdentity: setup.brush.renderIdentity,
+                seed: 2
+            )
+        )
+        try await drainUntilMeasured(
+            renderer: renderer,
+            measurements: measurements,
+            stage: .authoritativeCPU,
+            expectedEventCount: 1
+        )
+
+        let warmEventCount = 32
+        for index in 1...warmEventCount {
+            try renderer.appendStroke(
+                token: token,
+                sample: unresolvedEstimatedSample(index: index)
+            )
+            try renderer.applyEstimatedStrokeUpdate(
+                token: token,
+                sample: estimatedUpdateSample(index: index)
+            )
+            try await drainUntilMeasured(
+                renderer: renderer,
+                measurements: measurements,
+                stage: .estimatedCPU,
+                expectedEventCount: index
+            )
+        }
+        let warmPredictionEventCount = 16
+        for offset in 1...warmPredictionEventCount {
+            try renderer.appendStrokeBatch(
+                token: token,
+                samples: predictedBatch(
+                    after: warmEventCount + offset,
+                    count: 4
+                )
+            )
+            try await drainUntilMeasured(
+                renderer: renderer,
+                measurements: measurements,
+                stage: .predictionCPU,
+                expectedEventCount: offset
+            )
+        }
+        measurements.reset()
+
+        let measuredEventCount = 64
+        var mainActorEnqueueAllocations: UInt64 = 0
+        for offset in 1...measuredEventCount {
+            let index = warmEventCount + offset
+            let unresolved = unresolvedEstimatedSample(index: index)
+            probe.arm()
+            do {
+                try renderer.appendStroke(token: token, sample: unresolved)
+            } catch {
+                _ = probe.disarm()
+                throw error
+            }
+            mainActorEnqueueAllocations += probe.disarm()
+            let update = estimatedUpdateSample(index: index)
+            probe.arm()
+            do {
+                try renderer.applyEstimatedStrokeUpdate(
+                    token: token,
+                    sample: update
+                )
+            } catch {
+                _ = probe.disarm()
+                throw error
+            }
+            mainActorEnqueueAllocations += probe.disarm()
+            try await drainUntilMeasured(
+                renderer: renderer,
+                measurements: measurements,
+                stage: .estimatedCPU,
+                expectedEventCount: offset
+            )
+        }
+
+        let measuredPredictionEventCount = 32
+        for offset in 1...measuredPredictionEventCount {
+            let predicted = predictedBatch(
+                after: warmEventCount + measuredEventCount + offset,
+                count: 4
+            )
+            probe.arm()
+            do {
+                try renderer.appendStrokeBatch(
+                    token: token,
+                    samples: predicted
+                )
+            } catch {
+                _ = probe.disarm()
+                throw error
+            }
+            mainActorEnqueueAllocations += probe.disarm()
+            try await drainUntilMeasured(
+                renderer: renderer,
+                measurements: measurements,
+                stage: .predictionCPU,
+                expectedEventCount: offset
+            )
+        }
+
+        let authoritative = measurements.snapshot(for: .authoritativeCPU)
+        let estimated = measurements.snapshot(for: .estimatedCPU)
+        let prediction = measurements.snapshot(for: .predictionCPU)
+        let packaging = measurements.snapshot(for: .batchPackaging)
+        let surface = measurements.snapshot(for: .privateSurfaceEncoding)
+        let workspaceInstallationDelta = renderer
+            .offMainStrokeWorkspaceInstallationCountForTesting
+            - warmedWorkspaceInstallationCount
+        let workspaceIdentityChanged = renderer
+            .offMainStrokeWorkspaceIdentityForTesting
+            != warmedWorkspaceIdentity
+        try renderer.cancelStroke(token: token)
+        print(
+            "ALLOCATOR PROBE OFF-MAIN METRICS main="
+                + "\(mainActorEnqueueAllocations) "
+                + "authoritative=\(authoritative.allocationCount)/"
+                + "\(authoritative.firstHalfAllocationCount)/"
+                + "\(authoritative.lastHalfAllocationCount)/"
+                + "\(authoritative.maximumSingleEventCount) "
+                + "estimated=\(estimated.allocationCount)/"
+                + "\(estimated.firstHalfAllocationCount)/"
+                + "\(estimated.lastHalfAllocationCount)/"
+                + "\(estimated.maximumSingleEventCount) "
+                + "prediction=\(prediction.allocationCount)/"
+                + "\(prediction.firstHalfAllocationCount)/"
+                + "\(prediction.lastHalfAllocationCount)/"
+                + "\(prediction.maximumSingleEventCount) "
+                + "packaging=\(packaging.allocationCount)/"
+                + "\(packaging.firstHalfAllocationCount)/"
+                + "\(packaging.lastHalfAllocationCount)/"
+                + "\(packaging.maximumSingleEventCount) "
+                + "workspace=\(workspaceInstallationDelta)/"
+                + "\(workspaceIdentityChanged ? 1 : 0) "
+                + "surface_driver=\(surface.allocationCount)/"
+                + "\(surface.firstHalfAllocationCount)/"
+                + "\(surface.lastHalfAllocationCount)/"
+                + "\(surface.maximumSingleEventCount)"
+        )
+        let actorStages: [(
+            String,
+            ActorAllocationMeasurements.Snapshot,
+            Int
+        )] = [
+            ("authoritative", authoritative, measuredEventCount),
+            ("estimated", estimated, measuredEventCount),
+            ("prediction", prediction, measuredPredictionEventCount),
+        ]
+        guard mainActorEnqueueAllocations == 0 else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "MainActor enqueue allocations=\(mainActorEnqueueAllocations)"
+            )
+        }
+        for (name, snapshot, expectedCount) in actorStages {
+            guard snapshot.eventCount == expectedCount,
+                  snapshot.allocationCount == 0
+            else {
+                throw ProbeHarnessError.offMainAllocationRegression(
+                    "\(name) events=\(snapshot.eventCount)/\(expectedCount) "
+                        + "first=\(snapshot.firstHalfAllocationCount) "
+                        + "last=\(snapshot.lastHalfAllocationCount) "
+                        + "max=\(snapshot.maximumSingleEventCount)"
+                )
+            }
+        }
+        guard packaging.eventCount >= measuredEventCount
+                + measuredPredictionEventCount,
+              packaging.allocationCount == 0
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "packaging events=\(packaging.eventCount) "
+                    + "allocations=\(packaging.allocationCount) "
+                    + "max=\(packaging.maximumSingleEventCount)"
+            )
+        }
+        guard workspaceInstallationDelta == 0,
+              !workspaceIdentityChanged
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "workspace installations=\(workspaceInstallationDelta) "
+                    + "identityChanged=\(workspaceIdentityChanged)"
+            )
+        }
+        guard surface.eventCount >= measuredEventCount
+                + measuredPredictionEventCount,
+              surface.lastHalfAllocationCount
+                <= surface.firstHalfAllocationCount,
+              surface.maximumSingleEventCount <= 64
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "surface events=\(surface.eventCount) "
+                    + "first=\(surface.firstHalfAllocationCount) "
+                    + "last=\(surface.lastHalfAllocationCount) "
+                    + "max=\(surface.maximumSingleEventCount)/64"
+            )
+        }
+        print(
+            "ALLOCATOR PROBE OFF-MAIN PASS application=0 workspace=0 "
+                + "main=0 "
+                + "authoritative=\(authoritative.allocationCount) "
+                + "estimated=\(estimated.allocationCount) "
+                + "prediction=\(prediction.allocationCount) "
+                + "packaging=\(packaging.allocationCount) "
+                + "surface_driver_mallocs=\(surface.allocationCount)"
+        )
+    }
+
+    @MainActor
+    private static func drainUntilMeasured(
+        renderer: GridRenderer,
+        measurements: ActorAllocationMeasurements,
+        stage: StrokePreparationAllocationProbeStage,
+        expectedEventCount: Int
+    ) async throws {
+        for _ in 0..<20_000 {
+            if measurements.snapshot(for: stage).eventCount
+                >= expectedEventCount,
+               renderer.strokePreparationIsQuiescentForAllocationHarness
+            {
+                return
+            }
+            try renderer.advanceStrokePreparationForAllocationHarness()
+            await Task.yield()
+        }
+        throw ProbeHarnessError.offMainEstimatedAllocations(
+            total: measurements.snapshot(for: stage).allocationCount,
+            maximum:
+                measurements.snapshot(for: stage).maximumSingleEventCount
+        )
+    }
+
+    @MainActor
+    private static func makeRendererSetup(
+        root: URL,
+        usesOffMainNativeInk: Bool = false
+    ) async throws
         -> RendererSetup
     {
         guard
@@ -326,9 +688,15 @@ private struct BrushInputAllocationProbeHarness {
             )
         )
         let recipe = try BrushRecipe(
-            id: BrushRecipeID("brush.allocator-probe"),
-            replayMode: .replayTail,
-            replayLimits: BrushRecipePolicy.replayTailLimits
+            id: BrushRecipeID(
+                usesOffMainNativeInk
+                    ? "builtin.native-ink"
+                    : "brush.allocator-probe"
+            ),
+            replayMode: usesOffMainNativeInk ? .appendOnly : .replayTail,
+            replayLimits: usesOffMainNativeInk
+                ? nil
+                : BrushRecipePolicy.replayTailLimits
         )
         let definition = try LegacyBrushRecipeAdapter.definition(
             from: recipe,

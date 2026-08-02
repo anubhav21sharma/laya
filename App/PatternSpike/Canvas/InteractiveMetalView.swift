@@ -119,6 +119,7 @@ final class InteractiveMetalView: MTKView {
         super.layout()
         updateBrushCursorFrame()
         window?.invalidateCursorRects(for: self)
+        requestDraw()
     }
 
     override func viewDidMoveToWindow() {
@@ -195,6 +196,7 @@ final class InteractiveMetalView: MTKView {
                 )
             )
             dragMode = .panning(lastLocal: local)
+            requestDraw()
         case .drawing:
             let position = coordinateTransform.map(local)
             guard shouldDeliverTabletEvent(
@@ -276,6 +278,7 @@ final class InteractiveMetalView: MTKView {
             anchor: coordinateTransform.map(localPoint(event))
         )
         updateBrushCursorLocation(with: event)
+        requestDraw()
     }
 
     override func magnify(with event: NSEvent) {
@@ -286,6 +289,7 @@ final class InteractiveMetalView: MTKView {
             anchor: coordinateTransform.map(localPoint(event))
         )
         updateBrushCursorLocation(with: event)
+        requestDraw()
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -318,6 +322,11 @@ final class InteractiveMetalView: MTKView {
         lastPointerCancellationGeneration = generation
         dragMode = nil
         tabletEventDeduplicator.reset()
+        requestDraw()
+    }
+
+    func requestDraw() {
+        needsDisplay = true
     }
 
     var hasActivePointerInteractionForTesting: Bool {
@@ -402,6 +411,7 @@ final class InteractiveMetalView: MTKView {
         )
         dragMode = nil
         tabletEventDeduplicator.reset()
+        requestDraw()
     }
 
     private func shouldDeliverTabletEvent(
@@ -425,6 +435,7 @@ final class InteractiveMetalView: MTKView {
 
     private func deliver(_ samples: [StrokeSample]) {
         controller.handleStrokeSamples(samples)
+        requestDraw()
     }
 
     private func updateRefreshRate(for window: NSWindow) {
@@ -474,6 +485,12 @@ final class InteractiveMetalView: MTKView {
         super.didMoveToWindow()
         guard let screen = window?.screen else { return }
         preferredFramesPerSecond = screen.maximumFramesPerSecond
+        requestDraw()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        requestDraw()
     }
 
     override func touchesBegan(
@@ -575,6 +592,7 @@ final class InteractiveMetalView: MTKView {
                     sample,
                     inputGeneration: inputGeneration
                 )
+                requestDraw()
             }
             let state = brushInputAdapter.estimationState(for: touch)
             precondition(state.index == index)
@@ -595,6 +613,11 @@ final class InteractiveMetalView: MTKView {
         guard generation != lastPointerCancellationGeneration else { return }
         lastPointerCancellationGeneration = generation
         resetTouchState()
+        requestDraw()
+    }
+
+    func requestDraw() {
+        setNeedsDisplay()
     }
 
     private func matchingActiveTouch(
@@ -630,6 +653,10 @@ final class InteractiveMetalView: MTKView {
         let predicted = includesPrediction
             ? event?.predictedTouches(for: touch) ?? []
             : []
+        let predictionBatch = BrushInputBatchPolicy.predictionBatch(
+            predicted,
+            maximumCount: PredictionOverlay.maximumNormalizedSampleCount
+        )
         pendingEstimatedTouches.discardPredicted()
         for ordinaryTouch in coalesced {
             let state = brushInputAdapter.estimationState(
@@ -653,7 +680,7 @@ final class InteractiveMetalView: MTKView {
                 inputGeneration: inputGeneration
             )
         }
-        for predictedTouch in predicted {
+        for predictedTouch in predictionBatch.admitted {
             let state = brushInputAdapter.estimationState(
                 for: predictedTouch
             )
@@ -668,7 +695,7 @@ final class InteractiveMetalView: MTKView {
         let samples = brushInputAdapter.orderedSamples(
             coalescedTouches: coalesced,
             actualTouch: touch,
-            predictedTouches: predicted,
+            predictedTouches: predictionBatch.admitted,
             terminalPhase: terminalPhase,
             in: self
         ).compactMap(mapToDrawable)
@@ -678,8 +705,11 @@ final class InteractiveMetalView: MTKView {
         }
         controller.handleStrokeSamples(
             samples,
-            inputGeneration: inputGeneration
+            inputGeneration: inputGeneration,
+            submittedPredictionSampleCount:
+                predictionBatch.submittedCount
         )
+        requestDraw()
     }
 
     private var coordinateTransform: DrawableCoordinateTransform? {
@@ -731,6 +761,7 @@ final class InteractiveMetalView: MTKView {
             inputGeneration: activeInputGeneration
         )
         resetTouchState()
+        requestDraw()
     }
 
     private func resetTouchState() {

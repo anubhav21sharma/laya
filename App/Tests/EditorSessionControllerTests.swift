@@ -243,6 +243,68 @@ private func commitControllerStroke(
     _ = try renderer.finishCommitForHarness()
 }
 
+@MainActor
+private func awaitControllerRendererIdleForHarness(
+    _ renderer: GridRenderer
+) throws {
+    try renderer.drainStrokeWorkspaceRetirementForHarness()
+    #expect(renderer.isIdle)
+}
+
+@MainActor
+private func awaitActorTransientSamples(
+    _ renderer: GridRenderer,
+    predictedXs: [Float],
+    minimumAuthoritativeInputCount: UInt64? = nil
+) async throws -> StrokeTransientPreparationSnapshot {
+    var lastSnapshot: StrokeTransientPreparationSnapshot?
+    for _ in 0..<20_000 {
+        try renderer.drainCompletedOperationsForHarness()
+        if renderer.hasPendingOffMainSurfaceLeaseForTesting {
+            _ = try renderer.completeNextPendingInteractiveFrame()
+        }
+        let snapshot = await renderer.offMainTransientSnapshotForTesting()
+        lastSnapshot = snapshot
+        let predicted = snapshot.predictedSamples.map(\.position.x)
+        let authoritativeMatches = minimumAuthoritativeInputCount.map {
+            renderer.compatibilityInkCoordinatorSnapshotForTesting?
+                .commitMetadata.inputSampleCount ?? 0 >= $0
+        } ?? true
+        if predicted == predictedXs, authoritativeMatches {
+            return snapshot
+        }
+        await Task.yield()
+    }
+    let actualXs = lastSnapshot?.actualSamples.map(\.position.x) ?? []
+    let predictedActualXs =
+        lastSnapshot?.predictedSamples.map(\.position.x) ?? []
+    throw MetalRendererError.commandFailed(
+        "actor transient sample snapshot did not reach expected state "
+            + "actual=\(actualXs) predicted=\(predictedActualXs) "
+            + "expectedPredicted=\(predictedXs)"
+    )
+}
+
+@MainActor
+private func finishControllerCommitAndAwaitDeferredStroke(
+    _ controller: EditorSessionController,
+    renderer: GridRenderer
+) async throws {
+    _ = try renderer.completePendingInteractiveStroke()
+    for _ in 0..<20_000 {
+        if renderer.hasActiveStroke,
+           case .drawing = controller.transactionStateForTesting
+        {
+            return
+        }
+        try renderer.drainCompletedOperationsForHarness()
+        await Task.yield()
+    }
+    throw MetalRendererError.commandFailed(
+        "deferred controller stroke did not resume after workspace retirement"
+    )
+}
+
 @Test
 @MainActor
 func controllerStartsInFiniteDomainAndCanSwitchOnlyBeforeRasterEdit()
@@ -827,11 +889,13 @@ func cancellationFailureCannotStrandQueuedPeriodicIntentBusy() throws {
     #expect(errors == [injectedError])
     #expect(controller.transactionStateForTesting == .idle)
     #expect(!controller.model.isBusy)
-    #expect(renderer.isIdle)
+    #expect(!renderer.isIdle)
     #expect(controller.model.periodicConfiguration == before)
     #expect(!controller.historyAvailabilityForTesting.canUndo)
 
     controller.handleTiling(.mirrorX)
+    #expect(controller.model.isBusy)
+    try awaitControllerRendererIdleForHarness(renderer)
     #expect(controller.model.tiling == .mirrorX)
     #expect(!controller.model.isBusy)
 }
@@ -1056,6 +1120,7 @@ func pointerDownCapturesPreparedNativeProgramsAndUniqueNonzeroSeed() throws {
         sessionEntropy: sessionEntropy
     ))
     controller.handleStrokeSample(controllerSample(.cancelled))
+    try awaitControllerRendererIdleForHarness(renderer)
 
     controller.model.confirmRecipe(AnchorBrushCatalog.glaze.id)
     controller.handleStrokeSample(controllerSample(.began))
@@ -1070,6 +1135,7 @@ func pointerDownCapturesPreparedNativeProgramsAndUniqueNonzeroSeed() throws {
     ))
     #expect(second.seed != first.seed)
     controller.handleStrokeSample(controllerSample(.cancelled))
+    try awaitControllerRendererIdleForHarness(renderer)
 
     controller.handleTool(.erase)
     controller.handleStrokeSample(controllerSample(.began))
@@ -1085,6 +1151,7 @@ func pointerDownCapturesPreparedNativeProgramsAndUniqueNonzeroSeed() throws {
     #expect(eraser.seed != second.seed)
     #expect(eraser.compositeMode == .erase)
     controller.handleStrokeSample(controllerSample(.cancelled))
+    try awaitControllerRendererIdleForHarness(renderer)
 }
 
 @Test
@@ -1415,6 +1482,7 @@ func selectionDuringStrokeLeavesCurrentIdentityUntilNextStroke()
     #expect(renderer.harnessPreparedDrawBrushIdentity == activeIdentity)
 
     controller.handleStrokeSample(controllerSample(.cancelled))
+    try awaitControllerRendererIdleForHarness(renderer)
     await controller.selectBrush(AnchorBrushCatalog.marker.id)
     #expect(controller.model.selectedRecipeID == EditorBrushCatalog.chiselMarker.id)
 
@@ -1426,6 +1494,7 @@ func selectionDuringStrokeLeavesCurrentIdentityUntilNextStroke()
             == renderer.harnessPreparedDrawBrushIdentity
     )
     controller.handleStrokeSample(controllerSample(.cancelled, timestamp: 4))
+    try awaitControllerRendererIdleForHarness(renderer)
 }
 
 @Test
@@ -1448,6 +1517,7 @@ func diagnosticProgramSeedAndNormalizedInputAreCapturedAtStrokeStart()
     #expect(observed == [began])
 
     controller.handleStrokeSample(controllerSample(.cancelled, timestamp: 2))
+    try awaitControllerRendererIdleForHarness(renderer)
     controller.model.confirmRecipe(AnchorBrushCatalog.defaultDraw.id)
     controller.handleStrokeSample(controllerSample(.began, timestamp: 3))
     let builtIn = try #require(renderer.harnessActiveStrokeStyle)
@@ -1456,6 +1526,7 @@ func diagnosticProgramSeedAndNormalizedInputAreCapturedAtStrokeStart()
     )
     #expect(builtIn.seed == 0xCAFE)
     controller.handleStrokeSample(controllerSample(.cancelled, timestamp: 4))
+    try awaitControllerRendererIdleForHarness(renderer)
 }
 
 #if DEBUG
@@ -1645,6 +1716,7 @@ func cancellingWhileAwaitingEstimatesDiscardsWithoutHistory() throws {
         )
     )
     controller.handleStrokeSample(controllerSample(.cancelled))
+    try awaitControllerRendererIdleForHarness(renderer)
 
     #expect(controller.transactionStateForTesting == .idle)
     #expect(controller.lastRecordedRasterCommandForTesting == nil)
@@ -1653,7 +1725,9 @@ func cancellingWhileAwaitingEstimatesDiscardsWithoutHistory() throws {
 
 @Test
 @MainActor
-func newPointerFinalizesEstimateFallbackThenBeginsDeferredStroke() throws {
+func newPointerFinalizesEstimateFallbackThenBeginsDeferredStroke()
+    async throws
+{
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.handleStrokeSample(controllerSample(.began))
@@ -1676,8 +1750,10 @@ func newPointerFinalizesEstimateFallbackThenBeginsDeferredStroke() throws {
     }
     #expect(committing.phase == .commitPending)
 
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    try await finishControllerCommitAndAwaitDeferredStroke(
+        controller,
+        renderer: renderer
+    )
 
     guard case let .drawing(collecting) =
         controller.transactionStateForTesting
@@ -1759,7 +1835,7 @@ func movedBatchTracksEstimateUntilASeparateUpdateResolvesIt() throws {
 
 @Test
 @MainActor
-func completeDeferredPointerStreamReplaysAfterPriorCommit() throws {
+func completeDeferredPointerStreamReplaysAfterPriorCommit() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.handleStrokeSample(controllerSample(.began, x: 12))
@@ -1780,8 +1856,10 @@ func completeDeferredPointerStreamReplaysAfterPriorCommit() throws {
     )
     controller.handleStrokeSample(controllerSample(.ended, x: 52))
 
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    try await finishControllerCommitAndAwaitDeferredStroke(
+        controller,
+        renderer: renderer
+    )
     guard case let .drawing(secondCommit) =
         controller.transactionStateForTesting
     else {
@@ -1798,7 +1876,246 @@ func completeDeferredPointerStreamReplaysAfterPriorCommit() throws {
 
 @Test
 @MainActor
-func deferredPointerCanReuseAnOldEstimatedUpdateIndex() throws {
+func retiringWorkspaceDefersRapidPointerUntilTrueIdleExactlyOnce()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let initialStorage =
+        controller.deferredPointerStorageSnapshotForTesting
+    #expect(
+        initialStorage.queuedSampleCapacity
+            >= TransientStrokeBufferContract.wholeStrokeSampleCapacity
+    )
+    #expect(
+        initialStorage.drainSampleCapacity
+            >= TransientStrokeBufferContract.wholeStrokeSampleCapacity
+    )
+    #expect(
+        initialStorage.estimationIndexCapacity
+            >= TransientStrokeBufferContract.wholeStrokeSampleCapacity
+    )
+    var normalizedTimestamps: [TimeInterval] = []
+    var reportedErrors: [MetalRendererError] = []
+    controller.onNormalizedInput = {
+        normalizedTimestamps.append($0.timestamp)
+    }
+    controller.onError = { reportedErrors.append($0) }
+
+    controller.handleStrokeSample(
+        controllerSample(.began, x: 12, timestamp: 1),
+        inputGeneration: 7_000
+    )
+    controller.cancelTransientEdit()
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(!renderer.isIdle)
+    #expect(!renderer.offMainStrokeWorkspaceIsAvailableForTesting)
+    normalizedTimestamps.removeAll(keepingCapacity: true)
+
+    let generation: UInt64 = 7_001
+    let rapidMoveCount = 256
+    var expectedTimestamps: [TimeInterval] = [10]
+    controller.handleStrokeSample(
+        controllerSample(.began, x: 20, timestamp: 10),
+        inputGeneration: generation
+    )
+    controller.handleStrokeSample(
+        controllerMovedSample(
+            x: 63,
+            timestamp: 9_999,
+            kind: .actual
+        ),
+        inputGeneration: generation + 1
+    )
+    for index in 0..<rapidMoveCount {
+        let timestamp = TimeInterval(index + 11)
+        expectedTimestamps.append(timestamp)
+        controller.handleStrokeSample(
+            controllerMovedSample(
+                x: 21 + Float(index % 32),
+                timestamp: timestamp,
+                kind: .actual
+            ),
+            inputGeneration: generation
+        )
+    }
+    expectedTimestamps.append(400)
+    controller.handleStrokeSample(
+        controllerSample(.ended, x: 54, timestamp: 400),
+        inputGeneration: generation
+    )
+
+    let queuedStorage =
+        controller.deferredPointerStorageSnapshotForTesting
+    #expect(queuedStorage.queuedSampleCount == rapidMoveCount + 2)
+    #expect(
+        queuedStorage.queuedSampleCapacity
+            == initialStorage.queuedSampleCapacity
+    )
+    #expect(normalizedTimestamps.isEmpty)
+
+    // An operation-completion callback can run before the actor publishes
+    // its true idle transition. Rechecking renderer.isIdle must leave the
+    // deferred stream intact until that later notification arrives.
+    renderer.onIdleStateChange?(true)
+    #expect(!renderer.isIdle)
+    #expect(controller.deferredPointerResumeCountForTesting == 0)
+    #expect(
+        controller.deferredPointerStorageSnapshotForTesting.queuedSampleCount
+            == rapidMoveCount + 2
+    )
+    #expect(normalizedTimestamps.isEmpty)
+    #expect(reportedErrors.isEmpty)
+
+    var didResume = false
+    for _ in 0..<20_000 {
+        try renderer.drainCompletedOperationsForHarness()
+        if case let .drawing(drawing) =
+            controller.transactionStateForTesting,
+           drawing.phase == .commitPending
+        {
+            didResume = true
+            break
+        }
+        await Task.yield()
+    }
+    #expect(didResume)
+    #expect(controller.deferredPointerResumeCountForTesting == 1)
+    #expect(renderer.hasActiveStroke)
+    #expect(normalizedTimestamps == expectedTimestamps)
+    #expect(!normalizedTimestamps.contains(9_999))
+    #expect(reportedErrors.isEmpty)
+
+    let resumedStorage =
+        controller.deferredPointerStorageSnapshotForTesting
+    #expect(resumedStorage.queuedSampleCount == 0)
+    #expect(
+        resumedStorage.queuedSampleCapacity
+            == initialStorage.queuedSampleCapacity
+    )
+    #expect(
+        resumedStorage.drainSampleCapacity
+            == initialStorage.drainSampleCapacity
+    )
+    #expect(
+        resumedStorage.estimationIndexCapacity
+            == initialStorage.estimationIndexCapacity
+    )
+
+    _ = try await renderer
+        .completePendingInteractiveStrokeAndAwaitIdle()
+}
+
+@Test
+@MainActor
+func retiringWorkspaceResumesDeferredPrefixBeforePointerEnds()
+    async throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    var normalizedTimestamps: [TimeInterval] = []
+    var reportedErrors: [MetalRendererError] = []
+    controller.onNormalizedInput = {
+        normalizedTimestamps.append($0.timestamp)
+    }
+    controller.onError = { reportedErrors.append($0) }
+
+    controller.handleStrokeSample(
+        controllerSample(.began, x: 12, timestamp: 1),
+        inputGeneration: 8_000
+    )
+    controller.cancelTransientEdit()
+    #expect(!renderer.isIdle)
+    normalizedTimestamps.removeAll(keepingCapacity: true)
+
+    let generation: UInt64 = 8_001
+    let acceptedPrediction = (0..<64).map { index in
+        controllerMovedSample(
+            x: 31 + Float(index) * 0.125,
+            timestamp: 12 + Double(index) * 0.001,
+            kind: .predicted
+        )
+    }
+    var boundedDeferredBatch = [
+        StrokeSample(
+            position: ScreenPoint(x: 24, y: 32),
+            pressure: 0.5,
+            timestamp: 10,
+            phase: .began,
+            source: .mouse,
+            kind: .coalesced
+        ),
+        controllerMovedSample(
+            x: 30,
+            timestamp: 11,
+            kind: .actual
+        ),
+    ]
+    boundedDeferredBatch.append(contentsOf: acceptedPrediction)
+    controller.handleStrokeSamples(
+        boundedDeferredBatch,
+        inputGeneration: generation,
+        submittedPredictionSampleCount: 100_000
+    )
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(normalizedTimestamps.isEmpty)
+
+    var didResumeCollecting = false
+    for _ in 0..<20_000 {
+        try renderer.drainCompletedOperationsForHarness()
+        if case let .drawing(drawing) =
+            controller.transactionStateForTesting,
+           drawing.phase == .collecting
+        {
+            didResumeCollecting = true
+            break
+        }
+        await Task.yield()
+    }
+    #expect(didResumeCollecting)
+    let deferredPredictionState = try await awaitActorTransientSamples(
+        renderer,
+        predictedXs: acceptedPrediction.map(\.position.x),
+        minimumAuthoritativeInputCount: 2
+    )
+    #expect(deferredPredictionState.predictedSamples.count == 64)
+    #expect(normalizedTimestamps.count == 2 + 64)
+    #expect(normalizedTimestamps.prefix(2) == [10, 11])
+    let deferredPredictionScratch =
+        renderer.predictionSubmissionScratchSnapshotForTesting
+    #expect(deferredPredictionScratch.lastSubmittedSampleCount == 100_000)
+    #expect(deferredPredictionScratch.lastAcceptedSampleCount == 64)
+    #expect(
+        deferredPredictionScratch.lastShedSampleCount == 100_000 - 64
+    )
+    #expect(deferredPredictionScratch.lastValidatedSampleCount == 64)
+    #expect(deferredPredictionScratch.lastTelemetrySampleCount == 64)
+
+    controller.handleStrokeSample(
+        controllerMovedSample(x: 38, timestamp: 20, kind: .actual),
+        inputGeneration: generation
+    )
+    controller.handleStrokeSample(
+        controllerSample(.ended, x: 46, timestamp: 21),
+        inputGeneration: generation
+    )
+    guard case let .drawing(committing) =
+        controller.transactionStateForTesting
+    else {
+        Issue.record("Expected resumed pointer to request one commit")
+        return
+    }
+    #expect(committing.phase == .commitPending)
+    #expect(normalizedTimestamps.suffix(2) == [20, 21])
+    #expect(reportedErrors.isEmpty)
+
+    _ = try await renderer
+        .completePendingInteractiveStrokeAndAwaitIdle()
+}
+
+@Test
+@MainActor
+func deferredPointerCanReuseAnOldEstimatedUpdateIndex() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.handleStrokeSample(
@@ -1851,8 +2168,10 @@ func deferredPointerCanReuseAnOldEstimatedUpdateIndex() throws {
         inputGeneration: 2_002
     )
 
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    try await finishControllerCommitAndAwaitDeferredStroke(
+        controller,
+        renderer: renderer
+    )
     guard case let .drawing(secondCommit) =
         controller.transactionStateForTesting
     else {
@@ -1868,9 +2187,9 @@ func deferredPointerCanReuseAnOldEstimatedUpdateIndex() throws {
 @Test
 @MainActor
 func deferredPointerRejectsLatePriorGenerationUpdateForReusedIndex()
-    throws
+    async throws
 {
-    func render(includeLatePriorUpdate: Bool) throws -> [UInt8]? {
+    func render(includeLatePriorUpdate: Bool) async throws -> [UInt8]? {
         guard let renderer = try makeControllerRenderer() else {
             return nil
         }
@@ -1944,8 +2263,10 @@ func deferredPointerRejectsLatePriorGenerationUpdateForReusedIndex()
             inputGeneration: 1_002
         )
 
-        _ = try renderer.flushPendingLiveForHarness()
-        _ = try renderer.finishCommitForHarness()
+        try await finishControllerCommitAndAwaitDeferredStroke(
+            controller,
+            renderer: renderer
+        )
         guard case let .drawing(secondCommit) =
             controller.transactionStateForTesting
         else {
@@ -1959,8 +2280,8 @@ func deferredPointerRejectsLatePriorGenerationUpdateForReusedIndex()
         return try canonicalBytes(renderer)
     }
 
-    let expectedResult = try render(includeLatePriorUpdate: false)
-    let interleavedResult = try render(includeLatePriorUpdate: true)
+    let expectedResult = try await render(includeLatePriorUpdate: false)
+    let interleavedResult = try await render(includeLatePriorUpdate: true)
     let expected = try #require(expectedResult)
     let interleaved = try #require(interleavedResult)
     #expect(interleaved.elementsEqual(expected))
@@ -2116,6 +2437,7 @@ func failedEstimatedFallbackCommitLeavesRendererReusable() throws {
     controller.handleStrokeSample(controllerSample(.began, x: 40))
     #expect(renderer.hasActiveStroke)
     controller.handleStrokeSample(controllerSample(.cancelled, x: 40))
+    try awaitControllerRendererIdleForHarness(renderer)
     #expect(renderer.isIdle)
 }
 
@@ -2136,6 +2458,7 @@ func cancellationClearsPendingEstimateBookkeepingForNextStroke() throws {
         )
     )
     controller.cancelTransientEdit()
+    try awaitControllerRendererIdleForHarness(renderer)
     #expect(renderer.isIdle)
 
     controller.handleStrokeSample(controllerSample(.began, x: 36))
@@ -2150,6 +2473,7 @@ func cancellationClearsPendingEstimateBookkeepingForNextStroke() throws {
         )
     )
     controller.handleTool(.erase)
+    try awaitControllerRendererIdleForHarness(renderer)
     #expect(renderer.isIdle)
     #expect(controller.model.tool == .erase)
 
@@ -2173,6 +2497,8 @@ func cancellationClearsPendingEstimateBookkeepingForNextStroke() throws {
 func synchronousRendererFailureClearsEstimateBookkeeping() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
+    var reportedErrors: [MetalRendererError] = []
+    controller.onError = { reportedErrors.append($0) }
     controller.handleStrokeSample(controllerSample(.began, x: 16))
     guard case let .drawing(drawing) =
         controller.transactionStateForTesting
@@ -2193,10 +2519,13 @@ func synchronousRendererFailureClearsEstimateBookkeeping() throws {
     try renderer.cancelStroke(
         token: RendererOperationToken(rawValue: drawing.token.rawValue)
     )
-    controller.handleStrokeSample(
-        controllerMovedSample(x: 28, timestamp: 2, kind: .actual)
+    controller.handleStrokeSamples(
+        [],
+        submittedPredictionSampleCount: 100_000
     )
     #expect(controller.transactionStateForTesting == .idle)
+    #expect(reportedErrors == [.invalidStrokeLifecycle])
+    try awaitControllerRendererIdleForHarness(renderer)
 
     controller.handleStrokeSample(controllerSample(.began, x: 36))
     controller.handleStrokeSample(controllerSample(.ended, x: 44))
@@ -2210,6 +2539,7 @@ func synchronousRendererFailureClearsEstimateBookkeeping() throws {
     _ = try renderer.flushPendingLiveForHarness()
     _ = try renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
+    #expect(reportedErrors == [.invalidStrokeLifecycle])
 }
 
 @Test
@@ -2279,37 +2609,137 @@ func strokeSeedDerivationIsDeterministicNonzeroAndSessionScoped() {
 
 @Test
 @MainActor
-func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch() throws {
+func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch()
+    async throws
+{
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.model.confirmRecipe(AnchorBrushCatalog.marker.id)
-    controller.handleStrokeSample(controllerSample(.began, x: 16, y: 32))
+    var normalizedImmediateBatch: [StrokeSample] = []
+    controller.onNormalizedInput = {
+        normalizedImmediateBatch.append($0)
+    }
+    let immediatePrediction = (0..<64).map { index in
+        controllerMovedSample(
+            x: 17 + Float(index) * 0.125,
+            timestamp: 0.1 + Double(index) * 0.001,
+            kind: .predicted
+        )
+    }
+    var immediateBeganBatch = [
+        StrokeSample(
+            position: ScreenPoint(x: 16, y: 32),
+            pressure: 0.5,
+            timestamp: 0,
+            phase: .began,
+            source: .mouse,
+            kind: .coalesced
+        ),
+        controllerMovedSample(
+            x: 16.5,
+            timestamp: 0.05,
+            kind: .actual
+        ),
+    ]
+    immediateBeganBatch.append(contentsOf: immediatePrediction)
+    controller.handleStrokeSamples(
+        immediateBeganBatch,
+        submittedPredictionSampleCount: 100_000
+    )
+    let immediateState = try await awaitActorTransientSamples(
+        renderer,
+        predictedXs: immediatePrediction.map(\.position.x),
+        minimumAuthoritativeInputCount: 2
+    )
+    #expect(immediateState.predictedSamples.count == 64)
+    #expect(normalizedImmediateBatch.count == 2 + 64)
+    #expect(normalizedImmediateBatch[0].phase == .began)
+    #expect(normalizedImmediateBatch[0].kind == .coalesced)
+    #expect(normalizedImmediateBatch[1].phase == .moved)
+    #expect(normalizedImmediateBatch[1].kind == .actual)
+    let immediateScratch =
+        renderer.predictionSubmissionScratchSnapshotForTesting
+    #expect(immediateScratch.lastSubmittedSampleCount == 100_000)
+    #expect(immediateScratch.lastAcceptedSampleCount == 64)
+    #expect(immediateScratch.lastShedSampleCount == 100_000 - 64)
 
     controller.handleStrokeSamples([
         controllerMovedSample(x: 24, timestamp: 1, kind: .predicted),
         controllerMovedSample(x: 40, timestamp: 2, kind: .predicted),
     ])
-    #expect(renderer.transientStrokeBuffer?.predictedSampleCount == 2)
-    #expect(
-        renderer.transientStrokeBuffer?.predictedSamples.map(\.position.x)
-            == [24, 40]
+    let firstPrediction = try await awaitActorTransientSamples(
+        renderer,
+        predictedXs: [24, 40]
     )
+    #expect(firstPrediction.predictedSamples.count == 2)
 
     controller.handleStrokeSamples([
         controllerMovedSample(x: 28, timestamp: 1, kind: .predicted),
         controllerMovedSample(x: 34, timestamp: 2, kind: .predicted),
     ])
-    #expect(renderer.transientStrokeBuffer?.predictedSampleCount == 2)
-    #expect(
-        renderer.transientStrokeBuffer?.predictedSamples.map(\.position.x)
-            == [28, 34]
+    let replacementPrediction = try await awaitActorTransientSamples(
+        renderer,
+        predictedXs: [28, 34]
     )
+    #expect(replacementPrediction.predictedSamples.count == 2)
 
+    let mixedAuthoritativeInputBefore = try #require(
+        renderer.compatibilityInkCoordinatorSnapshotForTesting?
+            .commitMetadata.inputSampleCount
+    )
+    var normalizedMixedBatch: [StrokeSample] = []
+    controller.onNormalizedInput = { normalizedMixedBatch.append($0) }
+    let acceptedPrediction = (0..<64).map { index in
+        controllerMovedSample(
+            x: 31 + Float(index) * 0.125,
+            timestamp: 3 + Double(index) * 0.001,
+            kind: .predicted
+        )
+    }
+    var mixedBatch = [
+        controllerMovedSample(x: 30, timestamp: 2.5, kind: .actual),
+    ]
+    mixedBatch.append(contentsOf: acceptedPrediction)
+    controller.handleStrokeSamples(
+        mixedBatch,
+        submittedPredictionSampleCount: 100_000
+    )
+    let boundedMixed = try await awaitActorTransientSamples(
+        renderer,
+        predictedXs: acceptedPrediction.map(\.position.x),
+        minimumAuthoritativeInputCount:
+            mixedAuthoritativeInputBefore + 1
+    )
+    #expect(boundedMixed.predictedSamples.count == 64)
+    #expect(normalizedMixedBatch.count == 1 + 64)
+    let boundedScratch =
+        renderer.predictionSubmissionScratchSnapshotForTesting
+    #expect(boundedScratch.lastSubmittedSampleCount == 100_000)
+    #expect(boundedScratch.lastAcceptedSampleCount == 64)
+    #expect(boundedScratch.lastShedSampleCount == 100_000 - 64)
+    #expect(boundedScratch.lastValidatedSampleCount == 64)
+    #expect(boundedScratch.lastTelemetrySampleCount == 64)
+
+    let authoritativeInputBefore = try #require(
+        renderer.compatibilityInkCoordinatorSnapshotForTesting?
+            .commitMetadata.inputSampleCount
+    )
     controller.handleStrokeSample(
         controllerMovedSample(x: 30, timestamp: 2, kind: .actual)
     )
-    #expect(renderer.transientStrokeBuffer?.predictedSampleCount == 0)
+    let settled = try await awaitActorTransientSamples(
+        renderer,
+        predictedXs: [],
+        minimumAuthoritativeInputCount: authoritativeInputBefore + 1
+    )
+    #expect(settled.predictedSamples.isEmpty)
+    #expect(
+        renderer.compatibilityInkCoordinatorSnapshotForTesting?
+            .commitMetadata.inputSampleCount
+            == authoritativeInputBefore + 1
+    )
     controller.handleStrokeSample(controllerSample(.cancelled))
+    try awaitControllerRendererIdleForHarness(renderer)
     #expect(renderer.isIdle)
 }
 
@@ -2467,7 +2897,7 @@ func awaitedClearPropagatesSynchronousRequestFailureAndRecovers()
 
 @Test
 @MainActor
-func cancelShortcutCancelsStrokeWithoutCreatingHistory() throws {
+func cancelShortcutCancelsStrokeWithoutCreatingHistory() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
 
@@ -2475,6 +2905,7 @@ func cancelShortcutCancelsStrokeWithoutCreatingHistory() throws {
     #expect(renderer.hasActiveStroke)
     controller.handleShortcut(.cancel)
 
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
     #expect(renderer.isIdle)
     #expect(!controller.model.canUndo)
     #expect(controller.lastRecordedRasterCommandForTesting == nil)
@@ -2524,6 +2955,7 @@ func finiteStrokeWhoseBrushFootprintCrossesCanvasEdgeStillBegins() throws {
     controller.handleStrokeSample(
         controllerSample(.cancelled, x: -5, y: 32, timestamp: 2)
     )
+    try awaitControllerRendererIdleForHarness(renderer)
     #expect(renderer.isIdle)
 }
 
@@ -2543,6 +2975,7 @@ func focusLossPairsSpaceReleaseAndCancelsTheActivePointer() throws {
     #expect(renderer.hasActiveStroke)
 
     controller.handleFocusLoss()
+    try awaitControllerRendererIdleForHarness(renderer)
 
     #expect(!controller.isSpaceDown)
     #expect(!renderer.hasActiveStroke)

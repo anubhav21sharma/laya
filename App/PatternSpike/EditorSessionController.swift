@@ -40,11 +40,17 @@ final class EditorSessionController {
     private struct RoutedStrokeSample {
         let sample: StrokeSample
         let inputGeneration: UInt64?
+        let batchID: UInt64?
+        let submittedPredictionSampleCount: Int?
     }
 
     private var deferredPointerSamples: [RoutedStrokeSample] = []
+    private var deferredPointerDrainScratch: [RoutedStrokeSample] = []
+    private var deferredPointerBatchScratch: [StrokeSample] = []
     private var deferredPointerOverflowed = false
     private var deferredEstimationIndices: Set<Int> = []
+    private var nextDeferredPointerBatchID: UInt64 = 1
+    private(set) var deferredPointerResumeCountForTesting: UInt64 = 0
     private static let deferredPointerSampleCapacity =
         TransientStrokeBufferContract.wholeStrokeSampleCapacity
 
@@ -53,6 +59,10 @@ final class EditorSessionController {
     private var pendingRasterMutation: PendingRasterMutation?
     private var pendingTileResize: PendingTileResize?
     private var pendingHistoryNavigation: PendingHistoryNavigation?
+    /// Metadata emitted by the reducer after cancelling an active stroke must
+    /// wait for the actor-owned stroke workspace to finish retiring. The
+    /// reducer operation stays pending until this exact effect is applied.
+    private var pendingRendererIdleMetadataEffect: EditorTransactionEffect?
     private let releaseRasterRevisions: (Set<StoredRasterRevisionID>) -> Void
     private let requestRasterRestore: (
         RendererOperationToken,
@@ -168,6 +178,18 @@ final class EditorSessionController {
         self.compileDefinition = compileDefinition
             ?? Self.unsupportedDefinitionCompilation
         self.selectionStore = selectionStore
+        deferredPointerSamples.reserveCapacity(
+            Self.deferredPointerSampleCapacity
+        )
+        deferredPointerDrainScratch.reserveCapacity(
+            Self.deferredPointerSampleCapacity
+        )
+        deferredPointerBatchScratch.reserveCapacity(
+            Self.deferredPointerSampleCapacity
+        )
+        deferredEstimationIndices.reserveCapacity(
+            Self.deferredPointerSampleCapacity
+        )
         model.confirmDocumentConfiguration(renderer.documentConfiguration)
         model.confirmPixelSize(renderer.pixelSize)
         model.confirmGeometryLocks(
@@ -177,6 +199,9 @@ final class EditorSessionController {
         renderer.setInteractiveGridVisibility(model.showGrid)
         renderer.onOperationCompleted = { [weak self] completion in
             self?.handleRendererCompletion(completion)
+        }
+        renderer.onIdleStateChange = { [weak self] isIdle in
+            self?.handleRendererIdleStateChange(isIdle)
         }
         refreshDerivedModelState()
     }
@@ -195,11 +220,39 @@ final class EditorSessionController {
         transaction.state
     }
 
+    struct DeferredPointerStorageSnapshotForTesting: Equatable {
+        let queuedSampleCount: Int
+        let queuedSampleCapacity: Int
+        let drainSampleCapacity: Int
+        let estimationIndexCapacity: Int
+    }
+
+    var deferredPointerStorageSnapshotForTesting:
+        DeferredPointerStorageSnapshotForTesting
+    {
+        DeferredPointerStorageSnapshotForTesting(
+            queuedSampleCount: deferredPointerSamples.count,
+            queuedSampleCapacity: deferredPointerSamples.capacity,
+            drainSampleCapacity: deferredPointerDrainScratch.capacity,
+            estimationIndexCapacity: deferredEstimationIndices.capacity
+        )
+    }
+
     func handleStrokeSample(
         _ sample: StrokeSample,
         inputGeneration: UInt64? = nil
     ) {
         if hasDeferredPointerStream {
+            enqueueDeferredPointerSample(
+                sample,
+                inputGeneration: inputGeneration
+            )
+            return
+        }
+        if sample.phase == .began,
+           transaction.state == .idle,
+           !renderer.isIdle
+        {
             enqueueDeferredPointerSample(
                 sample,
                 inputGeneration: inputGeneration
@@ -289,19 +342,80 @@ final class EditorSessionController {
 
     func handleStrokeSamples(
         _ samples: [StrokeSample],
-        inputGeneration: UInt64? = nil
+        inputGeneration: UInt64? = nil,
+        submittedPredictionSampleCount: Int? = nil
     ) {
+        handleStrokeSampleBatch(
+            samples,
+            inputGeneration: inputGeneration,
+            submittedPredictionSampleCount:
+                submittedPredictionSampleCount
+        )
+    }
+
+    private func handleStrokeSampleBatch<Samples>(
+        _ samples: Samples,
+        inputGeneration: UInt64?,
+        submittedPredictionSampleCount: Int?
+    ) where
+        Samples: RandomAccessCollection,
+        Samples.Element == StrokeSample
+    {
         if hasDeferredPointerStream {
-            for sample in samples {
+            enqueueDeferredPointerBatch(
+                samples,
+                inputGeneration: inputGeneration,
+                submittedPredictionSampleCount:
+                    submittedPredictionSampleCount
+            )
+            return
+        }
+        let rawPredictionStart = samples.firstIndex {
+            $0.kind == .predicted
+        } ?? samples.endIndex
+        let authoritativePrefix = samples[..<rawPredictionStart]
+        let containsStrokeBegin = authoritativePrefix.contains {
+            $0.phase == .began && $0.kind != .estimatedUpdate
+        }
+        if containsStrokeBegin,
+           transaction.state == .idle,
+           !renderer.isIdle
+        {
+            enqueueDeferredPointerBatch(
+                samples,
+                inputGeneration: inputGeneration,
+                submittedPredictionSampleCount:
+                    submittedPredictionSampleCount
+            )
+            return
+        }
+        if containsStrokeBegin,
+           transaction.state == .idle
+        {
+            for sample in authoritativePrefix {
                 handleStrokeSample(
                     sample,
                     inputGeneration: inputGeneration
                 )
             }
+            guard rawPredictionStart < samples.endIndex
+                    || (submittedPredictionSampleCount ?? 0) > 0,
+                  case let .drawing(drawing) = transaction.state,
+                  drawing.phase == .collecting,
+                  transaction.pendingOperation == nil
+            else {
+                return
+            }
+            handleStrokeSampleBatch(
+                samples[rawPredictionStart...],
+                inputGeneration: inputGeneration,
+                submittedPredictionSampleCount:
+                    submittedPredictionSampleCount
+            )
             return
         }
-        guard samples.count > 1,
-              samples.allSatisfy({ $0.phase == .moved }),
+        guard samples.count > 1
+                || submittedPredictionSampleCount != nil,
               case let .drawing(drawing) = transaction.state,
               drawing.phase == .collecting,
               transaction.pendingOperation == nil
@@ -315,14 +429,70 @@ final class EditorSessionController {
             return
         }
 
-        for sample in samples {
+        // BrushInputAdapter guarantees an authoritative prefix followed by a
+        // terminal prediction suffix. Preserve every authoritative sample, but
+        // admit only the renderer's bounded prediction prefix on Main.
+        var predictionStart = samples.endIndex
+        var sampleIndex = samples.startIndex
+        var canUsePartitionedBatch = true
+        while sampleIndex < samples.endIndex {
+            let sample = samples[sampleIndex]
+            if sample.kind == .predicted {
+                predictionStart = sampleIndex
+                break
+            }
+            guard sample.phase == .moved,
+                  sample.kind == .actual || sample.kind == .coalesced
+            else {
+                canUsePartitionedBatch = false
+                break
+            }
+            sampleIndex = samples.index(after: sampleIndex)
+        }
+        let normalizedPredictionSampleCount = samples.distance(
+            from: predictionStart,
+            to: samples.endIndex
+        )
+        let admittedPredictionEnd = samples.index(
+            predictionStart,
+            offsetBy: min(
+                normalizedPredictionSampleCount,
+                PredictionOverlay.maximumNormalizedSampleCount
+            )
+        )
+        let effectiveSubmittedPredictionSampleCount = max(
+            normalizedPredictionSampleCount,
+            submittedPredictionSampleCount
+                ?? normalizedPredictionSampleCount
+        )
+        if canUsePartitionedBatch {
+            for sample in samples[predictionStart..<admittedPredictionEnd] {
+                guard sample.phase == .moved,
+                      sample.kind == .predicted
+                else {
+                    canUsePartitionedBatch = false
+                    break
+                }
+            }
+        }
+        guard canUsePartitionedBatch else {
+            for sample in samples {
+                handleStrokeSample(
+                    sample,
+                    inputGeneration: inputGeneration
+                )
+            }
+            return
+        }
+        let admittedSamples = samples[..<admittedPredictionEnd]
+        for sample in admittedSamples {
             onNormalizedInput?(sample)
             trackPendingEstimatedProperties(in: sample)
         }
-        let effects = samples.flatMap {
+        let effects = admittedSamples.flatMap {
             transaction.apply(.pointerMoved($0))
         }
-        guard effects.count == samples.count,
+        guard effects.count == admittedSamples.count,
               effects.allSatisfy({ effect in
                   if case let .appendStroke(token, _) = effect {
                       return token == drawing.token
@@ -338,18 +508,39 @@ final class EditorSessionController {
         do {
             try renderer.appendStrokeBatch(
                 token: rendererToken(drawing.token),
-                samples: samples
+                authoritativeSamples: samples[..<predictionStart],
+                predictedSamples:
+                    samples[predictionStart..<admittedPredictionEnd],
+                submittedPredictionSampleCount:
+                    effectiveSubmittedPredictionSampleCount
             )
         } catch let error as MetalRendererError {
-            handleSynchronousFailure(
-                of: effects[0],
-                error: error
-            )
+            if let firstEffect = effects.first {
+                handleSynchronousFailure(
+                    of: firstEffect,
+                    error: error
+                )
+            } else {
+                report(error)
+                cancelCollectingStrokeAfterSynchronousFailure(
+                    token: drawing.token
+                )
+            }
         } catch {
-            handleSynchronousFailure(
-                of: effects[0],
-                error: .commandFailed(error.localizedDescription)
+            let rendererError = MetalRendererError.commandFailed(
+                error.localizedDescription
             )
+            if let firstEffect = effects.first {
+                handleSynchronousFailure(
+                    of: firstEffect,
+                    error: rendererError
+                )
+            } else {
+                report(rendererError)
+                cancelCollectingStrokeAfterSynchronousFailure(
+                    token: drawing.token
+                )
+            }
         }
         refreshDerivedModelState()
         resumeDeferredPointerIfIdle()
@@ -882,6 +1073,11 @@ final class EditorSessionController {
             model.confirmGridVisibility(visible)
             renderer.setInteractiveGridVisibility(visible)
         case let .applyTiling(token, tiling):
+            guard renderer.isIdle else {
+                precondition(pendingRendererIdleMetadataEffect == nil)
+                pendingRendererIdleMetadataEffect = effect
+                return
+            }
             let before = model.periodicConfiguration
             if before.presetID == tiling {
                 apply(.operationCompleted(token, succeeded: true))
@@ -901,6 +1097,11 @@ final class EditorSessionController {
             }
             apply(.operationCompleted(token, succeeded: true))
         case let .applyPeriodicConfiguration(token, configuration):
+            guard renderer.isIdle else {
+                precondition(pendingRendererIdleMetadataEffect == nil)
+                pendingRendererIdleMetadataEffect = effect
+                return
+            }
             let before = model.periodicConfiguration
             if before == configuration {
                 apply(.operationCompleted(token, succeeded: true))
@@ -1077,9 +1278,7 @@ final class EditorSessionController {
              let .appendStroke(token, _),
              let .finishStrokeTransient(token, _),
              let .applyEstimatedUpdate(token, _):
-            ignorePendingEstimatedUpdates()
-            try? renderer.cancelStroke(token: rendererToken(token))
-            _ = transaction.apply(.pointerCancelled)
+            cancelCollectingStrokeAfterSynchronousFailure(token: token)
         case let .requestStrokeCommit(token, _),
              let .commitFinishedStroke(token),
              let .performCommand(token, _),
@@ -1108,6 +1307,14 @@ final class EditorSessionController {
         }
         refreshDerivedModelState()
         resumeDeferredPointerIfIdle()
+    }
+
+    private func cancelCollectingStrokeAfterSynchronousFailure(
+        token: EditorTransactionToken
+    ) {
+        ignorePendingEstimatedUpdates()
+        try? renderer.cancelStroke(token: rendererToken(token))
+        _ = transaction.apply(.pointerCancelled)
     }
 
     private func failUnexecutedEffects(
@@ -1308,12 +1515,21 @@ final class EditorSessionController {
 
     private func resumeDeferredPointerIfIdle() {
         guard transaction.state == .idle,
+              renderer.isIdle,
               hasDeferredPointerStream
         else { return }
-        let samples = deferredPointerSamples
+        deferredPointerResumeCountForTesting &+= 1
         let overflowed = deferredPointerOverflowed
-        discardDeferredPointerStream()
-        guard let began = samples.first(where: {
+        swap(
+            &deferredPointerSamples,
+            &deferredPointerDrainScratch
+        )
+        deferredPointerOverflowed = false
+        deferredEstimationIndices.removeAll(keepingCapacity: true)
+        defer {
+            deferredPointerDrainScratch.removeAll(keepingCapacity: true)
+        }
+        guard let began = deferredPointerDrainScratch.first(where: {
             $0.sample.phase == .began
         }) else {
             return
@@ -1333,12 +1549,46 @@ final class EditorSessionController {
             )
             return
         }
-        for routedSample in samples {
-            handleStrokeSample(
-                routedSample.sample,
-                inputGeneration: routedSample.inputGeneration
+        var index = deferredPointerDrainScratch.startIndex
+        while index < deferredPointerDrainScratch.endIndex {
+            let routedSample = deferredPointerDrainScratch[index]
+            guard let batchID = routedSample.batchID else {
+                handleStrokeSample(
+                    routedSample.sample,
+                    inputGeneration: routedSample.inputGeneration
+                )
+                index += 1
+                continue
+            }
+            deferredPointerBatchScratch.removeAll(keepingCapacity: true)
+            let inputGeneration = routedSample.inputGeneration
+            let submittedPredictionSampleCount =
+                routedSample.submittedPredictionSampleCount
+            while index < deferredPointerDrainScratch.endIndex,
+                  deferredPointerDrainScratch[index].batchID == batchID
+            {
+                deferredPointerBatchScratch.append(
+                    deferredPointerDrainScratch[index].sample
+                )
+                index += 1
+            }
+            handleStrokeSamples(
+                deferredPointerBatchScratch,
+                inputGeneration: inputGeneration,
+                submittedPredictionSampleCount:
+                    submittedPredictionSampleCount
             )
         }
+    }
+
+    private func handleRendererIdleStateChange(_ isIdle: Bool) {
+        guard isIdle, renderer.isIdle else { return }
+        if let effect = pendingRendererIdleMetadataEffect {
+            pendingRendererIdleMetadataEffect = nil
+            execute([effect])
+            refreshDerivedModelState()
+        }
+        resumeDeferredPointerIfIdle()
     }
 
     private var hasDeferredPointerStream: Bool {
@@ -1372,9 +1622,87 @@ final class EditorSessionController {
         deferredPointerSamples.append(
             RoutedStrokeSample(
                 sample: sample,
-                inputGeneration: inputGeneration
+                inputGeneration: inputGeneration,
+                batchID: nil,
+                submittedPredictionSampleCount: nil
             )
         )
+        recordDeferredEstimationState(for: sample)
+    }
+
+    private func enqueueDeferredPointerBatch<Samples>(
+        _ samples: Samples,
+        inputGeneration: UInt64?,
+        submittedPredictionSampleCount: Int?
+    ) where
+        Samples: RandomAccessCollection,
+        Samples.Element == StrokeSample
+    {
+        guard !samples.isEmpty, !deferredPointerOverflowed else { return }
+        guard shouldEnqueueDeferredPointerBatch(
+            samples,
+            inputGeneration: inputGeneration
+        ) else {
+            return
+        }
+        guard samples.count
+                <= Self.deferredPointerSampleCapacity
+                    - deferredPointerSamples.count
+        else {
+            deferredPointerOverflowed = true
+            deferredEstimationIndices.removeAll(keepingCapacity: true)
+            return
+        }
+        let batchID = nextDeferredPointerBatchID
+        nextDeferredPointerBatchID &+= 1
+        if nextDeferredPointerBatchID == 0 {
+            nextDeferredPointerBatchID = 1
+        }
+        for (offset, sample) in samples.enumerated() {
+            deferredPointerSamples.append(
+                RoutedStrokeSample(
+                    sample: sample,
+                    inputGeneration: inputGeneration,
+                    batchID: batchID,
+                    submittedPredictionSampleCount: offset == 0
+                        ? submittedPredictionSampleCount : nil
+                )
+            )
+            recordDeferredEstimationState(for: sample)
+        }
+    }
+
+    private func shouldEnqueueDeferredPointerBatch<Samples>(
+        _ samples: Samples,
+        inputGeneration: UInt64?
+    ) -> Bool where
+        Samples: RandomAccessCollection,
+        Samples.Element == StrokeSample
+    {
+        guard let firstSample = samples.first else { return false }
+        if let firstDeferred = deferredPointerSamples.first {
+            guard inputGeneration == firstDeferred.inputGeneration else {
+                return false
+            }
+        } else {
+            guard firstSample.phase == .began,
+                  firstSample.kind != .estimatedUpdate
+            else {
+                return false
+            }
+        }
+        for sample in samples where sample.kind == .estimatedUpdate {
+            guard inputGeneration != nil,
+                  let index = sample.estimationUpdateIndex,
+                  deferredEstimationIndices.contains(index)
+            else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func recordDeferredEstimationState(for sample: StrokeSample) {
         if let index = sample.estimationUpdateIndex {
             if sample.estimatedPropertiesExpectingUpdates.isEmpty {
                 deferredEstimationIndices.remove(index)

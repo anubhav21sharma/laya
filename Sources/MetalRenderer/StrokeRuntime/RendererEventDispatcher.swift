@@ -178,6 +178,21 @@ final class RendererEventDispatcher {
         operationDepth > 0
     }
 
+    #if DEBUG
+    /// Delivers one additional bounded turn while preserving the already
+    /// scheduled production continuation. Tests use this causal boundary to
+    /// change observers between turns without scheduler-count polling.
+    func drainOnePendingTurnForHarness() {
+        guard operationDepth == 0,
+              !isDraining,
+              pendingCallbackCount > 0
+        else {
+            return
+        }
+        drainTurn()
+    }
+    #endif
+
     func beginOperation() {
         if operationDepth == operationFrameStorage.count {
             operationFrameStorage.append(OperationFrame())

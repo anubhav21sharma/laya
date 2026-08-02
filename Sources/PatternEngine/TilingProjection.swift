@@ -73,6 +73,10 @@ public struct TilingProjectionResult: Equatable, Sendable {
     }
 }
 
+public enum TilingProjectionError: Error, Equatable, Sendable {
+    case fragmentCapacityExceeded(maximum: Int)
+}
+
 /// Reusable projection output owned by a renderer. Its backing storage is
 /// acquired before interactive input and retained across projection calls.
 public final class TilingProjectionScratch: @unchecked Sendable {
@@ -82,6 +86,20 @@ public final class TilingProjectionScratch: @unchecked Sendable {
     var cells: [CellIndex] = []
     var polygonA: [SIMD2<Float>] = []
     var polygonB: [SIMD2<Float>] = []
+
+    public var storageDiagnostics: TilingProjectionStorageDiagnostics {
+        TilingProjectionStorageDiagnostics(
+            imageCapacity: images.capacity,
+            candidateCapacity: fragments.capacity,
+            maximumClippedPolygonCapacity:
+                max(polygonA.capacity, polygonB.capacity),
+            fragmentCapacity: fragments.capacity
+        )
+    }
+
+    public var imageCount: Int { images.count }
+    public var cellCount: Int { cells.count }
+    public var cellStorageCapacity: Int { cells.capacity }
 
     public init(
         maximumFragmentCount: Int = 4_096
@@ -186,10 +204,53 @@ public enum TilingProjection {
         using strategy: TilingStrategy,
         into scratch: TilingProjectionScratch
     ) -> TilingProjectionStorageDiagnostics {
+        try! projectCore(
+            footprint,
+            using: strategy,
+            into: scratch,
+            maximumFragmentCount: nil
+        )
+    }
+
+    /// Projects through fixed reusable storage and aborts before either the
+    /// candidate-image or accepted-fragment arrays can exceed `maximum`.
+    @discardableResult
+    public static func project(
+        _ footprint: StampFootprint,
+        using strategy: TilingStrategy,
+        into scratch: TilingProjectionScratch,
+        maximumFragmentCount maximum: Int
+    ) throws -> TilingProjectionStorageDiagnostics {
+        guard maximum > 0 else {
+            throw TilingProjectionError.fragmentCapacityExceeded(
+                maximum: maximum
+            )
+        }
+        return try projectCore(
+            footprint,
+            using: strategy,
+            into: scratch,
+            maximumFragmentCount: maximum
+        )
+    }
+
+    private static func projectCore(
+        _ footprint: StampFootprint,
+        using strategy: TilingStrategy,
+        into scratch: TilingProjectionScratch,
+        maximumFragmentCount: Int?
+    ) throws -> TilingProjectionStorageDiagnostics {
         precondition(
             footprint.coverageSymmetry == .oriented,
             "Reusable projection scratch is the oriented renderer path."
         )
+        if let maximumFragmentCount {
+            try validateBoundedProjectionInput(
+                footprint,
+                using: strategy,
+                maximumFragmentCount: maximumFragmentCount
+            )
+        }
         validateBrushToWorld(footprint.brushToWorld)
         let capacitiesBefore = (
             scratch.images.capacity,
@@ -210,12 +271,24 @@ public enum TilingProjection {
         )
         let worldBounds = AxisAlignedRect(
             minimum: SIMD2(
-                min(world0.x, world1.x, world2.x, world3.x),
-                min(world0.y, world1.y, world2.y, world3.y)
+                min(
+                    min(world0.x, world1.x),
+                    min(world2.x, world3.x)
+                ),
+                min(
+                    min(world0.y, world1.y),
+                    min(world2.y, world3.y)
+                )
             ),
             maximum: SIMD2(
-                max(world0.x, world1.x, world2.x, world3.x),
-                max(world0.y, world1.y, world2.y, world3.y)
+                max(
+                    max(world0.x, world1.x),
+                    max(world2.x, world3.x)
+                ),
+                max(
+                    max(world0.y, world1.y),
+                    max(world2.y, world3.y)
+                )
             )
         )
         scratch.fragments.removeAll(keepingCapacity: true)
@@ -236,10 +309,18 @@ public enum TilingProjection {
             )
         }
 
-        strategy.populateImages(
-            intersecting: worldBounds,
-            scratch: scratch
-        )
+        if let maximumFragmentCount {
+            try strategy.populateImages(
+                intersecting: worldBounds,
+                scratch: scratch,
+                maximumImageCount: maximumFragmentCount
+            )
+        } else {
+            strategy.populateImages(
+                intersecting: worldBounds,
+                scratch: scratch
+            )
+        }
         for image in scratch.images
         where image.worldBounds.intersects(worldBounds) {
             let localClip = ConvexClip(
@@ -282,6 +363,13 @@ public enum TilingProjection {
                 operation: image.operation
             )
             if !scratch.fragments.contains(fragment) {
+                if let maximumFragmentCount,
+                   scratch.fragments.count >= maximumFragmentCount
+                {
+                    throw TilingProjectionError.fragmentCapacityExceeded(
+                        maximum: maximumFragmentCount
+                    )
+                }
                 scratch.fragments.append(fragment)
             }
         }
@@ -554,6 +642,243 @@ private func validateBrushToWorld(_ affine: Affine2D) {
         determinant.isFinite && abs(determinant) >= Float.ulpOfOne,
         "TilingProjection brush-to-world determinant must be finite and nonsingular"
     )
+}
+
+/// The bounded renderer path must reject work before Float arithmetic can
+/// overflow into the projection kernels' checked cell-index conversions.
+/// Compatibility projection intentionally retains its historical preconditions.
+private func validateBoundedProjectionInput(
+    _ footprint: StampFootprint,
+    using strategy: TilingStrategy,
+    maximumFragmentCount maximum: Int
+) throws {
+    let affine = footprint.brushToWorld
+    let xRowLength = hypot(
+        Double(affine.xAxis.x),
+        Double(affine.yAxis.x)
+    )
+    let yRowLength = hypot(
+        Double(affine.xAxis.y),
+        Double(affine.yAxis.y)
+    )
+    guard xRowLength.isFinite, xRowLength > 0,
+          yRowLength.isFinite, yRowLength > 0
+    else {
+        try throwProjectionCapacityExceeded(maximum: maximum)
+    }
+    let normalizedDeterminant =
+        Double(affine.xAxis.x) / xRowLength
+            * (Double(affine.yAxis.y) / yRowLength)
+        - Double(affine.yAxis.x) / xRowLength
+            * (Double(affine.xAxis.y) / yRowLength)
+    guard normalizedDeterminant.isFinite,
+          abs(normalizedDeterminant) >= Double(Float.ulpOfOne)
+    else {
+        try throwProjectionCapacityExceeded(maximum: maximum)
+    }
+
+    // This headroom covers Float row-length/area arithmetic and the later
+    // PixelRect floor/ceil-to-Int conversion used by renderer deposition.
+    let maximumSafeLinearComponent = min(
+        sqrt(Double(Float.greatestFiniteMagnitude) / 8),
+        Double(Int.max) / 64
+    )
+    guard abs(Double(affine.xAxis.x)) <= maximumSafeLinearComponent,
+          abs(Double(affine.xAxis.y)) <= maximumSafeLinearComponent,
+          abs(Double(affine.yAxis.x)) <= maximumSafeLinearComponent,
+          abs(Double(affine.yAxis.y)) <= maximumSafeLinearComponent
+    else {
+        try throwProjectionCapacityExceeded(maximum: maximum)
+    }
+
+    let localMinimum = footprint.localBounds.minimum
+    let localMaximum = footprint.localBounds.maximum
+    let maximumFloat = Double(Float.greatestFiniteMagnitude)
+    guard let world0 = boundedApplyingInDouble(
+        affine,
+        to: ProjectionDoublePoint(localMinimum),
+        maximumMagnitude: maximumFloat
+    ), let world1 = boundedApplyingInDouble(
+        affine,
+        to: ProjectionDoublePoint(
+            x: Double(localMaximum.x),
+            y: Double(localMinimum.y)
+        ),
+        maximumMagnitude: maximumFloat
+    ), let world2 = boundedApplyingInDouble(
+        affine,
+        to: ProjectionDoublePoint(localMaximum),
+        maximumMagnitude: maximumFloat
+    ), let world3 = boundedApplyingInDouble(
+        affine,
+        to: ProjectionDoublePoint(
+            x: Double(localMinimum.x),
+            y: Double(localMaximum.y)
+        ),
+        maximumMagnitude: maximumFloat
+    ) else {
+        try throwProjectionCapacityExceeded(maximum: maximum)
+    }
+
+    let minimumX = min(
+        min(world0.x, world1.x),
+        min(world2.x, world3.x)
+    )
+    let maximumX = max(
+        max(world0.x, world1.x),
+        max(world2.x, world3.x)
+    )
+    let minimumY = min(
+        min(world0.y, world1.y),
+        min(world2.y, world3.y)
+    )
+    let maximumY = max(
+        max(world0.y, world1.y),
+        max(world2.y, world3.y)
+    )
+    let width = maximumX - minimumX
+    let height = maximumY - minimumY
+    let maximumTileExtent = Double(
+        max(strategy.tileSize.width, strategy.tileSize.height)
+    )
+    let maximumWorldWork = Double(maximum) * maximumTileExtent
+    guard width.isFinite, width <= maximumWorldWork,
+          height.isFinite, height <= maximumWorldWork
+    else {
+        try throwProjectionCapacityExceeded(maximum: maximum)
+    }
+
+    guard let periodic = strategy.compiledSymmetry.domain.periodic else {
+        return
+    }
+    let lattice0 = applyingInDouble(periodic.worldToLattice, to: world0)
+    let lattice1 = applyingInDouble(periodic.worldToLattice, to: world1)
+    let lattice2 = applyingInDouble(periodic.worldToLattice, to: world2)
+    let lattice3 = applyingInDouble(periodic.worldToLattice, to: world3)
+    // Float cell origins and their successors must remain exact. Leaving two
+    // bits of headroom also keeps phased half-open boundary checks stable.
+    let maximumExactCellMagnitude = Double(1 << 22)
+    guard projectionPoint(
+        lattice0,
+        isWithin: maximumExactCellMagnitude
+    ), projectionPoint(
+        lattice1,
+        isWithin: maximumExactCellMagnitude
+    ), projectionPoint(
+        lattice2,
+        isWithin: maximumExactCellMagnitude
+    ), projectionPoint(
+        lattice3,
+        isWithin: maximumExactCellMagnitude
+    ) else {
+        try throwProjectionCapacityExceeded(maximum: maximum)
+    }
+    let latticeMinimumX = min(
+        min(lattice0.x, lattice1.x),
+        min(lattice2.x, lattice3.x)
+    )
+    let latticeMaximumX = max(
+        max(lattice0.x, lattice1.x),
+        max(lattice2.x, lattice3.x)
+    )
+    let latticeMinimumY = min(
+        min(lattice0.y, lattice1.y),
+        min(lattice2.y, lattice3.y)
+    )
+    let latticeMaximumY = max(
+        max(lattice0.y, lattice1.y),
+        max(lattice2.y, lattice3.y)
+    )
+    guard boundedCellSpan(
+        minimum: latticeMinimumX,
+        maximum: latticeMaximumX,
+        limit: maximum
+    ), boundedCellSpan(
+        minimum: latticeMinimumY,
+        maximum: latticeMaximumY,
+        limit: maximum
+    ) else {
+        try throwProjectionCapacityExceeded(maximum: maximum)
+    }
+}
+
+private func throwProjectionCapacityExceeded(maximum: Int) throws -> Never {
+    throw TilingProjectionError.fragmentCapacityExceeded(maximum: maximum)
+}
+
+private struct ProjectionDoublePoint {
+    let x: Double
+    let y: Double
+
+    init(x: Double, y: Double) {
+        self.x = x
+        self.y = y
+    }
+
+    init(_ point: SIMD2<Float>) {
+        self.init(x: Double(point.x), y: Double(point.y))
+    }
+}
+
+private func applyingInDouble(
+    _ affine: Affine2D,
+    to point: ProjectionDoublePoint
+) -> ProjectionDoublePoint {
+    ProjectionDoublePoint(
+        x: Double(affine.xAxis.x) * point.x
+            + Double(affine.yAxis.x) * point.y
+            + Double(affine.translation.x),
+        y: Double(affine.xAxis.y) * point.x
+            + Double(affine.yAxis.y) * point.y
+            + Double(affine.translation.y)
+    )
+}
+
+private func boundedApplyingInDouble(
+    _ affine: Affine2D,
+    to point: ProjectionDoublePoint,
+    maximumMagnitude: Double
+) -> ProjectionDoublePoint? {
+    let xMagnitude =
+        abs(Double(affine.xAxis.x) * point.x)
+        + abs(Double(affine.yAxis.x) * point.y)
+        + abs(Double(affine.translation.x))
+    let yMagnitude =
+        abs(Double(affine.xAxis.y) * point.x)
+        + abs(Double(affine.yAxis.y) * point.y)
+        + abs(Double(affine.translation.y))
+    guard xMagnitude.isFinite, xMagnitude <= maximumMagnitude,
+          yMagnitude.isFinite, yMagnitude <= maximumMagnitude
+    else {
+        return nil
+    }
+    let result = applyingInDouble(affine, to: point)
+    guard result.x.isFinite, abs(result.x) <= maximumMagnitude,
+          result.y.isFinite, abs(result.y) <= maximumMagnitude
+    else {
+        return nil
+    }
+    return result
+}
+
+private func projectionPoint(
+    _ point: ProjectionDoublePoint,
+    isWithin magnitude: Double
+) -> Bool {
+    point.x.isFinite && abs(point.x) <= magnitude
+        && point.y.isFinite && abs(point.y) <= magnitude
+}
+
+private func boundedCellSpan(
+    minimum: Double,
+    maximum: Double,
+    limit: Int
+) -> Bool {
+    guard maximum > minimum else { return true }
+    let first = floor(minimum)
+    let last = floor(maximum.nextDown)
+    let count = last - first + 1
+    return count.isFinite && count <= Double(limit)
 }
 
 private struct FragmentCandidate {

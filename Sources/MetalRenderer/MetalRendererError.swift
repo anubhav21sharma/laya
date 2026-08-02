@@ -16,6 +16,11 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
     case strokeSampleCapacityExceeded(Int)
     case generatedDabCapacityExceeded(Int)
     case projectedInstanceCapacityExceeded(Int)
+    case brushDiameterOutOfRange(
+        actual: Float,
+        minimum: Float,
+        maximum: Float
+    )
     case invalidTileDimensions(width: Int, height: Int)
     case invalidPeriodicConfiguration(String)
     case invalidSymmetryConfiguration(String)
@@ -80,6 +85,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
             "Generated-dab capacity \(capacity) was exceeded."
         case let .projectedInstanceCapacityExceeded(capacity):
             "Projected-instance capacity \(capacity) was exceeded."
+        case let .brushDiameterOutOfRange(actual, minimum, maximum):
+            "Brush diameter \(actual) is outside \(minimum)...\(maximum)."
         case let .invalidTileDimensions(width, height):
             "Tile dimensions \(width)x\(height) are outside 64...4096."
         case let .invalidPeriodicConfiguration(message):

@@ -4,6 +4,7 @@ import PatternEngine
 public enum StrokeRenderCoordinatorError: Error, Equatable, Sendable {
     case invalidLifecycle
     case invalidAuthoritativeSample
+    case settledReplayCheckpointMismatch
     case ordinalDiscontinuity(expected: UInt64, actual: UInt64)
     case transactionAlreadyPrepared
     case preparedEmissionOriginMismatch
@@ -76,6 +77,7 @@ public final class StrokeRenderCoordinator {
     private let coordinatorIdentity = UUID()
     private var transactionState = TransactionState.idle
     private var nextTransactionToken: UInt64 = 1
+    private var settledTransferWorkScratch: [AuthoritativeStrokeWork] = []
 
     private enum TransactionState: Equatable, Sendable {
         case idle
@@ -105,6 +107,7 @@ public final class StrokeRenderCoordinator {
         authoritativeQueue = try AuthoritativeStrokeQueue(
             capacity: authoritativeCapacity
         )
+        settledTransferWorkScratch.reserveCapacity(authoritativeCapacity)
     }
 
     public func prepareBegin(
@@ -178,6 +181,173 @@ public final class StrokeRenderCoordinator {
             firstOperation: actualSamples.count == 1 ? .finish : .append,
             hasBegun: true,
             hasFinished: true
+        )
+    }
+
+    func prepareSettledReplayTransfer(
+        _ chunks: [TransientStrokeChunk]
+    ) throws -> PreparedStrokeCoordinatorEmission {
+        try requireIdleTransaction()
+        guard !chunks.isEmpty else {
+            throw StrokeRenderCoordinatorError.invalidLifecycle
+        }
+
+        var candidateGenerator = generator
+        var candidateDeriver = inputDeriver
+        settledTransferWorkScratch.removeAll(keepingCapacity: true)
+        var candidateHasBegun = hasBegun
+        var candidateHasFinished = hasFinished
+        var expectedOrdinal = authoritativeQueue.nextExpectedOrdinal
+
+        for (index, chunk) in chunks.enumerated() {
+            switch chunk.sample.phase {
+            case .began:
+                guard index == 0, !candidateHasBegun,
+                      !candidateHasFinished
+                else {
+                    throw StrokeRenderCoordinatorError.invalidLifecycle
+                }
+                candidateHasBegun = true
+            case .moved:
+                guard candidateHasBegun, !candidateHasFinished else {
+                    throw StrokeRenderCoordinatorError.invalidLifecycle
+                }
+            case .ended:
+                guard candidateHasBegun, !candidateHasFinished,
+                      index == chunks.index(before: chunks.endIndex)
+                else {
+                    throw StrokeRenderCoordinatorError.invalidLifecycle
+                }
+                candidateHasFinished = true
+            case .cancelled:
+                throw StrokeRenderCoordinatorError.invalidLifecycle
+            }
+            guard
+                chunk.sample.kind == .actual
+                    || chunk.sample.kind == .coalesced
+            else {
+                throw StrokeRenderCoordinatorError.invalidAuthoritativeSample
+            }
+            guard
+                let generatorBefore =
+                    chunk.generatorSnapshotBeforeSample,
+                let generatorAfter =
+                    chunk.generatorSnapshotAfterSample,
+                let inputDeriverBefore =
+                    chunk.inputDeriverSnapshotBeforeSample
+            else {
+                throw StrokeRenderCoordinatorError.invalidAuthoritativeSample
+            }
+            guard generatorBefore == candidateGenerator,
+                  inputDeriverBefore == candidateDeriver
+            else {
+                throw StrokeRenderCoordinatorError
+                    .settledReplayCheckpointMismatch
+            }
+            for transientDab in chunk.dabs {
+                let dab = transientDab.attributes
+                guard !dab.isPredicted else {
+                    throw StrokeRenderCoordinatorError
+                        .invalidAuthoritativeSample
+                }
+                guard dab.ordinal == expectedOrdinal else {
+                    throw StrokeRenderCoordinatorError.ordinalDiscontinuity(
+                        expected: expectedOrdinal,
+                        actual: dab.ordinal
+                    )
+                }
+                let (nextOrdinal, overflow) = expectedOrdinal
+                    .addingReportingOverflow(1)
+                guard !overflow else {
+                    throw AuthoritativeStrokeQueueError.ordinalOverflow
+                }
+                settledTransferWorkScratch.append(
+                    AuthoritativeStrokeWork(dab: dab)
+                )
+                expectedOrdinal = nextOrdinal
+            }
+            var replayedGenerator = candidateGenerator
+            var replayedDabIndex = 0
+            switch chunk.sample.phase {
+            case .began:
+                try replayedGenerator.begin(chunk.sample) { dab in
+                    guard replayedDabIndex < chunk.dabs.count,
+                          chunk.dabs[replayedDabIndex].attributes == dab
+                    else {
+                        throw StrokeRenderCoordinatorError
+                            .settledReplayCheckpointMismatch
+                    }
+                    replayedDabIndex += 1
+                }
+            case .moved:
+                try replayedGenerator.append(chunk.sample) { dab in
+                    guard replayedDabIndex < chunk.dabs.count,
+                          chunk.dabs[replayedDabIndex].attributes == dab
+                    else {
+                        throw StrokeRenderCoordinatorError
+                            .settledReplayCheckpointMismatch
+                    }
+                    replayedDabIndex += 1
+                }
+            case .ended:
+                try replayedGenerator.finish(chunk.sample) { dab in
+                    guard replayedDabIndex < chunk.dabs.count,
+                          chunk.dabs[replayedDabIndex].attributes == dab
+                    else {
+                        throw StrokeRenderCoordinatorError
+                            .settledReplayCheckpointMismatch
+                    }
+                    replayedDabIndex += 1
+                }
+            case .cancelled:
+                throw StrokeRenderCoordinatorError.invalidLifecycle
+            }
+            guard replayedDabIndex == chunk.dabs.count,
+                  replayedGenerator == generatorAfter
+            else {
+                throw StrokeRenderCoordinatorError
+                    .settledReplayCheckpointMismatch
+            }
+            let expectedGeneratorDabCount = chunk.sample.phase == .ended
+                ? 0
+                : expectedOrdinal
+            guard generatorAfter.emittedDabCount
+                    == expectedGeneratorDabCount
+            else {
+                throw StrokeRenderCoordinatorError
+                    .settledReplayCheckpointMismatch
+            }
+            candidateGenerator = replayedGenerator
+            let rederivedSample = candidateDeriver.rederive(chunk.sample)
+            guard rederivedSample == chunk.sample else {
+                throw StrokeRenderCoordinatorError
+                    .settledReplayCheckpointMismatch
+            }
+        }
+
+        try authoritativeQueue.preflightAppend(settledTransferWorkScratch)
+        var candidateMetadata = commitMetadata
+        candidateMetadata.inputSampleCount += UInt64(chunks.count)
+        candidateMetadata.emittedDabCount += UInt64(
+            settledTransferWorkScratch.count
+        )
+        candidateMetadata.lastEmittedOrdinal =
+            settledTransferWorkScratch.last?.ordinal
+                ?? candidateMetadata.lastEmittedOrdinal
+        return try registerPreparedTransaction(
+            emission: StrokeCoordinatorEmission(
+                work: settledTransferWorkScratch,
+                generatedSamples: []
+            ),
+            generator: candidateGenerator,
+            inputDeriver: candidateDeriver,
+            commitMetadata: candidateMetadata,
+            maximumReturnedDabCount: max(
+                maximumReturnedDabCount,
+                settledTransferWorkScratch.count
+            ),
+            hasBegun: candidateHasBegun,
+            hasFinished: candidateHasFinished
         )
     }
 

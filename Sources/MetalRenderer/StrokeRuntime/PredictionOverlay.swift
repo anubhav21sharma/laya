@@ -60,8 +60,12 @@ public final class PredictionOverlay {
 
     public let pixelSize: PixelSize
     public let surface: ReplayLiveTile
+    private(set) var snapshotMaterializationCountForTesting: UInt64 = 0
 
     public var snapshot: PredictionOverlaySnapshot {
+        snapshotMaterializationCountForTesting = Self.saturatingIncrement(
+            snapshotMaterializationCountForTesting
+        )
         let usePlanned = hasPlannedReplacement
         let admission = usePlanned ? plannedAdmission : visibleAdmission
         return PredictionOverlaySnapshot(
@@ -285,7 +289,10 @@ public final class PredictionOverlay {
         hasPlannedReplacement = false
     }
 
-    private var currentProvenance: PredictionProvenanceBoundary? {
+    /// Hot-path validation reads only provenance. Building the public snapshot
+    /// also canonicalizes a value copy of the dirty footprint, which belongs
+    /// to diagnostics and must not run for every authoritative input event.
+    var currentProvenance: PredictionProvenanceBoundary? {
         hasPlannedReplacement ? plannedProvenance : visibleProvenance
     }
 

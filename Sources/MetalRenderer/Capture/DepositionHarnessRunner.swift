@@ -230,20 +230,7 @@ public final class DepositionHarnessRunner {
             maximumCPUGPUChannelDelta: cpuDelta,
             previewCommitMaximumChannelDelta:
                 capture.previewCommitMaximumChannelDelta,
-            telemetry: DepositionTelemetryEvidence(
-                authoritativeBacklog:
-                    capture.telemetry.authoritativePending,
-                predictedBacklog:
-                    capture.telemetry.predictedPending,
-                backlogHighWater:
-                    capture.telemetry.backlogHighWater,
-                encodedInstanceCount:
-                    capture.telemetry.strokeEncodedInstanceCount,
-                bufferHighWater:
-                    capture.telemetry.strokeBufferLeaseHighWater,
-                missedFrameCount:
-                    capture.telemetry.missedFrameCount
-            ),
+            telemetry: capture.telemetry,
             invariantResults: invariants
         )
         try DepositionEvidenceValidator.validate(evidence)
@@ -345,7 +332,7 @@ private extension DepositionHarnessRunner {
         let identityFrames: [ProfessionalLongStrokeIdentityFrame]
         let displayMetrics: [GPUFrameMetrics]
         let pipelinePreparationUnchanged: Bool
-        let telemetry: BrushLabRendererDepositionDiagnosticSnapshot
+        let telemetry: DepositionTelemetryEvidence
     }
 
     struct ProfessionalRasterPair {
@@ -550,7 +537,11 @@ private extension DepositionHarnessRunner {
             ?? Self.trace(width: scene.width, height: scene.height)
         let token = RendererOperationToken(rawValue: Self.seed)
         var completions: [RendererOperationCompletion] = []
+        var generatedLogicalDabs: [LogicalDab] = []
         renderer.onOperationCompleted = { completions.append($0) }
+        renderer.onLogicalDabsGenerated = {
+            generatedLogicalDabs.append($0)
+        }
         let before = Self.textureBytes(
             try renderer.copyCanonicalForHarness()
         )
@@ -661,37 +652,39 @@ private extension DepositionHarnessRunner {
             }
         }
         if !cancel {
+            try renderer.drainPreparedStrokeInputForHarness()
             try renderer.requestStrokeCommit(
                 token: token,
                 sample: samples.last!,
                 maximumRetainedBytes: 64 * 1_024 * 1_024
             )
         }
-        let scheduled = renderer.harnessScheduledAuthoritativeRecords
-            + renderer.harnessScheduledPredictedRecords
-        let logical = renderer.harnessCounters.totalDabsThisStroke
-        let projected = renderer.harnessCounters.totalInstancesThisStroke
         let firstFlush = try renderer.flushPendingLiveForHarness()
-        var flushMetrics = firstFlush.metrics
+        let flushMetrics = firstFlush.metrics
         if collectPerformanceEvidence {
             try recordPerformanceFlush(
                 firstFlush,
                 inputPhase: Self.phaseName(samples.last!.phase)
             )
         }
-        while !renderer.harnessScheduledAuthoritativeRecords.isEmpty
-                || !renderer.harnessScheduledPredictedRecords.isEmpty
-        {
-            let result = try renderer.flushPendingLiveForHarness()
-            flushMetrics = result.metrics
-            intermediateMetrics.append(result.metrics)
-            if collectPerformanceEvidence {
-                try recordPerformanceFlush(
-                    result,
-                    inputPhase: Self.phaseName(samples.last!.phase)
-                )
-            }
+        if !cancel {
+            try renderer.preparePendingCommitForHarness()
         }
+        let scheduled = try renderer.projectLogicalDabsForHarness(
+            generatedLogicalDabs
+        )
+        renderer.onLogicalDabsGenerated = nil
+        let actorSnapshot = renderer.harnessOffMainDepositionSnapshot
+        if !cancel, actorSnapshot == nil {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: scene.name,
+                invariant: "productionActorDepositionSnapshot"
+            )
+        }
+        let logical = actorSnapshot?.logicalDabCount
+            ?? renderer.harnessCounters.totalDabsThisStroke
+        let projected = actorSnapshot?.projectedInstanceCount
+            ?? renderer.harnessCounters.totalInstancesThisStroke
         let liveFrame = try renderer.renderOffscreenDisplayForHarness(
             width: scene.width,
             height: scene.height,
@@ -700,6 +693,7 @@ private extension DepositionHarnessRunner {
         let commitMetrics: GPUFrameMetrics
         if cancel {
             try renderer.cancelStroke(token: token)
+            try renderer.drainStrokeWorkspaceRetirementForHarness()
             commitMetrics = flushMetrics
         } else {
             commitMetrics = try renderer.finishCommitForHarness()
@@ -730,7 +724,18 @@ private extension DepositionHarnessRunner {
             Self.textureBytes(liveFrame.texture),
             Self.textureBytes(committedFrame.texture)
         )
-        let telemetry = renderer.brushLabDiagnosticSnapshot.deposition
+        let timingTelemetry = renderer.brushLabDiagnosticSnapshot.deposition
+        let telemetry = DepositionTelemetryEvidence(
+            authoritativeBacklog:
+                actorSnapshot?.authoritativeBacklog ?? 0,
+            predictedBacklog: 0,
+            backlogHighWater:
+                actorSnapshot?.authoritativeBacklogHighWater ?? 0,
+            encodedInstanceCount:
+                actorSnapshot?.encodedInstanceCount ?? 0,
+            bufferHighWater: actorSnapshot?.surfaceLeaseHighWater ?? 0,
+            missedFrameCount: timingTelemetry.missedFrameCount
+        )
         return StrokeCapture(
             live: liveFrame.texture,
             committed: committedFrame.texture,
@@ -1371,20 +1376,7 @@ private extension DepositionHarnessRunner {
                 beforeStroke: .init(countersBeforeStroke),
                 afterStroke: .init(countersAfterStroke)
             ),
-            telemetry: DepositionTelemetryEvidence(
-                authoritativeBacklog:
-                    capture.telemetry.authoritativePending,
-                predictedBacklog:
-                    capture.telemetry.predictedPending,
-                backlogHighWater:
-                    capture.telemetry.backlogHighWater,
-                encodedInstanceCount:
-                    capture.telemetry.strokeEncodedInstanceCount,
-                bufferHighWater:
-                    capture.telemetry.strokeBufferLeaseHighWater,
-                missedFrameCount:
-                    capture.telemetry.missedFrameCount
-            ),
+            telemetry: capture.telemetry,
             observations: observations,
             invariantResults: invariants
         )
@@ -2196,6 +2188,10 @@ private extension DepositionHarnessRunner {
         try context.renderer.activateDrawBrush(context.compiled)
         let token = RendererOperationToken(rawValue: Self.seed &+ 20)
         let samples = Self.trace(width: scene.width, height: scene.height)
+        var generatedLogicalDabs: [LogicalDab] = []
+        context.renderer.onLogicalDabsGenerated = {
+            generatedLogicalDabs.append($0)
+        }
         try context.renderer.beginStroke(
             token: token,
             sample: samples[0],
@@ -2215,7 +2211,11 @@ private extension DepositionHarnessRunner {
                 sample: sample
             )
         }
-        let records = context.renderer.harnessScheduledAuthoritativeRecords
+        try context.renderer.drainPreparedStrokeInputForHarness()
+        context.renderer.onLogicalDabsGenerated = nil
+        let records = try context.renderer.projectLogicalDabsForHarness(
+            generatedLogicalDabs
+        )
         let compiled = try SymmetryDescriptorCompiler.compile(
             finiteConfiguration: .radial(
                 RadialSymmetryConfiguration(
@@ -2259,6 +2259,7 @@ private extension DepositionHarnessRunner {
             height: scene.height
         )
         try context.renderer.cancelStroke(token: token)
+        try context.renderer.drainStrokeWorkspaceRetirementForHarness()
         let renderedReflectionIsCorrect =
             try await radialMirrorDisplayIsCorrect(
                 scene: scene,
@@ -2946,36 +2947,53 @@ private extension DepositionHarnessRunner {
         )
         let context = seeded.context
         let before = seeded.baseline
-        guard let leases = context.renderer.instancePool.acquire(
-            count: GridCanvasContract.inFlightBufferCount
-        ) else {
-            return false
-        }
+        let constrainedBudget = try DepositionFrameBudget(
+            cpuPreparationNanoseconds: 1_000_000,
+            maximumAuthoritativeInstances: 4,
+            maximumPredictedInstances: 4,
+            maximumPendingAuthoritativeInstances: 4,
+            maximumPendingPredictedInstances: 4,
+            inFlightUploadBufferCount:
+                GridCanvasContract.inFlightBufferCount
+        )
+        let previousBudget = context.renderer
+            .replaceDepositionFrameBudgetForHarness(constrainedBudget)
         let token = RendererOperationToken(rawValue: Self.seed &+ 31)
+        let trace = Self.trace(
+            width: scene.width,
+            height: scene.height
+        )
         try context.renderer.beginStroke(
             token: token,
-            sample: Self.trace(
-                width: scene.width,
-                height: scene.height
-            )[0],
+            sample: trace[0],
             style: Self.style(context.compiled)
         )
         do {
-            _ = try context.renderer.flushPendingLiveForHarness()
-            for lease in leases {
-                context.renderer.instancePool.abandon(lease)
+            // Settle the begin message before submitting the overflowing
+            // mutation so the failure is actor scheduler backpressure, not
+            // synchronous input-ring admission.
+            try context.renderer.drainPreparedStrokeInputForHarness()
+            try context.renderer.appendStroke(
+                token: token,
+                sample: trace[1]
+            )
+            try context.renderer.drainPreparedStrokeInputForHarness()
+            if context.renderer.hasActiveStroke {
+                try context.renderer.cancelStroke(token: token)
+                try context.renderer
+                    .drainStrokeWorkspaceRetirementForHarness()
             }
+            _ = context.renderer.replaceDepositionFrameBudgetForHarness(
+                previousBudget
+            )
             return false
-        } catch MetalRendererError.instanceBufferAllocationFailed {
-            let onlyExternallyHeldLeasesRemain =
-                context.renderer.harnessReservedInstanceBufferCount
-                == leases.count
-            for lease in leases {
-                context.renderer.instancePool.abandon(lease)
-            }
+        } catch MetalRendererError.projectedInstanceCapacityExceeded(4) {
+            try context.renderer.drainStrokeWorkspaceRetirementForHarness()
+            _ = context.renderer.replaceDepositionFrameBudgetForHarness(
+                previousBudget
+            )
             let after = try failureSnapshot(context.renderer)
             let failureWasAtomic = context.renderer.isIdle
-                && onlyExternallyHeldLeasesRemain
                 && before == after
             let recovered = try validRecovery(
                 context: context,
@@ -2983,6 +3001,15 @@ private extension DepositionHarnessRunner {
                 preservedState: before
             )
             return failureWasAtomic && recovered
+        } catch {
+            if context.renderer.hasActiveStroke {
+                try? context.renderer.cancelStroke(token: token)
+            }
+            try? context.renderer.drainStrokeWorkspaceRetirementForHarness()
+            _ = context.renderer.replaceDepositionFrameBudgetForHarness(
+                previousBudget
+            )
+            throw error
         }
     }
 
@@ -2997,6 +3024,9 @@ private extension DepositionHarnessRunner {
         let context = seeded.context
         let before = seeded.baseline
         let token = RendererOperationToken(rawValue: Self.seed &+ 32)
+        context.renderer.setForceOffMainStrokeCommandFailureForTesting(
+            true
+        )
         try context.renderer.beginStroke(
             token: token,
             sample: Self.trace(
@@ -3005,17 +3035,20 @@ private extension DepositionHarnessRunner {
             )[0],
             style: Self.style(context.compiled)
         )
-        guard let encoder =
-                context.renderer.removeDepositionEncoderForHarness()
-        else {
-            return false
-        }
         do {
-            _ = try context.renderer.flushPendingLiveForHarness()
-            context.renderer.restoreDepositionEncoderForHarness(encoder)
+            try context.renderer.drainPreparedStrokeInputForHarness()
+            if context.renderer.hasActiveStroke {
+                try context.renderer.cancelStroke(token: token)
+                try context.renderer
+                    .drainStrokeWorkspaceRetirementForHarness()
+            }
+            context.renderer
+                .setForceOffMainStrokeCommandFailureForTesting(false)
             return false
-        } catch MetalRendererError.depositionEncoderUnavailable {
-            context.renderer.restoreDepositionEncoderForHarness(encoder)
+        } catch MetalRendererError.commandFailed {
+            try context.renderer.drainStrokeWorkspaceRetirementForHarness()
+            context.renderer
+                .setForceOffMainStrokeCommandFailureForTesting(false)
             let after = try failureSnapshot(context.renderer)
             let failureWasAtomic = context.renderer.isIdle
                 && before == after
@@ -3025,6 +3058,16 @@ private extension DepositionHarnessRunner {
                 preservedState: before
             )
             return failureWasAtomic && recovered
+        } catch {
+            if context.renderer.hasActiveStroke {
+                try? context.renderer.cancelStroke(token: token)
+            }
+            try? context.renderer.drainStrokeWorkspaceRetirementForHarness()
+            if context.renderer.isIdle {
+                context.renderer
+                    .setForceOffMainStrokeCommandFailureForTesting(false)
+            }
+            throw error
         }
     }
 
@@ -3088,11 +3131,13 @@ private extension DepositionHarnessRunner {
             style: Self.style(context.compiled)
         )
         do {
+            try context.renderer.preparePendingLiveSurfaceForHarness()
             _ = try context.renderer.flushPendingLiveForHarness(
                 forceFailure: true
             )
             return false
         } catch MetalRendererError.commandFailed {
+            try context.renderer.drainStrokeWorkspaceRetirementForHarness()
             let oneFailure = completions.filter {
                 if case let .failure(value, _) = $0 {
                     return value == token

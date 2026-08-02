@@ -2,10 +2,26 @@ import Foundation
 import PatternEngine
 
 enum BrushInputBatchPolicy {
-    static func stableOrder<Element>(
+    struct PredictionBatch<Element> {
+        let submittedCount: Int
+        let admitted: ArraySlice<Element>
+    }
+
+    static func predictionBatch<Element>(
         _ elements: [Element],
-        timestamp: (Element) -> TimeInterval
-    ) -> [Element] {
+        maximumCount: Int
+    ) -> PredictionBatch<Element> {
+        precondition(maximumCount >= 0)
+        return PredictionBatch(
+            submittedCount: elements.count,
+            admitted: elements.prefix(maximumCount)
+        )
+    }
+
+    static func stableOrder<Elements: Collection>(
+        _ elements: Elements,
+        timestamp: (Elements.Element) -> TimeInterval
+    ) -> [Elements.Element] {
         elements.enumerated()
             .sorted { lhs, rhs in
                 let leftTimestamp = timestamp(lhs.element)
@@ -23,7 +39,10 @@ enum BrushInputBatchPolicy {
         count: Int,
         terminalPhase: StrokePhase
     ) -> StrokePhase {
-        index == count - 1 ? terminalPhase : .moved
+        if terminalPhase == .began {
+            return index == 0 ? .began : .moved
+        }
+        return index == count - 1 ? terminalPhase : .moved
     }
 
     static func discoversRoll(
@@ -371,7 +390,7 @@ struct BrushInputAdapter {
     mutating func orderedSamples(
         coalescedTouches: [UITouch],
         actualTouch: UITouch,
-        predictedTouches: [UITouch],
+        predictedTouches: ArraySlice<UITouch>,
         terminalPhase: StrokePhase,
         in view: UIView
     ) -> [StrokeSample] {

@@ -511,25 +511,28 @@ surface. The coordinator actor performs stabilization, spacing, dynamics,
 projection, dirty-tile derivation, queueing, and private-surface command
 encoding. Drawable acquisition stays late in `draw(in:)`.
 
-- [ ] Add an executor-probe test proving generator and projection work do not
+- [x] Add an executor-probe test proving generator and projection work do not
   execute on `MainActor` and strict concurrency reports no unsafe capture.
-- [ ] Add deterministic scheduler tests for 60/120 Hz budgets, queue high-water,
+- [x] Add deterministic scheduler tests for 60/120 Hz budgets, queue high-water,
   drain-before-commit, overload, cancellation, and prediction shedding.
-- [ ] Use preallocated ring buffers; an authoritative-capacity failure cancels
+- [x] Use preallocated ring buffers; an authoritative-capacity failure cancels
   the stroke with a typed error rather than dropping or mutating dabs.
-- [ ] Pause `MTKView` when no stroke, viewport animation, pending composite, or
+- [x] Pause `MTKView` when no stroke, viewport animation, pending composite, or
   HUD sample requires a frame; request a draw on invalidation.
-- [ ] Keep the debug A/B route until parity, history, cancel, tiling, and
+- [x] Keep the debug A/B route until parity, history, cancel, tiling, and
   symmetry tests pass, then delete the old runtime.
-- [ ] Run `swift test --filter 'StrokeFrameSchedulerTests|StrokeRenderCoordinatorTests|InteractiveFrameTimestampTests|DepositionRendererTests'`.
-- [ ] Run the 10-minute trace and assert bounded memory plus flat per-event CPU
+- [x] Run `swift test --filter 'StrokeFrameSchedulerTests|StrokeRenderCoordinatorTests|InteractiveFrameTimestampTests|DepositionRendererTests'`.
+- [x] Run the 10-minute trace and assert bounded memory plus flat per-event CPU
   work between the first and last deciles.
-- [ ] Commit as `perf(render): move stroke preparation off main`.
+- [x] Commit as `perf(render): move stroke preparation off main`.
 
 **Stage B exit:** Task 5A's renderer event dispatcher is independently clean;
 long strokes have O(new work) CPU behavior, zero actual replay, bounded memory
 and queues, isolated prediction, causal endpoints, and the existing
 preview/commit/cancel/history/symmetry matrix passes.
+
+Accepted on 2026-08-02. See
+[`2026-08-02-stage-b-acceptance.md`](../reports/2026-08-02-stage-b-acceptance.md).
 
 ---
 

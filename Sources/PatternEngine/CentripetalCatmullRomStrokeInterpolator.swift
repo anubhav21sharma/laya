@@ -229,6 +229,15 @@ public struct AttributedStrokePathSegment: Equatable, Sendable {
     }
 }
 
+public enum StrokePathInterpolationError: Error, Equatable, Sendable {
+    case subdivisionCapacityExceeded(maximum: Int)
+}
+
+public enum StrokePathInterpolationOutcome: Equatable, Sendable {
+    case completed
+    case truncated
+}
+
 /// Converts attributed control points into deterministic short path segments.
 /// Dab spacing is deliberately owned by the downstream stroke generator.
 public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
@@ -291,10 +300,123 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
                 + simd_distance(p1.position.simd, current.position.simd),
             minimumSubdivisionEstimate
         )
-        let subdivisions = max(
-            1,
-            Int(ceil(estimate / maximumSegmentLength))
+        let rawSubdivisionCount = ceil(estimate / maximumSegmentLength)
+        let subdivisions = rawSubdivisionCount.isFinite
+            && Double(rawSubdivisionCount) < Double(Int.max)
+            ? max(1, Int(rawSubdivisionCount))
+            : Int.max
+        try append(
+            current,
+            from: p0,
+            after: p1,
+            subdivisions: subdivisions,
+            emit: emit
         )
+    }
+
+    /// Executes a path step only when its interpolation work fits the caller's
+    /// explicit budget. The Double preflight avoids overflowing finite Float
+    /// coordinates before the bounded renderer path can reject the input.
+    public mutating func append(
+        _ current: InterpolatedStrokeSample,
+        maximumSubdivisionCount: Int,
+        emit: (AttributedStrokePathSegment) throws -> Void
+    ) throws {
+        precondition(maximumSubdivisionCount > 0)
+        guard let p1 = previous, let p0 = beforePrevious else {
+            _ = begin(at: current)
+            return
+        }
+        let requiredSubdivisionCount = Self.requiredSubdivisionCount(
+            p0: p0.position,
+            p1: p1.position,
+            p2: current.position,
+            maximumSegmentLength: maximumSegmentLength,
+            minimumSubdivisionEstimate: minimumSubdivisionEstimate
+        )
+        guard requiredSubdivisionCount
+            <= Double(maximumSubdivisionCount)
+        else {
+            throw StrokePathInterpolationError
+                .subdivisionCapacityExceeded(
+                    maximum: maximumSubdivisionCount
+                )
+        }
+        let estimate = max(
+            simd_distance(p0.position.simd, p1.position.simd)
+                + simd_distance(p1.position.simd, current.position.simd),
+            minimumSubdivisionEstimate
+        )
+        let rawSubdivisionCount = ceil(estimate / maximumSegmentLength)
+        guard rawSubdivisionCount.isFinite,
+              Double(rawSubdivisionCount) <= Double(maximumSubdivisionCount)
+        else {
+            throw StrokePathInterpolationError
+                .subdivisionCapacityExceeded(
+                    maximum: maximumSubdivisionCount
+                )
+        }
+        try append(
+            current,
+            from: p0,
+            after: p1,
+            subdivisions: max(1, Int(rawSubdivisionCount)),
+            emit: emit
+        )
+    }
+
+    /// Emits only the true leading path subdivisions that fit the caller's
+    /// budget. A truncated prefix never advances interpolation state, allowing
+    /// prediction callers to retain the visible prefix without committing a
+    /// generator snapshot for an incomplete input sample.
+    @discardableResult
+    public mutating func appendBoundedPrefix(
+        _ current: InterpolatedStrokeSample,
+        maximumSubdivisionCount: Int,
+        emit: (AttributedStrokePathSegment) throws -> Void
+    ) throws -> StrokePathInterpolationOutcome {
+        precondition(maximumSubdivisionCount > 0)
+        guard let p1 = previous, let p0 = beforePrevious else {
+            _ = begin(at: current)
+            return .completed
+        }
+        let requiredSubdivisionCount = Self.requiredSubdivisionCount(
+            p0: p0.position,
+            p1: p1.position,
+            p2: current.position,
+            maximumSegmentLength: maximumSegmentLength,
+            minimumSubdivisionEstimate: minimumSubdivisionEstimate
+        )
+        guard requiredSubdivisionCount
+            > Double(maximumSubdivisionCount)
+        else {
+            try append(
+                current,
+                maximumSubdivisionCount:
+                    maximumSubdivisionCount,
+                emit: emit
+            )
+            return .completed
+        }
+
+        try emitBoundedPrefix(
+            current,
+            from: p0,
+            after: p1,
+            emittedSubdivisionCount: maximumSubdivisionCount,
+            requiredSubdivisionCount: requiredSubdivisionCount,
+            emit: emit
+        )
+        return .truncated
+    }
+
+    private mutating func append(
+        _ current: InterpolatedStrokeSample,
+        from p0: InterpolatedStrokeSample,
+        after p1: InterpolatedStrokeSample,
+        subdivisions: Int,
+        emit: (AttributedStrokePathSegment) throws -> Void
+    ) rethrows {
         var lineStart = p1
 
         for step in 1...subdivisions {
@@ -322,6 +444,60 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
         previous = current
     }
 
+    private func emitBoundedPrefix(
+        _ current: InterpolatedStrokeSample,
+        from p0: InterpolatedStrokeSample,
+        after p1: InterpolatedStrokeSample,
+        emittedSubdivisionCount: Int,
+        requiredSubdivisionCount: Double,
+        emit: (AttributedStrokePathSegment) throws -> Void
+    ) rethrows {
+        var lineStart = p1
+
+        for step in 1...emittedSubdivisionCount {
+            let fraction = Float(
+                Double(step) / requiredSubdivisionCount
+            )
+            let position = Self.samplePosition(
+                p0: p0.position,
+                p1: p1.position,
+                p2: current.position,
+                p3: current.position,
+                u: fraction
+            )
+            let lineEnd = p1.interpolated(
+                to: current,
+                fraction: fraction,
+                position: position
+            )
+            try emit(AttributedStrokePathSegment(
+                start: lineStart,
+                end: lineEnd
+            ))
+            lineStart = lineEnd
+        }
+    }
+
+    private static func requiredSubdivisionCount(
+        p0: WorldPoint,
+        p1: WorldPoint,
+        p2: WorldPoint,
+        maximumSegmentLength: Float,
+        minimumSubdivisionEstimate: Float
+    ) -> Double {
+        func distance(_ lhs: WorldPoint, _ rhs: WorldPoint) -> Double {
+            hypot(
+                Double(rhs.x) - Double(lhs.x),
+                Double(rhs.y) - Double(lhs.y)
+            )
+        }
+        let estimate = max(
+            distance(p0, p1) + distance(p1, p2),
+            Double(minimumSubdivisionEstimate)
+        )
+        return ceil(estimate / Double(maximumSegmentLength))
+    }
+
     @discardableResult
     public mutating func finish(
         at finalSample: InterpolatedStrokeSample,
@@ -332,6 +508,41 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
         }
         cancel()
         return finalSample
+    }
+
+    @discardableResult
+    public mutating func finish(
+        at finalSample: InterpolatedStrokeSample,
+        maximumSubdivisionCount: Int,
+        emit: (AttributedStrokePathSegment) throws -> Void
+    ) throws -> InterpolatedStrokeSample {
+        if previous?.position != finalSample.position {
+            try append(
+                finalSample,
+                maximumSubdivisionCount: maximumSubdivisionCount,
+                emit: emit
+            )
+        }
+        cancel()
+        return finalSample
+    }
+
+    @discardableResult
+    public mutating func finishBoundedPrefix(
+        at finalSample: InterpolatedStrokeSample,
+        maximumSubdivisionCount: Int,
+        emit: (AttributedStrokePathSegment) throws -> Void
+    ) throws -> StrokePathInterpolationOutcome {
+        if previous?.position != finalSample.position {
+            let outcome = try appendBoundedPrefix(
+                finalSample,
+                maximumSubdivisionCount: maximumSubdivisionCount,
+                emit: emit
+            )
+            guard outcome == .completed else { return .truncated }
+        }
+        cancel()
+        return .completed
     }
 
     public mutating func cancel() {

@@ -12,6 +12,8 @@ final class GridRenderCompletionMailbox: @unchecked Sendable {
         let rasterCommit: RasterCommit?
         let uploadSubmissions: [DabBufferSubmissionIdentity]
         let replayEpoch: UInt64
+        let preparedWorkerFrame:
+            GridRenderer.PreparedWorkerFrameIdentity?
         let succeeded: Bool
         let errorMessage: String?
 
@@ -20,6 +22,8 @@ final class GridRenderCompletionMailbox: @unchecked Sendable {
             rasterCommit: RasterCommit?,
             uploadSubmissions: [DabBufferSubmissionIdentity],
             replayEpoch: UInt64 = 0,
+            preparedWorkerFrame:
+                GridRenderer.PreparedWorkerFrameIdentity? = nil,
             succeeded: Bool,
             errorMessage: String?
         ) {
@@ -27,6 +31,7 @@ final class GridRenderCompletionMailbox: @unchecked Sendable {
             self.rasterCommit = rasterCommit
             self.uploadSubmissions = uploadSubmissions
             self.replayEpoch = replayEpoch
+            self.preparedWorkerFrame = preparedWorkerFrame
             self.succeeded = succeeded
             self.errorMessage = errorMessage
         }

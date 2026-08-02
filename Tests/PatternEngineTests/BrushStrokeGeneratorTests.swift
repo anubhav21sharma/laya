@@ -632,6 +632,31 @@ func retroactiveTaperPreservesAppendedLogicalDabInputs() throws {
     #expect(tapered.worldBounds != original.worldBounds)
 }
 
+@Test
+func truncatedPredictionFinishDoesNotAdvanceOrSynthesizeEndpoint() throws {
+    var generator = legacyGenerator(seed: 93)
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    let before = generator
+    let terminal = generatorSample(
+        x: 10_000,
+        timestamp: 1,
+        phase: .ended
+    ).replacingKindForTest(.predicted)
+    var emitted: [DabAttributes] = []
+
+    let outcome = try generator.finishPredictionPrefix(
+        terminal,
+        maximumPathSubdivisionCount: 16
+    ) { emitted.append($0) }
+
+    #expect(outcome == .truncated)
+    #expect(!emitted.isEmpty)
+    #expect(emitted.last?.position != terminal.position)
+    #expect(generator == before)
+}
+
 private extension WorldStrokeSample {
     func replacingKindForTest(_ kind: StrokeSampleKind) -> WorldStrokeSample {
         let source = StrokeSample(

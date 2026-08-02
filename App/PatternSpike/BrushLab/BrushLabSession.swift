@@ -870,7 +870,8 @@ final class BrushLabSession {
                 min(2_000, max(40, card.diameter * 1.75))
             )
             controller.handleStrokeSamples(card.substrateTraceSamples())
-            _ = try controller.renderer.completePendingInteractiveStroke()
+            _ = try await controller.renderer
+                .completePendingInteractiveStrokeAndAwaitIdle()
             substrateInputCount = inputRecords.count
             try applyAndValidateStrokeProperties(card)
         } else {
@@ -878,7 +879,8 @@ final class BrushLabSession {
             try applyAndValidateStrokeProperties(card)
         }
         controller.handleStrokeSamples(card.traceSamples())
-        _ = try controller.renderer.completePendingInteractiveStroke()
+        _ = try await controller.renderer
+            .completePendingInteractiveStrokeAndAwaitIdle()
         guard controller.renderer.isIdle else {
             throw BrushLabEvidenceError.rendererBusy
         }
@@ -948,7 +950,7 @@ final class BrushLabSession {
             professionalPassRecords.removeAll(keepingCapacity: true)
             currentProfessionalPassIndex = nil
         }
-        let record = try executeProfessionalPass(
+        let record = try await executeProfessionalPass(
             card.passes[nextProfessionalPassIndex],
             card: card
         )
@@ -974,7 +976,7 @@ final class BrushLabSession {
         clearTrace()
         resetProfessionalPassNavigation()
         for pass in card.passes {
-            _ = try executeProfessionalPass(pass, card: card)
+            _ = try await executeProfessionalPass(pass, card: card)
         }
         let replay = try completeProfessionalReplay(card: card)
         completedReplay = replay
@@ -1001,7 +1003,7 @@ final class BrushLabSession {
     private func executeProfessionalPass(
         _ pass: BrushLabProfessionalManualPass,
         card: BrushLabProfessionalManualCard
-    ) throws -> BrushLabProfessionalPassReplay {
+    ) async throws -> BrushLabProfessionalPassReplay {
         guard pass.passIndex == nextProfessionalPassIndex else {
             throw BrushLabEvidenceError.professionalPassUnavailable
         }
@@ -1019,7 +1021,8 @@ final class BrushLabSession {
                         )
                 )
             )
-            _ = try controller.renderer.completePendingInteractiveStroke()
+            _ = try await controller.renderer
+                .completePendingInteractiveStrokeAndAwaitIdle()
         }
         guard controller.renderer.isIdle,
               let activeProfessionalCompiledBrush

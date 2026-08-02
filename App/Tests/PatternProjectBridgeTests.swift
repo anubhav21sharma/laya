@@ -1,6 +1,6 @@
 import Foundation
 import Metal
-import MetalRenderer
+@testable import MetalRenderer
 import PatternEngine
 import PatternFile
 import Testing
@@ -135,6 +135,7 @@ struct PatternProjectBridgeTests {
             ),
         ])
         _ = try importedRenderer.completePendingInteractiveStroke()
+        try importedRenderer.drainStrokeWorkspaceRetirementForHarness()
 
         #expect(importedRenderer.isIdle)
         #expect(imported.model.canUndo)

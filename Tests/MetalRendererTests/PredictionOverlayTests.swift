@@ -59,21 +59,8 @@ struct PredictionOverlayTests {
             ),
             style: predictionStyle(brush)
         )
-        let coordinatorBefore = try #require(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-        )
-        let transactionTokenBefore = try #require(
-            setup.renderer
-                .compatibilityInkCoordinatorTransactionTokenForTesting
-        )
-        let bufferBefore = try #require(
-            setup.renderer.transientStrokeBuffer
-        )
-        let authoritativeBefore =
-            setup.renderer.harnessScheduledAuthoritativeRecords
-        let predictedBefore =
-            setup.renderer.harnessScheduledPredictedRecords
-
+        try await drainPredictionActor(setup.renderer)
+        let before = await predictionMutationSnapshot(setup.renderer)
         #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
             try setup.renderer.finishStrokeTransient(
                 token: token,
@@ -87,21 +74,7 @@ struct PredictionOverlayTests {
         }
 
         #expect(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == coordinatorBefore
-        )
-        #expect(
-            setup.renderer
-                .compatibilityInkCoordinatorTransactionTokenForTesting
-                == transactionTokenBefore
-        )
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                == authoritativeBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords == predictedBefore
+            await predictionMutationSnapshot(setup.renderer) == before
         )
         #expect(setup.renderer.activeStroke?.isFinishedTransiently == false)
         try setup.renderer.cancelStroke(token: token)
@@ -127,9 +100,8 @@ struct PredictionOverlayTests {
             ),
             style: predictionStyle(brush)
         )
-        let bufferBefore = try #require(
-            setup.renderer.transientStrokeBuffer
-        )
+        try await drainPredictionActor(setup.renderer)
+        let before = await predictionMutationSnapshot(setup.renderer)
 
         #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
             try setup.renderer.requestStrokeCommit(
@@ -145,7 +117,9 @@ struct PredictionOverlayTests {
         }
 
         #expect(setup.renderer.activeStroke?.token == token)
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
+        #expect(
+            await predictionMutationSnapshot(setup.renderer) == before
+        )
         #expect(setup.renderer.activeStroke?.isFinishedTransiently == false)
         try setup.renderer.cancelStroke(token: token)
     }
@@ -178,7 +152,8 @@ struct PredictionOverlayTests {
             _ = setup.renderer.takeBrushLabEventToSubmitNanoseconds(
                 submittedAt: UInt64.max
             )
-            let before = predictionMutationSnapshot(setup.renderer)
+            try await drainPredictionActor(setup.renderer)
+            let before = await predictionMutationSnapshot(setup.renderer)
 
             #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
                 try setup.renderer.appendStroke(
@@ -192,7 +167,9 @@ struct PredictionOverlayTests {
                 )
             }
 
-            #expect(predictionMutationSnapshot(setup.renderer) == before)
+            #expect(
+                await predictionMutationSnapshot(setup.renderer) == before
+            )
             try setup.renderer.cancelStroke(token: token)
         }
     }
@@ -219,7 +196,8 @@ struct PredictionOverlayTests {
         _ = setup.renderer.takeBrushLabEventToSubmitNanoseconds(
             submittedAt: UInt64.max
         )
-        let before = predictionMutationSnapshot(setup.renderer)
+        try await drainPredictionActor(setup.renderer)
+        let before = await predictionMutationSnapshot(setup.renderer)
 
         #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
             try setup.renderer.appendStrokeBatch(
@@ -240,7 +218,9 @@ struct PredictionOverlayTests {
             )
         }
 
-        #expect(predictionMutationSnapshot(setup.renderer) == before)
+        #expect(
+            await predictionMutationSnapshot(setup.renderer) == before
+        )
         try setup.renderer.cancelStroke(token: token)
     }
 
@@ -276,7 +256,8 @@ struct PredictionOverlayTests {
         _ = setup.renderer.takeBrushLabEventToSubmitNanoseconds(
             submittedAt: UInt64.max
         )
-        let before = predictionMutationSnapshot(setup.renderer)
+        try await drainPredictionActor(setup.renderer)
+        let before = await predictionMutationSnapshot(setup.renderer)
 
         #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
             try setup.renderer.applyEstimatedStrokeUpdate(
@@ -291,7 +272,9 @@ struct PredictionOverlayTests {
             )
         }
 
-        #expect(predictionMutationSnapshot(setup.renderer) == before)
+        #expect(
+            await predictionMutationSnapshot(setup.renderer) == before
+        )
         try setup.renderer.cancelStroke(token: token)
     }
 
@@ -664,6 +647,7 @@ struct PredictionOverlayTests {
         guard let setup = try predictionRendererSetup() else { return }
         let brush = try await setup.compileNativeInk()
         try setup.renderer.activateDrawBrush(brush)
+        setup.renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
         let token = RendererOperationToken(rawValue: 700)
         try setup.renderer.beginStroke(
             token: token,
@@ -674,10 +658,11 @@ struct PredictionOverlayTests {
             ),
             style: predictionStyle(brush)
         )
+        try await drainPredictionActor(setup.renderer)
         let authoritativeBefore = try #require(
             setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
         )
-        let predicted = (0..<65).map { index in
+        var predicted = (0..<64).map { index in
             predictionInputSample(
                 x: 9 + Float(index) * 0.25,
                 timestamp: 0.001 + Double(index) * 0.001,
@@ -685,19 +670,99 @@ struct PredictionOverlayTests {
                 kind: .predicted
             )
         }
-
-        try setup.renderer.appendStrokeBatch(
-            token: token,
-            samples: predicted
+        predicted.append(
+            contentsOf: repeatElement(
+                predictionInvalidLifecycleSample(
+                    x: 40,
+                    timestamp: 1,
+                    phase: .ended,
+                    kind: .predicted
+                ),
+                count: 100_000 - predicted.count
+            )
         )
 
+        var scratchSnapshots: [
+            GridRenderer.PredictionSubmissionScratchSnapshot
+        ] = []
+        for _ in 0..<3 {
+            try setup.renderer.appendStrokeBatch(
+                token: token,
+                authoritativeSamples:
+                    predicted[..<predicted.startIndex],
+                predictedSamples: predicted[...]
+            )
+            scratchSnapshots.append(
+                setup.renderer
+                    .predictionSubmissionScratchSnapshotForTesting
+            )
+            try await drainPredictionActor(setup.renderer)
+        }
+        let actorState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
+
+        #expect(actorState.predictedSamples.count == 64)
+        let firstScratch = try #require(scratchSnapshots.first)
+        #expect(firstScratch.count == 64)
+        #expect(firstScratch.highWater == 64)
+        #expect(firstScratch.storageCapacity >= 64)
+        #expect(firstScratch.storageIdentity != 0)
+        #expect(firstScratch.storageReallocationCount == 0)
+        #expect(firstScratch.lastSubmittedSampleCount == 100_000)
+        #expect(firstScratch.lastAcceptedSampleCount == 64)
+        #expect(firstScratch.lastShedSampleCount == 100_000 - 64)
+        #expect(firstScratch.lastValidatedSampleCount == 64)
+        #expect(firstScratch.lastTelemetrySampleCount == 64)
         #expect(
-            setup.renderer.transientStrokeBuffer?.predictedSampleCount
-                == 64
+            scratchSnapshots.allSatisfy {
+                $0.storageCapacity == firstScratch.storageCapacity
+                    && $0.storageIdentity == firstScratch.storageIdentity
+                    && $0.storageReallocationCount == 0
+                    && $0.lastSubmittedSampleCount == 100_000
+                    && $0.lastAcceptedSampleCount == 64
+                    && $0.lastShedSampleCount == 100_000 - 64
+                    && $0.lastValidatedSampleCount == 64
+                    && $0.lastTelemetrySampleCount == 64
+            }
+        )
+        #expect(
+            setup.renderer.strokeRuntimeSnapshot?.inputProvenance.predicted
+                == 3 * 64
         )
         #expect(
             setup.renderer.predictionOverlay.snapshot.lastOverload
                 .contains(.normalizedSamples)
+        )
+        #expect(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+                == authoritativeBefore
+        )
+
+        try setup.renderer.appendStrokeBatch(
+            token: token,
+            authoritativeSamples: predicted[..<predicted.startIndex],
+            predictedSamples: predicted[..<predicted.startIndex],
+            submittedPredictionSampleCount: 100_000
+        )
+        let emptyScratch =
+            setup.renderer.predictionSubmissionScratchSnapshotForTesting
+        #expect(emptyScratch.count == 0)
+        #expect(emptyScratch.highWater == 64)
+        #expect(emptyScratch.storageCapacity == firstScratch.storageCapacity)
+        #expect(emptyScratch.storageIdentity == firstScratch.storageIdentity)
+        #expect(emptyScratch.storageReallocationCount == 0)
+        #expect(emptyScratch.lastSubmittedSampleCount == 100_000)
+        #expect(emptyScratch.lastAcceptedSampleCount == 0)
+        #expect(emptyScratch.lastShedSampleCount == 100_000)
+        #expect(emptyScratch.lastValidatedSampleCount == 0)
+        #expect(emptyScratch.lastTelemetrySampleCount == 0)
+        try await drainPredictionActor(setup.renderer)
+        let clearedActorState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
+        #expect(clearedActorState.predictedSamples.isEmpty)
+        #expect(
+            setup.renderer.predictionOverlay.snapshot.normalizedSampleCount
+                == 0
         )
         #expect(
             setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
@@ -737,11 +802,11 @@ struct PredictionOverlayTests {
             token: token,
             samples: predicted
         )
+        try await drainPredictionActor(setup.renderer)
+        let actorState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
 
-        #expect(
-            setup.renderer.transientStrokeBuffer?.predictedSampleCount
-                == 64
-        )
+        #expect(actorState.predictedSamples.count == 64)
         #expect(
             setup.renderer.predictionOverlay.snapshot.lastOverload
                 .contains(.normalizedSamples)
@@ -769,9 +834,9 @@ struct PredictionOverlayTests {
             sample: predictionUnresolvedActualBegan(index: 101),
             style: predictionStyle(brush)
         )
-        let actualBefore = try #require(
-            setup.renderer.transientStrokeBuffer
-        )
+        try await drainPredictionActor(setup.renderer)
+        let actualBefore = await setup.renderer
+            .offMainTransientSnapshotForTesting()
 
         try setup.renderer.appendStroke(
             token: token,
@@ -782,14 +847,13 @@ struct PredictionOverlayTests {
                 kind: .predicted
             )
         )
+        try await drainPredictionActor(setup.renderer)
+        let actorState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
 
-        #expect(
-            setup.renderer.transientStrokeBuffer?.actualChunks
-                == actualBefore.actualChunks
-        )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.predictedSampleCount == 0
-        )
+        #expect(actorState.actualSamples == actualBefore.actualSamples)
+        #expect(actorState.actualDabs == actualBefore.actualDabs)
+        #expect(actorState.predictedSamples.isEmpty)
         #expect(
             setup.renderer.predictionOverlay.snapshot.lastOverload
                 .contains(.normalizedSamples)
@@ -817,7 +881,11 @@ struct PredictionOverlayTests {
             sample: predictionUnresolvedActualBegan(index: 102),
             style: predictionStyle(brush)
         )
-        #expect(setup.renderer.transientStrokeBuffer?.actualDabCount == 1)
+        try await drainPredictionActor(setup.renderer)
+        #expect(
+            await setup.renderer.offMainTransientSnapshotForTesting()
+                .actualDabs.count == 1
+        )
 
         try setup.renderer.appendStroke(
             token: token,
@@ -828,11 +896,12 @@ struct PredictionOverlayTests {
                 kind: .predicted
             )
         )
+        try await drainPredictionActor(setup.renderer)
+        let actorState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
 
-        #expect(setup.renderer.transientStrokeBuffer?.actualDabCount == 1)
-        #expect(
-            setup.renderer.transientStrokeBuffer?.predictedDabCount == 0
-        )
+        #expect(actorState.actualDabs.count == 1)
+        #expect(actorState.predictedDabs.isEmpty)
         #expect(
             setup.renderer.predictionOverlay.snapshot.lastOverload
                 .contains(.logicalDabs)
@@ -860,9 +929,10 @@ struct PredictionOverlayTests {
             sample: predictionUnresolvedActualBegan(index: 103),
             style: predictionStyle(brush)
         )
+        try await drainPredictionActor(setup.renderer)
         let actualProjectedCount = try #require(
-            setup.renderer.transientStrokeBuffer?.actualChunks.first?
-                .projectedInstanceCount
+            await setup.renderer.offMainTransientSnapshotForTesting()
+                .actualDabs.first?.projectedInstanceCount
         )
         #expect(actualProjectedCount == 1)
 
@@ -875,9 +945,11 @@ struct PredictionOverlayTests {
                 kind: .predicted
             )
         )
+        try await drainPredictionActor(setup.renderer)
 
         #expect(
-            setup.renderer.transientStrokeBuffer?.predictedDabCount == 0
+            await setup.renderer.offMainTransientSnapshotForTesting()
+                .predictedDabs.isEmpty
         )
         #expect(
             setup.renderer.predictionOverlay.snapshot.lastOverload
@@ -894,15 +966,23 @@ struct PredictionOverlayTests {
         guard let setup = try predictionRendererSetup() else { return }
         let brush = try await setup.compileReplayTail()
         try setup.renderer.activateDrawBrush(brush)
-        let token = RendererOperationToken(rawValue: 709)
+
+        let probeToken = RendererOperationToken(rawValue: 7_090)
         try setup.renderer.beginStroke(
-            token: token,
-            sample: predictionUnresolvedActualBegan(index: 104),
+            token: probeToken,
+            sample: predictionUnresolvedActualBegan(index: 1_040),
             style: predictionStyle(brush)
         )
-        let correctionCount = setup.renderer
-            .harnessScheduledPredictedRecords.count
+        try await drainPredictionActor(setup.renderer)
+        let probeState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
+        let correctionCount = probeState.actualDabs.reduce(0) {
+            $0 + $1.projectedInstanceCount
+        }
         #expect(correctionCount > 0)
+        try setup.renderer.cancelStroke(token: probeToken)
+        try setup.renderer.drainStrokeWorkspaceRetirementForHarness()
+
         let constrained = try predictionBudget(
             predictedPerFrame: 1,
             authoritativeCapacity: 64,
@@ -911,10 +991,17 @@ struct PredictionOverlayTests {
         _ = setup.renderer.replaceDepositionFrameBudgetForHarness(
             constrained
         )
-        _ = try #require(
-            setup.renderer.replaceActiveStrokeSchedulerForHarness(
-                constrained
-            )
+        let token = RendererOperationToken(rawValue: 709)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: predictionUnresolvedActualBegan(index: 104),
+            style: predictionStyle(brush)
+        )
+        try await drainPredictionActor(setup.renderer)
+        let actualBefore = await setup.renderer
+            .offMainTransientSnapshotForTesting()
+        let coordinatorBefore = try #require(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
         )
 
         try setup.renderer.appendStroke(
@@ -926,18 +1013,25 @@ struct PredictionOverlayTests {
                 kind: .predicted
             )
         )
+        try await drainPredictionActor(setup.renderer)
+        let actorState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
 
+        #expect(actorState.actualSamples == actualBefore.actualSamples)
+        #expect(actorState.actualDabs == actualBefore.actualDabs)
+        #expect(actorState.predictedSamples.count == 1)
+        #expect(actorState.predictedDabs.isEmpty)
         #expect(
-            setup.renderer.harnessScheduledPredictedRecords.count
+            setup.renderer.offMainPredictedInstanceCountForTesting
                 == correctionCount
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords
-                .allSatisfy { !$0.isPredicted }
         )
         #expect(
             setup.renderer.predictionOverlay.snapshot.lastOverload
                 .contains(.projectedInstances)
+        )
+        #expect(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+                == coordinatorBefore
         )
         try setup.renderer.cancelStroke(token: token)
     }
@@ -970,14 +1064,15 @@ struct PredictionOverlayTests {
                 kind: .predicted
             )
         )
+        try await drainPredictionActor(setup.renderer)
+        let actorState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
 
-        #expect(
-            setup.renderer.transientStrokeBuffer?.predictedDabCount == 512
-        )
+        #expect(actorState.predictedDabs.count == 512)
         #expect(
             setup.renderer.predictionOverlay.snapshot
                 .projectedInstanceCount
-                == setup.renderer.harnessScheduledPredictedRecords.count
+                == setup.renderer.offMainPredictedInstanceCountForTesting
         )
         #expect(
             setup.renderer.predictionOverlay.snapshot.lastOverload
@@ -1016,6 +1111,7 @@ struct PredictionOverlayTests {
                 index: 91
             )
         )
+        try await drainPredictionActor(setup.renderer)
         let provenance = try #require(
             setup.renderer.predictionOverlay.snapshot.provenance
         )
@@ -1028,10 +1124,11 @@ struct PredictionOverlayTests {
                 index: 91
             )
         )
+        try await drainPredictionActor(setup.renderer)
+        let actorState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
 
-        #expect(
-            setup.renderer.transientStrokeBuffer?.predictedDabCount == 512
-        )
+        #expect(actorState.predictedDabs.count == 512)
         #expect(
             setup.renderer.predictionOverlay.snapshot.provenance
                 == provenance
@@ -1043,7 +1140,7 @@ struct PredictionOverlayTests {
         #expect(
             setup.renderer.predictionOverlay.snapshot
                 .projectedInstanceCount
-                == setup.renderer.harnessScheduledPredictedRecords.count
+                == setup.renderer.offMainPredictedInstanceCountForTesting
         )
         try setup.renderer.cancelStroke(token: token)
     }
@@ -1056,6 +1153,31 @@ struct PredictionOverlayTests {
         guard let setup = try predictionRendererSetup() else { return }
         let brush = try await setup.compileNativeInk()
         try setup.renderer.activateDrawBrush(brush)
+
+        let probeToken = RendererOperationToken(rawValue: 7_160)
+        try setup.renderer.beginStroke(
+            token: probeToken,
+            sample: predictionUnresolvedActualBegan(index: 1_210),
+            style: predictionStyle(brush)
+        )
+        try await drainPredictionActor(setup.renderer)
+        let probeState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
+        let correctionCount = probeState.actualDabs.reduce(0) {
+            $0 + $1.projectedInstanceCount
+        }
+        #expect(correctionCount > 0)
+        try setup.renderer.cancelStroke(token: probeToken)
+        try setup.renderer.drainStrokeWorkspaceRetirementForHarness()
+
+        let constrained = try predictionBudget(
+            predictedPerFrame: 1,
+            authoritativeCapacity: 64,
+            predictedCapacity: correctionCount
+        )
+        _ = setup.renderer.replaceDepositionFrameBudgetForHarness(
+            constrained
+        )
         let token = RendererOperationToken(rawValue: 716)
         try setup.renderer.beginStroke(
             token: token,
@@ -1070,29 +1192,15 @@ struct PredictionOverlayTests {
                 index: 122
             )
         )
-        let actualBefore = try #require(
-            setup.renderer.transientStrokeBuffer?.actualChunks
+        try await drainPredictionActor(setup.renderer)
+        let actualBefore = await setup.renderer
+            .offMainTransientSnapshotForTesting()
+        let coordinatorBefore = try #require(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
         )
-        let correctionCount = setup.renderer
-            .harnessScheduledPredictedRecords
-            .filter { !$0.isPredicted }
-            .count
-        #expect(correctionCount > 0)
-        let constrained = try predictionBudget(
-            predictedPerFrame: 1,
-            authoritativeCapacity: 64,
-            predictedCapacity: correctionCount
+        let provenanceBefore = try #require(
+            setup.renderer.predictionOverlay.snapshot.provenance
         )
-        _ = setup.renderer.replaceDepositionFrameBudgetForHarness(
-            constrained
-        )
-        _ = try #require(
-            setup.renderer.replaceActiveStrokeSchedulerForHarness(
-                constrained
-            )
-        )
-        let authoritativeBefore =
-            setup.renderer.harnessScheduledAuthoritativeRecords
 
         try setup.renderer.applyEstimatedStrokeUpdate(
             token: token,
@@ -1102,29 +1210,29 @@ struct PredictionOverlayTests {
                 index: 122
             )
         )
+        try await drainPredictionActor(setup.renderer)
+        let actorState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
 
+        #expect(actorState.actualSamples == actualBefore.actualSamples)
+        #expect(actorState.actualDabs == actualBefore.actualDabs)
+        #expect(actorState.predictedSamples.count == 1)
+        #expect(actorState.predictedDabs.isEmpty)
         #expect(
-            setup.renderer.transientStrokeBuffer?.actualChunks
-                == actualBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                == authoritativeBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords.count
+            setup.renderer.offMainPredictedInstanceCountForTesting
                 == correctionCount
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords
-                .allSatisfy { !$0.isPredicted }
-        )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.predictedDabCount == 0
         )
         #expect(
             setup.renderer.predictionOverlay.snapshot.lastOverload
                 .contains(.projectedInstances)
+        )
+        #expect(
+            setup.renderer.predictionOverlay.snapshot.provenance
+                == provenanceBefore
+        )
+        #expect(
+            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
+                == coordinatorBefore
         )
         #expect(setup.renderer.activeStroke?.token == token)
         #expect(setup.renderer.activeStroke?.isFinishedTransiently == false)
@@ -1157,6 +1265,7 @@ struct PredictionOverlayTests {
                 index: 92
             )
         )
+        try await drainPredictionActor(setup.renderer)
         let matching = try #require(
             setup.renderer.predictionOverlay.snapshot.provenance
         )
@@ -1176,22 +1285,10 @@ struct PredictionOverlayTests {
             ),
             dirtyRegions: []
         )
-        let coordinatorBefore = try #require(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-        )
-        let transactionTokenBefore = try #require(
-            setup.renderer
-                .compatibilityInkCoordinatorTransactionTokenForTesting
-        )
-        let bufferBefore = try #require(
-            setup.renderer.transientStrokeBuffer
-        )
-        let arenaBefore =
-            setup.renderer.harnessTransientDabArenaSnapshot
-        let authoritativeBefore =
-            setup.renderer.harnessScheduledAuthoritativeRecords
-        let predictedBefore =
-            setup.renderer.harnessScheduledPredictedRecords
+        let before = await predictionMutationSnapshot(setup.renderer)
+        let snapshotMaterializationCountBeforePreflight =
+            setup.renderer.predictionOverlay
+                .snapshotMaterializationCountForTesting
 
         #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
             try setup.renderer.appendStroke(
@@ -1203,27 +1300,15 @@ struct PredictionOverlayTests {
                 )
             )
         }
+        #expect(
+            setup.renderer.predictionOverlay
+                .snapshotMaterializationCountForTesting
+                == snapshotMaterializationCountBeforePreflight
+        )
+        #expect(
+            await predictionMutationSnapshot(setup.renderer) == before
+        )
 
-        #expect(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == coordinatorBefore
-        )
-        #expect(
-            setup.renderer
-                .compatibilityInkCoordinatorTransactionTokenForTesting
-                == transactionTokenBefore
-        )
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                == authoritativeBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords == predictedBefore
-        )
         #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
             try setup.renderer.applyEstimatedStrokeUpdate(
                 token: token,
@@ -1235,25 +1320,9 @@ struct PredictionOverlayTests {
             )
         }
         #expect(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == coordinatorBefore
+            await predictionMutationSnapshot(setup.renderer) == before
         )
-        #expect(
-            setup.renderer
-                .compatibilityInkCoordinatorTransactionTokenForTesting
-                == transactionTokenBefore
-        )
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                == authoritativeBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords == predictedBefore
-        )
+
         #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
             try setup.renderer.finishStrokeTransient(
                 token: token,
@@ -1265,25 +1334,9 @@ struct PredictionOverlayTests {
             )
         }
         #expect(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == coordinatorBefore
+            await predictionMutationSnapshot(setup.renderer) == before
         )
-        #expect(
-            setup.renderer
-                .compatibilityInkCoordinatorTransactionTokenForTesting
-                == transactionTokenBefore
-        )
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                == authoritativeBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords == predictedBefore
-        )
+
         #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
             try setup.renderer.appendStroke(
                 token: token,
@@ -1295,27 +1348,11 @@ struct PredictionOverlayTests {
             )
         }
         #expect(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == coordinatorBefore
-        )
-        #expect(
-            setup.renderer
-                .compatibilityInkCoordinatorTransactionTokenForTesting
-                == transactionTokenBefore
-        )
-        #expect(setup.renderer.transientStrokeBuffer == bufferBefore)
-        #expect(
-            setup.renderer.harnessTransientDabArenaSnapshot == arenaBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                == authoritativeBefore
-        )
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords == predictedBefore
+            await predictionMutationSnapshot(setup.renderer) == before
         )
         try setup.renderer.cancelStroke(token: token)
     }
+
 
     @Test
     @MainActor
@@ -1342,9 +1379,10 @@ struct PredictionOverlayTests {
                 kind: .predicted
             )
         )
+        try await drainPredictionActor(setup.renderer)
         #expect(
-            setup.renderer.harnessScheduledPredictedRecords
-                .contains { $0.isPredicted }
+            await setup.renderer.offMainTransientSnapshotForTesting()
+                .predictedDabs.contains { $0.attributes.isPredicted }
         )
         #expect(setup.renderer.predictionOverlay.snapshot.provenance != nil)
 
@@ -1356,18 +1394,14 @@ struct PredictionOverlayTests {
                 phase: .ended
             )
         )
+        try await drainPredictionActor(setup.renderer)
+        let actorState = await setup.renderer
+            .offMainTransientSnapshotForTesting()
 
-        #expect(
-            setup.renderer.harnessScheduledPredictedRecords
-                .allSatisfy { !$0.isPredicted }
-        )
-        #expect(
-            setup.renderer.harnessScheduledAuthoritativeRecords
-                .allSatisfy { !$0.isPredicted }
-        )
-        #expect(
-            setup.renderer.transientStrokeBuffer?.predictedSampleCount == 0
-        )
+        #expect(actorState.predictedDabs.allSatisfy {
+            !$0.attributes.isPredicted
+        })
+        #expect(actorState.predictedSamples.isEmpty)
         #expect(setup.renderer.predictionOverlay.snapshot.provenance == nil)
         #expect(setup.renderer.activeStroke?.isFinishedTransiently == true)
         try setup.renderer.cancelStroke(token: token)
@@ -1424,10 +1458,8 @@ private struct PredictionMutationSnapshot: Equatable {
     let runtimeInputProvenance: StrokeRuntimeInputProvenanceCounts?
     let eventDiagnostics: RendererEventDispatcher.Diagnostics
     let coordinator: StrokeRenderSnapshot?
-    let coordinatorTransactionToken: UInt64?
-    let buffer: TransientStrokeBuffer?
-    let authoritative: [ProjectedDepositionRecord]
-    let predicted: [ProjectedDepositionRecord]
+    let scheduler: StrokeFrameSchedulerSnapshot
+    let transient: StrokeTransientPreparationSnapshot
     let overlay: PredictionOverlaySnapshot
     let activeToken: RendererOperationToken?
     let isFinishedTransiently: Bool?
@@ -1436,23 +1468,45 @@ private struct PredictionMutationSnapshot: Equatable {
 @MainActor
 private func predictionMutationSnapshot(
     _ renderer: GridRenderer
-) -> PredictionMutationSnapshot {
-    PredictionMutationSnapshot(
+) async -> PredictionMutationSnapshot {
+    let scheduler = await renderer.offMainSchedulerSnapshotForTesting()
+    let transient = await renderer.offMainTransientSnapshotForTesting()
+    return PredictionMutationSnapshot(
         receiptPending: renderer.brushLabInputReceiptPendingForTesting,
         runtimeInputProvenance:
             renderer.strokeRuntimeSnapshot?.inputProvenance,
         eventDiagnostics: renderer.rendererEventDiagnosticsForTesting,
         coordinator:
             renderer.compatibilityInkCoordinatorSnapshotForTesting,
-        coordinatorTransactionToken:
-            renderer.compatibilityInkCoordinatorTransactionTokenForTesting,
-        buffer: renderer.transientStrokeBuffer,
-        authoritative: renderer.harnessScheduledAuthoritativeRecords,
-        predicted: renderer.harnessScheduledPredictedRecords,
+        scheduler: scheduler,
+        transient: transient,
         overlay: renderer.predictionOverlay.snapshot,
         activeToken: renderer.activeStroke?.token,
         isFinishedTransiently:
             renderer.activeStroke?.isFinishedTransiently
+    )
+}
+
+@MainActor
+private func drainPredictionActor(
+    _ renderer: GridRenderer
+) async throws {
+    for _ in 0..<20_000 {
+        try renderer.drainCompletedInteractiveOperations()
+        if renderer.hasPendingOffMainSurfaceLeaseForTesting {
+            _ = try renderer.completeNextPendingInteractiveFrame()
+            continue
+        }
+        if let mailbox = renderer.offMainPreparationMailboxSnapshotForTesting,
+           mailbox.isQuiescent,
+           !renderer.hasSubmittedOffMainSurfaceLeaseForTesting
+        {
+            return
+        }
+        await Task.yield()
+    }
+    throw MetalRendererError.commandFailed(
+        "prediction actor drain exceeded its test bound"
     )
 }
 

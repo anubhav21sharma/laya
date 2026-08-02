@@ -132,6 +132,51 @@ struct StrokeRuntimeReplayEpochTracker {
     }
 }
 
+#if DEBUG
+struct OffMainStrokeProductionTraceSnapshot: Sendable {
+    let inputSampleCount: Int
+    let logicalDurationNanoseconds: UInt64
+    let wallDurationNanoseconds: UInt64
+    let firstDecileNanosecondsPerEvent: UInt64
+    let lastDecileNanosecondsPerEvent: UInt64
+    let authoritativeInputHighWater: Int
+    let authoritativeInputCapacity: Int
+    let authoritativeInputInitialStorageCapacity: Int
+    let authoritativeInputStorageCapacity: Int
+    let predictionInputCapacity: Int
+    let predictionInputInitialStorageCapacity: Int
+    let predictionInputStorageCapacity: Int
+    let resultHighWater: Int
+    let resultCapacity: Int
+    let resultInitialStorageCapacity: Int
+    let resultStorageCapacity: Int
+    let workspaceInitialInstallationCount: UInt64
+    let workspaceInstallationCount: UInt64
+    let workspaceIdentityStayedStable: Bool
+    let maximumPreparedPayloadBytes: Int
+    let surface: StrokePrivateSurfaceEncoderSnapshot
+    let missedLogicalFrameCount: Int
+    let deferredDrainCount: Int
+    let zeroWorkLeaseCount: Int
+    let allPreparationAndEncodingOffMain: Bool
+}
+
+private struct OffMainStrokeTraceDrainOutcome {
+    let coordinatorSnapshot: StrokeRenderSnapshot
+    let surfaceSnapshot: StrokePrivateSurfaceEncoderSnapshot
+    let deferredDrainCount: Int
+    let zeroWorkLeaseCount: Int
+    let commitBarrierReached: Bool
+    let allPreparationAndEncodingOffMain: Bool
+    let preparationCPUNanoseconds: UInt64
+}
+
+private struct OffMainStrokeTraceCommandOutcome: Sendable {
+    let succeeded: Bool
+    let errorMessage: String?
+}
+#endif
+
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
     public let device: any MTLDevice
@@ -172,7 +217,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         StrokeRuntimeReplayEpochTracker()
     public private(set) var interactiveGridVisibility = false
     public var isIdle: Bool {
-        activeStroke == nil && pendingRasterOperation == nil
+        activeStroke == nil
+            && pendingRasterOperation == nil
+            && strokeWorkspaceState == .available
     }
     public var strokeRuntimeSnapshot: StrokeRuntimeTelemetrySnapshot? {
         strokeRuntimeController?.snapshot
@@ -235,7 +282,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public var brushLabDiagnosticSnapshot:
         BrushLabRendererDiagnosticSnapshot
     {
-        let scheduler = activeStroke?.scheduler?.diagnosticSnapshot
+        let scheduler = activeStroke?.frozenHarnessScheduler?
+            .diagnosticSnapshot
         let telemetry = brushLabDepositionTelemetry.snapshot
         let timings = brushLabDepositionTelemetry.timings
         let pool = instancePool.diagnosticSnapshot
@@ -339,10 +387,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let encodedReplayClear: Bool
         let replayEpoch: UInt64
         let encodedAuthoritativeIdentityRange: Range<UInt64>?
+        let preparedWorkerFrame: PreparedWorkerFrameIdentity?
 
         var instanceCount: Int {
             authoritativeCount + predictedCount
         }
+    }
+
+    struct PreparedWorkerFrameIdentity: Equatable, Sendable {
+        let generation: UInt64
+        let token: UInt64
+        let recordCount: Int
+    }
+
+    struct PendingPreparedSurfaceFrame: Sendable {
+        let identity: PreparedWorkerFrameIdentity
+        let lease: StrokePreparedSurfaceLease
+        let logicalDabCount: Int
+        let replayEpoch: UInt64
     }
 
     struct ActiveStrokeExecution {
@@ -350,7 +412,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let style: StrokeRenderStyle
         let brush: CompiledBrushRenderState
         let renderIdentity: BrushRenderIdentity
-        var scheduler: FrameScheduler?
+        /// Scheduler retained only by deterministic projected-dab harnesses.
+        /// Interactive compiled-brush strokes always leave this nil.
+        var frozenHarnessScheduler: FrameScheduler?
         var commitRequested: Bool
         var commitRetainedByteLimit: Int?
         var pendingRevisions: PendingRasterRevisionPair?
@@ -398,6 +462,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     private struct PredictionGenerationLimitReached: Error {
         let reason: PredictionOverloadReasons
+    }
+
+    struct PredictionSubmissionScratchSnapshot: Equatable, Sendable {
+        let count: Int
+        let highWater: Int
+        let storageCapacity: Int
+        let storageIdentity: UInt
+        let storageReallocationCount: UInt64
+        let lastSubmittedSampleCount: Int
+        let lastAcceptedSampleCount: Int
+        let lastShedSampleCount: Int
+        let lastValidatedSampleCount: Int
+        let lastTelemetrySampleCount: Int
     }
 
     /// Renderer-owned collection storage used by the synchronous input and
@@ -484,6 +561,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     struct PreparedRasterReplacement {
         let resources: RasterResources
+        let strokeMetalSurfaceResources: StrokeMetalSurfaceResources
         let strategy: TilingStrategy
         let radialPageTableTexture: any MTLTexture
     }
@@ -573,6 +651,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     var depositionFrameBudget: DepositionFrameBudget
     private(set) var activeDrawBrush: CompiledBrush?
     private(set) var activeEraserBrush: CompiledBrush?
+    private var activeDrawBrushRenderState: CompiledBrushRenderState?
+    private var activeEraserBrushRenderState: CompiledBrushRenderState?
     let instancePool: DabInstanceBufferPool
     var depositionEncoder: DepositionEncoder?
     private var brushLabDepositionTelemetry = DepositionTelemetry()
@@ -597,6 +677,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     let completionMailbox = GridRenderCompletionMailbox()
     private let rasterCompletionMailbox = RendererRasterCompletionMailbox()
     var resources: RasterResources
+    private var strokeMetalSurfaceResources: StrokeMetalSurfaceResources
+    private var strokeMetalSurfaceInstallationCount: UInt64 = 1
     private var radialPageTableTexture: (any MTLTexture)?
     var tileSize: PatternSize { resources.tileSize }
     var canonical: CanonicalRaster { resources.canonical }
@@ -609,7 +691,51 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     var activeStroke: ActiveStrokeExecution?
     var pendingRasterOperation: PendingRasterOperation?
     var strokeGenerator: BrushStrokeGenerator?
-    var strokeRenderCoordinator: StrokeRenderCoordinator?
+    private var strokePreparationBridge: StrokePreparationBridge?
+    private var warmedStrokePreparationBridge: StrokePreparationBridge
+    private enum StrokeWorkspaceState: Equatable {
+        case available
+        case borrowed(UInt64)
+        case retiring(UInt64)
+    }
+    private var strokeWorkspaceState = StrokeWorkspaceState.available
+    private var strokePreparationGeneration: UInt64?
+    private var strokePreparationAllocationProbe:
+        StrokePreparationAllocationProbe?
+    private var strokePreparationResultScratch:
+        [StrokePreparationResult] = []
+    private var predictionSubmissionScratch: [StrokeSample] = []
+    private var predictionSubmissionScratchHighWater = 0
+    private var predictionSubmissionScratchStorageIdentity: UInt = 0
+    private var predictionSubmissionScratchStorageReallocationCount: UInt64 = 0
+    private var predictionSubmissionLastSubmittedSampleCount = 0
+    private var predictionSubmissionLastAcceptedSampleCount = 0
+    private var predictionSubmissionLastShedSampleCount = 0
+    private var predictionSubmissionLastValidatedSampleCount = 0
+    private var predictionSubmissionLastTelemetrySampleCount = 0
+    private var pendingPreparedWorkerFrame: PreparedWorkerFrameIdentity?
+    private var pendingPreparedSurfaceFrame: PendingPreparedSurfaceFrame?
+    private var submittedPreparedWorkerFrame:
+        PreparedWorkerFrameIdentity?
+    private var currentPreparedSurfaceLease:
+        StrokePreparedSurfaceLease?
+    private var offMainLiveVisible = false
+    private var offMainReplayVisible = false
+    var compositeLiveIsVisible: Bool {
+        if strokePreparationBridge != nil {
+            return offMainLiveVisible || offMainReplayVisible
+        }
+        return liveTile.isVisible || replayTile.isVisible
+    }
+    private var pendingPreparationCommitRetainedBytes: Int?
+    private var lastOffMainCoordinatorSnapshot: StrokeRenderSnapshot?
+    private var lastOffMainPredictionProvenanceBoundary:
+        PredictionProvenanceBoundary?
+    private var lastOffMainEncodingRanOnMainThread: Bool?
+    private var lastOffMainSurfaceSnapshot:
+        StrokePrivateSurfaceEncoderSnapshot?
+    private var lastOffMainZeroWorkLeaseCount = 0
+    private var lastOffMainPredictedInstanceCount = 0
     var predictedStrokeGenerator: BrushStrokeGenerator?
     var transientStrokeBuffer: TransientStrokeBuffer?
     var brushInputDeriver = BrushInputDeriver()
@@ -634,15 +760,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var nextReplayEpoch: UInt64 = 1
     private var knownStrokeTotalDistance: Float?
 
-    #if DEBUG
-    enum CompatibilityInkRuntimeRoute: Equatable {
-        case incremental
-        case legacyReplay
-    }
-
-    var compatibilityInkRuntimeRoute: CompatibilityInkRuntimeRoute =
-        .incremental
-    #endif
+    private var forceOffMainStrokeCommandFailureForTesting = false
 
     public convenience init(
         device: any MTLDevice,
@@ -696,7 +814,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         self.commandQueue = commandQueue
         self.library = library
         self.resources = resources
-        depositionFrameBudget = try DepositionFrameBudget(
+        let frameBudget = try DepositionFrameBudget(
             cpuPreparationNanoseconds: 1_500_000,
             maximumAuthoritativeInstances:
                 GridCanvasContract.instanceCapacity,
@@ -710,6 +828,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     .visibleEpochProjectedInstanceCapacity,
             inFlightUploadBufferCount:
                 GridCanvasContract.inFlightBufferCount
+        )
+        depositionFrameBudget = frameBudget
+        strokeMetalSurfaceResources = try StrokeMetalSurfaceResources(
+            device: device,
+            pixelSize: storageSize,
+            maximumRecordCount: max(
+                frameBudget.maximumAuthoritativeInstances,
+                frameBudget.maximumPredictedInstances
+            )
+        )
+        warmedStrokePreparationBridge = StrokePreparationBridge(
+            budget: frameBudget,
+            targetFramesPerSecond: 120
         )
         activeDrawBrush = nil
         activeEraserBrush = nil
@@ -732,6 +863,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         completedUploadRanges.reserveCapacity(
             GridCanvasContract.inFlightBufferCount
+        )
+        strokePreparationResultScratch.reserveCapacity(1)
+        predictionSubmissionScratch.reserveCapacity(
+            PredictionOverlay.maximumNormalizedSampleCount
         )
         super.init()
         depositionEncoder = DepositionEncoder(
@@ -812,6 +947,31 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         _ configuration: SymmetryDocumentConfiguration,
         pixelSize proposedPixelSize: PixelSize
     ) throws {
+        try replaceEmptyDocumentConfiguration(
+            configuration,
+            pixelSize: proposedPixelSize,
+            forceStrokeSurfaceAllocationFailure: false
+        )
+    }
+
+    func replaceEmptyDocumentConfigurationForTesting(
+        _ configuration: SymmetryDocumentConfiguration,
+        pixelSize proposedPixelSize: PixelSize,
+        forceStrokeSurfaceAllocationFailure: Bool
+    ) throws {
+        try replaceEmptyDocumentConfiguration(
+            configuration,
+            pixelSize: proposedPixelSize,
+            forceStrokeSurfaceAllocationFailure:
+                forceStrokeSurfaceAllocationFailure
+        )
+    }
+
+    private func replaceEmptyDocumentConfiguration(
+        _ configuration: SymmetryDocumentConfiguration,
+        pixelSize proposedPixelSize: PixelSize,
+        forceStrokeSurfaceAllocationFailure: Bool
+    ) throws {
         guard isIdle else {
             throw MetalRendererError.tilingChangeRequiresIdle
         }
@@ -835,7 +995,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 )
             }
         }
-        try installEmptyStrategy(proposed)
+        try installEmptyStrategy(
+            proposed,
+            forceStrokeSurfaceAllocationFailure:
+                forceStrokeSurfaceAllocationFailure
+        )
     }
 
     public func reconcileGeometryLock(documentIsEmpty: Bool) throws {
@@ -852,7 +1016,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func installEmptyStrategy(
-        _ proposed: TilingStrategy
+        _ proposed: TilingStrategy,
+        forceStrokeSurfaceAllocationFailure: Bool = false
     ) throws {
         let canvasSizeChanged = proposed.canvasSize != pixelSize
         let proposedStorageSize = PixelSize(
@@ -870,16 +1035,39 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             device: device,
             compiled: proposed.compiledSymmetry
         )
+        if forceStrokeSurfaceAllocationFailure {
+            throw MetalRendererError.textureAllocationFailed
+        }
+        let replacementStrokeMetalSurfaceResources =
+            try StrokeMetalSurfaceResources(
+                device: device,
+                pixelSize: proposedStorageSize,
+                maximumRecordCount: max(
+                    depositionFrameBudget.maximumAuthoritativeInstances,
+                    depositionFrameBudget.maximumPredictedInstances
+                )
+            )
         let priorResources = resources
         let priorStrategy = tilingStrategy
         let priorPageTable = radialPageTableTexture
+        let priorStrokeMetalSurfaceResources =
+            strokeMetalSurfaceResources
+        let priorStrokeMetalSurfaceInstallationCount =
+            strokeMetalSurfaceInstallationCount
         resources = replacement
+        strokeMetalSurfaceResources =
+            replacementStrokeMetalSurfaceResources
+        strokeMetalSurfaceInstallationCount &+= 1
         tilingStrategy = proposed
         radialPageTableTexture = replacementPageTable
         do {
             try clearInitialTextures()
         } catch {
             resources = priorResources
+            strokeMetalSurfaceResources =
+                priorStrokeMetalSurfaceResources
+            strokeMetalSurfaceInstallationCount =
+                priorStrokeMetalSurfaceInstallationCount
             tilingStrategy = priorStrategy
             radialPageTableTexture = priorPageTable
             throw error
@@ -937,11 +1125,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.compiledBrushActivationRequiresIdle
         }
         try validateCompiledBrush(brush)
+        let renderState = brush.renderState
         switch mode {
         case .draw:
             activeDrawBrush = brush
+            activeDrawBrushRenderState = renderState
         case .erase:
             activeEraserBrush = brush
+            activeEraserBrushRenderState = renderState
         }
     }
 
@@ -1078,6 +1269,24 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         throw MetalRendererError.compiledBrushUnavailable(style.compositeMode)
     }
 
+    private func compiledBrushRenderState(
+        for style: StrokeRenderStyle
+    ) throws -> CompiledBrushRenderState {
+        let state: CompiledBrushRenderState? = switch style.compositeMode {
+        case .draw:
+            activeDrawBrushRenderState
+        case .erase:
+            activeEraserBrushRenderState
+        }
+        guard let state,
+              state.renderIdentity == style.renderIdentity,
+              state.program == style.program
+        else {
+            throw MetalRendererError.compiledBrushIdentityMismatch
+        }
+        return state
+    }
+
     public func setPeriodicConfiguration(
         _ configuration: PeriodicSymmetryConfiguration
     ) throws {
@@ -1090,6 +1299,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         style: StrokeRenderStyle
     ) throws {
         try validateStrokeBeginSample(sample)
+        let diameterLimits = style.program.definition.limits
+        guard style.diameter >= diameterLimits.minimumDiameter,
+              style.diameter <= diameterLimits.maximumDiameter
+        else {
+            throw MetalRendererError.brushDiameterOutOfRange(
+                actual: style.diameter,
+                minimum: diameterLimits.minimumDiameter,
+                maximum: diameterLimits.maximumDiameter
+            )
+        }
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         let wasIdle = isIdle
@@ -1100,10 +1319,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 succeeded: operationSucceeded
             )
         }
-        guard isIdle else {
+        guard isIdle, strokeWorkspaceState == .available else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let compiledBrush = try compiledBrush(for: style)
+        _ = try compiledBrush(for: style)
+        let brushRenderState = try compiledBrushRenderState(for: style)
         instancePool.beginStrokeDiagnostics()
         resetBrushLabDepositionDiagnostics()
         markBrushLabInputReceipt()
@@ -1123,81 +1343,55 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 alpha: 1
             )!
         }
-        strokeGenerator = BrushStrokeGenerator(
-            program: style.program,
-            nominalDiameter: style.diameter,
-            color: generatorColor,
-            seed: style.seed
-        )
-        transientStrokeBuffer = TransientStrokeBuffer(
-            replayContract: style.program.replayContract
-        )
         activeStroke = ActiveStrokeExecution(
             token: token,
             style: style,
-            brush: compiledBrush.renderState,
+            brush: brushRenderState,
             renderIdentity: style.renderIdentity,
-            scheduler: FrameScheduler(budget: depositionFrameBudget),
+            frozenHarnessScheduler: nil,
             commitRequested: false,
             commitRetainedByteLimit: nil,
             pendingRevisions: nil,
             pendingTokenBearingFrameCount: 0,
             isFinishedTransiently: false
         )
-        if shouldUseIncrementalCompatibilityInk(
-            style: style,
-            sample: sample
-        ) {
-            strokeRenderCoordinator = try StrokeRenderCoordinator(
-                program: style.program,
-                nominalDiameter: style.diameter,
-                color: generatorColor,
-                seed: style.seed,
-                viewport: viewport,
-                authoritativeCapacity:
-                    depositionFrameBudget
-                        .maximumPendingAuthoritativeInstances
-            )
-        }
-        strokeEventGeneration = rendererEventDispatcher
-            .advanceStrokeGeneration()
+        let generation = rendererEventDispatcher.advanceStrokeGeneration()
+        strokeEventGeneration = generation
         let runtimeBeginEvents = beginStrokeRuntime(sample)
         do {
             counters.newDabsThisEvent = 0
-            if strokeRenderCoordinator != nil {
-                let prepared = try strokeRenderCoordinator!.prepareBegin(
-                    actualSamples: [sample]
-                )
-                try ingestCoordinatorEmission(
-                    prepared,
-                    coordinator: strokeRenderCoordinator!,
-                    isFinishing: false
-                )
-                stageStrokeRuntimeEvents(runtimeBeginEvents)
-                operationSucceeded = true
-                return
-            }
-            let inputBefore = brushInputDeriver
-            let generatorBefore = strokeGenerator
-            let worldSample = brushInputDeriver.derive(
-                sample,
-                viewport: viewport
+            let forceOffMainCommandFailure =
+                forceOffMainStrokeCommandFailureForTesting
+            let metalResourceDescriptor = StrokeMetalResourceDescriptor(
+                surfaces: strokeMetalSurfaceResources,
+                brush: brushRenderState,
+                frameUniforms: frameUniforms(
+                    drawableSize: tileSize,
+                    showGridLines: false,
+                    liveVisible: true
+                ),
+                forceCommandFailure: forceOffMainCommandFailure
             )
-            guard var generator = strokeGenerator else {
-                throw MetalRendererError.invalidStrokeLifecycle
-            }
-            let dabs = try prepareGeneratedDabs(generator: &generator) {
-                generator, emit in
-                try generator.begin(worldSample, emit: emit)
-            }
-            strokeGenerator = generator
-            try ingestGeneratedSample(
-                worldSample,
-                dabs: dabs,
-                generatorBeforeSample: generatorBefore,
-                generatorSnapshot: generator,
-                inputDeriverBeforeSample: inputBefore,
-                isFinishing: false
+            let bridge = warmedStrokePreparationBridge
+            strokePreparationBridge = bridge
+            strokePreparationGeneration = generation
+            strokeWorkspaceState = .borrowed(generation)
+            try submitStrokeInput(
+                .begin(
+                    generation: generation,
+                    configuration: StrokePreparationConfiguration(
+                        program: style.program,
+                        nominalDiameter: style.diameter,
+                        color: generatorColor,
+                        seed: style.seed,
+                        viewport: viewport,
+                        tilingStrategy: tilingStrategy,
+                        metalResourceDescriptor: metalResourceDescriptor,
+                        allocationProbe: strokePreparationAllocationProbe
+                    ),
+                    samples: [sample]
+                ),
+                using: bridge
             )
             stageStrokeRuntimeEvents(runtimeBeginEvents)
             operationSucceeded = true
@@ -1214,6 +1408,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         sample: StrokeSample
     ) throws {
         try validateStrokeAppendSample(sample)
+        if sample.kind != .predicted {
+            try requireCollectingStroke(token: token)
+            try requireCurrentPredictionProvenance()
+        }
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         defer {
@@ -1225,9 +1423,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         markBrushLabInputReceipt()
         recordStrokeRuntimeInput(sample)
         if sample.kind == .predicted {
-            try replacePredictedStrokeSuffix(
-                token: token,
-                samples: CollectionOfOne(sample)
+            try requireCollectingStroke(token: token)
+            guard let bridge = strokePreparationBridge,
+                  let generation = strokePreparationGeneration
+            else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            _ = try submitStrokeInput(
+                .replacePredictionSample(
+                    generation: generation,
+                    sample: sample
+                ),
+                using: bridge
             )
         } else {
             try appendAuthoritativeStroke(token: token, sample: sample)
@@ -1235,13 +1442,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         operationSucceeded = true
     }
 
-    public func appendStrokeBatch(
+    package func appendStrokeBatch(
         token: RendererOperationToken,
         samples: [StrokeSample]
     ) throws {
         guard !samples.isEmpty else { return }
         for sample in samples {
             try validateStrokeAppendSample(sample)
+        }
+        if samples.contains(where: { $0.kind != .predicted }) {
+            try requireCollectingStroke(token: token)
+            try requireCurrentPredictionProvenance()
         }
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
@@ -1281,6 +1492,143 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         operationSucceeded = true
     }
 
+    /// Production batch route for the BrushInput adapter's explicit ordering
+    /// contract: exact authoritative prefix followed by a replaceable predicted
+    /// suffix. Only the admitted prediction prefix is inspected on Main; the
+    /// suffix count still reaches the worker for overload accounting.
+    public func appendStrokeBatch<AuthoritativeSamples, PredictedSamples>(
+        token: RendererOperationToken,
+        authoritativeSamples: AuthoritativeSamples,
+        predictedSamples: PredictedSamples,
+        submittedPredictionSampleCount: Int? = nil
+    ) throws
+    where
+        AuthoritativeSamples: RandomAccessCollection,
+        PredictedSamples: RandomAccessCollection,
+        AuthoritativeSamples.Element == StrokeSample,
+        PredictedSamples.Element == StrokeSample
+    {
+        let receivedPredictionSampleCount = predictedSamples.count
+        let submittedPredictionSampleCount =
+            submittedPredictionSampleCount
+                ?? receivedPredictionSampleCount
+        guard submittedPredictionSampleCount >= receivedPredictionSampleCount
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        guard !authoritativeSamples.isEmpty
+                || submittedPredictionSampleCount > 0
+        else {
+            return
+        }
+        for sample in authoritativeSamples {
+            try validateStrokeAppendSample(sample)
+            guard sample.kind == .actual || sample.kind == .coalesced else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+        }
+        predictionSubmissionScratch.removeAll(keepingCapacity: true)
+        for sample in predictedSamples.prefix(
+            PredictionOverlay.maximumNormalizedSampleCount
+        ) {
+            try validateStrokeAppendSample(sample)
+            guard sample.kind == .predicted else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            predictionSubmissionScratch.append(sample)
+        }
+        if !authoritativeSamples.isEmpty {
+            try requireCollectingStroke(token: token)
+            try requireCurrentPredictionProvenance()
+        } else {
+            try requireCollectingStroke(token: token)
+        }
+
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        var operationSucceeded = false
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: operationSucceeded
+            )
+        }
+        markBrushLabInputReceipt()
+        for sample in authoritativeSamples {
+            recordStrokeRuntimeInput(sample)
+            try appendAuthoritativeStroke(token: token, sample: sample)
+            commitRendererEventCheckpoint()
+        }
+        for sample in predictionSubmissionScratch {
+            recordStrokeRuntimeInput(sample)
+        }
+        if submittedPredictionSampleCount > 0 {
+            let admission = try submitPrevalidatedPredictedStrokeSuffix(
+                token: token,
+                samples: predictionSubmissionScratch,
+                submittedSampleCount: submittedPredictionSampleCount
+            )
+            recordPredictionSubmissionScratch(
+                admission: admission,
+                submittedSampleCount: submittedPredictionSampleCount
+            )
+            commitRendererEventCheckpoint()
+        }
+        operationSucceeded = true
+    }
+
+    private func submitPrevalidatedPredictedStrokeSuffix(
+        token: RendererOperationToken,
+        samples: [StrokeSample],
+        submittedSampleCount: Int
+    ) throws -> StrokeInputAdmission {
+        precondition(samples.count <= submittedSampleCount)
+        guard let bridge = strokePreparationBridge,
+              let generation = strokePreparationGeneration
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        return try submitStrokeInput(
+            .replacePrediction(
+                generation: generation,
+                samples: samples,
+                acceptedCount: submittedSampleCount
+            ),
+            using: bridge
+        )
+    }
+
+    private func recordPredictionSubmissionScratch(
+        admission: StrokeInputAdmission,
+        submittedSampleCount: Int
+    ) {
+        let identity = predictionSubmissionScratch.withUnsafeBufferPointer {
+            buffer -> UInt in
+            guard let baseAddress = buffer.baseAddress else { return 0 }
+            return UInt(bitPattern: UnsafeRawPointer(baseAddress))
+        }
+        if identity != 0 {
+            if predictionSubmissionScratchStorageIdentity != 0,
+               predictionSubmissionScratchStorageIdentity != identity
+            {
+                predictionSubmissionScratchStorageReallocationCount &+= 1
+            }
+            predictionSubmissionScratchStorageIdentity = identity
+        }
+        predictionSubmissionScratchHighWater = max(
+            predictionSubmissionScratchHighWater,
+            predictionSubmissionScratch.count
+        )
+        predictionSubmissionLastSubmittedSampleCount = submittedSampleCount
+        predictionSubmissionLastAcceptedSampleCount =
+            admission.acceptedPredictionSampleCount
+        predictionSubmissionLastShedSampleCount =
+            admission.shedPredictionSampleCount
+        predictionSubmissionLastValidatedSampleCount =
+            predictionSubmissionScratch.count
+        predictionSubmissionLastTelemetrySampleCount =
+            predictionSubmissionScratch.count
+    }
+
     private func replacePredictedStrokeSuffix<Samples: Collection>(
         token: RendererOperationToken,
         samples: Samples
@@ -1295,189 +1643,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             sampleIndex = samples.index(after: sampleIndex)
         }
         try requireCollectingStroke(token: token)
-        guard let authoritativeGenerator = strokeGenerator,
-              transientStrokeBuffer != nil,
-              let scheduler = activeStroke?.scheduler
+        guard let bridge = strokePreparationBridge,
+              let generation = strokePreparationGeneration
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let limits = transientStrokeBuffer!.activeReplayLimits
-        let retainedActualProjectedCount =
-            transientStrokeBuffer!.actualChunks.reduce(0) {
-                $0 + $1.projectedInstanceCount
-            }
-        let maximumPredictionSamples = min(
-            PredictionOverlay.maximumNormalizedSampleCount,
-            max(
-                0,
-                limits.maximumSamples
-                    - transientStrokeBuffer!.actualSampleCount
-            )
-        )
-        let maximumPredictionDabs = min(
-            PredictionOverlay.maximumLogicalDabCount,
-            max(
-                0,
-                limits.maximumDabs
-                    - transientStrokeBuffer!.actualDabCount
-            )
-        )
-        let maximumPredictionProjectedInstances = min(
-            depositionFrameBudget.maximumPredictedInstances,
-            min(
-                max(
-                    0,
-                    limits.maximumProjectedInstances
-                        - retainedActualProjectedCount
-                ),
-                max(
-                    0,
-                    scheduler.predictedCapacity
-                        - retainedActualProjectedCount
-                )
-            )
-        )
-        var predictionOverload: PredictionOverloadReasons = []
-        if samples.count > maximumPredictionSamples {
-            predictionOverload.insert(.normalizedSamples)
-        }
-
-        var previewDeriver = brushInputDeriver
-        var previewGenerator = authoritativeGenerator
-        var generatedDabCount = 0
-        var projectedInstanceCount = 0
-        var predictionWasTruncated = false
-        depositionInputScratch.transientChunks.removeAll(
-            keepingCapacity: true
-        )
-        depositionInputScratch.preparedDabs.removeAll(
-            keepingCapacity: true
-        )
-        depositionInputScratch.transientDabs.removeAll(
-            keepingCapacity: true
-        )
-        depositionInputScratch.preparedChunkRanges.removeAll(
-            keepingCapacity: true
-        )
-        depositionInputScratch.projectedArena.removeAll(
-            keepingCapacity: true
-        )
-        let arenaTransaction = try transientDabArena.beginTransaction(
-            replacingPrediction: true
-        )
-        defer { arenaTransaction.rollback() }
-
-        var admittedSampleCount = 0
-        for sample in samples {
-            guard admittedSampleCount < maximumPredictionSamples else {
-                break
-            }
-            admittedSampleCount += 1
-            let inputBefore = previewDeriver
-            let generatorBefore = previewGenerator
-            let worldSample = previewDeriver.deriveAdvancingPrediction(
-                sample,
-                viewport: viewport
-            )
-            let preparedPrediction = try prepareBoundedPredictedDabs(
-                generator: &previewGenerator,
-                resetScratch: false,
-                limits: PredictionGenerationLimits(
-                    maximumDabCount: max(
-                        0,
-                        maximumPredictionDabs - generatedDabCount
-                    ),
-                    maximumProjectedInstanceCount: max(
-                        0,
-                        maximumPredictionProjectedInstances
-                            - projectedInstanceCount
-                    )
-                )
-            ) { generator, emit in
-                try generator.append(worldSample, emit: emit)
-            }
-            let prepared = preparedPrediction.range
-            predictionOverload.formUnion(preparedPrediction.overload)
-            if preparedPrediction.overload.isEmpty == false {
-                predictionWasTruncated = true
-            }
-            let (nextCount, overflow) = generatedDabCount
-                .addingReportingOverflow(prepared.count)
-            guard !overflow, nextCount <= limits.maximumDabs else {
-                throw MetalRendererError.generatedDabCapacityExceeded(
-                    limits.maximumDabs
-                )
-            }
-            let chunkProjectedCount = prepared.reduce(0) {
-                $0 + depositionInputScratch.preparedDabs[$1]
-                    .projectedRange.count
-            }
-            let (nextProjectedCount, projectedOverflow) = projectedInstanceCount
-                .addingReportingOverflow(chunkProjectedCount)
-            guard !projectedOverflow,
-                  nextProjectedCount <= limits.maximumProjectedInstances
-            else {
-                throw MetalRendererError.projectedInstanceCapacityExceeded(
-                    limits.maximumProjectedInstances
-                )
-            }
-            generatedDabCount = nextCount
-            projectedInstanceCount = nextProjectedCount
-            depositionInputScratch.transientChunks.append(
-                TransientStrokeChunk(
-                    sample: worldSample,
-                    dabs: try transientDabSlice(
-                        for: prepared,
-                        predicted: true,
-                        transaction: arenaTransaction
-                    ),
-                    generatorSnapshotBeforeSample: generatorBefore,
-                    generatorSnapshotAfterSample: previewGenerator,
-                    inputDeriverSnapshotBeforeSample: inputBefore
-                )
-            )
-            depositionInputScratch.preparedChunkRanges.append(
-                prepared
-            )
-            if predictionWasTruncated { break }
-        }
-
-        depositionInputScratch.settledChunks.removeAll(
-            keepingCapacity: true
-        )
-        let replayProjectedInstanceCount =
-            try transientStrokeBuffer!.previewPredictedReplacement(
-                with: depositionInputScratch.transientChunks,
-                settledInto: &depositionInputScratch.settledChunks
-            )
-        try preflightStrokeMutation(
-            settledChunks: depositionInputScratch.settledChunks,
-            replayProjectedInstanceCount: replayProjectedInstanceCount
-        )
-        _ = try transientStrokeBuffer!.replacePredicted(
-            with: depositionInputScratch.transientChunks,
-            settledInto: &depositionInputScratch.settledChunks
-        )
-
-        try appendSettled(depositionInputScratch.settledChunks)
-        try rebuildReplayLayer(
-            preparedPredictedSuffixCount:
-                depositionInputScratch.preparedChunkRanges.count,
-            predictionProvenance:
-                strokeRenderCoordinator?
-                    .predictionProvenanceBoundary,
-            predictionOverload: predictionOverload
-        )
-        predictedInputDeriver = previewDeriver
-        predictedStrokeGenerator = previewGenerator
-        try arenaTransaction.commit(
-            retainingActual: transientStrokeBuffer!.actualChunks,
-            retainingPredicted: transientStrokeBuffer!.predictedChunks
-        )
-        counters.newDabsThisEvent = generatedDabCount
-        counters.totalDabsThisStroke += generatedDabCount
-        deferPreparedLogicalDabsForPublication(
-            depositionInputScratch.preparedChunkRanges
+        _ = try submitStrokeInput(
+            .replacePrediction(
+                generation: generation,
+                samples: Array(samples),
+                acceptedCount: samples.count
+            ),
+            using: bridge
         )
     }
 
@@ -1490,60 +1667,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         try requireCollectingStroke(token: token)
-        let predictionInvalidationBoundary = try
-            prevalidatedPredictionInvalidationBoundary()
-        counters.newDabsThisEvent = 0
-        if strokeRenderCoordinator != nil,
-           isIncrementalCompatibilitySample(sample)
-        {
-            let prepared = try strokeRenderCoordinator!.prepareAppend(
-                actualSamples: [sample]
-            )
-            try ingestCoordinatorEmission(
-                prepared,
-                coordinator: strokeRenderCoordinator!,
-                isFinishing: false
-            )
-            predictedInputDeriver = nil
-            predictedStrokeGenerator = nil
-            return
-        }
-        if strokeRenderCoordinator != nil {
-            // Estimated properties need the existing bounded correction path.
-            // The legacy generator mirrors coordinator state after every
-            // successful append, so this is a causal handoff, not a replay.
-            strokeRenderCoordinator = nil
-        }
-        guard let authoritativeGenerator = strokeGenerator else {
+        guard let bridge = strokePreparationBridge,
+              let generation = strokePreparationGeneration
+        else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-
-        var previewDeriver = brushInputDeriver
-        let inputBefore = previewDeriver
-        let worldSample = previewDeriver.derive(
-            sample,
-            viewport: viewport
+        try submitStrokeInput(
+            .appendAuthoritativeSample(
+                generation: generation,
+                sample: sample
+            ),
+            using: bridge
         )
-        var generator = authoritativeGenerator
-        let generatorBefore = generator
-        let dabs = try prepareGeneratedDabs(generator: &generator) {
-            generator, emit in
-            try generator.append(worldSample, emit: emit)
-        }
-        try ingestGeneratedSample(
-            worldSample,
-            dabs: dabs,
-            generatorBeforeSample: generatorBefore,
-            generatorSnapshot: generator,
-            inputDeriverBeforeSample: inputBefore,
-            isFinishing: false,
-            predictionInvalidationBoundary:
-                predictionInvalidationBoundary
-        )
-        brushInputDeriver = previewDeriver
-        strokeGenerator = generator
-        predictedInputDeriver = nil
-        predictedStrokeGenerator = nil
     }
 
     public func requestStrokeCommit(
@@ -1565,7 +1700,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try requireCollectingStroke(token: token)
         do {
             try finishStrokeTransient(token: token, sample: sample)
-            try requestCompiledStrokeCommit(
+            try requestOffMainStrokeCommit(
                 maximumRetainedBytes: maximumRetainedBytes
             )
             operationSucceeded = true
@@ -1585,6 +1720,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         sample: StrokeSample
     ) throws {
         try validateStrokeFinishSample(sample)
+        try requireCollectingStroke(token: token)
+        try requireCurrentPredictionProvenance()
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         defer {
@@ -1594,58 +1731,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         try requireCollectingStroke(token: token)
+        markBrushLabInputReceipt()
         recordStrokeRuntimeInput(sample)
-        let predictionInvalidationBoundary = try
-            prevalidatedPredictionInvalidationBoundary()
-        counters.newDabsThisEvent = 0
-        if strokeRenderCoordinator != nil,
-           isIncrementalCompatibilitySample(sample)
-        {
-            let prepared = try strokeRenderCoordinator!.prepareFinish(
-                actualSamples: [sample]
-            )
-            try ingestCoordinatorEmission(
-                prepared,
-                coordinator: strokeRenderCoordinator!,
-                isFinishing: true
-            )
-            predictedInputDeriver = nil
-            predictedStrokeGenerator = nil
-            activeStroke?.isFinishedTransiently = true
-            operationSucceeded = true
-            return
-        }
-        if strokeRenderCoordinator != nil {
-            strokeRenderCoordinator = nil
-        }
-        var previewDeriver = brushInputDeriver
-        let inputBefore = previewDeriver
-        let worldSample = previewDeriver.derive(
-            sample,
-            viewport: viewport
-        )
-        guard var generator = strokeGenerator else {
+        guard let bridge = strokePreparationBridge,
+              let generation = strokePreparationGeneration
+        else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        let generatorBefore = generator
-        let dabs = try prepareGeneratedDabs(generator: &generator) {
-            generator, emit in
-            try generator.finish(worldSample, emit: emit)
-        }
-        try ingestGeneratedSample(
-            worldSample,
-            dabs: dabs,
-            generatorBeforeSample: generatorBefore,
-            generatorSnapshot: generator,
-            inputDeriverBeforeSample: inputBefore,
-            isFinishing: true,
-            predictionInvalidationBoundary:
-                predictionInvalidationBoundary
+        try submitStrokeInput(
+            .finish(generation: generation, samples: [sample]),
+            using: bridge
         )
-        brushInputDeriver = previewDeriver
-        strokeGenerator = generator
-        predictedInputDeriver = nil
-        predictedStrokeGenerator = nil
         activeStroke?.isFinishedTransiently = true
         operationSucceeded = true
     }
@@ -1669,7 +1765,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         do {
-            try requestCompiledStrokeCommit(
+            try requestOffMainStrokeCommit(
                 maximumRetainedBytes: maximumRetainedBytes
             )
             operationSucceeded = true
@@ -1689,6 +1785,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         sample: StrokeSample
     ) throws {
         try validateEstimatedStrokeUpdateSample(sample)
+        try requireEditableStroke(token: token)
+        try requireCurrentPredictionProvenance()
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         defer {
@@ -1699,275 +1797,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         recordStrokeRuntimeInput(sample)
         try requireEditableStroke(token: token)
-        guard transientStrokeBuffer != nil,
-              let scheduler = activeStroke?.scheduler
+        guard let bridge = strokePreparationBridge,
+              let generation = strokePreparationGeneration
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        var updateDeriver = brushInputDeriver
-        let update = updateDeriver.derive(sample, viewport: viewport)
-        let plan: BorrowedEstimatedStrokeUpdatePlan
-        do {
-            plan = try transientStrokeBuffer!.planEstimatedUpdate(
-                update,
-                replacementSamplesInto:
-                    &depositionInputScratch.worldSamples
-            )
-        } catch let error as TransientStrokeBufferError {
-            switch error {
-            case .unknownEstimatedUpdateIndex,
-                 .estimatedUpdateAlreadyResolved:
-                #if DEBUG
-                print("Ignoring late or unknown estimated stroke update: \(error)")
-                #endif
-                operationSucceeded = true
-                return
-            default:
-                throw error
-            }
-        }
-        guard var generator = plan.generatorBeforeReplacement else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let isPredictedReplay = plan.target == .predicted
-        let predictionProvenance = isPredictedReplay
-            ? strokeRenderCoordinator?.predictionProvenanceBoundary
-            : nil
-        if let predictionProvenance,
-           !predictionOverlay.canInvalidatePrediction(
-                from: predictionProvenance
-           )
-        {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let replayLimits = transientStrokeBuffer!.activeReplayLimits
-        let retainedPredictionPrefix = isPredictedReplay
-            ? transientStrokeBuffer!.predictedChunks[
-                ..<plan.replacedChunkIndex
-            ]
-            : transientStrokeBuffer!.predictedChunks[..<0]
-        let retainedPredictionPrefixDabCount =
-            retainedPredictionPrefix.reduce(0) {
-                $0 + $1.dabs.count
-            }
-        let retainedPredictionPrefixProjectedCount =
-            retainedPredictionPrefix.reduce(0) {
-                $0 + $1.projectedInstanceCount
-            }
-        let retainedActualProjectedCount =
-            transientStrokeBuffer!.actualChunks.reduce(0) {
-                $0 + $1.projectedInstanceCount
-            }
-        let maximumReplacementDabCount = max(
-            0,
-            min(
-                PredictionOverlay.maximumLogicalDabCount
-                    - retainedPredictionPrefixDabCount,
-                replayLimits.maximumDabs
-                    - transientStrokeBuffer!.actualDabCount
-                    - retainedPredictionPrefixDabCount
-            )
-        )
-        let maximumReplacementProjectedCount = max(
-            0,
-            min(
-                depositionFrameBudget.maximumPredictedInstances
-                    - retainedPredictionPrefixProjectedCount,
-                replayLimits.maximumProjectedInstances
-                    - retainedActualProjectedCount
-                    - retainedPredictionPrefixProjectedCount,
-                scheduler.predictedCapacity
-                    - retainedActualProjectedCount
-                    - retainedPredictionPrefixProjectedCount
-            )
-        )
-        var generatedPredictionDabCount = 0
-        var generatedPredictionProjectedCount = 0
-        var predictionWasTruncated = false
-        var predictionOverload: PredictionOverloadReasons = []
-        if isPredictedReplay,
-           transientStrokeBuffer!.predictedSampleCount
-            > PredictionOverlay.maximumNormalizedSampleCount
-        {
-            predictionOverload.insert(.normalizedSamples)
-        }
-        var deriver = plan.inputDeriverBeforeReplacement
-            ?? (plan.target == .predicted
-                ? brushInputDeriver
-                : BrushInputDeriver())
-        depositionInputScratch.transientChunks.removeAll(
-            keepingCapacity: true
-        )
-        depositionInputScratch.preparedDabs.removeAll(
-            keepingCapacity: true
-        )
-        depositionInputScratch.transientDabs.removeAll(
-            keepingCapacity: true
-        )
-        depositionInputScratch.preparedChunkRanges.removeAll(
-            keepingCapacity: true
-        )
-        depositionInputScratch.projectedArena.removeAll(
-            keepingCapacity: true
-        )
-        let arenaTransaction = try transientDabArena.beginTransaction(
-            replacingPrediction: plan.target == .predicted
-        )
-        defer { arenaTransaction.rollback() }
-
-        for plannedSample in depositionInputScratch.worldSamples {
-            let inputBefore = deriver
-            let replayedSample = deriver.rederive(plannedSample)
-            precondition(
-                replayedSample == plannedSample,
-                "Estimated update plan and replay derivation diverged."
-            )
-            let generatorBefore = generator
-            let preparedPrediction: PreparedPredictionDabs
-            if isPredictedReplay, !predictionWasTruncated {
-                preparedPrediction = try prepareBoundedPredictedDabs(
-                    generator: &generator,
-                    resetScratch: false,
-                    limits: PredictionGenerationLimits(
-                        maximumDabCount: max(
-                            0,
-                            maximumReplacementDabCount
-                                - generatedPredictionDabCount
-                        ),
-                        maximumProjectedInstanceCount: max(
-                            0,
-                            maximumReplacementProjectedCount
-                                - generatedPredictionProjectedCount
-                        )
-                    )
-                ) { generator, emit in
-                    switch replayedSample.phase {
-                    case .began:
-                        try generator.begin(replayedSample, emit: emit)
-                    case .moved:
-                        try generator.append(replayedSample, emit: emit)
-                    case .ended:
-                        try generator.finish(replayedSample, emit: emit)
-                    case .cancelled:
-                        throw MetalRendererError.invalidStrokeLifecycle
-                    }
-                }
-            } else if isPredictedReplay {
-                let end = depositionInputScratch.preparedDabs.endIndex
-                preparedPrediction = PreparedPredictionDabs(
-                    range: end..<end,
-                    overload: []
-                )
-            } else {
-                preparedPrediction = PreparedPredictionDabs(
-                    range: try prepareGeneratedDabs(
-                        generator: &generator,
-                        resetScratch: false
-                    ) { generator, emit in
-                        switch replayedSample.phase {
-                        case .began:
-                            try generator.begin(replayedSample, emit: emit)
-                        case .moved:
-                            try generator.append(
-                                replayedSample,
-                                emit: emit
-                            )
-                        case .ended:
-                            try generator.finish(replayedSample, emit: emit)
-                        case .cancelled:
-                            throw MetalRendererError.invalidStrokeLifecycle
-                        }
-                    },
-                    overload: []
-                )
-            }
-            let prepared = preparedPrediction.range
-            if isPredictedReplay {
-                predictionOverload.formUnion(
-                    preparedPrediction.overload
-                )
-                if !preparedPrediction.overload.isEmpty {
-                    predictionWasTruncated = true
-                }
-                generatedPredictionDabCount += prepared.count
-                generatedPredictionProjectedCount += prepared.reduce(0) {
-                    $0 + depositionInputScratch.preparedDabs[$1]
-                        .projectedRange.count
-                }
-            }
-            depositionInputScratch.transientChunks.append(
-                TransientStrokeChunk(
-                    sample: replayedSample,
-                    dabs: try transientDabSlice(
-                        for: prepared,
-                        predicted: plan.target == .predicted,
-                        transaction: arenaTransaction
-                    ),
-                    generatorSnapshotBeforeSample: generatorBefore,
-                    generatorSnapshotAfterSample: generator,
-                    inputDeriverSnapshotBeforeSample: inputBefore
-                )
-            )
-            depositionInputScratch.preparedChunkRanges.append(
-                prepared
-            )
-        }
-        let estimatedPreview = try transientStrokeBuffer!
-            .previewEstimatedSuffix(
-                using: plan,
-                expectedSamples: depositionInputScratch.worldSamples,
-                with: depositionInputScratch.transientChunks,
-                settledInto: &depositionInputScratch.settledChunks
-            )
-        try preflightStrokeMutation(
-            settledChunks: depositionInputScratch.settledChunks,
-            replayProjectedInstanceCount:
-                estimatedPreview.retainedProjectedInstanceCount
-        )
-        _ = try transientStrokeBuffer!.replaceEstimatedSuffix(
-            using: plan,
-            expectedSamples: depositionInputScratch.worldSamples,
-            with: depositionInputScratch.transientChunks,
-            settledInto: &depositionInputScratch.settledChunks
-        )
-        try appendSettled(depositionInputScratch.settledChunks)
-        switch plan.target {
-        case .authoritative:
-            try rebuildReplayLayer(
-                preparedActualSuffixCount: min(
-                    depositionInputScratch.preparedChunkRanges.count,
-                    transientStrokeBuffer!.actualChunks.count
-                )
-            )
-            strokeGenerator = generator
-            brushInputDeriver = deriver
-            predictedStrokeGenerator = nil
-            predictedInputDeriver = nil
-        case .predicted:
-            try rebuildReplayLayer(
-                preparedPredictedSuffixCount:
-                    depositionInputScratch.preparedChunkRanges.count,
-                predictionProvenance: predictionProvenance,
-                predictionOverload: predictionOverload
-            )
-            predictedStrokeGenerator = generator
-            predictedInputDeriver = deriver
-        }
-        try arenaTransaction.commit(
-            retainingActual: transientStrokeBuffer!.actualChunks,
-            retainingPredicted: transientStrokeBuffer!.predictedChunks
-        )
-        counters.newDabsThisEvent =
-            depositionInputScratch.transientChunks.reduce(0) {
-            $0 + $1.dabs.count
-        }
-        counters.totalDabsThisStroke += counters.newDabsThisEvent
-        deferPreparedLogicalDabsForPublication(
-            depositionInputScratch.preparedChunkRanges
+        try submitStrokeInput(
+            .applyEstimatedUpdate(
+                generation: generation,
+                sample: sample
+            ),
+            using: bridge
         )
         operationSucceeded = true
     }
-
     public func cancelStroke(token: RendererOperationToken) throws {
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
@@ -2086,6 +1929,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         let replacement = PreparedRasterReplacement(
             resources: replacementResources,
+            strokeMetalSurfaceResources: try StrokeMetalSurfaceResources(
+                device: device,
+                pixelSize: revision.pixelSize,
+                maximumRecordCount: max(
+                    depositionFrameBudget.maximumAuthoritativeInstances,
+                    depositionFrameBudget.maximumPredictedInstances
+                )
+            ),
             strategy: replacementStrategy,
             radialPageTableTexture: try Self.makeRadialPageTableTexture(
                 device: device,
@@ -2200,6 +2051,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         let replacement = PreparedRasterReplacement(
             resources: replacementResources,
+            strokeMetalSurfaceResources: try StrokeMetalSurfaceResources(
+                device: device,
+                pixelSize: newStoragePixelSize,
+                maximumRecordCount: max(
+                    depositionFrameBudget.maximumAuthoritativeInstances,
+                    depositionFrameBudget.maximumPredictedInstances
+                )
+            ),
             strategy: replacementStrategy,
             radialPageTableTexture: try Self.makeRadialPageTableTexture(
                 device: device,
@@ -2495,15 +2354,28 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    func prepareCurrentStrokeCommit(
+    private func requireCurrentPredictionProvenance() throws {
+        guard let visibleBoundary =
+            predictionOverlay.currentProvenance
+        else {
+            return
+        }
+        guard visibleBoundary
+            == lastOffMainPredictionProvenanceBoundary
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+    }
+
+    func prepareFrozenProjectionHarnessCommit(
         maximumRetainedBytes: Int
     ) throws {
-        try requestCompiledStrokeCommit(
+        try requestFrozenProjectionHarnessCommit(
             maximumRetainedBytes: maximumRetainedBytes
         )
     }
 
-    private func requestCompiledStrokeCommit(
+    private func requestFrozenProjectionHarnessCommit(
         maximumRetainedBytes: Int
     ) throws {
         markBrushLabInputReceipt()
@@ -2511,9 +2383,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.rasterRevisionStorageLimitExceeded
         }
         guard var execution = activeStroke,
-              let scheduler = execution.scheduler,
               !execution.commitRequested,
               execution.pendingRevisions == nil
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        guard strokePreparationBridge == nil,
+              let scheduler = execution.frozenHarnessScheduler
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -2547,12 +2423,110 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeStroke = execution
     }
 
+    private func markOffMainStrokeCommitReady(
+        maximumRetainedBytes: Int
+    ) throws {
+        markBrushLabInputReceipt()
+        guard maximumRetainedBytes >= 0 else {
+            throw MetalRendererError.rasterRevisionStorageLimitExceeded
+        }
+        guard strokePreparationBridge != nil,
+              var execution = activeStroke,
+              execution.frozenHarnessScheduler == nil,
+              !execution.commitRequested,
+              execution.pendingRevisions == nil
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        execution.commitRequested = true
+        execution.commitRetainedByteLimit = maximumRetainedBytes
+        activeStroke = execution
+    }
+
+    private func requestOffMainStrokeCommit(
+        maximumRetainedBytes: Int
+    ) throws {
+        guard maximumRetainedBytes >= 0 else {
+            throw MetalRendererError.rasterRevisionStorageLimitExceeded
+        }
+        guard pendingPreparationCommitRetainedBytes == nil,
+              let bridge = strokePreparationBridge,
+              let generation = strokePreparationGeneration
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        try submitStrokeInput(
+            .commit(generation: generation),
+            using: bridge
+        )
+        pendingPreparationCommitRetainedBytes = maximumRetainedBytes
+    }
+
+    @discardableResult
+    private func submitStrokeInput(
+        _ message: StrokeInputMessage,
+        using bridge: StrokePreparationBridge
+    ) throws -> StrokeInputAdmission {
+        do {
+            return try bridge.submit(message)
+        } catch let error as StrokeInputQueueError {
+            let rendererError: MetalRendererError
+            switch error {
+            case let .authoritativeCapacityExceeded(
+                _,
+                _,
+                _,
+                maximum
+            ):
+                rendererError = .strokeSampleCapacityExceeded(maximum)
+            case .invalidCapacity:
+                rendererError = .commandFailed(
+                    "stroke input queue has an invalid capacity"
+                )
+            }
+            failActiveOperationIfNeeded(rendererError)
+            throw rendererError
+        }
+    }
+
     func prepareCompiledCommitIfReady() throws {
-        guard var execution = activeStroke,
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
+        do {
+            try prepareCompiledCommitIfReadyCore()
+        } catch let error as MetalRendererError {
+            failActiveOperationIfNeeded(error)
+            throw error
+        } catch {
+            let rendererError = MetalRendererError.commandFailed(
+                error.localizedDescription
+            )
+            failActiveOperationIfNeeded(rendererError)
+            throw rendererError
+        }
+    }
+
+    private func prepareCompiledCommitIfReadyCore() throws {
+        guard var execution = activeStroke else { return }
+        let schedulerIsReady: Bool
+        if let scheduler = execution.frozenHarnessScheduler {
+            schedulerIsReady = scheduler.authoritativeIsDrained
+                && scheduler.predictedCount == 0
+        } else {
+            schedulerIsReady = strokePreparationBridge != nil
+                && pendingPreparedWorkerFrame == nil
+                && pendingPreparedSurfaceFrame == nil
+                && submittedPreparedWorkerFrame == nil
+        }
+        guard
               execution.commitRequested,
               execution.pendingRevisions == nil,
-              execution.scheduler?.authoritativeIsDrained == true,
-              execution.scheduler?.predictedCount == 0,
+              schedulerIsReady,
               execution.pendingTokenBearingFrameCount == 0,
               !needsReplayClear,
               let maximumRetainedBytes =
@@ -2611,7 +2585,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeStroke?.pendingRevisions = nil
     }
 
-    func beginHarnessExecution(radius: Float) throws {
+    /// Frozen projected-dab oracle entry point. It bypasses public stroke
+    /// input entirely and exists only for deterministic capture fixtures.
+    /// Interactive compiled-brush APIs never call this method.
+    func beginFrozenProjectionHarnessExecution(radius: Float) throws {
         guard activeStroke == nil else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -2639,7 +2616,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             style: style,
             brush: brush.renderState,
             renderIdentity: brush.renderIdentity,
-            scheduler: FrameScheduler(budget: depositionFrameBudget),
+            frozenHarnessScheduler: FrameScheduler(
+                budget: depositionFrameBudget
+            ),
             commitRequested: false,
             commitRetainedByteLimit: nil,
             pendingRevisions: nil,
@@ -2700,15 +2679,32 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         interactiveGridVisibility = visible
     }
 
+    /// Internal marker for a fatal completion outcome that already published
+    /// its renderer error and terminal operation event while it was drained.
+    /// Orchestration roots unwrap it without publishing the same failure again.
+    private struct PreviouslyPublishedInteractiveFailure: Error {
+        let error: MetalRendererError
+    }
+
     public func completePendingInteractiveStroke() throws
         -> GPUFrameMetrics
     {
         try completePendingInteractiveStroke(forceCommitFailure: false)
     }
 
-    func completePendingInteractiveStroke(
-        forceCommitFailure: Bool
-    ) throws -> GPUFrameMetrics {
+    /// Completes a scripted/headless interactive stroke and does not resume
+    /// until the actor-owned preparation workspace is truly reusable. The
+    /// regular pointer path remains request-driven and never awaits here.
+    public func completePendingInteractiveStrokeAndAwaitIdle() async throws
+        -> GPUFrameMetrics
+    {
+        guard let mailbox = strokePreparationBridge?.mailbox else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let progressRegistration =
+            StrokePreparationAsyncProgressRegistration(mailbox: mailbox)
+        defer { progressRegistration.remove() }
+
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         defer {
             endRendererEventOperationIfNeeded(
@@ -2718,22 +2714,54 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         do {
             var frames: [GPUFrameMetrics] = []
-            for _ in 0..<64 {
-                try prepareCompiledCommitIfReady()
+            while true {
+                let observedRevision = progressRegistration.currentRevision
+                try drainCompletedInteractiveOperationsCore()
+                try prepareCompiledCommitIfReadyCore()
                 if activeStroke?.pendingRevisions != nil {
                     break
                 }
-                frames.append(
-                    try completeNextPendingInteractiveFrame()
-                )
+                if pendingPreparedSurfaceFrame != nil {
+                    frames.append(
+                        try completeNextPendingInteractiveFrameCore()
+                    )
+                    continue
+                }
+                if progressRegistration.currentRevision
+                    != observedRevision
+                {
+                    continue
+                }
+                guard try await progressRegistration.waitForProgress(
+                    after: observedRevision
+                ) else {
+                    throw MetalRendererError.commandFailed(
+                        "stroke commit preparation exceeded its async bound"
+                    )
+                }
             }
-            try prepareCompiledCommitIfReady()
-            frames.append(
-                try submitPendingInteractiveCommit(
-                    forceFailure: forceCommitFailure
-                )
-            )
-            try drainCompletedInteractiveOperations()
+            try prepareCompiledCommitIfReadyCore()
+            frames.append(try submitPendingInteractiveCommitCore())
+            try drainCompletedInteractiveOperationsCore()
+
+            while true {
+                if isIdle { break }
+                let observedRevision = progressRegistration.currentRevision
+                try drainCompletedInteractiveOperationsCore()
+                if isIdle { break }
+                if progressRegistration.currentRevision
+                    != observedRevision
+                {
+                    continue
+                }
+                guard try await progressRegistration.waitForProgress(
+                    after: observedRevision
+                ) else {
+                    throw MetalRendererError.commandFailed(
+                        "stroke workspace retirement exceeded its async bound"
+                    )
+                }
+            }
             return GPUFrameMetrics(
                 cpuEncodeMilliseconds: frames.reduce(0) {
                     $0 + $1.cpuEncodeMilliseconds
@@ -2760,6 +2788,122 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     \.bufferLeaseCount
                 ).max() ?? 0
             )
+        } catch let published as PreviouslyPublishedInteractiveFailure {
+            throw published.error
+        } catch let error as MetalRendererError {
+            failActiveOperationIfNeeded(error)
+            throw error
+        } catch {
+            let rendererError = MetalRendererError.commandFailed(
+                error.localizedDescription
+            )
+            failActiveOperationIfNeeded(rendererError)
+            throw rendererError
+        }
+    }
+
+    /// Awaits only an already-requested actor workspace retirement. This is
+    /// useful for async workflows that cancel a transient stroke and must
+    /// subsequently capture state or begin another scripted operation.
+    public func awaitPendingStrokeWorkspaceRetirement() async throws {
+        if isIdle { return }
+        guard case let .retiring(retiringGeneration) = strokeWorkspaceState,
+              let mailbox = strokePreparationBridge?.mailbox
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let progressRegistration =
+            StrokePreparationAsyncProgressRegistration(mailbox: mailbox)
+        defer { progressRegistration.remove() }
+
+        while true {
+            let observedRevision = progressRegistration.currentRevision
+            try drainCompletedInteractiveOperations()
+            if strokeWorkspaceState != .retiring(retiringGeneration) {
+                return
+            }
+            if progressRegistration.currentRevision != observedRevision {
+                continue
+            }
+            guard try await progressRegistration.waitForProgress(
+                after: observedRevision
+            ) else {
+                throw MetalRendererError.commandFailed(
+                    "stroke workspace retirement exceeded its async bound"
+                )
+            }
+        }
+    }
+
+    func completePendingInteractiveStroke(
+        forceCommitFailure: Bool
+    ) throws -> GPUFrameMetrics {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
+        do {
+            var frames: [GPUFrameMetrics] = []
+            let maximumFrameAttempts = strokePreparationBridge == nil
+                ? 64
+                : 20_000
+            for _ in 0..<maximumFrameAttempts {
+                try drainCompletedInteractiveOperationsCore()
+                try prepareCompiledCommitIfReadyCore()
+                if activeStroke?.pendingRevisions != nil {
+                    break
+                }
+                if strokePreparationBridge != nil,
+                   pendingPreparedSurfaceFrame == nil
+                {
+                    // This synchronous API is a capture/test drain. Give the
+                    // independent preparation executor a scheduling window
+                    // instead of submitting empty GPU frames in a hot loop.
+                    Thread.sleep(forTimeInterval: 0.000_01)
+                    continue
+                }
+                frames.append(
+                    try completeNextPendingInteractiveFrameCore()
+                )
+            }
+            try prepareCompiledCommitIfReadyCore()
+            frames.append(
+                try submitPendingInteractiveCommitCore(
+                    forceFailure: forceCommitFailure
+                )
+            )
+            try drainCompletedInteractiveOperationsCore()
+            return GPUFrameMetrics(
+                cpuEncodeMilliseconds: frames.reduce(0) {
+                    $0 + $1.cpuEncodeMilliseconds
+                },
+                gpuMilliseconds: frames.reduce(0) {
+                    $0 + $1.gpuMilliseconds
+                },
+                eventToSubmitNanoseconds: frames.map(
+                    \.eventToSubmitNanoseconds
+                ).max() ?? 0,
+                gpuCompletionNanoseconds: frames.reduce(0) {
+                    Self.saturatingAdd(
+                        $0,
+                        $1.gpuCompletionNanoseconds
+                    )
+                },
+                encodedDabCount: frames.reduce(0) {
+                    $0 + $1.encodedDabCount
+                },
+                encodedInstanceCount: frames.reduce(0) {
+                    $0 + $1.encodedInstanceCount
+                },
+                bufferLeaseCount: frames.map(
+                    \.bufferLeaseCount
+                ).max() ?? 0
+            )
+        } catch let published as PreviouslyPublishedInteractiveFailure {
+            throw published.error
         } catch let error as MetalRendererError {
             failActiveOperationIfNeeded(error)
             throw error
@@ -2774,16 +2918,54 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     func completeNextPendingInteractiveFrame(
         forceFailure: Bool = false,
-        forceCommandBufferUnavailable: Bool = false
+        forceCommandBufferUnavailable: Bool = false,
+        forcePostSurfaceEncodingFailure: Bool = false
     ) throws -> GPUFrameMetrics {
-        drainFrameOutcomes()
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
+        do {
+            return try completeNextPendingInteractiveFrameCore(
+                forceFailure: forceFailure,
+                forceCommandBufferUnavailable:
+                    forceCommandBufferUnavailable,
+                forcePostSurfaceEncodingFailure:
+                    forcePostSurfaceEncodingFailure
+            )
+        } catch let published as PreviouslyPublishedInteractiveFailure {
+            throw published.error
+        } catch let error as MetalRendererError {
+            failActiveOperationIfNeeded(error)
+            throw error
+        } catch {
+            let rendererError = MetalRendererError.commandFailed(
+                error.localizedDescription
+            )
+            failActiveOperationIfNeeded(rendererError)
+            throw rendererError
+        }
+    }
+
+    private func completeNextPendingInteractiveFrameCore(
+        forceFailure: Bool = false,
+        forceCommandBufferUnavailable: Bool = false,
+        forcePostSurfaceEncodingFailure: Bool = false
+    ) throws -> GPUFrameMetrics {
+        if let submittedError = drainFrameOutcomes() {
+            throw PreviouslyPublishedInteractiveFailure(
+                error: submittedError
+            )
+        }
         drainCompletedUploadRanges()
+        try drainStrokePreparationResultsCore()
         guard !forceCommandBufferUnavailable,
               let commandBuffer = commandQueue.makeCommandBuffer()
         else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
+            throw MetalRendererError.commandBufferUnavailable
         }
 
         let uploads: [FrameUpload] = []
@@ -2799,6 +2981,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         do {
             let encoding = try encodeScheduledDeposition(commandBuffer)
             nativeEncoding = encoding
+            if forcePostSurfaceEncodingFailure,
+               encoding.preparedWorkerFrame != nil
+            {
+                throw MetalRendererError.commandFailed(
+                    "injected post-surface encoding failure"
+                )
+            }
             recordStrokeRuntimePreparedFrame(
                 id: runtimeFrameID,
                 encoding: encoding
@@ -2830,13 +3019,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             let submittedError = drainFrameOutcomes()
             drainCompletedUploadRanges()
             if let submittedError {
-                throw submittedError
+                throw PreviouslyPublishedInteractiveFailure(
+                    error: submittedError
+                )
             }
             do {
                 try validateCompletedCommand(commandBuffer)
-            } catch let error as MetalRendererError {
+            } catch {
                 instancePool.reclaimTerminalFailure(submissions)
-                report(error)
                 throw error
             }
             let frameMetrics = metrics(
@@ -2862,14 +3052,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 if nativeEncoding != nil,
                    commandBuffer.status == .notEnqueued
                 {
+                    installPreparedSurfaceTerminalHandler(
+                        for: nativeEncoding,
+                        on: commandBuffer
+                    )
                     commandBuffer.commit()
                     commandBuffer.waitUntilCompleted()
                 }
                 abandon(uploads)
-                failActiveOperationIfNeeded(
-                    (error as? MetalRendererError)
-                        ?? .commandFailed(error.localizedDescription)
-                )
+                _ = drainFrameOutcomes()
             }
             throw error
         }
@@ -2878,13 +3069,53 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func submitPendingInteractiveCommit(
         forceFailure: Bool = false
     ) throws -> GPUFrameMetrics {
-        drainFrameOutcomes()
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
+        do {
+            return try submitPendingInteractiveCommitCore(
+                forceFailure: forceFailure
+            )
+        } catch let published as PreviouslyPublishedInteractiveFailure {
+            throw published.error
+        } catch let error as MetalRendererError {
+            failActiveOperationIfNeeded(error)
+            throw error
+        } catch {
+            let rendererError = MetalRendererError.commandFailed(
+                error.localizedDescription
+            )
+            failActiveOperationIfNeeded(rendererError)
+            throw rendererError
+        }
+    }
+
+    private func submitPendingInteractiveCommitCore(
+        forceFailure: Bool = false
+    ) throws -> GPUFrameMetrics {
+        if let submittedError = drainFrameOutcomes() {
+            throw PreviouslyPublishedInteractiveFailure(
+                error: submittedError
+            )
+        }
         drainCompletedUploadRanges()
-        try prepareCompiledCommitIfReady()
+        try prepareCompiledCommitIfReadyCore()
         let nativeIsReady =
-            activeStroke?.scheduler?.authoritativeIsDrained == true
-            && activeStroke?.scheduler?.predictedCount == 0
-            && !needsReplayClear
+            if let scheduler = activeStroke?.frozenHarnessScheduler {
+                scheduler.authoritativeIsDrained
+                    && scheduler.predictedCount == 0
+                    && !needsReplayClear
+            } else {
+                strokePreparationBridge != nil
+                    && pendingPreparedWorkerFrame == nil
+                    && pendingPreparedSurfaceFrame == nil
+                    && submittedPreparedWorkerFrame == nil
+                    && !needsReplayClear
+            }
         guard activeStroke?.commitRequested == true,
               activeStroke?.pendingTokenBearingFrameCount == 0,
               activeStroke?.pendingRevisions != nil,
@@ -2893,9 +3124,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
+            throw MetalRendererError.commandBufferUnavailable
         }
 
         let runtimePrepareStarted = DispatchTime.now().uptimeNanoseconds
@@ -2906,7 +3135,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let start = CFAbsoluteTimeGetCurrent()
         let rasterCommit = try encodeCommit(
             commandBuffer,
-            liveVisible: liveTile.isVisible || replayTile.isVisible
+            liveVisible: compositeLiveIsVisible
         )
         _ = try finalizeFrameEncoding(
             encodedClear: false,
@@ -2931,6 +3160,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         commandBuffer.waitUntilCompleted()
         let completedAtNanoseconds =
             DispatchTime.now().uptimeNanoseconds
+        if commandBuffer.status == .completed, !forceFailure {
+            recordStrokeRuntimeCompletedFrame(
+                id: runtimeFrameID,
+                commandBuffer: commandBuffer,
+                submittedAt: submittedAtNanoseconds,
+                completedAt: completedAtNanoseconds
+            )
+        }
+        let submittedError = drainFrameOutcomes()
+        drainCompletedUploadRanges()
+        if let submittedError {
+            throw PreviouslyPublishedInteractiveFailure(
+                error: submittedError
+            )
+        }
         try validateCompletedCommand(commandBuffer)
         let frameMetrics = metrics(
             commandBuffer: commandBuffer,
@@ -2939,21 +3183,266 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             completedAtNanoseconds: completedAtNanoseconds
         )
         recordBrushLabCompletedFrame(frameMetrics)
-        recordStrokeRuntimeCompletedFrame(
-            id: runtimeFrameID,
-            commandBuffer: commandBuffer,
-            submittedAt: submittedAtNanoseconds,
-            completedAt: completedAtNanoseconds
-        )
         return frameMetrics
     }
 
     func drainCompletedInteractiveOperations() throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
+        do {
+            try drainCompletedInteractiveOperationsCore()
+        } catch let published as PreviouslyPublishedInteractiveFailure {
+            throw published.error
+        } catch let error as MetalRendererError {
+            failActiveOperationIfNeeded(error)
+            throw error
+        } catch {
+            let rendererError = MetalRendererError.commandFailed(
+                error.localizedDescription
+            )
+            failActiveOperationIfNeeded(rendererError)
+            throw rendererError
+        }
+    }
+
+    private func drainCompletedInteractiveOperationsCore() throws {
         let submittedError = drainFrameOutcomes()
         drainCompletedUploadRanges()
+        try drainStrokePreparationResultsCore()
         if let submittedError {
-            throw submittedError
+            throw PreviouslyPublishedInteractiveFailure(
+                error: submittedError
+            )
         }
+    }
+
+    private func drainStrokePreparationResultsCore() throws {
+        guard let bridge = strokePreparationBridge else { return }
+        bridge.drainResults(into: &strokePreparationResultScratch)
+        for result in strokePreparationResultScratch {
+            guard result.generation == strokePreparationGeneration else {
+                continue
+            }
+            switch result {
+            case let .prepared(batch):
+                try installPreparedStrokeBatch(batch)
+            case .predictionWasShed:
+                break
+            case .estimatedUpdateWasIgnored:
+                break
+            case let .estimatedUpdateWasRejected(
+                _,
+                error,
+                capacityFailure
+            ):
+                if let capacityFailure {
+                    throw rendererError(for: capacityFailure)
+                }
+                throw error
+            case .commitBarrierReached:
+                guard let maximumRetainedBytes =
+                    pendingPreparationCommitRetainedBytes
+                else {
+                    throw MetalRendererError.invalidStrokeLifecycle
+                }
+                pendingPreparationCommitRetainedBytes = nil
+                try markOffMainStrokeCommitReady(
+                    maximumRetainedBytes: maximumRetainedBytes
+                )
+            case let .cancelled(generation, _):
+                if strokeWorkspaceState == .retiring(generation) {
+                    finishStrokeWorkspaceRetirement(
+                        generation: generation
+                    )
+                    continue
+                }
+                throw MetalRendererError.invalidStrokeLifecycle
+            case let .failed(_, failure):
+                if case let .retiring(generation) = strokeWorkspaceState,
+                   generation == result.generation
+                {
+                    finishStrokeWorkspaceRetirement(
+                        generation: generation
+                    )
+                    continue
+                }
+                throw rendererError(for: failure)
+            }
+        }
+    }
+
+    private func rendererError(
+        for failure: StrokePreparationFailure
+    ) -> MetalRendererError {
+        switch failure {
+        case let .scheduler(
+            .authoritativeCapacityExceeded(_, _, _, maximum)
+        ):
+            return .projectedInstanceCapacityExceeded(maximum)
+        case let .scheduler(
+            .strokeSampleCapacityExceeded(_, maximum)
+        ):
+            return .strokeSampleCapacityExceeded(maximum)
+        case let .scheduler(
+            .generatedDabCapacityExceeded(_, maximum)
+        ), let .dabArenaCapacityExceeded(_, maximum):
+            return .generatedDabCapacityExceeded(maximum)
+        case let .scheduler(
+            .projectedInstanceCapacityExceeded(_, maximum)
+        ), let .scheduler(.replayCapacityExceeded(_, maximum)):
+            return .projectedInstanceCapacityExceeded(maximum)
+        case let .authoritativeQueue(
+            .capacityExceeded(_, _, maximum)
+        ):
+            return .generatedDabCapacityExceeded(maximum)
+        case .coordinator(.invalidLifecycle),
+             .scheduler(.invalidLifecycle),
+             .scheduler(.staleGeneration),
+             .scheduler(.invalidPreparedFrame),
+             .scheduler(.missingGeneratorCheckpoint):
+            return .invalidStrokeLifecycle
+        case .coordinator,
+             .authoritativeQueue,
+             .scheduler,
+             .stampPacking,
+             .privateSurfaceEncoding,
+             .transientBuffer,
+             .unexpected:
+            return .commandFailed(
+                "stroke preparation failed: \(failure)"
+            )
+        }
+    }
+
+    private func rendererError(
+        for failure: StrokePreparationCapacityFailure
+    ) -> MetalRendererError {
+        switch failure {
+        case let .strokeSamples(_, maximum):
+            .strokeSampleCapacityExceeded(maximum)
+        case let .generatedDabs(_, maximum):
+            .generatedDabCapacityExceeded(maximum)
+        case let .projectedInstances(_, maximum):
+            .projectedInstanceCapacityExceeded(maximum)
+        }
+    }
+
+    private func installPreparedStrokeBatch(
+        _ batch: StrokePreparedDepositionBatch
+    ) throws {
+        guard batch.generation == strokePreparationGeneration,
+              pendingPreparedWorkerFrame == nil,
+              pendingPreparedSurfaceFrame == nil,
+              submittedPreparedWorkerFrame == nil,
+              activeStroke != nil
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let totalInstanceCount = batch.authoritativeInstanceCount
+            + batch.predictedInstanceCount
+        lastOffMainSurfaceSnapshot = batch.surfaceSnapshot
+        lastOffMainPredictedInstanceCount = batch.predictedInstanceCount
+        var replayEpoch: UInt64 = 0
+        if let predictionAdmission = batch.predictionAdmission {
+            replayEpoch = takeReplayEpoch()
+            predictionOverlay.planReplacementInPlace(
+                epoch: replayEpoch,
+                provenance: batch.predictionProvenanceBoundary,
+                admission: predictionAdmission,
+                dirtyRegions: batch.dirtyRegions
+            )
+            replayStroke.beginReplacementEpoch(replayEpoch)
+            for region in batch.dirtyRegions {
+                replayStroke.recordDirtyRegion(region)
+            }
+            needsReplayClear = true
+        } else {
+            for region in batch.dirtyRegions {
+                liveStroke.recordDirtyRegion(region)
+            }
+        }
+
+        if let surfaceLease = batch.surfaceLease {
+            lastOffMainEncodingRanOnMainThread =
+                surfaceLease.encodingRanOnMainThread
+            if surfaceLease.clearedPredictionSurface,
+               batch.predictionAdmission == nil
+            {
+                replayEpoch = takeReplayEpoch()
+                predictionOverlay.discard(epoch: replayEpoch)
+                replayStroke.beginReplacementEpoch(replayEpoch)
+                needsReplayClear = true
+            }
+            currentPreparedSurfaceLease = surfaceLease
+            guard batch.frameToken == surfaceLease.token else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            let identity = PreparedWorkerFrameIdentity(
+                generation: batch.generation,
+                token: surfaceLease.token,
+                recordCount: totalInstanceCount
+            )
+            pendingPreparedWorkerFrame = identity
+            pendingPreparedSurfaceFrame = PendingPreparedSurfaceFrame(
+                identity: identity,
+                lease: surfaceLease,
+                logicalDabCount: batch.logicalDabs.count,
+                replayEpoch: replayEpoch
+            )
+            if totalInstanceCount == 0 {
+                lastOffMainZeroWorkLeaseCount += 1
+            }
+        } else if batch.frameToken != nil || totalInstanceCount != 0 {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+
+        let (scheduledHighWater, overflow) =
+            scheduledAuthoritativeIdentityHighWater
+                .addingReportingOverflow(
+                    UInt64(batch.authoritativeInstanceCount)
+                )
+        guard !overflow else {
+            throw MetalRendererError.projectedInstanceCapacityExceeded(
+                depositionFrameBudget.maximumPendingAuthoritativeInstances
+            )
+        }
+        scheduledAuthoritativeIdentityHighWater = scheduledHighWater
+        counters.newDabsThisEvent = batch.logicalDabs.count
+        counters.totalDabsThisStroke += batch.logicalDabs.count
+        counters.totalInstancesThisStroke += totalInstanceCount
+        deferLogicalDabsForPublication(batch.logicalDabs)
+        lastOffMainCoordinatorSnapshot = batch.coordinatorSnapshot
+        lastOffMainPredictionProvenanceBoundary =
+            batch.predictionProvenanceBoundary
+        if let scheduler = activeStroke?.frozenHarnessScheduler {
+            recordBrushLabScheduler(scheduler)
+        }
+    }
+
+    private func acknowledgeSubmittedPreparationFrame(
+        _ frame: PreparedWorkerFrameIdentity?
+    ) throws {
+        guard let frame else { return }
+        guard pendingPreparedWorkerFrame == frame,
+              let bridge = strokePreparationBridge
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        try bridge.acknowledgePreparedFrame(
+            generation: frame.generation,
+            token: frame.token
+        )
+        // Ack transfers the textures back to the actor. They must stop being
+        // readable on Main before the actor is allowed to mutate them again.
+        currentPreparedSurfaceLease = nil
+        pendingPreparedWorkerFrame = nil
+        pendingPreparedSurfaceFrame = nil
+        submittedPreparedWorkerFrame = nil
     }
 
     public func completePendingRasterOperation() throws {
@@ -2973,16 +3462,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 ownsEventOperation,
                 succeeded: true
             )
+            requestAnotherInteractiveFrameIfNeeded(in: view)
         }
         _ = drainRasterOperationOutcomes()
-        drainFrameOutcomes()
+        if drainFrameOutcomes() != nil { return }
         drainCompletedUploadRanges()
 
-        guard let drawable = view.currentDrawable else {
-            return
-        }
         do {
-            try prepareCompiledCommitIfReady()
+            try drainStrokePreparationResultsCore()
+            try prepareCompiledCommitIfReadyCore()
+        } catch let published as PreviouslyPublishedInteractiveFailure {
+            _ = published
+            return
         } catch let error as MetalRendererError {
             failActiveOperationIfNeeded(error)
             return
@@ -2990,6 +3481,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             failActiveOperationIfNeeded(
                 .commandFailed(error.localizedDescription)
             )
+            return
+        }
+
+        // One Main composite owns the borrowed actor surface at a time. Its
+        // completion outcome returns the lease before another actor mutation
+        // or another reader submission can proceed.
+        guard submittedPreparedWorkerFrame == nil else { return }
+        guard let drawable = view.currentDrawable else {
             return
         }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
@@ -3040,8 +3539,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             if shouldEncodeCommit {
                 rasterCommit = try encodeCommit(
                     commandBuffer,
-                    liveVisible: liveTile.isVisible
-                        || replayTile.isVisible || !uploads.isEmpty
+                    liveVisible: compositeLiveIsVisible
+                        || !uploads.isEmpty
                         || hasCurrentNativeDeposition
                 )
             }
@@ -3049,8 +3548,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 into: drawable.texture,
                 commandBuffer: commandBuffer,
                 showGridLines: interactiveGridVisibility,
-                liveVisible: liveTile.isVisible
-                    || replayTile.isVisible || !uploads.isEmpty
+                liveVisible: compositeLiveIsVisible
+                    || !uploads.isEmpty
                     || hasCurrentNativeDeposition
             )
             _ = try finalizeFrameEncoding(
@@ -3074,6 +3573,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             if runtimeFrameID != nil {
                 commandBuffer.addCompletedHandler { [weak self] completedBuffer in
                     guard completedBuffer.status == .completed else { return }
+                    #if targetEnvironment(simulator)
+                    let completedAtNanoseconds =
+                        DispatchTime.now().uptimeNanoseconds
+                    #endif
                     let gpuStarted = Self.nanoseconds(
                         completedBuffer.gpuStartTime
                     )
@@ -3081,14 +3584,25 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                         completedBuffer.gpuEndTime
                     )
                     Task { @MainActor [weak self] in
+                        #if targetEnvironment(simulator)
+                        self?.recordStrokeRuntimeCompletedFrame(
+                            id: runtimeFrameID,
+                            measuredGPUStart: gpuStarted,
+                            measuredGPUEnd: gpuFinished,
+                            submittedAt: submittedAtNanoseconds,
+                            completedAt: completedAtNanoseconds
+                        )
+                        #else
                         self?.recordStrokeRuntimeGPUFrame(
                             id: runtimeFrameID,
                             measuredStart: gpuStarted,
                             measuredFinish: gpuFinished,
                             submittedAt: submittedAtNanoseconds
                         )
+                        #endif
                     }
                 }
+                #if !targetEnvironment(simulator)
                 drawable.addPresentedHandler { [weak self] presentedDrawable in
                     let measured = Self.nanoseconds(
                         presentedDrawable.presentedTime
@@ -3103,6 +3617,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                         )
                     }
                 }
+                #endif
             }
             #if DEBUG
             let cpuEncodeMilliseconds = elapsedMilliseconds(
@@ -3187,6 +3702,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             if nativeEncoding != nil,
                commandBuffer.status == .notEnqueued
             {
+                installPreparedSurfaceTerminalHandler(
+                    for: nativeEncoding,
+                    on: commandBuffer
+                )
                 commandBuffer.commit()
             }
             abandon(uploads)
@@ -3199,6 +3718,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             if nativeEncoding != nil,
                commandBuffer.status == .notEnqueued
             {
+                installPreparedSurfaceTerminalHandler(
+                    for: nativeEncoding,
+                    on: commandBuffer
+                )
                 commandBuffer.commit()
             }
             abandon(uploads)
@@ -3220,6 +3743,41 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return presentedTime
     }
     #endif
+
+    nonisolated static func interactiveFrameDemand(
+        hasActiveStroke: Bool,
+        isViewportAnimating: Bool,
+        hasPendingComposite: Bool,
+        isHUDSamplePending: Bool
+    ) -> Bool {
+        hasActiveStroke
+            || isViewportAnimating
+            || hasPendingComposite
+            || isHUDSamplePending
+    }
+
+    private func requestAnotherInteractiveFrameIfNeeded(in view: MTKView) {
+        #if DEBUG
+        let isHUDSamplePending = onInteractiveFramePresented != nil
+            || onInteractiveFrameMetrics != nil
+        #else
+        let isHUDSamplePending = false
+        #endif
+        guard Self.interactiveFrameDemand(
+            hasActiveStroke: activeStroke != nil
+                || strokeWorkspaceState != .available,
+            isViewportAnimating: false,
+            hasPendingComposite: pendingRasterOperation != nil,
+            isHUDSamplePending: isHUDSamplePending
+        ) else {
+            return
+        }
+        #if os(macOS)
+        view.needsDisplay = true
+        #else
+        view.setNeedsDisplay()
+        #endif
+    }
 
     public func mtkView(
         _ view: MTKView,
@@ -3371,7 +3929,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             "Renderer must handle every transient buffer rejection"
         )
         if update.clearedPredictedSuffix {
-            _ = activeStroke?.scheduler?.discardTruePrediction()
+            _ = activeStroke?.frozenHarnessScheduler?
+                .discardTruePrediction()
         }
         let buffer = transientStrokeBuffer!
         if buffer.mode == .appendOnly,
@@ -3449,110 +4008,570 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         deferLogicalDabsForPublication(dabs.lazy.map(\.attributes))
     }
 
-    /// Transfers one compatibility-ink emission into the existing projection
-    /// and frame scheduler. The coordinator remains the sole generator owner;
-    /// the mirrored legacy snapshots exist only for prediction and estimated-
-    /// input fallback until Tasks 6 and 7 move those paths as well.
-    private func ingestCoordinatorEmission(
-        _ prepared: PreparedStrokeCoordinatorEmission,
-        coordinator: StrokeRenderCoordinator,
-        isFinishing: Bool
-    ) throws {
-        let emission = prepared.emission
-        precondition(
-            emission.generatedSamples.count == 1,
-            "GridRenderer currently transfers one normalized event at a time"
-        )
-        guard let generated = emission.generatedSamples.first else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        try coordinator.reserveForDownstreamAcceptance(
-            prepared,
-            retireAfterAcceptance: true
-        )
-        do {
-            var projectionGenerator = generated.generatorBefore
-            let dabs = try prepareGeneratedDabs(
-                generator: &projectionGenerator
-            ) { _, emit in
-                for dab in generated.dabs {
-                    try emit(dab)
-                }
-            }
-            try ingestGeneratedSample(
-                generated.sample,
-                dabs: dabs,
-                generatorBeforeSample: generated.generatorBefore,
-                generatorSnapshot: generated.generatorAfter,
-                inputDeriverBeforeSample: generated.inputDeriverBefore,
-                isFinishing: isFinishing,
-                predictionInvalidationBoundary:
-                    prepared.predictionProvenanceBoundary
-            )
-        } catch {
-            try coordinator.abandon(prepared)
-            throw error
-        }
-
-        coordinator.finalizeAndRetireAfterDownstreamAcceptance(prepared)
-        strokeGenerator = coordinator.generatorSnapshot
-        brushInputDeriver = coordinator.inputDeriverSnapshot
+    package func setStrokePreparationAllocationProbeForHarness(
+        _ probe: StrokePreparationAllocationProbe?
+    ) {
+        precondition(isIdle)
+        strokePreparationAllocationProbe = probe
     }
 
-    private func prevalidatedPredictionInvalidationBoundary() throws
-        -> PredictionProvenanceBoundary?
+    package func advanceStrokePreparationForAllocationHarness() throws {
+        try drainCompletedInteractiveOperations()
+        if pendingPreparedSurfaceFrame != nil {
+            _ = try completeNextPendingInteractiveFrame()
+        }
+    }
+
+    package func installStrokePreparationProgressWaiterForHarness()
+        -> StrokePreparationProgressRegistration?
     {
-        guard let coordinator = strokeRenderCoordinator else { return nil }
-        let boundary = coordinator.predictionProvenanceBoundary
-        guard predictionOverlay.canInvalidatePrediction(from: boundary) else {
-            throw MetalRendererError.invalidStrokeLifecycle
+        guard let mailbox = strokePreparationBridge?.mailbox else {
+            return nil
         }
-        return boundary
+        return StrokePreparationProgressRegistration(mailbox: mailbox)
     }
 
-    private func shouldUseIncrementalCompatibilityInk(
-        style: StrokeRenderStyle,
-        sample: StrokeSample
-    ) -> Bool {
-        guard style.program.definition.id.rawValue == "builtin.native-ink",
-              style.program.replayContract.mode == .appendOnly,
-              isIncrementalCompatibilitySample(sample)
-        else {
-            return false
-        }
-        #if DEBUG
-        return compatibilityInkRuntimeRoute == .incremental
-        #else
-        return true
-        #endif
+    package func removeStrokePreparationProgressWaiterForHarness(
+        _ registration: StrokePreparationProgressRegistration
+    ) {
+        registration.remove()
     }
 
-    private func isIncrementalCompatibilitySample(
-        _ sample: StrokeSample
-    ) -> Bool {
-        sample.kind != .predicted
-            && sample.kind != .estimatedUpdate
-            && sample.estimationUpdateIndex == nil
-            && sample.estimatedProperties.isEmpty
-            && sample.estimatedPropertiesExpectingUpdates.isEmpty
+    package var hasPendingPreparedStrokeSurfaceForHarness: Bool {
+        pendingPreparedSurfaceFrame != nil
+    }
+
+    package var strokePreparationIsQuiescentForAllocationHarness: Bool {
+        guard let snapshot = strokePreparationBridge?.mailbox.snapshot else {
+            return true
+        }
+        return snapshot.isQuiescent
+            && pendingPreparedSurfaceFrame == nil
+            && submittedPreparedWorkerFrame == nil
+    }
+
+    package var offMainStrokeWorkspaceIdentityForTesting: UUID {
+        strokeMetalSurfaceResources.identity
+    }
+
+    package var offMainStrokeWorkspacePixelSizeForTesting: PixelSize {
+        strokeMetalSurfaceResources.pixelSize
+    }
+
+    package var offMainStrokeWorkspaceInstallationCountForTesting: UInt64 {
+        strokeMetalSurfaceInstallationCount
+    }
+
+    var offMainCoordinatorSnapshotForHarness: StrokeRenderSnapshot? {
+        lastOffMainCoordinatorSnapshot
+    }
+
+    var offMainSurfaceSnapshotForHarness:
+        StrokePrivateSurfaceEncoderSnapshot?
+    {
+        lastOffMainSurfaceSnapshot
+    }
+
+    package func setForceOffMainStrokeCommandFailureForTesting(
+        _ force: Bool
+    ) {
+        precondition(isIdle)
+        forceOffMainStrokeCommandFailureForTesting = force
     }
 
     #if DEBUG
-    func setCompatibilityInkRuntimeRouteForTesting(
-        _ route: CompatibilityInkRuntimeRoute
-    ) {
-        precondition(isIdle)
-        compatibilityInkRuntimeRoute = route
-    }
-
     var compatibilityInkCoordinatorSnapshotForTesting:
         StrokeRenderSnapshot?
     {
-        strokeRenderCoordinator?.snapshot
+        lastOffMainCoordinatorSnapshot
     }
 
-    var compatibilityInkCoordinatorTransactionTokenForTesting: UInt64? {
-        strokeRenderCoordinator?.nextTransactionTokenForTesting
+    var compatibilityInkEncodingRanOnMainThreadForTesting: Bool? {
+        lastOffMainEncodingRanOnMainThread
+    }
+
+    var hasPendingOffMainSurfaceLeaseForTesting: Bool {
+        pendingPreparedSurfaceFrame != nil
+    }
+
+    var hasSubmittedOffMainSurfaceLeaseForTesting: Bool {
+        submittedPreparedWorkerFrame != nil
+    }
+
+    var hasCurrentOffMainSurfaceLeaseForTesting: Bool {
+        currentPreparedSurfaceLease != nil
+    }
+
+    var hasPendingRasterOperationForTesting: Bool {
+        pendingRasterOperation != nil
+    }
+
+    var offMainStrokeWorkspaceIsAvailableForTesting: Bool {
+        strokeWorkspaceState == .available
+    }
+
+    var offMainTerminalCancellationPublicationCountForTesting: UInt64 {
+        warmedStrokePreparationBridge.mailbox.snapshot
+            .terminalCancellationPublicationCount
+    }
+
+    var offMainPreparationWorkerTaskPriorityForTesting: TaskPriority? {
+        warmedStrokePreparationBridge.mailbox.snapshot.workerTaskPriority
+    }
+
+    var offMainPreparationMailboxSnapshotForTesting:
+        StrokePreparationMailboxSnapshot?
+    {
+        strokePreparationBridge?.mailbox.snapshot
+    }
+
+    #if DEBUG
+    func offMainSchedulerSnapshotForTesting() async
+        -> StrokeFrameSchedulerSnapshot
+    {
+        await (strokePreparationBridge ?? warmedStrokePreparationBridge)
+            .schedulerSnapshotForTesting()
+    }
+
+    func offMainTransientSnapshotForTesting() async
+        -> StrokeTransientPreparationSnapshot
+    {
+        await (strokePreparationBridge ?? warmedStrokePreparationBridge)
+            .transientSnapshotForTesting()
+    }
+    #endif
+
+    var offMainSurfaceSnapshotForTesting:
+        StrokePrivateSurfaceEncoderSnapshot?
+    {
+        lastOffMainSurfaceSnapshot
+    }
+
+    var offMainZeroWorkLeaseCountForTesting: Int {
+        lastOffMainZeroWorkLeaseCount
+    }
+
+    var offMainPredictedInstanceCountForTesting: Int {
+        lastOffMainPredictedInstanceCount
+    }
+
+    var predictionSubmissionScratchSnapshotForTesting:
+        PredictionSubmissionScratchSnapshot
+    {
+        PredictionSubmissionScratchSnapshot(
+            count: predictionSubmissionScratch.count,
+            highWater: predictionSubmissionScratchHighWater,
+            storageCapacity: predictionSubmissionScratch.capacity,
+            storageIdentity: predictionSubmissionScratchStorageIdentity,
+            storageReallocationCount:
+                predictionSubmissionScratchStorageReallocationCount,
+            lastSubmittedSampleCount:
+                predictionSubmissionLastSubmittedSampleCount,
+            lastAcceptedSampleCount:
+                predictionSubmissionLastAcceptedSampleCount,
+            lastShedSampleCount:
+                predictionSubmissionLastShedSampleCount,
+            lastValidatedSampleCount:
+                predictionSubmissionLastValidatedSampleCount,
+            lastTelemetrySampleCount:
+                predictionSubmissionLastTelemetrySampleCount
+        )
+    }
+
+    func runOffMainProductionTraceForTesting(
+        compiledBrush: CompiledBrush,
+        totalSampleCount: Int = 36_000,
+        batchSize: Int = 60
+    ) async throws -> OffMainStrokeProductionTraceSnapshot {
+        precondition(isIdle)
+        precondition(totalSampleCount >= 2)
+        precondition(batchSize > 0)
+        let generation: UInt64 = 600_000
+        let targetFrameNanoseconds = UInt64(1_000_000_000 / 60)
+        let firstDecileEnd = totalSampleCount / 10
+        let lastDecileStart = totalSampleCount - firstDecileEnd
+        let brushRenderState = compiledBrush.renderState
+        let bridge = warmedStrokePreparationBridge
+        let initialMailbox = bridge.mailbox.snapshot
+        let initialWorkspaceIdentity = strokeMetalSurfaceResources.identity
+        let initialWorkspaceInstallationCount =
+            strokeMetalSurfaceInstallationCount
+        let configuration = StrokePreparationConfiguration(
+            program: compiledBrush.program,
+            nominalDiameter: 12,
+            color: .black,
+            seed: 7,
+            viewport: viewport,
+            tilingStrategy: tilingStrategy,
+            metalResourceDescriptor: StrokeMetalResourceDescriptor(
+                surfaces: strokeMetalSurfaceResources,
+                brush: brushRenderState,
+                frameUniforms: frameUniforms(
+                    drawableSize: tileSize,
+                    showGridLines: false,
+                    liveVisible: true
+                ),
+                forceCommandFailure: false
+            )
+        )
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: storagePixelSize.width,
+            height: storagePixelSize.height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.renderTarget, .shaderRead]
+        guard let compositeTarget = device.makeTexture(
+            descriptor: descriptor
+        ) else {
+            throw MetalRendererError.textureAllocationFailed
+        }
+        compositeTarget.label = "Off-main Production Trace Composite"
+
+        var firstDecileNanoseconds: UInt64 = 0
+        var firstDecileEventCount = 0
+        var lastDecileNanoseconds: UInt64 = 0
+        var lastDecileEventCount = 0
+        var missedLogicalFrameCount = 0
+        var deferredDrainCount = 0
+        var zeroWorkLeaseCount = 0
+        var latestCoordinatorSnapshot: StrokeRenderSnapshot?
+        var latestSurfaceSnapshot: StrokePrivateSurfaceEncoderSnapshot?
+        var allOffMain = true
+        let wallStarted = DispatchTime.now().uptimeNanoseconds
+
+        var batchStart = 0
+        while batchStart < totalSampleCount {
+            let batchEnd = min(batchStart + batchSize, totalSampleCount)
+            var samples: [StrokeSample] = []
+            samples.reserveCapacity(batchEnd - batchStart)
+            for index in batchStart..<batchEnd {
+                let phase: StrokePhase
+                if index == 0 {
+                    phase = .began
+                } else if index == totalSampleCount - 1 {
+                    phase = .ended
+                } else {
+                    phase = .moved
+                }
+                samples.append(
+                    .mouse(
+                        position: ScreenPoint(
+                            x: 32 + cos(Float(index) * 0.013) * 20,
+                            y: 32 + sin(Float(index) * 0.013) * 20
+                        ),
+                        timestamp: TimeInterval(index) / 60,
+                        phase: phase
+                    )
+                )
+            }
+            let message: StrokeInputMessage
+            if batchStart == 0 {
+                message = .begin(
+                    generation: generation,
+                    configuration: configuration,
+                    samples: samples
+                )
+            } else if batchEnd == totalSampleCount {
+                message = .finish(
+                    generation: generation,
+                    samples: samples
+                )
+            } else {
+                message = .appendAuthoritative(
+                    generation: generation,
+                    samples: samples
+                )
+            }
+            try bridge.submit(message)
+            let drained = try await drainOffMainTraceMessage(
+                bridge: bridge,
+                generation: generation,
+                expectedInputSampleCount: UInt64(batchEnd),
+                requireCommitBarrier: false,
+                compositeTarget: compositeTarget
+            )
+            let batchPreparationCPU = drained.preparationCPUNanoseconds
+            let eventCount = batchEnd - batchStart
+            if batchEnd <= firstDecileEnd {
+                firstDecileNanoseconds += batchPreparationCPU
+                firstDecileEventCount += eventCount
+            }
+            if batchStart >= lastDecileStart {
+                lastDecileNanoseconds += batchPreparationCPU
+                lastDecileEventCount += eventCount
+            }
+            let logicalBudget = targetFrameNanoseconds * UInt64(eventCount)
+            if batchPreparationCPU > logicalBudget {
+                missedLogicalFrameCount += Int(
+                    (batchPreparationCPU - logicalBudget)
+                        / targetFrameNanoseconds
+                ) + 1
+            }
+            deferredDrainCount += drained.deferredDrainCount
+            zeroWorkLeaseCount += drained.zeroWorkLeaseCount
+            latestCoordinatorSnapshot = drained.coordinatorSnapshot
+            latestSurfaceSnapshot = drained.surfaceSnapshot
+            allOffMain = allOffMain
+                && drained.allPreparationAndEncodingOffMain
+            batchStart = batchEnd
+        }
+
+        try bridge.submit(.commit(generation: generation))
+        let committed = try await drainOffMainTraceMessage(
+            bridge: bridge,
+            generation: generation,
+            expectedInputSampleCount: UInt64(totalSampleCount),
+            requireCommitBarrier: true,
+            compositeTarget: compositeTarget
+        )
+        if committed.preparationCPUNanoseconds > targetFrameNanoseconds {
+            missedLogicalFrameCount += Int(
+                (committed.preparationCPUNanoseconds
+                    - targetFrameNanoseconds)
+                    / targetFrameNanoseconds
+            ) + 1
+        }
+        deferredDrainCount += committed.deferredDrainCount
+        zeroWorkLeaseCount += committed.zeroWorkLeaseCount
+        latestCoordinatorSnapshot = committed.coordinatorSnapshot
+        latestSurfaceSnapshot = committed.surfaceSnapshot
+        allOffMain = allOffMain
+            && committed.allPreparationAndEncodingOffMain
+        let wallDuration = DispatchTime.now().uptimeNanoseconds
+            - wallStarted
+        let mailbox = bridge.mailbox.snapshot
+        guard let coordinator = latestCoordinatorSnapshot else {
+            throw MetalRendererError.commandFailed(
+                "production trace did not publish a coordinator snapshot"
+            )
+        }
+        guard let surface = latestSurfaceSnapshot else {
+            throw MetalRendererError.commandFailed(
+                "production trace did not publish a surface snapshot"
+            )
+        }
+        precondition(coordinator.commitMetadata.inputSampleCount
+            == UInt64(totalSampleCount))
+        let trace = OffMainStrokeProductionTraceSnapshot(
+            inputSampleCount: totalSampleCount,
+            logicalDurationNanoseconds:
+                UInt64(totalSampleCount) * targetFrameNanoseconds,
+            wallDurationNanoseconds: wallDuration,
+            firstDecileNanosecondsPerEvent:
+                firstDecileNanoseconds
+                    / UInt64(max(1, firstDecileEventCount)),
+            lastDecileNanosecondsPerEvent:
+                lastDecileNanoseconds
+                    / UInt64(max(1, lastDecileEventCount)),
+            authoritativeInputHighWater:
+                mailbox.input.authoritativeHighWater,
+            authoritativeInputCapacity:
+                mailbox.input.authoritativeCapacity,
+            authoritativeInputInitialStorageCapacity:
+                initialMailbox.input.authoritativeStorageCapacity,
+            authoritativeInputStorageCapacity:
+                mailbox.input.authoritativeStorageCapacity,
+            predictionInputCapacity:
+                mailbox.input.predictionCapacity,
+            predictionInputInitialStorageCapacity:
+                initialMailbox.input.predictionStorageCapacity,
+            predictionInputStorageCapacity:
+                mailbox.input.predictionStorageCapacity,
+            resultHighWater: mailbox.resultHighWater,
+            resultCapacity: mailbox.resultCapacity,
+            resultInitialStorageCapacity:
+                initialMailbox.resultStorageCapacity,
+            resultStorageCapacity: mailbox.resultStorageCapacity,
+            workspaceInitialInstallationCount:
+                initialWorkspaceInstallationCount,
+            workspaceInstallationCount:
+                strokeMetalSurfaceInstallationCount,
+            workspaceIdentityStayedStable:
+                strokeMetalSurfaceResources.identity
+                    == initialWorkspaceIdentity,
+            maximumPreparedPayloadBytes:
+                mailbox.maximumPreparedPayloadBytes,
+            surface: surface,
+            missedLogicalFrameCount: missedLogicalFrameCount,
+            deferredDrainCount: deferredDrainCount,
+            zeroWorkLeaseCount: zeroWorkLeaseCount,
+            allPreparationAndEncodingOffMain: allOffMain
+        )
+        try await resetOffMainTraceBridge(
+            bridge,
+            generation: generation
+        )
+        return trace
+    }
+
+    private func resetOffMainTraceBridge(
+        _ bridge: StrokePreparationBridge,
+        generation: UInt64
+    ) async throws {
+        try bridge.submit(.cancel(generation: generation, reason: nil))
+        var resultScratch: [StrokePreparationResult] = []
+        resultScratch.reserveCapacity(1)
+        for _ in 0..<10_000 {
+            bridge.drainResults(into: &resultScratch)
+            for result in resultScratch {
+                switch result {
+                case let .cancelled(cancelledGeneration, _)
+                    where cancelledGeneration == generation:
+                    return
+                case let .prepared(batch):
+                    if let lease = batch.surfaceLease {
+                        try bridge.acknowledgePreparedFrame(
+                            generation: lease.generation,
+                            token: lease.token
+                        )
+                    }
+                case let .failed(_, failure):
+                    throw rendererError(for: failure)
+                default:
+                    break
+                }
+            }
+            await Task.yield()
+        }
+        throw MetalRendererError.commandFailed(
+            "off-main trace workspace retirement exceeded its bound"
+        )
+    }
+
+    private func drainOffMainTraceMessage(
+        bridge: StrokePreparationBridge,
+        generation: UInt64,
+        expectedInputSampleCount: UInt64,
+        requireCommitBarrier: Bool,
+        compositeTarget: any MTLTexture
+    ) async throws -> OffMainStrokeTraceDrainOutcome {
+        var resultScratch: [StrokePreparationResult] = []
+        resultScratch.reserveCapacity(1)
+        var coordinatorSnapshot: StrokeRenderSnapshot?
+        var surfaceSnapshot: StrokePrivateSurfaceEncoderSnapshot?
+        var deferredDrainCount = 0
+        var zeroWorkLeaseCount = 0
+        var commitBarrierReached = false
+        var allOffMain = true
+        var preparationCPUNanoseconds: UInt64 = 0
+
+        for _ in 0..<1_000_000 {
+            bridge.drainResults(into: &resultScratch)
+            if resultScratch.isEmpty {
+                deferredDrainCount += 1
+            }
+            for result in resultScratch {
+                switch result {
+                case let .prepared(batch):
+                    preparationCPUNanoseconds = Self.saturatingAdd(
+                        preparationCPUNanoseconds,
+                        batch.preparationCPUNanoseconds
+                    )
+                    coordinatorSnapshot = batch.coordinatorSnapshot
+                    surfaceSnapshot = batch.surfaceSnapshot
+                    allOffMain = allOffMain
+                        && !batch.executorProbe.generatorRanOnMainThread
+                        && !batch.executorProbe.projectionRanOnMainThread
+                    if let lease = batch.surfaceLease {
+                        allOffMain = allOffMain
+                            && !lease.encodingRanOnMainThread
+                        if lease.authoritativeInstanceCount
+                            + lease.predictedInstanceCount == 0
+                        {
+                            zeroWorkLeaseCount += 1
+                        }
+                        guard let commandBuffer = commandQueue
+                            .makeCommandBuffer()
+                        else {
+                            throw MetalRendererError
+                                .commandBufferUnavailable
+                        }
+                        try encodeDisplay(
+                            into: compositeTarget,
+                            commandBuffer: commandBuffer,
+                            showGridLines: false,
+                            liveVisible: true,
+                            liveTexture: lease.authoritativeTexture,
+                            replayTexture: lease.predictionTexture
+                        )
+                        let commandOutcome = await withCheckedContinuation {
+                            continuation in
+                            commandBuffer.addCompletedHandler { completed in
+                                continuation.resume(
+                                    returning:
+                                        OffMainStrokeTraceCommandOutcome(
+                                            succeeded:
+                                                completed.status
+                                                    == .completed
+                                                    && completed.error == nil,
+                                            errorMessage:
+                                                completed.error?
+                                                    .localizedDescription
+                                        )
+                                )
+                            }
+                            commandBuffer.commit()
+                        }
+                        guard commandOutcome.succeeded else {
+                            throw MetalRendererError.commandFailed(
+                                commandOutcome.errorMessage
+                                    ?? "off-main trace composite failed"
+                            )
+                        }
+                        try bridge.acknowledgePreparedFrame(
+                            generation: lease.generation,
+                            token: lease.token
+                        )
+                    }
+                case .predictionWasShed:
+                    break
+                case .estimatedUpdateWasIgnored:
+                    break
+                case let .estimatedUpdateWasRejected(
+                    _,
+                    error,
+                    capacityFailure
+                ):
+                    if let capacityFailure {
+                        throw rendererError(for: capacityFailure)
+                    }
+                    throw error
+                case .commitBarrierReached:
+                    commitBarrierReached = true
+                case .cancelled:
+                    throw MetalRendererError.invalidStrokeLifecycle
+                case let .failed(_, failure):
+                    throw rendererError(for: failure)
+                }
+            }
+            let mailbox = bridge.mailbox.snapshot
+            let inputReached = coordinatorSnapshot?
+                .commitMetadata.inputSampleCount
+                == expectedInputSampleCount
+            if inputReached,
+               mailbox.isQuiescent,
+               (!requireCommitBarrier || commitBarrierReached),
+               let coordinatorSnapshot,
+               let surfaceSnapshot
+            {
+                return OffMainStrokeTraceDrainOutcome(
+                    coordinatorSnapshot: coordinatorSnapshot,
+                    surfaceSnapshot: surfaceSnapshot,
+                    deferredDrainCount: deferredDrainCount,
+                    zeroWorkLeaseCount: zeroWorkLeaseCount,
+                    commitBarrierReached: commitBarrierReached,
+                    allPreparationAndEncodingOffMain: allOffMain,
+                    preparationCPUNanoseconds:
+                        preparationCPUNanoseconds
+                )
+            }
+            await Task.yield()
+        }
+        throw MetalRendererError.commandFailed(
+            "off-main production trace drain exceeded its bound"
+        )
     }
 
     var brushLabInputReceiptPendingForTesting: Bool {
@@ -3565,12 +4584,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         rendererEventDispatcher.diagnostics
     }
 
-    @discardableResult
-    func replaceCompatibilityInkFrameTokenForTesting(
-        _ token: UInt64
-    ) -> UInt64? {
-        strokeRenderCoordinator?.replaceNextFrameTokenForTesting(token)
+    func drainOneRendererEventTurnForHarness() {
+        rendererEventDispatcher.drainOnePendingTurnForHarness()
     }
+
     #endif
 
     @discardableResult
@@ -3731,7 +4748,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             projectedCount = nextCount
         }
-        guard let scheduler = activeStroke?.scheduler else {
+        guard let scheduler = activeStroke?.frozenHarnessScheduler else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let availableCapacity = scheduler.authoritativeAvailableCapacity
@@ -3747,7 +4764,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         replayProjectedInstanceCount: Int
     ) throws {
         try preflightSettledAppend(settledChunks)
-        guard let scheduler = activeStroke?.scheduler else {
+        guard let scheduler = activeStroke?.frozenHarnessScheduler else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         guard replayProjectedInstanceCount
@@ -3768,7 +4785,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func enqueueCompiledAuthoritative(
         _ records: [ProjectedDabRecord]
     ) throws {
-        guard let scheduler = activeStroke?.scheduler
+        guard let scheduler = activeStroke?.frozenHarnessScheduler
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -4167,7 +5184,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             PredictionProvenanceBoundary?,
         predictionOverload: PredictionOverloadReasons
     ) throws {
-        guard let scheduler = activeStroke?.scheduler
+        guard let scheduler = activeStroke?.frozenHarnessScheduler
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -5158,9 +6175,76 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func encodeScheduledDeposition(
         _ commandBuffer: any MTLCommandBuffer
     ) throws -> NativeDepositionFrameEncoding {
-        guard let execution = activeStroke,
-              let scheduler = execution.scheduler
-        else {
+        guard let execution = activeStroke else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        if strokePreparationBridge != nil {
+            guard let pending = pendingPreparedSurfaceFrame,
+                  submittedPreparedWorkerFrame == nil
+            else {
+                lastEncodedAuthoritativeIdentityRange = nil
+                return NativeDepositionFrameEncoding(
+                    authoritativeCount: 0,
+                    predictedCount: 0,
+                    logicalDabCount: 0,
+                    uploadBufferCount: 0,
+                    encodedLiveClear: false,
+                    encodedReplayClear: false,
+                    replayEpoch: 0,
+                    encodedAuthoritativeIdentityRange: nil,
+                    preparedWorkerFrame: nil
+                )
+            }
+            let lease = pending.lease
+            try encodePreparedSurfaceSnapshot(
+                lease,
+                commandBuffer: commandBuffer
+            )
+            let encodedAuthoritativeIdentityRange: Range<UInt64>?
+            if lease.authoritativeInstanceCount > 0 {
+                let lowerBound = encodedAuthoritativeIdentityHighWater
+                let (upperBound, overflow) = lowerBound
+                    .addingReportingOverflow(
+                        UInt64(lease.authoritativeInstanceCount)
+                    )
+                precondition(
+                    !overflow
+                        && upperBound
+                            <= scheduledAuthoritativeIdentityHighWater
+                )
+                encodedAuthoritativeIdentityRange = lowerBound..<upperBound
+                encodedAuthoritativeIdentityHighWater = upperBound
+            } else {
+                encodedAuthoritativeIdentityRange = nil
+            }
+            lastEncodedAuthoritativeIdentityRange =
+                encodedAuthoritativeIdentityRange
+            brushLabLastFrameEncodedDabCount = pending.logicalDabCount
+            brushLabLastFrameEncodedInstanceCount =
+                pending.identity.recordCount
+            brushLabStrokeEncodedDabCount = Self.saturatingAdd(
+                brushLabStrokeEncodedDabCount,
+                UInt64(pending.logicalDabCount)
+            )
+            brushLabDepositionTelemetry.recordEncoding(
+                instanceCount: UInt64(pending.identity.recordCount),
+                bufferCount: 1
+            )
+            submittedPreparedWorkerFrame = pending.identity
+            return NativeDepositionFrameEncoding(
+                authoritativeCount: lease.authoritativeInstanceCount,
+                predictedCount: lease.predictedInstanceCount,
+                logicalDabCount: pending.logicalDabCount,
+                uploadBufferCount: pending.identity.recordCount > 0 ? 1 : 0,
+                encodedLiveClear: lease.clearedAuthoritativeSurface,
+                encodedReplayClear: lease.clearedPredictionSurface,
+                replayEpoch: pending.replayEpoch,
+                encodedAuthoritativeIdentityRange:
+                    encodedAuthoritativeIdentityRange,
+                preparedWorkerFrame: pending.identity
+            )
+        }
+        guard let scheduler = execution.frozenHarnessScheduler else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         let binding = execution.brush.resources.depositionPipeline
@@ -5234,7 +6318,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 encodedLiveClear: false,
                 encodedReplayClear: false,
                 replayEpoch: 0,
-                encodedAuthoritativeIdentityRange: nil
+                encodedAuthoritativeIdentityRange: nil,
+                preparedWorkerFrame: nil
             )
         } catch {
             throw rendererError(forDepositionError: error)
@@ -5316,6 +6401,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         lastEncodedAuthoritativeIdentityRange =
             encodedAuthoritativeIdentityRange
+        let preparedWorkerFrame: PreparedWorkerFrameIdentity?
+        if let pendingPreparedWorkerFrame,
+           !frame.authoritative.isEmpty,
+           pendingPreparedWorkerFrame.recordCount
+            == frame.authoritative.count
+        {
+            preparedWorkerFrame = pendingPreparedWorkerFrame
+        } else {
+            preparedWorkerFrame = nil
+        }
         return NativeDepositionFrameEncoding(
             authoritativeCount: frame.authoritative.count,
             predictedCount: frame.predicted.count,
@@ -5327,8 +6422,56 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 ? replayStroke.renderEpoch
                 : 0,
             encodedAuthoritativeIdentityRange:
-                encodedAuthoritativeIdentityRange
+                encodedAuthoritativeIdentityRange,
+            preparedWorkerFrame: preparedWorkerFrame
         )
+    }
+
+    private func encodePreparedSurfaceSnapshot(
+        _ lease: StrokePreparedSurfaceLease,
+        commandBuffer: any MTLCommandBuffer
+    ) throws {
+        let authoritative = lease.authoritativeTexture
+        let prediction = lease.predictionTexture
+        guard authoritative.width == liveTile.texture.width,
+              authoritative.height == liveTile.texture.height,
+              prediction.width == replayTile.texture.width,
+              prediction.height == replayTile.texture.height,
+              authoritative.pixelFormat == liveTile.texture.pixelFormat,
+              prediction.pixelFormat == replayTile.texture.pixelFormat,
+              let encoder = commandBuffer.makeBlitCommandEncoder()
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        let size = MTLSize(
+            width: authoritative.width,
+            height: authoritative.height,
+            depth: 1
+        )
+        encoder.label = "Snapshot Prepared Stroke Surfaces"
+        encoder.copy(
+            from: authoritative,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: size,
+            to: liveTile.texture,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        encoder.copy(
+            from: prediction,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: size,
+            to: replayTile.texture,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        encoder.endEncoding()
     }
 
     private func rendererError(
@@ -5597,7 +6740,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     func encodeCommit(
         _ commandBuffer: any MTLCommandBuffer,
-        liveVisible: Bool
+        liveVisible: Bool,
+        liveTexture: (any MTLTexture)? = nil,
+        replayTexture: (any MTLTexture)? = nil
     ) throws -> EncodedRasterCommit {
         guard
             let execution = activeStroke,
@@ -5654,11 +6799,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 index: Int(PatternTextureIndexCanonical)
             )
             encoder.setFragmentTexture(
-                liveTile.texture,
+                liveTexture ?? liveTile.texture,
                 index: Int(PatternTextureIndexLive)
             )
             encoder.setFragmentTexture(
-                replayTile.texture,
+                replayTexture ?? replayTile.texture,
                 index: Int(PatternTextureIndexReplayLive)
             )
             encoder.drawPrimitives(
@@ -5696,7 +6841,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         transparentBackground: Bool = false,
         showCanvasBoundary: Bool = true,
         worldCenterOverride: SIMD2<Float>? = nil,
-        zoomOverride: Float? = nil
+        zoomOverride: Float? = nil,
+        liveTexture: (any MTLTexture)? = nil,
+        replayTexture: (any MTLTexture)? = nil
     ) throws {
         guard texture.width > 0, texture.height > 0 else {
             throw MetalRendererError.invalidDrawableSize
@@ -5788,11 +6935,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             index: Int(PatternTextureIndexCanonical)
         )
         encoder.setFragmentTexture(
-            liveTile.texture,
+            liveTexture ?? liveTile.texture,
             index: Int(PatternTextureIndexLive)
         )
         encoder.setFragmentTexture(
-            replayTile.texture,
+            replayTexture ?? replayTile.texture,
             index: Int(PatternTextureIndexReplayLive)
         )
         encoder.drawPrimitives(
@@ -5825,11 +6972,20 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             activeStroke = execution
         }
 
+        let usesPreparedWorkerSurface =
+            nativeEncoding?.preparedWorkerFrame != nil
         if encodedClear {
-            liveTile.markCleared()
+            if usesPreparedWorkerSurface {
+                offMainLiveVisible = false
+            } else {
+                liveTile.markCleared()
+            }
             needsLiveClear = false
         }
         if encodedReplayClear {
+            if usesPreparedWorkerSurface {
+                offMainReplayVisible = false
+            }
             predictionOverlay.markCleared(
                 epoch: nativeEncoding?.replayEpoch
                     ?? replayStroke.renderEpoch
@@ -5880,9 +7036,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         if let nativeEncoding {
             if nativeEncoding.authoritativeCount > 0 {
-                liveTile.markStamped()
+                if usesPreparedWorkerSurface {
+                    offMainLiveVisible = true
+                } else {
+                    liveTile.markStamped()
+                }
             }
             if nativeEncoding.predictedCount > 0 {
+                if usesPreparedWorkerSurface {
+                    offMainReplayVisible = true
+                }
                 predictionOverlay.markVisible(
                     epoch: nativeEncoding.replayEpoch
                 )
@@ -5924,6 +7087,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 captureTokens: $0.captureTokens
             )
         }
+        let submittedPreparedWorkerFrame =
+            nativeEncoding?.preparedWorkerFrame
         commandBuffer.addCompletedHandler {
             [
                 completionMailbox,
@@ -5931,6 +7096,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 submittedOperationToken,
                 submittedUploads,
                 submittedReplayEpoch,
+                submittedPreparedWorkerFrame,
             ] buffer in
             let completed = buffer.status == .completed && !forceFailure
             completionMailbox.push(
@@ -5939,6 +7105,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     rasterCommit: submittedCommit,
                     uploadSubmissions: submittedUploads,
                     replayEpoch: submittedReplayEpoch,
+                    preparedWorkerFrame:
+                        submittedPreparedWorkerFrame,
                     succeeded: completed,
                     errorMessage: forceFailure
                         ? "injected harness command-buffer failure"
@@ -5947,6 +7115,36 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
         }
         return submittedUploads
+    }
+
+    /// A prepared-surface blit may be encoded before later display or commit
+    /// encoding fails. The partial command must reach a terminal GPU state
+    /// before its actor-owned textures are returned. The operation failure is
+    /// reported by the caller; this outcome exists only to retire the exact
+    /// borrowed lease after the partial command terminates.
+    private func installPreparedSurfaceTerminalHandler(
+        for nativeEncoding: NativeDepositionFrameEncoding?,
+        on commandBuffer: any MTLCommandBuffer
+    ) {
+        guard let preparedWorkerFrame =
+                nativeEncoding?.preparedWorkerFrame,
+              submittedPreparedWorkerFrame == preparedWorkerFrame
+        else {
+            return
+        }
+        commandBuffer.addCompletedHandler {
+            [completionMailbox, preparedWorkerFrame] _ in
+            completionMailbox.push(
+                .init(
+                    operationToken: nil,
+                    rasterCommit: nil,
+                    uploadSubmissions: [],
+                    preparedWorkerFrame: preparedWorkerFrame,
+                    succeeded: true,
+                    errorMessage: nil
+                )
+            )
+        }
     }
 
     func drainCompletedUploadRanges() {
@@ -6180,6 +7378,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         replacement.resources.liveTile.markCleared()
         replacement.resources.predictionOverlay.markCleared(epoch: 0)
         resources = replacement.resources
+        strokeMetalSurfaceResources =
+            replacement.strokeMetalSurfaceResources
+        strokeMetalSurfaceInstallationCount &+= 1
         tilingStrategy = replacement.strategy
         radialPageTableTexture = replacement.radialPageTableTexture
         needsLiveClear = false
@@ -6288,6 +7489,27 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             instancePool.reclaimTerminalFailure(
                 outcome.uploadSubmissions
             )
+        }
+        if let preparedWorkerFrame = outcome.preparedWorkerFrame,
+           pendingPreparedWorkerFrame == preparedWorkerFrame
+        {
+            do {
+                try acknowledgeSubmittedPreparationFrame(
+                    preparedWorkerFrame
+                )
+            } catch {
+                let rendererError = (error as? MetalRendererError)
+                    ?? .commandFailed(error.localizedDescription)
+                if let token = outcome.operationToken {
+                    terminateActiveOperation(
+                        token: token,
+                        error: rendererError
+                    )
+                } else {
+                    report(rendererError)
+                }
+                return rendererError
+            }
         }
         let isStaleReplayOutcome = outcome.replayEpoch != 0
             && outcome.replayEpoch < replayStroke.renderEpoch
@@ -6463,8 +7685,21 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) {
         strokeGenerator?.cancel()
         strokeGenerator = nil
-        strokeRenderCoordinator?.cancel()
-        strokeRenderCoordinator = nil
+        let isRetiringStrokeWorkspace = retireStrokeWorkspaceIfNeeded()
+        if !isRetiringStrokeWorkspace {
+            strokePreparationBridge = nil
+            strokePreparationGeneration = nil
+            pendingPreparedWorkerFrame = nil
+            pendingPreparedSurfaceFrame = nil
+            submittedPreparedWorkerFrame = nil
+            currentPreparedSurfaceLease = nil
+        }
+        strokePreparationResultScratch.removeAll(keepingCapacity: true)
+        offMainLiveVisible = false
+        offMainReplayVisible = false
+        pendingPreparationCommitRetainedBytes = nil
+        lastOffMainCoordinatorSnapshot = nil
+        lastOffMainPredictionProvenanceBoundary = nil
         predictedStrokeGenerator?.cancel()
         predictedStrokeGenerator = nil
         transientStrokeBuffer?.cancel()
@@ -6483,6 +7718,129 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         if invalidateStrokeEvents {
             invalidateStrokeEventGeneration()
         }
+    }
+
+    private func retireStrokeWorkspaceIfNeeded() -> Bool {
+        guard let bridge = strokePreparationBridge,
+              let generation = strokePreparationGeneration
+        else {
+            strokeWorkspaceState = .available
+            return false
+        }
+        switch strokeWorkspaceState {
+        case .available:
+            return false
+        case .retiring:
+            return true
+        case let .borrowed(borrowedGeneration):
+            precondition(borrowedGeneration == generation)
+            var cancellationFrameDisposition =
+                StrokePreparationCancellationFrameDisposition
+                    .preserveMainOwnership
+            if submittedPreparedWorkerFrame == nil,
+               let frame = pendingPreparedWorkerFrame
+            {
+                do {
+                    try bridge.acknowledgePreparedFrame(
+                        generation: frame.generation,
+                        token: frame.token
+                    )
+                    pendingPreparedWorkerFrame = nil
+                    pendingPreparedSurfaceFrame = nil
+                    currentPreparedSurfaceLease = nil
+                } catch {
+                    report(
+                        .commandFailed(
+                            "stroke workspace retirement failed: \(error)"
+                        )
+                    )
+                }
+            } else if submittedPreparedWorkerFrame == nil,
+                      pendingPreparedSurfaceFrame == nil,
+                      currentPreparedSurfaceLease == nil
+            {
+                // A result may already have left the mailbox but fail before
+                // Main installs its immutable lease. No GPU command can own
+                // that surface, so cancellation must return it to the actor.
+                cancellationFrameDisposition =
+                    .abandonedBeforeSubmission
+            }
+            do {
+                try bridge.submitCancellation(
+                    generation: generation,
+                    reason: nil,
+                    frameDisposition: cancellationFrameDisposition
+                )
+            } catch {
+                report(
+                    .commandFailed(
+                        "stroke workspace cancellation failed: \(error)"
+                    )
+                )
+            }
+            strokeWorkspaceState = .retiring(generation)
+            return true
+        }
+    }
+
+    private func finishStrokeWorkspaceRetirement(
+        generation: UInt64
+    ) {
+        guard strokeWorkspaceState == .retiring(generation),
+              submittedPreparedWorkerFrame == nil,
+              pendingPreparedWorkerFrame == nil,
+              pendingPreparedSurfaceFrame == nil,
+              currentPreparedSurfaceLease == nil
+        else {
+            return
+        }
+        let wasIdle = isIdle
+        strokePreparationBridge = nil
+        strokePreparationGeneration = nil
+        strokeWorkspaceState = .available
+        notifyIdleStateIfChanged(from: wasIdle)
+    }
+
+    func drainStrokeWorkspaceRetirementForHarness() throws {
+        guard case .retiring = strokeWorkspaceState else { return }
+        guard let progressRegistration =
+                installStrokePreparationProgressWaiterForHarness()
+        else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        defer {
+            removeStrokePreparationProgressWaiterForHarness(
+                progressRegistration
+            )
+        }
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while true {
+            let observedRevision = progressRegistration.currentRevision
+            try drainCompletedInteractiveOperations()
+            if strokeWorkspaceState == .available { return }
+            if progressRegistration.currentRevision != observedRevision {
+                continue
+            }
+            guard progressRegistration.waitForProgress(
+                after: observedRevision,
+                until: deadline
+            ) else {
+                break
+            }
+        }
+        throw MetalRendererError.commandFailed(
+            "stroke workspace retirement exceeded its harness bound"
+        )
+    }
+
+    func replaceAvailableStrokePreparationWorkspaceForHarness(
+        budget: DepositionFrameBudget
+    ) {
+        guard strokeWorkspaceState == .available else { return }
+        warmedStrokePreparationBridge = StrokePreparationBridge(
+            budget: budget,
+            targetFramesPerSecond: 120
+        )
     }
 
     func report(_ error: MetalRendererError) {
@@ -6583,6 +7941,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         scheduledAuthoritativeIdentityHighWater = 0
         encodedAuthoritativeIdentityHighWater = 0
         lastEncodedAuthoritativeIdentityRange = nil
+        lastOffMainEncodingRanOnMainThread = nil
+        lastOffMainSurfaceSnapshot = nil
+        lastOffMainZeroWorkLeaseCount = 0
+        lastOffMainPredictedInstanceCount = 0
     }
 
     func armInputPathStorageAuditAfterWarmup() {
@@ -6818,7 +8180,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             return
         }
-        let scheduler = activeStroke?.scheduler?.diagnosticSnapshot
+        let scheduler = activeStroke?.frozenHarnessScheduler?
+            .diagnosticSnapshot
         let currentReplayEpoch = transientStrokeBuffer?.replayEpoch ?? 0
         let replayDelta = strokeRuntimeReplayEpochTracker.consume(
             currentEpoch: currentReplayEpoch
@@ -6894,14 +8257,30 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         completedAt: UInt64,
         presentedAt: UInt64? = nil
     ) {
+        recordStrokeRuntimeCompletedFrame(
+            id: id,
+            measuredGPUStart: Self.nanoseconds(commandBuffer.gpuStartTime),
+            measuredGPUEnd: Self.nanoseconds(commandBuffer.gpuEndTime),
+            submittedAt: submittedAt,
+            completedAt: completedAt,
+            presentedAt: presentedAt
+        )
+    }
+
+    private func recordStrokeRuntimeCompletedFrame(
+        id: StrokeRuntimeFrameIdentity?,
+        measuredGPUStart: UInt64,
+        measuredGPUEnd: UInt64,
+        submittedAt: UInt64,
+        completedAt: UInt64,
+        presentedAt: UInt64? = nil
+    ) {
         guard let id,
               id.telemetryGeneration == telemetryEventGeneration,
               let controller = strokeRuntimeController
         else {
             return
         }
-        let measuredGPUStart = Self.nanoseconds(commandBuffer.gpuStartTime)
-        let measuredGPUEnd = Self.nanoseconds(commandBuffer.gpuEndTime)
         let gpuStarted = max(submittedAt, measuredGPUStart)
         let gpuFinished = max(gpuStarted, measuredGPUEnd)
         let presented = max(gpuFinished, presentedAt ?? completedAt)

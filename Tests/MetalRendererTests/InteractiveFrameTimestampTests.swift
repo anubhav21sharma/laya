@@ -23,4 +23,48 @@ func interactiveFrameTimestampFallsBackWhenDrawableTimeIsUnavailable() {
         ) == 12.5
     )
 }
+
+@Test
+func interactiveFrameDemandRequiresAtLeastOneLiveReason() {
+    #expect(
+        !GridRenderer.interactiveFrameDemand(
+            hasActiveStroke: false,
+            isViewportAnimating: false,
+            hasPendingComposite: false,
+            isHUDSamplePending: false
+        )
+    )
+    #expect(
+        GridRenderer.interactiveFrameDemand(
+            hasActiveStroke: true,
+            isViewportAnimating: false,
+            hasPendingComposite: false,
+            isHUDSamplePending: false
+        )
+    )
+    #expect(
+        GridRenderer.interactiveFrameDemand(
+            hasActiveStroke: false,
+            isViewportAnimating: true,
+            hasPendingComposite: false,
+            isHUDSamplePending: false
+        )
+    )
+    #expect(
+        GridRenderer.interactiveFrameDemand(
+            hasActiveStroke: false,
+            isViewportAnimating: false,
+            hasPendingComposite: true,
+            isHUDSamplePending: false
+        )
+    )
+    #expect(
+        GridRenderer.interactiveFrameDemand(
+            hasActiveStroke: false,
+            isViewportAnimating: false,
+            hasPendingComposite: false,
+            isHUDSamplePending: true
+        )
+    )
+}
 #endif

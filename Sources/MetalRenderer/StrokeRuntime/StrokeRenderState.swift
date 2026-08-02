@@ -6,9 +6,9 @@ import PatternEngine
 /// immutable after compilation and are only dereferenced by renderer encoding
 /// code on its owning executor.
 public final class CompiledBrushMetalResourceHolder: @unchecked Sendable {
-    @MainActor public let depositionPipeline: DepositionPipelineBinding
-    @MainActor public let depositionMaterial: DepositionMaterialBinding
-    @MainActor public let textures: [String: any MTLTexture]
+    public let depositionPipeline: DepositionPipelineBinding
+    public let depositionMaterial: DepositionMaterialBinding
+    public let textures: [String: any MTLTexture]
 
     @MainActor
     fileprivate init(compiledBrush: CompiledBrush) {

@@ -259,6 +259,101 @@ struct AttributedStrokeInterpolatorTests {
     }
 
     @Test
+    func boundedPrefixUsesFullPathFractionsWithoutAdvancingState() throws {
+        let start = attributedSample(
+            x: 0,
+            timestamp: 0,
+            phase: .began,
+            kind: .predicted
+        )
+        let end = attributedSample(
+            x: 10,
+            timestamp: 1,
+            phase: .moved,
+            kind: .predicted
+        )
+        var complete = CentripetalCatmullRomPathInterpolator(
+            maximumSegmentLength: 1
+        )
+        _ = complete.begin(at: start)
+        var completeSegments: [AttributedStrokePathSegment] = []
+        complete.append(end) { completeSegments.append($0) }
+
+        var bounded = CentripetalCatmullRomPathInterpolator(
+            maximumSegmentLength: 1
+        )
+        _ = bounded.begin(at: start)
+        let before = bounded
+        var boundedSegments: [AttributedStrokePathSegment] = []
+        let outcome = try bounded.appendBoundedPrefix(
+            end,
+            maximumSubdivisionCount: 3
+        ) { boundedSegments.append($0) }
+
+        #expect(outcome == .truncated)
+        #expect(boundedSegments == Array(completeSegments.prefix(3)))
+        #expect(bounded == before)
+
+        var strict = before
+        var strictSegments: [AttributedStrokePathSegment] = []
+        #expect(
+            throws: StrokePathInterpolationError
+                .subdivisionCapacityExceeded(maximum: 3)
+        ) {
+            try strict.append(
+                end,
+                maximumSubdivisionCount: 3
+            ) { strictSegments.append($0) }
+        }
+        #expect(strictSegments.isEmpty)
+        #expect(strict == before)
+    }
+
+    @Test
+    func boundedPrefixKeepsExtremeFiniteInputWorkAndOutputFinite() throws {
+        for x in [
+            Float.greatestFiniteMagnitude,
+            -Float.greatestFiniteMagnitude,
+        ] {
+            let start = attributedSample(
+                x: 0,
+                timestamp: 0,
+                phase: .began,
+                kind: .predicted
+            )
+            let end = attributedSample(
+                x: x,
+                timestamp: 1,
+                phase: .moved,
+                kind: .predicted
+            )
+            var interpolator = CentripetalCatmullRomPathInterpolator(
+                maximumSegmentLength: 0.5
+            )
+            _ = interpolator.begin(at: start)
+            let before = interpolator
+            var segments: [AttributedStrokePathSegment] = []
+
+            let outcome = try interpolator.appendBoundedPrefix(
+                end,
+                maximumSubdivisionCount: 4
+            ) { segments.append($0) }
+
+            #expect(outcome == .truncated)
+            #expect(segments.count == 4)
+            #expect(
+                segments.allSatisfy {
+                    $0.start.position.x.isFinite
+                        && $0.start.position.y.isFinite
+                        && $0.end.position.x.isFinite
+                        && $0.end.position.y.isFinite
+                }
+            )
+            #expect(interpolator == before)
+        }
+    }
+
+    @Test
     func cancelDropsPathAndSpacingCarry() {
         var interpolator = AttributedStrokeInterpolator(spacing: 2.5)
         var emitted: [InterpolatedStrokeSample] = []

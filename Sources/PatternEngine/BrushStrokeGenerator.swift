@@ -93,6 +93,61 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         self = updated
     }
 
+    /// Bounded renderer entry point. Rejects pathological interpolation work
+    /// before sampling a segment, while preserving the transactional generator
+    /// state used by the throwing emission path.
+    public mutating func append(
+        _ sample: WorldStrokeSample,
+        maximumPathSubdivisionCount: Int,
+        emit: (DabAttributes) throws -> Void
+    ) throws {
+        precondition(maximumPathSubdivisionCount > 0)
+        precondition(sample.phase == .moved)
+        var updated = self
+        if updated.isActive {
+            try updated.appendActive(
+                sample,
+                maximumPathSubdivisionCount:
+                    maximumPathSubdivisionCount,
+                emit: emit
+            )
+        } else {
+            try updated.start(sample, emit: emit)
+        }
+        self = updated
+    }
+
+    /// Prediction-only bounded entry point. It emits the true path prefix that
+    /// fits the interpolation budget, but commits generator state only when
+    /// the complete input sample was processed.
+    @discardableResult
+    public mutating func appendPredictionPrefix(
+        _ sample: WorldStrokeSample,
+        maximumPathSubdivisionCount: Int,
+        emit: (DabAttributes) throws -> Void
+    ) throws -> StrokePathInterpolationOutcome {
+        precondition(maximumPathSubdivisionCount > 0)
+        precondition(sample.phase == .moved)
+        precondition(sample.kind == .predicted)
+        var updated = self
+        let outcome: StrokePathInterpolationOutcome
+        if updated.isActive {
+            outcome = try updated.appendActivePredictionPrefix(
+                sample,
+                maximumPathSubdivisionCount:
+                    maximumPathSubdivisionCount,
+                emit: emit
+            )
+        } else {
+            try updated.start(sample, emit: emit)
+            outcome = .completed
+        }
+        if outcome == .completed {
+            self = updated
+        }
+        return outcome
+    }
+
     public mutating func finish(
         _ sample: WorldStrokeSample,
         emit: (DabAttributes) throws -> Void
@@ -106,6 +161,60 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         }
         updated.resetRuntimeState()
         self = updated
+    }
+
+    /// Bounded renderer entry point matching `append`'s interpolation-work
+    /// contract for a terminal sample.
+    public mutating func finish(
+        _ sample: WorldStrokeSample,
+        maximumPathSubdivisionCount: Int,
+        emit: (DabAttributes) throws -> Void
+    ) throws {
+        precondition(maximumPathSubdivisionCount > 0)
+        precondition(sample.phase == .ended)
+        var updated = self
+        if !updated.isActive {
+            try updated.start(sample, emit: emit)
+        } else {
+            try updated.finishActive(
+                sample,
+                maximumPathSubdivisionCount:
+                    maximumPathSubdivisionCount,
+                emit: emit
+            )
+        }
+        updated.resetRuntimeState()
+        self = updated
+    }
+
+    /// Prediction-only terminal counterpart to `appendPredictionPrefix`.
+    /// Truncation neither commits state nor synthesizes the terminal dab.
+    @discardableResult
+    public mutating func finishPredictionPrefix(
+        _ sample: WorldStrokeSample,
+        maximumPathSubdivisionCount: Int,
+        emit: (DabAttributes) throws -> Void
+    ) throws -> StrokePathInterpolationOutcome {
+        precondition(maximumPathSubdivisionCount > 0)
+        precondition(sample.phase == .ended)
+        precondition(sample.kind == .predicted)
+        var updated = self
+        let outcome: StrokePathInterpolationOutcome
+        if !updated.isActive {
+            try updated.start(sample, emit: emit)
+            outcome = .completed
+        } else {
+            outcome = try updated.finishActivePredictionPrefix(
+                sample,
+                maximumPathSubdivisionCount:
+                    maximumPathSubdivisionCount,
+                emit: emit
+            )
+        }
+        guard outcome == .completed else { return .truncated }
+        updated.resetRuntimeState()
+        self = updated
+        return .completed
     }
 
     public mutating func cancel() {
@@ -319,6 +428,51 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         path = updatedPath
     }
 
+    private mutating func appendActive(
+        _ sample: WorldStrokeSample,
+        maximumPathSubdivisionCount: Int,
+        emit: (DabAttributes) throws -> Void
+    ) throws {
+        let isPredicted = sample.kind == .predicted
+        let stabilized = stabilizer.process(sample)
+        let attributed = InterpolatedStrokeSample(stabilized)
+        var updatedPath = path
+        try updatedPath.append(
+            attributed,
+            maximumSubdivisionCount: maximumPathSubdivisionCount
+        ) { segment in
+            try consume(
+                segment,
+                isPredicted: isPredicted,
+                emit: emit
+            )
+        }
+        path = updatedPath
+    }
+
+    private mutating func appendActivePredictionPrefix(
+        _ sample: WorldStrokeSample,
+        maximumPathSubdivisionCount: Int,
+        emit: (DabAttributes) throws -> Void
+    ) throws -> StrokePathInterpolationOutcome {
+        let stabilized = stabilizer.process(sample)
+        let attributed = InterpolatedStrokeSample(stabilized)
+        var updatedPath = path
+        let outcome = try updatedPath.appendBoundedPrefix(
+            attributed,
+            maximumSubdivisionCount: maximumPathSubdivisionCount
+        ) { segment in
+            try consume(
+                segment,
+                isPredicted: true,
+                emit: emit
+            )
+        }
+        guard outcome == .completed else { return .truncated }
+        path = updatedPath
+        return .completed
+    }
+
     private mutating func finishActive(
         _ sample: WorldStrokeSample,
         emit: (DabAttributes) throws -> Void
@@ -352,6 +506,85 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             currentSpacing = dab.spacing
             distanceUntilNext = dab.spacing
         }
+    }
+
+    private mutating func finishActive(
+        _ sample: WorldStrokeSample,
+        maximumPathSubdivisionCount: Int,
+        emit: (DabAttributes) throws -> Void
+    ) throws {
+        let isPredicted = sample.kind == .predicted
+        let terminalSample = program.termination
+            .usesLegacySchemaV1EndpointFiltering
+            ? stabilizer.process(sample)
+            : sample
+        let attributed = InterpolatedStrokeSample(terminalSample)
+        var updatedPath = path
+        let endpoint = try updatedPath.finish(
+            at: attributed,
+            maximumSubdivisionCount: maximumPathSubdivisionCount
+        ) { segment in
+            try consume(
+                segment,
+                isPredicted: isPredicted,
+                emit: emit
+            )
+        }
+        path = updatedPath
+
+        if lastEmittedSourcePosition != endpoint.position {
+            let dab = nextDab(
+                sample: endpoint,
+                traveledDistance: processedPathDistance,
+                direction: lastDirection,
+                totalDistance: nil,
+                isPredicted: isPredicted
+            )
+            try emit(dab)
+            lastEmittedSourcePosition = endpoint.position
+            currentSpacing = dab.spacing
+            distanceUntilNext = dab.spacing
+        }
+    }
+
+    private mutating func finishActivePredictionPrefix(
+        _ sample: WorldStrokeSample,
+        maximumPathSubdivisionCount: Int,
+        emit: (DabAttributes) throws -> Void
+    ) throws -> StrokePathInterpolationOutcome {
+        let terminalSample = program.termination
+            .usesLegacySchemaV1EndpointFiltering
+            ? stabilizer.process(sample)
+            : sample
+        let attributed = InterpolatedStrokeSample(terminalSample)
+        var updatedPath = path
+        let outcome = try updatedPath.finishBoundedPrefix(
+            at: attributed,
+            maximumSubdivisionCount: maximumPathSubdivisionCount
+        ) { segment in
+            try consume(
+                segment,
+                isPredicted: true,
+                emit: emit
+            )
+        }
+        guard outcome == .completed else { return .truncated }
+        path = updatedPath
+
+        if lastEmittedSourcePosition != attributed.position {
+            let dab = nextDab(
+                sample: attributed,
+                traveledDistance: processedPathDistance,
+                direction: lastDirection,
+                totalDistance: nil,
+                isPredicted: true
+            )
+            try emit(dab)
+            lastEmittedSourcePosition = attributed.position
+            currentSpacing = dab.spacing
+            distanceUntilNext = dab.spacing
+        }
+        return .completed
     }
 
     private mutating func consume(

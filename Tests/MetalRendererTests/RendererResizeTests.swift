@@ -45,6 +45,77 @@ private func makeResizeRenderer(
 
 @Test
 @MainActor
+func emptyFiniteConfigurationAtomicallyReplacesStrokeWorkspace() throws {
+    let oldSize = PixelSize(width: 64, height: 64)
+    let newSize = PixelSize(width: 96, height: 80)
+    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else {
+        return
+    }
+    let initialWorkspaceIdentity =
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+    let initialWorkspaceInstallationCount =
+        renderer.offMainStrokeWorkspaceInstallationCountForTesting
+
+    try renderer.replaceEmptyDocumentConfiguration(
+        .finite(.plain),
+        pixelSize: newSize
+    )
+
+    #expect(renderer.pixelSize == newSize)
+    #expect(renderer.storagePixelSize == newSize)
+    #expect(renderer.offMainStrokeWorkspacePixelSizeForTesting == newSize)
+    #expect(
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+            != initialWorkspaceIdentity
+    )
+    #expect(
+        renderer.offMainStrokeWorkspaceInstallationCountForTesting
+            == initialWorkspaceInstallationCount + 1
+    )
+    #expect(renderer.isIdle)
+}
+
+@Test
+@MainActor
+func emptyFiniteConfigurationWorkspaceFailurePreservesOldInstallation() throws {
+    let oldSize = PixelSize(width: 64, height: 64)
+    let newSize = PixelSize(width: 96, height: 80)
+    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else {
+        return
+    }
+    let initialSnapshot = renderer.harnessTilingMutationSnapshot
+    let initialWorkspaceIdentity =
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+    let initialWorkspaceInstallationCount =
+        renderer.offMainStrokeWorkspaceInstallationCountForTesting
+    let initialViewport = renderer.viewport
+
+    #expect(throws: MetalRendererError.textureAllocationFailed) {
+        try renderer.replaceEmptyDocumentConfigurationForTesting(
+            .finite(.plain),
+            pixelSize: newSize,
+            forceStrokeSurfaceAllocationFailure: true
+        )
+    }
+
+    #expect(renderer.harnessTilingMutationSnapshot == initialSnapshot)
+    #expect(renderer.pixelSize == oldSize)
+    #expect(renderer.storagePixelSize == oldSize)
+    #expect(renderer.offMainStrokeWorkspacePixelSizeForTesting == oldSize)
+    #expect(
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+            == initialWorkspaceIdentity
+    )
+    #expect(
+        renderer.offMainStrokeWorkspaceInstallationCountForTesting
+            == initialWorkspaceInstallationCount
+    )
+    #expect(renderer.viewport == initialViewport)
+    #expect(renderer.isIdle)
+}
+
+@Test
+@MainActor
 func resizeShrinkCropsOnlyRightAndBottomBytes() throws {
     let oldSize = PixelSize(width: 96, height: 80)
     let newSize = PixelSize(width: 64, height: 72)
@@ -53,6 +124,10 @@ func resizeShrinkCropsOnlyRightAndBottomBytes() throws {
     }
     let original = deterministicPixels(oldSize)
     try renderer.replaceCanonicalPixelsForHarness(original)
+    let initialWorkspaceIdentity =
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+    let initialWorkspaceInstallationCount =
+        renderer.offMainStrokeWorkspaceInstallationCountForTesting
     let initialRevision = renderer.harnessRevision
     var receipts: [RasterMutationReceipt] = []
     renderer.onOperationCompleted = {
@@ -68,10 +143,22 @@ func resizeShrinkCropsOnlyRightAndBottomBytes() throws {
     )
     #expect(renderer.pixelSize == oldSize)
     #expect(renderer.harnessRevision == initialRevision)
+    #expect(
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+            == initialWorkspaceIdentity
+    )
     try renderer.finishRasterOperationForHarness()
 
     #expect(renderer.pixelSize == newSize)
     #expect(renderer.harnessRevision == initialRevision.advanced())
+    #expect(
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+            != initialWorkspaceIdentity
+    )
+    #expect(
+        renderer.offMainStrokeWorkspaceInstallationCountForTesting
+            == initialWorkspaceInstallationCount + 1
+    )
     #expect(try canonicalBytes(renderer) == croppedOrFilled(
         original,
         from: oldSize,
@@ -209,6 +296,10 @@ func replacementAllocationFailurePreservesAllRendererState() throws {
         anchor: ScreenPoint(x: 80, y: 60)
     )
     let resourceSnapshot = renderer.harnessTilingMutationSnapshot
+    let workspaceIdentity =
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+    let workspaceInstallationCount =
+        renderer.offMainStrokeWorkspaceInstallationCountForTesting
     let viewport = renderer.viewport
     let residentBytes = renderer.harnessRasterRevisionResidentBytes
     var completions: [RendererOperationCompletion] = []
@@ -224,6 +315,14 @@ func replacementAllocationFailurePreservesAllRendererState() throws {
     }
 
     #expect(renderer.harnessTilingMutationSnapshot == resourceSnapshot)
+    #expect(
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+            == workspaceIdentity
+    )
+    #expect(
+        renderer.offMainStrokeWorkspaceInstallationCountForTesting
+            == workspaceInstallationCount
+    )
     #expect(renderer.pixelSize == oldSize)
     #expect(renderer.tiling == .mirrorX)
     #expect(renderer.viewport == viewport)
@@ -244,6 +343,10 @@ func submittedResizeFailurePreservesResourcesPixelsAndRevisionStorage() throws {
     let original = deterministicPixels(oldSize)
     try renderer.replaceCanonicalPixelsForHarness(original)
     let snapshot = renderer.harnessTilingMutationSnapshot
+    let workspaceIdentity =
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+    let workspaceInstallationCount =
+        renderer.offMainStrokeWorkspaceInstallationCountForTesting
     var completions: [RendererOperationCompletion] = []
     renderer.onOperationCompleted = { completions.append($0) }
 
@@ -262,6 +365,14 @@ func submittedResizeFailurePreservesResourcesPixelsAndRevisionStorage() throws {
     }
 
     #expect(renderer.harnessTilingMutationSnapshot == snapshot)
+    #expect(
+        renderer.offMainStrokeWorkspaceIdentityForTesting
+            == workspaceIdentity
+    )
+    #expect(
+        renderer.offMainStrokeWorkspaceInstallationCountForTesting
+            == workspaceInstallationCount
+    )
     #expect(renderer.pixelSize == oldSize)
     #expect(renderer.tiling == .brick)
     #expect(try canonicalBytes(renderer) == original)

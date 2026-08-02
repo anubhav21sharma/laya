@@ -181,7 +181,13 @@ struct DepositionTelemetry: Sendable {
         gpuEncodingNanoseconds: UInt64,
         gpuCompletionNanoseconds: UInt64
     ) {
-        eventToSubmitWindow.append(eventToSubmitNanoseconds)
+        // A zero event-to-submit duration is the sentinel used when a
+        // submitted follow-up frame has no new input receipt. Keep counting
+        // that submitted frame, but do not let the sentinel dilute the
+        // latency distribution for frames that can be tied to input.
+        if eventToSubmitNanoseconds > 0 {
+            eventToSubmitWindow.append(eventToSubmitNanoseconds)
+        }
         cpuPreparationWindow.append(cpuPreparationNanoseconds)
         gpuEncodingWindow.append(gpuEncodingNanoseconds)
         gpuCompletionWindow.append(gpuCompletionNanoseconds)

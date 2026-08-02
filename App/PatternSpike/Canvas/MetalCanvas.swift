@@ -17,8 +17,13 @@ private func configure(
         alpha: 1
     )
     view.framebufferOnly = true
-    view.isPaused = false
-    view.enableSetNeedsDisplay = false
+    view.isPaused = true
+    view.enableSetNeedsDisplay = true
+    #if os(macOS)
+    view.needsDisplay = true
+    #else
+    view.setNeedsDisplay()
+    #endif
 }
 
 #if os(macOS)
@@ -59,6 +64,7 @@ struct MetalCanvas: NSViewRepresentable {
         view.applyPointerCancellation(
             generation: pointerCancellationGeneration
         )
+        view.requestDraw()
     }
 }
 #else
@@ -97,6 +103,7 @@ struct MetalCanvas: UIViewRepresentable {
         view.applyPointerCancellation(
             generation: pointerCancellationGeneration
         )
+        view.requestDraw()
     }
 }
 #endif

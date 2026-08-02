@@ -282,7 +282,7 @@ func gridRendererRecordsAttributedProductionCallSites() throws {
 @MainActor
 @Test
 func runtimeBeginObserverCanCancelStartReplacementWithoutOuterBeginDestroyingIt()
-    throws
+    async throws
 {
     guard let device = MTLCreateSystemDefaultDevice() else { return }
     let renderer = try runtimeTestRenderer(device: device)
@@ -294,13 +294,12 @@ func runtimeBeginObserverCanCancelStartReplacementWithoutOuterBeginDestroyingIt(
         seed: originalToken.rawValue
     )
     var replaced = false
+    var replacementStarted = false
     var replacementError: MetalRendererError?
-    renderer.onStrokeRuntimeSegmentMarker = { marker in
-        guard marker.kind == .segmentBegan, !replaced else { return }
-        replaced = true
-        #expect(renderer.hasActiveStroke)
+    renderer.onIdleStateChange = { idle in
+        guard idle, replaced, !replacementStarted else { return }
+        replacementStarted = true
         do {
-            try renderer.cancelStroke(token: originalToken)
             try renderer.beginStroke(
                 token: replacementToken,
                 sample: runtimeStrokeSample(
@@ -316,6 +315,18 @@ func runtimeBeginObserverCanCancelStartReplacementWithoutOuterBeginDestroyingIt(
             replacementError = .commandFailed(error.localizedDescription)
         }
     }
+    renderer.onStrokeRuntimeSegmentMarker = { marker in
+        guard marker.kind == .segmentBegan, !replaced else { return }
+        replaced = true
+        #expect(renderer.hasActiveStroke)
+        do {
+            try renderer.cancelStroke(token: originalToken)
+        } catch let error as MetalRendererError {
+            replacementError = error
+        } catch {
+            replacementError = .commandFailed(error.localizedDescription)
+        }
+    }
 
     try renderer.beginStroke(
         token: originalToken,
@@ -324,7 +335,10 @@ func runtimeBeginObserverCanCancelStartReplacementWithoutOuterBeginDestroyingIt(
     )
 
     #expect(replaced)
+    #expect(!replacementStarted)
     #expect(replacementError == nil)
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
+    #expect(replacementStarted)
     #expect(renderer.hasActiveStroke)
     try renderer.appendStroke(
         token: replacementToken,
@@ -337,13 +351,15 @@ func runtimeBeginObserverCanCancelStartReplacementWithoutOuterBeginDestroyingIt(
         #expect(error == .invalidRendererOperationToken)
     }
     renderer.onStrokeRuntimeSegmentMarker = nil
+    renderer.onIdleStateChange = nil
     try renderer.cancelStroke(token: replacementToken)
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
 }
 
 @MainActor
 @Test
 func runtimeEndObserverCanStartReplacementWithoutOuterTeardownDestroyingIt()
-    throws
+    async throws
 {
     guard let device = MTLCreateSystemDefaultDevice() else { return }
     let renderer = try runtimeTestRenderer(device: device)
@@ -360,11 +376,11 @@ func runtimeEndObserverCanStartReplacementWithoutOuterTeardownDestroyingIt()
         style: style
     )
     var replaced = false
+    var replacementStarted = false
     var replacementError: MetalRendererError?
-    renderer.onStrokeRuntimeSegmentMarker = { marker in
-        guard marker.kind == .segmentEnded, !replaced else { return }
-        replaced = true
-        #expect(renderer.isIdle)
+    renderer.onIdleStateChange = { idle in
+        guard idle, replaced, !replacementStarted else { return }
+        replacementStarted = true
         do {
             try renderer.beginStroke(
                 token: replacementToken,
@@ -381,23 +397,33 @@ func runtimeEndObserverCanStartReplacementWithoutOuterTeardownDestroyingIt()
             replacementError = .commandFailed(error.localizedDescription)
         }
     }
+    renderer.onStrokeRuntimeSegmentMarker = { marker in
+        guard marker.kind == .segmentEnded, !replaced else { return }
+        replaced = true
+        #expect(!renderer.isIdle)
+    }
 
     try renderer.cancelStroke(token: originalToken)
 
     #expect(replaced)
+    #expect(!replacementStarted)
     #expect(replacementError == nil)
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
+    #expect(replacementStarted)
     #expect(renderer.hasActiveStroke)
     try renderer.appendStroke(
         token: replacementToken,
         sample: runtimeStrokeSample(x: 32, phase: .moved, timestamp: 2)
     )
     renderer.onStrokeRuntimeSegmentMarker = nil
+    renderer.onIdleStateChange = nil
     try renderer.cancelStroke(token: replacementToken)
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
 }
 
 @MainActor
 @Test
-func failedCommitPublishesEndTelemetryAndIdleAfterRollback() throws {
+func failedCommitPublishesEndTelemetryAndIdleAfterRollback() async throws {
     guard let device = MTLCreateSystemDefaultDevice() else { return }
     let renderer = try runtimeTestRenderer(device: device)
     renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
@@ -419,11 +445,11 @@ func failedCommitPublishesEndTelemetryAndIdleAfterRollback() throws {
     }
     var events: [ObservedEvent] = []
     renderer.onStrokeRuntimeSegmentMarker = { marker in
-        #expect(renderer.isIdle)
+        #expect(!renderer.isIdle)
         events.append(.marker(marker.kind))
     }
     renderer.onStrokeRuntimeSnapshot = { _ in
-        #expect(renderer.isIdle)
+        #expect(!renderer.isIdle)
         events.append(.snapshot)
     }
     renderer.onIdleStateChange = { idle in
@@ -439,6 +465,14 @@ func failedCommitPublishesEndTelemetryAndIdleAfterRollback() throws {
         )
     }
 
+    #expect(!renderer.isIdle)
+    #expect(
+        events == [
+            .marker(.segmentEnded),
+            .snapshot,
+        ]
+    )
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
     #expect(renderer.isIdle)
     #expect(
         events == [
@@ -477,19 +511,23 @@ func mixedLogicalDabAndRuntimeEventsPreserveCommittedOrder() throws {
         sample: runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
         style: style
     )
+    try renderer.drainPreparedStrokeInputForHarness()
 
     let markerIndex = try #require(
         events.firstIndex(of: .marker(.segmentBegan))
     )
     let snapshotIndex = try #require(events.firstIndex(of: .snapshot))
-    let dabOrdinals: [UInt64] = events[..<markerIndex].compactMap { event in
+    let dabOrdinals: [UInt64] = events.compactMap { event in
         guard case let .dab(ordinal) = event else { return nil }
         return ordinal
     }
+    let firstDabIndex = try #require(events.firstIndex {
+        if case .dab = $0 { return true }
+        return false
+    })
     #expect(!dabOrdinals.isEmpty)
-    #expect(dabOrdinals.count == markerIndex)
     #expect(markerIndex < snapshotIndex)
-    #expect(snapshotIndex == events.index(before: events.endIndex))
+    #expect(snapshotIndex < firstDabIndex)
     #expect(
         zip(dabOrdinals, dabOrdinals.dropFirst()).allSatisfy {
             $0 <= $1
@@ -499,11 +537,12 @@ func mixedLogicalDabAndRuntimeEventsPreserveCommittedOrder() throws {
     renderer.onStrokeRuntimeSegmentMarker = nil
     renderer.onStrokeRuntimeSnapshot = nil
     try renderer.cancelStroke(token: token)
+    try renderer.drainStrokeWorkspaceRetirementForHarness()
 }
 
 @MainActor
 @Test
-func lateOldTelemetryFrameCannotMutateReconfiguredController() throws {
+func lateOldTelemetryFrameCannotMutateReconfiguredController() async throws {
     guard let device = MTLCreateSystemDefaultDevice() else { return }
     let renderer = try runtimeTestRenderer(device: device)
     let oldToken = RendererOperationToken(rawValue: 0x4F4C_4401)
@@ -524,6 +563,7 @@ func lateOldTelemetryFrameCannotMutateReconfiguredController() throws {
     renderer.prepareStrokeRuntimeFrameForTesting(oldIdentity)
     renderer.submitStrokeRuntimeFrameForTesting(oldIdentity)
     try renderer.cancelStroke(token: oldToken)
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
 
     renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
     try renderer.beginStroke(
@@ -553,6 +593,7 @@ func lateOldTelemetryFrameCannotMutateReconfiguredController() throws {
     renderer.presentStrokeRuntimeFrameForTesting(newIdentity)
     #expect(renderer.pendingStrokeRuntimeFrameCountForTesting == 0)
     try renderer.cancelStroke(token: newToken)
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
 }
 
 @MainActor
@@ -572,6 +613,7 @@ func queuedLogicalDabsResolveReplacementObserverAtContinuationTime()
         sample: runtimeStrokeSample(x: 0, phase: .began, timestamp: 0),
         style: style
     )
+    try renderer.drainPreparedStrokeInputForHarness()
 
     var initialObserverCount = 0
     var replacementObserverCount = 0
@@ -582,19 +624,19 @@ func queuedLogicalDabsResolveReplacementObserverAtContinuationTime()
         token: token,
         sample: runtimeStrokeSample(x: 4_096, phase: .moved, timestamp: 1)
     )
+    try renderer.drainPreparedStrokeInputForHarness()
 
     #expect(initialObserverCount == 256)
     renderer.onLogicalDabsGenerated = { _ in
         replacementObserverCount += 1
     }
-    for _ in 0..<10_000 where replacementObserverCount == 0 {
-        await Task.yield()
-    }
+    renderer.drainOneRendererEventTurnForHarness()
 
     #expect(initialObserverCount == 256)
     #expect(replacementObserverCount > 0)
     renderer.onLogicalDabsGenerated = nil
     try renderer.cancelStroke(token: token)
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
 }
 
 @MainActor
@@ -614,6 +656,7 @@ func queuedLogicalDabsStopCallingObserverWhenPropertyBecomesNil()
         sample: runtimeStrokeSample(x: 0, phase: .began, timestamp: 0),
         style: style
     )
+    try renderer.drainPreparedStrokeInputForHarness()
 
     var observerCount = 0
     renderer.onLogicalDabsGenerated = { _ in observerCount += 1 }
@@ -621,15 +664,15 @@ func queuedLogicalDabsStopCallingObserverWhenPropertyBecomesNil()
         token: token,
         sample: runtimeStrokeSample(x: 4_096, phase: .moved, timestamp: 1)
     )
+    try renderer.drainPreparedStrokeInputForHarness()
 
     #expect(observerCount == 256)
     renderer.onLogicalDabsGenerated = nil
-    for _ in 0..<1_000 {
-        await Task.yield()
-    }
+    renderer.drainOneRendererEventTurnForHarness()
 
     #expect(observerCount == 256)
     try renderer.cancelStroke(token: token)
+    try await renderer.awaitPendingStrokeWorkspaceRetirement()
 }
 
 @Test

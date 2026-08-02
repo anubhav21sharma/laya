@@ -92,7 +92,7 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
     ) -> [TilingImage] {
         var cells: [CellIndex] = []
         var result: [TilingImage] = []
-        populateImages(
+        try! populateImages(
             intersecting: worldBounds,
             cells: &cells,
             result: &result
@@ -103,8 +103,9 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
     func populateImages(
         intersecting worldBounds: AxisAlignedRect,
         cells: inout [CellIndex],
-        result: inout [TilingImage]
-    ) {
+        result: inout [TilingImage],
+        maximumImageCount: Int? = nil
+    ) throws {
         cells.removeAll(keepingCapacity: true)
         result.removeAll(keepingCapacity: true)
         if let program = periodic.phase {
@@ -131,8 +132,10 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
                         continue
                     }
                     for row in rows {
-                        cells.append(
-                            CellIndex(column: column, row: row)
+                        try appendBoundedRectangularCell(
+                            CellIndex(column: column, row: row),
+                            to: &cells,
+                            maximumImageCount: maximumImageCount
                         )
                     }
                 }
@@ -158,8 +161,10 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
                         continue
                     }
                     for column in columns {
-                        cells.append(
-                            CellIndex(column: column, row: row)
+                        try appendBoundedRectangularCell(
+                            CellIndex(column: column, row: row),
+                            to: &cells,
+                            maximumImageCount: maximumImageCount
                         )
                     }
                 }
@@ -185,7 +190,11 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
             }
             for row in rows {
                 for column in columns {
-                    cells.append(CellIndex(column: column, row: row))
+                    try appendBoundedRectangularCell(
+                        CellIndex(column: column, row: row),
+                        to: &cells,
+                        maximumImageCount: maximumImageCount
+                    )
                 }
             }
         } else {
@@ -235,7 +244,11 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
                 for column in columns {
                     let cell = CellIndex(column: column, row: row)
                     if cellIntersects(cell, worldBounds: worldBounds) {
-                        cells.append(cell)
+                        try appendBoundedRectangularCell(
+                            cell,
+                            to: &cells,
+                            maximumImageCount: maximumImageCount
+                        )
                     }
                 }
             }
@@ -249,10 +262,11 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
         }
 
         for cell in cells {
-            appendImages(
+            try appendImages(
                 for: cell,
                 intersecting: worldBounds,
-                to: &result
+                to: &result,
+                maximumImageCount: maximumImageCount
             )
         }
     }
@@ -320,8 +334,9 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
     private func appendImages(
         for cell: CellIndex,
         intersecting worldBounds: AxisAlignedRect,
-        to result: inout [TilingImage]
-    ) {
+        to result: inout [TilingImage],
+        maximumImageCount: Int?
+    ) throws {
         let origin = cellOrigin(for: cell)
         let vertices = cellQuad(origin: origin)
         let bounds = rectangularBounds(
@@ -362,6 +377,13 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
                 operation: compiledImage.operation
             )
             if !result.contains(candidate) {
+                if let maximumImageCount,
+                   result.count >= maximumImageCount
+                {
+                    throw TilingProjectionError.fragmentCapacityExceeded(
+                        maximum: maximumImageCount
+                    )
+                }
                 result.append(candidate)
             }
         }
@@ -538,6 +560,19 @@ struct RectangularSymmetryKernel: Equatable, Sendable {
         }
         return false
     }
+}
+
+private func appendBoundedRectangularCell(
+    _ cell: CellIndex,
+    to cells: inout [CellIndex],
+    maximumImageCount: Int?
+) throws {
+    if let maximumImageCount, cells.count >= maximumImageCount {
+        throw TilingProjectionError.fragmentCapacityExceeded(
+            maximum: maximumImageCount
+        )
+    }
+    cells.append(cell)
 }
 
 private func bounds(

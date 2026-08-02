@@ -43,7 +43,7 @@ enum FrameSchedulerError: Error, Equatable, Sendable {
     case predictedCapacityExceeded(actual: Int, maximum: Int)
 }
 
-final class FrameScheduler: @unchecked Sendable {
+final class FrameScheduler {
     var diagnosticSnapshot: FrameSchedulerDiagnosticSnapshot {
         FrameSchedulerDiagnosticSnapshot(
             authoritativePending: authoritativeQueue.count,
@@ -113,6 +113,13 @@ final class FrameScheduler: @unchecked Sendable {
     func enqueueAuthoritative(
         _ records: [ProjectedDepositionRecord]
     ) throws {
+        try preflightAuthoritative(records)
+        enqueueAuthoritativePrevalidated(records)
+    }
+
+    func preflightAuthoritative(
+        _ records: [ProjectedDepositionRecord]
+    ) throws {
         guard records.count <= authoritativeQueue.availableCapacity else {
             throw FrameSchedulerError.authoritativeCapacityExceeded(
                 current: authoritativeQueue.count,
@@ -120,6 +127,12 @@ final class FrameScheduler: @unchecked Sendable {
                 maximum: authoritativeQueue.capacity
             )
         }
+    }
+
+    func enqueueAuthoritativePrevalidated(
+        _ records: [ProjectedDepositionRecord]
+    ) {
+        precondition(records.count <= authoritativeQueue.availableCapacity)
         authoritativeQueue.append(records)
         authoritativeHighWater = max(
             authoritativeHighWater,
@@ -129,6 +142,14 @@ final class FrameScheduler: @unchecked Sendable {
 
     @discardableResult
     func replacePrediction(
+        _ records: [ProjectedDepositionRecord]
+    ) throws -> PredictionReplacementResult {
+        let result = try preflightPrediction(records)
+        replacePredictionPrevalidated(records, result: result)
+        return result
+    }
+
+    func preflightPrediction(
         _ records: [ProjectedDepositionRecord]
     ) throws -> PredictionReplacementResult {
         var nonPredictedCount = 0
@@ -156,13 +177,23 @@ final class FrameScheduler: @unchecked Sendable {
         )
         let droppedCount =
             requestedPredictedCount - acceptedPredictedCount
+        return PredictionReplacementResult(
+            acceptedPredictedInstanceCount: acceptedPredictedCount,
+            droppedPredictedInstanceCount: droppedCount
+        )
+    }
+
+    func replacePredictionPrevalidated(
+        _ records: [ProjectedDepositionRecord],
+        result: PredictionReplacementResult
+    ) {
         predictionCandidate.reset()
         var retainedPredictedCount = 0
         for record in records {
             if record.isPredicted {
-                guard retainedPredictedCount < acceptedPredictedCount else {
-                    continue
-                }
+                guard retainedPredictedCount
+                    < result.acceptedPredictedInstanceCount
+                else { continue }
                 retainedPredictedCount += 1
             }
             predictionCandidate.append(record)
@@ -172,19 +203,15 @@ final class FrameScheduler: @unchecked Sendable {
             predictedHighWater,
             predictionQueue.count
         )
-        if droppedCount > 0 {
+        if result.droppedPredictedInstanceCount > 0 {
             predictionOverloadCount = Self.saturatingIncrement(
                 predictionOverloadCount
             )
             droppedPredictedInstanceCount = Self.saturatingAdd(
                 droppedPredictedInstanceCount,
-                UInt64(droppedCount)
+                UInt64(result.droppedPredictedInstanceCount)
             )
         }
-        return PredictionReplacementResult(
-            acceptedPredictedInstanceCount: acceptedPredictedCount,
-            droppedPredictedInstanceCount: droppedCount
-        )
     }
 
     func nextFrame(

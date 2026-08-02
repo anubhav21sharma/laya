@@ -1799,7 +1799,12 @@ struct BrushLabSessionTests {
         )
 
         #expect(runtime.session.inputRecords.count == 2)
-        #expect(!runtime.session.dabRecords.isEmpty)
+        // Cancellation invalidates queued actor work before publication. The
+        // input trace remains evidence; no logical dab is promised for a
+        // stroke that never reached an authoritative completion boundary.
+        #expect(runtime.session.dabRecords.isEmpty)
+        try await runtime.controller.renderer
+            .awaitPendingStrokeWorkspaceRetirement()
         let evidence = try runtime.session.makeEvidenceData()
         let object = try #require(
             JSONSerialization.jsonObject(with: evidence)
@@ -1847,8 +1852,8 @@ struct BrushLabSessionTests {
 
         runtime.controller.handleTool(.draw)
         runtime.controller.handleStrokeSamples(stroke)
-        _ = try runtime.controller.renderer
-            .completePendingInteractiveStroke()
+        _ = try await runtime.controller.renderer
+            .completePendingInteractiveStrokeAndAwaitIdle()
         let painted = try #require(
             singleRasterBytes(
                 runtime.controller.renderer.captureCommittedDocument()
@@ -1857,8 +1862,8 @@ struct BrushLabSessionTests {
 
         runtime.controller.handleTool(.erase)
         runtime.controller.handleStrokeSamples(stroke)
-        _ = try runtime.controller.renderer
-            .completePendingInteractiveStroke()
+        _ = try await runtime.controller.renderer
+            .completePendingInteractiveStrokeAndAwaitIdle()
         let erased = try #require(
             singleRasterBytes(
                 runtime.controller.renderer.captureCommittedDocument()
@@ -1928,6 +1933,8 @@ struct BrushLabSessionTests {
                 phase: .cancelled
             )
         )
+        try await runtime.controller.renderer
+            .awaitPendingStrokeWorkspaceRetirement()
         let evidence = try runtime.session.makeEvidenceData()
         let object = try #require(
             JSONSerialization.jsonObject(with: evidence)

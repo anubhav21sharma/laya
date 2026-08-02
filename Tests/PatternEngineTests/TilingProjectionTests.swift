@@ -71,6 +71,32 @@ func reusableProjectionMatchesCompatibilityPathWithoutStorageAcquisition() {
         )
     }
     #expect(scratch.storageAllocationCount == allocationCountBefore)
+
+    let boundedDiagnosticsBefore = scratch.storageDiagnostics
+    let boundedFragmentsBefore = scratch.fragments
+    let extremeFootprint = StampFootprint(
+        brushToWorld: Affine2D(
+            xAxis: SIMD2(Float.greatestFiniteMagnitude, 0),
+            yAxis: SIMD2(0, Float.greatestFiniteMagnitude),
+            translation: SIMD2(32, 32)
+        ),
+        localBounds: normalizedBrushBounds,
+        coverageSymmetry: .oriented
+    )
+    #expect(
+        throws: TilingProjectionError.fragmentCapacityExceeded(
+            maximum: 4_096
+        )
+    ) {
+        try TilingProjection.project(
+            extremeFootprint,
+            using: stressStrategy,
+            into: scratch,
+            maximumFragmentCount: 4_096
+        )
+    }
+    #expect(scratch.storageDiagnostics == boundedDiagnosticsBefore)
+    #expect(scratch.fragments == boundedFragmentsBefore)
 }
 
 @Test
