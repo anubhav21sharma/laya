@@ -377,7 +377,7 @@ fixtures lock v1/hash-schema-2 and v2/hash-schema-3 field order and digests.
 
 ## 3. Sequential Implementation Tasks
 
-### C0 — Freeze The Reproducible Stage B Baseline
+### Task 0 (C0) — Freeze The Reproducible Stage B Baseline
 
 **Files:**
 
@@ -411,7 +411,7 @@ Scripts/verify-swift-testing-baseline.sh \
 
 **Commit:** `test(brush): freeze stage B issue baseline`
 
-### C1 — Deterministic Velocity Filter
+### Task 1 (C1) — Deterministic Velocity Filter
 
 **Files:**
 
@@ -437,7 +437,7 @@ swift test --filter StrokeVelocityFilterTests
 
 **Commit:** `feat(input): add deterministic velocity filter`
 
-### C2 — Direction Tracker And Corner Oracle
+### Task 2 (C2) — Direction Tracker And Corner Oracle
 
 **Files:**
 
@@ -464,7 +464,7 @@ swift test --filter 'BrushDirectionTrackerTests|BrushCornerEmitterTests'
 
 **Commit:** `feat(input): track direction and corner turns`
 
-### C3 — Stabilizer Modes As Bounded State Machines
+### Task 3 (C3) — Stabilizer Modes As Bounded State Machines
 
 **Files:**
 
@@ -488,7 +488,7 @@ swift test --filter StrokeStabilizerTests
 
 **Commit:** `feat(input): add bounded stabilizer modes`
 
-### C4 — Timed Candidate State Machine
+### Task 4 (C4) — Timed Candidate State Machine
 
 **Files:**
 
@@ -513,7 +513,7 @@ swift test --filter TimedStrokeEmitterTests
 
 **Commit:** `feat(input): add recorded-time candidates`
 
-### C5 — Portable Tip Support And Spacing Oracle
+### Task 5 (C5) — Portable Tip Support And Spacing Oracle
 
 **Files:**
 
@@ -539,7 +539,7 @@ swift test --filter 'BrushTipSupportTests|BrushFootprintSpacingTests'
 
 **Commit:** `feat(brush): model directional tip support`
 
-### C6 — Atomic Definition V2 And Semantic Identity
+### Task 6 (C6) — Atomic Definition V2 And Semantic Identity
 
 **Files:**
 
@@ -597,7 +597,7 @@ swift test --filter 'SyntheticV1BrushMapperTests|professionalCatalog|anchorCatal
 
 **Commit:** `feat(brush): add versioned stage C schema`
 
-### C7 — Ordered Sensor Compiler And Evaluator
+### Task 7 (C7) — Ordered Sensor Compiler And Evaluator
 
 **Files:**
 
@@ -628,7 +628,7 @@ swift test --filter 'BrushSensorProgramTests|BrushDynamicsEngineTests|BrushRando
 
 **Commit:** `feat(brush): evaluate ordered sensor programs`
 
-### C8 — Velocity And Normalization Production Integration
+### Task 8 (C8) — Velocity And Normalization Production Integration
 
 **Files:**
 
@@ -671,7 +671,7 @@ swift test --filter 'BrushInputTests|StrokeVelocityFilterTests|AttributedStrokeI
 
 **Commit:** `feat(input): integrate artistic velocity`
 
-### C9 — Stabilized Path And Direction Production Integration
+### Task 9 (C9) — Stabilized Path And Direction Production Integration
 
 **Files:**
 
@@ -701,7 +701,7 @@ swift test --filter 'StrokeStabilizerTests|BrushDirectionTrackerTests|BrushCorne
 
 **Commit:** `feat(input): integrate stable path direction`
 
-### C10 — Footprint-Aware Distance Integration
+### Task 10 (C10) — Footprint-Aware Distance Integration
 
 **Files:**
 
@@ -730,7 +730,7 @@ swift test --filter 'BrushFootprintSpacingTests|BrushStrokeGeneratorTests|Logica
 
 **Commit:** `feat(brush): space from evaluated footprint`
 
-### C11 — Unified Distance/Time Candidate Merge
+### Task 11 (C11) — Unified Distance/Time Candidate Merge
 
 **Files:**
 
@@ -760,7 +760,7 @@ swift test --filter 'TimedStrokeEmitterTests|StrokeEmissionMergerTests|BrushStro
 
 **Commit:** `feat(brush): merge distance and timed emission`
 
-### C12 — Bounded Scheduler Drain And Failure Recovery
+### Task 12 (C12) — Bounded Scheduler Drain And Failure Recovery
 
 **Files:**
 
@@ -794,7 +794,7 @@ swift test --filter 'StrokeFrameSchedulerTests|StrokeRenderCoordinatorTests|Tran
 
 **Commit:** `perf(render): bound stage C candidate drain`
 
-### C13 — Stage C Acceptance Checkpoint
+### Task 13 (C13) — Stage C Acceptance Checkpoint
 
 **Files:**
 
