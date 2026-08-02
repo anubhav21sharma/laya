@@ -262,7 +262,7 @@ private struct BrushInputAllocationProbeHarness {
     ) throws {
         var tracker = BrushDirectionTracker()
         var position = WorldPoint(x: 0, y: 0)
-        tracker.begin(at: position)
+        try tracker.begin(at: position)
         let emitter = try BrushCornerEmitter(maximumAngularStep: .pi / 4)
         var output = StrokeEmissionCandidateBuffer()
         var nextCornerSequence: UInt64 = 0
@@ -318,7 +318,7 @@ private struct BrushInputAllocationProbeHarness {
             default: position.y -= 1
             }
 
-            let update = tracker.update(to: position)
+            let update = try tracker.update(to: position)
             guard
                 let direction = update.direction,
                 let signedTurn = update.signedTurn

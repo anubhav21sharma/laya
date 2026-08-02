@@ -3,6 +3,7 @@ import Foundation
 public enum BrushCornerEmitterError: Error, Equatable, Sendable {
     case invalidMaximumAngularStep
     case invalidSignedTurn
+    case invalidStartingDirection
     case capacityExceeded(
         requiredCandidateCount: Int,
         maximumCandidateCount: Int
@@ -37,24 +38,21 @@ public struct BrushCornerEmitter: Equatable, Sendable {
         guard signedTurn.isFinite, abs(signedTurn) <= .pi else {
             throw BrushCornerEmitterError.invalidSignedTurn
         }
-        precondition(
-            startingDirection.isFinite,
-            "Corner direction must be finite"
-        )
+        guard startingDirection.isFinite else {
+            throw BrushCornerEmitterError.invalidStartingDirection
+        }
         let turnMagnitude = abs(signedTurn)
         guard turnMagnitude > maximumAngularStep else {
             return
         }
 
-        let gapRatio = Double(turnMagnitude) / Double(maximumAngularStep)
-        let nearestGapCount = gapRatio.rounded()
-        let ratioTolerance = Double(Float.ulpOfOne) * 8 * max(1, gapRatio)
         let gapCount = Int(
-            abs(gapRatio - nearestGapCount) <= ratioTolerance
-                ? nearestGapCount
-                : ceil(gapRatio)
+            ceil(Double(turnMagnitude) / Double(maximumAngularStep))
         )
         let requiredCandidateCount = gapCount - 1
+        guard requiredCandidateCount > 0 else {
+            return
+        }
         guard
             requiredCandidateCount <= StrokeEmissionCandidateBuffer.maximumCount,
             output.count <= StrokeEmissionCandidateBuffer.maximumCount
@@ -73,7 +71,7 @@ public struct BrushCornerEmitter: Equatable, Sendable {
             throw BrushCornerEmitterError.cornerSequenceOverflow
         }
 
-        for intermediateIndex in 1...requiredCandidateCount {
+        for intermediateIndex in 1..<gapCount {
             let fraction = Float(intermediateIndex) / Float(gapCount)
             let direction = startingDirection + signedTurn * fraction
             output.append(

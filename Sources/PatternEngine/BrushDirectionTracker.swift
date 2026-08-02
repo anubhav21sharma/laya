@@ -1,5 +1,9 @@
 import Foundation
 
+public enum BrushDirectionTrackerError: Error, Equatable, Sendable {
+    case invalidPosition
+}
+
 public struct BrushDirectionUpdate: Equatable, Sendable {
     public let direction: Float?
     public let signedTurn: Float?
@@ -10,13 +14,16 @@ public struct BrushDirectionTracker: Equatable, Sendable {
     private static let halfTurnTolerance = Double(Float.pi.ulp) * 8
 
     private var previousPosition: WorldPoint?
-    private var unwrappedDirection: Float?
+    private var previousWrappedDirection: Double?
+    private var unwrappedDirection: Double?
     private var lastNonzeroTurnSign: Float?
 
     public init() {}
 
-    public mutating func begin(at position: WorldPoint) {
-        precondition(Self.isFinite(position), "Direction input must be finite")
+    public mutating func begin(at position: WorldPoint) throws {
+        guard Self.isFinite(position) else {
+            throw BrushDirectionTrackerError.invalidPosition
+        }
         reset()
         previousPosition = position
     }
@@ -24,8 +31,10 @@ public struct BrushDirectionTracker: Equatable, Sendable {
     @discardableResult
     public mutating func update(
         to position: WorldPoint
-    ) -> BrushDirectionUpdate {
-        precondition(Self.isFinite(position), "Direction input must be finite")
+    ) throws -> BrushDirectionUpdate {
+        guard Self.isFinite(position) else {
+            throw BrushDirectionTrackerError.invalidPosition
+        }
         guard let previousPosition else {
             self.previousPosition = position
             return BrushDirectionUpdate(direction: nil, signedTurn: nil)
@@ -37,51 +46,48 @@ public struct BrushDirectionTracker: Equatable, Sendable {
 
         guard deltaX != 0 || deltaY != 0 else {
             return BrushDirectionUpdate(
-                direction: unwrappedDirection,
+                direction: unwrappedDirection.map(Float.init),
                 signedTurn: nil
             )
         }
 
         let wrappedDirection = atan2(deltaY, deltaX)
         guard let unwrappedDirection else {
-            let initializedDirection = Float(wrappedDirection)
-            precondition(
-                initializedDirection.isFinite,
-                "Direction must remain finite"
-            )
-            self.unwrappedDirection = initializedDirection
+            previousWrappedDirection = wrappedDirection
+            self.unwrappedDirection = wrappedDirection
             return BrushDirectionUpdate(
-                direction: initializedDirection,
+                direction: Float(wrappedDirection),
                 signedTurn: nil
             )
         }
 
         var signedTurn = Self.shortestSignedDelta(
-            from: Double(unwrappedDirection),
+            from: previousWrappedDirection!,
             to: wrappedDirection
         )
         if abs(abs(signedTurn) - Double.pi) <= Self.halfTurnTolerance {
             signedTurn = Double(lastNonzeroTurnSign ?? 1) * Double.pi
         }
 
-        let finiteTurn = Float(signedTurn)
-        let nextDirection = unwrappedDirection + finiteTurn
+        let nextDirection = unwrappedDirection + signedTurn
         precondition(
-            finiteTurn.isFinite && nextDirection.isFinite,
+            signedTurn.isFinite && nextDirection.isFinite,
             "Direction must remain finite"
         )
-        if finiteTurn != 0 {
-            lastNonzeroTurnSign = finiteTurn.sign == .minus ? -1 : 1
+        if signedTurn != 0 {
+            lastNonzeroTurnSign = signedTurn.sign == .minus ? -1 : 1
         }
+        previousWrappedDirection = wrappedDirection
         self.unwrappedDirection = nextDirection
         return BrushDirectionUpdate(
-            direction: nextDirection,
-            signedTurn: finiteTurn
+            direction: Float(nextDirection),
+            signedTurn: Float(signedTurn)
         )
     }
 
     public mutating func reset() {
         previousPosition = nil
+        previousWrappedDirection = nil
         unwrappedDirection = nil
         lastNonzeroTurnSign = nil
     }

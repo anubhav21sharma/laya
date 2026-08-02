@@ -5,12 +5,12 @@ import Testing
 @Suite("BrushDirectionTracker")
 struct BrushDirectionTrackerTests {
     @Test
-    func firstNonzeroSegmentInitializesWithoutInventingATurn() {
+    func firstNonzeroSegmentInitializesWithoutInventingATurn() throws {
         var tracker = BrushDirectionTracker()
-        tracker.begin(at: directionPoint(0, 0))
+        try tracker.begin(at: directionPoint(0, 0))
 
-        let stationary = tracker.update(to: directionPoint(0, 0))
-        let firstTravel = tracker.update(to: directionPoint(0, 4))
+        let stationary = try tracker.update(to: directionPoint(0, 0))
+        let firstTravel = try tracker.update(to: directionPoint(0, 4))
 
         #expect(stationary.direction == nil)
         #expect(stationary.signedTurn == nil)
@@ -19,13 +19,13 @@ struct BrushDirectionTrackerTests {
     }
 
     @Test
-    func crossingFrom359DegreesTo1DegreeUsesTheShortArc() {
+    func crossingFrom359DegreesTo1DegreeUsesTheShortArc() throws {
         var tracker = BrushDirectionTracker()
-        tracker.begin(at: directionPoint(0, 0))
+        try tracker.begin(at: directionPoint(0, 0))
         let firstEndpoint = directionEndpoint(degrees: 359)
-        let first = tracker.update(to: firstEndpoint)
+        let first = try tracker.update(to: firstEndpoint)
 
-        let turn = tracker.update(
+        let turn = try tracker.update(
             to: firstEndpoint + directionEndpoint(degrees: 1)
         )
 
@@ -35,14 +35,14 @@ struct BrushDirectionTrackerTests {
     }
 
     @Test
-    func stationarySegmentsRetainDirectionAndPriorTurnSign() {
+    func stationarySegmentsRetainDirectionAndPriorTurnSign() throws {
         var tracker = BrushDirectionTracker()
-        tracker.begin(at: directionPoint(0, 0))
-        _ = tracker.update(to: directionPoint(1, 0))
-        _ = tracker.update(to: directionPoint(1, -1))
+        try tracker.begin(at: directionPoint(0, 0))
+        _ = try tracker.update(to: directionPoint(1, 0))
+        _ = try tracker.update(to: directionPoint(1, -1))
 
-        let stationary = tracker.update(to: directionPoint(1, -1))
-        let halfTurnAfterStationary = tracker.update(
+        let stationary = try tracker.update(to: directionPoint(1, -1))
+        let halfTurnAfterStationary = try tracker.update(
             to: directionPoint(1, 0)
         )
 
@@ -53,13 +53,13 @@ struct BrushDirectionTrackerTests {
     }
 
     @Test
-    func exactHalfTurnWithoutPriorTurnUsesPositiveSignForBothSignedZeros() {
+    func exactHalfTurnWithoutPriorTurnUsesPositiveSignForBothSignedZeros() throws {
         for y in [Float.zero, -Float.zero] {
             var tracker = BrushDirectionTracker()
-            tracker.begin(at: directionPoint(0, 0))
-            _ = tracker.update(to: directionPoint(1, 0))
+            try tracker.begin(at: directionPoint(0, 0))
+            _ = try tracker.update(to: directionPoint(1, 0))
 
-            let reversal = tracker.update(to: directionPoint(0, y))
+            let reversal = try tracker.update(to: directionPoint(0, y))
 
             expectDirection(reversal.signedTurn, equals: .pi)
             expectDirection(reversal.direction, equals: .pi)
@@ -67,47 +67,101 @@ struct BrushDirectionTrackerTests {
     }
 
     @Test
-    func exactHalfTurnFollowsTheLastPositiveTurnSign() {
+    func exactHalfTurnFollowsTheLastPositiveTurnSign() throws {
         var tracker = BrushDirectionTracker()
-        tracker.begin(at: directionPoint(0, 0))
-        _ = tracker.update(to: directionPoint(1, 0))
-        _ = tracker.update(to: directionPoint(1, 1))
+        try tracker.begin(at: directionPoint(0, 0))
+        _ = try tracker.update(to: directionPoint(1, 0))
+        _ = try tracker.update(to: directionPoint(1, 1))
 
-        let reversal = tracker.update(to: directionPoint(1, 0))
+        let reversal = try tracker.update(to: directionPoint(1, 0))
 
         expectDirection(reversal.signedTurn, equals: .pi)
         expectDirection(reversal.direction, equals: 3 * .pi / 2)
     }
 
     @Test
-    func exactHalfTurnFollowsTheLastNegativeTurnSign() {
+    func exactHalfTurnFollowsTheLastNegativeTurnSign() throws {
         var tracker = BrushDirectionTracker()
-        tracker.begin(at: directionPoint(0, 0))
-        _ = tracker.update(to: directionPoint(1, 0))
-        _ = tracker.update(to: directionPoint(1, -1))
+        try tracker.begin(at: directionPoint(0, 0))
+        _ = try tracker.update(to: directionPoint(1, 0))
+        _ = try tracker.update(to: directionPoint(1, -1))
 
-        let reversal = tracker.update(to: directionPoint(1, 0))
+        let reversal = try tracker.update(to: directionPoint(1, 0))
 
         expectDirection(reversal.signedTurn, equals: -.pi)
         expectDirection(reversal.direction, equals: -3 * .pi / 2)
     }
 
     @Test
-    func copyHasIndependentValueStateAndResetRemovesAllHistory() {
-        var original = BrushDirectionTracker()
-        original.begin(at: directionPoint(0, 0))
-        _ = original.update(to: directionEndpoint(degrees: 0))
-        var copy = original
-        _ = copy.update(to: directionPoint(1, 1))
+    func manyCompleteTurnsPreserveExactReversalSignAndMonotonicAngle() throws {
+        var tracker = BrushDirectionTracker()
+        try tracker.begin(at: directionPoint(0, 0))
+        var priorDirection: Float?
 
-        let originalTurn = original.update(to: directionPoint(1, -1))
+        for _ in 0..<20_000 {
+            priorDirection = try tracker.update(to: directionPoint(1, 0)).direction
+            priorDirection = try tracker.update(to: directionPoint(1, 1)).direction
+            priorDirection = try tracker.update(to: directionPoint(0, 1)).direction
+            priorDirection = try tracker.update(to: directionPoint(0, 0)).direction
+        }
+
+        let previous = try #require(priorDirection)
+        let reversal = try tracker.update(to: directionPoint(0, 1))
+
+        expectDirection(reversal.signedTurn, equals: .pi)
+        let reversalDirection = try #require(reversal.direction)
+        #expect(reversalDirection.isFinite)
+        #expect(reversalDirection > previous)
+    }
+
+    @Test
+    func copyHasIndependentValueStateAndResetRemovesAllHistory() throws {
+        var original = BrushDirectionTracker()
+        try original.begin(at: directionPoint(0, 0))
+        _ = try original.update(to: directionEndpoint(degrees: 0))
+        var copy = original
+        _ = try copy.update(to: directionPoint(1, 1))
+
+        let originalTurn = try original.update(to: directionPoint(1, -1))
         expectDirection(originalTurn.signedTurn, equals: -.pi / 2)
 
         copy.reset()
-        copy.begin(at: directionPoint(4, 5))
-        let stationary = copy.update(to: directionPoint(4, 5))
+        try copy.begin(at: directionPoint(4, 5))
+        let stationary = try copy.update(to: directionPoint(4, 5))
         #expect(stationary.direction == nil)
         #expect(stationary.signedTurn == nil)
+    }
+
+    @Test
+    func nonfiniteBeginFailsTypedWithoutMutatingExistingState() throws {
+        var tracker = BrushDirectionTracker()
+        try tracker.begin(at: directionPoint(0, 0))
+        _ = try tracker.update(to: directionPoint(1, 0))
+        let stateBefore = tracker
+
+        #expect(throws: BrushDirectionTrackerError.invalidPosition) {
+            try tracker.begin(at: directionPoint(.infinity, 0))
+        }
+
+        #expect(tracker == stateBefore)
+        let turn = try tracker.update(to: directionPoint(1, 1))
+        expectDirection(turn.signedTurn, equals: .pi / 2)
+    }
+
+    @Test
+    func nonfiniteUpdateFailsTypedWithoutMutatingExistingState() throws {
+        var tracker = BrushDirectionTracker()
+        try tracker.begin(at: directionPoint(0, 0))
+        _ = try tracker.update(to: directionPoint(1, 0))
+        let stateBefore = tracker
+
+        #expect(throws: BrushDirectionTrackerError.invalidPosition) {
+            _ = try tracker.update(to: directionPoint(1, .nan))
+        }
+
+        #expect(tracker == stateBefore)
+        let turn = try tracker.update(to: directionPoint(1, -1))
+        expectDirection(turn.signedTurn, equals: -.pi / 2)
     }
 }
 

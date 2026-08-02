@@ -29,26 +29,75 @@ struct BrushCornerEmitterTests {
     }
 
     @Test
+    func turnJustAboveMaximumStepEmitsOneInteriorCandidate() throws {
+        let step = Float.pi / 4
+        let signedTurn = step.nextUp
+        let emitter = try BrushCornerEmitter(maximumAngularStep: step)
+        var output = StrokeEmissionCandidateBuffer()
+        var nextSequence: UInt64 = 7
+
+        try emitter.emit(
+            from: 0,
+            signedTurn: signedTurn,
+            vertex: cornerVertex(x: 2, y: 3),
+            into: &output,
+            nextCornerSequence: &nextSequence
+        )
+
+        #expect(output.count == 1)
+        expectCornerAngle(output[0].direction, equals: signedTurn / 2)
+        #expect(output[0].cornerSequence == 7)
+        #expect(nextSequence == 8)
+    }
+
+    @Test
+    func turnJustAboveThirtyThreeGapsFailsCapacityAtomically() throws {
+        let step = Float.pi / 36
+        let signedTurn = (step * 33).nextUp
+        let emitter = try BrushCornerEmitter(maximumAngularStep: step)
+        var output = StrokeEmissionCandidateBuffer()
+        var nextSequence: UInt64 = 17
+        let outputBefore = output
+
+        #expect(throws: BrushCornerEmitterError.capacityExceeded(
+            requiredCandidateCount: 33,
+            maximumCandidateCount: 32
+        )) {
+            try emitter.emit(
+                from: 0,
+                signedTurn: signedTurn,
+                vertex: cornerVertex(x: 4, y: 5),
+                into: &output,
+                nextCornerSequence: &nextSequence
+            )
+        }
+
+        #expect(output == outputBefore)
+        #expect(nextSequence == 17)
+    }
+
+    @Test
     func fanExcludesEndpointsAndUsesMinimumEvenlySpacedOrientations() throws {
         let emitter = try BrushCornerEmitter(
             maximumAngularStep: degreesForCorner(30)
         )
         var output = StrokeEmissionCandidateBuffer()
         var nextSequence: UInt64 = 40
+        let vertex = cornerVertex(
+            x: 4,
+            y: 5,
+            pressure: 0.73,
+            relativeStrokeTime: 1.25,
+            sourceDistance: 7_000.000_001,
+            provenance: .prediction,
+            timeKey: -9,
+            distanceKey: 7_000_000_001
+        )
 
         try emitter.emit(
             from: 0,
             signedTurn: degreesForCorner(100),
-            vertex: cornerVertex(
-                x: 4,
-                y: 5,
-                pressure: 0.73,
-                relativeStrokeTime: 1.25,
-                sourceDistance: 7_000.000_001,
-                provenance: .prediction,
-                timeKey: -9,
-                distanceKey: 7_000_000_001
-            ),
+            vertex: vertex,
             into: &output,
             nextCornerSequence: &nextSequence
         )
@@ -62,8 +111,10 @@ struct BrushCornerEmitterTests {
         #expect(output[0].position == cornerPoint(4, 5))
         #expect(output[1].position == cornerPoint(4, 5))
         #expect(output[2].position == cornerPoint(4, 5))
+        for index in 0..<output.count {
+            #expect(output[index].sample == vertex.sample)
+        }
         #expect(output[0].provenance == .prediction)
-        #expect(output[0].sample.pressure == 0.73)
         #expect(output[1].relativeStrokeTime == 1.25)
         #expect(output[2].sourceDistance == 7_000.000_001)
         #expect(output[1].timeKey == -9)
@@ -219,6 +270,27 @@ struct BrushCornerEmitterTests {
     }
 
     @Test
+    func invalidStartingDirectionFailsTypedWithoutMutatingCallerState() throws {
+        let emitter = try BrushCornerEmitter(maximumAngularStep: .pi / 2)
+        var output = StrokeEmissionCandidateBuffer()
+        var nextSequence: UInt64 = 29
+        let outputBefore = output
+
+        #expect(throws: BrushCornerEmitterError.invalidStartingDirection) {
+            try emitter.emit(
+                from: .infinity,
+                signedTurn: .pi,
+                vertex: cornerVertex(x: 1, y: 2),
+                into: &output,
+                nextCornerSequence: &nextSequence
+            )
+        }
+
+        #expect(output == outputBefore)
+        #expect(nextSequence == 29)
+    }
+
+    @Test
     func candidateOutputCopiesIndependentlyAndResetClearsLogicalContents() throws {
         let emitter = try BrushCornerEmitter(
             maximumAngularStep: degreesForCorner(30)
@@ -236,7 +308,7 @@ struct BrushCornerEmitterTests {
 
         copy.reset()
 
-        #expect(original.count == 2)
+        #expect(original.count == 3)
         #expect(original[0].cornerSequence == 5)
         #expect(copy.isEmpty)
     }
@@ -289,7 +361,18 @@ private func cornerVertex(
         phase: .moved,
         source: .pencil,
         kind: provenance == .prediction ? .predicted : .actual,
-        capabilities: [.pressure, .altitude, .azimuth, .roll]
+        capabilities: [
+            .pressure,
+            .altitude,
+            .azimuth,
+            .roll,
+            .tangentialPressure,
+        ],
+        tangentialPressure: -0.25,
+        deviceIdentifier: 77,
+        estimationUpdateIndex: 3,
+        estimatedProperties: [.pressure, .roll],
+        estimatedPropertiesExpectingUpdates: [.azimuth]
     )
     return StrokeEmissionCandidate(
         sample: sample,
