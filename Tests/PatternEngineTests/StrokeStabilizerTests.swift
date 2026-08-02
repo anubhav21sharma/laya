@@ -7,6 +7,32 @@ private let stabilizerViewport = ViewportTransform(
     worldCenter: WorldPoint(x: 0, y: 0)
 )
 
+private let exactWorldViewport = ViewportTransform(
+    drawableSize: PatternSize(
+        width: .leastNonzeroMagnitude,
+        height: .leastNonzeroMagnitude
+    ),
+    worldCenter: WorldPoint(x: 0, y: 0)
+)
+
+private func exactWorldSample(
+    x: Float,
+    y: Float,
+    timestamp: TimeInterval,
+    phase: StrokePhase
+) -> WorldStrokeSample {
+    let sample = StrokeSample(
+        position: ScreenPoint(x: x, y: y),
+        pressure: 0.5,
+        timestamp: timestamp,
+        phase: phase,
+        source: .pencil,
+        capabilities: [.pressure]
+    )
+    var deriver = BrushInputDeriver()
+    return deriver.derive(sample, viewport: exactWorldViewport)
+}
+
 private func worldSample(
     x: Float,
     y: Float = 0,
@@ -49,6 +75,110 @@ private func worldSample(
 
 @Suite("StrokeStabilizer")
 struct StrokeStabilizerTests {
+    @Test
+    func belowGridBoundaryNeverPromotesFuturePointOrSkipsTurnCrossing()
+        throws
+    {
+        var stabilizer = try StrokeStabilizer(
+            mode: .weightedWindow(distance: 64)
+        )
+        _ = try stabilizer.processV2(
+            exactWorldSample(x: 0, y: 0, timestamp: 0, phase: .began)
+        )
+        let almostOne = WorldPoint(x: 0.000345, y: 0.99999994)
+        _ = try stabilizer.processV2(
+            exactWorldSample(
+                x: almostOne.x,
+                y: almostOne.y,
+                timestamp: 1,
+                phase: .moved
+            )
+        )
+
+        #expect(stabilizer.snapshot.retainedPointCount == 1)
+        #expect(stabilizer.snapshot.newestRetainedDistance == 0)
+        #expect(
+            try #require(stabilizer.snapshot.newestRetainedDistance)
+                <= stabilizer.snapshot.authoredDistance
+        )
+
+        _ = try stabilizer.processV2(
+            exactWorldSample(
+                x: almostOne.x + 1,
+                y: almostOne.y,
+                timestamp: 2,
+                phase: .moved
+            )
+        )
+
+        #expect(stabilizer.snapshot.newestRetainedDistance == 1)
+        #expect(
+            try #require(stabilizer.snapshot.newestRetainedDistance)
+                <= stabilizer.snapshot.authoredDistance
+        )
+        #expect(
+            try #require(stabilizer.snapshot.newestRetainedPosition).x
+                > almostOne.x
+        )
+        #expect(
+            try #require(stabilizer.snapshot.newestRetainedPosition).y
+                == almostOne.y
+        )
+    }
+
+    @Test
+    func legacyInstanceRejectsV2ProcessingWithoutMutation() {
+        var stabilizer = StrokeStabilizer(strength: 0.5)
+        let before = stabilizer
+
+        #expect(throws: StrokeStabilizerError.incompatibleMode) {
+            _ = try stabilizer.processV2(
+                worldSample(x: 1, timestamp: 0, phase: .began)
+            )
+        }
+
+        #expect(stabilizer == before)
+    }
+
+    @Test
+    func weightedModeInterpolatesNonGridClippingBoundary() throws {
+        var stabilizer = try StrokeStabilizer(
+            mode: .weightedWindow(distance: 2)
+        )
+        _ = try stabilizer.processV2(
+            worldSample(x: 0, timestamp: 0, phase: .began)
+        )
+
+        let output = try stabilizer.processV2(
+            worldSample(x: 3.1, timestamp: 1, phase: .moved)
+        )
+
+        #expect(abs(
+            try #require(output).position.x - 2.211_111
+        ) < 0.000_01)
+        #expect(try #require(output).position.y == 0)
+    }
+
+    @Test
+    func delayedModeInterpolatesTargetBetweenRetainedGridPoints() throws {
+        var stabilizer = try StrokeStabilizer(mode: .delayed(distance: 1.1))
+        _ = try stabilizer.processV2(
+            worldSample(x: 0, timestamp: 0, phase: .began)
+        )
+        _ = try stabilizer.processV2(
+            worldSample(x: 1, timestamp: 1, phase: .moved)
+        )
+
+        let output = try stabilizer.processV2(
+            worldSample(x: 1, y: 0.5, timestamp: 2, phase: .moved)
+        )
+
+        #expect(abs(
+            try #require(output).position.x - 0.4
+        ) < 0.000_01)
+        #expect(abs(try #require(output).position.y) < 0.000_01)
+    }
+
     @Test
     func v2DistanceModesAcceptOnlyFiniteInclusiveContractBounds() throws {
         _ = try StrokeStabilizer(
@@ -98,7 +228,7 @@ struct StrokeStabilizerTests {
             worldSample(x: 9, timestamp: 3, phase: .ended),
         ]
 
-        let output = samples.map { stabilizer.processV2($0) }
+        let output = try samples.map { try stabilizer.processV2($0) }
 
         #expect(output == samples.map(Optional.some))
         #expect(stabilizer.declaredEndpointLag == nil)
@@ -111,16 +241,16 @@ struct StrokeStabilizerTests {
         var stabilizer = try StrokeStabilizer(mode: .delayed(distance: 1))
         #expect(stabilizer.declaredEndpointLag == 1)
 
-        #expect(stabilizer.processV2(
+        #expect(try stabilizer.processV2(
             worldSample(x: 2, timestamp: 0, phase: .began)
         ) == nil)
-        #expect(stabilizer.processV2(
+        #expect(try stabilizer.processV2(
             worldSample(x: 2.5, timestamp: 1, phase: .moved)
         ) == nil)
-        #expect(stabilizer.processV2(
+        #expect(try stabilizer.processV2(
             worldSample(x: 3, timestamp: 2, phase: .moved)
         )?.position == WorldPoint(x: 2, y: 0))
-        #expect(stabilizer.processV2(
+        #expect(try stabilizer.processV2(
             worldSample(x: 4, timestamp: 3, phase: .ended)
         )?.position == WorldPoint(x: 3, y: 0))
     }
@@ -129,11 +259,11 @@ struct StrokeStabilizerTests {
     func delayedModeProducesOneVisibleExactTapAtFinish() throws {
         var stabilizer = try StrokeStabilizer(mode: .delayed(distance: 1))
 
-        #expect(stabilizer.processV2(
+        #expect(try stabilizer.processV2(
             worldSample(x: 4, timestamp: 0, phase: .began)
         ) == nil)
         let tap = worldSample(x: 4, timestamp: 1, phase: .ended)
-        #expect(stabilizer.processV2(tap) == tap)
+        #expect(try stabilizer.processV2(tap) == tap)
     }
 
     @Test
@@ -145,15 +275,15 @@ struct StrokeStabilizerTests {
         )
         let began = worldSample(x: 0, timestamp: 0, phase: .began)
 
-        #expect(stabilizer.processV2(began) == began)
-        let prefixOutput = stabilizer.processV2(
+        #expect(try stabilizer.processV2(began) == began)
+        let prefixOutput = try stabilizer.processV2(
             worldSample(x: 1, timestamp: 1, phase: .moved)
         )
         let prefix = try #require(prefixOutput)
         #expect(abs(prefix.position.x - Float(8) / 15) < 0.000_01)
         #expect(prefix.position.y == 0)
 
-        let fullWindowOutput = stabilizer.processV2(
+        let fullWindowOutput = try stabilizer.processV2(
             worldSample(x: 2, timestamp: 2, phase: .moved)
         )
         let fullWindow = try #require(fullWindowOutput)
@@ -168,14 +298,14 @@ struct StrokeStabilizerTests {
         var stabilizer = try StrokeStabilizer(
             mode: .weightedWindow(distance: 2)
         )
-        _ = stabilizer.processV2(
+        _ = try stabilizer.processV2(
             worldSample(x: 0, timestamp: 0, phase: .began)
         )
-        _ = stabilizer.processV2(
+        _ = try stabilizer.processV2(
             worldSample(x: 1, timestamp: 1, phase: .moved)
         )
 
-        let clippedOutput = stabilizer.processV2(
+        let clippedOutput = try stabilizer.processV2(
             worldSample(x: 1, y: 2, timestamp: 2, phase: .moved)
         )
         let clipped = try #require(clippedOutput)
@@ -183,7 +313,7 @@ struct StrokeStabilizerTests {
         #expect(abs(clipped.position.y - Float(10) / 9) < 0.000_01)
 
         let endpoint = WorldPoint(x: 1, y: 2)
-        let correctionOutput = stabilizer.processV2(
+        let correctionOutput = try stabilizer.processV2(
             worldSample(x: endpoint.x, y: endpoint.y, timestamp: 3, phase: .ended)
         )
         let correction = try #require(correctionOutput)
@@ -196,14 +326,14 @@ struct StrokeStabilizerTests {
     @Test
     func delayedModeInterpolatesBehindHeadAcrossCurvedAuthoredArc() throws {
         var stabilizer = try StrokeStabilizer(mode: .delayed(distance: 1))
-        _ = stabilizer.processV2(
+        _ = try stabilizer.processV2(
             worldSample(x: 0, timestamp: 0, phase: .began)
         )
-        _ = stabilizer.processV2(
+        _ = try stabilizer.processV2(
             worldSample(x: 1, timestamp: 1, phase: .moved)
         )
 
-        let output = stabilizer.processV2(
+        let output = try stabilizer.processV2(
             worldSample(x: 1, y: 0.5, timestamp: 2, phase: .moved)
         )
 
@@ -220,21 +350,21 @@ struct StrokeStabilizerTests {
         ]
         for mode in modes {
             var longSegment = try StrokeStabilizer(mode: mode)
-            _ = longSegment.processV2(
+            _ = try longSegment.processV2(
                 worldSample(x: 0, timestamp: 0, phase: .began)
             )
-            let longOutput = longSegment.processV2(
+            let longOutput = try longSegment.processV2(
                 worldSample(x: 130, timestamp: 1, phase: .moved)
             )
 
             var partitioned = try StrokeStabilizer(mode: mode)
-            _ = partitioned.processV2(
+            _ = try partitioned.processV2(
                 worldSample(x: 0, timestamp: 0, phase: .began)
             )
             let partitions: [Float] = [0.25, 7.75, 41.5, 64, 99.125, 130]
             var partitionedOutput: WorldStrokeSample?
             for (index, x) in partitions.enumerated() {
-                partitionedOutput = partitioned.processV2(
+                partitionedOutput = try partitioned.processV2(
                     worldSample(
                         x: x,
                         timestamp: TimeInterval(index + 1),
@@ -261,10 +391,10 @@ struct StrokeStabilizerTests {
         var stabilizer = try StrokeStabilizer(
             mode: .weightedWindow(distance: 64)
         )
-        _ = stabilizer.processV2(
+        _ = try stabilizer.processV2(
             worldSample(x: 0, timestamp: 0, phase: .began)
         )
-        _ = stabilizer.processV2(
+        _ = try stabilizer.processV2(
             worldSample(x: 1_000_000.25, timestamp: 1, phase: .moved)
         )
 
@@ -286,10 +416,10 @@ struct StrokeStabilizerTests {
         ]
         for mode in modes {
             var stabilizer = try StrokeStabilizer(mode: mode)
-            _ = stabilizer.processV2(
+            _ = try stabilizer.processV2(
                 worldSample(x: 0, timestamp: 0, phase: .began)
             )
-            _ = stabilizer.processV2(
+            _ = try stabilizer.processV2(
                 worldSample(x: 2, timestamp: 1, phase: .moved)
             )
             let retainedCount = stabilizer.snapshot.retainedPointCount
@@ -313,7 +443,7 @@ struct StrokeStabilizerTests {
                 estimatedPropertiesExpectingUpdates: [.roll]
             )
 
-            let currentOutput = stabilizer.processV2(currentHead)
+            let currentOutput = try stabilizer.processV2(currentHead)
             let output = try #require(currentOutput)
 
             #expect(output.pressure == currentHead.pressure)
@@ -354,14 +484,14 @@ struct StrokeStabilizerTests {
         ]
         for mode in modes {
             var stabilizer = try StrokeStabilizer(mode: mode)
-            _ = stabilizer.processV2(
+            _ = try stabilizer.processV2(
                 worldSample(x: 0, timestamp: 0, phase: .began)
             )
-            _ = stabilizer.processV2(
+            _ = try stabilizer.processV2(
                 worldSample(x: 2, timestamp: 1, phase: .moved)
             )
 
-            let cancelled = stabilizer.processV2(
+            let cancelled = try stabilizer.processV2(
                 worldSample(x: 3, timestamp: 2, phase: .cancelled)
             )
 
@@ -378,16 +508,16 @@ struct StrokeStabilizerTests {
         var authoritative = try StrokeStabilizer(
             mode: .weightedWindow(distance: 2)
         )
-        _ = authoritative.processV2(
+        _ = try authoritative.processV2(
             worldSample(x: 0, timestamp: 0, phase: .began)
         )
-        _ = authoritative.processV2(
+        _ = try authoritative.processV2(
             worldSample(x: 1, timestamp: 1, phase: .moved)
         )
         let authoritativeCheckpoint = authoritative
 
         var prediction = authoritative
-        let predicted = prediction.processV2(
+        let predicted = try prediction.processV2(
             worldSample(
                 x: 2,
                 timestamp: 2,
@@ -397,7 +527,7 @@ struct StrokeStabilizerTests {
         )
         #expect(authoritative == authoritativeCheckpoint)
 
-        let actual = authoritative.processV2(
+        let actual = try authoritative.processV2(
             worldSample(x: 1.5, timestamp: 2, phase: .moved)
         )
 
@@ -416,10 +546,10 @@ struct StrokeStabilizerTests {
         var stabilizer = try StrokeStabilizer(
             mode: .weightedWindow(distance: 2)
         )
-        _ = stabilizer.processV2(
+        _ = try stabilizer.processV2(
             worldSample(x: 0, timestamp: 0, phase: .began)
         )
-        _ = stabilizer.processV2(
+        _ = try stabilizer.processV2(
             worldSample(x: 2, timestamp: 1, phase: .moved)
         )
 
@@ -432,8 +562,8 @@ struct StrokeStabilizerTests {
             timestamp: 2,
             phase: .began
         )
-        #expect(stabilizer.processV2(secondBegin) == secondBegin)
-        let secondMove = stabilizer.processV2(
+        #expect(try stabilizer.processV2(secondBegin) == secondBegin)
+        let secondMove = try stabilizer.processV2(
             worldSample(x: 11, timestamp: 3, phase: .moved)
         )
         #expect(abs(
@@ -446,7 +576,7 @@ struct StrokeStabilizerTests {
             timestamp: 4,
             phase: .ended
         )
-        #expect(stabilizer.processV2(secondEnd) == secondEnd)
+        #expect(try stabilizer.processV2(secondEnd) == secondEnd)
         #expect(stabilizer.snapshot.retainedPointCount == 0)
 
         let tapBegin = worldSample(
@@ -459,8 +589,8 @@ struct StrokeStabilizerTests {
             timestamp: 6,
             phase: .ended
         )
-        #expect(stabilizer.processV2(tapBegin) == tapBegin)
-        #expect(stabilizer.processV2(tapEnd) == tapEnd)
+        #expect(try stabilizer.processV2(tapBegin) == tapBegin)
+        #expect(try stabilizer.processV2(tapEnd) == tapEnd)
         #expect(stabilizer.snapshot.exactHeadPosition == nil)
     }
 

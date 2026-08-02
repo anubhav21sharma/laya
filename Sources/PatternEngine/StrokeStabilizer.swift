@@ -9,6 +9,7 @@ public enum StrokeStabilizerMode: Equatable, Sendable {
 
 public enum StrokeStabilizerError: Error, Equatable, Sendable {
     case invalidDistance
+    case incompatibleMode
 }
 
 /// Deterministic, fixed-capacity position stabilization for one stroke stream.
@@ -22,6 +23,9 @@ public struct StrokeStabilizer: Equatable, Sendable {
         public let pointCapacity: Int
         public let exactHeadPosition: WorldPoint?
         public let exactHead: WorldStrokeSample?
+        public let authoredDistance: Double
+        public let newestRetainedDistance: Double?
+        public let newestRetainedPosition: WorldPoint?
     }
 
     public let strength: Float
@@ -30,7 +34,7 @@ public struct StrokeStabilizer: Equatable, Sendable {
     private var v2Mode: StrokeStabilizerMode?
     private var v2ExactHead: WorldStrokeSample?
     private var v2AuthoredDistance: Double
-    private var v2LastResampleDistance: Double
+    private var v2LastResampleIndex: UInt64
     private var v2PointStorage: StrokeStabilizerPointStorage
     private var v2OldestPointIndex: Int
     private var v2PointCount: Int
@@ -45,7 +49,7 @@ public struct StrokeStabilizer: Equatable, Sendable {
         v2Mode = nil
         v2ExactHead = nil
         v2AuthoredDistance = 0
-        v2LastResampleDistance = 0
+        v2LastResampleIndex = 0
         v2PointStorage = StrokeStabilizerPointStorage()
         v2OldestPointIndex = 0
         v2PointCount = 0
@@ -68,7 +72,7 @@ public struct StrokeStabilizer: Equatable, Sendable {
         v2Mode = mode
         v2ExactHead = nil
         v2AuthoredDistance = 0
-        v2LastResampleDistance = 0
+        v2LastResampleIndex = 0
         v2PointStorage = StrokeStabilizerPointStorage()
         v2OldestPointIndex = 0
         v2PointCount = 0
@@ -80,19 +84,25 @@ public struct StrokeStabilizer: Equatable, Sendable {
     }
 
     public var snapshot: Snapshot {
-        Snapshot(
+        let newest = v2PointCount > 0
+            ? retainedPoint(at: v2PointCount - 1)
+            : nil
+        return Snapshot(
             retainedPointCount: v2PointCount,
             pointCapacity: Self.resampledPointCapacity,
             exactHeadPosition: v2ExactHead?.position,
-            exactHead: v2ExactHead
+            exactHead: v2ExactHead,
+            authoredDistance: v2AuthoredDistance,
+            newestRetainedDistance: newest?.authoredDistance,
+            newestRetainedPosition: newest?.position
         )
     }
 
     public mutating func processV2(
         _ sample: WorldStrokeSample
-    ) -> WorldStrokeSample? {
+    ) throws -> WorldStrokeSample? {
         guard let v2Mode else {
-            preconditionFailure("V2 processing requires a v2 mode")
+            throw StrokeStabilizerError.incompatibleMode
         }
         if sample.phase == .cancelled {
             resetV2()
@@ -224,7 +234,7 @@ public struct StrokeStabilizer: Equatable, Sendable {
     private mutating func resetV2() {
         v2ExactHead = nil
         v2AuthoredDistance = 0
-        v2LastResampleDistance = 0
+        v2LastResampleIndex = 0
         v2PointStorage = StrokeStabilizerPointStorage()
         v2OldestPointIndex = 0
         v2PointCount = 0
@@ -245,34 +255,37 @@ public struct StrokeStabilizer: Equatable, Sendable {
             configuredDistance = Double(distance)
         }
         let interval = configuredDistance / 64
-        let tolerance = interval * 1e-9
-        let finalGridDistance = floor(
-            (v2AuthoredDistance + tolerance) / interval
-        ) * interval
-        guard finalGridDistance > v2LastResampleDistance + tolerance else {
+        let quotient = floor(v2AuthoredDistance / interval)
+        guard quotient < Double(UInt64.max) else {
+            preconditionFailure("Authored stroke exceeds resampling index range")
+        }
+        let finalGridIndex = UInt64(quotient)
+        guard finalGridIndex > v2LastResampleIndex else {
             return
         }
 
-        let firstNewDistance = v2LastResampleDistance + interval
-        var firstRetainedNewDistance = firstNewDistance
-        if finalGridDistance - firstNewDistance
-            >= Double(Self.resampledPointCapacity) * interval
+        let firstNewIndex = v2LastResampleIndex + 1
+        var firstRetainedNewIndex = firstNewIndex
+        if finalGridIndex - firstNewIndex
+            >= UInt64(Self.resampledPointCapacity)
         {
-            firstRetainedNewDistance = finalGridDistance
-                - Double(Self.resampledPointCapacity - 1) * interval
+            firstRetainedNewIndex = finalGridIndex
+                - UInt64(Self.resampledPointCapacity - 1)
             v2PointStorage = StrokeStabilizerPointStorage()
             v2OldestPointIndex = 0
             v2PointCount = 0
         }
 
-        let rawCount = floor(
-            (finalGridDistance - firstRetainedNewDistance + tolerance)
-                / interval
-        ) + 1
-        let pointCount = min(Self.resampledPointCapacity, Int(rawCount))
+        let rawCount = finalGridIndex - firstRetainedNewIndex + 1
+        let pointCount = min(
+            Self.resampledPointCapacity,
+            Int(rawCount)
+        )
+        var lastAppendedIndex = v2LastResampleIndex
         for offset in 0..<pointCount {
-            let authoredDistance = firstRetainedNewDistance
-                + Double(offset) * interval
+            let gridIndex = firstRetainedNewIndex + UInt64(offset)
+            let authoredDistance = Double(gridIndex) * interval
+            guard authoredDistance <= v2AuthoredDistance else { break }
             let fraction = min(
                 1,
                 max(
@@ -293,8 +306,9 @@ public struct StrokeStabilizer: Equatable, Sendable {
                 ),
                 authoredDistance: authoredDistance
             )
+            lastAppendedIndex = gridIndex
         }
-        v2LastResampleDistance = finalGridDistance
+        v2LastResampleIndex = lastAppendedIndex
     }
 
     private static let resampledPointCapacity = 65

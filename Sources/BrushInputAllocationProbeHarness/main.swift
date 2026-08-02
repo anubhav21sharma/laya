@@ -312,9 +312,9 @@ private struct BrushInputAllocationProbeHarness {
             mode: .weightedWindow(distance: 4)
         )
         var delayed = try StrokeStabilizer(mode: .delayed(distance: 4))
-        _ = weighted.processV2(samples.began)
-        _ = delayed.processV2(samples.began)
-        _ = runStabilizerV2Updates(
+        _ = try weighted.processV2(samples.began)
+        _ = try delayed.processV2(samples.began)
+        _ = try runStabilizerV2Updates(
             weighted: &weighted,
             delayed: &delayed,
             samples: samples,
@@ -323,13 +323,19 @@ private struct BrushInputAllocationProbeHarness {
         )
 
         probe.arm()
-        let checksum = runStabilizerV2Updates(
-            weighted: &weighted,
-            delayed: &delayed,
-            samples: samples,
-            startingAt: 128,
-            count: 1_000_000
-        )
+        let checksum: UInt64
+        do {
+            checksum = try runStabilizerV2Updates(
+                weighted: &weighted,
+                delayed: &delayed,
+                samples: samples,
+                startingAt: 128,
+                count: 1_000_000
+            )
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
         let allocations = probe.disarm()
 
         guard allocations == 0 else {
@@ -350,7 +356,7 @@ private struct BrushInputAllocationProbeHarness {
         samples: StabilizerProbeSamples,
         startingAt start: Int,
         count: Int
-    ) -> UInt64 {
+    ) throws -> UInt64 {
         var checksum: UInt64 = 0
         for index in start..<(start + count) {
             let sample = switch index & 3 {
@@ -359,11 +365,11 @@ private struct BrushInputAllocationProbeHarness {
             case 2: samples.left
             default: samples.down
             }
-            if let output = weighted.processV2(sample) {
+            if let output = try weighted.processV2(sample) {
                 checksum &+= UInt64(output.position.x.bitPattern)
                 checksum &+= UInt64(output.position.y.bitPattern)
             }
-            if let output = delayed.processV2(sample) {
+            if let output = try delayed.processV2(sample) {
                 checksum &+= UInt64(output.position.x.bitPattern)
                 checksum &+= UInt64(output.position.y.bitPattern)
             }
