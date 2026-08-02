@@ -117,6 +117,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case selfTestMissedAllocation
     case velocityFilterAllocations(total: UInt64)
     case directionCornerAllocations(total: UInt64)
+    case stabilizerV2Allocations(total: UInt64)
     case offMainEstimatedAllocations(total: UInt64, maximum: UInt64)
     case offMainAllocationRegression(String)
     case productionAllocations(
@@ -141,6 +142,8 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
             "velocity filter allocated \(total) times after warm-up"
         case let .directionCornerAllocations(total):
             "direction/corner path allocated \(total) times after warm-up"
+        case let .stabilizerV2Allocations(total):
+            "stabilizer v2 path allocated \(total) times after warm-up"
         case let .offMainEstimatedAllocations(total, maximum):
             "off-main estimated correction allocated \(total) times; "
                 + "maximum single correction=\(maximum)"
@@ -194,6 +197,8 @@ private struct BrushInputAllocationProbeHarness {
                 try runVelocityFilterProbe(probe: probe)
             case "--direction-corner":
                 try runDirectionCornerProbe(probe: probe)
+            case "--stabilizer-v2":
+                try runStabilizerV2Probe(probe: probe)
             case "--production":
                 try await runProduction(probe: probe, root: root)
             default:
@@ -296,6 +301,108 @@ private struct BrushInputAllocationProbeHarness {
         print(
             "ALLOCATOR PROBE DIRECTION/CORNER PASS allocations=0 "
                 + "checksum=\(checksum)"
+        )
+    }
+
+    private static func runStabilizerV2Probe(
+        probe: AllocatorProbe
+    ) throws {
+        let samples = makeStabilizerProbeSamples()
+        var weighted = try StrokeStabilizer(
+            mode: .weightedWindow(distance: 4)
+        )
+        var delayed = try StrokeStabilizer(mode: .delayed(distance: 4))
+        _ = weighted.processV2(samples.began)
+        _ = delayed.processV2(samples.began)
+        _ = runStabilizerV2Updates(
+            weighted: &weighted,
+            delayed: &delayed,
+            samples: samples,
+            startingAt: 0,
+            count: 128
+        )
+
+        probe.arm()
+        let checksum = runStabilizerV2Updates(
+            weighted: &weighted,
+            delayed: &delayed,
+            samples: samples,
+            startingAt: 128,
+            count: 1_000_000
+        )
+        let allocations = probe.disarm()
+
+        guard allocations == 0 else {
+            throw ProbeHarnessError.stabilizerV2Allocations(
+                total: allocations
+            )
+        }
+        print(
+            "ALLOCATOR PROBE STABILIZER V2 PASS allocations=0 "
+                + "checksum=\(checksum)"
+        )
+    }
+
+    @inline(never)
+    private static func runStabilizerV2Updates(
+        weighted: inout StrokeStabilizer,
+        delayed: inout StrokeStabilizer,
+        samples: StabilizerProbeSamples,
+        startingAt start: Int,
+        count: Int
+    ) -> UInt64 {
+        var checksum: UInt64 = 0
+        for index in start..<(start + count) {
+            let sample = switch index & 3 {
+            case 0: samples.right
+            case 1: samples.up
+            case 2: samples.left
+            default: samples.down
+            }
+            if let output = weighted.processV2(sample) {
+                checksum &+= UInt64(output.position.x.bitPattern)
+                checksum &+= UInt64(output.position.y.bitPattern)
+            }
+            if let output = delayed.processV2(sample) {
+                checksum &+= UInt64(output.position.x.bitPattern)
+                checksum &+= UInt64(output.position.y.bitPattern)
+            }
+        }
+        return checksum
+    }
+
+    private static func makeStabilizerProbeSamples()
+        -> StabilizerProbeSamples
+    {
+        let viewport = ViewportTransform(
+            drawableSize: PatternSize(width: 2, height: 2),
+            worldCenter: WorldPoint(x: 0, y: 0)
+        )
+        var deriver = BrushInputDeriver()
+        func sample(
+            x: Float,
+            y: Float,
+            timestamp: TimeInterval,
+            phase: StrokePhase
+        ) -> WorldStrokeSample {
+            deriver.derive(
+                StrokeSample(
+                    position: ScreenPoint(x: x + 1, y: y + 1),
+                    pressure: 0.5,
+                    timestamp: timestamp,
+                    phase: phase,
+                    source: .pencil,
+                    capabilities: [.pressure]
+                ),
+                viewport: viewport
+            )
+        }
+        return StabilizerProbeSamples(
+            began: sample(x: 0, y: 0, timestamp: 0, phase: .began),
+            right: sample(x: 1, y: 0, timestamp: 1, phase: .moved),
+            up: sample(x: 1, y: 1, timestamp: 2, phase: .moved),
+            left: sample(x: 0, y: 1, timestamp: 3, phase: .moved),
+            down: sample(x: 0, y: 0, timestamp: 4, phase: .moved)
         )
     }
 
@@ -967,4 +1074,12 @@ private struct BrushInputAllocationProbeHarness {
             estimationUpdateIndex: index
         )
     }
+}
+
+private struct StabilizerProbeSamples {
+    let began: WorldStrokeSample
+    let right: WorldStrokeSample
+    let up: WorldStrokeSample
+    let left: WorldStrokeSample
+    let down: WorldStrokeSample
 }
