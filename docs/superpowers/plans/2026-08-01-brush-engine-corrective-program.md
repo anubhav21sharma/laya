@@ -89,6 +89,28 @@ but they do block `physicalProfilePassed` and `productAccepted`.
   post-Stage-G automated performance round finish. Pending manual cards do not
   block implementation, but they do block product admission.
 
+## Universal Stage Delivery Protocol
+
+The Stage B acceptance cycle exposed that a large task can hide state-machine,
+platform, and performance defects until late integration. Every remaining stage
+therefore uses the following protocol:
+
+1. Replan the stage just in time from the current code and approved specs.
+2. Split pure semantic components from schema ownership and production wiring.
+3. Keep one schema owner and enumerate every lifecycle transition before edits.
+4. Use focused red/green tests per task and production-path metamorphic tests at
+   each integration seam.
+5. Independently review each task before the next shared hotspot is changed.
+6. Add allocation/bounded-work evidence in the task that creates a hot path.
+7. Finish with a clustered stage acceptance covering correctness, lifecycle,
+   production routes, sustained performance, failure recovery, and fresh review.
+8. Do not declare delivery or wait for manual review until the automated stage
+   gate is complete. Physical/manual evidence remains a later admission gate.
+
+Stage C's expanded protocol and executable steps are defined in
+[`2026-08-02-stage-c-physical-input-dynamics.md`](2026-08-02-stage-c-physical-input-dynamics.md).
+Stages D through G receive equivalent just-in-time preflights before execution.
+
 ## Locked Technical Decisions
 
 1. **Authoritative deposition is append-only.** `replayTail` survives only as
@@ -538,125 +560,17 @@ Accepted on 2026-08-02. See
 
 ## Stage C — Make Input, Dynamics, Direction, And Spacing Physically Coherent
 
-### Task 8: Separate Velocity Safety From Artistic Speed
+The original four tasks were too broad and left schema migration, filter math,
+corner semantics, candidate ordering, scheduler resumption, and compatibility
+under-specified. They are superseded by the C0 baseline freeze plus thirteen
+sequential implementation/acceptance tasks in
+[`2026-08-02-stage-c-physical-input-dynamics.md`](2026-08-02-stage-c-physical-input-dynamics.md).
 
-**Files:**
-
-- Modify: `Sources/PatternEngine/BrushInput.swift`
-- Create: `Sources/PatternEngine/StrokeVelocityFilter.swift`
-- Create: `Sources/PatternEngine/BrushSpeedNormalization.swift`
-- Modify: `Sources/PatternEngine/BrushDynamicsEngine.swift`
-- Modify: `Sources/PatternEngine/BrushModel/BrushDefinition.swift`
-- Create: `Tests/PatternEngineTests/StrokeVelocityFilterTests.swift`
-- Modify: `Tests/PatternEngineTests/BrushDynamicsEngineTests.swift`
-
-**Behavior:** `BrushInputContract.maximumWorldVelocity` remains the malformed-
-input clamp. Every schema-v2 definition declares a positive artistic
-`fullScaleWorldVelocity`. Velocity is derived from a deterministic 40 ms
-weighted sample window, ignores zero/negative timestamp deltas, and is
-evaluated in world units so zoom changes do not change dynamics.
-
-- [ ] Add traces with timestamp jitter, coalescing, zoom changes, and one
-  malformed velocity spike; assert smooth bounded normalized values.
-- [ ] Add `BrushSpeedNormalization(fullScaleWorldVelocity:minimumDeltaTime:)`
-  and reject values above the safety ceiling.
-- [ ] Replace the current default `speedReference = maximumWorldVelocity` with
-  the compiled brush's artistic normalization.
-- [ ] Characterize schema-v1 behavior through an explicit legacy default; do
-  not silently alter saved definitions.
-- [ ] Run `swift test --filter 'StrokeVelocityFilterTests|BrushDynamicsEngineTests|BrushDefinitionTests'`.
-- [ ] Commit as `fix(input): normalize artistic stroke speed`.
-
-### Task 9: Add Ordered Multi-Sensor Dynamics Programs
-
-**Files:**
-
-- Create: `Sources/PatternEngine/BrushModel/BrushSensorProgram.swift`
-- Modify: `Sources/PatternEngine/BrushModel/BrushDefinition.swift`
-- Modify: `Sources/PatternEngine/BrushModel/BrushProgram.swift`
-- Modify: `Sources/PatternEngine/BrushModel/BrushProgramCompiler.swift`
-- Modify: `Sources/PatternEngine/BrushDynamicsEngine.swift`
-- Modify: `Sources/BrushFormat/BrushPackage.swift`
-- Create: `Tests/PatternEngineTests/BrushSensorProgramTests.swift`
-- Modify: `Tests/BrushFormatTests/BrushPackageCodecTests.swift`
-
-**Behavior:** Each dynamic output starts with a base value and applies zero to
-four serialized terms in order. Allowed operations are `replace`, `multiply`,
-`add`, `minimum`, and `maximum`; each step clamps only where its output contract
-requires. Missing optional inputs use the authored neutral value. Dictionary
-or set iteration never determines term order.
-
-- [ ] Add compiler/evaluator tests for pressure x tilt, pressure + speed,
-  direction x rotation, missing tilt, term-order sensitivity, and schema-v1
-  single-mapping parity.
-- [ ] Bump native brush schema to v2 and add a deterministic v1-to-v2 compiler
-  adapter without rewriting source packages on read.
-- [ ] Compile curves to fixed sampled tables before activation; no curve
-  allocation or validation occurs during a stroke.
-- [ ] Extend semantic hashing and package validation to include ordered terms.
-- [ ] Run `swift test --filter 'BrushSensorProgramTests|BrushDefinitionTests|BrushPackageTests'`.
-- [ ] Commit as `feat(brush): compile multi-sensor dynamics`.
-
-### Task 10: Stabilize Direction And Paths Without Endpoint Surprises
-
-**Files:**
-
-- Create: `Sources/PatternEngine/BrushDirectionTracker.swift`
-- Create: `Sources/PatternEngine/StrokeStabilizer.swift`
-- Modify: `Sources/PatternEngine/BrushStrokeGenerator.swift`
-- Modify: `Sources/PatternEngine/BrushModel/BrushDefinition.swift`
-- Create: `Tests/PatternEngineTests/BrushDirectionTrackerTests.swift`
-- Create: `Tests/PatternEngineTests/StrokeStabilizerTests.swift`
-
-**Behavior:** Direction is the shortest-angle-filtered tangent of the stabilized
-path. The first direction-dependent dab waits for the first nonzero segment,
-then uses that tangent; it does not jump from a fixed zero angle. Schema-v2
-stabilization is one of `.none`, `.weightedWindow(distance:)`, or
-`.delayed(distance:)`. Technical Ink uses a short weighted window; delayed
-stabilization is opt-in and its lag is shown to the authoring tool.
-
-- [ ] Add wraparound tests for 359 degrees to 1 degree, tight corners,
-  stationary input, reversal, and first-segment initialization.
-- [ ] Add endpoint tests proving weighted stabilization reaches the final
-  actual sample within 1 logical pixel and delayed mode reports its authored
-  lag rather than disguising it as taper.
-- [ ] Apply stabilization before spacing and direction; preserve actual sample
-  provenance for commit and telemetry.
-- [ ] Run `swift test --filter 'BrushDirectionTrackerTests|StrokeStabilizerTests|BrushStrokeGeneratorTests'`.
-- [ ] Commit as `feat(input): stabilize path and direction`.
-
-### Task 11: Add Deterministic Timed Emission And Footprint-Aware Spacing
-
-**Files:**
-
-- Create: `Sources/PatternEngine/TimedStrokeEmitter.swift`
-- Create: `Sources/PatternEngine/BrushFootprintSpacing.swift`
-- Modify: `Sources/PatternEngine/BrushStrokeGenerator.swift`
-- Modify: `Sources/PatternEngine/BrushModel/LogicalDabBatch.swift`
-- Modify: `Sources/PatternEngine/BrushModel/BrushDefinition.swift`
-- Create: `Tests/PatternEngineTests/TimedStrokeEmitterTests.swift`
-- Create: `Tests/PatternEngineTests/BrushFootprintSpacingTests.swift`
-
-**Behavior:** A definition may request distance emission, time emission, or the
-union of both. Timestamped samples drive time candidates, so stationary
-airbrush deposition is replayable. Distance spacing uses the projected tip
-support along the local path tangent, including aspect and rotation, rather
-than nominal diameter alone.
-
-- [ ] Add deterministic stationary-hold tests at different event batching and
-  display rates; identical trace time must yield identical dab ordinals.
-- [ ] Add ellipse/chisel spacing tests at 0, 45, and 90 degrees with no gaps or
-  runaway density.
-- [ ] Define `BrushEmissionDefinition` with bounded `minimumInterval` and
-  `minimumDistanceFraction`; reject unbounded emission rates at compile time.
-- [ ] Carry tangent/support metadata in `LogicalDabBatch` so projection applies
-  whole-frame transforms after logical generation.
-- [ ] Run `swift test --filter 'TimedStrokeEmitterTests|BrushFootprintSpacingTests|BrushStrokeGeneratorTests'`.
-- [ ] Commit as `feat(brush): add coherent dab emission`.
-
-**Stage C exit:** Speed, pressure, tilt, direction, time, and spacing compose in
-a deterministic schema-v2 program; zoom/batching/display rate do not alter
-committed output; broad tips turn without angle discontinuities.
+**Stage C exit:** C13 proves exact v1 preservation; deterministic schema-v2
+speed, sensor, stabilization, direction, corner, time, and footprint semantics;
+production scheduler lifecycle correctness; bounded work and allocations; a
+10-minute sustained trace; the broad regression baseline; and a fresh review
+with no unresolved Critical or Important issue.
 
 ---
 
