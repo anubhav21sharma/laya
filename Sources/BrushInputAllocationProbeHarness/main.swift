@@ -128,6 +128,106 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
     }
 }
 
+private final class TenMinuteTraceAllocationMeasurements:
+    @unchecked Sendable
+{
+    struct Snapshot {
+        let firstHotEventCount: Int
+        let firstHotAllocationCount: UInt64
+        let lastHotEventCount: Int
+        let lastHotAllocationCount: UInt64
+        let firstLifecycleAllocationCount: UInt64
+        let lastLifecycleAllocationCount: UInt64
+        let maximumLifecycleEventCount: UInt64
+    }
+
+    private enum Window {
+        case first
+        case middle
+        case last
+    }
+
+    private let lock = NSLock()
+    private var window: Window = .middle
+    private var firstHotEventCount = 0
+    private var firstHotAllocationCount: UInt64 = 0
+    private var lastHotEventCount = 0
+    private var lastHotAllocationCount: UInt64 = 0
+    private var firstLifecycleAllocationCount: UInt64 = 0
+    private var lastLifecycleAllocationCount: UInt64 = 0
+    private var maximumLifecycleEventCount: UInt64 = 0
+
+    func selectWindow(
+        batchStart: Int,
+        batchEnd: Int,
+        totalSampleCount: Int
+    ) {
+        let decileCount = totalSampleCount / 10
+        lock.lock()
+        if batchEnd <= decileCount {
+            window = .first
+        } else if batchStart >= totalSampleCount - decileCount {
+            window = .last
+        } else {
+            window = .middle
+        }
+        lock.unlock()
+    }
+
+    func record(
+        _ stage: StrokePreparationAllocationProbeStage,
+        count: UInt64
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        switch stage {
+        case .surfaceMetalSubmission:
+            // Driver allocator timing is diagnostic, not application work.
+            return
+        case .strokeLifecycleCPU:
+            maximumLifecycleEventCount = max(
+                maximumLifecycleEventCount,
+                count
+            )
+            switch window {
+            case .first:
+                firstLifecycleAllocationCount &+= count
+            case .last:
+                lastLifecycleAllocationCount &+= count
+            case .middle:
+                break
+            }
+        case .authoritativeCPU, .predictionCPU, .estimatedCPU,
+             .batchPackaging, .surfaceRecordPacking:
+            switch window {
+            case .first:
+                firstHotEventCount += 1
+                firstHotAllocationCount &+= count
+            case .last:
+                lastHotEventCount += 1
+                lastHotAllocationCount &+= count
+            case .middle:
+                break
+            }
+        }
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        let result = Snapshot(
+            firstHotEventCount: firstHotEventCount,
+            firstHotAllocationCount: firstHotAllocationCount,
+            lastHotEventCount: lastHotEventCount,
+            lastHotAllocationCount: lastHotAllocationCount,
+            firstLifecycleAllocationCount: firstLifecycleAllocationCount,
+            lastLifecycleAllocationCount: lastLifecycleAllocationCount,
+            maximumLifecycleEventCount: maximumLifecycleEventCount
+        )
+        lock.unlock()
+        return result
+    }
+}
+
 private enum ProbeHarnessError: Error, CustomStringConvertible {
     case invalidArguments
     case metalUnavailable
@@ -270,6 +370,11 @@ private struct BrushInputAllocationProbeHarness {
                 try runSensorProgramProbe(probe: probe)
             case "--production":
                 try await runProduction(probe: probe, root: root)
+            case "--ten-minute-trace":
+                try await runTenMinuteProductionTraceProbe(
+                    probe: probe,
+                    root: root
+                )
             default:
                 throw ProbeHarnessError.invalidArguments
             }
@@ -1851,8 +1956,147 @@ private struct BrushInputAllocationProbeHarness {
             probe: probe,
             root: root
         )
+        try await runTenMinuteProductionTraceProbe(
+            probe: probe,
+            root: root
+        )
         print(
             "ALLOCATOR PROBE PRODUCTION PASS allocations=\(allocationCount)"
+        )
+    }
+
+    @MainActor
+    private static func runTenMinuteProductionTraceProbe(
+        probe: AllocatorProbe,
+        root: URL
+    ) async throws {
+        let totalSampleCount = 36_000
+        let batchSize = 60
+        let maximumZeroWorkLeaseCount =
+            (totalSampleCount + batchSize - 1) / batchSize + 1
+        let setup = try await makeRendererSetup(
+            root: root,
+            usesOffMainNativeInk: true
+        )
+        let measurements = TenMinuteTraceAllocationMeasurements()
+        let allocationProbe = StrokePreparationAllocationProbe(
+            identity: 3,
+            arm: { probe.arm() },
+            disarm: { probe.disarm() },
+            record: { stage, count in
+                measurements.record(stage, count: count)
+            }
+        )
+        let trace = try await setup.renderer
+            .runOffMainProductionTraceForTesting(
+                compiledBrush: setup.brush,
+                totalSampleCount: totalSampleCount,
+                batchSize: batchSize,
+                allocationProbe: allocationProbe,
+                batchWillSubmit: { batchStart, batchEnd in
+                    measurements.selectWindow(
+                        batchStart: batchStart,
+                        batchEnd: batchEnd,
+                        totalSampleCount: totalSampleCount
+                    )
+                }
+            )
+        let allocations = measurements.snapshot()
+        guard allocations.firstHotEventCount > 0,
+              allocations.lastHotEventCount > 0,
+              allocations.firstHotAllocationCount <= 64,
+              allocations.lastHotAllocationCount
+                <= allocations.firstHotAllocationCount,
+              allocations.maximumLifecycleEventCount <= 64,
+              allocations.lastLifecycleAllocationCount
+                <= allocations.firstLifecycleAllocationCount + 8
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "ten-minute trace allocations hot="
+                    + "\(allocations.firstHotAllocationCount)/"
+                    + "\(allocations.lastHotAllocationCount) events="
+                    + "\(allocations.firstHotEventCount)/"
+                    + "\(allocations.lastHotEventCount) lifecycle="
+                    + "\(allocations.firstLifecycleAllocationCount)/"
+                    + "\(allocations.lastLifecycleAllocationCount) max="
+                    + "\(allocations.maximumLifecycleEventCount)/64"
+            )
+        }
+        guard trace.inputSampleCount == totalSampleCount,
+              trace.logicalDurationNanoseconds == 599_999_976_000,
+              trace.authoritativeInputHighWater <= 60,
+              trace.authoritativeInputCapacity == 12_288,
+              trace.authoritativeInputStorageCapacity
+                == trace.authoritativeInputInitialStorageCapacity,
+              trace.predictionInputCapacity == 64,
+              trace.predictionInputStorageCapacity
+                == trace.predictionInputInitialStorageCapacity,
+              trace.resultHighWater == 1,
+              trace.resultCapacity == 1,
+              trace.resultStorageCapacity
+                == trace.resultInitialStorageCapacity,
+              trace.workspaceInstallationCount
+                == trace.workspaceInitialInstallationCount,
+              trace.workspaceIdentityStayedStable,
+              trace.maximumPreparedPayloadBytes > 0,
+              trace.surface.surfaceCount == 2,
+              trace.surface.surfaceLeaseHighWater == 1,
+              trace.surface.encodedFrameCount > 0,
+              trace.surface.encodedInstanceCount > 0,
+              trace.zeroWorkLeaseCount <= maximumZeroWorkLeaseCount,
+              trace.missedLogicalFrameCount == 0,
+              trace.allPreparationAndEncodingOffMain,
+              trace.lastDecileNanosecondsPerEvent
+                <= max(
+                    trace.firstDecileNanosecondsPerEvent * 2,
+                    trace.firstDecileNanosecondsPerEvent + 100_000
+                )
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "ten-minute production trace invariant failed "
+                    + "samples=\(trace.inputSampleCount)/\(totalSampleCount) "
+                    + "logical=\(trace.logicalDurationNanoseconds) "
+                    + "authoritative=\(trace.authoritativeInputHighWater)/"
+                    + "\(trace.authoritativeInputCapacity) storage="
+                    + "\(trace.authoritativeInputInitialStorageCapacity)/"
+                    + "\(trace.authoritativeInputStorageCapacity) prediction="
+                    + "\(trace.predictionInputCapacity) storage="
+                    + "\(trace.predictionInputInitialStorageCapacity)/"
+                    + "\(trace.predictionInputStorageCapacity) result="
+                    + "\(trace.resultHighWater)/\(trace.resultCapacity) storage="
+                    + "\(trace.resultInitialStorageCapacity)/"
+                    + "\(trace.resultStorageCapacity) workspace="
+                    + "\(trace.workspaceInitialInstallationCount)/"
+                    + "\(trace.workspaceInstallationCount)/"
+                    + "\(trace.workspaceIdentityStayedStable) payload="
+                    + "\(trace.maximumPreparedPayloadBytes) surface="
+                    + "\(trace.surface.surfaceCount)/"
+                    + "\(trace.surface.surfaceLeaseHighWater)/"
+                    + "\(trace.surface.encodedFrameCount)/"
+                    + "\(trace.surface.encodedInstanceCount) zero="
+                    + "\(trace.zeroWorkLeaseCount) missed="
+                    + "\(trace.missedLogicalFrameCount) offMain="
+                    + "\(trace.allPreparationAndEncodingOffMain) cpu="
+                    + "\(trace.firstDecileNanosecondsPerEvent)/"
+                    + "\(trace.lastDecileNanosecondsPerEvent)"
+            )
+        }
+        let hotSummary = "\(allocations.firstHotAllocationCount)/"
+            + "\(allocations.lastHotAllocationCount)"
+        let lifecycleSummary =
+            "\(allocations.firstLifecycleAllocationCount)/"
+                + "\(allocations.lastLifecycleAllocationCount)"
+        let cpuSummary = "\(trace.firstDecileNanosecondsPerEvent)/"
+            + "\(trace.lastDecileNanosecondsPerEvent)"
+        print(
+            "ALLOCATOR PROBE TEN-MINUTE TRACE PASS "
+                + "samples=\(trace.inputSampleCount) "
+                + "hot_allocations=\(hotSummary) "
+                + "lifecycle=\(lifecycleSummary) cpu_ns=\(cpuSummary) "
+                + "missed=\(trace.missedLogicalFrameCount) "
+                + "zero_work=\(trace.zeroWorkLeaseCount)/"
+                + "\(maximumZeroWorkLeaseCount) "
+                + "deferred=\(trace.deferredDrainCount)"
         )
     }
 

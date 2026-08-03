@@ -132,33 +132,32 @@ struct StrokeRuntimeReplayEpochTracker {
     }
 }
 
-#if DEBUG
-struct OffMainStrokeProductionTraceSnapshot: Sendable {
-    let inputSampleCount: Int
-    let logicalDurationNanoseconds: UInt64
-    let wallDurationNanoseconds: UInt64
-    let firstDecileNanosecondsPerEvent: UInt64
-    let lastDecileNanosecondsPerEvent: UInt64
-    let authoritativeInputHighWater: Int
-    let authoritativeInputCapacity: Int
-    let authoritativeInputInitialStorageCapacity: Int
-    let authoritativeInputStorageCapacity: Int
-    let predictionInputCapacity: Int
-    let predictionInputInitialStorageCapacity: Int
-    let predictionInputStorageCapacity: Int
-    let resultHighWater: Int
-    let resultCapacity: Int
-    let resultInitialStorageCapacity: Int
-    let resultStorageCapacity: Int
-    let workspaceInitialInstallationCount: UInt64
-    let workspaceInstallationCount: UInt64
-    let workspaceIdentityStayedStable: Bool
-    let maximumPreparedPayloadBytes: Int
-    let surface: StrokePrivateSurfaceEncoderSnapshot
-    let missedLogicalFrameCount: Int
-    let deferredDrainCount: Int
-    let zeroWorkLeaseCount: Int
-    let allPreparationAndEncodingOffMain: Bool
+package struct OffMainStrokeProductionTraceSnapshot: Sendable {
+    package let inputSampleCount: Int
+    package let logicalDurationNanoseconds: UInt64
+    package let wallDurationNanoseconds: UInt64
+    package let firstDecileNanosecondsPerEvent: UInt64
+    package let lastDecileNanosecondsPerEvent: UInt64
+    package let authoritativeInputHighWater: Int
+    package let authoritativeInputCapacity: Int
+    package let authoritativeInputInitialStorageCapacity: Int
+    package let authoritativeInputStorageCapacity: Int
+    package let predictionInputCapacity: Int
+    package let predictionInputInitialStorageCapacity: Int
+    package let predictionInputStorageCapacity: Int
+    package let resultHighWater: Int
+    package let resultCapacity: Int
+    package let resultInitialStorageCapacity: Int
+    package let resultStorageCapacity: Int
+    package let workspaceInitialInstallationCount: UInt64
+    package let workspaceInstallationCount: UInt64
+    package let workspaceIdentityStayedStable: Bool
+    package let maximumPreparedPayloadBytes: Int
+    package let surface: StrokePrivateSurfaceEncoderSnapshot
+    package let missedLogicalFrameCount: Int
+    package let deferredDrainCount: Int
+    package let zeroWorkLeaseCount: Int
+    package let allPreparationAndEncodingOffMain: Bool
 }
 
 private struct OffMainStrokeTraceDrainOutcome {
@@ -175,7 +174,38 @@ private struct OffMainStrokeTraceCommandOutcome: Sendable {
     let succeeded: Bool
     let errorMessage: String?
 }
-#endif
+
+private struct OffMainStrokeTraceInactivityWatchdog {
+    let timeoutNanoseconds: UInt64
+    private(set) var lastProgressUptimeNanoseconds:
+        UInt64 = DispatchTime.now().uptimeNanoseconds
+
+    mutating func recordProgress() {
+        lastProgressUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    }
+
+    var hasExpired: Bool {
+        elapsedNanoseconds >= timeoutNanoseconds
+    }
+
+    var waitDeadline: Date {
+        let remaining = timeoutNanoseconds > elapsedNanoseconds
+            ? timeoutNanoseconds - elapsedNanoseconds
+            : 0
+        // Date is required by the condition wait, but it is only used for a
+        // short polling slice. The actual inactivity budget is monotonic.
+        let waitSeconds = min(
+            0.25,
+            max(0.001, Double(remaining) / 1_000_000_000)
+        )
+        return Date(timeIntervalSinceNow: waitSeconds)
+    }
+
+    private var elapsedNanoseconds: UInt64 {
+        DispatchTime.now().uptimeNanoseconds
+            &- lastProgressUptimeNanoseconds
+    }
+}
 
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
@@ -4292,20 +4322,30 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    func runOffMainProductionTraceForTesting(
+    #endif
+
+    package func runOffMainProductionTraceForTesting(
         compiledBrush: CompiledBrush,
         totalSampleCount: Int = 36_000,
-        batchSize: Int = 60
+        batchSize: Int = 60,
+        inactivityTimeoutNanoseconds: UInt64 = 30_000_000_000,
+        allocationProbe: StrokePreparationAllocationProbe? = nil,
+        batchWillSubmit: (@Sendable (Int, Int) -> Void)? = nil
     ) async throws -> OffMainStrokeProductionTraceSnapshot {
         precondition(isIdle)
         precondition(totalSampleCount >= 2)
         precondition(batchSize > 0)
+        precondition(inactivityTimeoutNanoseconds > 0)
         let generation: UInt64 = 600_000
         let targetFrameNanoseconds = UInt64(1_000_000_000 / 60)
         let firstDecileEnd = totalSampleCount / 10
         let lastDecileStart = totalSampleCount - firstDecileEnd
         let brushRenderState = compiledBrush.renderState
         let bridge = warmedStrokePreparationBridge
+        let progressRegistration = StrokePreparationProgressRegistration(
+            mailbox: bridge.mailbox
+        )
+        defer { progressRegistration.remove() }
         let initialMailbox = bridge.mailbox.snapshot
         let initialWorkspaceIdentity = strokeMetalSurfaceResources.identity
         let initialWorkspaceInstallationCount =
@@ -4326,7 +4366,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     liveVisible: true
                 ),
                 forceCommandFailure: false
-            )
+            ),
+            allocationProbe: allocationProbe
         )
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
@@ -4398,14 +4439,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     samples: samples
                 )
             }
+            batchWillSubmit?(batchStart, batchEnd)
             try bridge.submit(message)
-            let drained = try await drainOffMainTraceMessage(
-                bridge: bridge,
-                generation: generation,
-                expectedInputSampleCount: UInt64(batchEnd),
-                requireCommitBarrier: false,
-                compositeTarget: compositeTarget
-            )
+            let drained: OffMainStrokeTraceDrainOutcome
+            do {
+                drained = try await drainOffMainTraceMessage(
+                    bridge: bridge,
+                    generation: generation,
+                    expectedInputSampleCount: UInt64(batchEnd),
+                    requireCommitBarrier: false,
+                    compositeTarget: compositeTarget,
+                    progressRegistration: progressRegistration,
+                    inactivityTimeoutNanoseconds:
+                        inactivityTimeoutNanoseconds
+                )
+            } catch {
+                throw MetalRendererError.commandFailed(
+                    "off-main production trace batch "
+                        + "\(batchStart)..<\(batchEnd) failed: \(error)"
+                )
+            }
             let batchPreparationCPU = drained.preparationCPUNanoseconds
             let eventCount = batchEnd - batchStart
             if batchEnd <= firstDecileEnd {
@@ -4438,7 +4491,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             generation: generation,
             expectedInputSampleCount: UInt64(totalSampleCount),
             requireCommitBarrier: true,
-            compositeTarget: compositeTarget
+            compositeTarget: compositeTarget,
+            progressRegistration: progressRegistration,
+            inactivityTimeoutNanoseconds: inactivityTimeoutNanoseconds
         )
         if committed.preparationCPUNanoseconds > targetFrameNanoseconds {
             missedLogicalFrameCount += Int(
@@ -4515,20 +4570,31 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         try await resetOffMainTraceBridge(
             bridge,
-            generation: generation
+            generation: generation,
+            progressRegistration: progressRegistration,
+            inactivityTimeoutNanoseconds: inactivityTimeoutNanoseconds
         )
         return trace
     }
 
     private func resetOffMainTraceBridge(
         _ bridge: StrokePreparationBridge,
-        generation: UInt64
+        generation: UInt64,
+        progressRegistration: StrokePreparationProgressRegistration,
+        inactivityTimeoutNanoseconds: UInt64
     ) async throws {
         try bridge.submit(.cancel(generation: generation, reason: nil))
         var resultScratch: [StrokePreparationResult] = []
         resultScratch.reserveCapacity(1)
-        for _ in 0..<10_000 {
+        var watchdog = OffMainStrokeTraceInactivityWatchdog(
+            timeoutNanoseconds: inactivityTimeoutNanoseconds
+        )
+        while !watchdog.hasExpired {
+            let observedRevision = progressRegistration.currentRevision
             bridge.drainResults(into: &resultScratch)
+            if !resultScratch.isEmpty {
+                watchdog.recordProgress()
+            }
             var deferredAcknowledgement: (generation: UInt64, token: UInt64)?
             for result in resultScratch {
                 switch result {
@@ -4556,8 +4622,18 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     generation: deferredAcknowledgement.generation,
                     token: deferredAcknowledgement.token
                 )
+                watchdog.recordProgress()
             }
-            await Task.yield()
+            if progressRegistration.currentRevision != observedRevision {
+                watchdog.recordProgress()
+                continue
+            }
+            if progressRegistration.waitForProgress(
+                after: observedRevision,
+                until: watchdog.waitDeadline
+            ) {
+                watchdog.recordProgress()
+            }
         }
         throw MetalRendererError.commandFailed(
             "off-main trace workspace retirement exceeded its bound"
@@ -4569,7 +4645,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         generation: UInt64,
         expectedInputSampleCount: UInt64,
         requireCommitBarrier: Bool,
-        compositeTarget: any MTLTexture
+        compositeTarget: any MTLTexture,
+        progressRegistration: StrokePreparationProgressRegistration,
+        inactivityTimeoutNanoseconds: UInt64
     ) async throws -> OffMainStrokeTraceDrainOutcome {
         var resultScratch: [StrokePreparationResult] = []
         resultScratch.reserveCapacity(1)
@@ -4581,10 +4659,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         var allOffMain = true
         var preparationCPUNanoseconds: UInt64 = 0
 
-        for _ in 0..<1_000_000 {
+        var watchdog = OffMainStrokeTraceInactivityWatchdog(
+            timeoutNanoseconds: inactivityTimeoutNanoseconds
+        )
+        while !watchdog.hasExpired {
+            let observedRevision = progressRegistration.currentRevision
             bridge.drainResults(into: &resultScratch)
             if resultScratch.isEmpty {
                 deferredDrainCount += 1
+            } else {
+                watchdog.recordProgress()
             }
             var deferredAcknowledgement: (generation: UInt64, token: UInt64)?
             for result in resultScratch {
@@ -4680,11 +4764,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     generation: deferredAcknowledgement.generation,
                     token: deferredAcknowledgement.token
                 )
+                watchdog.recordProgress()
             }
             let mailbox = bridge.mailbox.snapshot
-            let inputReached = coordinatorSnapshot?
-                .commitMetadata.inputSampleCount
-                == expectedInputSampleCount
+            // Replay-tail/whole-stroke brushes legitimately retain consumed
+            // input without advancing committed metadata until promotion or
+            // finish. Mailbox quiescence proves an intermediate message was
+            // consumed; the final commit barrier below requires the exact
+            // total committed sample count.
+            let inputReached = !requireCommitBarrier
+                || coordinatorSnapshot?.commitMetadata.inputSampleCount
+                    == expectedInputSampleCount
             if inputReached,
                mailbox.isQuiescent,
                (!requireCommitBarrier || commitBarrierReached),
@@ -4702,13 +4792,33 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                         preparationCPUNanoseconds
                 )
             }
-            await Task.yield()
+            if progressRegistration.currentRevision != observedRevision {
+                watchdog.recordProgress()
+                continue
+            }
+            if progressRegistration.waitForProgress(
+                after: observedRevision,
+                until: watchdog.waitDeadline
+            ) {
+                watchdog.recordProgress()
+            }
         }
+        let stalled = bridge.mailbox.snapshot
         throw MetalRendererError.commandFailed(
-            "off-main production trace drain exceeded its bound"
+            "off-main production trace drain exceeded its inactivity bound "
+                + "at input sample \(expectedInputSampleCount); input="
+                + "\(stalled.input.authoritativePendingSampleCount)/"
+                + "\(stalled.input.predictedPendingSampleCount) result="
+                + "\(stalled.pendingResultCount) awaiting="
+                + "\(stalled.awaitingPreparedFrameSubmission) worker="
+                + "\(stalled.workerIsProcessing) coordinatorInput="
+                + "\(String(describing: coordinatorSnapshot?.commitMetadata.inputSampleCount)) "
+                + "surface=\(surfaceSnapshot != nil) barrier="
+                + "\(commitBarrierReached)/\(requireCommitBarrier)"
         )
     }
 
+    #if DEBUG
     var brushLabInputReceiptPendingForTesting: Bool {
         brushLabPendingInputReceiptNanoseconds != nil
     }

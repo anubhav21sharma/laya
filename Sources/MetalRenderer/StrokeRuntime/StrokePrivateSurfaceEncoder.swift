@@ -172,14 +172,14 @@ struct StrokePreparedSurfaceLease: Sendable {
     }
 }
 
-struct StrokePrivateSurfaceEncoderSnapshot: Equatable, Sendable {
-    let encodedFrameCount: UInt64
-    let encodedInstanceCount: UInt64
-    let surfaceCount: Int
-    let surfaceLeaseHighWater: Int
-    let maximumUploadBytes: Int
-    let authoritativeSurfaceIsInitialized: Bool
-    let predictionSurfaceIsInitialized: Bool
+package struct StrokePrivateSurfaceEncoderSnapshot: Equatable, Sendable {
+    package let encodedFrameCount: UInt64
+    package let encodedInstanceCount: UInt64
+    package let surfaceCount: Int
+    package let surfaceLeaseHighWater: Int
+    package let maximumUploadBytes: Int
+    package let authoritativeSurfaceIsInitialized: Bool
+    package let predictionSurfaceIsInitialized: Bool
 }
 
 private struct StrokePrivateSurfaceCommandOutcome: Sendable {

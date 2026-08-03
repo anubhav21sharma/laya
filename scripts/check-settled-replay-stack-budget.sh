@@ -525,7 +525,7 @@ measure timed_normalized_angle "$debug_binary" TimedStrokeEmissionCursorV15norma
 measure timed_stable_double "$debug_binary" TimedStrokeEmissionCursorV12stableLinear026_93A8D2497DE33A4E0A7046812L5DC127LL__8fractionS2d non-external fragment
 measure timed_stable_float "$debug_binary" TimedStrokeEmissionCursorV12stableLinear026_93A8D2497DE33A4E0A7046812L5DC127LL__8fractionS2f non-external fragment
 measure timed_finite "$debug_binary" TimedStrokeEmissionCursorV8isFinite non-external fragment
-measure cursor_accept "$debug_binary" BrushStrokeGeneratorV21emitAcceptedCandidate non-external fragment
+measure cursor_accept "$debug_binary" BrushStrokeGeneratorV21emitAcceptedCandidate non-external swift-function
 measure cursor_evaluate "$debug_binary" BrushStrokeGeneratorV12evaluatedDab non-external fragment
 measure cursor_identity "$debug_binary" BrushStrokeGeneratorV24preflightLogicalIdentity external fragment
 measure cursor_install "$debug_binary" BrushStrokeGeneratorV24installAcceptedCandidate non-external fragment

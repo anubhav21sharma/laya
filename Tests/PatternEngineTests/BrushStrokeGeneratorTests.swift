@@ -650,6 +650,62 @@ func schemaV2PagedGeneratorMatchesCompatibilityTraceAcrossLifecycleAndCorners()
 }
 
 @Test
+func schemaV2PagedUnionSettlesTimedDistanceDuplicates() throws {
+    let program = try stageCTestProgram(
+        id: "test.generator.emission.cursor-union-duplicate",
+        baseSpacingFraction: 0.1,
+        maximumSpacingFraction: 0.5,
+        emission: BrushEmissionDefinition(
+            mode: .distanceAndTime,
+            timeInterval: 0.05
+        )
+    )
+    let samples = [
+        generatorSample(x: 8, y: 8, timestamp: 0, phase: .began),
+        generatorSample(x: 20, y: 8, timestamp: 0.1, phase: .moved),
+        generatorSample(x: 20, y: 20, timestamp: 0.2, phase: .moved),
+        generatorSample(x: 32, y: 20, timestamp: 0.3, phase: .moved),
+        generatorSample(x: 32, y: 32, timestamp: 0.4, phase: .moved),
+        generatorSample(x: 44, y: 32, timestamp: 0.5, phase: .moved),
+        generatorSample(x: 44, y: 44, timestamp: 0.6, phase: .ended),
+    ]
+    var compatibility = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 12,
+        color: .black,
+        seed: 1
+    )
+    var expected: [DabAttributes] = []
+    compatibility.begin(samples[0]) { expected.append($0) }
+    for sample in samples.dropFirst().dropLast() {
+        compatibility.append(sample) { expected.append($0) }
+    }
+    compatibility.finish(samples[samples.count - 1]) {
+        expected.append($0)
+    }
+
+    var paged = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 12,
+        color: .black,
+        seed: 1
+    )
+    var actual: [DabAttributes] = []
+    for sample in samples {
+        var cursor = try paged.emissionCursor(
+            for: sample,
+            maximumPathSubdivisionCount: 4_096
+        )
+        let page = try cursor.emitNextPage { actual.append($0) }
+        #expect(!page.hasMore)
+        paged = try #require(cursor.completedGenerator)
+    }
+
+    #expect(actual == expected)
+    #expect(paged == compatibility)
+}
+
+@Test
 func schemaV2DistanceCursorResumesA513DabPathExactly() throws {
     var generator = try stageCGenerator(
         id: "test.generator.emission.distance-page",

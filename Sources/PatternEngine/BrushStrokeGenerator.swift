@@ -186,6 +186,7 @@ extension BrushStrokeGenerator {
             let consumesDistance: Bool
             let consumesTimed: Bool
             let selectsDistance: Bool
+            let acceptsCandidate: Bool
 
             init(
                 step: StrokeEmissionMergeStep,
@@ -201,7 +202,8 @@ extension BrushStrokeGenerator {
                     continuation: step.continuation,
                     consumesDistance: step.consumesDistance,
                     consumesTimed: step.consumesTimed,
-                    selectsDistance: distance == candidate || timed == nil
+                    selectsDistance: distance == candidate || timed == nil,
+                    acceptsCandidate: true
                 )
             }
 
@@ -209,12 +211,14 @@ extension BrushStrokeGenerator {
                 continuation: StrokeEmissionMerger,
                 consumesDistance: Bool,
                 consumesTimed: Bool,
-                selectsDistance: Bool
+                selectsDistance: Bool,
+                acceptsCandidate: Bool
             ) {
                 self.continuation = continuation
                 self.consumesDistance = consumesDistance
                 self.consumesTimed = consumesTimed
                 self.selectsDistance = selectsDistance
+                self.acceptsCandidate = acceptsCandidate
             }
         }
 
@@ -448,7 +452,8 @@ extension BrushStrokeGenerator {
                     continuation: mergeStep.continuation,
                     consumesDistance: mergeStep.consumesDistance,
                     consumesTimed: mergeStep.consumesTimed,
-                    selectsDistance: mergeStep.consumesDistance
+                    selectsDistance: mergeStep.consumesDistance,
+                    acceptsCandidate: false
                 )
                 return .noDab
             }
@@ -472,7 +477,8 @@ extension BrushStrokeGenerator {
             }
 
             var preparedCandidate: StrokeEmissionCandidate? {
-                guard let decision = pendingMergeDecision
+                guard let decision = pendingMergeDecision,
+                      decision.acceptsCandidate
                 else { return nil }
                 return decision.selectsDistance
                     ? pendingSpatialCandidate
