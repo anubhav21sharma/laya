@@ -32,6 +32,13 @@ func stageCTestProgram(
     maximumAngularStep: Float = .pi / 6,
     stationaryDirection: Float = 0,
     baseSpacingFraction: Float? = nil,
+    maximumSpacingFraction: Float? = nil,
+    coverage: BrushCoverageDefinition? = nil,
+    outputOverrides: [
+        BrushDynamicOutput: BrushOutputProgramDefinition
+    ] = [:],
+    randomization: BrushRandomization? = nil,
+    tipSupports: [BrushTipSupportDefinition] = [.analyticEllipse],
     replayMode: BrushReplayMode = .appendOnly,
     replayLimits: BrushReplayLimits? = nil
 ) throws -> BrushProgram {
@@ -65,10 +72,27 @@ func stageCTestProgram(
             )]
         )
     }
+    for (output, program) in outputOverrides {
+        outputs[output] = program
+    }
+    let coverage = coverage ?? base.coverage
+    var capabilities = base.capabilities
+    if coverage.shapes.count == 2,
+       !capabilities.contains(where: {
+           $0.identifier == BrushCapability.dualShape.rawValue
+       })
+    {
+        capabilities.append(BrushCapabilityDeclaration(
+            identifier: BrushCapability.dualShape.rawValue,
+            required: true
+        ))
+    }
     let placement = BrushPlacementDefinition(
         baseSpacingFraction:
             baseSpacingFraction ?? base.placement.baseSpacingFraction,
-        maximumSpacingFraction: base.placement.maximumSpacingFraction,
+        maximumSpacingFraction:
+            maximumSpacingFraction
+                ?? base.placement.maximumSpacingFraction,
         baseFlow: base.placement.baseFlow,
         strokeOpacity: base.placement.strokeOpacity,
         baseScatterFraction: 0,
@@ -79,11 +103,30 @@ func stageCTestProgram(
     let definition = try BrushDefinition(
         v2ID: BrushRecipeID(id),
         metadata: base.metadata,
-        capabilities: base.capabilities,
+        capabilities: capabilities,
         resources: base.resources,
-        coverage: base.coverage,
+        coverage: coverage,
         placement: placement,
-        dynamics: base.dynamics,
+        dynamics: randomization.map { value in
+            BrushDynamicsDefinition(
+                size: base.dynamics.size,
+                flow: base.dynamics.flow,
+                opacity: base.dynamics.opacity,
+                spacing: base.dynamics.spacing,
+                rotation: base.dynamics.rotation,
+                scatter: base.dynamics.scatter,
+                hardness: base.dynamics.hardness,
+                grain: base.dynamics.grain,
+                offsetX: base.dynamics.offsetX,
+                offsetY: base.dynamics.offsetY,
+                hue: base.dynamics.hue,
+                saturation: base.dynamics.saturation,
+                brightness: base.dynamics.brightness,
+                secondaryColorMix: base.dynamics.secondaryColorMix,
+                noPressureNeutral: base.dynamics.noPressureNeutral,
+                randomization: value
+            )
+        } ?? base.dynamics,
         color: base.color,
         material: base.material,
         stabilization: base.stabilization,
@@ -108,7 +151,7 @@ func stageCTestProgram(
             stationaryDirection: stationaryDirection
         ),
         emission: BrushEmissionDefinition(mode: .distance, timeInterval: nil),
-        tipSupports: [.analyticEllipse]
+        tipSupports: tipSupports
     )
     return try BrushProgramCompiler.compile(definition)
 }

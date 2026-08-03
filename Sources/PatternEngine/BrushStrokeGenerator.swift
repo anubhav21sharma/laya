@@ -7,6 +7,117 @@ enum BrushStrokeBatchOperation {
     case finish
 }
 
+public enum BrushStrokeGeneratorFootprintError: Error, Equatable, Sendable {
+    case nominalDiameterOutsideCompiledLimits(
+        actual: Float,
+        minimum: Float,
+        maximum: Float
+    )
+    case unsafeCompiledFootprintEnvelope
+    case worldPositionOutsideFootprintEnvelope
+}
+
+/// A conservative, compile-once proof that every accepted schema-v2 sample can
+/// build its post-dynamics affine support using finite Float arithmetic. The
+/// fourfold input margin covers the bounded interpolator's control-point
+/// envelope; the wider arithmetic margin protects all placement and shape math.
+private struct BrushStrokeFootprintEnvelope: Equatable, Sendable {
+    static let interpolationSafetyDivisor = 4.0
+    static let arithmeticSafetyDivisor = 1_024.0
+
+    let rejection: BrushStrokeGeneratorFootprintError?
+    let maximumInputMagnitude: Float
+
+    static func compile(
+        program: BrushProgram,
+        nominalDiameter: Float
+    ) -> BrushStrokeFootprintEnvelope {
+        guard program.stageC != nil else {
+            return BrushStrokeFootprintEnvelope(
+                rejection: nil,
+                maximumInputMagnitude: .greatestFiniteMagnitude
+            )
+        }
+        let limits = program.definition.limits
+        guard nominalDiameter >= limits.minimumDiameter,
+              nominalDiameter <= limits.maximumDiameter
+        else {
+            return BrushStrokeFootprintEnvelope(
+                rejection: .nominalDiameterOutsideCompiledLimits(
+                    actual: nominalDiameter,
+                    minimum: limits.minimumDiameter,
+                    maximum: limits.maximumDiameter
+                ),
+                maximumInputMagnitude: 0
+            )
+        }
+
+        let definition = program.definition
+        let nominal = Double(nominalDiameter)
+        let maximumRadius = nominal * 4
+        let aspect = Double(definition.coverage.aspectRatio)
+        var maximumShapeReach = 0.0
+        for shape in definition.coverage.shapes {
+            let offsetReach = maximumRadius * (
+                abs(Double(shape.offset.x))
+                    + aspect * abs(Double(shape.offset.y))
+            )
+            let axisReach = maximumRadius
+                * Double(shape.scale)
+                * (1 + aspect)
+            maximumShapeReach = max(
+                maximumShapeReach,
+                offsetReach + axisReach
+            )
+        }
+        let placement = definition.placement
+        let maximumDynamicOffset = nominal * 8
+        let maximumScatter = nominal
+            * Double(placement.baseScatterFraction)
+            * 8
+            * Double(definition.dynamics.randomization.scatter)
+        let maximumJitter = nominal
+            * Double(placement.baseJitterFraction)
+        let maximumBaseOffset = max(
+            abs(Double(placement.baseOffset.x)),
+            abs(Double(placement.baseOffset.y))
+        )
+        let maximumReach = maximumShapeReach
+            + maximumDynamicOffset
+            + maximumScatter
+            + maximumJitter
+            + maximumBaseOffset
+        let arithmeticLimit = Double(Float.greatestFiniteMagnitude)
+            / arithmeticSafetyDivisor
+        guard maximumReach.isFinite,
+              maximumReach >= 0,
+              maximumReach < arithmeticLimit
+        else {
+            return BrushStrokeFootprintEnvelope(
+                rejection: .unsafeCompiledFootprintEnvelope,
+                maximumInputMagnitude: 0
+            )
+        }
+        return BrushStrokeFootprintEnvelope(
+            rejection: nil,
+            maximumInputMagnitude: Float(
+                (arithmeticLimit - maximumReach)
+                    / interpolationSafetyDivisor
+            )
+        )
+    }
+
+    func validate(_ sample: WorldStrokeSample) throws {
+        if let rejection { throw rejection }
+        guard abs(sample.position.x) <= maximumInputMagnitude,
+              abs(sample.position.y) <= maximumInputMagnitude
+        else {
+            throw BrushStrokeGeneratorFootprintError
+                .worldPositionOutsideFootprintEnvelope
+        }
+    }
+}
+
 /// Deterministic input-to-dab generator for one captured stroke configuration.
 public struct BrushStrokeGenerator: Equatable, Sendable {
     public let program: BrushProgram
@@ -31,6 +142,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     private var distanceUntilNext: Float
     private var lastDirection: Float
     private var lastEmittedSourcePosition: WorldPoint?
+    private let footprintEnvelope: BrushStrokeFootprintEnvelope
 
     public init(
         program: BrushProgram,
@@ -77,6 +189,10 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         distanceUntilNext = spacing
         lastDirection = 0
         lastEmittedSourcePosition = nil
+        footprintEnvelope = BrushStrokeFootprintEnvelope.compile(
+            program: program,
+            nominalDiameter: nominalDiameter
+        )
     }
 
     public static func == (
@@ -99,6 +215,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             && lhs.nominalDiameter == rhs.nominalDiameter
             && lhs.color == rhs.color
             && lhs.seed == rhs.seed
+            && lhs.footprintEnvelope == rhs.footprintEnvelope
     }
 
     @inline(never)
@@ -148,8 +265,28 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     public mutating func begin(
         _ sample: WorldStrokeSample,
+        emit: (DabAttributes) -> Void
+    ) {
+        do {
+            try beginTransaction(sample, emit: emit)
+        } catch {
+            preconditionFailure(
+                "Unbounded stroke generation exceeded a typed bound: \(error)"
+            )
+        }
+    }
+
+    public mutating func begin(
+        _ sample: WorldStrokeSample,
         emit: (DabAttributes) throws -> Void
-    ) rethrows {
+    ) throws {
+        try beginTransaction(sample, emit: emit)
+    }
+
+    private mutating func beginTransaction(
+        _ sample: WorldStrokeSample,
+        emit: (DabAttributes) throws -> Void
+    ) throws {
         precondition(sample.phase == .began)
         var updated = self
         try updated.start(sample, emit: emit)
@@ -182,6 +319,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     ) throws {
         precondition(sample.phase == .moved)
         var updated = self
+        try updated.footprintEnvelope.validate(sample)
         if updated.isActive {
             try updated.appendActive(sample, emit: emit)
         } else {
@@ -201,6 +339,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         precondition(maximumPathSubdivisionCount > 0)
         precondition(sample.phase == .moved)
         var updated = self
+        try updated.footprintEnvelope.validate(sample)
         if updated.isActive {
             try updated.appendActive(
                 sample,
@@ -227,6 +366,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         precondition(sample.phase == .moved)
         precondition(sample.kind == .predicted)
         var updated = self
+        try updated.footprintEnvelope.validate(sample)
         let outcome: StrokePathInterpolationOutcome
         if updated.isActive {
             outcome = try updated.appendActivePredictionPrefix(
@@ -271,6 +411,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     ) throws {
         precondition(sample.phase == .ended)
         var updated = self
+        try updated.footprintEnvelope.validate(sample)
         if !updated.isActive {
             try updated.start(sample, emit: emit)
         } else {
@@ -290,6 +431,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         precondition(maximumPathSubdivisionCount > 0)
         precondition(sample.phase == .ended)
         var updated = self
+        try updated.footprintEnvelope.validate(sample)
         if !updated.isActive {
             try updated.start(sample, emit: emit)
         } else {
@@ -316,6 +458,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         precondition(sample.phase == .ended)
         precondition(sample.kind == .predicted)
         var updated = self
+        try updated.footprintEnvelope.validate(sample)
         let outcome: StrokePathInterpolationOutcome
         if !updated.isActive {
             try updated.start(sample, emit: emit)
@@ -499,7 +642,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         let collect: (DabAttributes) throws -> Void = { dabs.append($0) }
         switch operation {
         case .begin:
-            candidate.begin(sample) { dabs.append($0) }
+            try candidate.begin(sample, emit: collect)
         case .append:
             try candidate.append(sample, emit: collect)
         case .finish:
@@ -511,7 +654,8 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     private mutating func start(
         _ sample: WorldStrokeSample,
         emit: (DabAttributes) throws -> Void
-    ) rethrows {
+    ) throws {
+        try footprintEnvelope.validate(sample)
         resetRuntimeState()
         isActive = true
         strokeStartTimestamp = sample.timestamp
@@ -1046,6 +1190,8 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
                 isPredicted: isPredicted
             )
             try emit(dab)
+            currentSpacing = dab.spacing
+            distanceUntilNext = min(distanceUntilNext, dab.spacing)
         }
     }
 

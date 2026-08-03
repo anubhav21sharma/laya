@@ -210,7 +210,7 @@ structural=$((p + structure + $(maximum "$lifecycle" "$append_work")))
 input=$((p + input_loop + input_transition + input_eq + filter_eq + filter_storage_eq))
 generator_base=$((p + generator_loop + generator_chunk))
 
-measure generator_begin "$debug_binary" BrushStrokeGeneratorV5begin external fragment
+measure generator_begin "$debug_binary" BrushStrokeGeneratorV5begin_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment
 measure generator_append "$debug_binary" BrushStrokeGeneratorV6append_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment
 measure generator_finish "$debug_binary" BrushStrokeGeneratorV6finish_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment
 begin_path=$((replay_begin + generator_begin + begin_partial + begin_closure + validate_dab))
@@ -236,7 +236,7 @@ for release_spec in \
   'BrushProgramC2eeoiy external fragment' \
   'BrushStageCProgramMetadataC2eeoiy external fragment' \
   'CompiledBrushSensorProgramC2eeoiy non-external fragment' \
-  'BrushStrokeGeneratorV5begin external fragment' \
+  'BrushStrokeGeneratorV5begin_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment' \
   'BrushStrokeGeneratorV6append_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment' \
   'BrushStrokeGeneratorV6finish_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment'
 do

@@ -144,39 +144,75 @@ public enum BrushTipSupport {
         layers: [BrushTipSupportLayer],
         tangent: SIMD2<Float>
     ) throws -> BrushTipProjectionInterval {
-        guard tangent.x.isFinite, tangent.y.isFinite else {
-            throw BrushTipSupportError.nonfiniteTangent
-        }
-        let tangentX = Double(tangent.x)
-        let tangentY = Double(tangent.y)
-        let lengthSquared = tangentX * tangentX + tangentY * tangentY
-        guard abs(lengthSquared - 1) <= unitLengthTolerance else {
-            throw BrushTipSupportError.nonunitTangent
-        }
         guard !layers.isEmpty else {
             throw BrushTipSupportError.emptyLayers
         }
+        var accumulator = try ProjectionAccumulator(tangent: tangent)
+        for layer in layers {
+            try accumulator.include(layer)
+        }
+        return try accumulator.interval()
+    }
 
+    /// Fixed-arity production overload for the schema-v2 one/two-layer hot
+    /// path. It avoids constructing a transient Array for every logical dab.
+    public static func projectionInterval(
+        primary: BrushTipSupportLayer,
+        secondary: BrushTipSupportLayer?,
+        tangent: SIMD2<Float>
+    ) throws -> BrushTipProjectionInterval {
+        var accumulator = try ProjectionAccumulator(tangent: tangent)
+        try accumulator.include(primary)
+        if let secondary {
+            try accumulator.include(secondary)
+        }
+        return try accumulator.interval()
+    }
+
+    private struct ProjectionAccumulator {
+        let tangentX: Double
+        let tangentY: Double
         var unionMinimum = Double.infinity
         var unionMaximum = -Double.infinity
-        for layer in layers {
-            let centerProjection = dot(layer.offset, tangentX, tangentY)
-            let xProjection = dot(layer.xAxis, tangentX, tangentY)
-            let yProjection = dot(layer.yAxis, tangentX, tangentY)
-            let interval: (minimum: Double, maximum: Double)
+
+        init(tangent: SIMD2<Float>) throws {
+            guard tangent.x.isFinite, tangent.y.isFinite else {
+                throw BrushTipSupportError.nonfiniteTangent
+            }
+            tangentX = Double(tangent.x)
+            tangentY = Double(tangent.y)
+            let lengthSquared = tangentX * tangentX + tangentY * tangentY
+            guard abs(lengthSquared - 1)
+                    <= BrushTipSupport.unitLengthTolerance
+            else {
+                throw BrushTipSupportError.nonunitTangent
+            }
+        }
+
+        mutating func include(_ layer: BrushTipSupportLayer) throws {
+            let centerProjection = BrushTipSupport.dot(
+                layer.offset, tangentX, tangentY
+            )
+            let xProjection = BrushTipSupport.dot(
+                layer.xAxis, tangentX, tangentY
+            )
+            let yProjection = BrushTipSupport.dot(
+                layer.yAxis, tangentX, tangentY
+            )
+            let projected: (minimum: Double, maximum: Double)
             switch layer.definition.kind {
             case .analyticEllipse:
                 let radius = sqrt(
                     xProjection * xProjection
                         + yProjection * yProjection
                 )
-                interval = (
+                projected = (
                     centerProjection - radius,
                     centerProjection + radius
                 )
             case .analyticRectangle:
                 let radius = abs(xProjection) + abs(yProjection)
-                interval = (
+                projected = (
                     centerProjection - radius,
                     centerProjection + radius
                 )
@@ -184,31 +220,33 @@ public enum BrushTipSupport {
                 guard let bounds = layer.definition.bounds else {
                     throw BrushTipSupportError.invalidSupportWidth
                 }
-                interval = boundsInterval(
+                projected = BrushTipSupport.boundsInterval(
                     bounds,
                     centerProjection: centerProjection,
                     xProjection: xProjection,
                     yProjection: yProjection
                 )
             }
-            guard interval.minimum.isFinite,
-                  interval.maximum.isFinite
+            guard projected.minimum.isFinite,
+                  projected.maximum.isFinite
             else {
                 throw BrushTipSupportError.arithmeticOverflow
             }
-            unionMinimum = min(unionMinimum, interval.minimum)
-            unionMaximum = max(unionMaximum, interval.maximum)
+            unionMinimum = min(unionMinimum, projected.minimum)
+            unionMaximum = max(unionMaximum, projected.maximum)
         }
 
-        let width = unionMaximum - unionMinimum
-        guard width.isFinite, width > 0 else {
-            throw BrushTipSupportError.invalidSupportWidth
+        func interval() throws -> BrushTipProjectionInterval {
+            let width = unionMaximum - unionMinimum
+            guard width.isFinite, width > 0 else {
+                throw BrushTipSupportError.invalidSupportWidth
+            }
+            return BrushTipProjectionInterval(
+                minimumProjection: unionMinimum,
+                maximumProjection: unionMaximum,
+                width: width
+            )
         }
-        return BrushTipProjectionInterval(
-            minimumProjection: unionMinimum,
-            maximumProjection: unionMaximum,
-            width: width
-        )
     }
 
     private static func dot(

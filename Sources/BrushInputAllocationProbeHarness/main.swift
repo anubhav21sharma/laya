@@ -432,14 +432,32 @@ private struct BrushInputAllocationProbeHarness {
             makeStageCProbeDefinition(
                 id: "probe.stage-c.generator.weighted",
                 stabilization: .weightedWindow(distance: 12),
-                maximumAngularStep: .pi / 8
+                maximumAngularStep: .pi / 8,
+                footprint: .ellipse
             )
         )
         let delayedProgram = try BrushProgramCompiler.compile(
             makeStageCProbeDefinition(
                 id: "probe.stage-c.generator.delayed",
                 stabilization: .delayed(distance: 12),
-                maximumAngularStep: .pi / 8
+                maximumAngularStep: .pi / 8,
+                footprint: .chisel
+            )
+        )
+        let texturedProgram = try BrushProgramCompiler.compile(
+            makeStageCProbeDefinition(
+                id: "probe.stage-c.generator.textured",
+                stabilization: .weightedWindow(distance: 12),
+                maximumAngularStep: .pi / 8,
+                footprint: .translatedBounds
+            )
+        )
+        let dualProgram = try BrushProgramCompiler.compile(
+            makeStageCProbeDefinition(
+                id: "probe.stage-c.generator.dual",
+                stabilization: .delayed(distance: 12),
+                maximumAngularStep: .pi / 8,
+                footprint: .dualEllipse
             )
         )
         let samples = makeStageCGeneratorProbeSamples()
@@ -455,9 +473,27 @@ private struct BrushInputAllocationProbeHarness {
             color: .black,
             seed: 0xC9_02
         )
+        var textured = BrushStrokeGenerator(
+            program: texturedProgram,
+            nominalDiameter: 20,
+            color: .black,
+            seed: 0xC9_03
+        )
+        var dual = BrushStrokeGenerator(
+            program: dualProgram,
+            nominalDiameter: 20,
+            color: .black,
+            seed: 0xC9_04
+        )
         _ = try runStageCGeneratorCycles(
             weighted: &weighted,
             delayed: &delayed,
+            samples: samples,
+            count: 128
+        )
+        _ = try runStageCGeneratorCycles(
+            weighted: &textured,
+            delayed: &dual,
             samples: samples,
             count: 128
         )
@@ -465,12 +501,19 @@ private struct BrushInputAllocationProbeHarness {
         probe.arm()
         let checksum: UInt64
         do {
-            checksum = try runStageCGeneratorCycles(
+            let primaryChecksum = try runStageCGeneratorCycles(
                 weighted: &weighted,
                 delayed: &delayed,
                 samples: samples,
                 count: 10_000
             )
+            let layeredChecksum = try runStageCGeneratorCycles(
+                weighted: &textured,
+                delayed: &dual,
+                samples: samples,
+                count: 10_000
+            )
+            checksum = primaryChecksum &+ layeredChecksum
         } catch {
             _ = probe.disarm()
             throw error
@@ -643,7 +686,8 @@ private struct BrushInputAllocationProbeHarness {
     private static func makeStageCProbeDefinition(
         id: String,
         stabilization: BrushStabilizationDefinition,
-        maximumAngularStep: Float
+        maximumAngularStep: Float,
+        footprint: StageCProbeFootprint = .ellipse
     ) throws -> BrushDefinition {
         let base = try LegacyBrushRecipeAdapter.definition(
             from: .legacyEquivalent,
@@ -678,13 +722,78 @@ private struct BrushInputAllocationProbeHarness {
                 ),
             ]
         )
+        let primaryShape = base.coverage.shapes[0]
+        let coverage: BrushCoverageDefinition
+        let tipSupports: [BrushTipSupportDefinition]
+        switch footprint {
+        case .ellipse:
+            coverage = base.coverage
+            tipSupports = [.analyticEllipse]
+        case .chisel:
+            coverage = BrushCoverageDefinition(
+                shapes: [primaryShape],
+                grains: base.coverage.grains,
+                baseHardness: base.coverage.baseHardness,
+                aspectRatio: 0.2,
+                tipThreshold: base.coverage.tipThreshold,
+                antialiasing: base.coverage.antialiasing
+            )
+            tipSupports = [.analyticRectangle]
+        case .translatedBounds:
+            coverage = BrushCoverageDefinition(
+                shapes: [BrushShapeLayerDefinition(
+                    shape: primaryShape.shape,
+                    combination: .replace,
+                    scale: 0.75,
+                    rotation: .pi / 9,
+                    offset: SIMD2(0.6, -0.35)
+                )],
+                grains: base.coverage.grains,
+                baseHardness: base.coverage.baseHardness,
+                aspectRatio: 0.6,
+                tipThreshold: base.coverage.tipThreshold,
+                antialiasing: base.coverage.antialiasing
+            )
+            tipSupports = [try .normalizedBounds(
+                minX: -0.7,
+                maxX: 0.85,
+                minY: -0.45,
+                maxY: 0.65
+            )]
+        case .dualEllipse:
+            coverage = BrushCoverageDefinition(
+                shapes: [
+                    primaryShape,
+                    BrushShapeLayerDefinition(
+                        shape: primaryShape.shape,
+                        combination: .maximum,
+                        scale: 0.5,
+                        rotation: -.pi / 7,
+                        offset: SIMD2(1.4, 0.3)
+                    ),
+                ],
+                grains: base.coverage.grains,
+                baseHardness: base.coverage.baseHardness,
+                aspectRatio: 0.7,
+                tipThreshold: base.coverage.tipThreshold,
+                antialiasing: base.coverage.antialiasing
+            )
+            tipSupports = [.analyticEllipse, .analyticEllipse]
+        }
+        var capabilities = base.capabilities
+        if coverage.shapes.count == 2 {
+            capabilities.append(BrushCapabilityDeclaration(
+                identifier: BrushCapability.dualShape.rawValue,
+                required: true
+            ))
+        }
         let replayLimits = BrushRecipePolicy.replayTailLimits
         return try BrushDefinition(
             v2ID: BrushRecipeID(id),
             metadata: base.metadata,
-            capabilities: base.capabilities,
+            capabilities: capabilities,
             resources: base.resources,
-            coverage: base.coverage,
+            coverage: coverage,
             placement: BrushPlacementDefinition(
                 baseSpacingFraction: 0.05,
                 maximumSpacingFraction: max(
@@ -730,7 +839,7 @@ private struct BrushInputAllocationProbeHarness {
                 mode: .distance,
                 timeInterval: nil
             ),
-            tipSupports: [.analyticEllipse]
+            tipSupports: tipSupports
         )
     }
 
@@ -1918,4 +2027,11 @@ private struct StageCGeneratorProbeSamples {
     let left: WorldStrokeSample
     let predicted: WorldStrokeSample
     let ended: WorldStrokeSample
+}
+
+private enum StageCProbeFootprint {
+    case ellipse
+    case chisel
+    case translatedBounds
+    case dualEllipse
 }

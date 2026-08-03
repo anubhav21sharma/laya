@@ -371,15 +371,8 @@ public struct BrushDynamicsEngine: Sendable {
             dynamics.spacing, inputs: inputs, strokeSeed: strokeSeed,
             ordinal: context.ordinal, channel: .spacing
         )
-        let randomizedSpacing = diameter
-            * definition.placement.baseSpacingFraction
-            * spacingFactor
+        let dynamicSpacing = spacingFactor
             * (1 + symmetric(random.spacing) * definition.dynamics.randomization.spacing)
-        let spacingUpperBound = max(
-            1,
-            min(8, diameter * definition.placement.maximumSpacingFraction)
-        )
-        let spacing = min(spacingUpperBound, max(1, randomizedSpacing))
 
         let flowFactor = orderedDynamics?.flow ?? evaluate(
             dynamics.flow, inputs: inputs, strokeSeed: strokeSeed,
@@ -433,29 +426,99 @@ public struct BrushDynamicsEngine: Sendable {
         let position = WorldPoint(sample.position.simd + scatter + offset + placementJitter)
         let cosine = cos(rotation)
         let sine = sin(rotation)
-        let tipToWorld = Affine2D(
+        let tipRelativeToPosition = Affine2D(
             xAxis: SIMD2(cosine, sine) * radius,
             yAxis: SIMD2(-sine, cosine) * radius * definition.coverage.aspectRatio,
+            translation: .zero
+        )
+        let tipToWorld = Affine2D(
+            xAxis: tipRelativeToPosition.xAxis,
+            yAxis: tipRelativeToPosition.yAxis,
             translation: position.simd
         )
-        func evaluatedShapeFrame(
-            _ shape: BrushShapeLayerDefinition
-        ) -> Affine2D {
+        func shapeFrame(_ shape: BrushShapeLayerDefinition) -> Affine2D {
             let shapeCosine = cos(shape.rotation) * shape.scale
             let shapeSine = sin(shape.rotation) * shape.scale
             return Affine2D(
                 xAxis: SIMD2(shapeCosine, shapeSine),
                 yAxis: SIMD2(-shapeSine, shapeCosine),
                 translation: shape.offset
-            ).concatenating(tipToWorld)
+            )
         }
-        let brushToWorld = evaluatedShapeFrame(
-            definition.coverage.shapes[0]
+        let primaryShape = shapeFrame(definition.coverage.shapes[0])
+        let primarySupportFrame = primaryShape.concatenating(
+            tipRelativeToPosition
+        )
+        let brushToWorld = primaryShape.concatenating(tipToWorld)
+        let secondaryShape = definition.coverage.shapes.count == 2
+            ? shapeFrame(definition.coverage.shapes[1])
+            : nil
+        let secondarySupportFrame = secondaryShape?.concatenating(
+            tipRelativeToPosition
         )
         let secondaryShapeToWorld =
-            definition.coverage.shapes.count == 2
-                ? evaluatedShapeFrame(definition.coverage.shapes[1])
-                : nil
+            secondaryShape?.concatenating(tipToWorld)
+        let spacing: Float
+        if let stageC = program.stageC {
+            do {
+                let primary = try BrushTipSupportLayer(
+                    definition: stageC.tipSupports[0],
+                    xAxis: primarySupportFrame.xAxis,
+                    yAxis: primarySupportFrame.yAxis,
+                    offset: primarySupportFrame.translation
+                )
+                let secondary: BrushTipSupportLayer?
+                if let secondarySupportFrame {
+                    secondary = try BrushTipSupportLayer(
+                        definition: stageC.tipSupports[1],
+                        xAxis: secondarySupportFrame.xAxis,
+                        yAxis: secondarySupportFrame.yAxis,
+                        offset: secondarySupportFrame.translation
+                    )
+                } else {
+                    secondary = nil
+                }
+                let tangent = SIMD2(cos(context.direction), sin(context.direction))
+                let interval = try BrushTipSupport.projectionInterval(
+                    primary: primary,
+                    secondary: secondary,
+                    tangent: tangent
+                )
+                let carry = try BrushFootprintSpacing.nextCarry(
+                    supportWidth: interval.width,
+                    baseSpacingFraction:
+                        definition.placement.baseSpacingFraction,
+                    // Compatibility jitter can reach exactly zero only when
+                    // its authored magnitude and random negative extreme are
+                    // both one. Preserve the spacing oracle's positive-domain
+                    // invariant; its one-pixel safety floor is the observable
+                    // result for that degenerate multiplier.
+                    dynamicSpacing: max(
+                        Float.leastNonzeroMagnitude,
+                        dynamicSpacing
+                    ),
+                    maximumSpacingFraction:
+                        definition.placement.maximumSpacingFraction
+                )
+                guard carry <= Double(Float.greatestFiniteMagnitude) else {
+                    throw BrushFootprintSpacingError.arithmeticOverflow
+                }
+                spacing = Float(carry)
+            } catch {
+                preconditionFailure(
+                    "Validated schema-v2 footprint spacing failed: \(error)"
+                )
+            }
+        } else {
+            let randomizedSpacing = diameter
+                * definition.placement.baseSpacingFraction
+                * dynamicSpacing
+            let spacingUpperBound = max(
+                1,
+                min(8, diameter * definition.placement.maximumSpacingFraction)
+            )
+            spacing = min(spacingUpperBound, max(1, randomizedSpacing))
+        }
         let hardness = clamp01(
             definition.coverage.baseHardness
                 * (orderedDynamics?.hardness ?? evaluate(

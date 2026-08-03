@@ -1,5 +1,6 @@
 import Foundation
 @testable import PatternEngine
+import simd
 import Testing
 
 private let generatorViewport = ViewportTransform(
@@ -43,6 +44,13 @@ private func stageCGenerator(
     maximumAngularStep: Float = .pi / 6,
     stationaryDirection: Float = 0,
     baseSpacingFraction: Float? = nil,
+    maximumSpacingFraction: Float? = nil,
+    coverage: BrushCoverageDefinition? = nil,
+    outputOverrides: [
+        BrushDynamicOutput: BrushOutputProgramDefinition
+    ] = [:],
+    tipSupports: [BrushTipSupportDefinition] = [.analyticEllipse],
+    nominalDiameter: Float = 20,
     seed: UInt64 = 1
 ) throws -> BrushStrokeGenerator {
     BrushStrokeGenerator(
@@ -52,9 +60,13 @@ private func stageCGenerator(
             usesTravelDirection: usesTravelDirection,
             maximumAngularStep: maximumAngularStep,
             stationaryDirection: stationaryDirection,
-            baseSpacingFraction: baseSpacingFraction
+            baseSpacingFraction: baseSpacingFraction,
+            maximumSpacingFraction: maximumSpacingFraction,
+            coverage: coverage,
+            outputOverrides: outputOverrides,
+            tipSupports: tipSupports
         ),
-        nominalDiameter: 20,
+        nominalDiameter: nominalDiameter,
         color: .black,
         seed: seed
     )
@@ -87,6 +99,7 @@ func manualEqualityInventoryCoversEveryStoredField() {
         "distanceUntilNext",
         "lastDirection",
         "lastEmittedSourcePosition",
+        "footprintEnvelope",
     ]))
 }
 
@@ -301,7 +314,7 @@ func typedCornerCapacityFailurePublishesNothingAndGeneratorRemainsReusable()
         maximumAngularStep: BrushCornerEmitter.minimumAngularStep,
         seed: 0x73
     )
-    try generator.begin(
+    generator.begin(
         generatorSample(x: 0, timestamp: 0, phase: .began)
     ) { _ in }
     try generator.append(
@@ -576,7 +589,867 @@ func generatorPreservesLegacyStraightPlacementAndExactEndpoint() {
         WorldPoint(x: 6, y: 0),
     ])
     #expect(dabs.map(\.ordinal) == [0, 1, 2, 3])
+    #expect(dabs.map(\.sourceDistance) == [0, 2.5, 5, 6])
     #expect(dabs.allSatisfy { $0.spacing == 2.5 })
+    var expectedRandom = BrushRandom(seed: 1)
+    #expect(dabs.map(\.randomValues.compatibility) == (0..<4).map { _ in
+        expectedRandom.nextValues()
+    })
+}
+
+@Test
+func schemaV2UsesEvaluatedShapeSupportUnionForFollowingCarry() throws {
+    let baseCoverage = nativeTestDefinition().coverage
+    let baseShape = baseCoverage.shapes[0]
+    let bounds = try BrushTipSupportDefinition.normalizedBounds(
+        minX: -0.25,
+        maxX: 0.75,
+        minY: -0.5,
+        maxY: 0.5
+    )
+    let cases: [(
+        name: String,
+        coverage: BrushCoverageDefinition,
+        supports: [BrushTipSupportDefinition],
+        outputs: [BrushDynamicOutput: BrushOutputProgramDefinition],
+        expectedCarry: Float
+    )] = [
+        (
+            "rotated chisel",
+            footprintCoverage(
+                base: baseCoverage,
+                aspectRatio: 0.25,
+                shapes: [baseShape]
+            ),
+            [.analyticRectangle],
+            [.rotation: constantOutput(.pi / 2)],
+            1.25
+        ),
+        (
+            "asymmetric normalized texture bounds",
+            footprintCoverage(
+                base: baseCoverage,
+                aspectRatio: 1,
+                shapes: [BrushShapeLayerDefinition(
+                    shape: baseShape.shape,
+                    combination: .replace,
+                    scale: 1,
+                    rotation: 0,
+                    offset: SIMD2(0.75, -0.5)
+                )]
+            ),
+            [bounds],
+            [:],
+            2.5
+        ),
+        (
+            "offset two-layer union",
+            footprintCoverage(
+                base: baseCoverage,
+                aspectRatio: 1,
+                shapes: [
+                    baseShape,
+                    BrushShapeLayerDefinition(
+                        shape: baseShape.shape,
+                        combination: .maximum,
+                        scale: 0.5,
+                        rotation: 0,
+                        offset: SIMD2(2, 0)
+                    ),
+                ]
+            ),
+            [.analyticEllipse, .analyticEllipse],
+            [:],
+            8.75
+        ),
+    ]
+
+    for fixture in cases {
+        var generator = try stageCGenerator(
+            id: "test.generator.footprint.\(fixture.name)",
+            baseSpacingFraction: 0.25,
+            maximumSpacingFraction: 0.5,
+            coverage: fixture.coverage,
+            outputOverrides: fixture.outputs,
+            tipSupports: fixture.supports
+        )
+        let trace = try straightTrace(
+            generator: &generator,
+            length: 30,
+            pressure: 0.5
+        )
+
+        #expect(trace.count >= 3, "\(fixture.name)")
+        #expect(abs(trace[0].sourceDistance) < 0.000_01, "\(fixture.name)")
+        #expect(
+            abs(trace[0].spacing - fixture.expectedCarry) < 0.000_1,
+            "\(fixture.name)"
+        )
+        #expect(
+            abs(trace[1].sourceDistance - fixture.expectedCarry) < 0.000_1,
+            "\(fixture.name)"
+        )
+    }
+}
+
+@Test
+func schemaV2FootprintCarryIsTranslationInvariantAtLargeWorldCoordinates()
+    throws
+{
+    let baseCoverage = nativeTestDefinition().coverage
+    let baseShape = baseCoverage.shapes[0]
+    let coverage = footprintCoverage(
+        base: baseCoverage,
+        aspectRatio: 1,
+        shapes: [
+            baseShape,
+            BrushShapeLayerDefinition(
+                shape: baseShape.shape,
+                combination: .maximum,
+                scale: 0.5,
+                rotation: 0,
+                offset: SIMD2(2, 0)
+            ),
+        ]
+    )
+    func firstDab(at x: Float, id: String) throws -> DabAttributes {
+        var generator = try stageCGenerator(
+            id: id,
+            baseSpacingFraction: 0.25,
+            maximumSpacingFraction: 0.5,
+            coverage: coverage,
+            tipSupports: [.analyticEllipse, .analyticEllipse]
+        )
+        var dabs: [DabAttributes] = []
+        generator.begin(
+            generatorSample(x: x, timestamp: 0, phase: .began)
+        ) { dabs.append($0) }
+        return try #require(dabs.first)
+    }
+
+    let origin = try firstDab(
+        at: 0,
+        id: "test.generator.footprint.translation-origin"
+    )
+    let translated = try firstDab(
+        at: 1e10,
+        id: "test.generator.footprint.translation-large"
+    )
+
+    #expect(abs(origin.spacing - 8.75) < 0.000_1)
+    #expect(abs(translated.spacing - origin.spacing) < 0.000_1)
+}
+
+@Test
+func schemaV2ProjectionModesChangeInstancesButNotLogicalTrace() throws {
+    let baseCoverage = nativeTestDefinition().coverage
+    let coverage = footprintCoverage(
+        base: baseCoverage,
+        aspectRatio: 0.3,
+        shapes: baseCoverage.shapes
+    )
+    let inputs = [
+        generatorSample(x: 128, y: 128, timestamp: 0, phase: .began),
+        generatorSample(x: 176, y: 144, timestamp: 1, phase: .ended),
+    ]
+    func logicalTrace(id: String) throws -> [DabAttributes] {
+        var generator = try stageCGenerator(
+            id: id,
+            usesTravelDirection: true,
+            baseSpacingFraction: 0.25,
+            maximumSpacingFraction: 0.5,
+            coverage: coverage,
+            tipSupports: [.analyticRectangle],
+            seed: 0xC1_10
+        )
+        var dabs: [DabAttributes] = []
+        generator.begin(inputs[0]) { dabs.append($0) }
+        try generator.finish(
+            inputs[1],
+            maximumPathSubdivisionCount: 4_096
+        ) { dabs.append($0) }
+        return dabs
+    }
+
+    let plainTrace = try logicalTrace(id: "test.generator.projection.plain")
+    let seamlessTrace = try logicalTrace(
+        id: "test.generator.projection.seamless"
+    )
+    let radialTrace = try logicalTrace(id: "test.generator.projection.radial")
+    #expect(plainTrace == seamlessTrace)
+    #expect(plainTrace == radialTrace)
+
+    let canvas = PixelSize(width: 256, height: 256)
+    let strategies = [
+        try TilingStrategy(
+            finiteConfiguration: .plain,
+            canvasSize: canvas
+        ),
+        TilingStrategy(
+            kind: .grid,
+            tileSize: PatternSize(width: 64, height: 64)
+        ),
+        try TilingStrategy(
+            finiteConfiguration: .radial(RadialSymmetryConfiguration(
+                kind: .mandala,
+                rayCount: 8,
+                center: WorldPoint(x: 128, y: 128)
+            )),
+            canvasSize: canvas
+        ),
+    ]
+    let bounds = AxisAlignedRect(
+        minimum: SIMD2(-1, -1),
+        maximum: SIMD2(1, 1)
+    )
+    let instanceCounts = strategies.map { strategy in
+        plainTrace.reduce(into: 0) { count, dab in
+            count += TilingProjection.fragments(
+                for: StampFootprint(
+                    brushToWorld: dab.brushToWorld,
+                    localBounds: bounds,
+                    coverageSymmetry: .oriented
+                ),
+                using: strategy
+            ).count
+        }
+    }
+
+    #expect(instanceCounts[0] > 0)
+    #expect(instanceCounts[1] != instanceCounts[0])
+    #expect(instanceCounts[2] != instanceCounts[0])
+}
+
+@Test
+func schemaV2CurrentPostDynamicsFootprintChangesOnlyTheNextCandidate()
+    throws
+{
+    let pressureSize = BrushOutputProgramDefinition(
+        baseValue: 0.25,
+        terms: [BrushResponseTermDefinition(
+            input: .pressure,
+            response: .linear,
+            inputInverted: false,
+            missingInputValue: 0,
+            responseScale: 0.75,
+            responseOffset: 0.25,
+            responseLowerClamp: 0.25,
+            responseUpperClamp: 1,
+            jitter: 0,
+            operation: .replace
+        )]
+    )
+    var constant = try stageCGenerator(
+        id: "test.generator.footprint.causal-constant",
+        baseSpacingFraction: 0.25,
+        maximumSpacingFraction: 0.5,
+        outputOverrides: [.size: constantOutput(0.25)]
+    )
+    var dynamic = try stageCGenerator(
+        id: "test.generator.footprint.causal-dynamic",
+        baseSpacingFraction: 0.25,
+        maximumSpacingFraction: 0.5,
+        outputOverrides: [.size: pressureSize]
+    )
+    let began = generatorSample(
+        x: 0,
+        pressure: 0,
+        timestamp: 0,
+        phase: .began,
+        capabilities: [.pressure]
+    )
+    let pressureChange = generatorSample(
+        x: 0,
+        pressure: 1,
+        timestamp: 1,
+        phase: .moved,
+        capabilities: [.pressure]
+    )
+    let ended = generatorSample(
+        x: 20,
+        pressure: 1,
+        timestamp: 2,
+        phase: .ended,
+        capabilities: [.pressure]
+    )
+    var constantTrace: [DabAttributes] = []
+    var dynamicTrace: [DabAttributes] = []
+    constant.begin(began) { constantTrace.append($0) }
+    dynamic.begin(began) { dynamicTrace.append($0) }
+    constant.append(pressureChange) { constantTrace.append($0) }
+    dynamic.append(pressureChange) { dynamicTrace.append($0) }
+    constant.finish(ended) { constantTrace.append($0) }
+    dynamic.finish(ended) { dynamicTrace.append($0) }
+
+    #expect(constantTrace.prefix(2).map(\.sourceDistance) == [0, 1.25])
+    #expect(dynamicTrace.prefix(2).map(\.sourceDistance) == [0, 1.25])
+    #expect(constantTrace[1].ordinal == dynamicTrace[1].ordinal)
+    #expect(
+        constantTrace[1].randomValues == dynamicTrace[1].randomValues
+    )
+    #expect(abs(constantTrace[2].sourceDistance - 2.5) < 0.000_1)
+    #expect(abs(dynamicTrace[2].sourceDistance - 6.25) < 0.000_1)
+}
+
+@Test
+func schemaV2FootprintEnvelopeRejectsBeforePublishingOrMutating() throws {
+    let program = try stageCTestProgram(id: "test.generator.footprint.envelope")
+    let limits = program.definition.limits
+    let acceptedDiameter = limits.maximumDiameter
+    var accepted = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: acceptedDiameter,
+        color: .black,
+        seed: 0xA1
+    )
+    let collectAccepted: (DabAttributes) throws -> Void = { _ in }
+    try accepted.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began),
+        emit: collectAccepted
+    )
+
+    let rejectedDiameter = acceptedDiameter.nextUp
+    var outsideDiameter = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: rejectedDiameter,
+        color: .black,
+        seed: 0xA2
+    )
+    let beforeDiameterRejection = outsideDiameter
+    var diameterSink: [DabAttributes] = []
+    let collectDiameter: (DabAttributes) throws -> Void = {
+        diameterSink.append($0)
+    }
+    #expect(throws: BrushStrokeGeneratorFootprintError
+        .nominalDiameterOutsideCompiledLimits(
+            actual: rejectedDiameter,
+            minimum: limits.minimumDiameter,
+            maximum: limits.maximumDiameter
+        )) {
+        try outsideDiameter.begin(
+            generatorSample(x: 0, timestamp: 0, phase: .began),
+            emit: collectDiameter
+        )
+    }
+    #expect(diameterSink.isEmpty)
+    #expect(outsideDiameter == beforeDiameterRejection)
+    #expect(outsideDiameter.emittedDabCount == 0)
+
+    var outsideWorld = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 0xA3
+    )
+    let beforeWorldRejection = outsideWorld
+    var worldSink: [DabAttributes] = []
+    let collectWorld: (DabAttributes) throws -> Void = {
+        worldSink.append($0)
+    }
+    let hugeWorld = generatorSample(
+        x: 0,
+        timestamp: 0,
+        phase: .began
+    ).replacing(position: WorldPoint(
+        x: Float.greatestFiniteMagnitude / 2,
+        y: 0
+    ))
+    #expect(throws: BrushStrokeGeneratorFootprintError
+        .worldPositionOutsideFootprintEnvelope) {
+        try outsideWorld.begin(hugeWorld, emit: collectWorld)
+    }
+    #expect(worldSink.isEmpty)
+    #expect(outsideWorld == beforeWorldRejection)
+    #expect(outsideWorld.emittedDabCount == 0)
+}
+
+@Test
+func schemaV2UnsafeCompiledGeometryRejectsBeforeFirstCallback() throws {
+    let baseCoverage = nativeTestDefinition().coverage
+    let baseShape = baseCoverage.shapes[0]
+    let unsafeCoverage = footprintCoverage(
+        base: baseCoverage,
+        aspectRatio: 1,
+        shapes: [BrushShapeLayerDefinition(
+            shape: baseShape.shape,
+            combination: .replace,
+            scale: 1,
+            rotation: 0,
+            offset: SIMD2(Float.greatestFiniteMagnitude / 2, 0)
+        )]
+    )
+    var generator = try stageCGenerator(
+        id: "test.generator.footprint.unsafe-geometry",
+        coverage: unsafeCoverage,
+        nominalDiameter: 20,
+        seed: 0xA4
+    )
+    let before = generator
+    var sink: [DabAttributes] = []
+    let collect: (DabAttributes) throws -> Void = { sink.append($0) }
+
+    #expect(throws: BrushStrokeGeneratorFootprintError
+        .unsafeCompiledFootprintEnvelope) {
+        try generator.begin(
+            generatorSample(x: 0, timestamp: 0, phase: .began),
+            emit: collect
+        )
+    }
+    #expect(sink.isEmpty)
+    #expect(generator == before)
+    #expect(generator.emittedDabCount == 0)
+}
+
+@Test
+func schemaV2CornerFootprintShortensOnlyTheUntraveledRemainder() throws {
+    let baseCoverage = nativeTestDefinition().coverage
+    let directionalButUnrotated = BrushOutputProgramDefinition(
+        baseValue: 0,
+        terms: [BrushResponseTermDefinition(
+            input: .direction,
+            response: .linear,
+            inputInverted: false,
+            missingInputValue: 0.5,
+            responseScale: 0,
+            responseOffset: 0,
+            responseLowerClamp: 0,
+            responseUpperClamp: 0,
+            jitter: 0,
+            operation: .replace
+        )]
+    )
+    var generator = try stageCGenerator(
+        id: "test.generator.footprint.corner-carry",
+        maximumAngularStep: .pi / 8,
+        baseSpacingFraction: 0.5,
+        maximumSpacingFraction: 0.5,
+        coverage: footprintCoverage(
+            base: baseCoverage,
+            aspectRatio: 0.05,
+            shapes: baseCoverage.shapes
+        ),
+        outputOverrides: [.rotation: directionalButUnrotated],
+        tipSupports: [.analyticRectangle],
+        seed: 0xA5
+    )
+    var trace: [DabAttributes] = []
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { trace.append($0) }
+    try generator.append(
+        generatorSample(x: 12, timestamp: 1, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { trace.append($0) }
+    let spacingBeforeTurn = generator.currentSpacing
+    var turnDabs: [DabAttributes] = []
+    try generator.append(
+        generatorSample(x: 12, y: 3, timestamp: 2, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { turnDabs.append($0) }
+    let finalCorner = try #require(turnDabs.last)
+    #expect(turnDabs.count >= 2)
+    #expect(turnDabs.allSatisfy {
+        abs($0.sourceDistance - finalCorner.sourceDistance) < 0.000_1
+    })
+    #expect(finalCorner.spacing < spacingBeforeTurn)
+    #expect(abs(generator.currentSpacing - finalCorner.spacing) < 0.000_1)
+
+    let cornerTraceIndex = trace.count + turnDabs.count - 1
+    trace.append(contentsOf: turnDabs)
+    try generator.append(
+        generatorSample(x: 12, y: 24, timestamp: 3, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { trace.append($0) }
+    let next = try #require(trace.dropFirst(cornerTraceIndex + 1).first(where: {
+        $0.sourceDistance > finalCorner.sourceDistance + 0.000_1
+    }))
+    let remaining = next.sourceDistance - finalCorner.sourceDistance
+
+    #expect(remaining <= finalCorner.spacing + 0.000_1)
+    #expect(trace.map(\.sourceDistance) == trace.map(\.sourceDistance).sorted())
+    #expect(trace.map(\.ordinal) == Array(0..<UInt64(trace.count)))
+}
+
+@Test
+func schemaV2RectangleCarryTracksTangentAndExactReversal() throws {
+    let baseCoverage = nativeTestDefinition().coverage
+    let coverage = footprintCoverage(
+        base: baseCoverage,
+        aspectRatio: 0.25,
+        shapes: baseCoverage.shapes
+    )
+    func trace(
+        id: String,
+        end: WorldPoint
+    ) throws -> [DabAttributes] {
+        var generator = try stageCGenerator(
+            id: id,
+            baseSpacingFraction: 0.25,
+            maximumSpacingFraction: 0.5,
+            coverage: coverage,
+            tipSupports: [.analyticRectangle]
+        )
+        var result: [DabAttributes] = []
+        generator.begin(
+            generatorSample(x: 0, timestamp: 0, phase: .began)
+        ) { result.append($0) }
+        try generator.finish(
+            generatorSample(
+                x: end.x,
+                y: end.y,
+                timestamp: 1,
+                phase: .ended
+            ),
+            maximumPathSubdivisionCount: 4_096
+        ) { result.append($0) }
+        return result
+    }
+
+    let forward = try trace(
+        id: "test.generator.footprint.forward",
+        end: WorldPoint(x: 20, y: 0)
+    )
+    let vertical = try trace(
+        id: "test.generator.footprint.vertical",
+        end: WorldPoint(x: 0, y: 20)
+    )
+    let reversed = try trace(
+        id: "test.generator.footprint.reversed",
+        end: WorldPoint(x: -20, y: 0)
+    )
+
+    #expect(forward.prefix(3).map(\.sourceDistance) == [0, 5, 10])
+    #expect(reversed.prefix(3).map(\.sourceDistance) == [0, 5, 10])
+    #expect(abs(vertical[1].sourceDistance - 5) < 0.000_1)
+    #expect(abs(vertical[1].spacing - 1.25) < 0.000_1)
+    #expect(abs(vertical[2].sourceDistance - 6.25) < 0.000_1)
+    #expect(forward.map(\.ordinal) == Array(0..<UInt64(forward.count)))
+    #expect(reversed.map(\.ordinal) == Array(0..<UInt64(reversed.count)))
+}
+
+@Test
+func schemaV2GeneratedTracesPassIndependentRasterGapAndDensityOracle()
+    throws
+{
+    let baseCoverage = nativeTestDefinition().coverage
+    let fixtures: [(
+        name: String,
+        support: BrushTipSupportDefinition,
+        aspect: Float,
+        rotation: Float,
+        usesTravelDirection: Bool,
+        end: WorldPoint
+    )] = [
+        (
+            "ellipse", .analyticEllipse, 0.35, .pi / 7, false,
+            WorldPoint(x: 32, y: 0)
+        ),
+        (
+            "chisel tangent", .analyticRectangle, 0.2, 0, true,
+            WorldPoint(x: 0, y: 32)
+        ),
+        (
+            "textured bounds",
+            try BrushTipSupportDefinition.normalizedBounds(
+                minX: -0.7,
+                maxX: 0.8,
+                minY: -0.4,
+                maxY: 0.6
+            ),
+            0.6,
+            -.pi / 9,
+            false,
+            WorldPoint(x: 32, y: 0)
+        ),
+    ]
+
+    for fixture in fixtures {
+        var generator = try stageCGenerator(
+            id: "test.generator.footprint.raster.\(fixture.name)",
+            usesTravelDirection: fixture.usesTravelDirection,
+            baseSpacingFraction: 0.3,
+            maximumSpacingFraction: 0.4,
+            coverage: footprintCoverage(
+                base: baseCoverage,
+                aspectRatio: fixture.aspect,
+                shapes: baseCoverage.shapes
+            ),
+            outputOverrides: [
+                .rotation: fixture.usesTravelDirection
+                    ? directionalConstantOutput(fixture.rotation)
+                    : constantOutput(fixture.rotation),
+            ],
+            tipSupports: [fixture.support]
+        )
+        var trace: [DabAttributes] = []
+        generator.begin(
+            generatorSample(x: 0, timestamp: 0, phase: .began)
+        ) { trace.append($0) }
+        try generator.finish(
+            generatorSample(
+                x: fixture.end.x,
+                y: fixture.end.y,
+                timestamp: 1,
+                phase: .ended
+            ),
+            maximumPathSubdivisionCount: 4_096
+        ) { trace.append($0) }
+
+        let raster = independentTraceRasterMetrics(
+            dabs: trace,
+            support: fixture.support,
+            from: WorldPoint(x: 0, y: 0),
+            to: fixture.end,
+            step: 0.05
+        )
+        #expect(raster.firstGap == nil, "\(fixture.name)")
+        #expect(raster.maximumOverlap <= 8, "\(fixture.name)")
+    }
+}
+
+@Test
+func schemaV2FootprintSpacingHonorsSafetyFloorAndSupportRelativeCeiling()
+    throws
+{
+    var tiny = try stageCGenerator(
+        id: "test.generator.footprint.floor",
+        baseSpacingFraction: 0.5,
+        maximumSpacingFraction: 4,
+        outputOverrides: [
+            .size: constantOutput(1 / 1_024),
+            .spacing: constantOutput(1 / 1_024),
+        ]
+    )
+    let tinyTrace = try straightTrace(
+        generator: &tiny,
+        length: 4,
+        pressure: 0.5
+    )
+    #expect(tinyTrace.first?.spacing == 1)
+
+    var huge = try stageCGenerator(
+        id: "test.generator.footprint.ceiling",
+        baseSpacingFraction: 0.5,
+        maximumSpacingFraction: 4,
+        outputOverrides: [
+            .size: constantOutput(8),
+            .spacing: constantOutput(8),
+        ]
+    )
+    let hugeTrace = try straightTrace(
+        generator: &huge,
+        length: 800,
+        pressure: 0.5
+    )
+    #expect(hugeTrace.first?.spacing == 640)
+    #expect(hugeTrace.dropFirst().first?.sourceDistance == 640)
+}
+
+@Test
+func schemaV2MaximumCompatibilitySpacingJitterCannotInvalidateCarry()
+    throws
+{
+    let program = try stageCTestProgram(
+        id: "test.generator.footprint.maximum-spacing-jitter",
+        randomization: BrushRandomization(
+            spacing: 1,
+            scatter: 0,
+            rotation: 0,
+            grain: 0,
+            material: 0
+        )
+    )
+    let sample = InterpolatedStrokeSample(generatorSample(
+        x: 0,
+        timestamp: 0,
+        phase: .began
+    ))
+    let dab = BrushDynamicsEngine().evaluate(
+        sample: sample,
+        context: BrushStrokeContext(
+            nominalDiameter: 20,
+            color: .black,
+            direction: 0,
+            strokeAge: 0,
+            traveledDistance: 0,
+            totalDistance: nil,
+            ordinal: 0,
+            isPredicted: false
+        ),
+        program: program,
+        random: BrushRandomValues(
+            spacing: 0,
+            scatterX: 0.5,
+            scatterY: 0.5,
+            rotation: 0.5,
+            grainX: 0.5,
+            grainY: 0.5,
+            materialVariation: 0.5
+        ),
+        strokeSeed: 1
+    )
+
+    #expect(dab.spacing == 1)
+}
+
+@Test
+func schemaV2FootprintPredictionIsAValueCopyAndActualRetryIsExact()
+    throws
+{
+    let baseCoverage = nativeTestDefinition().coverage
+    var authoritative = try stageCGenerator(
+        id: "test.generator.footprint.prediction",
+        usesTravelDirection: true,
+        maximumAngularStep: .pi / 8,
+        baseSpacingFraction: 0.3,
+        maximumSpacingFraction: 0.5,
+        coverage: footprintCoverage(
+            base: baseCoverage,
+            aspectRatio: 0.2,
+            shapes: baseCoverage.shapes
+        ),
+        tipSupports: [.analyticRectangle],
+        seed: 0xC1_11
+    )
+    authoritative.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    try authoritative.append(
+        generatorSample(x: 24, timestamp: 1, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { _ in }
+    let beforePrediction = authoritative
+    var prediction = authoritative
+    var predicted: [DabAttributes] = []
+    let outcome = try prediction.appendPredictionPrefix(
+        generatorSample(
+            x: 24,
+            y: 24,
+            timestamp: 2,
+            phase: .moved
+        ).replacingKindForTest(.predicted),
+        maximumPathSubdivisionCount: 4_096
+    ) { predicted.append($0) }
+    #expect(outcome == .completed)
+    #expect(!predicted.isEmpty)
+    #expect(authoritative == beforePrediction)
+
+    var baseline = beforePrediction
+    let actual = generatorSample(
+        x: 24,
+        y: 24,
+        timestamp: 2,
+        phase: .moved
+    )
+    var afterPrediction: [DabAttributes] = []
+    var expected: [DabAttributes] = []
+    try authoritative.append(
+        actual,
+        maximumPathSubdivisionCount: 4_096
+    ) { afterPrediction.append($0) }
+    try baseline.append(
+        actual,
+        maximumPathSubdivisionCount: 4_096
+    ) { expected.append($0) }
+
+    #expect(afterPrediction == expected)
+    #expect(authoritative == baseline)
+}
+
+@Test
+func schemaV2FootprintBatchAndStreamingRoutesAreIdentical() throws {
+    let baseCoverage = nativeTestDefinition().coverage
+    let program = try stageCTestProgram(
+        id: "test.generator.footprint.batch-parity",
+        usesTravelDirection: true,
+        maximumAngularStep: .pi / 8,
+        baseSpacingFraction: 0.25,
+        maximumSpacingFraction: 0.5,
+        coverage: footprintCoverage(
+            base: baseCoverage,
+            aspectRatio: 0.25,
+            shapes: baseCoverage.shapes
+        ),
+        tipSupports: [.analyticRectangle]
+    )
+    var streaming = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 0xC1_12
+    )
+    var batched = streaming
+    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
+    let moved = generatorSample(x: 24, timestamp: 1, phase: .moved)
+    let ended = generatorSample(
+        x: 24,
+        y: 24,
+        timestamp: 2,
+        phase: .ended
+    )
+    var streamed: [DabAttributes] = []
+    streaming.begin(began) { streamed.append($0) }
+    streaming.append(moved) { streamed.append($0) }
+    streaming.finish(ended) { streamed.append($0) }
+    let batches = [
+        try batched.beginBatch(began),
+        try batched.appendBatch(moved),
+        try batched.finishBatch(ended),
+    ]
+
+    #expect(batches.flatMap(\.dabs) == streamed)
+    #expect(batched == streaming)
+}
+
+@Test
+func schemaV2FootprintInputRejectionAfterBeginIsAtomicAndRetryable()
+    throws
+{
+    let program = try stageCTestProgram(
+        id: "test.generator.footprint.append-rejection"
+    )
+    var generator = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 0xC1_13
+    )
+    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
+    let beginSink: (DabAttributes) throws -> Void = { _ in }
+    try generator.begin(began, emit: beginSink)
+    let beforeRejection = generator
+    var rejected: [DabAttributes] = []
+    let collectRejected: (DabAttributes) throws -> Void = {
+        rejected.append($0)
+    }
+    let outside = generatorSample(
+        x: 0,
+        timestamp: 1,
+        phase: .moved
+    ).replacing(position: WorldPoint(
+        x: Float.greatestFiniteMagnitude / 2,
+        y: 0
+    ))
+    #expect(throws: BrushStrokeGeneratorFootprintError
+        .worldPositionOutsideFootprintEnvelope) {
+        try generator.append(outside, emit: collectRejected)
+    }
+    #expect(rejected.isEmpty)
+    #expect(generator == beforeRejection)
+
+    var baseline = beforeRejection
+    let retry = generatorSample(x: 20, timestamp: 1, phase: .moved)
+    var actual: [DabAttributes] = []
+    var expected: [DabAttributes] = []
+    let collectActual: (DabAttributes) throws -> Void = { actual.append($0) }
+    let collectExpected: (DabAttributes) throws -> Void = {
+        expected.append($0)
+    }
+    try generator.append(retry, emit: collectActual)
+    try baseline.append(retry, emit: collectExpected)
+
+    #expect(actual == expected)
+    #expect(generator == baseline)
 }
 
 @Test
@@ -1158,6 +2031,139 @@ func truncatedPredictionFinishDoesNotAdvanceOrSynthesizeEndpoint() throws {
     #expect(emitted.last?.position != terminal.position)
     #expect(generator == before)
 }
+
+private func constantOutput(_ value: Float) -> BrushOutputProgramDefinition {
+    BrushOutputProgramDefinition(baseValue: value, terms: [])
+}
+
+private func directionalConstantOutput(
+    _ value: Float
+) -> BrushOutputProgramDefinition {
+    BrushOutputProgramDefinition(
+        baseValue: value,
+        terms: [BrushResponseTermDefinition(
+            input: .direction,
+            response: .linear,
+            inputInverted: false,
+            missingInputValue: 0.5,
+            responseScale: 0,
+            responseOffset: value,
+            responseLowerClamp: value,
+            responseUpperClamp: value,
+            jitter: 0,
+            operation: .replace
+        )]
+    )
+}
+
+private func footprintCoverage(
+    base: BrushCoverageDefinition,
+    aspectRatio: Float,
+    shapes: [BrushShapeLayerDefinition]
+) -> BrushCoverageDefinition {
+    BrushCoverageDefinition(
+        shapes: shapes,
+        grains: base.grains,
+        baseHardness: base.baseHardness,
+        aspectRatio: aspectRatio,
+        tipThreshold: base.tipThreshold,
+        antialiasing: base.antialiasing
+    )
+}
+
+private func straightTrace(
+    generator: inout BrushStrokeGenerator,
+    length: Float,
+    pressure: Float
+) throws -> [DabAttributes] {
+    let capabilities: StrokeInputCapabilities = [.pressure]
+    var trace: [DabAttributes] = []
+    generator.begin(generatorSample(
+        x: 0,
+        pressure: pressure,
+        timestamp: 0,
+        phase: .began,
+        capabilities: capabilities
+    )) { trace.append($0) }
+    try generator.finish(
+        generatorSample(
+            x: length,
+            pressure: pressure,
+            timestamp: 1,
+            phase: .ended,
+            capabilities: capabilities
+        ),
+        maximumPathSubdivisionCount: 4_096
+    ) { trace.append($0) }
+    return trace
+}
+
+private func independentTraceRasterMetrics(
+    dabs: [DabAttributes],
+    support: BrushTipSupportDefinition,
+    from start: WorldPoint,
+    to end: WorldPoint,
+    step: Float
+) -> (firstGap: Float?, maximumOverlap: Int) {
+    let delta = end.simd - start.simd
+    let length = simd_length(delta)
+    let sampleCount = max(1, Int(ceil(length / step)))
+    var firstGap: Float?
+    var maximumOverlap = 0
+    for index in 0...sampleCount {
+        let distance = min(length, Float(index) * step)
+        let fraction = length > 0 ? distance / length : 0
+        let point = start.simd + delta * fraction
+        let overlap = dabs.reduce(into: 0) { count, dab in
+            if independentTipContains(
+                worldPoint: point,
+                transform: dab.brushToWorld,
+                support: support
+            ) {
+                count += 1
+            }
+        }
+        if overlap == 0, firstGap == nil { firstGap = distance }
+        maximumOverlap = max(maximumOverlap, overlap)
+    }
+    return (firstGap, maximumOverlap)
+}
+
+private func independentTipContains(
+    worldPoint: SIMD2<Float>,
+    transform: Affine2D,
+    support: BrushTipSupportDefinition
+) -> Bool {
+    let relative = worldPoint - transform.translation
+    let determinant = transform.xAxis.x * transform.yAxis.y
+        - transform.xAxis.y * transform.yAxis.x
+    guard determinant.isFinite, abs(determinant) > Float.ulpOfOne else {
+        return false
+    }
+    let localX = (
+        relative.x * transform.yAxis.y
+            - relative.y * transform.yAxis.x
+    ) / determinant
+    let localY = (
+        transform.xAxis.x * relative.y
+            - transform.xAxis.y * relative.x
+    ) / determinant
+    let tolerance: Float = 0.000_1
+    switch support.kind {
+    case .analyticEllipse:
+        return localX * localX + localY * localY <= 1 + tolerance
+    case .analyticRectangle:
+        return abs(localX) <= 1 + tolerance
+            && abs(localY) <= 1 + tolerance
+    case .normalizedBounds:
+        guard let bounds = support.bounds else { return false }
+        return localX >= bounds.minX - tolerance
+            && localX <= bounds.maxX + tolerance
+            && localY >= bounds.minY - tolerance
+            && localY <= bounds.maxY + tolerance
+    }
+}
+
 
 private extension WorldStrokeSample {
     func replacingKindForTest(_ kind: StrokeSampleKind) -> WorldStrokeSample {
