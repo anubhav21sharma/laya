@@ -120,6 +120,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case stabilizerV2Allocations(total: UInt64)
     case timedEmitterAllocations(normal: UInt64, hugeGap: UInt64)
     case timedEmitterMissingCursor
+    case tipSupportSpacingAllocations(total: UInt64)
     case offMainEstimatedAllocations(total: UInt64, maximum: UInt64)
     case offMainAllocationRegression(String)
     case productionAllocations(
@@ -151,6 +152,8 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
                 + "hugeGap=\(hugeGap)"
         case .timedEmitterMissingCursor:
             "timed emitter did not produce the expected probe cursor"
+        case let .tipSupportSpacingAllocations(total):
+            "tip support/spacing path allocated \(total) times after warm-up"
         case let .offMainEstimatedAllocations(total, maximum):
             "off-main estimated correction allocated \(total) times; "
                 + "maximum single correction=\(maximum)"
@@ -208,6 +211,8 @@ private struct BrushInputAllocationProbeHarness {
                 try runStabilizerV2Probe(probe: probe)
             case "--timed-emitter":
                 try runTimedEmitterProbe(probe: probe)
+            case "--tip-support-spacing":
+                try runTipSupportSpacingProbe(probe: probe)
             case "--production":
                 try await runProduction(probe: probe, root: root)
             default:
@@ -443,6 +448,92 @@ private struct BrushInputAllocationProbeHarness {
                 + "checksum=\(normalChecksum &+ hugeChecksum) "
                 + "remaining=\(remaining)"
         )
+    }
+
+    private static func runTipSupportSpacingProbe(
+        probe: AllocatorProbe
+    ) throws {
+        let bounds = try BrushTipSupportDefinition.normalizedBounds(
+            minX: -0.25,
+            maxX: 0.75,
+            minY: -0.5,
+            maxY: 0.5
+        )
+        let layers = [
+            try BrushTipSupportLayer(
+                definition: .analyticEllipse,
+                xAxis: SIMD2(3, 1),
+                yAxis: SIMD2(-0.5, 1.5),
+                offset: SIMD2(-1, 0.25)
+            ),
+            try BrushTipSupportLayer(
+                definition: bounds,
+                xAxis: SIMD2(1.5, -0.25),
+                yAxis: SIMD2(0.25, 1),
+                offset: SIMD2(2, -0.5)
+            ),
+        ]
+        _ = try runTipSupportSpacingUpdates(
+            layers: layers,
+            startingAt: 0,
+            count: 128
+        )
+
+        probe.arm()
+        let checksum: UInt64
+        do {
+            checksum = try runTipSupportSpacingUpdates(
+                layers: layers,
+                startingAt: 128,
+                count: 1_000_000
+            )
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
+        let allocations = probe.disarm()
+
+        guard allocations == 0 else {
+            throw ProbeHarnessError.tipSupportSpacingAllocations(
+                total: allocations
+            )
+        }
+        print(
+            "ALLOCATOR PROBE TIP SUPPORT/SPACING PASS allocations=0 "
+                + "checksum=\(checksum)"
+        )
+    }
+
+    @inline(never)
+    private static func runTipSupportSpacingUpdates(
+        layers: [BrushTipSupportLayer],
+        startingAt start: Int,
+        count: Int
+    ) throws -> UInt64 {
+        let diagonal = Float(1 / sqrt(2.0))
+        var checksum: UInt64 = 0
+        for index in start..<(start + count) {
+            let tangent: SIMD2<Float> = switch index & 3 {
+            case 0: SIMD2(1, 0)
+            case 1: SIMD2(repeating: diagonal)
+            case 2: SIMD2(0, 1)
+            default: SIMD2(-1, 0)
+            }
+            let interval = try BrushTipSupport.projectionInterval(
+                layers: layers,
+                tangent: tangent
+            )
+            let carry = try BrushFootprintSpacing.nextCarry(
+                supportWidth: interval.width,
+                baseSpacingFraction: 0.1,
+                dynamicSpacing: 0.5 + Float(index & 3),
+                maximumSpacingFraction: 0.4
+            )
+            checksum &+= UInt64(interval.minimumProjection.bitPattern)
+            checksum &+= UInt64(interval.maximumProjection.bitPattern)
+            checksum &+= UInt64(carry.bitPattern)
+        }
+        return checksum
     }
 
     @inline(never)

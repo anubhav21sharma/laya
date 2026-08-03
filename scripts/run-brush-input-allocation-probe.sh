@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 scratch="${1:-$repo_root/.build/brush-input-allocation-probe}"
 configuration="${2:-release}"
+scope="${3:-all}"
 probe="$scratch/$configuration/libLayaAllocationProbe.dylib"
 helper="$scratch/$configuration/BrushInputAllocationProbeHarness"
 
@@ -31,15 +32,27 @@ xcrun clang \
   exit 1
 }
 
-DYLD_INSERT_LIBRARIES="$probe" \
-  "$helper" --self-test "$repo_root"
-DYLD_INSERT_LIBRARIES="$probe" \
-  "$helper" --velocity-filter "$repo_root"
-DYLD_INSERT_LIBRARIES="$probe" \
-  "$helper" --direction-corner "$repo_root"
-DYLD_INSERT_LIBRARIES="$probe" \
-  "$helper" --stabilizer-v2 "$repo_root"
-DYLD_INSERT_LIBRARIES="$probe" \
-  "$helper" --timed-emitter "$repo_root"
-DYLD_INSERT_LIBRARIES="$probe" \
-  "$helper" --production "$repo_root"
+run_probe() {
+  DYLD_INSERT_LIBRARIES="$probe" \
+    "$helper" "$1" "$repo_root"
+}
+
+case "$scope" in
+  all)
+    run_probe --self-test
+    run_probe --velocity-filter
+    run_probe --direction-corner
+    run_probe --stabilizer-v2
+    run_probe --timed-emitter
+    run_probe --tip-support-spacing
+    run_probe --production
+    ;;
+  tip-support-spacing)
+    run_probe --self-test
+    run_probe --tip-support-spacing
+    ;;
+  *)
+    printf 'unsupported allocator probe scope: %s\n' "$scope" >&2
+    exit 1
+    ;;
+esac
