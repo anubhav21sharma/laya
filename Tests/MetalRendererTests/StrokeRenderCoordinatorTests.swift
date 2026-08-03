@@ -899,6 +899,213 @@ struct StrokeRenderCoordinatorTests {
     }
 
     @Test
+    func stageCDirectionalBeginPromotesItsZeroDabCheckpoint() throws {
+        let coordinator = try makeStageCCoordinator(
+            program: stageCMetalTestProgram(
+                id: "test.coordinator-stage-c-held-begin",
+                usesTravelDirection: true
+            ),
+            capacity: 64
+        )
+        let initialGenerator = coordinator.generatorSnapshot
+        let beganSample = stageCSample(x: 16, y: 256, phase: .began)
+        let chunks = settledReplayChunks(
+            samples: [beganSample],
+            generator: initialGenerator,
+            inputDeriver: coordinator.inputDeriverSnapshot
+        )
+        let beganChunk = try #require(chunks.first)
+        let heldGenerator = try #require(
+            beganChunk.generatorSnapshotAfterSample
+        )
+
+        #expect(beganChunk.dabs.isEmpty)
+        #expect(heldGenerator.emittedDabCount == 0)
+        #expect(heldGenerator != initialGenerator)
+
+        let transfer = try coordinator.prepareSettledReplayTransfer(chunks)
+        try coordinator.reserveForDownstreamAcceptance(
+            transfer,
+            retireAfterAcceptance: true
+        )
+        coordinator.finalizeAndRetireAfterDownstreamAcceptance(transfer)
+        #expect(coordinator.generatorSnapshot == heldGenerator)
+
+        let moved = try commitAppend(
+            [stageCSample(x: 48, y: 256, phase: .moved)],
+            coordinator: coordinator
+        )
+        #expect(moved.work.first?.ordinal == 0)
+        #expect(moved.work.allSatisfy { $0.dab.isPredicted == false })
+    }
+
+    @Test
+    func stageCDelayedCheckpointMutationIsRejectedBeforePublication()
+        throws
+    {
+        let coordinator = try makeStageCCoordinator(
+            program: stageCMetalTestProgram(
+                id: "test.coordinator-stage-c-delayed-checkpoint",
+                stabilization: .delayed(distance: 12)
+            ),
+            capacity: 64
+        )
+        let initialGenerator = coordinator.generatorSnapshot
+        let valid = settledReplayChunks(
+            samples: [stageCSample(x: 16, y: 256, phase: .began)],
+            generator: initialGenerator,
+            inputDeriver: coordinator.inputDeriverSnapshot
+        )
+        let validChunk = try #require(valid.first)
+        let delayedGenerator = try #require(
+            validChunk.generatorSnapshotAfterSample
+        )
+        #expect(validChunk.dabs.isEmpty)
+        #expect(delayedGenerator.emittedDabCount == 0)
+        #expect(delayedGenerator != initialGenerator)
+
+        let omittingStabilizerState = TransientStrokeChunk(
+            sample: validChunk.sample,
+            dabs: validChunk.dabs,
+            generatorSnapshotBeforeSample:
+                validChunk.generatorSnapshotBeforeSample,
+            generatorSnapshotAfterSample: initialGenerator,
+            inputDeriverSnapshotBeforeSample:
+                validChunk.inputDeriverSnapshotBeforeSample
+        )
+        let before = coordinator.snapshot
+        #expect(
+            throws: StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        ) {
+            _ = try coordinator.prepareSettledReplayTransfer([
+                omittingStabilizerState,
+            ])
+        }
+        #expect(coordinator.snapshot == before)
+        #expect(coordinator.generatorSnapshot == initialGenerator)
+
+        let retry = try coordinator.prepareSettledReplayTransfer(valid)
+        try coordinator.abandon(retry)
+        #expect(coordinator.snapshot == before)
+    }
+
+    @Test
+    func stageCDirectionalBatchPartitionsPreserveDabsAndCheckpoint()
+        throws
+    {
+        let program = try stageCMetalTestProgram(
+            id: "test.coordinator-stage-c-batching",
+            usesTravelDirection: true,
+            maximumAngularStep: .pi / 6,
+            baseSpacingFraction: 0.05
+        )
+        var samples: [StrokeSample] = []
+        samples.reserveCapacity(96)
+        for index in 0..<96 {
+            let column = Float(index % 24)
+            let row = Float(index / 24)
+            samples.append(
+                stageCSample(
+                    x: 32 + column * 3,
+                    y: 128 + row * 16,
+                    phase: index == 0 ? .began : .moved
+                )
+            )
+        }
+        let single = try makeStageCCoordinator(
+            program: program,
+            capacity: 2_048
+        )
+        let partitioned = try makeStageCCoordinator(
+            program: program,
+            capacity: 2_048
+        )
+
+        var singleWork = try commitBegin(
+            [samples[0]],
+            coordinator: single
+        ).work
+        singleWork += try commitAppend(
+            Array(samples.dropFirst()),
+            coordinator: single
+        ).work
+
+        var partitionedWork = try commitBegin(
+            [samples[0]],
+            coordinator: partitioned
+        ).work
+        let widths = [1, 7, 3, 13, 2, 17, 5, 11]
+        var cursor = 1
+        var widthIndex = 0
+        while cursor < samples.count {
+            let end = min(
+                samples.count,
+                cursor + widths[widthIndex % widths.count]
+            )
+            partitionedWork += try commitAppend(
+                Array(samples[cursor..<end]),
+                coordinator: partitioned
+            ).work
+            cursor = end
+            widthIndex += 1
+        }
+
+        #expect(partitionedWork == singleWork)
+        #expect(partitioned.generatorSnapshot == single.generatorSnapshot)
+        #expect(
+            partitioned.inputDeriverSnapshot
+                == single.inputDeriverSnapshot
+        )
+    }
+
+    @Test
+    func stageCCornerFailureRollsBackAndCoordinatorRemainsReusable()
+        throws
+    {
+        let coordinator = try makeStageCCoordinator(
+            program: stageCMetalTestProgram(
+                id: "test.coordinator-stage-c-failure",
+                usesTravelDirection: true,
+                maximumAngularStep: .pi / 180,
+                baseSpacingFraction: 0.05
+            ),
+            capacity: 2_048
+        )
+        _ = try commitBegin(
+            [stageCSample(x: 40, y: 256, phase: .began)],
+            coordinator: coordinator
+        )
+        _ = try commitAppend(
+            [stageCSample(x: 80, y: 256, phase: .moved)],
+            coordinator: coordinator
+        )
+        let beforeFailure = coordinator.generatorSnapshot
+        let beforeSnapshot = coordinator.snapshot
+
+        #expect(throws: BrushCornerEmitterError.capacityExceeded(
+            requiredCandidateCount: 179,
+            maximumCandidateCount:
+                StrokeEmissionCandidateBuffer.maximumCount
+        )) {
+            _ = try coordinator.prepareAppend(
+                actualSamples: [
+                    stageCSample(x: 40, y: 256, phase: .moved),
+                ]
+            )
+        }
+        #expect(coordinator.generatorSnapshot == beforeFailure)
+        #expect(coordinator.snapshot == beforeSnapshot)
+
+        let retry = try commitAppend(
+            [stageCSample(x: 120, y: 256, phase: .moved)],
+            coordinator: coordinator
+        )
+        #expect(!retry.work.isEmpty)
+        #expect(retry.work.first?.ordinal == beforeFailure.emittedDabCount)
+    }
+
+    @Test
     func completedBodyIsReducedToCompactCommitMetadata() throws {
         let coordinator = try makeCoordinator(capacity: 32)
         var ordinals: [UInt64] = []
@@ -937,6 +1144,20 @@ private func makeCoordinator(
     let definition = try coordinatorInkDefinition()
     let program = try BrushProgramCompiler.compile(definition)
     return try StrokeRenderCoordinator(
+        program: program,
+        nominalDiameter: 10,
+        color: .black,
+        seed: 7,
+        viewport: coordinatorViewport(),
+        authoritativeCapacity: capacity
+    )
+}
+
+private func makeStageCCoordinator(
+    program: BrushProgram,
+    capacity: Int
+) throws -> StrokeRenderCoordinator {
+    try StrokeRenderCoordinator(
         program: program,
         nominalDiameter: 10,
         color: .black,
@@ -1081,6 +1302,30 @@ private func sample(index: Int, phase: StrokePhase) -> StrokeSample {
         phase: phase,
         source: .mouse,
         kind: index.isMultiple(of: 3) ? .coalesced : .actual
+    )
+}
+
+private func stageCSample(
+    x: Float,
+    y: Float,
+    phase: StrokePhase,
+    kind: StrokeSampleKind = .actual,
+    estimationUpdateIndex: Int? = nil,
+    estimatedProperties: StrokeEstimatedProperties = []
+) -> StrokeSample {
+    StrokeSample(
+        position: ScreenPoint(x: x, y: y),
+        pressure: 1,
+        timestamp: TimeInterval(x + y) / 240,
+        phase: phase,
+        source: .pencil,
+        kind: kind,
+        capabilities: [.pressure, .altitude, .azimuth],
+        altitude: 0.7,
+        azimuth: 0.8,
+        estimationUpdateIndex: estimationUpdateIndex,
+        estimatedProperties: estimatedProperties,
+        estimatedPropertiesExpectingUpdates: estimatedProperties
     )
 }
 

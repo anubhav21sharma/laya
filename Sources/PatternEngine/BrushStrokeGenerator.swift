@@ -18,9 +18,14 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     public private(set) var emittedDabCount: UInt64
 
     private var stabilizer: StrokeStabilizer
+    private var directionTracker: BrushDirectionTracker
+    private var cornerEmitter: BrushCornerEmitter?
     private var path: CentripetalCatmullRomPathInterpolator
     private var random: BrushRandom
     private var isActive: Bool
+    private var hasAttributedPath: Bool
+    private var heldDirectionalBegin: InterpolatedStrokeSample?
+    private var nextCornerSequence: UInt64
     private var strokeStartTimestamp: TimeInterval?
     private var processedPathDistance: Float
     private var distanceUntilNext: Float
@@ -55,18 +60,90 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         self.seed = effectiveSeed
         currentSpacing = spacing
         emittedDabCount = 0
-        stabilizer = StrokeStabilizer(strength: program.definition.stabilization)
+        stabilizer = Self.makeStabilizer(program: program)
+        directionTracker = BrushDirectionTracker()
+        cornerEmitter = Self.makeCornerEmitter(program: program)
         path = CentripetalCatmullRomPathInterpolator(
             maximumSegmentLength: min(0.5, spacing * 0.2),
             minimumSubdivisionEstimate: spacing
         )
         random = BrushRandom(seed: effectiveSeed)
         isActive = false
+        hasAttributedPath = false
+        heldDirectionalBegin = nil
+        nextCornerSequence = 0
         strokeStartTimestamp = nil
         processedPathDistance = 0
         distanceUntilNext = spacing
         lastDirection = 0
         lastEmittedSourcePosition = nil
+    }
+
+    public static func == (
+        lhs: borrowing BrushStrokeGenerator,
+        rhs: borrowing BrushStrokeGenerator
+    ) -> Bool {
+        configurationEqual(lhs, rhs)
+            && stabilizationStateEqual(lhs, rhs)
+            && directionStateEqual(lhs, rhs)
+            && pathStateEqual(lhs, rhs)
+            && emissionStateEqual(lhs, rhs)
+    }
+
+    @inline(never)
+    private static func configurationEqual(
+        _ lhs: borrowing BrushStrokeGenerator,
+        _ rhs: borrowing BrushStrokeGenerator
+    ) -> Bool {
+        lhs.program == rhs.program
+            && lhs.nominalDiameter == rhs.nominalDiameter
+            && lhs.color == rhs.color
+            && lhs.seed == rhs.seed
+    }
+
+    @inline(never)
+    private static func stabilizationStateEqual(
+        _ lhs: borrowing BrushStrokeGenerator,
+        _ rhs: borrowing BrushStrokeGenerator
+    ) -> Bool {
+        lhs.stabilizer == rhs.stabilizer
+    }
+
+    @inline(never)
+    private static func directionStateEqual(
+        _ lhs: borrowing BrushStrokeGenerator,
+        _ rhs: borrowing BrushStrokeGenerator
+    ) -> Bool {
+        lhs.directionTracker == rhs.directionTracker
+            && lhs.cornerEmitter == rhs.cornerEmitter
+            && lhs.heldDirectionalBegin == rhs.heldDirectionalBegin
+            && lhs.nextCornerSequence == rhs.nextCornerSequence
+            && lhs.lastDirection == rhs.lastDirection
+    }
+
+    @inline(never)
+    private static func pathStateEqual(
+        _ lhs: borrowing BrushStrokeGenerator,
+        _ rhs: borrowing BrushStrokeGenerator
+    ) -> Bool {
+        lhs.path == rhs.path
+            && lhs.hasAttributedPath == rhs.hasAttributedPath
+            && lhs.processedPathDistance == rhs.processedPathDistance
+            && lhs.lastEmittedSourcePosition
+                == rhs.lastEmittedSourcePosition
+    }
+
+    @inline(never)
+    private static func emissionStateEqual(
+        _ lhs: borrowing BrushStrokeGenerator,
+        _ rhs: borrowing BrushStrokeGenerator
+    ) -> Bool {
+        lhs.currentSpacing == rhs.currentSpacing
+            && lhs.emittedDabCount == rhs.emittedDabCount
+            && lhs.random == rhs.random
+            && lhs.isActive == rhs.isActive
+            && lhs.strokeStartTimestamp == rhs.strokeStartTimestamp
+            && lhs.distanceUntilNext == rhs.distanceUntilNext
     }
 
     public mutating func begin(
@@ -81,8 +158,28 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     public mutating func append(
         _ sample: WorldStrokeSample,
+        emit: (DabAttributes) -> Void
+    ) {
+        do {
+            try appendTransaction(sample, emit: emit)
+        } catch {
+            preconditionFailure(
+                "Unbounded stroke generation exceeded a typed bound: \(error)"
+            )
+        }
+    }
+
+    public mutating func append(
+        _ sample: WorldStrokeSample,
         emit: (DabAttributes) throws -> Void
-    ) rethrows {
+    ) throws {
+        try appendTransaction(sample, emit: emit)
+    }
+
+    private mutating func appendTransaction(
+        _ sample: WorldStrokeSample,
+        emit: (DabAttributes) throws -> Void
+    ) throws {
         precondition(sample.phase == .moved)
         var updated = self
         if updated.isActive {
@@ -150,8 +247,28 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
 
     public mutating func finish(
         _ sample: WorldStrokeSample,
+        emit: (DabAttributes) -> Void
+    ) {
+        do {
+            try finishTransaction(sample, emit: emit)
+        } catch {
+            preconditionFailure(
+                "Unbounded stroke generation exceeded a typed bound: \(error)"
+            )
+        }
+    }
+
+    public mutating func finish(
+        _ sample: WorldStrokeSample,
         emit: (DabAttributes) throws -> Void
-    ) rethrows {
+    ) throws {
+        try finishTransaction(sample, emit: emit)
+    }
+
+    private mutating func finishTransaction(
+        _ sample: WorldStrokeSample,
+        emit: (DabAttributes) throws -> Void
+    ) throws {
         precondition(sample.phase == .ended)
         var updated = self
         if !updated.isActive {
@@ -267,7 +384,10 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             _ dabs: [LogicalDab]
         ) throws -> LogicalDabBatch
     ) throws -> LogicalDabBatch {
-        let emission = collectCandidateEmission(sample, operation: operation)
+        let emission = try collectCandidateEmission(
+            sample,
+            operation: operation
+        )
         let batch = try validator(
             seed,
             emission.startingOrdinal,
@@ -305,7 +425,10 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             _ dabs: [LogicalDab]
         ) throws -> LogicalDabBatch
     ) throws -> [LogicalDabBatch] {
-        let emission = collectCandidateEmission(sample, operation: operation)
+        let emission = try collectCandidateEmission(
+            sample,
+            operation: operation
+        )
         let starts: [Int]
         if emission.dabs.isEmpty {
             starts = [0]
@@ -363,7 +486,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     private func collectCandidateEmission(
         _ sample: WorldStrokeSample,
         operation: BrushStrokeBatchOperation
-    ) -> (
+    ) throws -> (
         candidate: BrushStrokeGenerator,
         startingOrdinal: UInt64,
         dabs: [LogicalDab]
@@ -373,13 +496,14 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             : emittedDabCount
         var candidate = self
         var dabs: [LogicalDab] = []
+        let collect: (DabAttributes) throws -> Void = { dabs.append($0) }
         switch operation {
         case .begin:
             candidate.begin(sample) { dabs.append($0) }
         case .append:
-            candidate.append(sample) { dabs.append($0) }
+            try candidate.append(sample, emit: collect)
         case .finish:
-            candidate.finish(sample) { dabs.append($0) }
+            try candidate.finish(sample, emit: collect)
         }
         return (candidate, startingOrdinal, dabs)
     }
@@ -391,35 +515,71 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         resetRuntimeState()
         isActive = true
         strokeStartTimestamp = sample.timestamp
-        let stabilized = stabilizer.process(sample)
+        guard program.stageC != nil else {
+            let stabilized = stabilizer.process(sample)
+            let attributed = InterpolatedStrokeSample(stabilized)
+            _ = path.begin(at: attributed)
+            hasAttributedPath = true
+            let dab = nextDab(
+                sample: attributed,
+                traveledDistance: 0,
+                direction: 0,
+                totalDistance: sample.phase == .ended
+                    && program.termination.isLegacySchemaV1EndTaper
+                    ? 0
+                    : nil,
+                isPredicted: sample.kind == .predicted
+            )
+            try emit(dab)
+            lastEmittedSourcePosition = attributed.position
+            currentSpacing = dab.spacing
+            distanceUntilNext = dab.spacing
+            return
+        }
+        guard let stabilized = processStageCStabilizer(sample) else {
+            return
+        }
         let attributed = InterpolatedStrokeSample(stabilized)
-        _ = path.begin(at: attributed)
-        let dab = nextDab(
-            sample: attributed,
-            traveledDistance: 0,
-            direction: 0,
-            totalDistance: sample.phase == .ended
-                && program.termination.isLegacySchemaV1EndTaper
-                ? 0
-                : nil,
-            isPredicted: sample.kind == .predicted
-        )
-        try emit(dab)
-        lastEmittedSourcePosition = attributed.position
-        currentSpacing = dab.spacing
-        distanceUntilNext = dab.spacing
+        try beginStageCAttributedPath(attributed, emit: emit)
+        if sample.phase == .ended {
+            try resolveHeldDirectionalBegin(
+                direction: stageCStationaryDirection,
+                isPredicted: sample.kind == .predicted,
+                emit: emit
+            )
+        }
     }
 
     private mutating func appendActive(
         _ sample: WorldStrokeSample,
         emit: (DabAttributes) throws -> Void
-    ) rethrows {
+    ) throws {
         let isPredicted = sample.kind == .predicted
-        let stabilized = stabilizer.process(sample)
+        guard program.stageC != nil else {
+            let stabilized = stabilizer.process(sample)
+            let attributed = InterpolatedStrokeSample(stabilized)
+            var updatedPath = path
+            try updatedPath.append(attributed) { segment in
+                try consumeLegacy(
+                    segment,
+                    isPredicted: isPredicted,
+                    emit: emit
+                )
+            }
+            path = updatedPath
+            return
+        }
+        guard let stabilized = processStageCStabilizer(sample) else {
+            return
+        }
         let attributed = InterpolatedStrokeSample(stabilized)
+        guard hasAttributedPath else {
+            try beginStageCAttributedPath(attributed, emit: emit)
+            return
+        }
         var updatedPath = path
         try updatedPath.append(attributed) { segment in
-            try consume(
+            try consumeStageC(
                 segment,
                 isPredicted: isPredicted,
                 emit: emit
@@ -434,14 +594,37 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         emit: (DabAttributes) throws -> Void
     ) throws {
         let isPredicted = sample.kind == .predicted
-        let stabilized = stabilizer.process(sample)
+        guard program.stageC != nil else {
+            let stabilized = stabilizer.process(sample)
+            let attributed = InterpolatedStrokeSample(stabilized)
+            var updatedPath = path
+            try updatedPath.append(
+                attributed,
+                maximumSubdivisionCount: maximumPathSubdivisionCount
+            ) { segment in
+                try consumeLegacy(
+                    segment,
+                    isPredicted: isPredicted,
+                    emit: emit
+                )
+            }
+            path = updatedPath
+            return
+        }
+        guard let stabilized = processStageCStabilizer(sample) else {
+            return
+        }
         let attributed = InterpolatedStrokeSample(stabilized)
+        guard hasAttributedPath else {
+            try beginStageCAttributedPath(attributed, emit: emit)
+            return
+        }
         var updatedPath = path
         try updatedPath.append(
             attributed,
             maximumSubdivisionCount: maximumPathSubdivisionCount
         ) { segment in
-            try consume(
+            try consumeStageC(
                 segment,
                 isPredicted: isPredicted,
                 emit: emit
@@ -455,14 +638,38 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         maximumPathSubdivisionCount: Int,
         emit: (DabAttributes) throws -> Void
     ) throws -> StrokePathInterpolationOutcome {
-        let stabilized = stabilizer.process(sample)
+        guard program.stageC != nil else {
+            let stabilized = stabilizer.process(sample)
+            let attributed = InterpolatedStrokeSample(stabilized)
+            var updatedPath = path
+            let outcome = try updatedPath.appendBoundedPrefix(
+                attributed,
+                maximumSubdivisionCount: maximumPathSubdivisionCount
+            ) { segment in
+                try consumeLegacy(
+                    segment,
+                    isPredicted: true,
+                    emit: emit
+                )
+            }
+            guard outcome == .completed else { return .truncated }
+            path = updatedPath
+            return .completed
+        }
+        guard let stabilized = processStageCStabilizer(sample) else {
+            return .completed
+        }
         let attributed = InterpolatedStrokeSample(stabilized)
+        guard hasAttributedPath else {
+            try beginStageCAttributedPath(attributed, emit: emit)
+            return .completed
+        }
         var updatedPath = path
         let outcome = try updatedPath.appendBoundedPrefix(
             attributed,
             maximumSubdivisionCount: maximumPathSubdivisionCount
         ) { segment in
-            try consume(
+            try consumeStageC(
                 segment,
                 isPredicted: true,
                 emit: emit
@@ -476,36 +683,70 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
     private mutating func finishActive(
         _ sample: WorldStrokeSample,
         emit: (DabAttributes) throws -> Void
-    ) rethrows {
+    ) throws {
         let isPredicted = sample.kind == .predicted
-        let terminalSample = program.termination
-            .usesLegacySchemaV1EndpointFiltering
-            ? stabilizer.process(sample)
-            : sample
+        guard program.stageC != nil else {
+            let terminalSample = program.termination
+                .usesLegacySchemaV1EndpointFiltering
+                ? stabilizer.process(sample)
+                : sample
+            let attributed = InterpolatedStrokeSample(terminalSample)
+            var updatedPath = path
+            let endpoint = try updatedPath.finish(at: attributed) { segment in
+                try consumeLegacy(
+                    segment,
+                    isPredicted: isPredicted,
+                    emit: emit
+                )
+            }
+            path = updatedPath
+            try emitTerminalDabIfNeeded(
+                endpoint,
+                isPredicted: isPredicted,
+                emit: emit
+            )
+            return
+        }
+        guard let terminalSample = processStageCStabilizer(sample) else {
+            return
+        }
         let attributed = InterpolatedStrokeSample(terminalSample)
+        guard hasAttributedPath else {
+            try beginStageCAttributedPath(attributed, emit: emit)
+            try resolveHeldDirectionalBegin(
+                direction: stageCStationaryDirection,
+                isPredicted: isPredicted,
+                emit: emit
+            )
+            return
+        }
+        if case .weightedWindow = program.stageC?.stabilization {
+            try emitWeightedEndpointCorrection(
+                attributed,
+                isPredicted: isPredicted,
+                emit: emit
+            )
+            return
+        }
         var updatedPath = path
         let endpoint = try updatedPath.finish(at: attributed) { segment in
-            try consume(
+            try consumeStageC(
                 segment,
                 isPredicted: isPredicted,
                 emit: emit
             )
         }
         path = updatedPath
-
-        if lastEmittedSourcePosition != endpoint.position {
-            let dab = nextDab(
-                sample: endpoint,
-                traveledDistance: processedPathDistance,
-                direction: lastDirection,
-                totalDistance: nil,
-                isPredicted: isPredicted
-            )
-            try emit(dab)
-            lastEmittedSourcePosition = endpoint.position
-            currentSpacing = dab.spacing
-            distanceUntilNext = dab.spacing
-        }
+        try resolveHeldDirectionalBegin(
+            direction: stageCStationaryDirection,
+            isPredicted: isPredicted,
+            emit: emit
+        )
+        try emitTerminalDabIfNeeded(
+            endpoint,
+            isPredicted: isPredicted,
+            emit: emit
+        )
     }
 
     private mutating func finishActive(
@@ -514,17 +755,58 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         emit: (DabAttributes) throws -> Void
     ) throws {
         let isPredicted = sample.kind == .predicted
-        let terminalSample = program.termination
-            .usesLegacySchemaV1EndpointFiltering
-            ? stabilizer.process(sample)
-            : sample
+        guard program.stageC != nil else {
+            let terminalSample = program.termination
+                .usesLegacySchemaV1EndpointFiltering
+                ? stabilizer.process(sample)
+                : sample
+            let attributed = InterpolatedStrokeSample(terminalSample)
+            var updatedPath = path
+            let endpoint = try updatedPath.finish(
+                at: attributed,
+                maximumSubdivisionCount: maximumPathSubdivisionCount
+            ) { segment in
+                try consumeLegacy(
+                    segment,
+                    isPredicted: isPredicted,
+                    emit: emit
+                )
+            }
+            path = updatedPath
+            try emitTerminalDabIfNeeded(
+                endpoint,
+                isPredicted: isPredicted,
+                emit: emit
+            )
+            return
+        }
+        guard let terminalSample = processStageCStabilizer(sample) else {
+            return
+        }
         let attributed = InterpolatedStrokeSample(terminalSample)
+        guard hasAttributedPath else {
+            try beginStageCAttributedPath(attributed, emit: emit)
+            try resolveHeldDirectionalBegin(
+                direction: stageCStationaryDirection,
+                isPredicted: isPredicted,
+                emit: emit
+            )
+            return
+        }
+        if case .weightedWindow = program.stageC?.stabilization {
+            try emitWeightedEndpointCorrection(
+                attributed,
+                isPredicted: isPredicted,
+                emit: emit
+            )
+            return
+        }
         var updatedPath = path
         let endpoint = try updatedPath.finish(
             at: attributed,
             maximumSubdivisionCount: maximumPathSubdivisionCount
         ) { segment in
-            try consume(
+            try consumeStageC(
                 segment,
                 isPredicted: isPredicted,
                 emit: emit
@@ -532,19 +814,16 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         }
         path = updatedPath
 
-        if lastEmittedSourcePosition != endpoint.position {
-            let dab = nextDab(
-                sample: endpoint,
-                traveledDistance: processedPathDistance,
-                direction: lastDirection,
-                totalDistance: nil,
-                isPredicted: isPredicted
-            )
-            try emit(dab)
-            lastEmittedSourcePosition = endpoint.position
-            currentSpacing = dab.spacing
-            distanceUntilNext = dab.spacing
-        }
+        try resolveHeldDirectionalBegin(
+            direction: stageCStationaryDirection,
+            isPredicted: isPredicted,
+            emit: emit
+        )
+        try emitTerminalDabIfNeeded(
+            endpoint,
+            isPredicted: isPredicted,
+            emit: emit
+        )
     }
 
     private mutating func finishActivePredictionPrefix(
@@ -552,17 +831,59 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         maximumPathSubdivisionCount: Int,
         emit: (DabAttributes) throws -> Void
     ) throws -> StrokePathInterpolationOutcome {
-        let terminalSample = program.termination
-            .usesLegacySchemaV1EndpointFiltering
-            ? stabilizer.process(sample)
-            : sample
+        guard program.stageC != nil else {
+            let terminalSample = program.termination
+                .usesLegacySchemaV1EndpointFiltering
+                ? stabilizer.process(sample)
+                : sample
+            let attributed = InterpolatedStrokeSample(terminalSample)
+            var updatedPath = path
+            let outcome = try updatedPath.finishBoundedPrefix(
+                at: attributed,
+                maximumSubdivisionCount: maximumPathSubdivisionCount
+            ) { segment in
+                try consumeLegacy(
+                    segment,
+                    isPredicted: true,
+                    emit: emit
+                )
+            }
+            guard outcome == .completed else { return .truncated }
+            path = updatedPath
+            try emitTerminalDabIfNeeded(
+                attributed,
+                isPredicted: true,
+                emit: emit
+            )
+            return .completed
+        }
+        guard let terminalSample = processStageCStabilizer(sample) else {
+            return .completed
+        }
         let attributed = InterpolatedStrokeSample(terminalSample)
+        guard hasAttributedPath else {
+            try beginStageCAttributedPath(attributed, emit: emit)
+            try resolveHeldDirectionalBegin(
+                direction: stageCStationaryDirection,
+                isPredicted: true,
+                emit: emit
+            )
+            return .completed
+        }
+        if case .weightedWindow = program.stageC?.stabilization {
+            try emitWeightedEndpointCorrection(
+                attributed,
+                isPredicted: true,
+                emit: emit
+            )
+            return .completed
+        }
         var updatedPath = path
         let outcome = try updatedPath.finishBoundedPrefix(
             at: attributed,
             maximumSubdivisionCount: maximumPathSubdivisionCount
         ) { segment in
-            try consume(
+            try consumeStageC(
                 segment,
                 isPredicted: true,
                 emit: emit
@@ -571,23 +892,20 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         guard outcome == .completed else { return .truncated }
         path = updatedPath
 
-        if lastEmittedSourcePosition != attributed.position {
-            let dab = nextDab(
-                sample: attributed,
-                traveledDistance: processedPathDistance,
-                direction: lastDirection,
-                totalDistance: nil,
-                isPredicted: true
-            )
-            try emit(dab)
-            lastEmittedSourcePosition = attributed.position
-            currentSpacing = dab.spacing
-            distanceUntilNext = dab.spacing
-        }
+        try resolveHeldDirectionalBegin(
+            direction: stageCStationaryDirection,
+            isPredicted: true,
+            emit: emit
+        )
+        try emitTerminalDabIfNeeded(
+            attributed,
+            isPredicted: true,
+            emit: emit
+        )
         return .completed
     }
 
-    private mutating func consume(
+    private mutating func consumeLegacy(
         _ segment: AttributedStrokePathSegment,
         isPredicted: Bool,
         emit: (DabAttributes) throws -> Void
@@ -636,6 +954,259 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         lastDirection = direction
     }
 
+    private mutating func consumeStageC(
+        _ segment: AttributedStrokePathSegment,
+        isPredicted: Bool,
+        emit: (DabAttributes) throws -> Void
+    ) throws {
+        guard segment.length > 0 else { return }
+        let update = try directionTracker.update(to: segment.end.position)
+        let direction = update.direction ?? lastDirection
+        if update.direction != nil {
+            try resolveHeldDirectionalBegin(
+                direction: direction,
+                isPredicted: isPredicted,
+                emit: emit
+            )
+        }
+        if let signedTurn = update.signedTurn,
+           let cornerEmitter
+        {
+            try emitCornerFan(
+                emitter: cornerEmitter,
+                segment: segment,
+                endingDirection: direction,
+                signedTurn: signedTurn,
+                isPredicted: isPredicted,
+                emit: emit
+            )
+        }
+        try consumeDistanceSegment(
+            segment,
+            direction: direction,
+            isPredicted: isPredicted,
+            emit: emit
+        )
+        lastDirection = direction
+    }
+
+    @inline(never)
+    private mutating func emitCornerFan(
+        emitter: BrushCornerEmitter,
+        segment: AttributedStrokePathSegment,
+        endingDirection: Float,
+        signedTurn: Float,
+        isPredicted: Bool,
+        emit: (DabAttributes) throws -> Void
+    ) throws {
+        let startDirection = endingDirection - signedTurn
+        let relativeTime = max(
+            0,
+            segment.start.timestamp - (strokeStartTimestamp ?? 0)
+        )
+        let sourceDistance = Double(processedPathDistance)
+        let vertex = StrokeEmissionCandidate(
+            sample: segment.start,
+            relativeStrokeTime: relativeTime,
+            sourceDistance: sourceDistance,
+            direction: startDirection,
+            provenance: isPredicted ? .prediction : .authoritative,
+            timeKey: Self.canonicalKey(relativeTime, scale: 1_000_000_000),
+            distanceKey: Self.canonicalKey(
+                sourceDistance,
+                scale: 1_000_000
+            ),
+            kind: .distance,
+            cornerSequence: 0
+        )
+        var candidates = StrokeEmissionCandidateBuffer()
+        try emitter.emit(
+            from: startDirection,
+            signedTurn: signedTurn,
+            vertex: vertex,
+            into: &candidates,
+            nextCornerSequence: &nextCornerSequence
+        )
+        for index in 0..<candidates.count {
+            let candidate = candidates[index]
+            let dab = nextDab(
+                sample: candidate.sample,
+                traveledDistance: Float(candidate.sourceDistance),
+                direction: candidate.direction,
+                totalDistance: nil,
+                isPredicted: isPredicted
+            )
+            try emit(dab)
+        }
+    }
+
+    private mutating func consumeDistanceSegment(
+        _ segment: AttributedStrokePathSegment,
+        direction: Float,
+        isPredicted: Bool,
+        emit: (DabAttributes) throws -> Void
+    ) rethrows {
+        let length = segment.length
+        guard length > 0 else { return }
+        let delta = segment.end.position.simd - segment.start.position.simd
+        var distanceFromStart: Float = 0
+        var remainingLength = length
+
+        while remainingLength >= distanceUntilNext {
+            distanceFromStart += distanceUntilNext
+            let fraction = min(1, distanceFromStart / length)
+            let exactPosition = WorldPoint(
+                segment.start.position.simd + delta * fraction
+            )
+            let sample = segment.sample(
+                at: fraction,
+                exactPosition: exactPosition
+            )
+            let sourceDistance = processedPathDistance + distanceFromStart
+            if lastEmittedSourcePosition != sample.position {
+                let dab = nextDab(
+                    sample: sample,
+                    traveledDistance: sourceDistance,
+                    direction: direction,
+                    totalDistance: nil,
+                    isPredicted: isPredicted
+                )
+                try emit(dab)
+                lastEmittedSourcePosition = sample.position
+                currentSpacing = dab.spacing
+                distanceUntilNext = dab.spacing
+            } else {
+                distanceUntilNext = currentSpacing
+            }
+            remainingLength = length - distanceFromStart
+        }
+
+        distanceUntilNext -= remainingLength
+        processedPathDistance += length
+    }
+
+    private mutating func beginStageCAttributedPath(
+        _ attributed: InterpolatedStrokeSample,
+        emit: (DabAttributes) throws -> Void
+    ) rethrows {
+        _ = path.begin(at: attributed)
+        hasAttributedPath = true
+        do {
+            try directionTracker.begin(at: attributed.position)
+        } catch {
+            preconditionFailure(
+                "Validated world input must have a finite position: \(error)"
+            )
+        }
+        if program.stageC?.usesTravelDirection == true {
+            heldDirectionalBegin = attributed
+            return
+        }
+        let dab = nextDab(
+            sample: attributed,
+            traveledDistance: 0,
+            direction: 0,
+            totalDistance: nil,
+            isPredicted: attributed.kind == .predicted
+        )
+        try emit(dab)
+        lastEmittedSourcePosition = attributed.position
+        currentSpacing = dab.spacing
+        distanceUntilNext = dab.spacing
+    }
+
+    private mutating func resolveHeldDirectionalBegin(
+        direction: Float,
+        isPredicted: Bool,
+        emit: (DabAttributes) throws -> Void
+    ) rethrows {
+        guard let held = heldDirectionalBegin else { return }
+        let dab = nextDab(
+            sample: held,
+            traveledDistance: 0,
+            direction: direction,
+            totalDistance: nil,
+            isPredicted: isPredicted
+        )
+        try emit(dab)
+        heldDirectionalBegin = nil
+        lastEmittedSourcePosition = held.position
+        currentSpacing = dab.spacing
+        distanceUntilNext = dab.spacing
+        lastDirection = direction
+    }
+
+    private mutating func emitWeightedEndpointCorrection(
+        _ endpoint: InterpolatedStrokeSample,
+        isPredicted: Bool,
+        emit: (DabAttributes) throws -> Void
+    ) throws {
+        let update = try directionTracker.update(to: endpoint.position)
+        let direction = update.direction ?? lastDirection
+        try resolveHeldDirectionalBegin(
+            direction: update.direction == nil
+                ? stageCStationaryDirection
+                : direction,
+            isPredicted: isPredicted,
+            emit: emit
+        )
+        lastDirection = update.direction ?? lastDirection
+        try emitTerminalDabIfNeeded(
+            endpoint,
+            isPredicted: isPredicted,
+            emit: emit
+        )
+    }
+
+    private mutating func emitTerminalDabIfNeeded(
+        _ endpoint: InterpolatedStrokeSample,
+        isPredicted: Bool,
+        emit: (DabAttributes) throws -> Void
+    ) rethrows {
+        guard lastEmittedSourcePosition != endpoint.position else { return }
+        let dab = nextDab(
+            sample: endpoint,
+            traveledDistance: processedPathDistance,
+            direction: lastDirection,
+            totalDistance: nil,
+            isPredicted: isPredicted
+        )
+        try emit(dab)
+        lastEmittedSourcePosition = endpoint.position
+        currentSpacing = dab.spacing
+        distanceUntilNext = dab.spacing
+    }
+
+    private mutating func processStageCStabilizer(
+        _ sample: WorldStrokeSample
+    ) -> WorldStrokeSample? {
+        do {
+            return try stabilizer.processV2(sample)
+        } catch {
+            preconditionFailure(
+                "Compiled Stage C stabilizer must remain compatible: \(error)"
+            )
+        }
+    }
+
+    private var stageCStationaryDirection: Float {
+        program.stageC?.direction.stationaryDirection ?? 0
+    }
+
+    private static func canonicalKey(
+        _ value: Double,
+        scale: Double
+    ) -> Int64 {
+        let scaled = (value * scale).rounded(.toNearestOrEven)
+        precondition(
+            scaled.isFinite
+                && scaled >= Double(Int64.min)
+                && scaled <= Double(Int64.max),
+            "Stage C corner key must fit the canonical domain"
+        )
+        return Int64(scaled)
+    }
+
     private mutating func nextDab(
         sample: InterpolatedStrokeSample,
         traveledDistance: Float,
@@ -673,18 +1244,65 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         )
         currentSpacing = spacing
         emittedDabCount = 0
-        stabilizer = StrokeStabilizer(strength: program.definition.stabilization)
+        stabilizer = Self.makeStabilizer(program: program)
+        directionTracker = BrushDirectionTracker()
+        cornerEmitter = Self.makeCornerEmitter(program: program)
         path = CentripetalCatmullRomPathInterpolator(
             maximumSegmentLength: min(0.5, spacing * 0.2),
             minimumSubdivisionEstimate: spacing
         )
         random = BrushRandom(seed: seed)
         isActive = false
+        hasAttributedPath = false
+        heldDirectionalBegin = nil
+        nextCornerSequence = 0
         strokeStartTimestamp = nil
         processedPathDistance = 0
         distanceUntilNext = spacing
         lastDirection = 0
         lastEmittedSourcePosition = nil
+    }
+
+    private static func makeStabilizer(
+        program: BrushProgram
+    ) -> StrokeStabilizer {
+        guard let stageC = program.stageC else {
+            return StrokeStabilizer(
+                strength: program.definition.stabilization
+            )
+        }
+        let mode: StrokeStabilizerMode = switch stageC.stabilization {
+        case .none: .none
+        case let .weightedWindow(distance):
+            .weightedWindow(distance: distance)
+        case let .delayed(distance): .delayed(distance: distance)
+        }
+        do {
+            return try StrokeStabilizer(mode: mode)
+        } catch {
+            preconditionFailure(
+                "Compiled Stage C stabilization must be valid: \(error)"
+            )
+        }
+    }
+
+    private static func makeCornerEmitter(
+        program: BrushProgram
+    ) -> BrushCornerEmitter? {
+        guard let stageC = program.stageC,
+              stageC.usesTravelDirection
+        else {
+            return nil
+        }
+        do {
+            return try BrushCornerEmitter(
+                maximumAngularStep: stageC.direction.maximumAngularStep
+            )
+        } catch {
+            preconditionFailure(
+                "Compiled Stage C direction must be valid: \(error)"
+            )
+        }
     }
 
     private static func initialSpacing(

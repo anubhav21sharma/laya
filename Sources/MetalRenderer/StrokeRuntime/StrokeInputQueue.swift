@@ -506,6 +506,7 @@ private struct MessageRing: Sendable {
 
 enum StrokePreparationFailure: Error, Equatable, Sendable {
     case coordinator(StrokeRenderCoordinatorError)
+    case cornerEmission(BrushCornerEmitterError)
     case authoritativeQueue(AuthoritativeStrokeQueueError)
     case scheduler(StrokeFrameSchedulerError)
     case stampPacking(DepositionStampPackingError)

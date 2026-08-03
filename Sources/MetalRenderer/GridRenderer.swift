@@ -3307,6 +3307,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
              .scheduler(.missingGeneratorCheckpoint):
             return .invalidStrokeLifecycle
         case .coordinator,
+             .cornerEmission,
              .authoritativeQueue,
              .scheduler,
              .stampPacking,

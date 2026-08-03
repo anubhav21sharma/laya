@@ -1,41 +1,19 @@
 import PatternEngine
 
-func nativeTestDefinition(
-    _ recipe: BrushRecipe = .legacyEquivalent
-) -> BrushDefinition {
-    do {
-        return try LegacyBrushRecipeAdapter.definition(
-            from: recipe,
-            displayName: recipe.id.rawValue
-        )
-    } catch {
-        preconditionFailure("Native test definition must adapt: \(error)")
-    }
-}
-
-func nativeTestProgram(
-    _ recipe: BrushRecipe = .legacyEquivalent
-) -> BrushProgram {
-    do {
-        return try BrushProgramCompiler.compile(
-            nativeTestDefinition(recipe)
-        )
-    } catch {
-        preconditionFailure("Native test program must compile: \(error)")
-    }
-}
-
-func stageCTestProgram(
+func stageCMetalTestProgram(
     id: String,
     stabilization: BrushStabilizationDefinition = .none,
     usesTravelDirection: Bool = false,
     maximumAngularStep: Float = .pi / 6,
     stationaryDirection: Float = 0,
-    baseSpacingFraction: Float? = nil,
-    replayMode: BrushReplayMode = .appendOnly,
-    replayLimits: BrushReplayLimits? = nil
+    baseSpacingFraction: Float = 0.1,
+    replayMode: BrushReplayMode = .replayTail,
+    replayLimits: BrushReplayLimits = BrushRecipePolicy.replayTailLimits
 ) throws -> BrushProgram {
-    let base = nativeTestDefinition()
+    let base = try LegacyBrushRecipeAdapter.definition(
+        from: .legacyEquivalent,
+        displayName: id
+    )
     var outputs: [BrushDynamicOutput: BrushOutputProgramDefinition] = [:]
     for output in BrushDynamicOutput.allCases {
         let baseValue: Float = switch output {
@@ -51,38 +29,51 @@ func stageCTestProgram(
     if usesTravelDirection {
         outputs[.rotation] = BrushOutputProgramDefinition(
             baseValue: 0,
-            terms: [BrushResponseTermDefinition(
-                input: .direction,
-                response: .linear,
-                inputInverted: false,
-                missingInputValue: 0.5,
-                responseScale: 2 * .pi,
-                responseOffset: -.pi,
-                responseLowerClamp: -.pi,
-                responseUpperClamp: .pi,
-                jitter: 0,
-                operation: .replace
-            )]
+            terms: [
+                BrushResponseTermDefinition(
+                    input: .direction,
+                    response: .linear,
+                    inputInverted: false,
+                    missingInputValue: 0.5,
+                    responseScale: 2 * .pi,
+                    responseOffset: -.pi,
+                    responseLowerClamp: -.pi,
+                    responseUpperClamp: .pi,
+                    jitter: 0,
+                    operation: .replace
+                ),
+            ]
         )
     }
-    let placement = BrushPlacementDefinition(
-        baseSpacingFraction:
-            baseSpacingFraction ?? base.placement.baseSpacingFraction,
-        maximumSpacingFraction: base.placement.maximumSpacingFraction,
-        baseFlow: base.placement.baseFlow,
-        strokeOpacity: base.placement.strokeOpacity,
-        baseScatterFraction: 0,
-        baseRotation: 0,
-        baseJitterFraction: 0,
-        baseOffset: .zero
-    )
+    let termination: BrushTerminationDefinition = switch replayMode {
+    case .appendOnly:
+        .cap
+    case .replayTail, .boundedWholeStroke:
+        .boundedCorrection(
+            maximumSamples: replayLimits.maximumSamples,
+            maximumWorldLength: 4_096,
+            maximumDabs: replayLimits.maximumDabs
+        )
+    }
     let definition = try BrushDefinition(
         v2ID: BrushRecipeID(id),
         metadata: base.metadata,
         capabilities: base.capabilities,
         resources: base.resources,
         coverage: base.coverage,
-        placement: placement,
+        placement: BrushPlacementDefinition(
+            baseSpacingFraction: baseSpacingFraction,
+            maximumSpacingFraction: max(
+                baseSpacingFraction,
+                base.placement.maximumSpacingFraction
+            ),
+            baseFlow: base.placement.baseFlow,
+            strokeOpacity: base.placement.strokeOpacity,
+            baseScatterFraction: 0,
+            baseRotation: 0,
+            baseJitterFraction: 0,
+            baseOffset: .zero
+        ),
         dynamics: base.dynamics,
         color: base.color,
         material: base.material,
@@ -90,7 +81,7 @@ func stageCTestProgram(
         taper: .none,
         replayMode: replayMode,
         replayLimits: replayLimits,
-        termination: .cap,
+        termination: termination,
         seedPolicy: .perStroke,
         limits: base.limits,
         performanceIntent: base.performanceIntent,

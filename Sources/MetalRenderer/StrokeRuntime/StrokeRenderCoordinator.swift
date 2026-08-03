@@ -701,6 +701,9 @@ public final class StrokeRenderCoordinator {
             )
             let generatorBefore = candidateGenerator
             var dabs: [LogicalDab] = []
+            let collect: (DabAttributes) throws -> Void = {
+                dabs.append($0)
+            }
             let operation: Operation
             if offset == 0 {
                 operation = firstOperation
@@ -711,11 +714,11 @@ public final class StrokeRenderCoordinator {
             }
             switch operation {
             case .begin:
-                candidateGenerator.begin(worldSample) { dabs.append($0) }
+                try candidateGenerator.begin(worldSample, emit: collect)
             case .append:
-                candidateGenerator.append(worldSample) { dabs.append($0) }
+                try candidateGenerator.append(worldSample, emit: collect)
             case .finish:
-                candidateGenerator.finish(worldSample) { dabs.append($0) }
+                try candidateGenerator.finish(worldSample, emit: collect)
             }
             for dab in dabs {
                 let expected = authoritativeQueue.nextExpectedOrdinal

@@ -36,6 +36,406 @@ private func legacyGenerator(seed: UInt64 = 1) -> BrushStrokeGenerator {
     )
 }
 
+private func stageCGenerator(
+    id: String,
+    stabilization: BrushStabilizationDefinition = .none,
+    usesTravelDirection: Bool = false,
+    maximumAngularStep: Float = .pi / 6,
+    stationaryDirection: Float = 0,
+    baseSpacingFraction: Float? = nil,
+    seed: UInt64 = 1
+) throws -> BrushStrokeGenerator {
+    BrushStrokeGenerator(
+        program: try stageCTestProgram(
+            id: id,
+            stabilization: stabilization,
+            usesTravelDirection: usesTravelDirection,
+            maximumAngularStep: maximumAngularStep,
+            stationaryDirection: stationaryDirection,
+            baseSpacingFraction: baseSpacingFraction
+        ),
+        nominalDiameter: 20,
+        color: .black,
+        seed: seed
+    )
+}
+
+@Test
+func manualEqualityInventoryCoversEveryStoredField() {
+    let fieldNames = Set(
+        Mirror(reflecting: legacyGenerator()).children.compactMap(\.label)
+    )
+
+    #expect(fieldNames == Set([
+        "program",
+        "nominalDiameter",
+        "color",
+        "seed",
+        "currentSpacing",
+        "emittedDabCount",
+        "stabilizer",
+        "directionTracker",
+        "cornerEmitter",
+        "path",
+        "random",
+        "isActive",
+        "hasAttributedPath",
+        "heldDirectionalBegin",
+        "nextCornerSequence",
+        "strokeStartTimestamp",
+        "processedPathDistance",
+        "distanceUntilNext",
+        "lastDirection",
+        "lastEmittedSourcePosition",
+    ]))
+}
+
+@Test
+func schemaV2NonePinsExactNonDirectionalTrace() throws {
+    var generator = try stageCGenerator(id: "test.generator.v2-none")
+    var dabs: [DabAttributes] = []
+
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { dabs.append($0) }
+    generator.append(
+        generatorSample(x: 5, timestamp: 1, phase: .moved)
+    ) { dabs.append($0) }
+    generator.finish(
+        generatorSample(x: 6, timestamp: 2, phase: .ended)
+    ) { dabs.append($0) }
+
+    #expect(dabs.map(\.position) == [
+        WorldPoint(x: 0, y: 0),
+        WorldPoint(x: 2.5, y: 0),
+        WorldPoint(x: 5, y: 0),
+        WorldPoint(x: 6, y: 0),
+    ])
+    #expect(dabs.map(\.ordinal) == [0, 1, 2, 3])
+}
+
+@Test
+func directionalBeginWaitsForFirstTravelWithoutConsumingOrdinalOrRandom()
+    throws
+{
+    var generator = try stageCGenerator(
+        id: "test.generator.directional-begin",
+        usesTravelDirection: true,
+        seed: 0x51
+    )
+    var began: [DabAttributes] = []
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { began.append($0) }
+
+    #expect(began.isEmpty)
+    #expect(generator.emittedDabCount == 0)
+
+    var moved: [DabAttributes] = []
+    generator.append(
+        generatorSample(x: 5, timestamp: 1, phase: .moved)
+    ) { moved.append($0) }
+
+    #expect(moved.map(\.position) == [
+        WorldPoint(x: 0, y: 0),
+        WorldPoint(x: 2.5, y: 0),
+        WorldPoint(x: 5, y: 0),
+    ])
+    #expect(moved.map(\.ordinal) == [0, 1, 2])
+    var expectedRandom = BrushRandom(seed: 0x51)
+    #expect(moved.first?.randomValues.compatibility == expectedRandom.nextValues())
+    #expect(moved.allSatisfy { abs($0.rotation) < 0.000_01 })
+}
+
+@Test
+func stationaryDirectionalTapUsesCompiledFallbackAndEmitsExactlyOneDab()
+    throws
+{
+    let fallback = Float.pi / 3
+    var generator = try stageCGenerator(
+        id: "test.generator.directional-tap",
+        usesTravelDirection: true,
+        stationaryDirection: fallback
+    )
+    var dabs: [DabAttributes] = []
+
+    generator.begin(
+        generatorSample(x: 4, y: 7, timestamp: 0, phase: .began)
+    ) { dabs.append($0) }
+    generator.finish(
+        generatorSample(x: 4, y: 7, timestamp: 1, phase: .ended)
+    ) { dabs.append($0) }
+
+    #expect(dabs.count == 1)
+    #expect(dabs.first?.position == WorldPoint(x: 4, y: 7))
+    #expect(dabs.first?.ordinal == 0)
+    #expect(abs(try #require(dabs.first).rotation - fallback) < 0.000_01)
+}
+
+@Test
+func weightedFinishAddsOnlyOneCausalEndpointCorrectionAndResetsForNextStroke()
+    throws
+{
+    var generator = try stageCGenerator(
+        id: "test.generator.weighted-finish",
+        stabilization: .weightedWindow(distance: 4),
+        baseSpacingFraction: 0.05
+    )
+    var body: [DabAttributes] = []
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { body.append($0) }
+    for index in 1...8 {
+        generator.append(
+            generatorSample(
+                x: Float(index),
+                timestamp: Double(index),
+                phase: .moved
+            )
+        ) { body.append($0) }
+    }
+    let bodyBeforeFinish = body
+    #expect((body.last?.position.x ?? 8) < 7)
+    var correction: [DabAttributes] = []
+    generator.finish(
+        generatorSample(x: 9, timestamp: 9, phase: .ended)
+    ) { correction.append($0) }
+
+    #expect(body == bodyBeforeFinish)
+    #expect(correction.count == 1)
+    #expect(correction.first?.position == WorldPoint(x: 9, y: 0))
+
+    var next: [DabAttributes] = []
+    generator.begin(
+        generatorSample(x: 100, timestamp: 10, phase: .began)
+    ) { next.append($0) }
+    #expect(next.map(\.position) == [WorldPoint(x: 100, y: 0)])
+    #expect(next.map(\.ordinal) == [0])
+}
+
+@Test
+func delayedFinishPreservesDeclaredLagWithoutFlushingBodyAndTapResets()
+    throws
+{
+    var generator = try stageCGenerator(
+        id: "test.generator.delayed-finish",
+        stabilization: .delayed(distance: 4)
+    )
+    var dabs: [DabAttributes] = []
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { dabs.append($0) }
+    generator.append(
+        generatorSample(x: 2, timestamp: 1, phase: .moved)
+    ) { dabs.append($0) }
+    generator.append(
+        generatorSample(x: 6, timestamp: 2, phase: .moved)
+    ) { dabs.append($0) }
+    generator.finish(
+        generatorSample(x: 10, timestamp: 3, phase: .ended)
+    ) { dabs.append($0) }
+
+    #expect(!dabs.isEmpty)
+    #expect(dabs.last?.position == WorldPoint(x: 6, y: 0))
+    #expect(dabs.allSatisfy { $0.position.x <= 6 })
+
+    var tap: [DabAttributes] = []
+    generator.begin(
+        generatorSample(x: 20, timestamp: 4, phase: .began)
+    ) { tap.append($0) }
+    generator.finish(
+        generatorSample(x: 20, timestamp: 5, phase: .ended)
+    ) { tap.append($0) }
+    #expect(tap.count == 1)
+    #expect(tap.first?.position == WorldPoint(x: 20, y: 0))
+    #expect(tap.first?.ordinal == 0)
+}
+
+@Test
+func directionalPredictionRunsFromValueCopyAndLeavesAuthoritativeStateUntouched()
+    throws
+{
+    var authoritative = try stageCGenerator(
+        id: "test.generator.direction-prediction",
+        usesTravelDirection: true,
+        maximumAngularStep: .pi / 8,
+        seed: 0x71
+    )
+    authoritative.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    authoritative.append(
+        generatorSample(x: 8, timestamp: 1, phase: .moved)
+    ) { _ in }
+    let beforePrediction = authoritative
+
+    var prediction = authoritative
+    var predictedDabs: [DabAttributes] = []
+    let outcome = try prediction.appendPredictionPrefix(
+        generatorSample(x: 8, y: 8, timestamp: 2, phase: .moved)
+            .replacingKindForTest(.predicted),
+        maximumPathSubdivisionCount: 4_096
+    ) { predictedDabs.append($0) }
+
+    #expect(outcome == .completed)
+    #expect(!predictedDabs.isEmpty)
+    #expect(authoritative == beforePrediction)
+
+    var baseline = beforePrediction
+    var afterPrediction: [DabAttributes] = []
+    var expected: [DabAttributes] = []
+    let actual = generatorSample(x: 8, y: 8, timestamp: 2, phase: .moved)
+    authoritative.append(actual) { afterPrediction.append($0) }
+    baseline.append(actual) { expected.append($0) }
+    #expect(afterPrediction == expected)
+    #expect(authoritative == baseline)
+}
+
+@Test
+func typedCornerCapacityFailurePublishesNothingAndGeneratorRemainsReusable()
+    throws
+{
+    var generator = try stageCGenerator(
+        id: "test.generator.corner-capacity",
+        usesTravelDirection: true,
+        maximumAngularStep: BrushCornerEmitter.minimumAngularStep,
+        seed: 0x73
+    )
+    try generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    try generator.append(
+        generatorSample(x: 10, timestamp: 1, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { _ in }
+    let beforeReversal = generator
+    var rejected: [DabAttributes] = []
+
+    #expect(throws: BrushCornerEmitterError.self) {
+        try generator.append(
+            generatorSample(x: 0, timestamp: 2, phase: .moved),
+            maximumPathSubdivisionCount: 4_096
+        ) { rejected.append($0) }
+    }
+    #expect(rejected.isEmpty)
+    #expect(generator == beforeReversal)
+
+    var baseline = beforeReversal
+    let recovery = generatorSample(x: 20, timestamp: 3, phase: .moved)
+    var actualDabs: [DabAttributes] = []
+    var expectedDabs: [DabAttributes] = []
+    try generator.append(
+        recovery,
+        maximumPathSubdivisionCount: 4_096
+    ) { actualDabs.append($0) }
+    try baseline.append(
+        recovery,
+        maximumPathSubdivisionCount: 4_096
+    ) { expectedDabs.append($0) }
+    #expect(actualDabs == expectedDabs)
+    #expect(generator == baseline)
+}
+
+@Test
+func exactReversalEmitsBoundedOrderedFanBeforeNumberingAndRandomConsumption()
+    throws
+{
+    let seed: UInt64 = 0x77
+    var generator = try stageCGenerator(
+        id: "test.generator.corner-order",
+        usesTravelDirection: true,
+        maximumAngularStep: .pi / 4,
+        seed: seed
+    )
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    var prefix: [DabAttributes] = []
+    try generator.append(
+        generatorSample(x: 10, timestamp: 1, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { prefix.append($0) }
+    let startingOrdinal = generator.emittedDabCount
+
+    var reversal: [DabAttributes] = []
+    try generator.append(
+        generatorSample(x: 0, timestamp: 2, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { reversal.append($0) }
+
+    #expect(reversal.count >= 3)
+    #expect(reversal.prefix(3).allSatisfy {
+        $0.position == WorldPoint(x: 10, y: 0)
+    })
+    let rotations = reversal.prefix(3).map(\.rotation)
+    #expect(abs(rotations[0] - .pi / 4) < 0.000_01)
+    #expect(abs(rotations[1] - .pi / 2) < 0.000_01)
+    #expect(abs(rotations[2] - 3 * .pi / 4) < 0.000_01)
+    #expect(reversal.prefix(3).map(\.ordinal) == [
+        startingOrdinal,
+        startingOrdinal + 1,
+        startingOrdinal + 2,
+    ])
+
+    var random = BrushRandom(seed: seed)
+    for _ in 0..<startingOrdinal { _ = random.nextValues() }
+    #expect(
+        reversal[0].randomValues.compatibility == random.nextValues()
+    )
+    #expect(
+        reversal[1].randomValues.compatibility == random.nextValues()
+    )
+    #expect(
+        reversal[2].randomValues.compatibility == random.nextValues()
+    )
+}
+
+@Test
+func cancelClearsHeldBeginDirectionAndCornerStateForRapidNextStroke()
+    throws
+{
+    var cancelled = try stageCGenerator(
+        id: "test.generator.cancel-direction",
+        usesTravelDirection: true,
+        maximumAngularStep: .pi / 8,
+        stationaryDirection: -.pi / 4,
+        seed: 0x79
+    )
+    cancelled.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    cancelled.append(
+        generatorSample(x: 8, timestamp: 1, phase: .moved)
+    ) { _ in }
+    cancelled.append(
+        generatorSample(x: 8, y: 8, timestamp: 2, phase: .moved)
+    ) { _ in }
+    cancelled.cancel()
+
+    var fresh = try stageCGenerator(
+        id: "test.generator.cancel-direction",
+        usesTravelDirection: true,
+        maximumAngularStep: .pi / 8,
+        stationaryDirection: -.pi / 4,
+        seed: 0x79
+    )
+    let nextBegin = generatorSample(
+        x: 30, y: 40, timestamp: 3, phase: .began
+    )
+    let nextEnd = generatorSample(
+        x: 30, y: 40, timestamp: 4, phase: .ended
+    )
+    var actual: [DabAttributes] = []
+    var expected: [DabAttributes] = []
+    cancelled.begin(nextBegin) { actual.append($0) }
+    cancelled.finish(nextEnd) { actual.append($0) }
+    fresh.begin(nextBegin) { expected.append($0) }
+    fresh.finish(nextEnd) { expected.append($0) }
+
+    #expect(actual == expected)
+    #expect(cancelled == fresh)
+}
+
 @Test
 func generatorAcceptsAPrecompiledProgram() throws {
     let definition = try LegacyBrushRecipeAdapter.definition(

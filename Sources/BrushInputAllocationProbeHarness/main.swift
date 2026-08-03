@@ -119,6 +119,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case inputDerivationAllocations(total: UInt64)
     case directionCornerAllocations(total: UInt64)
     case stabilizerV2Allocations(total: UInt64)
+    case stageCGeneratorAllocations(total: UInt64)
     case timedEmitterAllocations(normal: UInt64, hugeGap: UInt64)
     case timedEmitterMissingCursor
     case tipSupportSpacingAllocations(total: UInt64)
@@ -151,6 +152,8 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
             "direction/corner path allocated \(total) times after warm-up"
         case let .stabilizerV2Allocations(total):
             "stabilizer v2 path allocated \(total) times after warm-up"
+        case let .stageCGeneratorAllocations(total):
+            "integrated Stage C generator allocated \(total) times after warm-up"
         case let .timedEmitterAllocations(normal, hugeGap):
             "timed emitter allocated after warm-up; normal=\(normal) "
                 + "hugeGap=\(hugeGap)"
@@ -217,6 +220,8 @@ private struct BrushInputAllocationProbeHarness {
                 try runDirectionCornerProbe(probe: probe)
             case "--stabilizer-v2":
                 try runStabilizerV2Probe(probe: probe)
+            case "--stage-c-generator":
+                try runStageCGeneratorProbe(probe: probe)
             case "--timed-emitter":
                 try runTimedEmitterProbe(probe: probe)
             case "--tip-support-spacing":
@@ -417,6 +422,315 @@ private struct BrushInputAllocationProbeHarness {
         print(
             "ALLOCATOR PROBE STABILIZER V2 PASS allocations=0 "
                 + "checksum=\(checksum)"
+        )
+    }
+
+    private static func runStageCGeneratorProbe(
+        probe: AllocatorProbe
+    ) throws {
+        let weightedProgram = try BrushProgramCompiler.compile(
+            makeStageCProbeDefinition(
+                id: "probe.stage-c.generator.weighted",
+                stabilization: .weightedWindow(distance: 12),
+                maximumAngularStep: .pi / 8
+            )
+        )
+        let delayedProgram = try BrushProgramCompiler.compile(
+            makeStageCProbeDefinition(
+                id: "probe.stage-c.generator.delayed",
+                stabilization: .delayed(distance: 12),
+                maximumAngularStep: .pi / 8
+            )
+        )
+        let samples = makeStageCGeneratorProbeSamples()
+        var weighted = BrushStrokeGenerator(
+            program: weightedProgram,
+            nominalDiameter: 20,
+            color: .black,
+            seed: 0xC9_01
+        )
+        var delayed = BrushStrokeGenerator(
+            program: delayedProgram,
+            nominalDiameter: 20,
+            color: .black,
+            seed: 0xC9_02
+        )
+        _ = try runStageCGeneratorCycles(
+            weighted: &weighted,
+            delayed: &delayed,
+            samples: samples,
+            count: 128
+        )
+
+        probe.arm()
+        let checksum: UInt64
+        do {
+            checksum = try runStageCGeneratorCycles(
+                weighted: &weighted,
+                delayed: &delayed,
+                samples: samples,
+                count: 10_000
+            )
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
+        let allocations = probe.disarm()
+
+        guard allocations == 0 else {
+            throw ProbeHarnessError.stageCGeneratorAllocations(
+                total: allocations
+            )
+        }
+        print(
+            "ALLOCATOR PROBE STAGE C GENERATOR PASS allocations=0 "
+                + "cycles=10000 checksum=\(checksum)"
+        )
+    }
+
+    @inline(never)
+    private static func runStageCGeneratorCycles(
+        weighted: inout BrushStrokeGenerator,
+        delayed: inout BrushStrokeGenerator,
+        samples: StageCGeneratorProbeSamples,
+        count: Int
+    ) throws -> UInt64 {
+        var checksum: UInt64 = 0
+        var emittedCount = 0
+        for _ in 0..<count {
+            weighted.begin(samples.began) { dab in
+                emittedCount += 1
+                checksum &+= UInt64(dab.rotation.bitPattern)
+            }
+            delayed.begin(samples.began) { dab in
+                emittedCount += 1
+                checksum &+= UInt64(dab.position.x.bitPattern)
+            }
+            try appendStageCGeneratorPair(
+                weighted: &weighted,
+                delayed: &delayed,
+                sample: samples.right,
+                checksum: &checksum,
+                emittedCount: &emittedCount
+            )
+            try appendStageCGeneratorPair(
+                weighted: &weighted,
+                delayed: &delayed,
+                sample: samples.up,
+                checksum: &checksum,
+                emittedCount: &emittedCount
+            )
+            try appendStageCGeneratorPair(
+                weighted: &weighted,
+                delayed: &delayed,
+                sample: samples.left,
+                checksum: &checksum,
+                emittedCount: &emittedCount
+            )
+            let authoritativeBeforePrediction = weighted
+            var prediction = weighted
+            let predictionOutcome = try prediction.appendPredictionPrefix(
+                samples.predicted,
+                maximumPathSubdivisionCount: 4_096
+            ) { dab in
+                emittedCount += 1
+                checksum &+= UInt64(dab.rotation.bitPattern)
+                checksum &+= dab.ordinal
+            }
+            precondition(predictionOutcome == .completed)
+            precondition(weighted == authoritativeBeforePrediction)
+            try weighted.finish(
+                samples.ended,
+                maximumPathSubdivisionCount: 4_096
+            ) { dab in
+                emittedCount += 1
+                checksum &+= UInt64(dab.rotation.bitPattern)
+                checksum &+= dab.ordinal
+            }
+            try delayed.finish(
+                samples.ended,
+                maximumPathSubdivisionCount: 4_096
+            ) { dab in
+                emittedCount += 1
+                checksum &+= UInt64(dab.position.x.bitPattern)
+                checksum &+= dab.ordinal
+            }
+        }
+        precondition(emittedCount <= count * 512)
+        return checksum &+ UInt64(emittedCount)
+    }
+
+    @inline(__always)
+    private static func appendStageCGeneratorPair(
+        weighted: inout BrushStrokeGenerator,
+        delayed: inout BrushStrokeGenerator,
+        sample: WorldStrokeSample,
+        checksum: inout UInt64,
+        emittedCount: inout Int
+    ) throws {
+        try weighted.append(
+            sample,
+            maximumPathSubdivisionCount: 4_096
+        ) { dab in
+            emittedCount += 1
+            checksum &+= UInt64(dab.rotation.bitPattern)
+            checksum &+= dab.ordinal
+        }
+        try delayed.append(
+            sample,
+            maximumPathSubdivisionCount: 4_096
+        ) { dab in
+            emittedCount += 1
+            checksum &+= UInt64(dab.position.x.bitPattern)
+            checksum &+= dab.ordinal
+        }
+    }
+
+    private static func makeStageCGeneratorProbeSamples()
+        -> StageCGeneratorProbeSamples
+    {
+        let viewport = ViewportTransform(
+            drawableSize: PatternSize(width: 256, height: 256),
+            worldCenter: WorldPoint(x: 128, y: 128)
+        )
+        var deriver = BrushInputDeriver()
+        func actual(
+            x: Float,
+            y: Float,
+            timestamp: TimeInterval,
+            phase: StrokePhase
+        ) -> WorldStrokeSample {
+            deriver.derive(
+                StrokeSample(
+                    position: ScreenPoint(x: x, y: y),
+                    pressure: 0.5,
+                    timestamp: timestamp,
+                    phase: phase,
+                    source: .pencil,
+                    capabilities: [.pressure]
+                ),
+                viewport: viewport
+            )
+        }
+        let began = actual(x: 64, y: 64, timestamp: 0, phase: .began)
+        let right = actual(x: 112, y: 64, timestamp: 1, phase: .moved)
+        let up = actual(x: 112, y: 16, timestamp: 2, phase: .moved)
+        let left = actual(x: 64, y: 16, timestamp: 3, phase: .moved)
+        var predictionDeriver = deriver
+        let predicted = predictionDeriver.derive(
+            StrokeSample(
+                position: ScreenPoint(x: 112, y: 16),
+                pressure: 0.5,
+                timestamp: 4,
+                phase: .moved,
+                source: .pencil,
+                kind: .predicted,
+                capabilities: [.pressure]
+            ),
+            viewport: viewport
+        )
+        let ended = actual(x: 64, y: 64, timestamp: 4, phase: .ended)
+        return StageCGeneratorProbeSamples(
+            began: began,
+            right: right,
+            up: up,
+            left: left,
+            predicted: predicted,
+            ended: ended
+        )
+    }
+
+    private static func makeStageCProbeDefinition(
+        id: String,
+        stabilization: BrushStabilizationDefinition,
+        maximumAngularStep: Float
+    ) throws -> BrushDefinition {
+        let base = try LegacyBrushRecipeAdapter.definition(
+            from: .legacyEquivalent,
+            displayName: id
+        )
+        var outputs: [BrushDynamicOutput: BrushOutputProgramDefinition] = [:]
+        for output in BrushDynamicOutput.allCases {
+            let baseValue: Float = switch output {
+            case .size, .flow, .opacity, .spacing, .hardness, .grain: 1
+            case .rotation, .scatter, .offsetX, .offsetY, .hue,
+                 .saturation, .brightness, .secondaryColorMix: 0
+            }
+            outputs[output] = BrushOutputProgramDefinition(
+                baseValue: baseValue,
+                terms: []
+            )
+        }
+        outputs[.rotation] = BrushOutputProgramDefinition(
+            baseValue: 0,
+            terms: [
+                BrushResponseTermDefinition(
+                    input: .direction,
+                    response: .linear,
+                    inputInverted: false,
+                    missingInputValue: 0.5,
+                    responseScale: 2 * .pi,
+                    responseOffset: -.pi,
+                    responseLowerClamp: -.pi,
+                    responseUpperClamp: .pi,
+                    jitter: 0,
+                    operation: .replace
+                ),
+            ]
+        )
+        let replayLimits = BrushRecipePolicy.replayTailLimits
+        return try BrushDefinition(
+            v2ID: BrushRecipeID(id),
+            metadata: base.metadata,
+            capabilities: base.capabilities,
+            resources: base.resources,
+            coverage: base.coverage,
+            placement: BrushPlacementDefinition(
+                baseSpacingFraction: 0.05,
+                maximumSpacingFraction: max(
+                    0.05,
+                    base.placement.maximumSpacingFraction
+                ),
+                baseFlow: base.placement.baseFlow,
+                strokeOpacity: base.placement.strokeOpacity,
+                baseScatterFraction: 0,
+                baseRotation: 0,
+                baseJitterFraction: 0,
+                baseOffset: .zero
+            ),
+            dynamics: base.dynamics,
+            color: base.color,
+            material: base.material,
+            stabilization: base.stabilization,
+            taper: .none,
+            replayMode: .replayTail,
+            replayLimits: replayLimits,
+            termination: .boundedCorrection(
+                maximumSamples: replayLimits.maximumSamples,
+                maximumWorldLength: 4_096,
+                maximumDabs: replayLimits.maximumDabs
+            ),
+            seedPolicy: .perStroke,
+            limits: base.limits,
+            performanceIntent: base.performanceIntent,
+            compatibility: base.compatibility,
+            sensorNormalization: BrushSensorNormalizationDefinition(
+                fullScaleWorldVelocity: 2_000,
+                minimumVelocityDeltaTime: 0.001,
+                fullScaleStrokeAge: 4,
+                fullScaleStrokeDistanceInDiameters: 32
+            ),
+            sensorProgram: BrushSensorProgramDefinition(outputs: outputs),
+            stabilizationV2: stabilization,
+            direction: BrushDirectionDefinition(
+                maximumAngularStep: maximumAngularStep,
+                stationaryDirection: 0
+            ),
+            emission: BrushEmissionDefinition(
+                mode: .distance,
+                timeInterval: nil
+            ),
+            tipSupports: [.analyticEllipse]
         )
     }
 
@@ -1471,21 +1785,24 @@ private struct BrushInputAllocationProbeHarness {
                 library: library
             )
         )
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID(
-                usesOffMainNativeInk
-                    ? "builtin.native-ink"
-                    : "brush.allocator-probe"
-            ),
-            replayMode: usesOffMainNativeInk ? .appendOnly : .replayTail,
-            replayLimits: usesOffMainNativeInk
-                ? nil
-                : BrushRecipePolicy.replayTailLimits
-        )
-        let definition = try LegacyBrushRecipeAdapter.definition(
-            from: recipe,
-            displayName: recipe.id.rawValue
-        )
+        let definition: BrushDefinition
+        if usesOffMainNativeInk {
+            definition = try makeStageCProbeDefinition(
+                id: "probe.stage-c.production-weighted",
+                stabilization: .weightedWindow(distance: 8),
+                maximumAngularStep: .pi / 8
+            )
+        } else {
+            let recipe = try BrushRecipe(
+                id: BrushRecipeID("brush.allocator-probe"),
+                replayMode: .replayTail,
+                replayLimits: BrushRecipePolicy.replayTailLimits
+            )
+            definition = try LegacyBrushRecipeAdapter.definition(
+                from: recipe,
+                displayName: recipe.id.rawValue
+            )
+        }
         let brush = try await compiler.compileAndActivate(
             definition: definition
         )
@@ -1592,4 +1909,13 @@ private struct StabilizerProbeSamples {
     let up: WorldStrokeSample
     let left: WorldStrokeSample
     let down: WorldStrokeSample
+}
+
+private struct StageCGeneratorProbeSamples {
+    let began: WorldStrokeSample
+    let right: WorldStrokeSample
+    let up: WorldStrokeSample
+    let left: WorldStrokeSample
+    let predicted: WorldStrokeSample
+    let ended: WorldStrokeSample
 }

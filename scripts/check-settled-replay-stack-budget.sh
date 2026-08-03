@@ -35,6 +35,7 @@ if [[ "$clang_version" != *'Apple clang version 21.0.0 '* ]]; then
 fi
 
 debug_limit=65536
+generator_debug_limit=57344
 release_limit=16384
 measurement_limit=1048576
 
@@ -71,13 +72,14 @@ maximum() {
 require_composite() {
   local name=$1
   local value=$2
-  if (( value > debug_limit )); then
+  local maximum=${3:-$debug_limit}
+  if (( value > maximum )); then
     printf 'STACK COMPOSITE FAIL name=%s bytes=%s maximum=%s\n' \
-      "$name" "$value" "$debug_limit" >&2
+      "$name" "$value" "$maximum" >&2
     exit 1
   fi
   printf 'STACK COMPOSITE PASS name=%s bytes=%s maximum=%s\n' \
-    "$name" "$value" "$debug_limit"
+    "$name" "$value" "$maximum"
 }
 
 # Coordinator frames and closures. Private fragments include the source-level
@@ -110,11 +112,21 @@ measure input_eq "$debug_binary" BrushInputDeriverV23__derived_struct_equals ext
 measure filter_eq "$debug_binary" StrokeVelocityFilterV23__derived_struct_equals external fragment
 measure filter_storage_eq "$debug_binary" StrokeVelocityFilterSegmentStorage33_ non-external swift-equality
 
-# Generator equality and each semantic branch it can enter.
-measure generator_eq "$debug_binary" BrushStrokeGeneratorV23__derived_struct_equals external fragment
+# Generator equality and each segmented semantic branch it can enter. The
+# explicit helpers keep future stored fields from recreating one monolithic
+# synthesized frame; the field-inventory test makes additions fail closed.
+measure generator_eq "$debug_binary" BrushStrokeGeneratorV2eeoiy external fragment
+measure generator_configuration "$debug_binary" BrushStrokeGeneratorV18configurationEqual non-external fragment
+measure generator_stabilization "$debug_binary" BrushStrokeGeneratorV23stabilizationStateEqual non-external fragment
+measure generator_direction "$debug_binary" BrushStrokeGeneratorV19directionStateEqual non-external fragment
+measure generator_path "$debug_binary" BrushStrokeGeneratorV14pathStateEqual non-external fragment
+measure generator_emission "$debug_binary" BrushStrokeGeneratorV18emissionStateEqual non-external fragment
 measure program_eq "$debug_binary" BrushProgramC2eeoiy external fragment
 measure stabilizer_eq "$debug_binary" StrokeStabilizerV23__derived_struct_equals external fragment
 measure stabilizer_storage_eq "$debug_binary" StrokeStabilizerPointStorage33_ non-external swift-equality
+measure direction_tracker_eq "$debug_binary" BrushDirectionTrackerV23__derived_struct_equals external fragment
+measure corner_emitter_eq "$debug_binary" BrushCornerEmitterV23__derived_struct_equals external fragment
+measure interpolated_sample_eq "$debug_binary" InterpolatedStrokeSampleV23__derived_struct_equals external fragment
 measure path_eq "$debug_binary" CentripetalCatmullRomPathInterpolatorV23__derived_struct_equals external fragment
 measure random_eq "$debug_binary" BrushRandomV23__derived_struct_equals external fragment
 measure ink_eq "$debug_binary" InkColorV23__derived_struct_equals external fragment
@@ -186,9 +198,14 @@ program_fields=$(maximum \
   $((stage_helper + stage_eq + stage_fields)))
 
 generator_semantic=$(maximum \
-  $((program_eq + program_fields)) \
-  $((stabilizer_eq + stabilizer_storage_eq)) \
-  "$path_eq" "$random_eq" "$ink_eq" "$point_eq")
+  $((generator_configuration + $(maximum \
+    $((program_eq + program_fields)) "$ink_eq"))) \
+  $((generator_stabilization + stabilizer_eq + stabilizer_storage_eq)) \
+  $((generator_direction + $(maximum \
+    "$direction_tracker_eq" "$corner_emitter_eq" \
+    "$interpolated_sample_eq"))) \
+  $((generator_path + $(maximum "$path_eq" "$point_eq"))) \
+  $((generator_emission + $(maximum "$random_eq" "$point_eq"))))
 generator_semantic=$((generator_eq + generator_semantic))
 
 structural=$((p + structure + $(maximum "$lifecycle" "$append_work")))
@@ -197,8 +214,8 @@ generator_base=$((p + generator_loop + generator_chunk))
 before_path=$((generator_before + generator_semantic))
 
 measure generator_begin "$debug_binary" BrushStrokeGeneratorV5begin external fragment
-measure generator_append "$debug_binary" BrushStrokeGeneratorV6append_4emit external fragment
-measure generator_finish "$debug_binary" BrushStrokeGeneratorV6finish_4emit external fragment
+measure generator_append "$debug_binary" BrushStrokeGeneratorV6append_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment
+measure generator_finish "$debug_binary" BrushStrokeGeneratorV6finish_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment
 begin_path=$((replay_begin + generator_begin + begin_partial + begin_closure + validate_dab))
 append_path=$((replay_append + generator_append + append_partial + append_closure + validate_dab))
 finish_path=$((replay_finish + generator_finish + finish_partial + finish_closure + validate_dab))
@@ -209,7 +226,7 @@ generator=$((generator_base + $(maximum "$before_path" "$after_path")))
 
 require_composite structural "$structural"
 require_composite input "$input"
-require_composite generator "$generator"
+require_composite generator "$generator" "$generator_debug_limit"
 
 # Optimized private helpers may be folded into their roots. Gate every stable
 # production/equality root that must survive; inlined private work is therefore
@@ -218,13 +235,13 @@ for release_spec in \
   'prepareSettledReplayTransfer non-external fragment' \
   'BrushInputDeriverV23__derived_struct_equals external fragment' \
   'StrokeVelocityFilterV23__derived_struct_equals external fragment' \
-  'BrushStrokeGeneratorV23__derived_struct_equals external fragment' \
+  'BrushStrokeGeneratorV2eeoiy external fragment' \
   'BrushProgramC2eeoiy external fragment' \
   'BrushStageCProgramMetadataC2eeoiy external fragment' \
   'CompiledBrushSensorProgramC2eeoiy non-external fragment' \
   'BrushStrokeGeneratorV5begin external fragment' \
-  'BrushStrokeGeneratorV6append_4emit external fragment' \
-  'BrushStrokeGeneratorV6finish_4emit external fragment'
+  'BrushStrokeGeneratorV6append_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment' \
+  'BrushStrokeGeneratorV6finish_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment'
 do
   set -- $release_spec
   "$frame_checker" "$release_binary" "$1" "$release_limit" "$2" "$3"

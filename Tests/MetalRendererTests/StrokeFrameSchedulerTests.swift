@@ -627,6 +627,314 @@ struct StrokeFrameSchedulerTests {
     }
 
     @Test
+    func stageCDirectionalZeroDabBeginSurvivesPredictionAndActualReplay()
+        async throws
+    {
+        let scheduler = try preparationScheduler()
+        let generation: UInt64 = 451
+        let configuration = try preparationConfiguration(
+            program: stageCMetalTestProgram(
+                id: "test.scheduler-stage-c-held-begin",
+                usesTravelDirection: true,
+                baseSpacingFraction: 0.05
+            )
+        )
+        let began = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: configuration,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .began,
+                    x: 12,
+                    timestamp: 0
+                ),
+            ]
+        )
+        #expect(began.logicalDabs.isEmpty)
+        let beganSnapshot =
+            await scheduler.transientPreparationSnapshotForTesting
+        #expect(
+            beganSnapshot.actualSamples.count == 1,
+            "retained actual count: \(beganSnapshot.actualSamples.count); replay contract: \(configuration.program.replayContract)"
+        )
+        #expect(beganSnapshot.actualDabs.isEmpty)
+        try await acknowledgeAll(
+            began,
+            scheduler: scheduler,
+            generation: generation
+        )
+
+        let actualBeforePrediction =
+            await scheduler.transientPreparationSnapshotForTesting
+        let prediction = try await scheduler.replacePreparedPrediction(
+            generation: generation,
+            samples: [
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 52,
+                    timestamp: 1,
+                    kind: .predicted
+                ),
+            ]
+        )
+        #expect(prediction.logicalDabs.first?.ordinal == 0)
+        #expect(prediction.logicalDabs.allSatisfy { $0.isPredicted })
+        let withPrediction =
+            await scheduler.transientPreparationSnapshotForTesting
+        #expect(withPrediction.actualSamples == actualBeforePrediction.actualSamples)
+        #expect(withPrediction.actualDabs == actualBeforePrediction.actualDabs)
+        #expect(withPrediction.predictedSamples.count == 1)
+        #expect(withPrediction.predictedDabs.first?.attributes.ordinal == 0)
+        try await acknowledgeAll(
+            prediction,
+            scheduler: scheduler,
+            generation: generation
+        )
+
+        let clearedPrediction = try await scheduler.replacePreparedPrediction(
+            generation: generation,
+            samples: []
+        )
+        try await acknowledgeAll(
+            clearedPrediction,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let actual = try await scheduler.appendPreparedStroke(
+            generation: generation,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 52,
+                    timestamp: 1
+                ),
+            ]
+        )
+        #expect(actual.logicalDabs.first?.ordinal == 0)
+        #expect(actual.logicalDabs.allSatisfy { !$0.isPredicted })
+        try await acknowledgeAll(
+            actual,
+            scheduler: scheduler,
+            generation: generation
+        )
+
+        let finished = try await scheduler.finishPreparedStroke(
+            generation: generation,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .ended,
+                    x: 68,
+                    timestamp: 2
+                ),
+            ]
+        )
+        #expect(finished.isFinishing)
+        try await acknowledgeAll(
+            finished,
+            scheduler: scheduler,
+            generation: generation
+        )
+        await scheduler.cancel(generation: generation)
+    }
+
+    @Test
+    func stageCEstimatedReplacementRestoresPrecedingCheckpointOnce()
+        async throws
+    {
+        let program = try stageCMetalTestProgram(
+            id: "test.scheduler-stage-c-estimated",
+            stabilization: .weightedWindow(distance: 24),
+            usesTravelDirection: true,
+            baseSpacingFraction: 0.05
+        )
+        let configuration = try preparationConfiguration(program: program)
+        let generation: UInt64 = 452
+        let scheduler = try preparationScheduler()
+        let source = [
+            stageCPreparationSample(
+                phase: .began,
+                x: 10,
+                timestamp: 0
+            ),
+            stageCPreparationSample(
+                phase: .moved,
+                x: 40,
+                timestamp: 1,
+                estimationUpdateIndex: 701,
+                estimatedProperties: .location
+            ),
+            stageCPreparationSample(
+                phase: .moved,
+                x: 72,
+                timestamp: 2
+            ),
+        ]
+        let began = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: configuration,
+            actualSamples: source
+        )
+        try await acknowledgeAll(
+            began,
+            scheduler: scheduler,
+            generation: generation
+        )
+
+        let updateResult = await scheduler.process(
+            .applyEstimatedUpdate(
+                generation: generation,
+                sample: stageCPreparationSample(
+                    phase: .moved,
+                    x: 52,
+                    timestamp: 1,
+                    kind: .estimatedUpdate,
+                    estimationUpdateIndex: 701
+                )
+            )
+        )
+        guard case let .prepared(corrected) = updateResult else {
+            Issue.record("Expected Stage C estimated replay preparation")
+            return
+        }
+        let diagnostic = try #require(
+            await scheduler.lastEstimatedUpdateSnapshotForTesting
+        )
+        #expect(diagnostic.target == .authoritative)
+        #expect(diagnostic.rederivedSampleCount == 2)
+        let correctedSnapshot =
+            await scheduler.transientPreparationSnapshotForTesting
+
+        let clean = try preparationScheduler()
+        let cleanGeneration: UInt64 = 453
+        let cleanBatch = try await clean.beginPreparedStroke(
+            generation: cleanGeneration,
+            configuration: configuration,
+            actualSamples: [
+                source[0],
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 52,
+                    timestamp: 1
+                ),
+                source[2],
+            ]
+        )
+        let cleanSnapshot = await clean.transientPreparationSnapshotForTesting
+        #expect(correctedSnapshot.actualDabs == cleanSnapshot.actualDabs)
+        #expect(correctedSnapshot.predictedDabs.isEmpty)
+        #expect(corrected.logicalDabs.last == cleanBatch.logicalDabs.last)
+        try await acknowledgeAll(
+            corrected,
+            scheduler: scheduler,
+            generation: generation
+        )
+        try await acknowledgeAll(
+            cleanBatch,
+            scheduler: clean,
+            generation: cleanGeneration
+        )
+        await scheduler.cancel(generation: generation)
+        await clean.cancel(generation: cleanGeneration)
+    }
+
+    @Test
+    func stageCCornerFailureIsTypedAndFreshGenerationIsReusable()
+        async throws
+    {
+        let scheduler = try preparationScheduler()
+        let configuration = try preparationConfiguration(
+            program: stageCMetalTestProgram(
+                id: "test.scheduler-stage-c-failure",
+                usesTravelDirection: true,
+                maximumAngularStep: .pi / 180,
+                baseSpacingFraction: 0.05
+            )
+        )
+        let generation: UInt64 = 454
+        let began = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: configuration,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .began,
+                    x: 40,
+                    timestamp: 0
+                ),
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 80,
+                    timestamp: 1
+                ),
+            ]
+        )
+        try await acknowledgeAll(
+            began,
+            scheduler: scheduler,
+            generation: generation
+        )
+
+        let failed = await scheduler.process(
+            .appendAuthoritative(
+                generation: generation,
+                samples: [
+                    stageCPreparationSample(
+                        phase: .moved,
+                        x: 40,
+                        timestamp: 2
+                    ),
+                ]
+            )
+        )
+        guard case .failed(
+            generation,
+            .cornerEmission(.capacityExceeded(
+                requiredCandidateCount: 179,
+                maximumCandidateCount:
+                    StrokeEmissionCandidateBuffer.maximumCount
+            ))
+        ) = failed else {
+            Issue.record("Expected typed Stage C corner-capacity failure")
+            return
+        }
+        let cancelled = await scheduler.snapshot
+        #expect(cancelled.activeGeneration == nil)
+        #expect(cancelled.cancelledGeneration == generation)
+        #expect(cancelled.retainedActualSampleCount == 0)
+        #expect(cancelled.retainedPredictedSampleCount == 0)
+
+        let retryGeneration: UInt64 = 455
+        let retryBegin = try await scheduler.beginPreparedStroke(
+            generation: retryGeneration,
+            configuration: configuration,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .began,
+                    x: 20,
+                    timestamp: 0
+                ),
+            ]
+        )
+        #expect(retryBegin.logicalDabs.isEmpty)
+        try await acknowledgeAll(
+            retryBegin,
+            scheduler: scheduler,
+            generation: retryGeneration
+        )
+        let retryMove = try await scheduler.appendPreparedStroke(
+            generation: retryGeneration,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 60,
+                    timestamp: 1
+                ),
+            ]
+        )
+        #expect(retryMove.logicalDabs.first?.ordinal == 0)
+        await scheduler.cancel(generation: retryGeneration)
+    }
+
+    @Test
     func commitBarrierHasDedicatedCapacityAfterAuthoritativeQueueFills()
         throws
     {
@@ -1158,13 +1466,21 @@ struct StrokeFrameSchedulerTests {
         )
     }
 
-    private func preparationConfiguration() throws
+    private func preparationConfiguration(
+        program: BrushProgram? = nil
+    ) throws
         -> StrokePreparationConfiguration
     {
-        StrokePreparationConfiguration(
-            program: try BrushProgramCompiler.compile(
+        let selectedProgram: BrushProgram
+        if let program {
+            selectedProgram = program
+        } else {
+            selectedProgram = try BrushProgramCompiler.compile(
                 StageFourAnchorDefinitions.ink
-            ),
+            )
+        }
+        return StrokePreparationConfiguration(
+            program: selectedProgram,
             nominalDiameter: 10,
             color: .black,
             seed: 7,
@@ -1241,6 +1557,31 @@ struct StrokeFrameSchedulerTests {
             estimatedProperties: property,
             estimatedPropertiesExpectingUpdates:
                 kind == .estimatedUpdate ? [] : property
+        )
+    }
+
+    private func stageCPreparationSample(
+        phase: StrokePhase,
+        x: Float,
+        timestamp: TimeInterval,
+        kind: StrokeSampleKind = .actual,
+        estimationUpdateIndex: Int? = nil,
+        estimatedProperties: StrokeEstimatedProperties = []
+    ) -> StrokeSample {
+        StrokeSample(
+            position: ScreenPoint(x: x, y: 32),
+            pressure: 0.5,
+            timestamp: timestamp,
+            phase: phase,
+            source: .pencil,
+            kind: kind,
+            capabilities: [.pressure, .altitude, .azimuth],
+            altitude: 0.7,
+            azimuth: 0.8,
+            estimationUpdateIndex: estimationUpdateIndex,
+            estimatedProperties: estimatedProperties,
+            estimatedPropertiesExpectingUpdates:
+                kind == .estimatedUpdate ? [] : estimatedProperties
         )
     }
 

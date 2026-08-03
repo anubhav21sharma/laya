@@ -564,6 +564,12 @@ actor StrokeFrameScheduler {
                 generation: message.generation,
                 failure: .coordinator(error)
             )
+        } catch let error as BrushCornerEmitterError {
+            cancelPreparedStroke(generation: message.generation)
+            return .failed(
+                generation: message.generation,
+                failure: .cornerEmission(error)
+            )
         } catch let error as AuthoritativeStrokeQueueError {
             cancelPreparedStroke(generation: message.generation)
             return .failed(

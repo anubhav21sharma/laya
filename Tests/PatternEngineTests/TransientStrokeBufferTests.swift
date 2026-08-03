@@ -132,6 +132,62 @@ private func transientGenerator(seed: UInt64) -> BrushStrokeGenerator {
     )
 }
 
+@Test
+func zeroDabDirectionalBeginRemainsAReplayStateTransition() throws {
+    let program = try stageCTestProgram(
+        id: "test.buffer.zero-dab-directional",
+        usesTravelDirection: true,
+        replayMode: .replayTail,
+        replayLimits: BrushRecipePolicy.replayTailLimits
+    )
+    var generator = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 0x81
+    )
+    let begin = transientSample(0, capabilities: [])
+    let beforeBegin = generator
+    var beginDabs: [DabAttributes] = []
+    generator.begin(begin) { beginDabs.append($0) }
+    let afterBegin = generator
+    #expect(beginDabs.isEmpty)
+
+    var buffer = transientBuffer(mode: .replayTail)
+    let beginUpdate = buffer.appendActual(TransientStrokeChunk(
+        sample: begin,
+        dabs: [],
+        generatorSnapshotBeforeSample: beforeBegin,
+        generatorSnapshotAfterSample: afterBegin
+    ))
+
+    #expect(beginUpdate.settledPrefix.isEmpty)
+    #expect(buffer.actualSampleCount == 1)
+    #expect(buffer.actualDabCount == 0)
+    #expect(buffer.authoritativeGeneratorSnapshot == afterBegin)
+
+    let moved = transientSample(10, capabilities: [])
+    let beforeMove = generator
+    var movedDabs: [DabAttributes] = []
+    try generator.append(
+        moved,
+        maximumPathSubdivisionCount: 4_096
+    ) { movedDabs.append($0) }
+    _ = buffer.appendActual(TransientStrokeChunk(
+        sample: moved,
+        dabs: movedDabs.map {
+            TransientStrokeDab(attributes: $0, projectedInstanceCount: 1)
+        },
+        generatorSnapshotBeforeSample: beforeMove,
+        generatorSnapshotAfterSample: generator
+    ))
+
+    #expect(movedDabs.first?.ordinal == 0)
+    #expect(buffer.actualSampleCount == 2)
+    #expect(buffer.actualChunks.first?.dabs.isEmpty == true)
+    #expect(buffer.authoritativeGeneratorSnapshot == generator)
+}
+
 private func declaredReplayRecipe(
     id: String,
     mode: BrushReplayMode = .replayTail,

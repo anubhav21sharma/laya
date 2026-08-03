@@ -66,7 +66,7 @@ public struct BrushDirectionTracker: Equatable, Sendable {
             to: wrappedDirection
         )
         if abs(abs(signedTurn) - Double.pi) <= Self.halfTurnTolerance {
-            signedTurn = Double(lastNonzeroTurnSign ?? 1) * Double.pi
+            signedTurn = Double(lastNonzeroTurnSign ?? 1) * Double(Float.pi)
         }
 
         let nextDirection = unwrappedDirection + signedTurn
