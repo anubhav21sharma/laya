@@ -50,6 +50,10 @@ private func stageCGenerator(
         BrushDynamicOutput: BrushOutputProgramDefinition
     ] = [:],
     tipSupports: [BrushTipSupportDefinition] = [.analyticEllipse],
+    emission: BrushEmissionDefinition = BrushEmissionDefinition(
+        mode: .distance,
+        timeInterval: nil
+    ),
     nominalDiameter: Float = 20,
     seed: UInt64 = 1
 ) throws -> BrushStrokeGenerator {
@@ -64,7 +68,8 @@ private func stageCGenerator(
             maximumSpacingFraction: maximumSpacingFraction,
             coverage: coverage,
             outputOverrides: outputOverrides,
-            tipSupports: tipSupports
+            tipSupports: tipSupports,
+            emission: emission
         ),
         nominalDiameter: nominalDiameter,
         color: .black,
@@ -94,6 +99,9 @@ func manualEqualityInventoryCoversEveryStoredField() {
         "hasAttributedPath",
         "heldDirectionalBegin",
         "nextCornerSequence",
+        "timedEmitter",
+        "authoritativeEmissionMerger",
+        "predictionEmissionMerger",
         "strokeStartTimestamp",
         "processedPathDistance",
         "distanceUntilNext",
@@ -101,6 +109,49 @@ func manualEqualityInventoryCoversEveryStoredField() {
         "lastEmittedSourcePosition",
         "footprintEnvelope",
     ]))
+}
+
+@Test
+func emissionCursorInventoryCoversEveryContinuationOwner() throws {
+    let generator = try stageCGenerator(id: "test.generator.cursor-inventory")
+    let cursor = try generator.emissionCursor(
+        for: generatorSample(x: 0, timestamp: 0, phase: .began),
+        maximumPathSubdivisionCount: 4_096
+    )
+    let fieldNames = Set(
+        Mirror(reflecting: cursor).children.compactMap(\.label)
+    )
+
+    #expect(fieldNames == Set([
+        "generator",
+        "sample",
+        "operation",
+        "maximumPathSubdivisionCount",
+        "phase",
+        "attributed",
+        "pathCursor",
+        "pendingPathContinuation",
+        "pendingSegment",
+        "pendingDirection",
+        "pendingSignedTurn",
+        "segmentCursor",
+        "sourceCursor",
+        "sourcePurpose",
+    ]))
+}
+
+@Test
+func logicalIdentityOverflowIsPreflightedBeforeCandidateAcceptance() {
+    #expect(throws: BrushStrokeGeneratorEmissionError.logicalOrdinalOverflow) {
+        try BrushStrokeGenerator.preflightLogicalIdentity(
+            emittedDabCount: .max
+        )
+    }
+    #expect(throws: Never.self) {
+        try BrushStrokeGenerator.preflightLogicalIdentity(
+            emittedDabCount: .max - 1
+        )
+    }
 }
 
 @Test
@@ -125,6 +176,437 @@ func schemaV2NonePinsExactNonDirectionalTrace() throws {
         WorldPoint(x: 6, y: 0),
     ])
     #expect(dabs.map(\.ordinal) == [0, 1, 2, 3])
+}
+
+@Test
+func schemaV2UnionCollapsesExactTimedDistanceTiesBeforeIdentity() throws {
+    let interval = 0.25
+    let emission = BrushEmissionDefinition(
+        mode: .distanceAndTime,
+        timeInterval: interval
+    )
+    var union = try stageCGenerator(
+        id: "test.generator.emission.union-ties",
+        baseSpacingFraction: 0.125,
+        maximumSpacingFraction: 0.5,
+        emission: emission,
+        seed: 0xC1_11_01
+    )
+    var distanceOnly = try stageCGenerator(
+        id: "test.generator.emission.distance-ties",
+        baseSpacingFraction: 0.125,
+        maximumSpacingFraction: 0.5,
+        seed: 0xC1_11_01
+    )
+    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
+    let ended = generatorSample(x: 20, timestamp: 2, phase: .ended)
+    var unionTrace: [DabAttributes] = []
+    var distanceTrace: [DabAttributes] = []
+
+    union.begin(began) { unionTrace.append($0) }
+    union.finish(ended) { unionTrace.append($0) }
+    distanceOnly.begin(began) { distanceTrace.append($0) }
+    distanceOnly.finish(ended) { distanceTrace.append($0) }
+
+    #expect(unionTrace == distanceTrace)
+    #expect(unionTrace.map(\.ordinal) == Array(0..<UInt64(unionTrace.count)))
+    var expectedRandom = BrushRandom(seed: 0xC1_11_01)
+    #expect(unionTrace.map(\.randomValues.compatibility) == unionTrace.map {
+        _ in expectedRandom.nextValues()
+    })
+    #expect(zip(unionTrace, unionTrace.dropFirst()).allSatisfy {
+        $0.position != $1.position
+    })
+}
+
+@Test
+func schemaV2TimeModeEmitsStationaryRecordedTicksAndOneFinish() throws {
+    var generator = try stageCGenerator(
+        id: "test.generator.emission.stationary-time",
+        emission: BrushEmissionDefinition(
+            mode: .time,
+            timeInterval: 0.25
+        ),
+        seed: 0xC1_11_02
+    )
+    var trace: [DabAttributes] = []
+    generator.begin(
+        generatorSample(x: 7, y: 9, timestamp: 10, phase: .began)
+    ) { trace.append($0) }
+    generator.finish(
+        generatorSample(x: 7, y: 9, timestamp: 11, phase: .ended)
+    ) { trace.append($0) }
+
+    #expect(trace.count == 5)
+    #expect(trace.allSatisfy { $0.position == WorldPoint(x: 7, y: 9) })
+    #expect(trace.map(\.ordinal) == [0, 1, 2, 3, 4])
+}
+
+@Test
+func schemaV2UnionKeepsCornerOrientationsAsDistinctAcceptedIdentities()
+    throws
+{
+    var generator = try stageCGenerator(
+        id: "test.generator.emission.union-corners",
+        usesTravelDirection: true,
+        maximumAngularStep: .pi / 8,
+        baseSpacingFraction: 0.25,
+        maximumSpacingFraction: 0.5,
+        emission: BrushEmissionDefinition(
+            mode: .distanceAndTime,
+            timeInterval: 0.5
+        ),
+        seed: 0xC1_11_03
+    )
+    var trace: [DabAttributes] = []
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { trace.append($0) }
+    generator.append(
+        generatorSample(x: 10, timestamp: 1, phase: .moved)
+    ) { trace.append($0) }
+    generator.finish(
+        generatorSample(x: 10, y: 10, timestamp: 2, phase: .ended)
+    ) { trace.append($0) }
+
+    let grouped = Dictionary(grouping: trace, by: \.sourceDistance)
+    let cornerFan = try #require(grouped.values.first(where: { dabs in
+        Set(dabs.map(\.rotation)).count >= 2
+    }))
+    #expect(cornerFan.count >= 2)
+    #expect(Set(cornerFan.map(\.ordinal)).count == cornerFan.count)
+    #expect(trace.map(\.ordinal) == Array(0..<UInt64(trace.count)))
+}
+
+@Test
+func schemaV2TimedUnionIsInvariantToAuthoritativeInputPartitions() throws {
+    let emission = BrushEmissionDefinition(
+        mode: .distanceAndTime,
+        timeInterval: 0.125
+    )
+    func trace(partitioned: Bool) throws -> [DabAttributes] {
+        var generator = try stageCGenerator(
+            id: "test.generator.emission.partition",
+            baseSpacingFraction: 0.125,
+            maximumSpacingFraction: 0.5,
+            emission: emission,
+            seed: 0xC1_11_04
+        )
+        var result: [DabAttributes] = []
+        generator.begin(
+            generatorSample(x: 0, timestamp: 0, phase: .began)
+        ) { result.append($0) }
+        if partitioned {
+            for index in 1..<8 {
+                generator.append(
+                    generatorSample(
+                        x: Float(index) * 2.5,
+                        timestamp: Double(index) * 0.125,
+                        phase: .moved
+                    )
+                ) { result.append($0) }
+            }
+        }
+        generator.finish(
+            generatorSample(x: 20, timestamp: 1, phase: .ended)
+        ) { result.append($0) }
+        return result
+    }
+
+    #expect(try trace(partitioned: false) == trace(partitioned: true))
+}
+
+@Test
+func schemaV2TimedUnionBatchStreamingAndSinkRetryAreExact() throws {
+    let program = try stageCTestProgram(
+        id: "test.generator.emission.batch-retry",
+        baseSpacingFraction: 0.125,
+        maximumSpacingFraction: 0.5,
+        emission: BrushEmissionDefinition(
+            mode: .distanceAndTime,
+            timeInterval: 0.125
+        )
+    )
+    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
+    let ended = generatorSample(x: 20, timestamp: 1, phase: .ended)
+    var streaming = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 0xC1_11_05
+    )
+    var batched = streaming
+    var streamed: [DabAttributes] = []
+    streaming.begin(began) { streamed.append($0) }
+    streaming.finish(ended) { streamed.append($0) }
+    let batchTrace = try batched.beginBatch(began).dabs
+        + batched.finishBatch(ended).dabs
+    #expect(batchTrace == streamed)
+    #expect(batched == streaming)
+
+    enum Rejected: Error { case once }
+    var retrying = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 0xC1_11_05
+    )
+    retrying.begin(began) { _ in }
+    let before = retrying
+    var observed = 0
+    #expect(throws: Rejected.once) {
+        try retrying.finish(ended) { _ in
+            observed += 1
+            if observed == 3 { throw Rejected.once }
+        }
+    }
+    #expect(retrying == before)
+    var retried: [DabAttributes] = []
+    var baseline = before
+    let collectRetried: (DabAttributes) throws -> Void = {
+        retried.append($0)
+    }
+    try retrying.finish(ended, emit: collectRetried)
+    var expected: [DabAttributes] = []
+    let collectExpected: (DabAttributes) throws -> Void = {
+        expected.append($0)
+    }
+    try baseline.finish(ended, emit: collectExpected)
+    #expect(retried == expected)
+    #expect(retrying == baseline)
+}
+
+@Test
+func schemaV2TimedCancelAndPredictionLeaveRapidReuseAuthoritative() throws {
+    let program = try stageCTestProgram(
+        id: "test.generator.emission.lifecycle",
+        emission: BrushEmissionDefinition(mode: .time, timeInterval: 0.1)
+    )
+    func generator() -> BrushStrokeGenerator {
+        BrushStrokeGenerator(
+            program: program,
+            nominalDiameter: 20,
+            color: .black,
+            seed: 0xC1_11_06
+        )
+    }
+    let began = generatorSample(x: 0, timestamp: 0, phase: .began)
+    var authoritative = generator()
+    authoritative.begin(began) { _ in }
+    let beforePrediction = authoritative
+    var prediction = authoritative
+    var predicted: [DabAttributes] = []
+    _ = try prediction.appendPredictionPrefix(
+        generatorSample(x: 5, timestamp: 0.5, phase: .moved)
+            .replacingKindForTest(.predicted),
+        maximumPathSubdivisionCount: 4_096
+    ) { predicted.append($0) }
+    #expect(!predicted.isEmpty)
+    #expect(authoritative == beforePrediction)
+
+    authoritative.cancel()
+    var fresh = generator()
+    let nextBegin = generatorSample(x: 2, timestamp: 4, phase: .began)
+    let nextEnd = generatorSample(x: 2, timestamp: 4.3, phase: .ended)
+    var actual: [DabAttributes] = []
+    var expected: [DabAttributes] = []
+    authoritative.begin(nextBegin) { actual.append($0) }
+    authoritative.finish(nextEnd) { actual.append($0) }
+    fresh.begin(nextBegin) { expected.append($0) }
+    fresh.finish(nextEnd) { expected.append($0) }
+    #expect(actual == expected)
+    #expect(authoritative == fresh)
+}
+
+@Test(arguments: [511, 512, 513])
+func schemaV2GeneratorAdvancePagesAtTheLogicalDabBoundary(
+    candidateCount: Int
+) throws {
+    var generator = try stageCGenerator(
+        id: "test.generator.emission.page-\(candidateCount)",
+        emission: BrushEmissionDefinition(
+            mode: .time,
+            timeInterval: 1.0 / 240
+        ),
+        seed: 0xC1_11_10
+    )
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    var cursor = try generator.emissionCursor(
+        for: generatorSample(
+            x: 0,
+            timestamp: Double(candidateCount) / 240,
+            phase: .ended
+        ),
+        maximumPathSubdivisionCount: 4_096
+    )
+    var ordinals: [UInt64] = []
+
+    let first = try cursor.emitNextPage { ordinals.append($0.ordinal) }
+    #expect(first.emittedCount == min(candidateCount, 512))
+    #expect(first.hasMore == (candidateCount > 512))
+    if first.hasMore {
+        let second = try cursor.emitNextPage { ordinals.append($0.ordinal) }
+        #expect(second.emittedCount == candidateCount - 512)
+        #expect(!second.hasMore)
+    }
+
+    #expect(ordinals == Array(1...UInt64(candidateCount)))
+    let completed = try #require(cursor.completedGenerator)
+    #expect(completed.emittedDabCount == 0)
+}
+
+@Test
+func schemaV2HugeTimedGapDoesOnlyOneBoundedGeneratorPage() throws {
+    var generator = try stageCGenerator(
+        id: "test.generator.emission.huge-page",
+        emission: BrushEmissionDefinition(
+            mode: .time,
+            timeInterval: 1.0 / 240
+        ),
+        seed: 0xC1_11_11
+    )
+    generator.begin(
+        generatorSample(x: 3, timestamp: 0, phase: .began)
+    ) { _ in }
+    var cursor = try generator.emissionCursor(
+        for: generatorSample(
+            x: 3,
+            timestamp: 1_000_000,
+            phase: .ended
+        ),
+        maximumPathSubdivisionCount: 4_096
+    )
+    var count = 0
+    let page = try cursor.emitNextPage { _ in count += 1 }
+
+    #expect(page.emittedCount == LogicalDabBatch.maximumDabCount)
+    #expect(page.hasMore)
+    #expect(count == LogicalDabBatch.maximumDabCount)
+    #expect(cursor.completedGenerator == nil)
+}
+
+@Test
+func schemaV2GeneratorPageRetryResumesAtTheRejectedDab() throws {
+    enum Rejected: Error { case once }
+    var generator = try stageCGenerator(
+        id: "test.generator.emission.page-retry",
+        emission: BrushEmissionDefinition(mode: .time, timeInterval: 0.1),
+        seed: 0xC1_11_12
+    )
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    var cursor = try generator.emissionCursor(
+        for: generatorSample(x: 0, timestamp: 1, phase: .ended),
+        maximumPathSubdivisionCount: 4_096
+    )
+    var accepted: [UInt64] = []
+
+    #expect(throws: Rejected.once) {
+        _ = try cursor.emitNextPage { dab in
+            if dab.ordinal == 4 { throw Rejected.once }
+            accepted.append(dab.ordinal)
+        }
+    }
+    #expect(accepted == [1, 2, 3])
+    let retryStart = cursor
+    var retry = retryStart
+    var copied = retryStart
+    var retried: [DabAttributes] = []
+    var copiedDabs: [DabAttributes] = []
+    _ = try retry.emitNextPage { retried.append($0) }
+    _ = try copied.emitNextPage { copiedDabs.append($0) }
+
+    #expect(retried == copiedDabs)
+    #expect(retried.first?.ordinal == 4)
+    #expect(retry.completedGenerator == copied.completedGenerator)
+}
+
+@Test
+func schemaV2PagedGeneratorMatchesCompatibilityTraceAcrossLifecycleAndCorners()
+    throws
+{
+    let program = try stageCTestProgram(
+        id: "test.generator.emission.cursor-lifecycle",
+        usesTravelDirection: true,
+        maximumAngularStep: .pi / 8,
+        baseSpacingFraction: 0.125,
+        maximumSpacingFraction: 0.5,
+        emission: BrushEmissionDefinition(
+            mode: .distanceAndTime,
+            timeInterval: 0.125
+        )
+    )
+    let samples = [
+        generatorSample(x: 0, timestamp: 0, phase: .began),
+        generatorSample(x: 10, timestamp: 0.5, phase: .moved),
+        generatorSample(x: 10, y: 10, timestamp: 1, phase: .moved),
+        generatorSample(x: 20, y: 10, timestamp: 1.5, phase: .ended),
+    ]
+    var compatibility = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 0xC1_11_13
+    )
+    var expected: [DabAttributes] = []
+    compatibility.begin(samples[0]) { expected.append($0) }
+    compatibility.append(samples[1]) { expected.append($0) }
+    compatibility.append(samples[2]) { expected.append($0) }
+    compatibility.finish(samples[3]) { expected.append($0) }
+
+    var paged = BrushStrokeGenerator(
+        program: program,
+        nominalDiameter: 20,
+        color: .black,
+        seed: 0xC1_11_13
+    )
+    var actual: [DabAttributes] = []
+    for sample in samples {
+        var cursor = try paged.emissionCursor(
+            for: sample,
+            maximumPathSubdivisionCount: 4_096
+        )
+        repeat {
+            let page = try cursor.emitNextPage { actual.append($0) }
+            #expect(page.emittedCount <= LogicalDabBatch.maximumDabCount)
+        } while !cursor.isComplete
+        paged = try #require(cursor.completedGenerator)
+    }
+
+    #expect(actual == expected)
+    #expect(paged == compatibility)
+}
+
+@Test
+func schemaV2DistanceCursorResumesA513DabPathExactly() throws {
+    var generator = try stageCGenerator(
+        id: "test.generator.emission.distance-page",
+        baseSpacingFraction: 0.001,
+        maximumSpacingFraction: 0.5,
+        seed: 0xC1_11_14
+    )
+    var beginCursor = try generator.emissionCursor(
+        for: generatorSample(x: 0, timestamp: 0, phase: .began),
+        maximumPathSubdivisionCount: 4_096
+    )
+    _ = try beginCursor.emitNextPage { _ in }
+    generator = try #require(beginCursor.completedGenerator)
+    var cursor = try generator.emissionCursor(
+        for: generatorSample(x: 513, timestamp: 1, phase: .ended),
+        maximumPathSubdivisionCount: 4_096
+    )
+    var ordinals: [UInt64] = []
+
+    let first = try cursor.emitNextPage { ordinals.append($0.ordinal) }
+    let second = try cursor.emitNextPage { ordinals.append($0.ordinal) }
+
+    #expect(first == .init(emittedCount: 512, hasMore: true))
+    #expect(second == .init(emittedCount: 1, hasMore: false))
+    #expect(ordinals == Array(1...513))
+    #expect(cursor.completedGenerator != nil)
 }
 
 @Test

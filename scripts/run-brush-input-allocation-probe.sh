@@ -2,9 +2,18 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-scratch="${1:-$repo_root/.build/brush-input-allocation-probe}"
-configuration="${2:-release}"
-scope="${3:-all}"
+case "${1:-}" in
+  all|tip-support-spacing|sensor-program|input-derivation|stage-c|stage-c-emission)
+    scope=$1
+    scratch="$repo_root/.build/brush-input-allocation-probe"
+    configuration="${2:-release}"
+    ;;
+  *)
+    scratch="${1:-$repo_root/.build/brush-input-allocation-probe}"
+    configuration="${2:-release}"
+    scope="${3:-all}"
+    ;;
+esac
 probe="$scratch/$configuration/libLayaAllocationProbe.dylib"
 helper="$scratch/$configuration/BrushInputAllocationProbeHarness"
 
@@ -45,6 +54,7 @@ case "$scope" in
     run_probe --direction-corner
     run_probe --stabilizer-v2
     run_probe --stage-c-generator
+    run_probe --stage-c-emission
     run_probe --timed-emitter
     run_probe --tip-support-spacing
     run_probe --sensor-program
@@ -65,7 +75,12 @@ case "$scope" in
   stage-c)
     run_probe --self-test
     run_probe --stage-c-generator
+    run_probe --stage-c-emission
     run_probe --production
+    ;;
+  stage-c-emission)
+    run_probe --self-test
+    run_probe --stage-c-emission
     ;;
   *)
     printf 'unsupported allocator probe scope: %s\n' "$scope" >&2

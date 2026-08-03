@@ -39,6 +39,10 @@ func stageCTestProgram(
     ] = [:],
     randomization: BrushRandomization? = nil,
     tipSupports: [BrushTipSupportDefinition] = [.analyticEllipse],
+    emission: BrushEmissionDefinition = BrushEmissionDefinition(
+        mode: .distance,
+        timeInterval: nil
+    ),
     replayMode: BrushReplayMode = .appendOnly,
     replayLimits: BrushReplayLimits? = nil
 ) throws -> BrushProgram {
@@ -150,7 +154,7 @@ func stageCTestProgram(
             maximumAngularStep: maximumAngularStep,
             stationaryDirection: stationaryDirection
         ),
-        emission: BrushEmissionDefinition(mode: .distance, timeInterval: nil),
+        emission: emission,
         tipSupports: tipSupports
     )
     return try BrushProgramCompiler.compile(definition)

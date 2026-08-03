@@ -526,6 +526,71 @@ struct TimedStrokeEmitterTests {
         #expect(cursor.remainingCandidateCount == 239_999_488)
     }
 
+    @Test(arguments: [511, 512, 513])
+    func exactPageBoundariesResumeWithoutSkipOrDuplicate(
+        candidateCount: Int
+    ) throws {
+        var emitter = try TimedStrokeEmitter(timeInterval: 1)
+        _ = try emitter.begin(at: timedPoint(
+            x: 0,
+            timestamp: 0,
+            sourceDistance: 0,
+            direction: 0,
+            phase: .began
+        ))
+        let proposed = try emitter.advance(to: timedPoint(
+            x: Float(candidateCount),
+            timestamp: Double(candidateCount),
+            sourceDistance: Double(candidateCount),
+            direction: 0,
+            phase: .moved
+        ))
+        var cursor = try #require(proposed)
+        var keys: [Int64] = []
+        let first = try cursor.emitNextPage { keys.append($0.timeKey) }
+        #expect(first.emittedCount == min(candidateCount, 512))
+        #expect(first.hasMore == (candidateCount > 512))
+        if first.hasMore {
+            let second = try cursor.emitNextPage { keys.append($0.timeKey) }
+            #expect(second.emittedCount == candidateCount - 512)
+            #expect(!second.hasMore)
+        }
+        #expect(keys.count == candidateCount)
+        #expect(keys.first == 1_000_000_000)
+        #expect(keys.last == Int64(candidateCount) * 1_000_000_000)
+        #expect(zip(keys, keys.dropFirst()).allSatisfy { $1 - $0 == 1_000_000_000 })
+    }
+
+    @Test
+    func transactionalSingleCandidateStepIsCopyableAndRetryable() throws {
+        var emitter = try TimedStrokeEmitter(timeInterval: 0.1)
+        _ = try emitter.begin(at: timedPoint(
+            x: 0,
+            timestamp: 0,
+            sourceDistance: 0,
+            direction: 0,
+            phase: .began
+        ))
+        let proposed = try emitter.advance(to: timedPoint(
+            x: 3,
+            timestamp: 0.3,
+            sourceDistance: 3,
+            direction: 0,
+            phase: .moved
+        ))
+        let source = try #require(proposed)
+        let firstProposal = try source.nextCandidate()
+        let retryProposal = try source.nextCandidate()
+        let first = try #require(firstProposal)
+        let retry = try #require(retryProposal)
+        #expect(first == retry)
+        let secondProposal = try first.continuation.nextCandidate()
+        let second = try #require(secondProposal)
+        #expect(first.candidate.timeKey == 100_000_000)
+        #expect(second.candidate.timeKey == 200_000_000)
+        #expect(source.remainingCandidateCount == 3)
+    }
+
     @Test
     func copiedOrAbandonedContinuationCannotMutateAuthoritativeState() throws {
         var emitter = try TimedStrokeEmitter(timeInterval: 1.0 / 240)

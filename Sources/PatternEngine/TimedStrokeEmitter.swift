@@ -32,6 +32,13 @@ public struct TimedStrokeEmissionPage: Equatable, Sendable {
     public let hasMore: Bool
 }
 
+/// One transactional source-cursor decision. Install `continuation` only after
+/// the candidate has been accepted by the merge and downstream sink.
+public struct TimedStrokeEmissionStep: Equatable, Sendable {
+    public let candidate: StrokeEmissionCandidate
+    public let continuation: TimedStrokeEmissionCursor
+}
+
 /// A copyable arithmetic cursor over a bounded page of recorded-time output.
 public struct TimedStrokeEmissionCursor: Equatable, Sendable {
     private let originTimestamp: TimeInterval
@@ -89,6 +96,39 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
         return result
     }
 
+    public func nextCandidate() throws -> TimedStrokeEmissionStep? {
+        if let beginCandidate {
+            var continuation = self
+            continuation.beginCandidate = nil
+            return TimedStrokeEmissionStep(
+                candidate: beginCandidate,
+                continuation: continuation
+            )
+        }
+        if nextTickIndex <= finalTickIndex {
+            let candidate = try timedCandidate(at: nextTickIndex)
+            let (nextIndex, overflow) = nextTickIndex.addingReportingOverflow(1)
+            guard !overflow else {
+                throw TimedStrokeEmitterError.tickIndexOverflow
+            }
+            var continuation = self
+            continuation.nextTickIndex = nextIndex
+            return TimedStrokeEmissionStep(
+                candidate: candidate,
+                continuation: continuation
+            )
+        }
+        if let finishCandidate {
+            var continuation = self
+            continuation.finishCandidate = nil
+            return TimedStrokeEmissionStep(
+                candidate: finishCandidate,
+                continuation: continuation
+            )
+        }
+        return nil
+    }
+
     /// Emits at most one logical-batch page. Successfully accepted candidates
     /// advance the cursor one at a time, so a failed sink can safely retry.
     @discardableResult
@@ -96,26 +136,11 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
         _ emit: (StrokeEmissionCandidate) throws -> Void
     ) throws -> TimedStrokeEmissionPage {
         var emittedCount = 0
-        if let beginCandidate {
-            try emit(beginCandidate)
-            self.beginCandidate = nil
-            emittedCount += 1
-        }
-
         while emittedCount < LogicalDabBatch.maximumDabCount,
-              nextTickIndex <= finalTickIndex
+              let step = try nextCandidate()
         {
-            let candidate = try timedCandidate(at: nextTickIndex)
-            try emit(candidate)
-            nextTickIndex += 1
-            emittedCount += 1
-        }
-        if emittedCount < LogicalDabBatch.maximumDabCount,
-           nextTickIndex > finalTickIndex,
-           let finishCandidate
-        {
-            try emit(finishCandidate)
-            self.finishCandidate = nil
+            try emit(step.candidate)
+            self = step.continuation
             emittedCount += 1
         }
         return TimedStrokeEmissionPage(

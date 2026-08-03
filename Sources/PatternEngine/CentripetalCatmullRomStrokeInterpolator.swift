@@ -248,6 +248,74 @@ public enum StrokePathInterpolationOutcome: Equatable, Sendable {
     case truncated
 }
 
+/// Copyable, allocation-free traversal of one attributed path advance.
+///
+/// The stroke generator owns this cursor while a logical-dab page is pending.
+/// Installing `completedPath` is therefore an explicit commit performed only
+/// after every segment in the advance has been consumed.
+struct AttributedStrokePathAdvanceStep: Equatable, Sendable {
+    let segment: AttributedStrokePathSegment
+    let continuation: AttributedStrokePathAdvanceCursor
+}
+
+struct AttributedStrokePathAdvanceCursor: Equatable, Sendable {
+    private let p0: InterpolatedStrokeSample
+    private let p1: InterpolatedStrokeSample
+    private let current: InterpolatedStrokeSample
+    private let subdivisionCount: Int
+    private var nextStep: Int
+    private var lineStart: InterpolatedStrokeSample
+
+    let completedPath: CentripetalCatmullRomPathInterpolator
+
+    fileprivate init(
+        p0: InterpolatedStrokeSample,
+        p1: InterpolatedStrokeSample,
+        current: InterpolatedStrokeSample,
+        subdivisionCount: Int,
+        completedPath: CentripetalCatmullRomPathInterpolator
+    ) {
+        self.p0 = p0
+        self.p1 = p1
+        self.current = current
+        self.subdivisionCount = subdivisionCount
+        nextStep = 1
+        lineStart = p1
+        self.completedPath = completedPath
+    }
+
+    var isComplete: Bool {
+        nextStep > subdivisionCount
+    }
+
+    func nextSegment() -> AttributedStrokePathAdvanceStep? {
+        guard !isComplete else { return nil }
+        let fraction = Float(nextStep) / Float(subdivisionCount)
+        let position = CentripetalCatmullRomPathInterpolator.samplePosition(
+            p0: p0.position,
+            p1: p1.position,
+            p2: current.position,
+            p3: current.position,
+            u: fraction
+        )
+        let lineEnd = p1.interpolated(
+            to: current,
+            fraction: fraction,
+            position: position
+        )
+        var continuation = self
+        continuation.nextStep += 1
+        continuation.lineStart = lineEnd
+        return AttributedStrokePathAdvanceStep(
+            segment: AttributedStrokePathSegment(
+                start: lineStart,
+                end: lineEnd
+            ),
+            continuation: continuation
+        )
+    }
+}
+
 /// Converts attributed control points into deterministic short path segments.
 /// Dab spacing is deliberately owned by the downstream stroke generator.
 public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
@@ -321,6 +389,52 @@ public struct CentripetalCatmullRomPathInterpolator: Equatable, Sendable {
             after: p1,
             subdivisions: subdivisions,
             emit: emit
+        )
+    }
+
+    /// Creates a bounded, resumable traversal without mutating this path.
+    /// The caller installs the cursor's `completedPath` only after draining it.
+    func advanceCursor(
+        to current: InterpolatedStrokeSample,
+        maximumSubdivisionCount: Int
+    ) throws -> AttributedStrokePathAdvanceCursor? {
+        precondition(maximumSubdivisionCount > 0)
+        guard let p1 = previous, let p0 = beforePrevious else { return nil }
+        let requiredSubdivisionCount = Self.requiredSubdivisionCount(
+            p0: p0.position,
+            p1: p1.position,
+            p2: current.position,
+            maximumSegmentLength: maximumSegmentLength,
+            minimumSubdivisionEstimate: minimumSubdivisionEstimate
+        )
+        guard requiredSubdivisionCount <= Double(maximumSubdivisionCount)
+        else {
+            throw StrokePathInterpolationError.subdivisionCapacityExceeded(
+                maximum: maximumSubdivisionCount
+            )
+        }
+        let estimate = max(
+            simd_distance(p0.position.simd, p1.position.simd)
+                + simd_distance(p1.position.simd, current.position.simd),
+            minimumSubdivisionEstimate
+        )
+        let rawSubdivisionCount = ceil(estimate / maximumSegmentLength)
+        guard rawSubdivisionCount.isFinite,
+              Double(rawSubdivisionCount) <= Double(maximumSubdivisionCount)
+        else {
+            throw StrokePathInterpolationError.subdivisionCapacityExceeded(
+                maximum: maximumSubdivisionCount
+            )
+        }
+        var completedPath = self
+        completedPath.beforePrevious = p1
+        completedPath.previous = current
+        return AttributedStrokePathAdvanceCursor(
+            p0: p0,
+            p1: p1,
+            current: current,
+            subdivisionCount: max(1, Int(rawSubdivisionCount)),
+            completedPath: completedPath
         )
     }
 

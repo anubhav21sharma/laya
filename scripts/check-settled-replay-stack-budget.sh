@@ -130,6 +130,33 @@ measure random_eq "$debug_binary" BrushRandomV23__derived_struct_equals external
 measure ink_eq "$debug_binary" InkColorV23__derived_struct_equals external fragment
 measure point_eq "$debug_binary" WorldPointV23__derived_struct_equals external fragment
 
+# Schema-v2 emission continuation. The value is deliberately separate from
+# BrushStrokeGenerator, so the old coordinator composite cannot account for
+# its construction/page/resume frames until C12 owns it. Measure the public
+# fail-closed roots plus every non-inlined branch in the debug call tree.
+measure cursor_construct "$debug_binary" BrushStrokeGeneratorV14emissionCursor external fragment
+measure cursor_init "$debug_binary" EmissionCursorV9generator6sample27maximumPathSubdivisionCount non-external fragment
+measure cursor_page "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV12emitNextPage external fragment
+measure cursor_step "$debug_binary" EmissionCursorV10advanceOne non-external fragment
+measure cursor_prepare "$debug_binary" EmissionCursorV7prepare non-external fragment
+measure cursor_path "$debug_binary" EmissionCursorV11advancePath non-external fragment
+measure cursor_source "$debug_binary" EmissionCursorV13advanceSource non-external fragment
+measure cursor_segment "$debug_binary" EmissionCursorV14advanceSegment non-external fragment
+measure cursor_initial "$debug_binary" EmissionCursorV18prepareInitialPath non-external fragment
+measure cursor_held "$debug_binary" EmissionCursorV16prepareHeldBegin non-external fragment
+measure cursor_after_path "$debug_binary" EmissionCursorV9afterPath non-external fragment
+measure cursor_begin_source "$debug_binary" EmissionCursorV18prepareBeginSource non-external fragment
+measure cursor_prepare_segment "$debug_binary" EmissionCursorV21preparePendingSegment non-external fragment
+measure cursor_finish_source "$debug_binary" EmissionCursorV19prepareFinishSource non-external fragment
+measure cursor_source_candidate "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV06SourceG0 non-external swift-function
+measure cursor_segment_candidate "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV07SegmentG033_FCAB7D0E8C2617936E49D6F33D25623ALLV07advanceH9Candidate non-external swift-function
+measure cursor_spatial "$debug_binary" prepareSpatialCandidate non-external swift-function
+measure cursor_decide "$debug_binary" decidePreparedCandidates non-external swift-function
+measure cursor_commit "$debug_binary" commitPreparedCandidates non-external swift-function
+measure cursor_segment_finish "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV07SegmentG033_FCAB7D0E8C2617936E49D6F33D25623ALLV06finishH0 non-external fragment
+measure cursor_accept "$debug_binary" BrushStrokeGeneratorV21emitAcceptedCandidate non-external fragment
+measure cursor_evaluate "$debug_binary" BrushStrokeGeneratorV12evaluatedDab non-external fragment
+
 # BrushProgram semantic equality branches.
 measure definition_helper "$debug_binary" BrushProgramC16definitionsEqual non-external fragment
 measure dynamics_helper "$debug_binary" BrushProgramC13dynamicsEqual non-external fragment
@@ -225,6 +252,36 @@ require_composite structural "$structural"
 require_composite input "$input"
 require_composite generator "$generator" "$generator_debug_limit"
 
+cursor_construct_composite=$((cursor_construct + cursor_init))
+cursor_accept_composite=$((cursor_accept + cursor_evaluate))
+cursor_prepare_branch=$((cursor_prepare + $(maximum \
+  $((cursor_initial + cursor_held + cursor_begin_source)) \
+  $((cursor_held + cursor_begin_source)) \
+  "$cursor_finish_source")))
+cursor_after_branch=$((cursor_after_path + $(maximum \
+  $((cursor_held + cursor_begin_source)) \
+  "$cursor_finish_source")))
+cursor_path_branch=$((cursor_path + $(maximum \
+  "$cursor_after_branch" \
+  $((cursor_held + cursor_begin_source)) \
+  "$cursor_prepare_segment")))
+cursor_source_branch=$((cursor_source + $(maximum \
+  $((cursor_source_candidate + cursor_accept_composite)) \
+  "$cursor_prepare_segment" "$cursor_finish_source")))
+cursor_segment_phase=$(maximum \
+  "$cursor_spatial" "$cursor_decide" \
+  $((cursor_commit + cursor_accept_composite)))
+cursor_segment_branch=$((cursor_segment + $(maximum \
+  $((cursor_segment_candidate + cursor_segment_phase)) \
+  "$cursor_segment_finish")))
+cursor_advance_branch=$(maximum \
+  "$cursor_prepare_branch" "$cursor_path_branch" \
+  "$cursor_source_branch" "$cursor_segment_branch")
+cursor_advance_composite=$((cursor_page + cursor_step + cursor_advance_branch))
+require_composite cursor_construct "$cursor_construct_composite" "$generator_debug_limit"
+require_composite cursor_advance "$cursor_advance_composite" "$generator_debug_limit"
+require_composite cursor_resume "$cursor_advance_composite" "$generator_debug_limit"
+
 # Optimized private helpers may be folded into their roots. Gate every stable
 # production/equality root that must survive; inlined private work is therefore
 # charged to one of these optimized frames instead of silently disappearing.
@@ -238,7 +295,9 @@ for release_spec in \
   'CompiledBrushSensorProgramC2eeoiy non-external fragment' \
   'BrushStrokeGeneratorV5begin_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment' \
   'BrushStrokeGeneratorV6append_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment' \
-  'BrushStrokeGeneratorV6finish_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment'
+  'BrushStrokeGeneratorV6finish_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment' \
+  'BrushStrokeGeneratorV14emissionCursor external fragment' \
+  'BrushStrokeGeneratorV14EmissionCursorV12emitNextPage external fragment'
 do
   set -- $release_spec
   "$frame_checker" "$release_binary" "$1" "$release_limit" "$2" "$3"

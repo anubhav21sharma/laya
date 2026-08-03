@@ -120,6 +120,14 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case directionCornerAllocations(total: UInt64)
     case stabilizerV2Allocations(total: UInt64)
     case stageCGeneratorAllocations(total: UInt64)
+    case stageCEmissionCursorAllocations(total: UInt64)
+    case stageCEmissionCursorIncomplete
+    case stageCEmissionPageMismatch(
+        firstCount: Int,
+        firstHasMore: Bool,
+        secondCount: Int,
+        secondHasMore: Bool
+    )
     case timedEmitterAllocations(normal: UInt64, hugeGap: UInt64)
     case timedEmitterMissingCursor
     case tipSupportSpacingAllocations(total: UInt64)
@@ -154,6 +162,18 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
             "stabilizer v2 path allocated \(total) times after warm-up"
         case let .stageCGeneratorAllocations(total):
             "integrated Stage C generator allocated \(total) times after warm-up"
+        case let .stageCEmissionCursorAllocations(total):
+            "paged Stage C emission allocated \(total) times after warm-up"
+        case .stageCEmissionCursorIncomplete:
+            "paged Stage C emission did not complete the bounded probe input"
+        case let .stageCEmissionPageMismatch(
+            firstCount,
+            firstHasMore,
+            secondCount,
+            secondHasMore
+        ):
+            "paged Stage C boundary mismatch first=\(firstCount)/"
+                + "\(firstHasMore) second=\(secondCount)/\(secondHasMore)"
         case let .timedEmitterAllocations(normal, hugeGap):
             "timed emitter allocated after warm-up; normal=\(normal) "
                 + "hugeGap=\(hugeGap)"
@@ -222,6 +242,8 @@ private struct BrushInputAllocationProbeHarness {
                 try runStabilizerV2Probe(probe: probe)
             case "--stage-c-generator":
                 try runStageCGeneratorProbe(probe: probe)
+            case "--stage-c-emission":
+                try runStageCEmissionCursorProbe(probe: probe)
             case "--timed-emitter":
                 try runTimedEmitterProbe(probe: probe)
             case "--tip-support-spacing":
@@ -687,7 +709,12 @@ private struct BrushInputAllocationProbeHarness {
         id: String,
         stabilization: BrushStabilizationDefinition,
         maximumAngularStep: Float,
-        footprint: StageCProbeFootprint = .ellipse
+        footprint: StageCProbeFootprint = .ellipse,
+        usesDirectionOutput: Bool = true,
+        emission: BrushEmissionDefinition = BrushEmissionDefinition(
+            mode: .distance,
+            timeInterval: nil
+        )
     ) throws -> BrushDefinition {
         let base = try LegacyBrushRecipeAdapter.definition(
             from: .legacyEquivalent,
@@ -705,23 +732,25 @@ private struct BrushInputAllocationProbeHarness {
                 terms: []
             )
         }
-        outputs[.rotation] = BrushOutputProgramDefinition(
-            baseValue: 0,
-            terms: [
-                BrushResponseTermDefinition(
-                    input: .direction,
-                    response: .linear,
-                    inputInverted: false,
-                    missingInputValue: 0.5,
-                    responseScale: 2 * .pi,
-                    responseOffset: -.pi,
-                    responseLowerClamp: -.pi,
-                    responseUpperClamp: .pi,
-                    jitter: 0,
-                    operation: .replace
-                ),
-            ]
-        )
+        if usesDirectionOutput {
+            outputs[.rotation] = BrushOutputProgramDefinition(
+                baseValue: 0,
+                terms: [
+                    BrushResponseTermDefinition(
+                        input: .direction,
+                        response: .linear,
+                        inputInverted: false,
+                        missingInputValue: 0.5,
+                        responseScale: 2 * .pi,
+                        responseOffset: -.pi,
+                        responseLowerClamp: -.pi,
+                        responseUpperClamp: .pi,
+                        jitter: 0,
+                        operation: .replace
+                    ),
+                ]
+            )
+        }
         let primaryShape = base.coverage.shapes[0]
         let coverage: BrushCoverageDefinition
         let tipSupports: [BrushTipSupportDefinition]
@@ -835,11 +864,234 @@ private struct BrushInputAllocationProbeHarness {
                 maximumAngularStep: maximumAngularStep,
                 stationaryDirection: 0
             ),
-            emission: BrushEmissionDefinition(
-                mode: .distance,
-                timeInterval: nil
-            ),
+            emission: emission,
             tipSupports: tipSupports
+        )
+    }
+
+    private static func runStageCEmissionCursorProbe(
+        probe: AllocatorProbe
+    ) throws {
+        let unionProgram = try BrushProgramCompiler.compile(
+            makeStageCProbeDefinition(
+                id: "probe.stage-c.emission.union",
+                stabilization: .none,
+                maximumAngularStep: .pi / 8,
+                emission: BrushEmissionDefinition(
+                    mode: .distanceAndTime,
+                    timeInterval: 0.25
+                )
+            )
+        )
+        let timedProgram = try BrushProgramCompiler.compile(
+            makeStageCProbeDefinition(
+                id: "probe.stage-c.emission.time",
+                stabilization: .none,
+                maximumAngularStep: .pi / 8,
+                usesDirectionOutput: false,
+                emission: BrushEmissionDefinition(
+                    mode: .time,
+                    timeInterval: 1.0 / 240
+                )
+            )
+        )
+        let samples = makeStageCEmissionProbeSamples()
+        _ = try runStageCEmissionCursorScenarios(
+            unionProgram: unionProgram,
+            timedProgram: timedProgram,
+            samples: samples
+        )
+
+        probe.arm()
+        let checksum: UInt64
+        do {
+            checksum = try runStageCEmissionCursorScenarios(
+                unionProgram: unionProgram,
+                timedProgram: timedProgram,
+                samples: samples
+            )
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
+        let allocations = probe.disarm()
+        guard allocations == 0 else {
+            throw ProbeHarnessError.stageCEmissionCursorAllocations(
+                total: allocations
+            )
+        }
+        print(
+            "ALLOCATOR PROBE STAGE C EMISSION PASS allocations=0 "
+                + "checksum=\(checksum)"
+        )
+    }
+
+    @inline(never)
+    private static func runStageCEmissionCursorScenarios(
+        unionProgram: BrushProgram,
+        timedProgram: BrushProgram,
+        samples: StageCEmissionProbeSamples
+    ) throws -> UInt64 {
+        var checksum: UInt64 = 0
+        var union = BrushStrokeGenerator(
+            program: unionProgram,
+            nominalDiameter: 20,
+            color: .black,
+            seed: 0xC1_11_A1
+        )
+        try drainStageCEmissionInput(
+            generator: &union,
+            sample: samples.began,
+            checksum: &checksum
+        )
+        try drainStageCEmissionInput(
+            generator: &union,
+            sample: samples.right,
+            checksum: &checksum
+        )
+        try drainStageCEmissionInput(
+            generator: &union,
+            sample: samples.up,
+            checksum: &checksum
+        )
+        try drainStageCEmissionInput(
+            generator: &union,
+            sample: samples.ended,
+            checksum: &checksum
+        )
+
+        var boundary = BrushStrokeGenerator(
+            program: timedProgram,
+            nominalDiameter: 20,
+            color: .black,
+            seed: 0xC1_11_A2
+        )
+        var begin = try boundary.emissionCursor(
+            for: samples.began,
+            maximumPathSubdivisionCount: 4_096
+        )
+        _ = try begin.emitNextPage { checksum &+= $0.ordinal }
+        guard let boundaryContinuation = begin.completedGenerator else {
+            throw ProbeHarnessError.stageCEmissionCursorIncomplete
+        }
+        boundary = boundaryContinuation
+        var pageCursor = try boundary.emissionCursor(
+            for: samples.boundaryEnded,
+            maximumPathSubdivisionCount: 4_096
+        )
+        let first = try pageCursor.emitNextPage { checksum &+= $0.ordinal }
+        let second = try pageCursor.emitNextPage { checksum &+= $0.ordinal }
+        guard first.emittedCount == 512,
+              first.hasMore,
+              second.emittedCount == 1,
+              !second.hasMore
+        else {
+            throw ProbeHarnessError.stageCEmissionPageMismatch(
+                firstCount: first.emittedCount,
+                firstHasMore: first.hasMore,
+                secondCount: second.emittedCount,
+                secondHasMore: second.hasMore
+            )
+        }
+
+        var huge = BrushStrokeGenerator(
+            program: timedProgram,
+            nominalDiameter: 20,
+            color: .black,
+            seed: 0xC1_11_A3
+        )
+        var hugeBegin = try huge.emissionCursor(
+            for: samples.began,
+            maximumPathSubdivisionCount: 4_096
+        )
+        _ = try hugeBegin.emitNextPage { checksum &+= $0.ordinal }
+        guard let hugeContinuation = hugeBegin.completedGenerator else {
+            throw ProbeHarnessError.stageCEmissionCursorIncomplete
+        }
+        huge = hugeContinuation
+        var hugeCursor = try huge.emissionCursor(
+            for: samples.hugeEnded,
+            maximumPathSubdivisionCount: 4_096
+        )
+        let hugePage = try hugeCursor.emitNextPage {
+            checksum &+= $0.ordinal
+        }
+        guard hugePage.emittedCount == 512, hugePage.hasMore else {
+            throw ProbeHarnessError.stageCEmissionPageMismatch(
+                firstCount: hugePage.emittedCount,
+                firstHasMore: hugePage.hasMore,
+                secondCount: 0,
+                secondHasMore: false
+            )
+        }
+        return checksum
+    }
+
+    @inline(__always)
+    private static func drainStageCEmissionInput(
+        generator: inout BrushStrokeGenerator,
+        sample: WorldStrokeSample,
+        checksum: inout UInt64
+    ) throws {
+        var cursor = try generator.emissionCursor(
+            for: sample,
+            maximumPathSubdivisionCount: 4_096
+        )
+        repeat {
+            _ = try cursor.emitNextPage { dab in
+                checksum &+= dab.ordinal
+                checksum &+= UInt64(dab.rotation.bitPattern)
+            }
+        } while !cursor.isComplete
+        guard let continuation = cursor.completedGenerator else {
+            throw ProbeHarnessError.stageCEmissionCursorIncomplete
+        }
+        generator = continuation
+    }
+
+    private static func makeStageCEmissionProbeSamples()
+        -> StageCEmissionProbeSamples
+    {
+        let viewport = ViewportTransform(
+            drawableSize: PatternSize(width: 256, height: 256),
+            worldCenter: WorldPoint(x: 128, y: 128)
+        )
+        func sample(
+            x: Float,
+            y: Float,
+            timestamp: TimeInterval,
+            phase: StrokePhase
+        ) -> WorldStrokeSample {
+            var deriver = BrushInputDeriver()
+            return deriver.derive(
+                StrokeSample(
+                    position: ScreenPoint(x: x, y: y),
+                    pressure: 0.5,
+                    timestamp: timestamp,
+                    phase: phase,
+                    source: .pencil,
+                    capabilities: [.pressure]
+                ),
+                viewport: viewport
+            )
+        }
+        return StageCEmissionProbeSamples(
+            began: sample(x: 64, y: 64, timestamp: 0, phase: .began),
+            right: sample(x: 112, y: 64, timestamp: 0.5, phase: .moved),
+            up: sample(x: 112, y: 16, timestamp: 1, phase: .moved),
+            ended: sample(x: 64, y: 16, timestamp: 1.5, phase: .ended),
+            boundaryEnded: sample(
+                x: 64,
+                y: 64,
+                timestamp: 513.0 / 240,
+                phase: .ended
+            ),
+            hugeEnded: sample(
+                x: 64,
+                y: 64,
+                timestamp: 1_000_000,
+                phase: .ended
+            )
         )
     }
 
@@ -2027,6 +2279,15 @@ private struct StageCGeneratorProbeSamples {
     let left: WorldStrokeSample
     let predicted: WorldStrokeSample
     let ended: WorldStrokeSample
+}
+
+private struct StageCEmissionProbeSamples {
+    let began: WorldStrokeSample
+    let right: WorldStrokeSample
+    let up: WorldStrokeSample
+    let ended: WorldStrokeSample
+    let boundaryEnded: WorldStrokeSample
+    let hugeEnded: WorldStrokeSample
 }
 
 private enum StageCProbeFootprint {
