@@ -141,9 +141,35 @@ the cursor phase workers: footprint/stabilizer/path/direction setup, reset,
 candidate and source preparation, corner traversal, timed begin/advance/
 prediction/finish, timed sample/candidate generation, and merger decisions.
 It also fails if a phase worker is invoked anywhere except its definition and
-the `advanceOne` dispatcher, and fails if any calculated `*_branch` composite
-is not consumed. Thus the prior omission and unused-branch failure modes are
-structurally guarded rather than documented only by review.
+the `advanceOne` dispatcher. The initial occurrence-count attempt to guard
+calculated `*_branch` composites was superseded by the closed audit below.
+
+### Review RED 3 — timed descendants and self-satisfying branch audit
+
+A third independent review found two remaining gate-only defects; production
+semantics were clean. First, the gate charged `TimedStrokeEmitter.begin`,
+`advance`, `prediction`, and `finish` as leaves. Their non-inlined validation,
+canonical-key, tick-index, successor-index, and reset helpers were therefore
+absent. The strongest omitted descendant was `lastTickIndex` 640 +
+`canonicalKey` 336 = 976 bytes. Raw RED accounting showed the prediction root
+as 5,088 leaf bytes versus 6,064 complete bytes, an undercount of 976. The
+complete audited roots are now begin 3,200, advance 5,936, prediction 6,064,
+and finish 3,760 bytes.
+
+Second, the prior structural check accepted any branch name appearing twice.
+An orphan `orphan_review_mutant_branch=1` followed by a `printf` therefore
+satisfied its own assignment-plus-use count without reaching an asserted
+root. The permanent fast mutation test reproduces that exact adversary. The
+replacement keeps a closed explicit inventory of every audited `*_branch`
+name and compares it exactly with all branch assignments before any binary
+measurement. Every branch also has an explicit child-to-parent dependency path
+to the asserted `cursor_advance_composite` root. The gate verifies each declared
+edge against the parent's real multiline assignment expression, verifies every
+branch has a parent, and verifies the root is passed to `require_composite`.
+The fast mutation test rejects an unlisted orphan, a listed-but-unreachable
+orphan, and a listed orphan with a fabricated edge that is absent from its
+parent formula. All three fail before binary measurement; normal gate runs do
+not execute a nested mutant gate.
 
 This preserves exact retry semantics while remaining allocation-free. The
 fail-closed formula now charges:
@@ -157,10 +183,10 @@ fail-closed formula now charges:
 - every cursor phase, prepared lookup, accepted-candidate transaction and
   commit branch beneath the live page frame.
 
-Final debug values are 36,208 bytes for construction and 54,768 bytes for both
-advance and resume, below the 57,344-byte limit with 2,576 bytes reserve.
+Final debug values are 36,208 bytes for construction and 55,200 bytes for both
+advance and resume, below the 57,344-byte limit with 2,144 bytes reserve.
 Optimized `emissionCursor`, `emitNextPage` and dynamics `evaluate` roots are
-7,952, 10,512 and 480 bytes, respectively, below 16 KiB.
+7,952, 10,992 and 480 bytes, respectively, below 16 KiB.
 
 ## Contract implementation
 
@@ -234,12 +260,15 @@ stabilize the scheduler-facing API. The recommended cleanup point is after C12.
 - ARM64 stack gate: debug cursor composites <=57,344 and optimized public roots
   <=16 KiB under pinned Xcode 26.6 / Swift 6.3.3 / LLVM 21.0.0. Raw final
   components: structural 43,824; input 35,056; generator 48,960; dynamics
-  evaluator/native/full 10,080/24,128/24,672; accept 29,984; selection 29,584;
+  evaluator/native/full 10,080/24,128/24,672; accept 29,984; selection 30,416;
   prepared 12,368; commit 17,632; page 24,784; construct 36,208; advance/resume
-  54,768;
-- stack-gate structural audit: 14 phase workers are dispatch-only and all 48
-  calculated branch composites are consumed; public timed `nextCandidate`
-  composite is explicitly gated at 7,952 bytes;
+  55,200;
+- stack-gate structural audit: 14 phase workers are dispatch-only and the
+  closed 54-branch inventory matches every calculated branch assignment; all
+  55 declared edges match real parent formulas and reach the asserted cursor
+  root; unlisted, listed-unreachable, and fabricated-edge orphan mutations are
+  rejected before measurement; public timed `nextCandidate` is explicitly
+  gated at 7,952 bytes;
 - symbol selection is fail-closed: the fully qualified generator cursor page
   resolves once, while the deliberately broad timed/generator cursor fragment
   is rejected as ambiguous;

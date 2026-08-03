@@ -98,22 +98,226 @@ require_phase_worker_dispatch_only() {
   printf 'STACK STRUCTURE PASS phase_workers=%s dispatch=advanceOne\n' "$#"
 }
 
-require_all_branch_composites_consumed() {
+require_closed_branch_names() {
   local source=$1
+  shift
+  local actual
+  local expected
+  local missing
+  local unexpected
+  actual=$(sed -n 's/^\([a-z][a-z0-9_]*_branch\)=.*/\1/p' "$source" \
+    | LC_ALL=C sort -u)
+  expected=$(printf '%s\n' "$@" | LC_ALL=C sort -u)
+  unexpected=$(comm -13 \
+    <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") \
+    | head -1)
+  if [[ -n "$unexpected" ]]; then
+    printf 'STACK STRUCTURE FAIL unexpected_branch=%s\n' \
+      "$unexpected" >&2
+    exit 1
+  fi
+  missing=$(comm -23 \
+    <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") \
+    | head -1)
+  if [[ -n "$missing" ]]; then
+    printf 'STACK STRUCTURE FAIL missing_branch=%s\n' "$missing" >&2
+    exit 1
+  fi
+  printf 'STACK STRUCTURE PASS closed_branches=%s\n' "$#"
+}
+
+require_audited_branch_values() {
   local name
-  local occurrences
-  local count=0
-  while IFS= read -r name; do
-    occurrences=$(grep -o "$name" "$source" | wc -l | tr -d ' ')
-    if (( occurrences < 2 )); then
-      printf 'STACK STRUCTURE FAIL composite=%s occurrences=%s expected_at_least=2\n' \
-        "$name" "$occurrences" >&2
+  local value
+  for name in "$@"; do
+    value=${!name-}
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+      printf 'STACK STRUCTURE FAIL unaudited_branch_value=%s\n' "$name" >&2
       exit 1
     fi
-    count=$((count + 1))
-  done < <(sed -n 's/^\([a-z][a-z0-9_]*_branch\)=.*/\1/p' "$source")
-  printf 'STACK STRUCTURE PASS consumed_composites=%s\n' "$count"
+  done
+  printf 'STACK STRUCTURE PASS audited_branch_values=%s\n' "$#"
 }
+
+require_branch_root_reachability() {
+  local root=$1
+  local reachable=$root
+  local changed=1
+  local edge
+  local child
+  local parent
+  local branch
+  while (( changed != 0 )); do
+    changed=0
+    for edge in "${audited_branch_edges[@]}"; do
+      child=${edge%%:*}
+      parent=${edge#*:}
+      if printf '%s\n' "$reachable" | grep -Fqx "$parent" \
+          && ! printf '%s\n' "$reachable" | grep -Fqx "$child"
+      then
+        reachable=$(printf '%s\n%s' "$reachable" "$child")
+        changed=1
+      fi
+    done
+  done
+  for branch in "${audited_branches[@]}"; do
+    if ! printf '%s\n' "$reachable" | grep -Fqx "$branch"; then
+      printf 'STACK STRUCTURE FAIL unreachable_branch=%s root=%s\n' \
+        "$branch" "$root" >&2
+      exit 1
+    fi
+  done
+  printf 'STACK STRUCTURE PASS reachable_branches=%s root=%s\n' \
+    "${#audited_branches[@]}" "$root"
+}
+
+assignment_expression() {
+  local source=$1
+  local name=$2
+  awk -v assignment="$name" '
+    $0 ~ ("^" assignment "=") { emitting = 1 }
+    emitting {
+      print
+      if ($0 !~ /\\$/) { exit }
+    }
+  ' "$source"
+}
+
+require_declared_edges_match_formulas() {
+  local source=$1
+  local root=$2
+  local edge
+  local child
+  local parent
+  local expression
+  local branch
+  local has_parent
+  for edge in "${audited_branch_edges[@]}"; do
+    child=${edge%%:*}
+    parent=${edge#*:}
+    expression=$(assignment_expression "$source" "$parent")
+    if [[ -z "$expression" ]]; then
+      printf 'STACK STRUCTURE FAIL missing_parent_formula=%s child=%s\n' \
+        "$parent" "$child" >&2
+      exit 1
+    fi
+    if ! printf '%s\n' "$expression" \
+        | grep -Eq "(^|[^[:alnum:]_])${child}([^[:alnum:]_]|$)"
+    then
+      printf 'STACK STRUCTURE FAIL edge_not_in_formula child=%s parent=%s\n' \
+        "$child" "$parent" >&2
+      exit 1
+    fi
+  done
+  for branch in "${audited_branches[@]}"; do
+    has_parent=0
+    for edge in "${audited_branch_edges[@]}"; do
+      if [[ "${edge%%:*}" == "$branch" ]]; then
+        has_parent=1
+        break
+      fi
+    done
+    if (( has_parent == 0 )); then
+      printf 'STACK STRUCTURE FAIL branch_without_parent=%s\n' \
+        "$branch" >&2
+      exit 1
+    fi
+  done
+  if ! grep -Eq \
+      "^require_composite[[:space:]].*\\\$\\{?${root}\\}?" "$source"
+  then
+    printf 'STACK STRUCTURE FAIL unasserted_root=%s\n' "$root" >&2
+    exit 1
+  fi
+  printf 'STACK STRUCTURE PASS formula_edges=%s asserted_root=%s\n' \
+    "${#audited_branch_edges[@]}" "$root"
+}
+
+audited_branches=(
+  dynamics_input_branch dynamics_response_branch
+  dynamics_ordered_term_branch dynamics_ordered_output_branch
+  dynamics_ordered_branch dynamics_evaluator_branch
+  dynamics_taper_branch dynamics_placement_branch
+  dynamics_color_jitter_branch dynamics_primary_grain_branch
+  dynamics_secondary_grain_branch dynamics_random_branch
+  tip_layer_branch tip_include_branch tip_projection_branch
+  dynamics_support_branch dynamics_native_branch dynamics_branch
+  cursor_evaluate_branch timed_optional_angle_branch
+  timed_interpolated_branch timed_candidate_branch timed_next_branch
+  timed_consume_branch stabilizer_branch timed_emitter_validate_branch
+  timed_emitter_last_tick_branch timed_emitter_begin_branch
+  timed_emitter_advance_branch timed_emitter_prediction_branch
+  timed_emitter_finish_branch timed_initialization_branch
+  stage_c_timed_branch cursor_complete_branch cursor_prepare_branch
+  cursor_initial_branch cursor_begin_branch cursor_pending_segment_branch
+  cursor_finish_preparation_branch cursor_finish_timed_advance_branch
+  cursor_finish_timed_termination_branch cursor_after_branch
+  cursor_path_branch cursor_source_candidate_branch cursor_source_branch
+  cursor_segment_spatial_branch cursor_segment_timed_branch
+  cursor_segment_decide_branch cursor_segment_settle_branch
+  cursor_segment_lifecycle_branch cursor_advance_branch
+  cursor_selection_branch cursor_prepared_branch cursor_commit_branch
+)
+
+# Every audited branch has an explicit dependency path to the composite that
+# is asserted against the generator stack limit. Edges point child:parent.
+audited_branch_edges=(
+  dynamics_input_branch:dynamics_response_branch
+  dynamics_response_branch:dynamics_evaluator_branch
+  dynamics_ordered_term_branch:dynamics_ordered_output_branch
+  dynamics_ordered_output_branch:dynamics_ordered_branch
+  dynamics_ordered_branch:dynamics_evaluator_branch
+  dynamics_evaluator_branch:dynamics_branch
+  dynamics_taper_branch:dynamics_native_branch
+  dynamics_placement_branch:dynamics_native_branch
+  dynamics_color_jitter_branch:dynamics_native_branch
+  dynamics_primary_grain_branch:dynamics_native_branch
+  dynamics_secondary_grain_branch:dynamics_native_branch
+  dynamics_random_branch:dynamics_native_branch
+  tip_layer_branch:dynamics_support_branch
+  tip_include_branch:tip_projection_branch
+  tip_projection_branch:dynamics_support_branch
+  dynamics_support_branch:dynamics_native_branch
+  dynamics_native_branch:dynamics_branch
+  dynamics_branch:cursor_evaluate_branch
+  cursor_evaluate_branch:cursor_accept_composite
+  cursor_accept_composite:cursor_advance_composite
+  timed_optional_angle_branch:timed_interpolated_branch
+  timed_interpolated_branch:timed_candidate_branch
+  timed_candidate_branch:timed_next_branch
+  timed_next_branch:cursor_source_candidate_branch
+  timed_consume_branch:cursor_segment_timed_branch
+  stabilizer_branch:cursor_prepare_branch
+  timed_emitter_validate_branch:timed_emitter_begin_branch
+  timed_emitter_last_tick_branch:timed_emitter_advance_branch
+  timed_emitter_begin_branch:timed_initialization_branch
+  timed_emitter_advance_branch:stage_c_timed_branch
+  timed_emitter_prediction_branch:stage_c_timed_branch
+  timed_emitter_finish_branch:cursor_finish_timed_termination_branch
+  timed_initialization_branch:cursor_initial_branch
+  stage_c_timed_branch:cursor_pending_segment_branch
+  cursor_complete_branch:cursor_prepare_branch
+  cursor_prepare_branch:cursor_advance_branch
+  cursor_initial_branch:cursor_advance_branch
+  cursor_begin_branch:cursor_advance_branch
+  cursor_pending_segment_branch:cursor_advance_branch
+  cursor_finish_preparation_branch:cursor_advance_branch
+  cursor_finish_timed_advance_branch:cursor_advance_branch
+  cursor_finish_timed_termination_branch:cursor_advance_branch
+  cursor_after_branch:cursor_advance_branch
+  cursor_path_branch:cursor_advance_branch
+  cursor_source_candidate_branch:cursor_source_branch
+  cursor_source_branch:cursor_advance_branch
+  cursor_segment_spatial_branch:cursor_advance_branch
+  cursor_segment_timed_branch:cursor_advance_branch
+  cursor_segment_decide_branch:cursor_advance_branch
+  cursor_segment_settle_branch:cursor_advance_branch
+  cursor_segment_lifecycle_branch:cursor_advance_branch
+  cursor_advance_branch:cursor_selection_branch
+  cursor_selection_branch:cursor_advance_composite
+  cursor_prepared_branch:cursor_advance_composite
+  cursor_commit_branch:cursor_advance_composite
+)
 
 generator_source="$script_directory/../Sources/PatternEngine/BrushStrokeGenerator.swift"
 require_phase_worker_dispatch_only "$generator_source" \
@@ -122,6 +326,9 @@ require_phase_worker_dispatch_only "$generator_source" \
   prepareFinishTimedTermination advancePath afterPath advanceSource \
   prepareSegmentSpatial prepareSegmentTimed decideSegment \
   settleSegmentDuplicate advanceSegmentLifecycle
+require_closed_branch_names "$0" "${audited_branches[@]}"
+require_branch_root_reachability cursor_advance_composite
+require_declared_edges_match_formulas "$0" cursor_advance_composite
 
 # Coordinator frames and closures. Private fragments include the source-level
 # function name plus enough mangling context to exclude closure/partial symbols.
@@ -209,6 +416,12 @@ measure timed_begin "$debug_binary" TimedStrokeEmitterV5begin external fragment
 measure timed_advance "$debug_binary" TimedStrokeEmitterV7advance external fragment
 measure timed_prediction "$debug_binary" TimedStrokeEmitterV10prediction external fragment
 measure timed_finish "$debug_binary" TimedStrokeEmitterV6finish external fragment
+measure timed_emitter_validate "$debug_binary" TimedStrokeEmitterV8validate026_93A8D2497DE33A4E0A7046812J5DC127LL non-external fragment
+measure timed_emitter_provenance "$debug_binary" TimedStrokeEmitterV31validateAuthoritativeProvenance026_93A8D2497DE33A4E0A7046812L5DC127LL non-external fragment
+measure timed_emitter_canonical "$debug_binary" TimedStrokeEmitterV12canonicalKey026_93A8D2497DE33A4E0A7046812K5DC127LL non-external fragment
+measure timed_emitter_last_tick "$debug_binary" TimedStrokeEmitterV13lastTickIndex026_93A8D2497DE33A4E0A7046812L5DC127LL non-external fragment
+measure timed_emitter_index_after "$debug_binary" TimedStrokeEmitterV10indexAfter026_93A8D2497DE33A4E0A7046812K5DC127LL non-external fragment
+measure timed_emitter_reset "$debug_binary" TimedStrokeEmitterV5reset external fragment
 measure corner_cursor "$debug_binary" BrushCornerEmitterV6cursor external fragment
 measure corner_next "$debug_binary" BrushCornerEmissionCursorV13nextCandidate external fragment
 measure direction_begin "$debug_binary" BrushDirectionTrackerV5begin external fragment
@@ -459,9 +672,28 @@ timed_candidate_branch=$((timed_candidate + $(maximum \
 timed_next_branch=$((timed_next + timed_candidate_branch))
 timed_consume_branch=$((timed_consume + timed_candidate_branch))
 stabilizer_branch=$((generator_stabilizer + stabilizer_process))
-timed_initialization_branch=$((generator_timed_init + timed_begin))
+timed_emitter_validate_branch=$((timed_emitter_validate \
+  + timed_emitter_canonical))
+timed_emitter_last_tick_branch=$((timed_emitter_last_tick \
+  + timed_emitter_canonical))
+timed_emitter_begin_branch=$((timed_begin + $(maximum \
+  "$timed_emitter_validate_branch" "$timed_emitter_provenance" \
+  "$timed_emitter_canonical")))
+timed_emitter_advance_branch=$((timed_advance + $(maximum \
+  "$timed_emitter_validate_branch" "$timed_emitter_provenance" \
+  "$timed_emitter_canonical" "$timed_emitter_last_tick_branch")))
+timed_emitter_prediction_branch=$((timed_prediction + $(maximum \
+  "$timed_emitter_validate_branch" "$timed_emitter_canonical" \
+  "$timed_emitter_last_tick_branch" "$timed_emitter_index_after")))
+timed_emitter_finish_branch=$((timed_finish + $(maximum \
+  "$timed_emitter_validate_branch" "$timed_emitter_provenance" \
+  "$timed_emitter_canonical" "$timed_emitter_last_tick_branch" \
+  "$timed_emitter_index_after" "$timed_emitter_reset")))
+timed_initialization_branch=$((generator_timed_init \
+  + timed_emitter_begin_branch))
 stage_c_timed_branch=$((cursor_stage_c_timed + $(maximum \
-  "$stage_c_sample" "$timed_advance" "$timed_prediction")))
+  "$stage_c_sample" "$timed_emitter_advance_branch" \
+  "$timed_emitter_prediction_branch")))
 cursor_complete_branch=$((cursor_complete + generator_reset))
 cursor_prepare_branch=$((cursor_prepare + $(maximum \
   "$footprint_validate" "$generator_reset" "$stabilizer_branch" \
@@ -478,7 +710,7 @@ cursor_finish_preparation_branch=$((cursor_finish_source + $(maximum \
 cursor_finish_timed_advance_branch=$((cursor_finish_timed_advance \
   + stage_c_timed_branch))
 cursor_finish_timed_termination_branch=$(( \
-  cursor_finish_timed_termination + timed_finish))
+  cursor_finish_timed_termination + timed_emitter_finish_branch))
 cursor_after_branch=$((cursor_after_path + $(maximum \
   "$path_cancel" "$stage_c_timed_branch" "$cursor_prepare_source")))
 cursor_path_branch=$((cursor_path + $(maximum \
@@ -521,7 +753,7 @@ printf 'STACK COMPONENT dynamics_evaluator=%s dynamics_native=%s dynamics=%s cur
   "$dynamics_branch" "$cursor_accept_composite" \
   "$cursor_selection_branch" "$cursor_prepared_branch" \
   "$cursor_commit_branch" "$cursor_page"
-require_all_branch_composites_consumed "$0"
+require_audited_branch_values "${audited_branches[@]}"
 require_composite cursor_construct "$cursor_construct_composite" "$generator_debug_limit"
 require_composite timed_next "$timed_next_branch" "$generator_debug_limit"
 require_composite cursor_advance "$cursor_advance_composite" "$generator_debug_limit"
