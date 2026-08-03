@@ -171,6 +171,28 @@ orphan, and a listed orphan with a fabricated edge that is absent from its
 parent formula. All three fail before binary measurement; normal gate runs do
 not execute a nested mutant gate.
 
+### Review RED 4 — duplicate assignment and incomplete dependency set
+
+A fourth review found that name closure and reachability were still
+bypassable. `sort -u` hid a second assignment of an audited branch, while the
+assignment parser validated only the first expression even though a later
+assignment could change the runtime composite. Raw RED reduced two assignments
+to one unique name and accepted the duplicate. The declared DAG also recorded
+only one parent for multiply consumed branches. Removing
+`timed_emitter_validate_branch -> timed_emitter_prediction_branch`, for
+example, left an alternate path through begin and therefore passed
+reachability even though the prediction formula dependency was no longer
+audited.
+
+The gate now requires exactly one assignment for all 54 branches plus the two
+audited composite nodes. A single-pass formula extractor reads every complete
+multiline assignment, finds every audited branch/composite token in every RHS,
+and compares that exact sorted 65-edge set with the declared DAG. Duplicate,
+missing, or stale declared edges fail. The cursor root must appear in exactly
+one `require_composite` assertion. The mutation suite retains its prior three
+adversaries and adds duplicate reassignment plus removal of one real
+multi-parent edge; all five fail before binary measurement.
+
 This preserves exact retry semantics while remaining allocation-free. The
 fail-closed formula now charges:
 
@@ -183,8 +205,8 @@ fail-closed formula now charges:
 - every cursor phase, prepared lookup, accepted-candidate transaction and
   commit branch beneath the live page frame.
 
-Final debug values are 36,208 bytes for construction and 55,200 bytes for both
-advance and resume, below the 57,344-byte limit with 2,144 bytes reserve.
+Final debug values are 36,208 bytes for construction and 55,200 bytes for the
+advance/resume path, below the 57,344-byte limit with 2,144 bytes reserve.
 Optimized `emissionCursor`, `emitNextPage` and dynamics `evaluate` roots are
 7,952, 10,992 and 480 bytes, respectively, below 16 KiB.
 
@@ -264,11 +286,12 @@ stabilize the scheduler-facing API. The recommended cleanup point is after C12.
   prepared 12,368; commit 17,632; page 24,784; construct 36,208; advance/resume
   55,200;
 - stack-gate structural audit: 14 phase workers are dispatch-only and the
-  closed 54-branch inventory matches every calculated branch assignment; all
-  55 declared edges match real parent formulas and reach the asserted cursor
-  root; unlisted, listed-unreachable, and fabricated-edge orphan mutations are
-  rejected before measurement; public timed `nextCandidate` is explicitly
-  gated at 7,952 bytes;
+  closed 54-branch/two-composite inventory has exactly one assignment per
+  node; the declared DAG exactly matches all 65 real formula edges and reaches
+  the once-asserted cursor root; unlisted, listed-unreachable, fabricated-edge,
+  duplicate-assignment, and missing-multi-parent-edge mutations are rejected
+  before measurement; public timed `nextCandidate` is explicitly gated at
+  7,952 bytes;
 - symbol selection is fail-closed: the fully qualified generator cursor page
   resolves once, while the deliberately broad timed/generator cursor fragment
   is rejected as ambiguous;

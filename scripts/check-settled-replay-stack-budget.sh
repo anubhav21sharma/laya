@@ -183,32 +183,98 @@ assignment_expression() {
   ' "$source"
 }
 
-require_declared_edges_match_formulas() {
+require_unique_audited_node_assignments() {
   local source=$1
-  local root=$2
-  local edge
-  local child
-  local parent
-  local expression
-  local branch
-  local has_parent
-  for edge in "${audited_branch_edges[@]}"; do
-    child=${edge%%:*}
-    parent=${edge#*:}
-    expression=$(assignment_expression "$source" "$parent")
-    if [[ -z "$expression" ]]; then
-      printf 'STACK STRUCTURE FAIL missing_parent_formula=%s child=%s\n' \
-        "$parent" "$child" >&2
-      exit 1
-    fi
-    if ! printf '%s\n' "$expression" \
-        | grep -Eq "(^|[^[:alnum:]_])${child}([^[:alnum:]_]|$)"
-    then
-      printf 'STACK STRUCTURE FAIL edge_not_in_formula child=%s parent=%s\n' \
-        "$child" "$parent" >&2
+  local node
+  local count
+  for node in "${audited_nodes[@]}"; do
+    count=$(grep -Ec "^${node}=" "$source")
+    if (( count != 1 )); then
+      printf 'STACK STRUCTURE FAIL node=%s assignments=%s expected=1\n' \
+        "$node" "$count" >&2
       exit 1
     fi
   done
+  printf 'STACK STRUCTURE PASS unique_node_assignments=%s\n' \
+    "${#audited_nodes[@]}"
+}
+
+actual_formula_edges() {
+  local source=$1
+  local nodes="${audited_nodes[*]}"
+  awk -v nodes="$nodes" '
+    BEGIN {
+      nodeCount = split(nodes, node, " ")
+      for (idx = 1; idx <= nodeCount; idx += 1) {
+        known[node[idx]] = 1
+      }
+    }
+    function emitEdges(parent, expression, idx, child, pattern) {
+      for (idx = 1; idx <= nodeCount; idx += 1) {
+        child = node[idx]
+        if (child == parent) { continue }
+        pattern = "(^|[^[:alnum:]_])" child "([^[:alnum:]_]|$)"
+        if (expression ~ pattern) { print child ":" parent }
+      }
+    }
+    {
+      if (!emitting) {
+        equals = index($0, "=")
+        candidate = equals > 1 ? substr($0, 1, equals - 1) : ""
+        if (candidate in known) {
+          parent = candidate
+          expression = ""
+          emitting = 1
+        }
+      }
+      if (emitting) {
+        expression = expression "\n" $0
+        if ($0 !~ /\\$/) {
+          emitEdges(parent, expression)
+          emitting = 0
+        }
+      }
+    }
+  ' "$source"
+}
+
+require_declared_edges_match_formulas() {
+  local source=$1
+  local root=$2
+  local actual
+  local declared
+  local duplicate
+  local missing
+  local stale
+  local edge
+  local branch
+  local has_parent
+  local assertion_count
+  duplicate=$(printf '%s\n' "${audited_branch_edges[@]}" \
+    | LC_ALL=C sort | uniq -d | head -1)
+  if [[ -n "$duplicate" ]]; then
+    printf 'STACK STRUCTURE FAIL duplicate_declared_edge=%s\n' \
+      "$duplicate" >&2
+    exit 1
+  fi
+  actual=$(actual_formula_edges "$source" | LC_ALL=C sort)
+  declared=$(printf '%s\n' "${audited_branch_edges[@]}" | LC_ALL=C sort)
+  missing=$(comm -13 \
+    <(printf '%s\n' "$declared") <(printf '%s\n' "$actual") \
+    | head -1)
+  if [[ -n "$missing" ]]; then
+    printf 'STACK STRUCTURE FAIL missing_declared_edge=%s\n' \
+      "$missing" >&2
+    exit 1
+  fi
+  stale=$(comm -23 \
+    <(printf '%s\n' "$declared") <(printf '%s\n' "$actual") \
+    | head -1)
+  if [[ -n "$stale" ]]; then
+    printf 'STACK STRUCTURE FAIL stale_declared_edge=%s\n' \
+      "$stale" >&2
+    exit 1
+  fi
   for branch in "${audited_branches[@]}"; do
     has_parent=0
     for edge in "${audited_branch_edges[@]}"; do
@@ -223,10 +289,11 @@ require_declared_edges_match_formulas() {
       exit 1
     fi
   done
-  if ! grep -Eq \
-      "^require_composite[[:space:]].*\\\$\\{?${root}\\}?" "$source"
-  then
-    printf 'STACK STRUCTURE FAIL unasserted_root=%s\n' "$root" >&2
+  assertion_count=$(grep -Ec \
+    "^require_composite[[:space:]].*\\\$\\{?${root}\\}?" "$source")
+  if (( assertion_count != 1 )); then
+    printf 'STACK STRUCTURE FAIL root=%s assertions=%s expected=1\n' \
+      "$root" "$assertion_count" >&2
     exit 1
   fi
   printf 'STACK STRUCTURE PASS formula_edges=%s asserted_root=%s\n' \
@@ -258,12 +325,18 @@ audited_branches=(
   cursor_segment_lifecycle_branch cursor_advance_branch
   cursor_selection_branch cursor_prepared_branch cursor_commit_branch
 )
+audited_nodes=(
+  "${audited_branches[@]}"
+  cursor_accept_composite cursor_advance_composite
+)
 
 # Every audited branch has an explicit dependency path to the composite that
 # is asserted against the generator stack limit. Edges point child:parent.
 audited_branch_edges=(
   dynamics_input_branch:dynamics_response_branch
+  dynamics_input_branch:dynamics_ordered_term_branch
   dynamics_response_branch:dynamics_evaluator_branch
+  dynamics_response_branch:dynamics_secondary_grain_branch
   dynamics_ordered_term_branch:dynamics_ordered_output_branch
   dynamics_ordered_output_branch:dynamics_ordered_branch
   dynamics_ordered_branch:dynamics_evaluator_branch
@@ -285,17 +358,25 @@ audited_branch_edges=(
   timed_optional_angle_branch:timed_interpolated_branch
   timed_interpolated_branch:timed_candidate_branch
   timed_candidate_branch:timed_next_branch
+  timed_candidate_branch:timed_consume_branch
   timed_next_branch:cursor_source_candidate_branch
   timed_consume_branch:cursor_segment_timed_branch
   stabilizer_branch:cursor_prepare_branch
   timed_emitter_validate_branch:timed_emitter_begin_branch
+  timed_emitter_validate_branch:timed_emitter_advance_branch
+  timed_emitter_validate_branch:timed_emitter_prediction_branch
+  timed_emitter_validate_branch:timed_emitter_finish_branch
   timed_emitter_last_tick_branch:timed_emitter_advance_branch
+  timed_emitter_last_tick_branch:timed_emitter_prediction_branch
+  timed_emitter_last_tick_branch:timed_emitter_finish_branch
   timed_emitter_begin_branch:timed_initialization_branch
   timed_emitter_advance_branch:stage_c_timed_branch
   timed_emitter_prediction_branch:stage_c_timed_branch
   timed_emitter_finish_branch:cursor_finish_timed_termination_branch
   timed_initialization_branch:cursor_initial_branch
   stage_c_timed_branch:cursor_pending_segment_branch
+  stage_c_timed_branch:cursor_finish_timed_advance_branch
+  stage_c_timed_branch:cursor_after_branch
   cursor_complete_branch:cursor_prepare_branch
   cursor_prepare_branch:cursor_advance_branch
   cursor_initial_branch:cursor_advance_branch
@@ -327,6 +408,7 @@ require_phase_worker_dispatch_only "$generator_source" \
   prepareSegmentSpatial prepareSegmentTimed decideSegment \
   settleSegmentDuplicate advanceSegmentLifecycle
 require_closed_branch_names "$0" "${audited_branches[@]}"
+require_unique_audited_node_assignments "$0"
 require_branch_root_reachability cursor_advance_composite
 require_declared_edges_match_formulas "$0" cursor_advance_composite
 
@@ -757,7 +839,6 @@ require_audited_branch_values "${audited_branches[@]}"
 require_composite cursor_construct "$cursor_construct_composite" "$generator_debug_limit"
 require_composite timed_next "$timed_next_branch" "$generator_debug_limit"
 require_composite cursor_advance "$cursor_advance_composite" "$generator_debug_limit"
-require_composite cursor_resume "$cursor_advance_composite" "$generator_debug_limit"
 
 # Optimized private helpers may be folded into their roots. Gate every stable
 # production/equality root that must survive; inlined private work is therefore
