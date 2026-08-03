@@ -45,11 +45,16 @@ case "$scope" in
     run_probe --stabilizer-v2
     run_probe --timed-emitter
     run_probe --tip-support-spacing
+    run_probe --sensor-program
     run_probe --production
     ;;
   tip-support-spacing)
     run_probe --self-test
     run_probe --tip-support-spacing
+    ;;
+  sensor-program)
+    run_probe --self-test
+    run_probe --sensor-program
     ;;
   *)
     printf 'unsupported allocator probe scope: %s\n' "$scope" >&2

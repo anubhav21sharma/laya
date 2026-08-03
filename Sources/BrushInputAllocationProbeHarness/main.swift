@@ -121,6 +121,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case timedEmitterAllocations(normal: UInt64, hugeGap: UInt64)
     case timedEmitterMissingCursor
     case tipSupportSpacingAllocations(total: UInt64)
+    case sensorProgramAllocations(total: UInt64)
     case offMainEstimatedAllocations(total: UInt64, maximum: UInt64)
     case offMainAllocationRegression(String)
     case productionAllocations(
@@ -154,6 +155,8 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
             "timed emitter did not produce the expected probe cursor"
         case let .tipSupportSpacingAllocations(total):
             "tip support/spacing path allocated \(total) times after warm-up"
+        case let .sensorProgramAllocations(total):
+            "ordered sensor evaluator allocated \(total) times after warm-up"
         case let .offMainEstimatedAllocations(total, maximum):
             "off-main estimated correction allocated \(total) times; "
                 + "maximum single correction=\(maximum)"
@@ -213,6 +216,8 @@ private struct BrushInputAllocationProbeHarness {
                 try runTimedEmitterProbe(probe: probe)
             case "--tip-support-spacing":
                 try runTipSupportSpacingProbe(probe: probe)
+            case "--sensor-program":
+                try runSensorProgramProbe(probe: probe)
             case "--production":
                 try await runProduction(probe: probe, root: root)
             default:
@@ -502,6 +507,182 @@ private struct BrushInputAllocationProbeHarness {
             "ALLOCATOR PROBE TIP SUPPORT/SPACING PASS allocations=0 "
                 + "checksum=\(checksum)"
         )
+    }
+
+    private static func runSensorProgramProbe(
+        probe: AllocatorProbe
+    ) throws {
+        let program = try makeSensorProgramProbe()
+        let engine = BrushDynamicsEngine()
+        let sample = InterpolatedStrokeSample(
+            position: WorldPoint(x: 3, y: 4),
+            pressure: 0.25,
+            timestamp: 0,
+            altitude: 3 * .pi / 8,
+            azimuth: -.pi / 2,
+            roll: -.pi / 2,
+            velocity: 250,
+            phase: .moved,
+            source: .pencil,
+            kind: .actual,
+            capabilities: [.pressure, .altitude, .azimuth, .roll],
+            tangentialPressure: -0.5
+        )
+        _ = runSensorProgramUpdates(
+            engine: engine,
+            program: program,
+            sample: sample,
+            startingAt: 0,
+            count: 128
+        )
+
+        probe.arm()
+        let checksum = runSensorProgramUpdates(
+            engine: engine,
+            program: program,
+            sample: sample,
+            startingAt: 128,
+            count: 1_000_000
+        )
+        let allocations = probe.disarm()
+
+        guard allocations == 0 else {
+            throw ProbeHarnessError.sensorProgramAllocations(
+                total: allocations
+            )
+        }
+        print(
+            "ALLOCATOR PROBE SENSOR PROGRAM PASS allocations=0 "
+                + "checksum=\(checksum)"
+        )
+    }
+
+    private static func makeSensorProgramProbe() throws -> BrushProgram {
+        let base = try LegacyBrushRecipeAdapter.definition(
+            from: .legacyEquivalent,
+            displayName: "Sensor Program Allocation Probe"
+        )
+        var outputs: [BrushDynamicOutput: BrushOutputProgramDefinition] = [:]
+        for output in BrushDynamicOutput.allCases {
+            let operations: [BrushResponseOperation] = switch output {
+            case .offsetX, .offsetY:
+                [.replace, .add, .minimum, .maximum]
+            case .rotation, .hue:
+                [.replace, .multiply, .add, .add]
+            default:
+                [.replace, .multiply, .add, .maximum]
+            }
+            let inputs: [BrushDynamicsInput] = [
+                .pressure, .speed, .tilt, .age,
+            ]
+            var terms: [BrushResponseTermDefinition] = []
+            terms.reserveCapacity(4)
+            for index in 0..<4 {
+                terms.append(BrushResponseTermDefinition(
+                    input: inputs[index],
+                    response: index == 2
+                        ? .boundedPower(exponent: 2) : .linear,
+                    inputInverted: index == 2,
+                    missingInputValue: 0.5,
+                    responseScale: index == 1 ? 0.5 : 0.25,
+                    responseOffset: index == 1 ? 1 : 0.25,
+                    responseLowerClamp: -8,
+                    responseUpperClamp: 8,
+                    jitter: index == 3 ? 0.1 : 0,
+                    operation: operations[index]
+                ))
+            }
+            let baseValue: Float = switch output {
+            case .size, .flow, .opacity, .spacing, .hardness, .grain: 1
+            case .rotation, .scatter, .offsetX, .offsetY, .hue,
+                 .saturation, .brightness, .secondaryColorMix: 0
+            }
+            outputs[output] = BrushOutputProgramDefinition(
+                baseValue: baseValue,
+                terms: terms
+            )
+        }
+        let definition = try BrushDefinition(
+            v2ID: BrushRecipeID("probe.stage-c.sensor-program"),
+            metadata: base.metadata,
+            capabilities: base.capabilities,
+            resources: base.resources,
+            coverage: base.coverage,
+            placement: base.placement,
+            dynamics: base.dynamics,
+            color: base.color,
+            material: base.material,
+            stabilization: base.stabilization,
+            taper: .none,
+            replayMode: .appendOnly,
+            replayLimits: nil,
+            termination: .cap,
+            seedPolicy: .perStroke,
+            limits: base.limits,
+            performanceIntent: base.performanceIntent,
+            compatibility: base.compatibility,
+            sensorNormalization: BrushSensorNormalizationDefinition(
+                fullScaleWorldVelocity: 1_000,
+                minimumVelocityDeltaTime: 0.001,
+                fullScaleStrokeAge: 10,
+                fullScaleStrokeDistanceInDiameters: 10
+            ),
+            sensorProgram: BrushSensorProgramDefinition(outputs: outputs),
+            stabilizationV2: .none,
+            direction: BrushDirectionDefinition(
+                maximumAngularStep: .pi / 6,
+                stationaryDirection: 0
+            ),
+            emission: BrushEmissionDefinition(
+                mode: .distance,
+                timeInterval: nil
+            ),
+            tipSupports: [.analyticEllipse]
+        )
+        return try BrushProgramCompiler.compile(definition)
+    }
+
+    @inline(never)
+    private static func runSensorProgramUpdates(
+        engine: BrushDynamicsEngine,
+        program: BrushProgram,
+        sample: InterpolatedStrokeSample,
+        startingAt start: Int,
+        count: Int
+    ) -> UInt64 {
+        var checksum: UInt64 = 0
+        for index in start..<(start + count) {
+            let dab = engine.evaluate(
+                sample: sample,
+                context: BrushStrokeContext(
+                    nominalDiameter: 20,
+                    color: .black,
+                    direction: -.pi / 2,
+                    strokeAge: Float(index & 255) / 32,
+                    traveledDistance: Float(index & 1_023),
+                    ordinal: UInt64(index),
+                    isPredicted: false
+                ),
+                program: program,
+                random: .centered,
+                strokeSeed: 0x0123_4567_89ab_cdef
+            )
+            checksum &+= UInt64(dab.diameter.bitPattern)
+            checksum &+= UInt64(dab.spacing.bitPattern)
+            checksum &+= UInt64(dab.flow.bitPattern)
+            checksum &+= UInt64(dab.strokeOpacity.bitPattern)
+            checksum &+= UInt64(dab.rotation.bitPattern)
+            checksum &+= UInt64(dab.scatter.x.bitPattern)
+            checksum &+= UInt64(dab.hardness.bitPattern)
+            checksum &+= UInt64(dab.grainScale.bitPattern)
+            checksum &+= UInt64(dab.position.x.bitPattern)
+            checksum &+= UInt64(dab.position.y.bitPattern)
+            checksum &+= UInt64(dab.color.red.bitPattern)
+            checksum &+= UInt64(dab.color.green.bitPattern)
+            checksum &+= UInt64(dab.color.blue.bitPattern)
+            checksum &+= UInt64(dab.secondaryColorMix.bitPattern)
+        }
+        return checksum
     }
 
     @inline(never)

@@ -88,6 +88,44 @@ func splitMix64PinsWordsAndUpper24BitFloats(
     #expect(disabledCursor.nextValues() == enabledCursor.nextValues())
 }
 
+@Test
+func sensorTermCountersPinFourSlotsPerOutputWithoutAdvancingV1Cursor() {
+    var actual = BrushRandom(seed: 99)
+    var control = BrushRandom(seed: 99)
+    _ = actual.nextValues()
+    _ = control.nextValues()
+
+    let size = (0..<4).map {
+        BrushRandom.sensorTermUnitFloat(
+            strokeSeed: 0x0123_4567_89ab_cdef,
+            logicalDabOrdinal: 11,
+            output: .size,
+            termIndex: UInt64($0)
+        )
+    }
+    let rotation = (0..<4).map {
+        BrushRandom.sensorTermUnitFloat(
+            strokeSeed: 0x0123_4567_89ab_cdef,
+            logicalDabOrdinal: 11,
+            output: .rotation,
+            termIndex: UInt64($0)
+        )
+    }
+    let secondaryMix = (0..<4).map {
+        BrushRandom.sensorTermUnitFloat(
+            strokeSeed: 0x0123_4567_89ab_cdef,
+            logicalDabOrdinal: 11,
+            output: .secondaryColorMix,
+            termIndex: UInt64($0)
+        )
+    }
+
+    #expect(size == [0.777_548_1, 0.109_078_23, 0.893_011_45, 0.225_972_89])
+    #expect(rotation == [0.697_163_64, 0.722_595_45, 0.627_993_5, 0.453_686_6])
+    #expect(secondaryMix == [0.687_705_46, 0.092_912_26, 0.625_827_8, 0.089_917_24])
+    #expect(actual.nextValues() == control.nextValues())
+}
+
 private func dynamicsSample() -> InterpolatedStrokeSample {
     InterpolatedStrokeSample(
         position: WorldPoint(x: 0, y: 0),

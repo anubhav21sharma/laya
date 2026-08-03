@@ -48,6 +48,67 @@ public struct BrushDynamicsProgram: Equatable, Sendable {
     public let secondaryColorMix: CompiledBrushResponse
 }
 
+/// One schema-v2 response term after validation and LUT compilation.
+/// Construction is compiler-owned; stroke evaluation only reads this value.
+struct CompiledBrushSensorTerm: Equatable, Sendable {
+    let input: BrushDynamicsInput
+    let samples: [Float]
+    let inputInverted: Bool
+    let missingInputValue: Float
+    let responseScale: Float
+    let responseOffset: Float
+    let responseLowerClamp: Float
+    let responseUpperClamp: Float
+    let jitter: Float
+    let operation: BrushResponseOperation
+}
+
+/// Fixed-capacity ordered term storage. Optional slots avoid allocating or
+/// traversing a collection while input is arriving.
+struct CompiledBrushOutputProgram: Equatable, Sendable {
+    let baseValue: Float
+    let term0: CompiledBrushSensorTerm?
+    let term1: CompiledBrushSensorTerm?
+    let term2: CompiledBrushSensorTerm?
+    let term3: CompiledBrushSensorTerm?
+}
+
+/// Fixed output layout in the serialized `BrushDynamicOutput.allCases` order.
+/// The source dictionary is consumed only by the off-path compiler.
+struct CompiledBrushSensorProgram: Equatable, Sendable {
+    let size: CompiledBrushOutputProgram
+    let flow: CompiledBrushOutputProgram
+    let opacity: CompiledBrushOutputProgram
+    let spacing: CompiledBrushOutputProgram
+    let rotation: CompiledBrushOutputProgram
+    let scatter: CompiledBrushOutputProgram
+    let hardness: CompiledBrushOutputProgram
+    let grain: CompiledBrushOutputProgram
+    let offsetX: CompiledBrushOutputProgram
+    let offsetY: CompiledBrushOutputProgram
+    let hue: CompiledBrushOutputProgram
+    let saturation: CompiledBrushOutputProgram
+    let brightness: CompiledBrushOutputProgram
+    let secondaryColorMix: CompiledBrushOutputProgram
+}
+
+struct BrushOrderedDynamicValues: Equatable, Sendable {
+    let size: Float
+    let flow: Float
+    let opacity: Float
+    let spacing: Float
+    let rotation: Float
+    let scatter: Float
+    let hardness: Float
+    let grain: Float
+    let offsetX: Float
+    let offsetY: Float
+    let hue: Float
+    let saturation: Float
+    let brightness: Float
+    let secondaryColorMix: Float
+}
+
 public enum BrushBackendKind: String, Codable, Hashable, Sendable {
     case deposition
     case canvasInteraction
@@ -62,6 +123,7 @@ public struct BrushStageCProgramMetadata: Equatable, Sendable {
     public let tipSupports: [BrushTipSupportDefinition]
     public let declaredEndpointLag: Float?
     public let usesTravelDirection: Bool
+    let compiledSensorProgram: CompiledBrushSensorProgram
 }
 
 /// Immutable stroke-finalization program selected before input begins.

@@ -108,4 +108,23 @@ public struct BrushRandom: Equatable, Sendable {
         word = (word ^ (word >> 27)) &* 0x94d0_49bb_1331_11eb
         return unitFloat(from: word ^ (word >> 31))
     }
+
+    /// Schema-v2 counter randomness. Each output owns four permanently
+    /// reserved term slots, so adding or reordering another output cannot
+    /// perturb this term or any later logical dab.
+    static func sensorTermUnitFloat(
+        strokeSeed: UInt64,
+        logicalDabOrdinal: UInt64,
+        output: BrushDynamicOutput,
+        termIndex: UInt64
+    ) -> Float {
+        precondition(termIndex < 4)
+        let counter = output.stageCRandomID &* 4 &+ termIndex
+        var word = strokeSeed
+            &+ logicalDabOrdinal &* 0xd2b7_4407_b1ce_6e93
+            &+ counter &* 0xca5a_8263_9512_1157
+        word = (word ^ (word >> 30)) &* 0xbf58_476d_1ce4_e5b9
+        word = (word ^ (word >> 27)) &* 0x94d0_49bb_1331_11eb
+        return unitFloat(from: word ^ (word >> 31))
+    }
 }

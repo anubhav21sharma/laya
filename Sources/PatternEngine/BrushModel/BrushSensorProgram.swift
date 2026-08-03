@@ -27,6 +27,27 @@ public enum BrushDynamicOutput:
 {
     case size, flow, opacity, spacing, rotation, scatter, hardness, grain
     case offsetX, offsetY, hue, saturation, brightness, secondaryColorMix
+
+    /// Stable serialized/random namespace. Never derive this from collection
+    /// order: term randomness reserves four counters for every output.
+    var stageCRandomID: UInt64 {
+        switch self {
+        case .size: 0
+        case .flow: 1
+        case .opacity: 2
+        case .spacing: 3
+        case .rotation: 4
+        case .scatter: 5
+        case .hardness: 6
+        case .grain: 7
+        case .offsetX: 8
+        case .offsetY: 9
+        case .hue: 10
+        case .saturation: 11
+        case .brightness: 12
+        case .secondaryColorMix: 13
+        }
+    }
 }
 
 public enum BrushResponseOperation: String, Codable, Equatable, Sendable {

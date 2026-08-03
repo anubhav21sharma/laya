@@ -74,6 +74,10 @@ public enum BrushProgramCompiler {
             let usesDirection = sensorProgram.outputs.values.contains { output in
                 output.terms.contains { $0.input == .direction }
             }
+            let compiledSensorProgram = try compileSensorProgram(
+                sensorProgram,
+                maximumOpacity: definition.limits.maximumOpacity
+            )
             stageC = BrushStageCProgramMetadata(
                 normalization: normalization,
                 sensorProgram: sensorProgram,
@@ -82,7 +86,8 @@ public enum BrushProgramCompiler {
                 emission: emission,
                 tipSupports: tipSupports,
                 declaredEndpointLag: endpointLag,
-                usesTravelDirection: usesDirection
+                usesTravelDirection: usesDirection,
+                compiledSensorProgram: compiledSensorProgram
             )
         } else {
             stageC = nil
@@ -192,6 +197,216 @@ public enum BrushProgramCompiler {
             jitter: mapping.jitter,
             missingInputValue: mapping.missingInputValue
         )
+    }
+
+    static func compileSensorProgram(
+        _ definition: BrushSensorProgramDefinition,
+        maximumOpacity: Float
+    ) throws -> CompiledBrushSensorProgram {
+        guard definition.outputs.count == 14 else {
+            throw BrushProgramCompilerError.invalidStageCDefinition
+        }
+        return try CompiledBrushSensorProgram(
+            size: compileSensorOutput(
+                definition, output: .size, maximumOpacity: maximumOpacity
+            ),
+            flow: compileSensorOutput(
+                definition, output: .flow, maximumOpacity: maximumOpacity
+            ),
+            opacity: compileSensorOutput(
+                definition, output: .opacity, maximumOpacity: maximumOpacity
+            ),
+            spacing: compileSensorOutput(
+                definition, output: .spacing, maximumOpacity: maximumOpacity
+            ),
+            rotation: compileSensorOutput(
+                definition, output: .rotation, maximumOpacity: maximumOpacity
+            ),
+            scatter: compileSensorOutput(
+                definition, output: .scatter, maximumOpacity: maximumOpacity
+            ),
+            hardness: compileSensorOutput(
+                definition, output: .hardness, maximumOpacity: maximumOpacity
+            ),
+            grain: compileSensorOutput(
+                definition, output: .grain, maximumOpacity: maximumOpacity
+            ),
+            offsetX: compileSensorOutput(
+                definition, output: .offsetX, maximumOpacity: maximumOpacity
+            ),
+            offsetY: compileSensorOutput(
+                definition, output: .offsetY, maximumOpacity: maximumOpacity
+            ),
+            hue: compileSensorOutput(
+                definition, output: .hue, maximumOpacity: maximumOpacity
+            ),
+            saturation: compileSensorOutput(
+                definition, output: .saturation,
+                maximumOpacity: maximumOpacity
+            ),
+            brightness: compileSensorOutput(
+                definition, output: .brightness,
+                maximumOpacity: maximumOpacity
+            ),
+            secondaryColorMix: compileSensorOutput(
+                definition, output: .secondaryColorMix,
+                maximumOpacity: maximumOpacity
+            )
+        )
+    }
+
+    private static func compileSensorOutput(
+        _ program: BrushSensorProgramDefinition,
+        output: BrushDynamicOutput,
+        maximumOpacity: Float
+    ) throws -> CompiledBrushOutputProgram {
+        guard let definition = program.outputs[output],
+              definition.terms.count <= 4,
+              validBaseValue(
+                definition.baseValue,
+                output: output,
+                maximumOpacity: maximumOpacity
+              )
+        else {
+            throw BrushProgramCompilerError.invalidStageCDefinition
+        }
+        var terms: [CompiledBrushSensorTerm] = []
+        terms.reserveCapacity(definition.terms.count)
+        for term in definition.terms {
+            terms.append(try compileSensorTerm(term, output: output))
+        }
+        return CompiledBrushOutputProgram(
+            baseValue: definition.baseValue,
+            term0: terms.indices.contains(0) ? terms[0] : nil,
+            term1: terms.indices.contains(1) ? terms[1] : nil,
+            term2: terms.indices.contains(2) ? terms[2] : nil,
+            term3: terms.indices.contains(3) ? terms[3] : nil
+        )
+    }
+
+    private static func compileSensorTerm(
+        _ term: BrushResponseTermDefinition,
+        output: BrushDynamicOutput
+    ) throws -> CompiledBrushSensorTerm {
+        let finiteValues = [
+            term.missingInputValue,
+            term.responseScale,
+            term.responseOffset,
+            term.responseLowerClamp,
+            term.responseUpperClamp,
+            term.jitter,
+        ]
+        guard finiteValues.allSatisfy(\.isFinite),
+              (0...1).contains(term.missingInputValue),
+              term.responseLowerClamp <= term.responseUpperClamp,
+              term.jitter >= 0,
+              validOperation(term.operation, output: output),
+              validResponse(term.response)
+        else {
+            throw BrushProgramCompilerError.invalidStageCDefinition
+        }
+        if isCyclic(term.input) {
+            switch term.response {
+            case let .curve(curve):
+                guard curve.points.first?.y == curve.points.last?.y else {
+                    throw BrushProgramCompilerError.invalidStageCDefinition
+                }
+            case .linear:
+                guard output == .rotation || output == .hue else {
+                    throw BrushProgramCompilerError.invalidStageCDefinition
+                }
+            case .constant, .boundedPower:
+                throw BrushProgramCompilerError.invalidStageCDefinition
+            }
+        }
+        let samples = try (0..<sampleCount).map { index in
+            try responseValue(
+                term.response,
+                at: Float(index) / Float(sampleCount - 1)
+            )
+        }
+        return CompiledBrushSensorTerm(
+            input: term.input,
+            samples: samples,
+            inputInverted: term.inputInverted,
+            missingInputValue: term.missingInputValue,
+            responseScale: term.responseScale,
+            responseOffset: term.responseOffset,
+            responseLowerClamp: term.responseLowerClamp,
+            responseUpperClamp: term.responseUpperClamp,
+            jitter: term.jitter,
+            operation: term.operation
+        )
+    }
+
+    private static func validBaseValue(
+        _ value: Float,
+        output: BrushDynamicOutput,
+        maximumOpacity: Float
+    ) -> Bool {
+        guard value.isFinite else { return false }
+        return switch output {
+        case .size, .spacing, .grain:
+            (Float(1) / 1_024...8).contains(value)
+        case .flow, .hardness, .scatter:
+            (0...8).contains(value)
+        case .opacity:
+            (0...maximumOpacity).contains(value)
+        case .secondaryColorMix:
+            (0...1).contains(value)
+        case .offsetX, .offsetY:
+            (-8...8).contains(value)
+        case .rotation, .hue:
+            true
+        case .saturation, .brightness:
+            (-1...1).contains(value)
+        }
+    }
+
+    private static func validOperation(
+        _ operation: BrushResponseOperation,
+        output: BrushDynamicOutput
+    ) -> Bool {
+        switch output {
+        case .offsetX, .offsetY:
+            operation != .multiply
+        case .rotation, .hue:
+            operation == .replace || operation == .multiply
+                || operation == .add
+        default:
+            true
+        }
+    }
+
+    private static func isCyclic(_ input: BrushDynamicsInput) -> Bool {
+        input == .direction || input == .azimuth || input == .roll
+    }
+
+    private static func validResponse(_ response: BrushResponseDefinition)
+        -> Bool
+    {
+        switch response {
+        case let .constant(value):
+            return value.isFinite && (0...1).contains(value)
+        case .linear:
+            return true
+        case let .boundedPower(exponent):
+            return exponent.isFinite && (0.125...8).contains(exponent)
+        case let .curve(curve):
+            guard curve.points.count >= 2,
+                  curve.points.first?.x == 0,
+                  curve.points.last?.x == 1
+            else { return false }
+            var previous: Float = -1
+            for point in curve.points {
+                guard point.x.isFinite, point.y.isFinite,
+                      (0...1).contains(point.x), (0...1).contains(point.y),
+                      point.x > previous
+                else { return false }
+                previous = point.x
+            }
+            return true
+        }
     }
 
     private static func responseValue(
