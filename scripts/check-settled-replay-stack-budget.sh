@@ -171,18 +171,6 @@ require_branch_root_reachability() {
     "${#audited_branches[@]}" "$root"
 }
 
-assignment_expression() {
-  local source=$1
-  local name=$2
-  awk -v assignment="$name" '
-    $0 ~ ("^" assignment "=") { emitting = 1 }
-    emitting {
-      print
-      if ($0 !~ /\\$/) { exit }
-    }
-  ' "$source"
-}
-
 require_unique_audited_node_assignments() {
   local source=$1
   local node
