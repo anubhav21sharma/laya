@@ -1,6 +1,29 @@
 import Testing
 @testable import PatternEngine
 
+@Test
+func compiledProgramAndStrokeReplayStateHaveBoundedValueFootprints() {
+    let referenceSizedUpperBound = 2 * MemoryLayout<UnsafeRawPointer>.stride
+
+    #expect(MemoryLayout<BrushProgram>.size <= referenceSizedUpperBound)
+    #expect(MemoryLayout<BrushStrokeGenerator>.size <= 2_048)
+    #expect(MemoryLayout<TransientStrokeChunk>.size <= 4_096)
+    #expect(MemoryLayout<TransientStrokeBuffer>.size <= 8_192)
+}
+
+@Test
+func independentlyCompiledProgramsUseSemanticEquality() throws {
+    let definition = try legacyDefinition()
+    let first = try BrushProgramCompiler.compile(definition)
+    let second = try BrushProgramCompiler.compile(definition)
+    let different = try BrushProgramCompiler.compile(
+        replacing(definition, seedPolicy: .fixed(99))
+    )
+
+    #expect(first == second)
+    #expect(first != different)
+}
+
 @Test(arguments: AnchorRecipeFixtures.all)
 func compiledProgramCharacterizationIsDeterministic(
     _ fixture: AnchorRecipeFixture

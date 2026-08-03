@@ -101,7 +101,13 @@ public enum BrushTerminationProgram: Equatable, Sendable {
     }
 }
 
-public struct BrushProgram: Equatable, Sendable {
+/// Shared immutable result of brush compilation.
+///
+/// A program is retained by every generator snapshot in the replay buffer.
+/// Reference storage keeps those snapshots value-semantic without repeatedly
+/// embedding the compiled response tables and Stage C metadata in their value
+/// footprint. Compilation remains the only point that allocates a program.
+public final class BrushProgram: Equatable, Sendable {
     public let definition: BrushDefinition
     public let dynamics: BrushDynamicsProgram
     public let termination: BrushTerminationProgram
@@ -109,6 +115,37 @@ public struct BrushProgram: Equatable, Sendable {
     public let ignoredOptionalCapabilityIdentifiers: [String]
     public let requestedBackend: BrushBackendKind
     public let stageC: BrushStageCProgramMetadata?
+
+    init(
+        definition: BrushDefinition,
+        dynamics: BrushDynamicsProgram,
+        termination: BrushTerminationProgram,
+        requiredCapabilities: Set<BrushCapability>,
+        ignoredOptionalCapabilityIdentifiers: [String],
+        requestedBackend: BrushBackendKind,
+        stageC: BrushStageCProgramMetadata?
+    ) {
+        self.definition = definition
+        self.dynamics = dynamics
+        self.termination = termination
+        self.requiredCapabilities = requiredCapabilities
+        self.ignoredOptionalCapabilityIdentifiers =
+            ignoredOptionalCapabilityIdentifiers
+        self.requestedBackend = requestedBackend
+        self.stageC = stageC
+    }
+
+    public static func == (lhs: BrushProgram, rhs: BrushProgram) -> Bool {
+        lhs === rhs
+            || (lhs.definition == rhs.definition
+                && lhs.dynamics == rhs.dynamics
+                && lhs.termination == rhs.termination
+                && lhs.requiredCapabilities == rhs.requiredCapabilities
+                && lhs.ignoredOptionalCapabilityIdentifiers
+                    == rhs.ignoredOptionalCapabilityIdentifiers
+                && lhs.requestedBackend == rhs.requestedBackend
+                && lhs.stageC == rhs.stageC)
+    }
 
     public var replayContract: BrushReplayContract {
         switch termination {
