@@ -7,9 +7,13 @@ public struct InkColor: Equatable, Sendable {
     public let alpha: Float
 
     public init?(red: Float, green: Float, blue: Float, alpha: Float) {
-        let values = [red, green, blue, alpha]
-        guard values.allSatisfy({ $0.isFinite && (0...1).contains($0) })
-        else { return nil }
+        guard red.isFinite, (0...1).contains(red),
+              green.isFinite, (0...1).contains(green),
+              blue.isFinite, (0...1).contains(blue),
+              alpha.isFinite, (0...1).contains(alpha)
+        else {
+            return nil
+        }
         self.red = red
         self.green = green
         self.blue = blue

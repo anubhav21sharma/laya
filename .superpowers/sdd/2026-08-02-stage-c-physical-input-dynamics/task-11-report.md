@@ -40,9 +40,14 @@ The first green API is a pure allocation-free transactional head merge:
 `next(distance:timed:)` returns the accepted unnumbered candidate (or nil for an
 exact duplicate), exact source-consumption flags, and a copyable continuation.
 Callers install the continuation and advance sources only after sink acceptance.
-Six tests pin distance/time/union tuple order, exact versus adjacent keys, a
-transitive three-candidate chain across partitions, full earliest-kind
-attributes, stationary/corner ordering, and provenance isolation.
+Six tests pin distance/time/union tuple order, exact versus adjacent keys, full
+earliest-kind attributes, stationary/corner ordering, and provenance isolation.
+The transitivity test enters through production `TimedStrokeEmitter.begin`
+canonicalization with raw distances A=0.00001000, B=0.00001075 and
+C=0.00001150. Thus A≈B and B≈C under a 1e-6 epsilon while A≉C, but production
+keys remain the exact ordered integers 10, 11 and 12 across two source
+partitions/input orders. A temporary raw-epsilon mutant failed by collapsing
+the trace to keys 10 and 12; the mutant was removed.
 
 ### RED 4 — generator acceptance
 
@@ -75,25 +80,54 @@ The tests then pinned:
 The first correct cursor implementation copied the full 5+ KiB continuation
 for every candidate. It passed functional and allocation tests but the pinned
 ARM64 debug gate measured a 132,800-byte advance chain, so it was rejected.
-The final design uses no full-cursor proposal:
+The initial implementation gate then reported 52,704 bytes, but independent
+review proved that formula omitted the complete dynamics and recorded-time
+trees. Charging those paths made the true pre-correction cursor chain 97,216
+bytes. The gate was expanded before implementation changes, providing the
+required review RED.
+
+The corrected design uses no full-cursor proposal:
 
 - `emitNextPage` has one unified enabled/settling loop;
 - the cursor itself remains the last accepted checkpoint;
 - source and segment candidates mutate only after the sink accepts;
 - `emitAcceptedCandidate` proposes only the eight-word random cursor and dab,
   then installs random/ordinal/spacing after sink success;
-- segment work is a resumable `prepareSpatial -> prepareTimed -> decide ->
-  commit` state machine, so candidate construction, merge decision, and sink
-  commit do not share one stack frame;
+- all cursor orchestration is a resumable one-worker-per-loop state machine:
+  `prepare -> initialPath/beginSource/path -> afterPath/pendingSegment/
+  finishSource -> source -> spatial -> timed -> decide -> duplicate/commit ->
+  lifecycle`; each worker installs its successor and returns to
+  `emitNextPage`, and only `advanceOne` dispatches workers;
+- recorded-time generation has a shared mutating primitive that returns only
+  the candidate when the generator already owns a transactional local cursor;
+  public `nextCandidate` still provides the original candidate+continuation
+  value API by delegating through a copied cursor;
 - after a full page, disabled emission may settle duplicates and lifecycle-only
   transitions but returns `blocked` before the next accepted identity.
 
+The dynamics evaluator likewise selects schema v1/v2 into a fixed 14-Float
+value in a non-inlined phase, then performs native assembly after that phase
+returns. During allocation verification this exposed a latent `InkColor`
+initializer allocation: a temporary four-element Array had previously relied
+on release scalarization. Scalar finite/range guards removed the allocation at
+its source rather than weakening the phase boundary.
+
 This preserves exact retry semantics while remaining allocation-free. The
-fail-closed gate now measures construction, every cursor branch, accepted-dab
-evaluation, and both advance/resume roots. The final debug composites are
-34,928 bytes for construction and 52,704 bytes for advance/resume, each below
-57,344 bytes. Optimized `emissionCursor` and `emitNextPage` roots are 7,744 and
-8,544 bytes respectively, below 16 KiB.
+fail-closed formula now charges:
+
+- `evaluatedDab + BrushDynamicsEngine.evaluate + max(selector tree,
+  native-assembly tree)` on accepted candidates;
+- every ordered/legacy dynamics input, response, random, support, color,
+  material and dab-construction branch;
+- timed consume + candidate + interpolation + optional/angle/stable/key/finite
+  branches;
+- every cursor phase, prepared lookup, accepted-candidate transaction and
+  commit branch beneath the live page frame.
+
+Final debug values are 36,208 bytes for construction and 54,768 bytes for both
+advance and resume, below the 57,344-byte limit with 2,576 bytes reserve.
+Optimized `emissionCursor`, `emitNextPage` and dynamics `evaluate` roots are
+7,952, 10,512 and 480 bytes, respectively, below 16 KiB.
 
 ## Contract implementation
 
@@ -154,16 +188,22 @@ stabilize the scheduler-facing API. The recommended cleanup point is after C12.
 
 ## Verification evidence
 
-- prescribed focused gate:
-  `swift test --filter 'TimedStrokeEmitterTests|StrokeEmissionMergerTests|BrushStrokeGeneratorTests|LogicalDabBatchTests'`
-  passed 95 tests in 2 suites;
-- cursor layout gate: `BrushStrokeGenerator.EmissionCursor <= 6,144` bytes;
+- combined correction gate:
+  `swift test --filter 'TimedStrokeEmitterTests|StrokeEmissionMergerTests|BrushStrokeGeneratorTests|LogicalDabBatchTests|BrushSensorProgramTests|BrushDynamicsEngineTests|compiledProgramAndStrokeReplayStateHaveBoundedValueFootprints'`
+  passed 113 tests in 3 suites;
+- cursor layout gate: `BrushStrokeGenerator.EmissionCursor <= 6,144` bytes
+  passed (measured size remains 5,980 bytes);
 - release allocation probe: exact-tie union, direction/corners, 512+1 resume,
   huge time gap, standard Stage-C generator, and production route all require
-  zero post-warm-up allocations; final results were Stage-C generator 0,
-  Stage-C emission 0, and production 0;
+  zero post-warm-up allocations; final results are Stage-C generator 0 over
+  10,000 cycles, Stage-C emission 0, sensor-program 0 over 1,000,000
+  evaluations, and production 0;
 - ARM64 stack gate: debug cursor composites <=57,344 and optimized public roots
-  <=16 KiB under pinned Xcode 26.6 / Swift 6.3.3 / LLVM 21.0.0;
+  <=16 KiB under pinned Xcode 26.6 / Swift 6.3.3 / LLVM 21.0.0. Raw final
+  components: structural 43,824; input 35,056; generator 48,960; dynamics
+  evaluator/native/full 10,080/24,128/24,672; accept 29,984; selection 23,488;
+  prepared 12,368; commit 17,632; page 24,784; construct 36,208; advance/resume
+  54,768;
 - symbol selection is fail-closed: the fully qualified generator cursor page
   resolves once, while the deliberately broad timed/generator cursor fragment
   is rejected as ambiguous;

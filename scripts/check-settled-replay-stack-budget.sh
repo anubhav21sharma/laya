@@ -141,21 +141,96 @@ measure cursor_step "$debug_binary" EmissionCursorV10advanceOne non-external fra
 measure cursor_prepare "$debug_binary" EmissionCursorV7prepare non-external fragment
 measure cursor_path "$debug_binary" EmissionCursorV11advancePath non-external fragment
 measure cursor_source "$debug_binary" EmissionCursorV13advanceSource non-external fragment
-measure cursor_segment "$debug_binary" EmissionCursorV14advanceSegment non-external fragment
+measure cursor_segment_spatial "$debug_binary" EmissionCursorV21prepareSegmentSpatial non-external fragment
+measure cursor_segment_timed "$debug_binary" EmissionCursorV19prepareSegmentTimed non-external fragment
+measure cursor_segment_decide "$debug_binary" EmissionCursorV13decideSegment non-external fragment
+measure cursor_segment_settle "$debug_binary" EmissionCursorV22settleSegmentDuplicate non-external fragment
+measure cursor_segment_lifecycle "$debug_binary" EmissionCursorV23advanceSegmentLifecycle non-external fragment
 measure cursor_initial "$debug_binary" EmissionCursorV18prepareInitialPath non-external fragment
-measure cursor_held "$debug_binary" EmissionCursorV16prepareHeldBegin non-external fragment
 measure cursor_after_path "$debug_binary" EmissionCursorV9afterPath non-external fragment
 measure cursor_begin_source "$debug_binary" EmissionCursorV18prepareBeginSource non-external fragment
 measure cursor_prepare_segment "$debug_binary" EmissionCursorV21preparePendingSegment non-external fragment
 measure cursor_finish_source "$debug_binary" EmissionCursorV19prepareFinishSource non-external fragment
 measure cursor_source_candidate "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV06SourceG0 non-external swift-function
-measure cursor_segment_candidate "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV07SegmentG033_FCAB7D0E8C2617936E49D6F33D25623ALLV07advanceH9Candidate non-external swift-function
 measure cursor_spatial "$debug_binary" prepareSpatialCandidate non-external swift-function
 measure cursor_decide "$debug_binary" decidePreparedCandidates non-external swift-function
-measure cursor_commit "$debug_binary" commitPreparedCandidates non-external swift-function
+measure cursor_commit "$debug_binary" commitPreparedCandidates non-external fragment
+measure cursor_source_commit "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV06SourceG033_FCAB7D0E8C2617936E49D6F33D25623ALLV6commit non-external fragment
+measure cursor_source_prepared "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV06SourceG033_FCAB7D0E8C2617936E49D6F33D25623ALLV17preparedCandidate non-external fragment
+measure cursor_source_commit_prepared "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV06SourceG033_FCAB7D0E8C2617936E49D6F33D25623ALLV23commitPreparedCandidate non-external fragment
+measure cursor_segment_prepared "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV07SegmentG033_FCAB7D0E8C2617936E49D6F33D25623ALLV17preparedCandidate non-external fragment
+measure cursor_segment_commit_prepared "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV07SegmentG033_FCAB7D0E8C2617936E49D6F33D25623ALLV23commitPreparedCandidate non-external fragment
+measure cursor_prepared "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV17preparedCandidate33_ non-external fragment
+measure cursor_commit_root "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV23commitPreparedCandidate33_ non-external fragment
 measure cursor_segment_finish "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV07SegmentG033_FCAB7D0E8C2617936E49D6F33D25623ALLV06finishH0 non-external fragment
+measure timed_next "$debug_binary" TimedStrokeEmissionCursorV13nextCandidate external fragment
+measure timed_consume "$debug_binary" TimedStrokeEmissionCursorV20consumeNextCandidate external swift-function
+measure timed_candidate "$debug_binary" TimedStrokeEmissionCursorV14timedCandidate non-external fragment
+measure timed_interpolated "$debug_binary" TimedStrokeEmissionCursorV18interpolatedSample non-external fragment
+measure timed_replacing "$debug_binary" TimedStrokeEmissionCursorV18replacingTimestamp non-external fragment
+measure timed_canonical "$debug_binary" TimedStrokeEmissionCursorV12canonicalKey non-external fragment
+measure timed_optional_linear "$debug_binary" TimedStrokeEmissionCursorV14optionalLinear non-external fragment
+measure timed_optional_angle "$debug_binary" TimedStrokeEmissionCursorV13optionalAngle non-external fragment
+measure timed_normalized_angle "$debug_binary" TimedStrokeEmissionCursorV15normalizedAngle non-external fragment
+measure timed_stable_double "$debug_binary" TimedStrokeEmissionCursorV12stableLinear026_93A8D2497DE33A4E0A7046812L5DC127LL__8fractionS2d non-external fragment
+measure timed_stable_float "$debug_binary" TimedStrokeEmissionCursorV12stableLinear026_93A8D2497DE33A4E0A7046812L5DC127LL__8fractionS2f non-external fragment
+measure timed_finite "$debug_binary" TimedStrokeEmissionCursorV8isFinite non-external fragment
 measure cursor_accept "$debug_binary" BrushStrokeGeneratorV21emitAcceptedCandidate non-external fragment
 measure cursor_evaluate "$debug_binary" BrushStrokeGeneratorV12evaluatedDab non-external fragment
+measure cursor_identity "$debug_binary" BrushStrokeGeneratorV24preflightLogicalIdentity external fragment
+measure cursor_install "$debug_binary" BrushStrokeGeneratorV24installAcceptedCandidate non-external fragment
+measure cursor_random "$debug_binary" BrushRandomV10nextValues external fragment
+measure stroke_context_init "$debug_binary" BrushStrokeContextV15nominalDiameter5color9direction external fragment
+
+# Complete dynamics call tree reached by evaluatedDab. The selector completes
+# before native assembly begins. This is intentionally fail-closed: adding a
+# new non-inlined phase requires charging that frame to candidate acceptance
+# instead of treating evaluatedDab as a leaf.
+measure dynamics_root "$debug_binary" BrushDynamicsB0V8evaluate6sample external fragment
+measure dynamics_native "$debug_binary" BrushDynamicsB0V14evaluateNative non-external swift-nonthrowing-function
+measure dynamics_selector "$debug_binary" BrushDynamicsB0V09evaluatedD0 non-external swift-nonthrowing-function
+measure dynamics_legacy "$debug_binary" BrushDynamicsB0V014evaluateLegacyD0 non-external swift-nonthrowing-function
+measure dynamics_inputs_legacy "$debug_binary" BrushDynamicsB0V6Inputs33_7B02F200D8D2D730B1CECB3C373E8F93LLV6sample7contextAfA24InterpolatedStrokeSample non-external fragment
+measure dynamics_inputs_native "$debug_binary" BrushDynamicsB0V6Inputs33_7B02F200D8D2D730B1CECB3C373E8F93LLV6sample7context13normalization non-external fragment
+measure dynamics_input_value "$debug_binary" BrushDynamicsB0V6Inputs33_7B02F200D8D2D730B1CECB3C373E8F93LLV5value3forSf non-external fragment
+measure dynamics_input_missing "$debug_binary" BrushDynamicsB0V6Inputs33_7B02F200D8D2D730B1CECB3C373E8F93LLV5value3for17missingInputValue non-external fragment
+measure dynamics_ordered "$debug_binary" BrushDynamicsB0V15evaluateOrdered non-external fragment
+measure dynamics_ordered_output "$debug_binary" BrushDynamicsB0V21evaluateOrderedOutput non-external fragment
+measure dynamics_ordered_term "$debug_binary" BrushDynamicsB0V16applyOrderedTerm non-external fragment
+measure dynamics_contracted "$debug_binary" BrushDynamicsB0V22contractedOrderedValue non-external fragment
+measure dynamics_legacy_response "$debug_binary" BrushDynamicsB0V8evaluate33_7B02F200D8D2D730B1CECB3C373E8F93LL_ non-external fragment
+measure dynamics_sampled "$debug_binary" BrushDynamicsB0V12sampledValue non-external fragment
+measure dynamics_taper "$debug_binary" BrushDynamicsB0V13taperEnvelope non-external fragment
+measure dynamics_envelope "$debug_binary" BrushDynamicsB0V8envelope non-external fragment
+measure dynamics_placement "$debug_binary" BrushDynamicsB0V21nativePlacementJitter non-external fragment
+measure dynamics_shape "$debug_binary" shapeFrameL_ non-external fragment
+measure dynamics_color_jitter "$debug_binary" BrushDynamicsB0V17nativeColorJitter non-external fragment
+measure dynamics_jitter_value "$debug_binary" BrushDynamicsB0V17nativeJitterValue non-external fragment
+measure dynamics_material_family "$debug_binary" BrushDynamicsB0V20nativeMaterialFamily non-external fragment
+measure dynamics_primary_grain_closure "$debug_binary" AA8Affine2DVAA0C20GrainLayerDefinitionVXEfU_ non-external swift-closure
+measure dynamics_primary_grain_partial "$debug_binary" AA8Affine2DVAA0C20GrainLayerDefinitionVXEfU_TA non-external swift-partial-apply
+measure dynamics_secondary_grain_closure "$debug_binary" AA8Affine2DVAA0C20GrainLayerDefinitionVXEfU0_ non-external swift-closure
+measure dynamics_secondary_grain_partial "$debug_binary" AA8Affine2DVAA0C20GrainLayerDefinitionVXEfU0_TA non-external swift-partial-apply
+measure dynamics_grain "$debug_binary" BrushDynamicsB0V16nativeGrainFrame non-external fragment
+measure dynamics_adjusted_color "$debug_binary" BrushDynamicsB0V13adjustedColor non-external fragment
+measure dynamics_apply_color "$debug_binary" BrushDynamicsB0V013applyingColorD0 non-external fragment
+measure dynamics_material_inputs "$debug_binary" BrushDynamicsB0V14materialInputs non-external fragment
+measure dynamics_random "$debug_binary" BrushDynamicsB0V18nativeRandomValues non-external swift-nonthrowing-function
+measure dynamics_random_value "$debug_binary" BrushDynamicsB0V18nativeRandomValues33_7B02F200D8D2D730B1CECB3C373E8F93LL13compatibility10strokeSeed7ordinalAA0c7LogicalfG0VAA0cfG0V_s6UInt64VANtF5valueL_ non-external fragment
+measure random_extension "$debug_binary" BrushRandomV18extensionUnitFloat external fragment
+measure random_sensor_term "$debug_binary" BrushRandomV19sensorTermUnitFloat external fragment
+measure affine_concatenating "$debug_binary" Affine2DV13concatenating external fragment
+measure ink_color_init "$debug_binary" InkColorV3red5green4blue5alpha external fragment
+measure logical_dab_init "$debug_binary" LogicalDabV8position12brushToWorld6radius8diameter7spacing4flow13strokeOpacity8rotation7scatter8hardness11grainOffset0R5Scale0R8Rotation5color0V10Adjustment14materialFamily0X12Contribution14sourceDistance7ordinal11isPredicted17secondaryColorMix012primaryGraingH0014secondaryGraingH00X6Inputs12randomValues014secondaryShapegH0 external fragment
+measure tip_layer_init "$debug_binary" BrushTipSupportLayerV10definition5xAxis external fragment
+measure tip_layer_finite "$debug_binary" BrushTipSupportLayerV8isFinite non-external fragment
+measure tip_projection "$debug_binary" BrushTipSupportO18projectionInterval7primary external fragment
+measure tip_accumulator_init "$debug_binary" BrushTipSupportO21ProjectionAccumulator33_60C24F33D8AAD4452DB3F5F8F1479A63LLV7tangent non-external fragment
+measure tip_accumulator_include "$debug_binary" BrushTipSupportO21ProjectionAccumulator33_60C24F33D8AAD4452DB3F5F8F1479A63LLV7include non-external fragment
+measure tip_accumulator_interval "$debug_binary" BrushTipSupportO21ProjectionAccumulator33_60C24F33D8AAD4452DB3F5F8F1479A63LLV8interval non-external fragment
+measure tip_dot "$debug_binary" BrushTipSupportO3dot33_60C24F33D8AAD4452DB3F5F8F1479A63LL non-external fragment
+measure tip_bounds "$debug_binary" BrushTipSupportO14boundsInterval33_60C24F33D8AAD4452DB3F5F8F1479A63LL non-external fragment
+measure footprint_carry "$debug_binary" BrushFootprintSpacingO9nextCarry external fragment
 
 # BrushProgram semantic equality branches.
 measure definition_helper "$debug_binary" BrushProgramC16definitionsEqual non-external fragment
@@ -253,31 +328,108 @@ require_composite input "$input"
 require_composite generator "$generator" "$generator_debug_limit"
 
 cursor_construct_composite=$((cursor_construct + cursor_init))
-cursor_accept_composite=$((cursor_accept + cursor_evaluate))
-cursor_prepare_branch=$((cursor_prepare + $(maximum \
-  $((cursor_initial + cursor_held + cursor_begin_source)) \
-  $((cursor_held + cursor_begin_source)) \
-  "$cursor_finish_source")))
-cursor_after_branch=$((cursor_after_path + $(maximum \
-  $((cursor_held + cursor_begin_source)) \
-  "$cursor_finish_source")))
-cursor_path_branch=$((cursor_path + $(maximum \
-  "$cursor_after_branch" \
-  $((cursor_held + cursor_begin_source)) \
-  "$cursor_prepare_segment")))
-cursor_source_branch=$((cursor_source + $(maximum \
-  $((cursor_source_candidate + cursor_accept_composite)) \
-  "$cursor_prepare_segment" "$cursor_finish_source")))
-cursor_segment_phase=$(maximum \
-  "$cursor_spatial" "$cursor_decide" \
-  $((cursor_commit + cursor_accept_composite)))
-cursor_segment_branch=$((cursor_segment + $(maximum \
-  $((cursor_segment_candidate + cursor_segment_phase)) \
-  "$cursor_segment_finish")))
+
+dynamics_input_branch=$(maximum \
+  "$dynamics_input_value" \
+  $((dynamics_input_missing + dynamics_input_value)))
+dynamics_response_branch=$((dynamics_legacy_response + $(maximum \
+  "$dynamics_input_branch" "$dynamics_sampled" "$random_extension")))
+dynamics_ordered_term_branch=$((dynamics_ordered_term + $(maximum \
+  "$dynamics_input_branch" "$dynamics_sampled" "$random_sensor_term")))
+dynamics_ordered_output_branch=$((dynamics_ordered_output + $(maximum \
+  "$dynamics_ordered_term_branch" "$dynamics_contracted")))
+dynamics_ordered_branch=$((dynamics_ordered + dynamics_ordered_output_branch))
+dynamics_evaluator_branch=$((dynamics_selector + $(maximum \
+  "$dynamics_inputs_legacy" "$dynamics_inputs_native" \
+  $((dynamics_legacy + dynamics_response_branch)) \
+  "$dynamics_ordered_branch")))
+dynamics_taper_branch=$((dynamics_taper + dynamics_envelope))
+dynamics_placement_branch=$((dynamics_placement + random_extension))
+dynamics_color_jitter_branch=$((dynamics_color_jitter \
+  + dynamics_jitter_value + random_extension))
+dynamics_primary_grain_branch=$((dynamics_primary_grain_partial \
+  + dynamics_primary_grain_closure + dynamics_grain))
+dynamics_secondary_grain_branch=$((dynamics_secondary_grain_partial \
+  + dynamics_secondary_grain_closure + $(maximum \
+    "$dynamics_response_branch" "$dynamics_grain")))
+dynamics_random_branch=$((dynamics_random + dynamics_random_value \
+  + random_extension))
+tip_layer_branch=$((tip_layer_init + tip_layer_finite))
+tip_include_branch=$((tip_accumulator_include + $(maximum \
+  "$tip_dot" "$tip_bounds")))
+tip_projection_branch=$((tip_projection + $(maximum \
+  "$tip_accumulator_init" "$tip_include_branch" \
+  "$tip_accumulator_interval")))
+dynamics_support_branch=$(maximum \
+  "$tip_layer_branch" "$tip_projection_branch" "$footprint_carry")
+dynamics_native_branch=$((dynamics_native + $(maximum \
+  "$dynamics_taper_branch" "$dynamics_placement_branch" \
+  "$dynamics_shape" "$affine_concatenating" \
+  "$dynamics_color_jitter_branch" "$dynamics_material_family" \
+  "$dynamics_primary_grain_branch" "$dynamics_secondary_grain_branch" \
+  $((dynamics_adjusted_color + ink_color_init)) \
+  $((dynamics_apply_color + ink_color_init)) \
+  "$dynamics_material_inputs" "$dynamics_random_branch" \
+  "$dynamics_support_branch" "$logical_dab_init")))
+dynamics_branch=$((dynamics_root + $(maximum \
+  "$dynamics_evaluator_branch" "$dynamics_native_branch")))
+cursor_evaluate_branch=$((cursor_evaluate + $(maximum \
+  "$stroke_context_init" "$dynamics_branch")))
+cursor_accept_composite=$((cursor_accept + $(maximum \
+  "$cursor_identity" "$cursor_random" "$cursor_evaluate_branch" \
+  "$cursor_install")))
+cursor_prepare_branch=$cursor_prepare
+cursor_initial_branch=$cursor_initial
+cursor_begin_branch=$cursor_begin_source
+cursor_pending_segment_branch=$cursor_prepare_segment
+cursor_finish_preparation_branch=$cursor_finish_source
+cursor_after_branch=$cursor_after_path
+cursor_path_branch=$cursor_path
+cursor_source_branch=$((cursor_source + cursor_source_candidate \
+  + cursor_source_commit))
+timed_optional_angle_branch=$((timed_optional_angle \
+  + timed_normalized_angle))
+timed_interpolated_branch=$((timed_interpolated + $(maximum \
+  "$timed_replacing" "$timed_stable_double" \
+  $((timed_stable_float + timed_stable_double)) \
+  $((timed_optional_linear + timed_stable_float \
+    + timed_stable_double)) \
+  "$timed_optional_angle_branch")))
+timed_candidate_branch=$((timed_candidate + $(maximum \
+  "$timed_interpolated_branch" "$timed_stable_double" \
+  "$timed_finite" "$timed_canonical")))
+timed_next_branch=$((timed_next + timed_candidate_branch))
+timed_consume_branch=$((timed_consume + timed_candidate_branch))
+cursor_segment_spatial_branch=$((cursor_segment_spatial + cursor_spatial))
+cursor_segment_timed_branch=$((cursor_segment_timed + timed_consume_branch))
+cursor_segment_decide_branch=$((cursor_segment_decide + cursor_decide))
+cursor_segment_settle_branch=$((cursor_segment_settle \
+  + cursor_segment_commit_prepared + cursor_commit))
+cursor_segment_lifecycle_branch=$((cursor_segment_lifecycle \
+  + cursor_segment_finish))
 cursor_advance_branch=$(maximum \
-  "$cursor_prepare_branch" "$cursor_path_branch" \
-  "$cursor_source_branch" "$cursor_segment_branch")
-cursor_advance_composite=$((cursor_page + cursor_step + cursor_advance_branch))
+  "$cursor_prepare_branch" "$cursor_initial_branch" \
+  "$cursor_begin_branch" "$cursor_pending_segment_branch" \
+  "$cursor_finish_preparation_branch" "$cursor_path_branch" \
+  "$cursor_after_branch" \
+  "$cursor_source_branch" "$cursor_segment_spatial_branch" \
+  "$cursor_segment_timed_branch" "$cursor_segment_decide_branch" \
+  "$cursor_segment_settle_branch" \
+  "$cursor_segment_lifecycle_branch")
+cursor_selection_branch=$((cursor_step + cursor_advance_branch))
+cursor_prepared_branch=$((cursor_prepared + $(maximum \
+  "$cursor_source_prepared" "$cursor_segment_prepared")))
+cursor_commit_branch=$((cursor_commit_root + $(maximum \
+  $((cursor_source_commit_prepared + cursor_source_commit)) \
+  $((cursor_segment_commit_prepared + cursor_commit)))))
+cursor_advance_composite=$((cursor_page + $(maximum \
+  "$cursor_selection_branch" "$cursor_prepared_branch" \
+  "$cursor_accept_composite" "$cursor_commit_branch")))
+printf 'STACK COMPONENT dynamics_evaluator=%s dynamics_native=%s dynamics=%s cursor_accept=%s selection=%s prepared=%s commit=%s page=%s\n' \
+  "$dynamics_evaluator_branch" "$dynamics_native_branch" \
+  "$dynamics_branch" "$cursor_accept_composite" \
+  "$cursor_selection_branch" "$cursor_prepared_branch" \
+  "$cursor_commit_branch" "$cursor_page"
 require_composite cursor_construct "$cursor_construct_composite" "$generator_debug_limit"
 require_composite cursor_advance "$cursor_advance_composite" "$generator_debug_limit"
 require_composite cursor_resume "$cursor_advance_composite" "$generator_debug_limit"
@@ -297,7 +449,8 @@ for release_spec in \
   'BrushStrokeGeneratorV6append_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment' \
   'BrushStrokeGeneratorV6finish_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment' \
   'BrushStrokeGeneratorV14emissionCursor external fragment' \
-  'BrushStrokeGeneratorV14EmissionCursorV12emitNextPage external fragment'
+  'BrushStrokeGeneratorV14EmissionCursorV12emitNextPage external fragment' \
+  'BrushDynamicsB0V8evaluate6sample external fragment'
 do
   set -- $release_spec
   "$frame_checker" "$release_binary" "$1" "$release_limit" "$2" "$3"

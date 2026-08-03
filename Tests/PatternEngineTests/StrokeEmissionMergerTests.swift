@@ -60,45 +60,42 @@ struct StrokeEmissionMergerTests {
     }
 
     @Test
-    func exactIntegerEqualityIsTransitiveAcrossPartitionsAndInputOrder() throws {
-        let begin = candidate(
-            kind: .begin,
-            timeKey: 90,
-            distanceKey: 120,
+    func productionCanonicalizationRejectsNontransitiveEpsilonMerging() throws {
+        let tolerance = 0.000_001
+        let distanceA = 0.000_010_00
+        let distanceB = 0.000_010_75
+        let distanceC = 0.000_011_50
+        #expect(abs(distanceA - distanceB) < tolerance)
+        #expect(abs(distanceB - distanceC) < tolerance)
+        #expect(abs(distanceA - distanceC) > tolerance)
+
+        let a = try canonicalizedBegin(
+            sourceDistance: distanceA,
             marker: 1
         )
-        let distance = candidate(
-            kind: .distance,
-            timeKey: 90,
-            distanceKey: 120,
+        let b = try canonicalizedBegin(
+            sourceDistance: distanceB,
             marker: 2
         )
-        let time = candidate(
-            kind: .time,
-            timeKey: 90,
-            distanceKey: 120,
+        let c = try canonicalizedBegin(
+            sourceDistance: distanceC,
             marker: 3
         )
-        let adjacent = candidate(
-            kind: .distance,
-            timeKey: 90,
-            distanceKey: 121,
-            marker: 4
-        )
+        #expect([a.distanceKey, b.distanceKey, c.distanceKey] == [10, 11, 12])
 
         let first = try drain(
-            distance: [distance, adjacent],
-            timed: [begin, time]
+            distance: [b],
+            timed: [a, c]
         )
         let second = try drain(
-            distance: [begin, distance, adjacent],
-            timed: [time]
+            distance: [a, c],
+            timed: [b]
         )
 
-        #expect(first.map(\.kind) == [.begin, .distance])
-        #expect(second.map(\.kind) == [.begin, .distance])
-        #expect(first.map(\.sample.pressure) == [1, 4])
-        #expect(second.map(\.sample.pressure) == [1, 4])
+        #expect(first.map(\.distanceKey) == [10, 11, 12])
+        #expect(second.map(\.distanceKey) == [10, 11, 12])
+        #expect(first.map(\.sample.pressure) == [1, 2, 3])
+        #expect(second.map(\.sample.pressure) == [1, 2, 3])
     }
 
     @Test
@@ -320,4 +317,24 @@ private func candidate(
         kind: kind,
         cornerSequence: cornerSequence
     )
+}
+
+private func canonicalizedBegin(
+    sourceDistance: Double,
+    marker: Float
+) throws -> StrokeEmissionCandidate {
+    var emitter = try TimedStrokeEmitter(timeInterval: 10)
+    let sample = candidate(
+        kind: .begin,
+        timeKey: 0,
+        distanceKey: 0,
+        marker: marker
+    ).sample
+    let cursor = try emitter.begin(at: TimedStrokePoint(
+        sample: sample,
+        sourceDistance: sourceDistance,
+        direction: 0
+    ))
+    let step = try cursor.nextCandidate()
+    return try #require(step).candidate
 }

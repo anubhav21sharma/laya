@@ -317,12 +317,19 @@ public struct BrushDynamicsEngine: Sendable {
         random: BrushRandomValues,
         strokeSeed: UInt64
     ) -> DabAttributes {
-        evaluateNative(
+        let dynamics = evaluatedDynamics(
+            sample: sample,
+            context: context,
+            program: program,
+            strokeSeed: strokeSeed,
+        )
+        return evaluateNative(
             sample: sample,
             context: context,
             program: program,
             random: random,
-            strokeSeed: strokeSeed
+            strokeSeed: strokeSeed,
+            evaluatedDynamics: dynamics
         )
     }
 
@@ -331,31 +338,11 @@ public struct BrushDynamicsEngine: Sendable {
         context: BrushStrokeContext,
         program: BrushProgram,
         random: BrushRandomValues,
-        strokeSeed: UInt64
+        strokeSeed: UInt64,
+        evaluatedDynamics: BrushOrderedDynamicValues
     ) -> DabAttributes {
         let definition = program.definition
-        let inputs = Inputs(sample: sample, context: context)
-        let dynamics = program.dynamics
-        let orderedDynamics: BrushOrderedDynamicValues?
-        if let stageC = program.stageC {
-            orderedDynamics = evaluateOrdered(
-                stageC.compiledSensorProgram,
-                inputs: Inputs(
-                    sample: sample,
-                    context: context,
-                    normalization: stageC.normalization
-                ),
-                strokeSeed: strokeSeed,
-                ordinal: context.ordinal,
-                maximumOpacity: definition.limits.maximumOpacity
-            )
-        } else {
-            orderedDynamics = nil
-        }
-        let sizeFactor = orderedDynamics?.size ?? evaluate(
-            dynamics.size, inputs: inputs, strokeSeed: strokeSeed,
-            ordinal: context.ordinal, channel: .size
-        )
+        let sizeFactor = evaluatedDynamics.size
         let taperEnvelope = taperEnvelope(
             context: context,
             taper: definition.taper,
@@ -367,36 +354,21 @@ public struct BrushDynamicsEngine: Sendable {
         let diameter = context.nominalDiameter * sizeFactor * sizeTaper
         let radius = diameter * 0.5
 
-        let spacingFactor = orderedDynamics?.spacing ?? evaluate(
-            dynamics.spacing, inputs: inputs, strokeSeed: strokeSeed,
-            ordinal: context.ordinal, channel: .spacing
-        )
+        let spacingFactor = evaluatedDynamics.spacing
         let dynamicSpacing = spacingFactor
             * (1 + symmetric(random.spacing) * definition.dynamics.randomization.spacing)
 
-        let flowFactor = orderedDynamics?.flow ?? evaluate(
-            dynamics.flow, inputs: inputs, strokeSeed: strokeSeed,
-            ordinal: context.ordinal, channel: .flow
-        )
+        let flowFactor = evaluatedDynamics.flow
         let flowTaper = definition.taper.effects.contains(.flow)
             ? interpolate(from: definition.taper.minimumFlow, to: 1, fraction: taperEnvelope)
             : 1
         let flow = clamp01(definition.placement.baseFlow * flowFactor * flowTaper)
-        let opacity = orderedDynamics?.opacity ?? evaluate(
-            dynamics.opacity, inputs: inputs, strokeSeed: strokeSeed,
-            ordinal: context.ordinal, channel: .opacity
-        )
+        let opacity = evaluatedDynamics.opacity
 
         let rotation = definition.placement.baseRotation
-            + (orderedDynamics?.rotation ?? evaluate(
-                dynamics.rotation, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: context.ordinal, channel: .rotation
-            ))
+            + evaluatedDynamics.rotation
             + symmetric(random.rotation) * definition.dynamics.randomization.rotation
-        let scatterFactor = orderedDynamics?.scatter ?? evaluate(
-            dynamics.scatter, inputs: inputs, strokeSeed: strokeSeed,
-            ordinal: context.ordinal, channel: .scatter
-        )
+        let scatterFactor = evaluatedDynamics.scatter
         let maximumScatter = context.nominalDiameter
             * definition.placement.baseScatterFraction
             * scatterFactor
@@ -405,17 +377,11 @@ public struct BrushDynamicsEngine: Sendable {
             symmetric(random.scatterX) * maximumScatter,
             symmetric(random.scatterY) * maximumScatter
         )
-        let offsetScale: Float = orderedDynamics == nil
+        let offsetScale: Float = program.stageC == nil
             ? 1 : context.nominalDiameter
         let offset = SIMD2(
-            (orderedDynamics?.offsetX ?? evaluate(
-                dynamics.offsetX, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: context.ordinal, channel: .offsetX
-            )) * offsetScale,
-            (orderedDynamics?.offsetY ?? evaluate(
-                dynamics.offsetY, inputs: inputs, strokeSeed: strokeSeed,
-                ordinal: context.ordinal, channel: .offsetY
-            )) * offsetScale
+            evaluatedDynamics.offsetX * offsetScale,
+            evaluatedDynamics.offsetY * offsetScale
         ) + definition.placement.baseOffset
         let placementJitter = nativePlacementJitter(
             fraction: definition.placement.baseJitterFraction,
@@ -521,23 +487,11 @@ public struct BrushDynamicsEngine: Sendable {
         }
         let hardness = clamp01(
             definition.coverage.baseHardness
-                * (orderedDynamics?.hardness ?? evaluate(
-                    dynamics.hardness,
-                    inputs: inputs,
-                    strokeSeed: strokeSeed,
-                    ordinal: context.ordinal,
-                    channel: .hardness
-                ))
+                * evaluatedDynamics.hardness
         )
         let grain = definition.coverage.grains.first
         let grainScale = (grain?.transform.scale ?? 1)
-            * (orderedDynamics?.grain ?? evaluate(
-                dynamics.grain,
-                inputs: inputs,
-                strokeSeed: strokeSeed,
-                ordinal: context.ordinal,
-                channel: .grain
-            ))
+            * evaluatedDynamics.grain
         let grainOffset = (grain?.transform.offset ?? .zero) + SIMD2(
             symmetric(random.grainX) * definition.dynamics.randomization.grain,
             symmetric(random.grainY) * definition.dynamics.randomization.grain
@@ -557,26 +511,14 @@ public struct BrushDynamicsEngine: Sendable {
             ordinal: context.ordinal,
             scope: .perStroke
         )
-        let hue = (orderedDynamics?.hue ?? evaluate(
-            dynamics.hue, inputs: inputs, strokeSeed: strokeSeed,
-            ordinal: context.ordinal, channel: .hue
-        )) + perStampColorJitter.hue + perStrokeColorJitter.hue
-        let saturation = (orderedDynamics?.saturation ?? evaluate(
-            dynamics.saturation, inputs: inputs, strokeSeed: strokeSeed,
-            ordinal: context.ordinal, channel: .saturation
-        )) + perStampColorJitter.saturation + perStrokeColorJitter.saturation
-        let brightness = (orderedDynamics?.brightness ?? evaluate(
-            dynamics.brightness, inputs: inputs, strokeSeed: strokeSeed,
-            ordinal: context.ordinal, channel: .brightness
-        )) + perStampColorJitter.brightness + perStrokeColorJitter.brightness
+        let hue = evaluatedDynamics.hue
+            + perStampColorJitter.hue + perStrokeColorJitter.hue
+        let saturation = evaluatedDynamics.saturation
+            + perStampColorJitter.saturation + perStrokeColorJitter.saturation
+        let brightness = evaluatedDynamics.brightness
+            + perStampColorJitter.brightness + perStrokeColorJitter.brightness
         let secondaryColorMix = clamp01((
-            orderedDynamics?.secondaryColorMix ?? evaluate(
-                dynamics.secondaryColorMix,
-                inputs: inputs,
-                strokeSeed: strokeSeed,
-                ordinal: context.ordinal,
-                channel: .secondaryColorMix
-            )
+            evaluatedDynamics.secondaryColorMix
         ) + perStampColorJitter.secondaryColorMix
             + perStrokeColorJitter.secondaryColorMix)
         let materialFamily = nativeMaterialFamily(definition.material)
@@ -599,13 +541,7 @@ public struct BrushDynamicsEngine: Sendable {
             nativeGrainFrame(
                 layer: $0,
                 scale: $0.transform.scale
-                    * (orderedDynamics?.grain ?? evaluate(
-                        dynamics.grain,
-                        inputs: inputs,
-                        strokeSeed: strokeSeed,
-                        ordinal: context.ordinal,
-                        channel: .grain
-                    )),
+                    * evaluatedDynamics.grain,
                 offset: $0.transform.offset + SIMD2(
                     symmetric(random.grainX)
                         * definition.dynamics.randomization.grain,
@@ -1036,6 +972,107 @@ private extension BrushDynamicsEngine {
             logicalDabOrdinal: ordinal,
             outputChannel: channel
         )) * amplitude
+    }
+
+    /// Selects one precompiled dynamics representation before evaluating any
+    /// output channel. Keeping the schema-v1 and schema-v2 paths disjoint
+    /// prevents both implementations from occupying the live input stack.
+    @inline(never)
+    func evaluatedDynamics(
+        sample: InterpolatedStrokeSample,
+        context: BrushStrokeContext,
+        program: BrushProgram,
+        strokeSeed: UInt64
+    ) -> BrushOrderedDynamicValues {
+        if let stageC = program.stageC {
+            return evaluateOrdered(
+                stageC.compiledSensorProgram,
+                inputs: Inputs(
+                    sample: sample,
+                    context: context,
+                    normalization: stageC.normalization
+                ),
+                strokeSeed: strokeSeed,
+                ordinal: context.ordinal,
+                maximumOpacity: program.definition.limits.maximumOpacity
+            )
+        }
+        return evaluateLegacyDynamics(
+            program.dynamics,
+            inputs: Inputs(sample: sample, context: context),
+            strokeSeed: strokeSeed,
+            ordinal: context.ordinal
+        )
+    }
+
+    /// Evaluates every legacy channel exactly once and returns the same fixed
+    /// layout used by the ordered Stage C evaluator.
+    @inline(never)
+    func evaluateLegacyDynamics(
+        _ dynamics: borrowing BrushDynamicsProgram,
+        inputs: borrowing Inputs,
+        strokeSeed: UInt64,
+        ordinal: UInt64
+    ) -> BrushOrderedDynamicValues {
+        BrushOrderedDynamicValues(
+            size: evaluate(
+                dynamics.size, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .size
+            ),
+            flow: evaluate(
+                dynamics.flow, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .flow
+            ),
+            opacity: evaluate(
+                dynamics.opacity, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .opacity
+            ),
+            spacing: evaluate(
+                dynamics.spacing, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .spacing
+            ),
+            rotation: evaluate(
+                dynamics.rotation, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .rotation
+            ),
+            scatter: evaluate(
+                dynamics.scatter, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .scatter
+            ),
+            hardness: evaluate(
+                dynamics.hardness, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .hardness
+            ),
+            grain: evaluate(
+                dynamics.grain, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .grain
+            ),
+            offsetX: evaluate(
+                dynamics.offsetX, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .offsetX
+            ),
+            offsetY: evaluate(
+                dynamics.offsetY, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .offsetY
+            ),
+            hue: evaluate(
+                dynamics.hue, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .hue
+            ),
+            saturation: evaluate(
+                dynamics.saturation, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .saturation
+            ),
+            brightness: evaluate(
+                dynamics.brightness, inputs: inputs, strokeSeed: strokeSeed,
+                ordinal: ordinal, channel: .brightness
+            ),
+            secondaryColorMix: evaluate(
+                dynamics.secondaryColorMix, inputs: inputs,
+                strokeSeed: strokeSeed, ordinal: ordinal,
+                channel: .secondaryColorMix
+            )
+        )
     }
 
     func evaluateOrdered(

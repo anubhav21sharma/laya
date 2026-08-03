@@ -140,11 +140,24 @@ extension BrushStrokeGenerator {
             case begin, append, finish
         }
 
+        /// Each worker installs its successor and returns to `emitNextPage`.
+        /// Only `advanceOne` may dispatch a worker; workers must never invoke
+        /// one another or their large debug frames become simultaneously live.
         private enum Phase: Equatable, Sendable {
             case prepare
+            case initialPath
+            case beginSource
+            case pendingSegment
+            case finishSource
             case path
+            case afterPath
             case source
-            case segment
+            case segmentPrepareSpatial
+            case segmentPrepareTimed
+            case segmentDecide
+            case segmentSettleDuplicate
+            case segmentCommit
+            case segmentLifecycle
             case complete
         }
 
@@ -155,18 +168,80 @@ extension BrushStrokeGenerator {
             case finish
         }
 
-        private enum CandidateAdvance: Equatable, Sendable {
+        fileprivate enum CandidateAdvance: Equatable, Sendable {
             case noDab
-            case emitted
+            case prepared
             case blocked
         }
 
+        private struct PendingMergeDecision: Equatable, Sendable {
+            let continuation: StrokeEmissionMerger
+            let consumesDistance: Bool
+            let consumesTimed: Bool
+            let selectsDistance: Bool
+
+            init(
+                step: StrokeEmissionMergeStep,
+                distance: StrokeEmissionCandidate?,
+                timed: StrokeEmissionCandidate?
+            ) {
+                guard let candidate = step.candidate else {
+                    preconditionFailure(
+                        "A pending emission decision must contain a candidate"
+                    )
+                }
+                self.init(
+                    continuation: step.continuation,
+                    consumesDistance: step.consumesDistance,
+                    consumesTimed: step.consumesTimed,
+                    selectsDistance: distance == candidate || timed == nil
+                )
+            }
+
+            init(
+                continuation: StrokeEmissionMerger,
+                consumesDistance: Bool,
+                consumesTimed: Bool,
+                selectsDistance: Bool
+            ) {
+                self.continuation = continuation
+                self.consumesDistance = consumesDistance
+                self.consumesTimed = consumesTimed
+                self.selectsDistance = selectsDistance
+            }
+        }
+
         private struct SourceCursor: Equatable, Sendable {
+            private enum CandidatePhase: Equatable, Sendable {
+                case decide
+                case commit
+            }
+
             var distanceHead: StrokeEmissionCandidate?
             var timedHead: StrokeEmissionCandidate?
             var timedCursor: TimedStrokeEmissionCursor?
             var merger: StrokeEmissionMerger
             let isPredicted: Bool
+            private var candidatePhase = CandidatePhase.decide
+            private var pendingTimedCandidate: StrokeEmissionCandidate?
+            private var pendingMergeDecision: PendingMergeDecision?
+
+            init(
+                distanceHead: StrokeEmissionCandidate?,
+                timedHead: StrokeEmissionCandidate?,
+                timedCursor: TimedStrokeEmissionCursor?,
+                merger: StrokeEmissionMerger,
+                isPredicted: Bool
+            ) {
+                self.distanceHead = distanceHead
+                self.timedHead = timedHead
+                self.timedCursor = timedCursor
+                self.merger = merger
+                self.isPredicted = isPredicted
+                candidatePhase = .decide
+                pendingTimedCandidate = nil
+                pendingMergeDecision = nil
+            }
 
             var isComplete: Bool {
                 distanceHead == nil
@@ -176,36 +251,89 @@ extension BrushStrokeGenerator {
 
             @inline(never)
             mutating func advanceSourceCandidate(
-                generator: inout BrushStrokeGenerator,
-                allowEmission: Bool,
-                emit: (DabAttributes) throws -> Void
+                allowEmission: Bool
             ) throws -> CandidateAdvance {
-                let timedStep = timedHead == nil
-                    ? try timedCursor?.nextCandidate()
-                    : nil
-                let timedCandidate = timedHead ?? timedStep?.candidate
+                if candidatePhase == .commit {
+                    guard pendingMergeDecision != nil else {
+                        preconditionFailure(
+                            "Committed source decision must contain a dab"
+                        )
+                    }
+                    return allowEmission ? .prepared : .blocked
+                }
+
+                if timedHead == nil,
+                   pendingTimedCandidate == nil,
+                   let timedStep = try timedCursor?.nextCandidate()
+                {
+                    pendingTimedCandidate = timedStep.candidate
+                    timedCursor = timedStep.continuation
+                }
+                let timedCandidate = timedHead ?? pendingTimedCandidate
                 guard let step = try merger.next(
                     distance: distanceHead,
                     timed: timedCandidate
                 ) else { return .noDab }
 
-                if let candidate = step.candidate {
+                if step.candidate != nil {
                     guard allowEmission else { return .blocked }
-                    try generator.emitAcceptedCandidate(
-                        candidate,
-                        emit: emit
+                    pendingMergeDecision = PendingMergeDecision(
+                        step: step,
+                        distance: distanceHead,
+                        timed: timedCandidate
+                    )
+                    candidatePhase = .commit
+                    return .prepared
+                }
+
+                commit(
+                    continuation: step.continuation,
+                    consumesDistance: step.consumesDistance,
+                    consumesTimed: step.consumesTimed
+                )
+                return .noDab
+            }
+
+            var preparedCandidate: StrokeEmissionCandidate? {
+                guard candidatePhase == .commit,
+                      let decision = pendingMergeDecision
+                else { return nil }
+                return decision.selectsDistance
+                    ? distanceHead
+                    : (timedHead ?? pendingTimedCandidate)
+            }
+
+            mutating func commitPreparedCandidate() {
+                guard candidatePhase == .commit,
+                      let decision = pendingMergeDecision
+                else {
+                    preconditionFailure(
+                        "Missing prepared source emission decision"
                     )
                 }
-                merger = step.continuation
-                if step.consumesDistance { distanceHead = nil }
-                if step.consumesTimed {
+                commit(
+                    continuation: decision.continuation,
+                    consumesDistance: decision.consumesDistance,
+                    consumesTimed: decision.consumesTimed
+                )
+            }
+
+            private mutating func commit(
+                continuation: StrokeEmissionMerger,
+                consumesDistance: Bool,
+                consumesTimed: Bool
+            ) {
+                merger = continuation
+                if consumesDistance { distanceHead = nil }
+                if consumesTimed {
                     if timedHead != nil {
                         timedHead = nil
                     } else {
-                        timedCursor = timedStep?.continuation
+                        pendingTimedCandidate = nil
                     }
                 }
-                return step.candidate == nil ? .noDab : .emitted
+                pendingMergeDecision = nil
+                candidatePhase = .decide
             }
         }
 
@@ -221,17 +349,10 @@ extension BrushStrokeGenerator {
             var merger: StrokeEmissionMerger
             var traversed: Float
 
-            enum CandidatePhase: Equatable, Sendable {
-                case prepareSpatial
-                case prepareTimed
-                case decide
-                case commit
-            }
-
-            var candidatePhase: CandidatePhase
             var pendingSpatialCandidate: StrokeEmissionCandidate?
             var pendingSpatialIsCorner: Bool
             var pendingTimedCandidate: StrokeEmissionCandidate?
+            var pendingMergeDecision: PendingMergeDecision?
 
             var hasSource: Bool {
                 cornerCursor?.isComplete == false
@@ -239,35 +360,7 @@ extension BrushStrokeGenerator {
             }
 
             @inline(never)
-            mutating func advanceSegmentCandidate(
-                generator: inout BrushStrokeGenerator,
-                allowEmission: Bool,
-                emit: (DabAttributes) throws -> Void
-            ) throws -> CandidateAdvance {
-                switch candidatePhase {
-                case .prepareSpatial:
-                    try prepareSpatialCandidate(generator: generator)
-                    candidatePhase = .prepareTimed
-                    return .noDab
-                case .prepareTimed:
-                    pendingTimedCandidate = try timedCursor?
-                        .nextCandidate()?.candidate
-                    candidatePhase = .decide
-                    return .noDab
-                case .decide:
-                    return try decidePreparedCandidates(
-                        allowEmission: allowEmission
-                    )
-                case .commit:
-                    return try commitPreparedCandidates(
-                        generator: &generator,
-                        emit: emit
-                    )
-                }
-            }
-
-            @inline(never)
-            private mutating func prepareSpatialCandidate(
+            fileprivate mutating func prepareSpatialCandidate(
                 generator: borrowing BrushStrokeGenerator
             ) throws {
                 let distanceStep = generator.distanceUntilNext
@@ -323,39 +416,70 @@ extension BrushStrokeGenerator {
             }
 
             @inline(never)
-            private mutating func decidePreparedCandidates(
+            fileprivate mutating func decidePreparedCandidates(
                 allowEmission: Bool
             ) throws -> CandidateAdvance {
                 guard let mergeStep = try merger.next(
                     distance: pendingSpatialCandidate,
                     timed: pendingTimedCandidate
                 ) else {
-                    candidatePhase = .prepareSpatial
                     return .noDab
                 }
 
                 if mergeStep.candidate != nil, !allowEmission {
                     return .blocked
                 }
-                candidatePhase = .commit
+                if mergeStep.candidate != nil {
+                    pendingMergeDecision = PendingMergeDecision(
+                        step: mergeStep,
+                        distance: pendingSpatialCandidate,
+                        timed: pendingTimedCandidate
+                    )
+                    return .prepared
+                }
+                pendingMergeDecision = PendingMergeDecision(
+                    continuation: mergeStep.continuation,
+                    consumesDistance: mergeStep.consumesDistance,
+                    consumesTimed: mergeStep.consumesTimed,
+                    selectsDistance: mergeStep.consumesDistance
+                )
                 return .noDab
             }
 
             @inline(never)
-            private mutating func commitPreparedCandidates(
-                generator: inout BrushStrokeGenerator,
-                emit: (DabAttributes) throws -> Void
-            ) throws -> CandidateAdvance {
-                guard let mergeStep = try merger.next(
-                    distance: pendingSpatialCandidate,
-                    timed: pendingTimedCandidate
-                ) else {
+            mutating func commitPreparedCandidate(
+                generator: inout BrushStrokeGenerator
+            ) {
+                guard let decision = pendingMergeDecision else {
                     preconditionFailure(
-                        "Prepared emission decision must remain reproducible"
+                        "Missing prepared segment emission decision"
                     )
                 }
+                commitPreparedCandidates(
+                    generator: &generator,
+                    continuation: decision.continuation,
+                    consumesDistance: decision.consumesDistance,
+                    consumesTimed: decision.consumesTimed,
+                    selectsDistance: decision.selectsDistance
+                )
+            }
 
-                guard let selected = mergeStep.consumesDistance
+            var preparedCandidate: StrokeEmissionCandidate? {
+                guard let decision = pendingMergeDecision
+                else { return nil }
+                return decision.selectsDistance
+                    ? pendingSpatialCandidate
+                    : pendingTimedCandidate
+            }
+
+            private mutating func commitPreparedCandidates(
+                generator: inout BrushStrokeGenerator,
+                continuation: StrokeEmissionMerger,
+                consumesDistance: Bool,
+                consumesTimed: Bool,
+                selectsDistance: Bool
+            ) {
+                guard let selected = selectsDistance
                     ? pendingSpatialCandidate
                     : pendingTimedCandidate
                 else {
@@ -378,11 +502,7 @@ extension BrushStrokeGenerator {
                     proposedTraversed = selectedOffset
                 }
 
-                if let accepted = mergeStep.candidate {
-                    try generator.emitAcceptedCandidate(
-                        accepted,
-                        emit: emit
-                    )
+                if let accepted = preparedCandidate {
                     switch accepted.kind {
                     case .corner, .time:
                         generator.distanceUntilNext = min(
@@ -395,7 +515,7 @@ extension BrushStrokeGenerator {
                         generator.distanceUntilNext =
                             proposedDistanceUntilNext
                     }
-                } else if mergeStep.consumesDistance
+                } else if consumesDistance
                             && !pendingSpatialIsCorner
                 {
                     generator.distanceUntilNext = generator.currentSpacing
@@ -404,20 +524,16 @@ extension BrushStrokeGenerator {
                 }
 
                 traversed = proposedTraversed
-                merger = mergeStep.continuation
-                if mergeStep.consumesDistance,
+                merger = continuation
+                if consumesDistance,
                    pendingSpatialIsCorner
                 {
                     cornerCursor = cornerCursor?.nextCandidate()?.continuation
                 }
-                if mergeStep.consumesTimed {
-                    timedCursor = try timedCursor?.nextCandidate()?.continuation
-                }
+                if consumesTimed { pendingTimedCandidate = nil }
                 pendingSpatialCandidate = nil
                 pendingSpatialIsCorner = false
-                pendingTimedCandidate = nil
-                candidatePhase = .prepareSpatial
-                return mergeStep.candidate == nil ? .noDab : .emitted
+                pendingMergeDecision = nil
             }
 
             @inline(never)
@@ -502,15 +618,24 @@ extension BrushStrokeGenerator {
                 let allowEmission = emittedCount
                     < LogicalDabBatch.maximumDabCount
                 switch try advanceOne(
-                    allowEmission: allowEmission,
-                    emit: emit
+                    allowEmission: allowEmission
                 ) {
-                case .emitted:
+                case .prepared:
                     guard allowEmission else {
                         preconditionFailure(
-                            "Disabled cursor advance emitted a dab"
+                            "Disabled cursor advance prepared a dab"
                         )
                     }
+                    guard let candidate = preparedCandidate else {
+                        preconditionFailure(
+                            "Prepared cursor advance must expose a candidate"
+                        )
+                    }
+                    try generator.emitAcceptedCandidate(
+                        candidate,
+                        emit: emit
+                    )
+                    commitPreparedCandidate()
                     emittedCount += 1
                 case .noDab:
                     break
@@ -528,28 +653,107 @@ extension BrushStrokeGenerator {
         }
 
         private mutating func advanceOne(
-            allowEmission: Bool,
-            emit: (DabAttributes) throws -> Void
+            allowEmission: Bool
         ) throws -> CandidateAdvance {
             switch phase {
             case .prepare:
                 try prepare()
                 return .noDab
+            case .initialPath:
+                guard let attributed else {
+                    preconditionFailure("Missing initial attributed sample")
+                }
+                try prepareInitialPath(attributed)
+                return .noDab
+            case .beginSource:
+                try prepareBeginSource()
+                return .noDab
+            case .pendingSegment:
+                try preparePendingSegment()
+                return .noDab
+            case .finishSource:
+                try prepareFinishSource()
+                return .noDab
             case .path:
                 try advancePath()
                 return .noDab
+            case .afterPath:
+                try afterPath()
+                return .noDab
             case .source:
                 return try advanceSource(
-                    allowEmission: allowEmission,
-                    emit: emit
+                    allowEmission: allowEmission
                 )
-            case .segment:
-                return try advanceSegment(
-                    allowEmission: allowEmission,
-                    emit: emit
+            case .segmentPrepareSpatial:
+                try prepareSegmentSpatial()
+                return .noDab
+            case .segmentPrepareTimed:
+                try prepareSegmentTimed()
+                return .noDab
+            case .segmentDecide:
+                return try decideSegment(
+                    allowEmission: allowEmission
                 )
+            case .segmentSettleDuplicate:
+                settleSegmentDuplicate()
+                return .noDab
+            case .segmentCommit:
+                guard segmentCursor?.pendingMergeDecision != nil else {
+                    preconditionFailure(
+                        "Committed segment decision must contain a dab"
+                    )
+                }
+                return allowEmission ? .prepared : .blocked
+            case .segmentLifecycle:
+                advanceSegmentLifecycle()
+                return .noDab
             case .complete:
                 return .noDab
+            }
+        }
+
+        private var preparedCandidate: StrokeEmissionCandidate? {
+            switch phase {
+            case .source:
+                sourceCursor?.preparedCandidate
+            case .segmentCommit:
+                segmentCursor?.preparedCandidate
+            case .prepare, .initialPath, .beginSource, .pendingSegment,
+                    .finishSource, .path, .afterPath,
+                    .segmentPrepareSpatial,
+                    .segmentPrepareTimed, .segmentDecide,
+                    .segmentSettleDuplicate, .segmentLifecycle, .complete:
+                nil
+            }
+        }
+
+        private mutating func commitPreparedCandidate() {
+            switch phase {
+            case .source:
+                guard var cursor = sourceCursor else {
+                    preconditionFailure(
+                        "Missing prepared source cursor"
+                    )
+                }
+                cursor.commitPreparedCandidate()
+                sourceCursor = cursor
+            case .segmentCommit:
+                guard var cursor = segmentCursor else {
+                    preconditionFailure(
+                        "Missing prepared segment cursor"
+                    )
+                }
+                cursor.commitPreparedCandidate(generator: &generator)
+                segmentCursor = cursor
+                phase = .segmentLifecycle
+            case .prepare, .initialPath, .beginSource, .pendingSegment,
+                    .finishSource, .path, .afterPath,
+                    .segmentPrepareSpatial,
+                    .segmentPrepareTimed, .segmentDecide,
+                    .segmentSettleDuplicate, .segmentLifecycle, .complete:
+                preconditionFailure(
+                    "Prepared candidate cannot exist outside an emission source"
+                )
             }
         }
 
@@ -564,7 +768,8 @@ extension BrushStrokeGenerator {
                     complete(reset: operation == .finish)
                     return
                 }
-                try prepareInitialPath(InterpolatedStrokeSample(stabilized))
+                attributed = InterpolatedStrokeSample(stabilized)
+                phase = .initialPath
                 return
             }
 
@@ -577,7 +782,7 @@ extension BrushStrokeGenerator {
             let attributed = InterpolatedStrokeSample(terminal)
             self.attributed = attributed
             guard generator.hasAttributedPath else {
-                try prepareInitialPath(attributed)
+                phase = .initialPath
                 return
             }
 
@@ -591,14 +796,13 @@ extension BrushStrokeGenerator {
                 generator.lastDirection = update.direction
                     ?? generator.lastDirection
                 if generator.heldDirectionalBegin != nil {
-                    try prepareHeldBegin(
-                        direction: update.direction == nil
-                            ? generator.stageCStationaryDirection
-                            : direction,
-                        purpose: .finish
-                    )
+                    pendingDirection = update.direction == nil
+                        ? generator.stageCStationaryDirection
+                        : direction
+                    sourcePurpose = .finish
+                    phase = .beginSource
                 } else {
-                    try prepareFinishSource()
+                    phase = .finishSource
                 }
                 return
             }
@@ -608,7 +812,7 @@ extension BrushStrokeGenerator {
                 maximumSubdivisionCount: maximumPathSubdivisionCount
             )
             if pathCursor == nil {
-                try afterPath()
+                phase = .afterPath
             } else {
                 phase = .path
             }
@@ -632,31 +836,28 @@ extension BrushStrokeGenerator {
             if generator.program.stageC?.usesTravelDirection == true {
                 generator.heldDirectionalBegin = attributed
                 if resets {
-                    try prepareHeldBegin(
-                        direction: generator.stageCStationaryDirection,
-                        purpose: .resetAndComplete
-                    )
+                    pendingDirection = generator.stageCStationaryDirection
+                    sourcePurpose = .resetAndComplete
+                    phase = .beginSource
                 } else {
                     phase = .complete
                 }
             } else {
-                try prepareBeginSource(
-                    attributed,
-                    direction: 0,
-                    purpose: resets ? .resetAndComplete : .complete
-                )
+                pendingDirection = 0
+                sourcePurpose = resets ? .resetAndComplete : .complete
+                phase = .beginSource
             }
         }
 
         private mutating func advancePath() throws {
             guard let pathCursor else {
-                try afterPath()
+                phase = .afterPath
                 return
             }
             guard let step = pathCursor.nextSegment() else {
                 generator.path = pathCursor.completedPath
                 self.pathCursor = nil
-                try afterPath()
+                phase = .afterPath
                 return
             }
             if step.segment.length <= 0 {
@@ -674,9 +875,10 @@ extension BrushStrokeGenerator {
             if update.direction != nil,
                generator.heldDirectionalBegin != nil
             {
-                try prepareHeldBegin(direction: direction, purpose: .segment)
+                sourcePurpose = .segment
+                phase = .beginSource
             } else {
-                try preparePendingSegment()
+                phase = .pendingSegment
             }
         }
 
@@ -724,34 +926,81 @@ extension BrushStrokeGenerator {
                     ? generator.predictionEmissionMerger
                     : generator.authoritativeEmissionMerger,
                 traversed: 0,
-                candidatePhase: .prepareSpatial,
                 pendingSpatialCandidate: nil,
                 pendingSpatialIsCorner: false,
-                pendingTimedCandidate: nil
+                pendingTimedCandidate: nil,
+                pendingMergeDecision: nil
             )
             pendingSegment = nil
             pendingSignedTurn = nil
-            phase = .segment
+            phase = .segmentPrepareSpatial
         }
 
-        private mutating func advanceSegment(
-            allowEmission: Bool,
-            emit: (DabAttributes) throws -> Void
+        @inline(never)
+        private mutating func prepareSegmentSpatial() throws {
+            guard var cursor = segmentCursor else {
+                preconditionFailure("Missing resumable emission segment")
+            }
+            try cursor.prepareSpatialCandidate(generator: generator)
+            segmentCursor = cursor
+            phase = .segmentPrepareTimed
+        }
+
+        @inline(never)
+        private mutating func prepareSegmentTimed() throws {
+            guard var cursor = segmentCursor else {
+                preconditionFailure("Missing resumable emission segment")
+            }
+            if let candidate = try cursor.timedCursor?.consumeNextCandidate() {
+                cursor.pendingTimedCandidate = candidate
+            }
+            segmentCursor = cursor
+            phase = .segmentDecide
+        }
+
+        @inline(never)
+        private mutating func decideSegment(
+            allowEmission: Bool
         ) throws -> CandidateAdvance {
             guard var cursor = segmentCursor else {
                 preconditionFailure("Missing resumable emission segment")
             }
-            let result = try cursor.advanceSegmentCandidate(
-                generator: &generator,
-                allowEmission: allowEmission,
-                emit: emit
+            let result = try cursor.decidePreparedCandidates(
+                allowEmission: allowEmission
             )
-            if result == .blocked {
-                return .blocked
+            guard result != .blocked else { return .blocked }
+            segmentCursor = cursor
+            if result == .prepared {
+                phase = .segmentCommit
+            } else if cursor.pendingMergeDecision != nil {
+                phase = .segmentSettleDuplicate
+            } else {
+                phase = .segmentLifecycle
             }
-            if result == .emitted {
-                segmentCursor = cursor
-                return .emitted
+            return result
+        }
+
+        @inline(never)
+        private mutating func settleSegmentDuplicate() {
+            guard var cursor = segmentCursor else {
+                preconditionFailure(
+                    "Missing segment cursor for duplicate settlement"
+                )
+            }
+            guard cursor.pendingMergeDecision != nil else {
+                preconditionFailure(
+                    "Duplicate settlement must contain a decision"
+                )
+            }
+            cursor.commitPreparedCandidate(generator: &generator)
+            segmentCursor = cursor
+            phase = .segmentLifecycle
+        }
+
+        @inline(never)
+        private mutating func advanceSegmentLifecycle() {
+            guard var cursor = segmentCursor else {
+                preconditionFailure("Missing resumable emission segment")
             }
             if cursor.hasSource
                 || (generator.stageCUsesDistanceEmission
@@ -759,14 +1008,14 @@ extension BrushStrokeGenerator {
                         - cursor.traversed)
             {
                 segmentCursor = cursor
-                return .noDab
+                phase = .segmentPrepareSpatial
+                return
             }
             cursor.finishSegment(generator: &generator)
             segmentCursor = nil
             pathCursor = pendingPathContinuation
             pendingPathContinuation = nil
             phase = .path
-            return .noDab
         }
 
         private mutating func afterPath() throws {
@@ -776,12 +1025,11 @@ extension BrushStrokeGenerator {
             if operation == .finish {
                 generator.path.cancel()
                 if generator.heldDirectionalBegin != nil {
-                    try prepareHeldBegin(
-                        direction: generator.stageCStationaryDirection,
-                        purpose: .finish
-                    )
+                    pendingDirection = generator.stageCStationaryDirection
+                    sourcePurpose = .finish
+                    phase = .beginSource
                 } else {
-                    try prepareFinishSource()
+                    phase = .finishSource
                 }
                 return
             }
@@ -799,31 +1047,21 @@ extension BrushStrokeGenerator {
             )
         }
 
-        private mutating func prepareHeldBegin(
-            direction: Float,
-            purpose: SourcePurpose
-        ) throws {
-            guard let held = generator.heldDirectionalBegin else {
-                preconditionFailure("Missing held directional begin")
+        private mutating func prepareBeginSource() throws {
+            let beginSample: InterpolatedStrokeSample
+            if let held = generator.heldDirectionalBegin {
+                beginSample = held
+                generator.heldDirectionalBegin = nil
+                generator.lastDirection = pendingDirection
+            } else if let attributed {
+                beginSample = attributed
+            } else {
+                preconditionFailure("Missing attributed begin sample")
             }
-            generator.heldDirectionalBegin = nil
-            generator.lastDirection = direction
-            try prepareBeginSource(
-                held,
-                direction: direction,
-                purpose: purpose
-            )
-        }
-
-        private mutating func prepareBeginSource(
-            _ attributed: InterpolatedStrokeSample,
-            direction: Float,
-            purpose: SourcePurpose
-        ) throws {
             let candidate = try generator.stageCCandidate(
-                sample: attributed,
+                sample: beginSample,
                 sourceDistance: 0,
-                direction: direction,
+                direction: pendingDirection,
                 kind: .begin,
                 isPredicted: sample.kind == .predicted
             )
@@ -833,21 +1071,21 @@ extension BrushStrokeGenerator {
                     distance: candidate,
                     timedHead: nil,
                     timedCursor: nil,
-                    purpose: purpose
+                    purpose: sourcePurpose
                 )
             case .time:
                 prepareSource(
                     distance: nil,
                     timedHead: candidate,
                     timedCursor: nil,
-                    purpose: purpose
+                    purpose: sourcePurpose
                 )
             case .distanceAndTime:
                 prepareSource(
                     distance: candidate,
                     timedHead: candidate,
                     timedCursor: nil,
-                    purpose: purpose
+                    purpose: sourcePurpose
                 )
             }
         }
@@ -924,23 +1162,20 @@ extension BrushStrokeGenerator {
         }
 
         private mutating func advanceSource(
-            allowEmission: Bool,
-            emit: (DabAttributes) throws -> Void
+            allowEmission: Bool
         ) throws -> CandidateAdvance {
             guard var cursor = sourceCursor else {
                 preconditionFailure("Missing resumable source cursor")
             }
             let result = try cursor.advanceSourceCandidate(
-                generator: &generator,
-                allowEmission: allowEmission,
-                emit: emit
+                allowEmission: allowEmission
             )
             if result == .blocked {
                 return .blocked
             }
-            if result == .emitted {
+            if result == .prepared {
                 sourceCursor = cursor
-                return .emitted
+                return .prepared
             }
             guard cursor.isComplete else {
                 sourceCursor = cursor
@@ -958,9 +1193,9 @@ extension BrushStrokeGenerator {
             case .resetAndComplete:
                 complete(reset: true)
             case .segment:
-                try preparePendingSegment()
+                phase = .pendingSegment
             case .finish:
-                try prepareFinishSource()
+                phase = .finishSource
             }
             return .noDab
         }

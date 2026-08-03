@@ -97,13 +97,26 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
     }
 
     public func nextCandidate() throws -> TimedStrokeEmissionStep? {
+        var continuation = self
+        guard let candidate = try continuation.consumeNextCandidate() else {
+            return nil
+        }
+        return TimedStrokeEmissionStep(
+            candidate: candidate,
+            continuation: continuation
+        )
+    }
+
+    /// Advances one caller-owned cursor copy and returns only its candidate.
+    /// Generator paging already mutates a transactional local segment copy, so
+    /// returning a second complete cursor would duplicate the live stack value.
+    @inline(never)
+    mutating func consumeNextCandidate()
+        throws -> StrokeEmissionCandidate?
+    {
         if let beginCandidate {
-            var continuation = self
-            continuation.beginCandidate = nil
-            return TimedStrokeEmissionStep(
-                candidate: beginCandidate,
-                continuation: continuation
-            )
+            self.beginCandidate = nil
+            return beginCandidate
         }
         if nextTickIndex <= finalTickIndex {
             let candidate = try timedCandidate(at: nextTickIndex)
@@ -111,20 +124,12 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
             guard !overflow else {
                 throw TimedStrokeEmitterError.tickIndexOverflow
             }
-            var continuation = self
-            continuation.nextTickIndex = nextIndex
-            return TimedStrokeEmissionStep(
-                candidate: candidate,
-                continuation: continuation
-            )
+            nextTickIndex = nextIndex
+            return candidate
         }
         if let finishCandidate {
-            var continuation = self
-            continuation.finishCandidate = nil
-            return TimedStrokeEmissionStep(
-                candidate: finishCandidate,
-                continuation: continuation
-            )
+            self.finishCandidate = nil
+            return finishCandidate
         }
         return nil
     }

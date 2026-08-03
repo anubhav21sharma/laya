@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [[ $# -lt 3 || $# -gt 5 ]]; then
-  printf 'usage: %s BINARY SYMBOL_FRAGMENT MAXIMUM_BYTES [external|non-external|any] [fragment|swift-function|swift-equality|swift-closure|swift-partial-apply|swift-merged-function|swift-merged-closure]\n' "$0" >&2
+  printf 'usage: %s BINARY SYMBOL_FRAGMENT MAXIMUM_BYTES [external|non-external|any] [fragment|swift-function|swift-nonthrowing-function|swift-equality|swift-closure|swift-partial-apply|swift-merged-function|swift-merged-closure]\n' "$0" >&2
   exit 64
 fi
 
@@ -29,7 +29,7 @@ case "$scope" in
     ;;
 esac
 case "$match_kind" in
-  fragment|swift-function|swift-equality|swift-closure|swift-partial-apply|swift-merged-function|swift-merged-closure) ;;
+  fragment|swift-function|swift-nonthrowing-function|swift-equality|swift-closure|swift-partial-apply|swift-merged-function|swift-merged-closure) ;;
   *)
     printf 'unsupported symbol match kind: %s\n' "$match_kind" >&2
     exit 64
@@ -44,6 +44,8 @@ symbols=$(
         scope == "external" && $0 !~ / external / { next }
         scope == "non-external" && $0 !~ / non-external / { next }
         match_kind == "swift-function" && $NF !~ /KFZ?$/ { next }
+        match_kind == "swift-nonthrowing-function" \
+          && $NF !~ /tFZ?$/ { next }
         match_kind == "swift-equality" \
           && $NF !~ /V23__derived_struct_equals.*tFZ$/ { next }
         match_kind == "swift-closure" && $NF !~ /EfU[0-9]*_$/ { next }
