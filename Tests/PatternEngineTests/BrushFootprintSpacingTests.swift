@@ -54,7 +54,7 @@ struct BrushFootprintSpacingTests {
 
     @Test("all nonfinite and nonpositive factors fail with typed errors")
     func invalidFactorsFailWithTypedErrors() {
-        for supportWidth in [Float.nan, .infinity, 0, -1] {
+        for supportWidth in [Double.nan, .infinity, 0, -1] {
             #expect(throws: BrushFootprintSpacingError.invalidSupportWidth) {
                 try BrushFootprintSpacing.nextCarry(
                     supportWidth: supportWidth,
@@ -239,7 +239,7 @@ struct BrushFootprintSpacingTests {
             let firstGap = firstUncoveredDistance(
                 tip: fixture.tip,
                 tangent: fixture.tangent,
-                carry: carry,
+                carry: Float(carry),
                 strokeLength: 24,
                 samplingStep: 0.02
             )
@@ -260,7 +260,7 @@ struct BrushFootprintSpacingTests {
             maximumSpacingFraction: 0.2
         )
 
-        let count = rasterPlacementCount(pathLength: 64, carry: carry)
+        let count = rasterPlacementCount(pathLength: 64, carry: Float(carry))
 
         #expect(count == 65)
     }
@@ -270,7 +270,7 @@ private struct RasterOracleCase {
     let name: String
     let tip: RasterTip
     let tangent: SIMD2<Float>
-    let literalSupportWidth: Float
+    let literalSupportWidth: Double
 }
 
 /// Test-only oracle that rasterizes primitive membership by inverting the
@@ -358,7 +358,7 @@ private func rasterPlacementCount(pathLength: Float, carry: Float) -> Int {
     Int(ceil(pathLength / carry)) + 1
 }
 
-private func nextHalfSupportCarry(width: Float) throws -> Float {
+private func nextHalfSupportCarry(width: Double) throws -> Double {
     try BrushFootprintSpacing.nextCarry(
         supportWidth: width,
         baseSpacingFraction: 0.5,
@@ -368,9 +368,9 @@ private func nextHalfSupportCarry(width: Float) throws -> Float {
 }
 
 private func expectSpacingClose(
-    _ actual: Float,
-    _ expected: Float,
-    tolerance: Float = 0.000_01,
+    _ actual: Double,
+    _ expected: Double,
+    tolerance: Double = 0.000_01,
     sourceLocation: SourceLocation = #_sourceLocation
 ) {
     #expect(

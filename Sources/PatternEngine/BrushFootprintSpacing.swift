@@ -9,11 +9,11 @@ public enum BrushFootprintSpacingError: Error, Equatable, Sendable {
 /// Portable distance-spacing oracle for one fully evaluated dab footprint.
 public enum BrushFootprintSpacing {
     public static func nextCarry(
-        supportWidth: Float,
+        supportWidth: Double,
         baseSpacingFraction: Float,
         dynamicSpacing: Float,
         maximumSpacingFraction: Float
-    ) throws -> Float {
+    ) throws -> Double {
         guard supportWidth.isFinite, supportWidth > 0 else {
             throw BrushFootprintSpacingError.invalidSupportWidth
         }
@@ -29,16 +29,13 @@ public enum BrushFootprintSpacing {
             throw BrushFootprintSpacingError.invalidMaximumSpacingFraction
         }
 
-        let authored = Double(supportWidth)
+        let authored = supportWidth
             * Double(baseSpacingFraction)
             * Double(dynamicSpacing)
-        let ceilingCandidate = Double(supportWidth)
+        let ceilingCandidate = supportWidth
             * Double(maximumSpacingFraction)
-        let floatLimit = Double(Float.greatestFiniteMagnitude)
         guard authored.isFinite,
-              ceilingCandidate.isFinite,
-              authored <= floatLimit,
-              ceilingCandidate <= floatLimit
+              ceilingCandidate.isFinite
         else {
             throw BrushFootprintSpacingError.arithmeticOverflow
         }
@@ -48,6 +45,6 @@ public enum BrushFootprintSpacing {
             safetyFloor,
             ceilingCandidate
         )
-        return Float(min(max(authored, safetyFloor), safetyCeiling))
+        return min(max(authored, safetyFloor), safetyCeiling)
     }
 }

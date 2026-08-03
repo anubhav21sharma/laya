@@ -120,11 +120,18 @@ public struct BrushTipSupportLayer: Equatable, Sendable {
 }
 
 public struct BrushTipProjectionInterval: Equatable, Sendable {
-    public let minimumProjection: Float
-    public let maximumProjection: Float
+    public let minimumProjection: Double
+    public let maximumProjection: Double
+    public let width: Double
 
-    public var width: Float {
-        maximumProjection - minimumProjection
+    fileprivate init(
+        minimumProjection: Double,
+        maximumProjection: Double,
+        width: Double
+    ) {
+        self.minimumProjection = minimumProjection
+        self.maximumProjection = maximumProjection
+        self.width = width
     }
 }
 
@@ -197,16 +204,10 @@ public enum BrushTipSupport {
         guard width.isFinite, width > 0 else {
             throw BrushTipSupportError.invalidSupportWidth
         }
-        let floatLimit = Double(Float.greatestFiniteMagnitude)
-        guard abs(unionMinimum) <= floatLimit,
-              abs(unionMaximum) <= floatLimit,
-              width <= floatLimit
-        else {
-            throw BrushTipSupportError.arithmeticOverflow
-        }
         return BrushTipProjectionInterval(
-            minimumProjection: Float(unionMinimum),
-            maximumProjection: Float(unionMaximum)
+            minimumProjection: unionMinimum,
+            maximumProjection: unionMaximum,
+            width: width
         )
     }
 

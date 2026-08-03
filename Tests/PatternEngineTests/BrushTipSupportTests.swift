@@ -33,7 +33,7 @@ struct BrushTipSupportTests {
         expectClose(horizontal.minimumProjection, -2)
         expectClose(horizontal.maximumProjection, 2)
         expectClose(horizontal.width, 4)
-        expectClose(diagonal.width, Float(sqrt(10.0)))
+        expectClose(diagonal.width, sqrt(10.0))
         expectClose(vertical.width, 2)
     }
 
@@ -61,7 +61,7 @@ struct BrushTipSupportTests {
         )
 
         expectClose(horizontal.width, 4)
-        expectClose(diagonal.width, 3 * Float(sqrt(2.0)))
+        expectClose(diagonal.width, 3 * sqrt(2.0))
         expectClose(vertical.width, 2)
     }
 
@@ -89,9 +89,9 @@ struct BrushTipSupportTests {
         expectClose(interval.minimumProjection, 0)
         expectClose(
             interval.maximumProjection,
-            5.5 * diagonalComponent
+            5.5 * Double(diagonalComponent)
         )
-        expectClose(interval.width, 5.5 * diagonalComponent)
+        expectClose(interval.width, 5.5 * Double(diagonalComponent))
     }
 
     @Test("offset shape layers union their actual extrema")
@@ -141,9 +141,9 @@ struct BrushTipSupportTests {
             tangent: SIMD2(repeating: diagonalComponent)
         )
 
-        expectClose(horizontal.minimumProjection, 2 - Float(sqrt(5.0)))
-        expectClose(horizontal.maximumProjection, 2 + Float(sqrt(5.0)))
-        expectClose(horizontal.width, 2 * Float(sqrt(5.0)))
+        expectClose(horizontal.minimumProjection, 2 - sqrt(5.0))
+        expectClose(horizontal.maximumProjection, 2 + sqrt(5.0))
+        expectClose(horizontal.width, 2 * sqrt(5.0))
         expectClose(alongMajorAxis.width, 6)
     }
 
@@ -343,8 +343,8 @@ struct BrushTipSupportTests {
         }
     }
 
-    @Test("degenerate and overflowing support fail without a partial interval")
-    func degenerateAndOverflowingSupportFailAtomically() throws {
+    @Test("degenerate support fails while large finite support remains valid")
+    func degenerateSupportFailsAndLargeSupportRemainsFinite() throws {
         let degenerate = try BrushTipSupportLayer(
             definition: .analyticEllipse,
             xAxis: .zero,
@@ -364,19 +364,70 @@ struct BrushTipSupportTests {
             yAxis: SIMD2<Float>(.greatestFiniteMagnitude, 0),
             offset: .zero
         )
-        #expect(throws: BrushTipSupportError.arithmeticOverflow) {
-            try BrushTipSupport.projectionInterval(
-                layers: [huge],
-                tangent: SIMD2(1, 0)
-            )
-        }
+        let hugeInterval = try BrushTipSupport.projectionInterval(
+            layers: [huge],
+            tangent: SIMD2(1, 0)
+        )
+        #expect(hugeInterval.minimumProjection.isFinite)
+        #expect(hugeInterval.maximumProjection.isFinite)
+        #expect(hugeInterval.width.isFinite)
+        #expect(hugeInterval.width > 0)
+    }
+
+    @Test("translated subpixel support keeps a positive width through spacing")
+    func translatedSubpixelSupportKeepsPositiveWidthThroughSpacing() throws {
+        let layer = try BrushTipSupportLayer(
+            definition: .analyticRectangle,
+            xAxis: SIMD2<Float>(1e-8, 0),
+            yAxis: .zero,
+            offset: SIMD2(1, 0)
+        )
+
+        let interval = try BrushTipSupport.projectionInterval(
+            layers: [layer],
+            tangent: SIMD2(1, 0)
+        )
+        let carry = try BrushFootprintSpacing.nextCarry(
+            supportWidth: interval.width,
+            baseSpacingFraction: 0.1,
+            dynamicSpacing: 1,
+            maximumSpacingFraction: 0.2
+        )
+
+        #expect(interval.minimumProjection < interval.maximumProjection)
+        #expect(interval.width.isFinite)
+        expectClose(interval.width, 2e-8, tolerance: 1e-12)
+        expectClose(carry, 1)
+    }
+
+    @Test("near Float limit support returns a finite checked width")
+    func nearFloatLimitSupportReturnsFiniteCheckedWidth() throws {
+        let layer = try BrushTipSupportLayer(
+            definition: .analyticRectangle,
+            xAxis: SIMD2<Float>(8.507058158902981e37, 0),
+            yAxis: SIMD2<Float>(8.507059173023462e37, 0),
+            offset: SIMD2<Float>(-1.0716900716015884e37, 0)
+        )
+
+        let interval = try BrushTipSupport.projectionInterval(
+            layers: [layer],
+            tangent: SIMD2(1, 0)
+        )
+
+        #expect(interval.minimumProjection < interval.maximumProjection)
+        #expect(interval.width.isFinite)
+        expectClose(
+            interval.width,
+            Double(Float.greatestFiniteMagnitude),
+            tolerance: 1e31
+        )
     }
 }
 
 private func expectClose(
-    _ actual: Float,
-    _ expected: Float,
-    tolerance: Float = 0.000_01,
+    _ actual: Double,
+    _ expected: Double,
+    tolerance: Double = 0.000_01,
     sourceLocation: SourceLocation = #_sourceLocation
 ) {
     #expect(
