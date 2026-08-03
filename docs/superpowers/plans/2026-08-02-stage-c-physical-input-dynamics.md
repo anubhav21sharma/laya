@@ -597,6 +597,29 @@ swift test --filter 'SyntheticV1BrushMapperTests|professionalCatalog|anchorCatal
 
 **Commit:** `feat(brush): add versioned stage C schema`
 
+### C6 Medium-Gate Correction — Bounded Replay Value Footprints
+
+The first C6 medium gate exposed a cross-task stack-safety regression that the
+task-local C3 and C6 suites could not see. `BrushProgram` was a 2,102-byte
+immutable value embedded in every `BrushStrokeGenerator`; replay chunks store
+two generator checkpoints and `TransientStrokeBuffer` stores three more. The
+added Stage C state produced a roughly 116 KiB debug stack frame in prediction
+preflight and reproducible `SIGBUS` failures in otherwise-correct replay tests.
+LLDB and Address Sanitizer located the failing copy in
+`previewPredictedReplacement`; single-test isolation ruled out aggregate test
+parallelism and the Swift Testing harness.
+
+Keep the compiled program as shared, final, immutable, semantically equatable
+reference storage. Per-stroke mutable generator state remains value-owned and
+prediction continues to operate on independent value copies; program
+compilation remains the only allocation point. Pin portable upper bounds for
+the value footprints of `BrushProgram`, `BrushStrokeGenerator`,
+`TransientStrokeChunk`, and `TransientStrokeBuffer`, then run the original
+medium gate unchanged. This correction is part of C6 acceptance and is not a
+Stage D optimization.
+
+**Commit:** `fix(brush): share immutable compiled programs`
+
 ### Task 7 (C7) — Ordered Sensor Compiler And Evaluator
 
 **Files:**
