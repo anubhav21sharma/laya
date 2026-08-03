@@ -64,7 +64,8 @@ public enum BrushPackageCodec {
                 from: definitionData,
                 label: "definition"
             )
-        } catch BrushDefinitionValidationError.unsupportedSchema {
+        } catch BrushDefinitionValidationError.unsupportedSchema,
+                BrushDefinitionValidationError.unsupportedSchemaVersion {
             throw BrushPackageError.unsupportedDefinitionSchema
         } catch is BrushDefinitionValidationError {
             throw BrushPackageError.invalidDefinition

@@ -12,7 +12,9 @@ public enum BrushProgramCompiler {
         #if DEBUG
         testInvocationObserver?()
         #endif
-        guard definition.schemaVersion == BrushDefinition.currentSchemaVersion else {
+        guard definition.schemaVersion == BrushDefinition.legacySchemaVersion
+                || definition.schemaVersion == BrushDefinition.currentSchemaVersion
+        else {
             throw BrushProgramCompilerError.unsupportedSchemaVersion(
                 definition.schemaVersion
             )
@@ -54,6 +56,37 @@ public enum BrushProgramCompiler {
             ? .deposition
             : .canvasInteraction
         let termination = compileTermination(definition)
+        let stageC: BrushStageCProgramMetadata?
+        if definition.schemaVersion == BrushDefinition.currentSchemaVersion {
+            guard let normalization = definition.sensorNormalization,
+                  let sensorProgram = definition.sensorProgram,
+                  let stabilization = definition.stabilizationV2,
+                  let direction = definition.direction,
+                  let emission = definition.emission,
+                  let tipSupports = definition.tipSupports
+            else {
+                throw BrushProgramCompilerError.invalidStageCDefinition
+            }
+            let endpointLag: Float? = switch stabilization {
+            case .none, .weightedWindow: nil
+            case let .delayed(distance): distance
+            }
+            let usesDirection = sensorProgram.outputs.values.contains { output in
+                output.terms.contains { $0.input == .direction }
+            }
+            stageC = BrushStageCProgramMetadata(
+                normalization: normalization,
+                sensorProgram: sensorProgram,
+                stabilization: stabilization,
+                direction: direction,
+                emission: emission,
+                tipSupports: tipSupports,
+                declaredEndpointLag: endpointLag,
+                usesTravelDirection: usesDirection
+            )
+        } else {
+            stageC = nil
+        }
 
         return BrushProgram(
             definition: definition,
@@ -61,7 +94,8 @@ public enum BrushProgramCompiler {
             termination: termination,
             requiredCapabilities: requiredCapabilities,
             ignoredOptionalCapabilityIdentifiers: ignoredOptionalCapabilityIdentifiers,
-            requestedBackend: requestedBackend
+            requestedBackend: requestedBackend,
+            stageC: stageC
         )
     }
 

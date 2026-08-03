@@ -28,6 +28,9 @@ func professionalCatalogKeepsEveryPersistedPresetLaboratoryOnly(
 func professionalCatalogExposesTechnicalInkAsACompiledNativeBrush() throws {
     let entry = ProfessionalBrushCatalog.technicalInk
 
+    #expect(ProfessionalBrushCatalog.all.allSatisfy {
+        $0.definition.schemaVersion == 1
+    })
     #expect(ProfessionalBrushCatalog.all.first == entry)
     #expect(entry.id.rawValue == "builtin.professional-technical-ink")
     #expect(entry.displayName == "Technical Ink")

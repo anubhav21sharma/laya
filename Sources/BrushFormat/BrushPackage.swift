@@ -84,7 +84,10 @@ public struct BrushPackage: Equatable, Sendable {
 
 enum BrushPackageValidator {
     static func validate(_ package: BrushPackage) throws {
-        guard package.definition.schemaVersion == BrushDefinition.currentSchemaVersion else {
+        guard package.definition.schemaVersion == BrushDefinition.legacySchemaVersion
+                || package.definition.schemaVersion
+                    == BrushDefinition.currentSchemaVersion
+        else {
             throw BrushFormatError.unsupportedDefinitionSchema
         }
         let manifestIDs = Set(package.manifest.resources.map(\.id))
@@ -157,7 +160,7 @@ enum BrushPackageValidator {
         case (nil, nil, nil):
             reportBytes = nil
         case let (descriptor?, report?, data?):
-            let targetContentHash = BrushContentHash
+            let targetContentHash = try BrushContentHash
                 .digestOfValidatedPackage(package)
             do {
                 try report.validate(

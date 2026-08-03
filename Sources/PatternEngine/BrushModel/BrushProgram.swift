@@ -53,6 +53,17 @@ public enum BrushBackendKind: String, Codable, Hashable, Sendable {
     case canvasInteraction
 }
 
+public struct BrushStageCProgramMetadata: Equatable, Sendable {
+    public let normalization: BrushSensorNormalizationDefinition
+    public let sensorProgram: BrushSensorProgramDefinition
+    public let stabilization: BrushStabilizationDefinition
+    public let direction: BrushDirectionDefinition
+    public let emission: BrushEmissionDefinition
+    public let tipSupports: [BrushTipSupportDefinition]
+    public let declaredEndpointLag: Float?
+    public let usesTravelDirection: Bool
+}
+
 /// Immutable stroke-finalization program selected before input begins.
 /// Legacy cases are emitted only for definitions carrying the unforgeable
 /// compatibility marker installed by the legacy adapter/decoder.
@@ -97,6 +108,7 @@ public struct BrushProgram: Equatable, Sendable {
     public let requiredCapabilities: Set<BrushCapability>
     public let ignoredOptionalCapabilityIdentifiers: [String]
     public let requestedBackend: BrushBackendKind
+    public let stageC: BrushStageCProgramMetadata?
 
     public var replayContract: BrushReplayContract {
         switch termination {
@@ -136,6 +148,7 @@ public enum BrushProgramCompilerError: Error, Equatable, Sendable {
     case unsupportedSchemaVersion(UInt16)
     case unknownRequiredCapability(String)
     case invalidCurve
+    case invalidStageCDefinition
 }
 
 /// Namespaces counter-based extension randomness. Adding a channel must never

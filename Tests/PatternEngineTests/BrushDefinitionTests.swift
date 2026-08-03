@@ -9,7 +9,7 @@ func legacyRecipeRoundTripsExactly(_ fixture: AnchorRecipeFixture) throws {
 
     #expect(roundTrip == fixture.recipe)
     #expect(definition.id == fixture.recipe.id)
-    #expect(definition.schemaVersion == BrushDefinition.currentSchemaVersion)
+    #expect(definition.schemaVersion == 1)
     #expect(definition.metadata == BrushMetadata(displayName: fixture.displayName))
     #expect(definition.capabilities.isEmpty)
     #expect(definition.resources.map(\.identifier).sorted() == definition.resources.map(\.identifier))
@@ -592,7 +592,349 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
     #expect(throws: DecodingError.self) { try JSONDecoder().decode(BrushDefinition.self, from: JSONSerialization.data(withJSONObject: object)) }
 }
 
+@Test func schemaV2DefinitionRoundTripsEveryStageCField() throws {
+    let definition = try BrushDefinition.stageCV2Fixture()
+    let data = try JSONEncoder().encode(definition)
+    let decoded = try JSONDecoder().decode(BrushDefinition.self, from: data)
+
+    #expect(BrushDefinition.legacySchemaVersion == 1)
+    #expect(BrushDefinition.currentSchemaVersion == 2)
+    #expect(definition.schemaVersion == 2)
+    #expect(decoded == definition)
+    #expect(decoded.sensorNormalization?.fullScaleWorldVelocity == 2_000)
+    #expect(decoded.sensorProgram?.outputs[.rotation]?.terms.count == 1)
+    #expect(decoded.stabilizationV2 == .weightedWindow(distance: 8))
+    #expect(decoded.direction?.maximumAngularStep == .pi / 6)
+    #expect(decoded.emission == BrushEmissionDefinition(
+        mode: .distanceAndTime,
+        timeInterval: 1.0 / 120
+    ))
+    #expect(decoded.tipSupports == [.analyticEllipse])
+}
+
+@Test func schemaV2RejectsEveryStageCValidationBoundary() throws {
+    let base = try BrushDefinition.fixture()
+    let normalization = BrushSensorNormalizationDefinition(
+        fullScaleWorldVelocity: 2_000,
+        minimumVelocityDeltaTime: 0.001,
+        fullScaleStrokeAge: 4,
+        fullScaleStrokeDistanceInDiameters: 32
+    )
+    let program = BrushSensorProgramDefinition(outputs: Dictionary(
+        uniqueKeysWithValues: BrushDynamicOutput.allCases.map {
+            ($0, BrushOutputProgramDefinition(baseValue: 1, terms: []))
+        }
+    ))
+
+    #expect(throws: BrushDefinitionValidationError.outOfRange(
+        field: "sensorNormalization.fullScaleWorldVelocity"
+    )) {
+        _ = try BrushDefinition.stageCV2Fixture(
+            normalization: BrushSensorNormalizationDefinition(
+                fullScaleWorldVelocity: 100_001,
+                minimumVelocityDeltaTime: normalization.minimumVelocityDeltaTime,
+                fullScaleStrokeAge: normalization.fullScaleStrokeAge,
+                fullScaleStrokeDistanceInDiameters:
+                    normalization.fullScaleStrokeDistanceInDiameters
+            )
+        )
+    }
+    #expect(throws: BrushDefinitionValidationError.invalidMapping(
+        field: "sensorProgram.outputs"
+    )) {
+        _ = try BrushDefinition.stageCV2Fixture(
+            sensorProgram: BrushSensorProgramDefinition(outputs: [
+                .size: BrushOutputProgramDefinition(baseValue: 1, terms: []),
+            ])
+        )
+    }
+    #expect(throws: BrushDefinitionValidationError.invalidMapping(
+        field: "sensorProgram.size.terms"
+    )) {
+        let term = BrushResponseTermDefinition.fixture()
+        var outputs = program.outputs
+        outputs[.size] = BrushOutputProgramDefinition(
+            baseValue: 1,
+            terms: [term, term, term, term, term]
+        )
+        _ = try BrushDefinition.stageCV2Fixture(
+            sensorProgram: BrushSensorProgramDefinition(outputs: outputs)
+        )
+    }
+    #expect(throws: BrushDefinitionValidationError.outOfRange(
+        field: "stabilizationV2.distance"
+    )) {
+        _ = try BrushDefinition.stageCV2Fixture(
+            stabilizationV2: .weightedWindow(distance: 0)
+        )
+    }
+    #expect(throws: BrushDefinitionValidationError.outOfRange(
+        field: "direction.maximumAngularStep"
+    )) {
+        _ = try BrushDefinition.stageCV2Fixture(
+            direction: BrushDirectionDefinition(
+                maximumAngularStep: 0,
+                stationaryDirection: 0
+            )
+        )
+    }
+    #expect(throws: BrushDefinitionValidationError.outOfRange(
+        field: "emission.timeInterval"
+    )) {
+        _ = try BrushDefinition.stageCV2Fixture(
+            emission: BrushEmissionDefinition(mode: .time, timeInterval: nil)
+        )
+    }
+    #expect(base.schemaVersion == 1)
+}
+
+@Test func definitionEnvelopeRejectsUnsupportedVersionBeforeFieldDecode() {
+    let data = Data(#"{"schemaVersion":99}"#.utf8)
+    #expect(throws: BrushDefinitionValidationError.unsupportedSchemaVersion(99)) {
+        _ = try JSONDecoder().decode(BrushDefinition.self, from: data)
+    }
+}
+
+@Test func schemaV2NormalizationAndStabilizationBoundsAreClosedAndFinite() throws {
+    for normalization in [
+        BrushSensorNormalizationDefinition(
+            fullScaleWorldVelocity: 0,
+            minimumVelocityDeltaTime: 0.001,
+            fullScaleStrokeAge: 1,
+            fullScaleStrokeDistanceInDiameters: 1
+        ),
+        BrushSensorNormalizationDefinition(
+            fullScaleWorldVelocity: .infinity,
+            minimumVelocityDeltaTime: 0.001,
+            fullScaleStrokeAge: 1,
+            fullScaleStrokeDistanceInDiameters: 1
+        ),
+        BrushSensorNormalizationDefinition(
+            fullScaleWorldVelocity: 1,
+            minimumVelocityDeltaTime: 0.000_624,
+            fullScaleStrokeAge: 1,
+            fullScaleStrokeDistanceInDiameters: 1
+        ),
+        BrushSensorNormalizationDefinition(
+            fullScaleWorldVelocity: 1,
+            minimumVelocityDeltaTime: 0.011,
+            fullScaleStrokeAge: 1,
+            fullScaleStrokeDistanceInDiameters: 1
+        ),
+        BrushSensorNormalizationDefinition(
+            fullScaleWorldVelocity: 1,
+            minimumVelocityDeltaTime: 0.001,
+            fullScaleStrokeAge: 0.000_9,
+            fullScaleStrokeDistanceInDiameters: 1
+        ),
+        BrushSensorNormalizationDefinition(
+            fullScaleWorldVelocity: 1,
+            minimumVelocityDeltaTime: 0.001,
+            fullScaleStrokeAge: 86_401,
+            fullScaleStrokeDistanceInDiameters: 1
+        ),
+        BrushSensorNormalizationDefinition(
+            fullScaleWorldVelocity: 1,
+            minimumVelocityDeltaTime: 0.001,
+            fullScaleStrokeAge: 1,
+            fullScaleStrokeDistanceInDiameters: 0.000_9
+        ),
+        BrushSensorNormalizationDefinition(
+            fullScaleWorldVelocity: 1,
+            minimumVelocityDeltaTime: 0.001,
+            fullScaleStrokeAge: 1,
+            fullScaleStrokeDistanceInDiameters: 1_000_001
+        ),
+    ] {
+        #expect(throws: BrushDefinitionValidationError.self) {
+            _ = try BrushDefinition.stageCV2Fixture(
+                normalization: normalization
+            )
+        }
+    }
+    for stabilization in [
+        BrushStabilizationDefinition.weightedWindow(distance: 0),
+        .weightedWindow(distance: .infinity),
+        .delayed(distance: Float(1) / 2_048),
+        .delayed(distance: 4_097),
+    ] {
+        #expect(throws: BrushDefinitionValidationError.self) {
+            _ = try BrushDefinition.stageCV2Fixture(
+                stabilizationV2: stabilization
+            )
+        }
+    }
+}
+
+@Test func schemaV2DirectionEmissionAndTipSupportBoundariesReject() throws {
+    for direction in [
+        BrushDirectionDefinition(
+            maximumAngularStep: Float.pi / 181,
+            stationaryDirection: 0
+        ),
+        BrushDirectionDefinition(
+            maximumAngularStep: Float.pi.nextUp,
+            stationaryDirection: 0
+        ),
+        BrushDirectionDefinition(
+            maximumAngularStep: Float.pi / 6,
+            stationaryDirection: .nan
+        ),
+    ] {
+        #expect(throws: BrushDefinitionValidationError.self) {
+            _ = try BrushDefinition.stageCV2Fixture(direction: direction)
+        }
+    }
+    for emission in [
+        BrushEmissionDefinition(mode: .distance, timeInterval: 1),
+        BrushEmissionDefinition(mode: .time, timeInterval: nil),
+        BrushEmissionDefinition(mode: .time, timeInterval: 1.0 / 241),
+        BrushEmissionDefinition(mode: .distanceAndTime, timeInterval: 10.1),
+    ] {
+        #expect(throws: BrushDefinitionValidationError.self) {
+            _ = try BrushDefinition.stageCV2Fixture(emission: emission)
+        }
+    }
+    #expect(throws: BrushDefinitionValidationError.invalidCoverage(
+        field: "tipSupports"
+    )) {
+        _ = try BrushDefinition.stageCV2Fixture(tipSupports: [])
+    }
+}
+
+@Test func schemaV2SensorProgramRejectsInvalidValuesAndOperationDomains() throws {
+    func program(
+        output: BrushDynamicOutput,
+        baseValue: Float? = nil,
+        term: BrushResponseTermDefinition? = nil
+    ) -> BrushSensorProgramDefinition {
+        var outputs = Dictionary(
+            uniqueKeysWithValues: BrushDynamicOutput.allCases.map {
+                ($0, BrushOutputProgramDefinition(baseValue: 1, terms: []))
+            }
+        )
+        outputs[output] = BrushOutputProgramDefinition(
+            baseValue: baseValue ?? (output == .rotation ? 0 : 1),
+            terms: term.map { [$0] } ?? []
+        )
+        return BrushSensorProgramDefinition(outputs: outputs)
+    }
+    for (output, value) in [
+        (BrushDynamicOutput.size, Float(0)),
+        (.spacing, 9),
+        (.offsetX, -9),
+        (.opacity, 1.1),
+        (.secondaryColorMix, 1.1),
+        (.saturation, -1.1),
+    ] {
+        #expect(throws: BrushDefinitionValidationError.self) {
+            _ = try BrushDefinition.stageCV2Fixture(
+                sensorProgram: program(output: output, baseValue: value)
+            )
+        }
+    }
+    let multiplyOffset = BrushResponseTermDefinition(
+        input: .pressure, response: .linear, inputInverted: false,
+        missingInputValue: 0, responseScale: 1, responseOffset: 0,
+        responseLowerClamp: -1, responseUpperClamp: 1, jitter: 0,
+        operation: .multiply
+    )
+    let minimumRotation = BrushResponseTermDefinition(
+        input: .pressure, response: .linear, inputInverted: false,
+        missingInputValue: 0, responseScale: 1, responseOffset: 0,
+        responseLowerClamp: -1, responseUpperClamp: 1, jitter: 0,
+        operation: .minimum
+    )
+    for invalid in [
+        program(output: .offsetX, baseValue: 0, term: multiplyOffset),
+        program(output: .rotation, baseValue: 0, term: minimumRotation),
+    ] {
+        #expect(throws: BrushDefinitionValidationError.self) {
+            _ = try BrushDefinition.stageCV2Fixture(sensorProgram: invalid)
+        }
+    }
+    let nonperiodicDirectionCurve = BrushResponseTermDefinition(
+        input: .direction,
+        response: .curve(BrushCurveDefinition(points: [
+            BrushCurvePoint(x: 0, y: 0),
+            BrushCurvePoint(x: 1, y: 1),
+        ])),
+        inputInverted: false, missingInputValue: 0, responseScale: 1,
+        responseOffset: 0, responseLowerClamp: 0,
+        responseUpperClamp: 1, jitter: 0, operation: .replace
+    )
+    #expect(throws: BrushDefinitionValidationError.self) {
+        _ = try BrushDefinition.stageCV2Fixture(
+            sensorProgram: program(
+                output: .rotation,
+                baseValue: 0,
+                term: nonperiodicDirectionCurve
+            )
+        )
+    }
+}
+
 private extension BrushDefinition {
+    static func stageCV2Fixture(
+        normalization: BrushSensorNormalizationDefinition =
+            BrushSensorNormalizationDefinition(
+                fullScaleWorldVelocity: 2_000,
+                minimumVelocityDeltaTime: 0.001,
+                fullScaleStrokeAge: 4,
+                fullScaleStrokeDistanceInDiameters: 32
+            ),
+        sensorProgram: BrushSensorProgramDefinition? = nil,
+        stabilizationV2: BrushStabilizationDefinition =
+            .weightedWindow(distance: 8),
+        direction: BrushDirectionDefinition = BrushDirectionDefinition(
+            maximumAngularStep: .pi / 6,
+            stationaryDirection: 0
+        ),
+        emission: BrushEmissionDefinition = BrushEmissionDefinition(
+            mode: .distanceAndTime,
+            timeInterval: 1.0 / 120
+        ),
+        tipSupports: [BrushTipSupportDefinition] = [.analyticEllipse]
+    ) throws -> BrushDefinition {
+        let base = try fixture()
+        var outputs = Dictionary(
+            uniqueKeysWithValues: BrushDynamicOutput.allCases.map {
+                ($0, BrushOutputProgramDefinition(baseValue: 1, terms: []))
+            }
+        )
+        outputs[.rotation] = BrushOutputProgramDefinition(
+            baseValue: 0,
+            terms: [.fixture()]
+        )
+        return try BrushDefinition(
+            v2ID: base.id,
+            metadata: base.metadata,
+            capabilities: base.capabilities,
+            resources: base.resources,
+            coverage: base.coverage,
+            placement: base.placement,
+            dynamics: base.dynamics,
+            color: base.color,
+            material: base.material,
+            stabilization: base.stabilization,
+            taper: base.taper,
+            replayMode: base.replayMode,
+            replayLimits: base.replayLimits,
+            termination: base.termination,
+            seedPolicy: base.seedPolicy,
+            limits: base.limits,
+            performanceIntent: base.performanceIntent,
+            compatibility: base.compatibility,
+            sensorNormalization: normalization,
+            sensorProgram: sensorProgram
+                ?? BrushSensorProgramDefinition(outputs: outputs),
+            stabilizationV2: stabilizationV2,
+            direction: direction,
+            emission: emission,
+            tipSupports: tipSupports
+        )
+    }
+
     static func fixture(
         capabilities: [BrushCapabilityDeclaration] = [],
         resources: [BrushResourceReference] = [],
@@ -647,6 +989,23 @@ private extension BrushDefinition {
             seedPolicy: seedPolicy, limits: limits ?? self.limits,
             performanceIntent: performanceIntent,
             compatibility: compatibility ?? self.compatibility
+        )
+    }
+}
+
+private extension BrushResponseTermDefinition {
+    static func fixture() -> BrushResponseTermDefinition {
+        BrushResponseTermDefinition(
+            input: .direction,
+            response: .linear,
+            inputInverted: false,
+            missingInputValue: 0,
+            responseScale: 1,
+            responseOffset: 0,
+            responseLowerClamp: -.pi,
+            responseUpperClamp: .pi,
+            jitter: 0,
+            operation: .replace
         )
     }
 }

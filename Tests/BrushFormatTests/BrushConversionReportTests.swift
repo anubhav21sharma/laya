@@ -71,6 +71,11 @@ import Testing
 
     let package = try BrushPackageCodec.decode(data)
     #expect(package.manifest.schemaVersion == 1)
+    #expect(package.definition.schemaVersion == 1)
+    #expect(
+        try package.contentHash
+            == "5b9ff4f916d0a20dc1df61ad2b53056fe20b9950ea1e90792b96b5f64e1d0912"
+    )
     #expect(package.definition.id.rawValue == "fixture.stage2-v1")
     #expect(package.definition.metadata.displayName == "Stage 2 V1 Fixture")
     #expect(package.manifest.conversionReport == nil)

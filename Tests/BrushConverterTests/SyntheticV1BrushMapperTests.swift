@@ -11,10 +11,10 @@ struct SyntheticV1BrushMapperTests {
     @Test
     func mapsEveryDrySettingAndRoundTripsTheReportedPackage() throws {
         let document = try syntheticDocument()
-
         let result = try SyntheticV1BrushMapper().map(document)
         let definition = result.package.definition
 
+        #expect(definition.schemaVersion == 1)
         #expect(definition.compatibility.sourceSettingKeys == SyntheticV1SemanticKeys.dry)
         #expect(definition.compatibility.requiredSemanticKeys == [])
         #expect(definition.coverage.shapes[0].shape == .asset("shape.synthetic"))

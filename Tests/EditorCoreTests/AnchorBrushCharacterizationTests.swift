@@ -5,7 +5,7 @@ import PatternEngine
 import Testing
 
 @Test
-func allNativeAnchorTraceBatchesAreDeterministicAndNonempty() {
+func anchorCatalogTraceBatchesAreDeterministicAndNonempty() {
     let viewport = ViewportTransform(
         drawableSize: PatternSize(width: 256, height: 256),
         worldCenter: WorldPoint(x: 128, y: 128)

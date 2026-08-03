@@ -645,7 +645,7 @@ import Testing
     entries = try BrushFormatTestSupport.archiveEntries(package)
     entries["definition.json"] = Data(
         String(decoding: entries["definition.json"]!, as: UTF8.self)
-            .replacingOccurrences(of: "\"schemaVersion\":1", with: "\"schemaVersion\":2")
+            .replacingOccurrences(of: "\"schemaVersion\":1", with: "\"schemaVersion\":99")
             .utf8
     )
     #expect(throws: BrushPackageError.unsupportedDefinitionSchema) {

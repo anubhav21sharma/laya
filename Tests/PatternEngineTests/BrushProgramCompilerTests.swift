@@ -681,6 +681,84 @@ private let zeroColorJitter = BrushColorJitter(
     hue: 0, saturation: 0, brightness: 0, secondaryColorMix: 0
 )
 
+@Test
+func compilerPublishesStageCMetadataWithoutEvaluatingIt() throws {
+    let definition = try stageCV2Definition()
+    let program = try BrushProgramCompiler.compile(definition)
+    let stageC = try #require(program.stageC)
+
+    #expect(stageC.normalization == definition.sensorNormalization)
+    #expect(stageC.sensorProgram == definition.sensorProgram)
+    #expect(stageC.stabilization == definition.stabilizationV2)
+    #expect(stageC.direction == definition.direction)
+    #expect(stageC.emission == definition.emission)
+    #expect(stageC.tipSupports == definition.tipSupports)
+    #expect(stageC.declaredEndpointLag == 6)
+    #expect(stageC.usesTravelDirection)
+    #expect(try BrushProgramCompiler.compile(legacyDefinition()).stageC == nil)
+}
+
+private func stageCV2Definition() throws -> BrushDefinition {
+    let base = try nativeDefinition()
+    var outputs = Dictionary(
+        uniqueKeysWithValues: BrushDynamicOutput.allCases.map {
+            ($0, BrushOutputProgramDefinition(baseValue: 1, terms: []))
+        }
+    )
+    outputs[.rotation] = BrushOutputProgramDefinition(
+        baseValue: 0,
+        terms: [BrushResponseTermDefinition(
+            input: .direction,
+            response: .linear,
+            inputInverted: false,
+            missingInputValue: 0,
+            responseScale: 1,
+            responseOffset: 0,
+            responseLowerClamp: -.pi,
+            responseUpperClamp: .pi,
+            jitter: 0,
+            operation: .replace
+        )]
+    )
+    return try BrushDefinition(
+        v2ID: base.id,
+        metadata: base.metadata,
+        capabilities: base.capabilities,
+        resources: base.resources,
+        coverage: base.coverage,
+        placement: base.placement,
+        dynamics: base.dynamics,
+        color: base.color,
+        material: base.material,
+        stabilization: base.stabilization,
+        taper: base.taper,
+        replayMode: base.replayMode,
+        replayLimits: base.replayLimits,
+        termination: base.termination,
+        seedPolicy: base.seedPolicy,
+        limits: base.limits,
+        performanceIntent: base.performanceIntent,
+        compatibility: base.compatibility,
+        sensorNormalization: BrushSensorNormalizationDefinition(
+            fullScaleWorldVelocity: 2_000,
+            minimumVelocityDeltaTime: 0.001,
+            fullScaleStrokeAge: 4,
+            fullScaleStrokeDistanceInDiameters: 32
+        ),
+        sensorProgram: BrushSensorProgramDefinition(outputs: outputs),
+        stabilizationV2: .delayed(distance: 6),
+        direction: BrushDirectionDefinition(
+            maximumAngularStep: .pi / 6,
+            stationaryDirection: 0
+        ),
+        emission: BrushEmissionDefinition(
+            mode: .distanceAndTime,
+            timeInterval: 1.0 / 120
+        ),
+        tipSupports: [.analyticEllipse]
+    )
+}
+
 private func nativeDefinition() throws -> BrushDefinition {
     try replacing(
         legacyDefinition(),

@@ -49,6 +49,142 @@ enum BrushFormatTestSupport {
         )
     }
 
+    static func v2Package(
+        metadata: BrushMetadata? = nil,
+        sensorNormalization: BrushSensorNormalizationDefinition? = nil,
+        sensorProgram: BrushSensorProgramDefinition? = nil,
+        stabilizationV2: BrushStabilizationDefinition? = nil,
+        direction: BrushDirectionDefinition? = nil,
+        emission: BrushEmissionDefinition? = nil,
+        tipSupports: [BrushTipSupportDefinition]? = nil
+    ) throws -> BrushPackage {
+        let bytes = try fixturePNG()
+        let resource = try BrushPackageResource(
+            id: shapeID,
+            kind: .shape,
+            mediaType: "image/png",
+            data: bytes,
+            pixelWidth: 4,
+            pixelHeight: 4
+        )
+        return try BrushPackage(
+            manifest: BrushPackageManifest(
+                schemaVersion: BrushPackageManifest.currentVersion,
+                resources: [resource]
+            ),
+            definition: v2Definition(
+                metadata: metadata,
+                sensorNormalization: sensorNormalization,
+                sensorProgram: sensorProgram,
+                stabilizationV2: stabilizationV2,
+                direction: direction,
+                emission: emission,
+                tipSupports: tipSupports
+            ),
+            resourceData: [shapeID: bytes]
+        )
+    }
+
+    static func v2Definition(
+        metadata: BrushMetadata? = nil,
+        sensorNormalization: BrushSensorNormalizationDefinition? = nil,
+        sensorProgram: BrushSensorProgramDefinition? = nil,
+        stabilizationV2: BrushStabilizationDefinition? = nil,
+        direction: BrushDirectionDefinition? = nil,
+        emission: BrushEmissionDefinition? = nil,
+        tipSupports: [BrushTipSupportDefinition]? = nil
+    ) throws -> BrushDefinition {
+        let base = try definition()
+        return try BrushDefinition(
+            v2ID: base.id,
+            metadata: metadata ?? base.metadata,
+            capabilities: base.capabilities,
+            resources: base.resources,
+            coverage: base.coverage,
+            placement: base.placement,
+            dynamics: base.dynamics,
+            color: base.color,
+            material: base.material,
+            stabilization: base.stabilization,
+            taper: base.taper,
+            replayMode: base.replayMode,
+            replayLimits: base.replayLimits,
+            termination: base.termination,
+            seedPolicy: base.seedPolicy,
+            limits: base.limits,
+            performanceIntent: base.performanceIntent,
+            compatibility: base.compatibility,
+            sensorNormalization: sensorNormalization
+                ?? BrushSensorNormalizationDefinition(
+                    fullScaleWorldVelocity: 2_000,
+                    minimumVelocityDeltaTime: 0.001,
+                    fullScaleStrokeAge: 4,
+                    fullScaleStrokeDistanceInDiameters: 32
+                ),
+            sensorProgram: sensorProgram ?? v2SensorProgram(),
+            stabilizationV2: stabilizationV2
+                ?? .weightedWindow(distance: 8),
+            direction: direction ?? BrushDirectionDefinition(
+                maximumAngularStep: .pi / 6,
+                stationaryDirection: 0
+            ),
+            emission: emission ?? BrushEmissionDefinition(
+                mode: .distanceAndTime,
+                timeInterval: 1.0 / 120
+            ),
+            tipSupports: tipSupports ?? [.analyticEllipse]
+        )
+    }
+
+    static func v2SensorProgram(
+        reversedInsertion: Bool = false,
+        rotationTerms: [BrushResponseTermDefinition]? = nil
+    ) -> BrushSensorProgramDefinition {
+        let outputs = reversedInsertion
+            ? Array(BrushDynamicOutput.allCases.reversed())
+            : BrushDynamicOutput.allCases
+        var values: [BrushDynamicOutput: BrushOutputProgramDefinition] = [:]
+        for output in outputs {
+            let base: Float = switch output {
+            case .size, .flow, .opacity, .spacing, .hardness, .grain: 1
+            default: 0
+            }
+            values[output] = BrushOutputProgramDefinition(
+                baseValue: base,
+                terms: output == .rotation
+                    ? (rotationTerms ?? [v2Term(input: .direction)])
+                    : []
+            )
+        }
+        return BrushSensorProgramDefinition(outputs: values)
+    }
+
+    static func v2Term(
+        input: BrushDynamicsInput = .direction,
+        response: BrushResponseDefinition = .linear,
+        inputInverted: Bool = false,
+        missingInputValue: Float = 0,
+        responseScale: Float = 1,
+        operation: BrushResponseOperation = .add,
+        responseOffset: Float = 0,
+        responseLowerClamp: Float = -.pi,
+        responseUpperClamp: Float = .pi,
+        jitter: Float = 0
+    ) -> BrushResponseTermDefinition {
+        BrushResponseTermDefinition(
+            input: input,
+            response: response,
+            inputInverted: inputInverted,
+            missingInputValue: missingInputValue,
+            responseScale: responseScale,
+            responseOffset: responseOffset,
+            responseLowerClamp: responseLowerClamp,
+            responseUpperClamp: responseUpperClamp,
+            jitter: jitter,
+            operation: operation
+        )
+    }
+
     static func definition(
         capabilities: [BrushCapabilityDeclaration]? = nil,
         resources: [BrushResourceReference]? = nil,

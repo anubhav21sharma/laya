@@ -28,7 +28,7 @@ public enum LegacyBrushRecipeAdapter {
     private static let neutralCompatibility = BrushCompatibilityMetadata(nativeFeatureVersion: 1, sourceSettingKeys: [], requiredSemanticKeys: [])
 
     public static func definition(from recipe: BrushRecipe, displayName: String) throws -> BrushDefinition {
-        guard recipe.schemaVersion == BrushDefinition.currentSchemaVersion else {
+        guard recipe.schemaVersion == BrushDefinition.legacySchemaVersion else {
             throw BrushDefinitionValidationError.semanticLoss("recipe schema version")
         }
         let coverage = BrushCoverageDefinition(
@@ -46,17 +46,17 @@ public enum LegacyBrushRecipeAdapter {
         return try BrushDefinition(
             legacySchemaV1Compatibility: true,
             id: recipe.id,
-            schemaVersion: BrushDefinition.currentSchemaVersion,
+            schemaVersion: BrushDefinition.legacySchemaVersion,
             metadata: BrushMetadata(displayName: displayName),
             capabilities: [], resources: canonicalResources(shape: recipe.shape, grain: recipe.grain), coverage: coverage,
             placement: BrushPlacementDefinition(baseSpacingFraction: recipe.baseSpacingFraction, maximumSpacingFraction: recipe.maximumSpacingFraction, baseFlow: recipe.baseFlow, strokeOpacity: recipe.strokeOpacity, baseScatterFraction: recipe.baseScatterFraction, baseRotation: recipe.baseRotation, baseJitterFraction: 0, baseOffset: .zero),
             dynamics: dynamics, color: BrushColorBehaviorDefinition(baseAdjustment: recipe.colorAdjustment, perStampJitter: neutralJitter, perStrokeJitter: neutralJitter),
-            material: material(recipe.material), stabilization: recipe.stabilization, taper: recipe.taper, replayMode: recipe.replayMode, replayLimits: recipe.replayLimits, termination: .cap, seedPolicy: .perStroke, limits: limits, performanceIntent: .realtime120, compatibility: neutralCompatibility
+            material: material(recipe.material), stabilization: recipe.stabilization, taper: recipe.taper, replayMode: recipe.replayMode, replayLimits: recipe.replayLimits, termination: .cap, seedPolicy: .perStroke, limits: limits, performanceIntent: .realtime120, compatibility: neutralCompatibility, sensorNormalization: nil, sensorProgram: nil, stabilizationV2: nil, direction: nil, emission: nil, tipSupports: nil
         )
     }
 
     public static func recipe(from definition: BrushDefinition) throws -> BrushRecipe {
-        guard definition.schemaVersion == BrushDefinition.currentSchemaVersion, definition.capabilities.isEmpty, definition.coverage.shapes.count == 1, definition.coverage.grains.count <= 1, definition.coverage.shapes[0].combination == .replace, definition.coverage.shapes[0].scale == 1, definition.coverage.shapes[0].rotation == 0, definition.coverage.shapes[0].offset == .zero, definition.coverage.tipThreshold == 0, definition.coverage.antialiasing, definition.placement.baseJitterFraction == 0, definition.placement.baseOffset == .zero, isCanonicalConstant(definition.dynamics.opacity, value: 1), isCanonicalConstant(definition.dynamics.offsetX, value: 0), isCanonicalConstant(definition.dynamics.offsetY, value: 0), isCanonicalConstant(definition.dynamics.hue, value: 0), isCanonicalConstant(definition.dynamics.saturation, value: 0), isCanonicalConstant(definition.dynamics.brightness, value: 0), isCanonicalConstant(definition.dynamics.secondaryColorMix, value: 0), definition.color.perStampJitter == neutralJitter, definition.color.perStrokeJitter == neutralJitter, definition.material.interaction == .none, definition.material.interactionParameters == nil, definition.seedPolicy == .perStroke, definition.limits == limits, definition.performanceIntent == .realtime120, isLegacyCompatible(definition.compatibility) else { throw BrushDefinitionValidationError.semanticLoss("definition contains a native-only field") }
+        guard definition.schemaVersion == BrushDefinition.legacySchemaVersion, definition.capabilities.isEmpty, definition.coverage.shapes.count == 1, definition.coverage.grains.count <= 1, definition.coverage.shapes[0].combination == .replace, definition.coverage.shapes[0].scale == 1, definition.coverage.shapes[0].rotation == 0, definition.coverage.shapes[0].offset == .zero, definition.coverage.tipThreshold == 0, definition.coverage.antialiasing, definition.placement.baseJitterFraction == 0, definition.placement.baseOffset == .zero, isCanonicalConstant(definition.dynamics.opacity, value: 1), isCanonicalConstant(definition.dynamics.offsetX, value: 0), isCanonicalConstant(definition.dynamics.offsetY, value: 0), isCanonicalConstant(definition.dynamics.hue, value: 0), isCanonicalConstant(definition.dynamics.saturation, value: 0), isCanonicalConstant(definition.dynamics.brightness, value: 0), isCanonicalConstant(definition.dynamics.secondaryColorMix, value: 0), definition.color.perStampJitter == neutralJitter, definition.color.perStrokeJitter == neutralJitter, definition.material.interaction == .none, definition.material.interactionParameters == nil, definition.seedPolicy == .perStroke, definition.limits == limits, definition.performanceIntent == .realtime120, isLegacyCompatible(definition.compatibility) else { throw BrushDefinitionValidationError.semanticLoss("definition contains a native-only field") }
         guard definition.hasLegacySchemaV1Compatibility else {
             throw BrushDefinitionValidationError.semanticLoss(
                 "definition is not marked legacy-compatible"

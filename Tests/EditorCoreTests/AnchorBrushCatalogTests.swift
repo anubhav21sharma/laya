@@ -5,6 +5,7 @@ import Testing
 @Test func anchorCatalogPinsSixNativeBuiltInEntries() {
     let entries = AnchorBrushCatalog.all
 
+    #expect(entries.allSatisfy { $0.definition.schemaVersion == 1 })
     #expect(entries.map(\.id.rawValue) == [
         "builtin.native-ink",
         "builtin.native-dry-media",
