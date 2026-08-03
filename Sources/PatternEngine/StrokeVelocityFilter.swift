@@ -19,6 +19,7 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
     private var oldestSegmentIndex = 0
     private var segmentCount = 0
     private var capacityFallbackEvictionCount = 0
+    private var segmentTimeBase: TimeInterval = 0
     private var originPosition = WorldPoint(x: 0, y: 0)
     private var originTime: TimeInterval = 0
     private var hasOrigin = false
@@ -98,6 +99,7 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
         oldestSegmentIndex = 0
         segmentCount = 0
         capacityFallbackEvictionCount = 0
+        segmentTimeBase = 0
         originPosition = WorldPoint(x: 0, y: 0)
         originTime = 0
         hasOrigin = false
@@ -147,11 +149,15 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
         endingAtOrBefore windowStart: TimeInterval,
         currentTime: TimeInterval
     ) {
+        let relativeWindowStart = windowStart - segmentTimeBase
+        let relativeCurrentTime = currentTime - segmentTimeBase
         while segmentCount > 0,
               endsAtOrBeforeWindowStart(
-                  segmentSlots.segment(at: oldestSegmentIndex).end,
-                  windowStart: windowStart,
-                  currentTime: currentTime
+                  Double(
+                      segmentSlots.segment(at: oldestSegmentIndex).endOffset
+                  ),
+                  windowStart: relativeWindowStart,
+                  currentTime: relativeCurrentTime
               ) {
             oldestSegmentIndex = (oldestSegmentIndex + 1) % Self.segmentCapacity
             segmentCount -= 1
@@ -175,6 +181,9 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
         end: TimeInterval,
         speed: Float
     ) {
+        if segmentCount == 0 {
+            segmentTimeBase = start
+        }
         if segmentCount == Self.segmentCapacity {
             oldestSegmentIndex = (oldestSegmentIndex + 1) % Self.segmentCapacity
             segmentCount -= 1
@@ -182,8 +191,18 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
         }
 
         let index = (oldestSegmentIndex + segmentCount) % Self.segmentCapacity
+        let startOffset = Float(start - segmentTimeBase)
+        let endOffset = Float(end - segmentTimeBase)
+        precondition(
+            startOffset.isFinite && endOffset.isFinite,
+            "Velocity-window offsets must remain finite"
+        )
         segmentSlots.set(
-            StrokeVelocityFilterSegment(start: start, end: end, speed: speed),
+            StrokeVelocityFilterSegment(
+                startOffset: startOffset,
+                endOffset: endOffset,
+                speed: speed
+            ),
             at: index
         )
         segmentCount += 1
@@ -195,12 +214,20 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
     ) -> Float {
         var weightedDistance = 0.0
         var coveredDuration = 0.0
+        let relativeCurrentTime = currentTime - segmentTimeBase
+        let relativeWindowStart = windowStart - segmentTimeBase
 
         for offset in 0..<segmentCount {
             let index = (oldestSegmentIndex + offset) % Self.segmentCapacity
             let segment = segmentSlots.segment(at: index)
-            let overlapStart = max(segment.start, windowStart)
-            let overlapEnd = min(segment.end, currentTime)
+            let overlapStart = max(
+                Double(segment.startOffset),
+                relativeWindowStart
+            )
+            let overlapEnd = min(
+                Double(segment.endOffset),
+                relativeCurrentTime
+            )
             let overlap = overlapEnd - overlapStart
             guard overlap.isFinite, overlap > 0 else {
                 continue
@@ -232,8 +259,8 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
 }
 
 private struct StrokeVelocityFilterSegment: Equatable, Sendable {
-    var start: TimeInterval = 0
-    var end: TimeInterval = 0
+    var startOffset: Float = 0
+    var endOffset: Float = 0
     var speed: Float = 0
 }
 

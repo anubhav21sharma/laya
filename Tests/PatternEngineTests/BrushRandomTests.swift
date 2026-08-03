@@ -135,6 +135,7 @@ private func dynamicsSample() -> InterpolatedStrokeSample {
         azimuth: nil,
         roll: nil,
         velocity: 0,
+        artisticVelocity: 0,
         phase: .moved,
         source: .mouse,
         kind: .actual,

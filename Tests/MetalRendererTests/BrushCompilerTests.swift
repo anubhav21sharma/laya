@@ -2193,6 +2193,7 @@ private func compilerWorldSample(
         estimatedProperties: [],
         estimatedPropertiesExpectingUpdates: [],
         velocity: 0,
+        artisticVelocity: 0,
         phase: phase,
         source: .pencil,
         kind: .actual,

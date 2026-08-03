@@ -552,6 +552,7 @@ private func technicalInkDab(
         azimuth: nil,
         roll: nil,
         velocity: 50_000,
+        artisticVelocity: 50_000,
         phase: .moved,
         source: capabilities.contains(.pressure) ? .tablet : .mouse,
         kind: .actual,
@@ -620,6 +621,7 @@ private func graphitePencilDab(
     let sample = InterpolatedStrokeSample(
         position: WorldPoint(x: 10, y: 20), pressure: pressure, timestamp: 0,
         altitude: altitude, azimuth: nil, roll: nil, velocity: velocity,
+        artisticVelocity: velocity,
         phase: .moved,
         source: capabilities.contains(.pressure) ? .tablet : .mouse,
         kind: .actual, capabilities: capabilities
@@ -645,6 +647,7 @@ private func naturalCharcoalDab(
     let sample = InterpolatedStrokeSample(
         position: WorldPoint(x: 10, y: 20), pressure: pressure, timestamp: 0,
         altitude: altitude, azimuth: nil, roll: nil, velocity: velocity,
+        artisticVelocity: velocity,
         phase: .moved,
         source: capabilities.contains(.pressure) ? .tablet : .mouse,
         kind: .actual, capabilities: capabilities
@@ -669,6 +672,7 @@ private func chiselMarkerDab(
     let sample = InterpolatedStrokeSample(
         position: WorldPoint(x: 10, y: 20), pressure: pressure, timestamp: 0,
         altitude: nil, azimuth: nil, roll: nil, velocity: velocity,
+        artisticVelocity: velocity,
         phase: .moved,
         source: capabilities.contains(.pressure) ? .tablet : .mouse,
         kind: .actual, capabilities: capabilities

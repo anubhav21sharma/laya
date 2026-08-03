@@ -258,7 +258,8 @@ import Testing
                 sample: WorldStrokeSample(
                     sample: input,
                     position: WorldPoint(x: sourceDistance, y: 0),
-                    velocity: 0
+                    velocity: 0,
+                    artisticVelocity: 0
                 ),
                 dabs: [
                     TransientStrokeDab(
@@ -378,6 +379,7 @@ private func sample(
     azimuth: Float? = nil,
     roll: Float? = nil,
     velocity: Float = 0,
+    artisticVelocity: Float? = nil,
     capabilities: StrokeInputCapabilities = []
 ) -> InterpolatedStrokeSample {
     InterpolatedStrokeSample(
@@ -388,6 +390,7 @@ private func sample(
         azimuth: azimuth,
         roll: roll,
         velocity: velocity,
+        artisticVelocity: artisticVelocity ?? velocity,
         phase: .moved,
         source: .tablet,
         kind: .actual,

@@ -240,6 +240,11 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
                 end.velocity,
                 fraction: clamped
             ),
+            artisticVelocity: stableLinear(
+                start.artisticVelocity,
+                end.artisticVelocity,
+                fraction: clamped
+            ),
             phase: discrete.phase,
             source: discrete.source,
             kind: discrete.kind,
@@ -269,6 +274,7 @@ public struct TimedStrokeEmissionCursor: Equatable, Sendable {
             azimuth: sample.azimuth,
             roll: sample.roll,
             velocity: sample.velocity,
+            artisticVelocity: sample.artisticVelocity,
             phase: sample.phase,
             source: sample.source,
             kind: sample.kind,

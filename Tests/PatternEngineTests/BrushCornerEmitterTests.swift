@@ -358,6 +358,7 @@ private func cornerVertex(
         azimuth: -0.7,
         roll: 0.9,
         velocity: 12,
+        artisticVelocity: 12,
         phase: .moved,
         source: .pencil,
         kind: provenance == .prediction ? .predicted : .actual,

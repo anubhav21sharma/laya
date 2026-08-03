@@ -238,6 +238,7 @@ struct StrokeRenderCoordinatorTests {
             coordinator: coordinator
         )
         let before = coordinator.snapshot
+        let inputBefore = coordinator.inputDeriverSnapshot
 
         #expect(throws: AuthoritativeStrokeQueueError.self) {
             _ = try coordinator.prepareAppend(
@@ -246,6 +247,7 @@ struct StrokeRenderCoordinatorTests {
         }
 
         #expect(coordinator.snapshot == before)
+        #expect(coordinator.inputDeriverSnapshot == inputBefore)
         var ordinals: [UInt64] = []
         try submitAll(
             first,
@@ -269,12 +271,14 @@ struct StrokeRenderCoordinatorTests {
             ordinals: &ordinals
         )
         let before = coordinator.snapshot
+        let inputBefore = coordinator.inputDeriverSnapshot
 
         let prepared = try coordinator.prepareAppend(
             actualSamples: [sample(index: 3, phase: .moved)]
         )
         try coordinator.abandon(prepared)
         #expect(coordinator.snapshot == before)
+        #expect(coordinator.inputDeriverSnapshot == inputBefore)
 
         let retry = try coordinator.prepareAppend(
             actualSamples: [sample(index: 3, phase: .moved)]
@@ -287,6 +291,7 @@ struct StrokeRenderCoordinatorTests {
             ordinals: &ordinals
         )
         #expect(coordinator.snapshot.commitMetadata.inputSampleCount == 2)
+        #expect(coordinator.inputDeriverSnapshot != inputBefore)
     }
 
     @Test
@@ -858,9 +863,39 @@ struct StrokeRenderCoordinatorTests {
 
         #expect(partitionedWork == singleWork)
         #expect(
+            partitioned.inputDeriverSnapshot
+                == single.inputDeriverSnapshot
+        )
+        #expect(
             canonicalCoverage(for: partitionedWork)
                 == canonicalCoverage(for: singleWork)
         )
+    }
+
+    @Test
+    func cancelResetsCompleteInputStateBeforeRapidCoordinatorReuse() throws {
+        let coordinator = try makeCoordinator(capacity: 64)
+        _ = try commitBegin(
+            [sample(index: 0, phase: .began)],
+            coordinator: coordinator
+        )
+        _ = try commitAppend(
+            [
+                sample(index: 1, phase: .moved),
+                sample(index: 4, phase: .moved),
+            ],
+            coordinator: coordinator
+        )
+        #expect(coordinator.inputDeriverSnapshot != BrushInputDeriver())
+
+        coordinator.cancel()
+
+        #expect(coordinator.inputDeriverSnapshot == BrushInputDeriver())
+        let next = sample(index: 100, phase: .began)
+        _ = try commitBegin([next], coordinator: coordinator)
+        var expected = BrushInputDeriver()
+        _ = expected.derive(next, viewport: coordinatorViewport())
+        #expect(coordinator.inputDeriverSnapshot == expected)
     }
 
     @Test

@@ -799,7 +799,8 @@ private extension BrushDynamicsEngine {
             pressure = clamp01(sample.pressure)
             hasPressure = sample.capabilities.contains(.pressure)
             speed = clamp01(
-                sample.velocity / normalization.fullScaleWorldVelocity
+                sample.artisticVelocity
+                    / normalization.fullScaleWorldVelocity
             )
             direction = normalizedAngle(context.direction)
             if sample.capabilities.contains(.altitude),

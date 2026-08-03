@@ -6,6 +6,8 @@ func compiledProgramAndStrokeReplayStateHaveBoundedValueFootprints() {
     let referenceSizedUpperBound = 2 * MemoryLayout<UnsafeRawPointer>.stride
 
     #expect(MemoryLayout<BrushProgram>.size <= referenceSizedUpperBound)
+    #expect(MemoryLayout<StrokeVelocityFilter>.size <= 1_024)
+    #expect(MemoryLayout<BrushInputDeriver>.size <= 1_088)
     #expect(MemoryLayout<BrushStrokeGenerator>.size <= 2_048)
     #expect(MemoryLayout<TransientStrokeChunk>.size <= 4_096)
     #expect(MemoryLayout<TransientStrokeBuffer>.size <= 8_192)
@@ -65,7 +67,8 @@ func dynamicsEvaluatesACompiledProgram() throws {
     let program = try BrushProgramCompiler.compile(definition)
     let sample = InterpolatedStrokeSample(
         position: WorldPoint(x: 2, y: 3), pressure: 0.5, timestamp: 0,
-        altitude: nil, azimuth: nil, roll: nil, velocity: 0, phase: .moved,
+        altitude: nil, azimuth: nil, roll: nil, velocity: 0,
+        artisticVelocity: 0, phase: .moved,
         source: .mouse, kind: .actual, capabilities: []
     )
     let context = BrushStrokeContext(
@@ -880,6 +883,7 @@ private func evaluateNative(
     let sample = InterpolatedStrokeSample(
         position: WorldPoint(x: 2, y: 3), pressure: 0.5, timestamp: 0,
         altitude: altitude, azimuth: azimuth, roll: roll, velocity: 0,
+        artisticVelocity: 0,
         phase: .moved, source: .mouse, kind: .actual, capabilities: capabilities
     )
     return BrushDynamicsEngine().evaluate(

@@ -760,7 +760,7 @@ func locationResolutionRederivesVelocityFromExactInputCheckpoint() throws {
         StrokeSample(
             position: ScreenPoint(x: 2, y: 1),
             pressure: 0.5,
-            timestamp: 1,
+            timestamp: 0.01,
             phase: .moved,
             source: .pencil,
             estimationUpdateIndex: 20,
@@ -774,7 +774,7 @@ func locationResolutionRederivesVelocityFromExactInputCheckpoint() throws {
         StrokeSample(
             position: ScreenPoint(x: 3, y: 1),
             pressure: 0.5,
-            timestamp: 2,
+            timestamp: 0.02,
             phase: .moved,
             source: .pencil
         ),
@@ -816,12 +816,14 @@ func locationResolutionRederivesVelocityFromExactInputCheckpoint() throws {
 
     #expect(plan.inputDeriverBeforeReplacement == beforeEstimated)
     #expect(plan.generatorBeforeReplacement == generatorBefore)
-    #expect(plan.mergedSample.timestamp == 1)
+    #expect(plan.mergedSample.timestamp == 0.01)
     #expect(plan.mergedSample.position.x == 10)
-    #expect(plan.mergedSample.velocity == 10)
+    #expect(plan.mergedSample.velocity == 1_000)
+    #expect(plan.mergedSample.artisticVelocity == 1_000)
     #expect(plan.samplesToReplay.count == 1)
     #expect(plan.samplesToReplay[0].position.x == 2)
-    #expect(plan.samplesToReplay[0].velocity == 8)
+    #expect(plan.samplesToReplay[0].velocity == 800)
+    #expect(plan.samplesToReplay[0].artisticVelocity == 900)
 }
 
 @Test

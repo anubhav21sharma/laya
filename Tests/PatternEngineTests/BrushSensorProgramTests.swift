@@ -140,6 +140,71 @@ func schemaV1OptionalAbsenceAndCounterRandomStayPinned() throws {
     #expect(presentZero.position.x == absent.position.x)
 }
 
+@Suite("BrushStrokeGeneratorTests velocity selection")
+struct BrushStrokeGeneratorVelocitySelectionTests {
+    @Test
+    func compiledSchemaSelectsInstantaneousForV1AndNormalizedArtisticForV2()
+        throws
+    {
+        let base = nativeTestDefinition()
+        let legacyDynamics = BrushDynamicsDefinition(
+            size: base.dynamics.size,
+            flow: legacyLinear(.speed, 0...1),
+            opacity: base.dynamics.opacity,
+            spacing: base.dynamics.spacing,
+            rotation: base.dynamics.rotation,
+            scatter: base.dynamics.scatter,
+            hardness: base.dynamics.hardness,
+            grain: base.dynamics.grain,
+            offsetX: base.dynamics.offsetX,
+            offsetY: base.dynamics.offsetY,
+            hue: base.dynamics.hue,
+            saturation: base.dynamics.saturation,
+            brightness: base.dynamics.brightness,
+            secondaryColorMix: base.dynamics.secondaryColorMix,
+            noPressureNeutral: base.dynamics.noPressureNeutral,
+            randomization: base.dynamics.randomization
+        )
+        let v1 = try BrushProgramCompiler.compile(
+            schemaV1Definition(base: base, dynamics: legacyDynamics)
+        )
+        let speedTerm = BrushResponseTermDefinition(
+            input: .speed,
+            response: .linear,
+            inputInverted: false,
+            missingInputValue: 0,
+            responseScale: 1,
+            responseOffset: 0,
+            responseLowerClamp: 0,
+            responseUpperClamp: 1,
+            jitter: 0,
+            operation: .replace
+        )
+        let v2 = try BrushProgramCompiler.compile(
+            schemaV2Definition(sensorProgram: sensorProgramReplacing(
+                .size,
+                with: BrushOutputProgramDefinition(
+                    baseValue: 1,
+                    terms: [speedTerm]
+                )
+            ))
+        )
+        let sample = sensorSample(velocity: 25, artisticVelocity: 75)
+        let context = sensorContext(nominalDiameter: 20)
+        let v1Dab = BrushDynamicsEngine().evaluate(
+            sample: sample, context: context, program: v1,
+            random: .centered, strokeSeed: 1
+        )
+        let v2Dab = BrushDynamicsEngine().evaluate(
+            sample: sample, context: context, program: v2,
+            random: .centered, strokeSeed: 1
+        )
+
+        #expect(abs(v1Dab.flow - 0.25) < 0.0001)
+        #expect(abs(v2Dab.diameter - 15) < 0.0001)
+    }
+}
+
 @Test(arguments: BrushDynamicsInput.allCases)
 func schemaV2OneTermMatchesIndependentScalarReferenceForEverySensor(
     input: BrushDynamicsInput
@@ -838,6 +903,7 @@ private func schemaV1Definition(
 private func sensorSample(
     pressure: Float = 0,
     velocity: Float = 0,
+    artisticVelocity: Float? = nil,
     altitude: Float? = nil,
     azimuth: Float? = nil,
     roll: Float? = nil,
@@ -852,6 +918,7 @@ private func sensorSample(
         azimuth: azimuth,
         roll: roll,
         velocity: velocity,
+        artisticVelocity: artisticVelocity ?? velocity,
         phase: .moved,
         source: .tablet,
         kind: .actual,
@@ -1016,7 +1083,7 @@ private func referenceInputs(
     return ReferenceNormalizedInputs(
         pressure: sample.capabilities.contains(.pressure)
             ? unit(sample.pressure) : nil,
-        speed: unit(sample.velocity / 100),
+        speed: unit(sample.artisticVelocity / 100),
         direction: angle(context.direction),
         tilt: sample.capabilities.contains(.altitude)
             ? sample.altitude.map { unit(1 - $0 / (.pi / 2)) } : nil,

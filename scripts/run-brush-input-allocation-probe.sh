@@ -41,6 +41,7 @@ case "$scope" in
   all)
     run_probe --self-test
     run_probe --velocity-filter
+    run_probe --input-derivation
     run_probe --direction-corner
     run_probe --stabilizer-v2
     run_probe --timed-emitter
@@ -55,6 +56,10 @@ case "$scope" in
   sensor-program)
     run_probe --self-test
     run_probe --sensor-program
+    ;;
+  input-derivation)
+    run_probe --self-test
+    run_probe --input-derivation
     ;;
   *)
     printf 'unsupported allocator probe scope: %s\n' "$scope" >&2

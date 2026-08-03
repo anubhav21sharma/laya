@@ -116,6 +116,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case probeUnavailable
     case selfTestMissedAllocation
     case velocityFilterAllocations(total: UInt64)
+    case inputDerivationAllocations(total: UInt64)
     case directionCornerAllocations(total: UInt64)
     case stabilizerV2Allocations(total: UInt64)
     case timedEmitterAllocations(normal: UInt64, hugeGap: UInt64)
@@ -144,6 +145,8 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
             "allocator probe missed the deliberate Array allocation"
         case let .velocityFilterAllocations(total):
             "velocity filter allocated \(total) times after warm-up"
+        case let .inputDerivationAllocations(total):
+            "production input derivation allocated \(total) times after warm-up"
         case let .directionCornerAllocations(total):
             "direction/corner path allocated \(total) times after warm-up"
         case let .stabilizerV2Allocations(total):
@@ -208,6 +211,8 @@ private struct BrushInputAllocationProbeHarness {
                 try runSelfTest(probe: probe)
             case "--velocity-filter":
                 try runVelocityFilterProbe(probe: probe)
+            case "--input-derivation":
+                try runInputDerivationProbe(probe: probe)
             case "--direction-corner":
                 try runDirectionCornerProbe(probe: probe)
             case "--stabilizer-v2":
@@ -278,6 +283,53 @@ private struct BrushInputAllocationProbeHarness {
         print(
             "ALLOCATOR PROBE VELOCITY FILTER PASS allocations=0 "
                 + "checksum=\(checksum)"
+        )
+    }
+
+    private static func runInputDerivationProbe(
+        probe: AllocatorProbe
+    ) throws {
+        let viewport = ViewportTransform(
+            drawableSize: PatternSize(width: 2_048, height: 2_048),
+            worldCenter: WorldPoint(x: 0, y: 0),
+            zoom: 2
+        )
+        var deriver = BrushInputDeriver()
+        _ = deriver.derive(
+            StrokeSample(
+                position: ScreenPoint(x: 1_024, y: 1_024),
+                pressure: 0.5,
+                timestamp: 0,
+                phase: .began,
+                source: .pencil,
+                capabilities: [.pressure]
+            ),
+            viewport: viewport
+        )
+        _ = runInputDerivationUpdates(
+            deriver: &deriver,
+            viewport: viewport,
+            startingAt: 1,
+            count: 128
+        )
+
+        probe.arm()
+        let checksum = runInputDerivationUpdates(
+            deriver: &deriver,
+            viewport: viewport,
+            startingAt: 129,
+            count: 1_000_000
+        )
+        let allocations = probe.disarm()
+
+        guard allocations == 0 else {
+            throw ProbeHarnessError.inputDerivationAllocations(
+                total: allocations
+            )
+        }
+        print(
+            "ALLOCATOR PROBE INPUT DERIVATION PASS allocations=0 "
+                + "derivations=1000000 checksum=\(checksum)"
         )
     }
 
@@ -522,6 +574,7 @@ private struct BrushInputAllocationProbeHarness {
             azimuth: -.pi / 2,
             roll: -.pi / 2,
             velocity: 250,
+            artisticVelocity: 250,
             phase: .moved,
             source: .pencil,
             kind: .actual,
@@ -759,6 +812,7 @@ private struct BrushInputAllocationProbeHarness {
                 azimuth: 0.25,
                 roll: -0.25,
                 velocity: 100,
+                artisticVelocity: 100,
                 phase: index == 0 ? .began : .moved,
                 source: .pencil,
                 kind: kind,
@@ -833,6 +887,35 @@ private struct BrushInputAllocationProbeHarness {
     }
 
     @inline(never)
+    private static func runInputDerivationUpdates(
+        deriver: inout BrushInputDeriver,
+        viewport: ViewportTransform,
+        startingAt start: Int,
+        count: Int
+    ) -> UInt64 {
+        var checksum: UInt64 = 0
+        for index in start..<(start + count) {
+            let x = Float((index * 17) & 2_047)
+            let y = Float((index * 29) & 2_047)
+            let sample = StrokeSample(
+                position: ScreenPoint(x: x, y: y),
+                pressure: Float(index & 255) / 255,
+                timestamp: Double(index) * 0.001,
+                phase: .moved,
+                source: .pencil,
+                kind: index.isMultiple(of: 3) ? .coalesced : .actual,
+                capabilities: [.pressure]
+            )
+            let world = deriver.derive(sample, viewport: viewport)
+            checksum &+= UInt64(world.position.x.bitPattern)
+            checksum &+= UInt64(world.position.y.bitPattern)
+            checksum &+= UInt64(world.velocity.bitPattern)
+            checksum &+= UInt64(world.artisticVelocity.bitPattern)
+        }
+        return checksum
+    }
+
+    @inline(never)
     private static func runDirectionCornerUpdates(
         tracker: inout BrushDirectionTracker,
         emitter: BrushCornerEmitter,
@@ -866,6 +949,7 @@ private struct BrushInputAllocationProbeHarness {
                 azimuth: nil,
                 roll: nil,
                 velocity: 1_000,
+                artisticVelocity: 1_000,
                 phase: .moved,
                 source: .pencil,
                 kind: .actual,

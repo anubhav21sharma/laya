@@ -236,7 +236,8 @@ private func terminationSample(
             source: .mouse
         ),
         position: WorldPoint(x: x, y: 0),
-        velocity: 0
+        velocity: 0,
+        artisticVelocity: 0
     )
 }
 

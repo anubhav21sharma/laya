@@ -18,6 +18,7 @@ public struct WorldStrokeSample: Equatable, Sendable {
     public let estimatedProperties: StrokeEstimatedProperties
     public let estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties
     public let velocity: Float
+    public let artisticVelocity: Float
     public let phase: StrokePhase
     public let source: StrokeSource
     public let kind: StrokeSampleKind
@@ -26,7 +27,8 @@ public struct WorldStrokeSample: Equatable, Sendable {
     init(
         sample: StrokeSample,
         position: WorldPoint,
-        velocity: Float
+        velocity: Float,
+        artisticVelocity: Float
     ) {
         self.position = position
         pressure = sample.pressure
@@ -41,6 +43,7 @@ public struct WorldStrokeSample: Equatable, Sendable {
         estimatedPropertiesExpectingUpdates =
             sample.estimatedPropertiesExpectingUpdates
         self.velocity = velocity
+        self.artisticVelocity = artisticVelocity
         phase = sample.phase
         source = sample.source
         kind = sample.kind
@@ -60,6 +63,7 @@ public struct WorldStrokeSample: Equatable, Sendable {
         estimatedProperties: StrokeEstimatedProperties,
         estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties,
         velocity: Float,
+        artisticVelocity: Float,
         phase: StrokePhase,
         source: StrokeSource,
         kind: StrokeSampleKind,
@@ -78,6 +82,7 @@ public struct WorldStrokeSample: Equatable, Sendable {
         self.estimatedPropertiesExpectingUpdates =
             estimatedPropertiesExpectingUpdates
         self.velocity = velocity
+        self.artisticVelocity = artisticVelocity
         self.phase = phase
         self.source = source
         self.kind = kind
@@ -92,7 +97,8 @@ public struct WorldStrokeSample: Equatable, Sendable {
         roll: Float?? = nil,
         estimatedProperties: StrokeEstimatedProperties? = nil,
         estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties? = nil,
-        velocity: Float? = nil
+        velocity: Float? = nil,
+        artisticVelocity: Float? = nil
     ) -> WorldStrokeSample {
         WorldStrokeSample(
             position: position ?? self.position,
@@ -110,6 +116,7 @@ public struct WorldStrokeSample: Equatable, Sendable {
                 estimatedPropertiesExpectingUpdates
                     ?? self.estimatedPropertiesExpectingUpdates,
             velocity: velocity ?? self.velocity,
+            artisticVelocity: artisticVelocity ?? self.artisticVelocity,
             phase: phase,
             source: source,
             kind: kind,
@@ -126,11 +133,13 @@ public struct BrushInputDeriver: Equatable, Sendable {
     private var previousPosition: WorldPoint?
     private var previousTimestamp: TimeInterval?
     private var lastVelocity: Float
+    private var artisticVelocityFilter: StrokeVelocityFilter
 
     public init() {
         previousPosition = nil
         previousTimestamp = nil
         lastVelocity = 0
+        artisticVelocityFilter = StrokeVelocityFilter()
     }
 
     public mutating func derive(
@@ -150,7 +159,8 @@ public struct BrushInputDeriver: Equatable, Sendable {
             return WorldStrokeSample(
                 sample: sample,
                 position: position,
-                velocity: 0
+                velocity: 0,
+                artisticVelocity: 0
             )
         }
 
@@ -161,7 +171,11 @@ public struct BrushInputDeriver: Equatable, Sendable {
                 velocity: derivedVelocity(
                     to: position,
                     timestamp: sample.timestamp
-                )
+                ),
+                artisticVelocity: evaluatedArtisticVelocity(
+                    to: position,
+                    timestamp: sample.timestamp
+                ).velocity
             )
         }
 
@@ -170,11 +184,16 @@ public struct BrushInputDeriver: Equatable, Sendable {
                 reset()
                 previousPosition = position
                 previousTimestamp = sample.timestamp
+                _ = artisticVelocityFilter.begin(
+                    at: position,
+                    time: sample.timestamp
+                )
             }
             return WorldStrokeSample(
                 sample: sample,
                 position: position,
-                velocity: 0
+                velocity: 0,
+                artisticVelocity: 0
             )
         }
 
@@ -182,10 +201,15 @@ public struct BrushInputDeriver: Equatable, Sendable {
             to: position,
             timestamp: sample.timestamp
         )
+        let artistic = evaluatedArtisticVelocity(
+            to: position,
+            timestamp: sample.timestamp
+        )
         let result = WorldStrokeSample(
             sample: sample,
             position: position,
-            velocity: velocity
+            velocity: velocity,
+            artisticVelocity: artistic.velocity
         )
 
         guard sample.kind != .predicted else {
@@ -198,6 +222,7 @@ public struct BrushInputDeriver: Equatable, Sendable {
             previousPosition = position
             previousTimestamp = sample.timestamp
             lastVelocity = velocity
+            artisticVelocityFilter = artistic.filter
         }
         return result
     }
@@ -216,6 +241,10 @@ public struct BrushInputDeriver: Equatable, Sendable {
             previousPosition = result.position
             previousTimestamp = result.timestamp
             lastVelocity = result.velocity
+            _ = artisticVelocityFilter.update(
+                to: result.position,
+                time: result.timestamp
+            )
         }
         return result
     }
@@ -230,26 +259,38 @@ public struct BrushInputDeriver: Equatable, Sendable {
             if sample.kind != .predicted {
                 reset()
             }
-            return sample.replacing(velocity: 0)
+            return sample.replacing(velocity: 0, artisticVelocity: 0)
         }
         if sample.phase == .began {
             reset()
             previousPosition = sample.position
             previousTimestamp = sample.timestamp
-            return sample.replacing(velocity: 0)
+            _ = artisticVelocityFilter.begin(
+                at: sample.position,
+                time: sample.timestamp
+            )
+            return sample.replacing(velocity: 0, artisticVelocity: 0)
         }
 
         let velocity = derivedVelocity(
             to: sample.position,
             timestamp: sample.timestamp
         )
-        let result = sample.replacing(velocity: velocity)
+        let artistic = evaluatedArtisticVelocity(
+            to: sample.position,
+            timestamp: sample.timestamp
+        )
+        let result = sample.replacing(
+            velocity: velocity,
+            artisticVelocity: artistic.velocity
+        )
         if sample.phase == .ended {
             reset()
         } else {
             previousPosition = sample.position
             previousTimestamp = sample.timestamp
             lastVelocity = velocity
+            artisticVelocityFilter = artistic.filter
         }
         return result
     }
@@ -258,6 +299,7 @@ public struct BrushInputDeriver: Equatable, Sendable {
         previousPosition = nil
         previousTimestamp = nil
         lastVelocity = 0
+        artisticVelocityFilter.reset()
     }
 
     private func derivedVelocity(
@@ -286,5 +328,14 @@ public struct BrushInputDeriver: Equatable, Sendable {
             BrushInputContract.maximumWorldVelocity,
             Float(velocity)
         )
+    }
+
+    private func evaluatedArtisticVelocity(
+        to position: WorldPoint,
+        timestamp: TimeInterval
+    ) -> (velocity: Float, filter: StrokeVelocityFilter) {
+        var candidate = artisticVelocityFilter
+        let velocity = candidate.update(to: position, time: timestamp)
+        return (velocity, candidate)
     }
 }

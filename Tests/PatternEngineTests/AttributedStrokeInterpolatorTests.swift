@@ -8,6 +8,7 @@ private func attributedSample(
     pressure: Float = 0.5,
     timestamp: TimeInterval,
     velocity: Float = 0,
+    artisticVelocity: Float = 0,
     altitude: Float? = nil,
     azimuth: Float? = nil,
     roll: Float? = nil,
@@ -28,6 +29,7 @@ private func attributedSample(
         azimuth: azimuth,
         roll: roll,
         velocity: velocity,
+        artisticVelocity: artisticVelocity,
         phase: phase,
         source: .pencil,
         kind: kind,
@@ -92,7 +94,7 @@ struct AttributedStrokeInterpolatorTests {
         #expect(midpoint.phase == .ended)
     }
     @Test
-    func pressureTimestampAndVelocityFollowArcFraction() {
+    func pressureTimestampAndBothVelocitiesFollowArcFraction() {
         var interpolator = AttributedStrokeInterpolator(spacing: 2.5)
         var emitted: [InterpolatedStrokeSample] = []
         interpolator.begin(
@@ -101,6 +103,7 @@ struct AttributedStrokeInterpolatorTests {
                 pressure: 0,
                 timestamp: 10,
                 velocity: 100,
+                artisticVelocity: 50,
                 phase: .began
             )
         ) { emitted.append($0) }
@@ -110,6 +113,7 @@ struct AttributedStrokeInterpolatorTests {
                 pressure: 1,
                 timestamp: 14,
                 velocity: 500,
+                artisticVelocity: 250,
                 phase: .ended
             )
         ) { emitted.append($0) }
@@ -118,6 +122,7 @@ struct AttributedStrokeInterpolatorTests {
         #expect(emitted.map(\.pressure) == [0, 0.25, 0.5, 0.75, 1])
         #expect(emitted.map(\.timestamp) == [10, 11, 12, 13, 14])
         #expect(emitted.map(\.velocity) == [100, 200, 300, 400, 500])
+        #expect(emitted.map(\.artisticVelocity) == [50, 100, 150, 200, 250])
     }
 
     @Test

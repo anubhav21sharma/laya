@@ -476,6 +476,9 @@ struct StrokeFrameSchedulerTests {
             (await scheduler.transientPreparationSnapshotForTesting)
                 .predictedSamples.last
         )
+        let actualBefore =
+            (await scheduler.transientPreparationSnapshotForTesting)
+                .actualSamples
 
         let updateResult = await scheduler.process(
             .applyEstimatedUpdate(
@@ -503,6 +506,11 @@ struct StrokeFrameSchedulerTests {
         let correctedSnapshot =
             await scheduler.transientPreparationSnapshotForTesting
         #expect(predictedAfter.position != predictedBefore.position)
+        #expect(
+            predictedAfter.artisticVelocity
+                != predictedBefore.artisticVelocity
+        )
+        #expect(correctedSnapshot.actualSamples == actualBefore)
         #expect(
             predictedAfter.estimatedPropertiesExpectingUpdates.isEmpty
         )

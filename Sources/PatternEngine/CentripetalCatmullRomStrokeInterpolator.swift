@@ -15,6 +15,7 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
     public let estimatedProperties: StrokeEstimatedProperties
     public let estimatedPropertiesExpectingUpdates: StrokeEstimatedProperties
     public let velocity: Float
+    public let artisticVelocity: Float
     public let phase: StrokePhase
     public let source: StrokeSource
     public let kind: StrokeSampleKind
@@ -28,6 +29,7 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
         azimuth: Float?,
         roll: Float?,
         velocity: Float,
+        artisticVelocity: Float,
         phase: StrokePhase,
         source: StrokeSource,
         kind: StrokeSampleKind,
@@ -51,6 +53,7 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
         self.estimatedPropertiesExpectingUpdates =
             estimatedPropertiesExpectingUpdates
         self.velocity = velocity
+        self.artisticVelocity = artisticVelocity
         self.phase = phase
         self.source = source
         self.kind = kind
@@ -66,6 +69,7 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
             azimuth: sample.azimuth,
             roll: sample.roll,
             velocity: sample.velocity,
+            artisticVelocity: sample.artisticVelocity,
             phase: sample.phase,
             source: sample.source,
             kind: sample.kind,
@@ -102,6 +106,11 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
             azimuth: Self.optionalAngle(azimuth, end.azimuth, clamped),
             roll: Self.optionalAngle(roll, end.roll, clamped),
             velocity: lerp(velocity, end.velocity, clamped),
+            artisticVelocity: lerp(
+                artisticVelocity,
+                end.artisticVelocity,
+                clamped
+            ),
             phase: discrete.phase,
             source: discrete.source,
             kind: discrete.kind,
@@ -130,6 +139,7 @@ public struct InterpolatedStrokeSample: Equatable, Sendable {
             azimuth: azimuth,
             roll: roll,
             velocity: velocity,
+            artisticVelocity: artisticVelocity,
             phase: phase,
             source: source,
             kind: kind,
@@ -766,6 +776,7 @@ public struct CentripetalCatmullRomStrokeInterpolator: Sendable {
             azimuth: nil,
             roll: nil,
             velocity: 0,
+            artisticVelocity: 0,
             phase: phase,
             source: .mouse,
             kind: .actual,

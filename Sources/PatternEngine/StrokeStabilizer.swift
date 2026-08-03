@@ -566,7 +566,8 @@ private extension WorldStrokeSample {
         return WorldStrokeSample(
             sample: copiedSample,
             position: position,
-            velocity: velocity
+            velocity: velocity,
+            artisticVelocity: artisticVelocity
         )
     }
 }

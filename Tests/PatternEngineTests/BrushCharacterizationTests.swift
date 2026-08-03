@@ -292,6 +292,7 @@ func logicalDabFactoryPreservesNativeRandomPayloadWhileDigestBoundsExcludeHalo()
         azimuth: nil,
         roll: nil,
         velocity: 0,
+        artisticVelocity: 0,
         phase: .began,
         source: .mouse,
         kind: .actual,
