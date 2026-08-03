@@ -165,6 +165,7 @@ struct StrokeTransientPreparationSnapshot: Equatable, Sendable {
 struct StrokeEstimatedUpdateDiagnosticSnapshot: Equatable, Sendable {
     let target: EstimatedStrokeUpdateTarget
     let mergedSample: WorldStrokeSample
+    let rederivedSampleCount: Int
     let mutationVersion: UInt64
 }
 #endif
@@ -1265,16 +1266,18 @@ actor StrokeFrameScheduler {
         var predictionWasTruncated = false
         var predictionOverload: PredictionOverloadReasons = []
         var projectionRanOnMainThread = false
+        var rederivedSampleCount = 0
         let replacementPreview: BorrowedEstimatedStrokeUpdatePreview
 
         do {
-            for plannedSample in estimatedReplacementSampleScratch {
+            for sampleIndex in estimatedReplacementSampleScratch.indices {
+                let plannedSample =
+                    estimatedReplacementSampleScratch[sampleIndex]
                 let inputBefore = replayDeriver
                 let replayedSample = replayDeriver.rederive(plannedSample)
-                guard replayedSample == plannedSample else {
-                    throw TransientStrokeBufferError
-                        .invalidEstimatedReplacement
-                }
+                estimatedReplacementSampleScratch[sampleIndex] =
+                    replayedSample
+                rederivedSampleCount += 1
                 let generatorBefore = replayGenerator
                 var candidateGenerator = replayGenerator
                 perSampleLogicalDabScratch.removeAll(keepingCapacity: true)
@@ -1673,7 +1676,10 @@ actor StrokeFrameScheduler {
         #if DEBUG
         lastEstimatedUpdateSnapshot = StrokeEstimatedUpdateDiagnosticSnapshot(
             target: plan.target,
-            mergedSample: plan.mergedSample,
+            mergedSample:
+                estimatedReplacementSampleScratch.first
+                    ?? plan.mergedSample,
+            rederivedSampleCount: rederivedSampleCount,
             mutationVersion: candidateBuffer.mutationVersion
         )
         #endif

@@ -452,7 +452,7 @@ struct StrokeFrameSchedulerTests {
                         phase: .moved,
                         kind: .predicted,
                         index: 89,
-                        property: .location,
+                        property: [],
                         x: 36,
                         pressure: 0.5,
                         altitude: 0.7,
@@ -486,7 +486,7 @@ struct StrokeFrameSchedulerTests {
                 sample: estimatedPreparationSample(
                     phase: .moved,
                     kind: .estimatedUpdate,
-                    index: 89,
+                    index: 88,
                     property: [],
                     x: 48,
                     pressure: 0.9,
@@ -505,7 +505,7 @@ struct StrokeFrameSchedulerTests {
         )
         let correctedSnapshot =
             await scheduler.transientPreparationSnapshotForTesting
-        #expect(predictedAfter.position != predictedBefore.position)
+        #expect(predictedAfter.position == predictedBefore.position)
         #expect(
             predictedAfter.artisticVelocity
                 != predictedBefore.artisticVelocity
@@ -521,10 +521,11 @@ struct StrokeFrameSchedulerTests {
                     $0 + $1.projectedInstanceCount
                 }
         )
-        #expect(
-            (await scheduler.lastEstimatedUpdateSnapshotForTesting)?.target
-                == .predicted
+        let diagnostic = try #require(
+            await scheduler.lastEstimatedUpdateSnapshotForTesting
         )
+        #expect(diagnostic.target == .predicted)
+        #expect(diagnostic.rederivedSampleCount == 2)
         try await acknowledgeAll(
             corrected,
             scheduler: scheduler,

@@ -62,6 +62,19 @@ struct StrokeVelocityFilterTests {
     }
 
     @Test
+    func finiteHugeGapRetainsOnlyItsLastWindowWithoutTrapping() {
+        var filter = StrokeVelocityFilter()
+        _ = filter.begin(at: point(0), time: 0)
+
+        let velocity = filter.update(to: point(1e38), time: 1e40)
+
+        expect(velocity, equals: 0.01, tolerance: 0.000_001)
+        #expect(velocity.isFinite)
+        #expect(velocity > 0)
+        #expect(filter.snapshot.segmentCount == 1)
+    }
+
+    @Test
     func jitteredIntervalsUseTheirActualDurations() {
         var filter = StrokeVelocityFilter()
         _ = filter.begin(at: point(0), time: 0)

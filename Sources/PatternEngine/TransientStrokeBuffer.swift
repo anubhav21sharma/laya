@@ -757,9 +757,11 @@ public struct EstimatedStrokeUpdatePlan: Equatable, Sendable {
     /// public API; it is intentionally independent of renderer replay epochs.
     public let sourceReplayEpoch: UInt64
     public let replacedChunkIndex: Int
+    /// Merged raw input. Velocity channels are rederived by the replay owner.
     public let mergedSample: WorldStrokeSample
     public let generatorBeforeReplacement: BrushStrokeGenerator?
     public let inputDeriverBeforeReplacement: BrushInputDeriver?
+    /// Raw retained suffix. Velocity channels have not been rederived.
     public let samplesToReplay: [WorldStrokeSample]
 
     init(
@@ -788,6 +790,7 @@ public struct BorrowedEstimatedStrokeUpdatePlan: Equatable, Sendable {
     public let target: EstimatedStrokeUpdateTarget
     public let sourceReplayEpoch: UInt64
     public let replacedChunkIndex: Int
+    /// Merged raw input. Velocity channels are rederived by the replay owner.
     public let mergedSample: WorldStrokeSample
     public let generatorBeforeReplacement: BrushStrokeGenerator?
     public let inputDeriverBeforeReplacement: BrushInputDeriver?
@@ -1741,7 +1744,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         }
 
         let expecting = original.estimatedPropertiesExpectingUpdates
-        var merged = original.replacing(
+        let merged = original.replacing(
             position: expecting.contains(.location)
                 ? update.position
                 : original.position,
@@ -1761,13 +1764,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             estimatedPropertiesExpectingUpdates:
                 update.estimatedPropertiesExpectingUpdates
         )
-        var replay = Array(chunks.dropFirst(index + 1).map(\.sample))
+        let replay = Array(chunks.dropFirst(index + 1).map(\.sample))
         let deriverCheckpoint =
             originalChunk.inputDeriverSnapshotBeforeSample
-        if var deriver = deriverCheckpoint {
-            merged = deriver.rederive(merged)
-            replay = replay.map { deriver.rederive($0) }
-        }
         let generatorBefore =
             originalChunk.generatorSnapshotBeforeSample
                 ?? (index == 0
@@ -1846,7 +1845,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         }
 
         let expecting = original.estimatedPropertiesExpectingUpdates
-        var merged = original.replacing(
+        let merged = original.replacing(
             position: expecting.contains(.location)
                 ? update.position
                 : original.position,
@@ -1868,30 +1867,16 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         )
         let deriverCheckpoint =
             originalChunk.inputDeriverSnapshotBeforeSample
-        if var deriver = deriverCheckpoint {
-            merged = deriver.rederive(merged)
-            replacementSamples.append(merged)
-            let sourceCount = target == .authoritative
-                ? actualChunks.count
-                : predictedChunks.count
-            for index in (matchedIndex + 1) ..< sourceCount {
-                let sample = target == .authoritative
+        replacementSamples.append(merged)
+        let sourceCount = target == .authoritative
+            ? actualChunks.count
+            : predictedChunks.count
+        for index in (matchedIndex + 1) ..< sourceCount {
+            replacementSamples.append(
+                target == .authoritative
                     ? actualChunks[index].sample
                     : predictedChunks[index].sample
-                replacementSamples.append(deriver.rederive(sample))
-            }
-        } else {
-            replacementSamples.append(merged)
-            let sourceCount = target == .authoritative
-                ? actualChunks.count
-                : predictedChunks.count
-            for index in (matchedIndex + 1) ..< sourceCount {
-                replacementSamples.append(
-                    target == .authoritative
-                        ? actualChunks[index].sample
-                        : predictedChunks[index].sample
-                )
-            }
+            )
         }
         let generatorBefore =
             originalChunk.generatorSnapshotBeforeSample
@@ -1924,10 +1909,19 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             throw TransientStrokeBufferError.staleEstimatedUpdatePlan
         }
         guard rebuiltChunks.count == plan.samplesToReplay.count + 1,
-              rebuiltChunks.first?.sample == plan.mergedSample,
-              Array(rebuiltChunks.dropFirst().map(\.sample))
-                == plan.samplesToReplay
+              let first = rebuiltChunks.first,
+              Self.matchesReplaySource(
+                  first.sample,
+                  raw: plan.mergedSample
+              )
         else {
+            throw TransientStrokeBufferError.invalidEstimatedReplacement
+        }
+        for index in plan.samplesToReplay.indices
+        where !Self.matchesReplaySource(
+            rebuiltChunks[index + 1].sample,
+            raw: plan.samplesToReplay[index]
+        ) {
             throw TransientStrokeBufferError.invalidEstimatedReplacement
         }
 
@@ -2026,7 +2020,8 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         guard
             expectedSamples.count == plan.replacementSampleCount,
             rebuiltChunks.count == expectedSamples.count,
-            expectedSamples.first == plan.mergedSample
+            let first = expectedSamples.first,
+            Self.matchesReplaySource(first, raw: plan.mergedSample)
         else {
             throw TransientStrokeBufferError.invalidEstimatedReplacement
         }
@@ -2551,6 +2546,16 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             clearedPredictedSuffix: false,
             replayEpoch: replayEpoch
         )
+    }
+
+    private static func matchesReplaySource(
+        _ replayed: WorldStrokeSample,
+        raw: WorldStrokeSample
+    ) -> Bool {
+        replayed.replacing(
+            velocity: raw.velocity,
+            artisticVelocity: raw.artisticVelocity
+        ) == raw
     }
 
     private static func projectedInstanceCount(

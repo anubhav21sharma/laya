@@ -36,6 +36,12 @@ public struct PreparedStrokeCoordinatorEmission: Sendable {
     fileprivate let hasFinished: Bool
 }
 
+private struct SettledReplayLifecycleCandidate {
+    var hasBegun: Bool
+    var hasFinished: Bool
+    var expectedOrdinal: UInt64
+}
+
 /// Mutable single-owner authoritative core. This deliberately non-Sendable
 /// final reference is confined to its owning executor (`GridRenderer` uses the
 /// main actor) until Task 7 moves it behind an off-main actor and bounded queue.
@@ -185,145 +191,35 @@ public final class StrokeRenderCoordinator {
     }
 
     func prepareSettledReplayTransfer(
-        _ chunks: [TransientStrokeChunk]
+        _ chunks: borrowing [TransientStrokeChunk]
     ) throws -> PreparedStrokeCoordinatorEmission {
         try requireIdleTransaction()
         guard !chunks.isEmpty else {
             throw StrokeRenderCoordinatorError.invalidLifecycle
         }
 
-        var candidateGenerator = generator
-        var candidateDeriver = inputDeriver
         settledTransferWorkScratch.removeAll(keepingCapacity: true)
-        var candidateHasBegun = hasBegun
-        var candidateHasFinished = hasFinished
-        var expectedOrdinal = authoritativeQueue.nextExpectedOrdinal
-
-        for (index, chunk) in chunks.enumerated() {
-            switch chunk.sample.phase {
-            case .began:
-                guard index == 0, !candidateHasBegun,
-                      !candidateHasFinished
-                else {
-                    throw StrokeRenderCoordinatorError.invalidLifecycle
-                }
-                candidateHasBegun = true
-            case .moved:
-                guard candidateHasBegun, !candidateHasFinished else {
-                    throw StrokeRenderCoordinatorError.invalidLifecycle
-                }
-            case .ended:
-                guard candidateHasBegun, !candidateHasFinished,
-                      index == chunks.index(before: chunks.endIndex)
-                else {
-                    throw StrokeRenderCoordinatorError.invalidLifecycle
-                }
-                candidateHasFinished = true
-            case .cancelled:
-                throw StrokeRenderCoordinatorError.invalidLifecycle
-            }
-            guard
-                chunk.sample.kind == .actual
-                    || chunk.sample.kind == .coalesced
-            else {
-                throw StrokeRenderCoordinatorError.invalidAuthoritativeSample
-            }
-            guard
-                let generatorBefore =
-                    chunk.generatorSnapshotBeforeSample,
-                let generatorAfter =
-                    chunk.generatorSnapshotAfterSample,
-                let inputDeriverBefore =
-                    chunk.inputDeriverSnapshotBeforeSample
-            else {
-                throw StrokeRenderCoordinatorError.invalidAuthoritativeSample
-            }
-            guard generatorBefore == candidateGenerator,
-                  inputDeriverBefore == candidateDeriver
-            else {
-                throw StrokeRenderCoordinatorError
-                    .settledReplayCheckpointMismatch
-            }
-            for transientDab in chunk.dabs {
-                let dab = transientDab.attributes
-                guard !dab.isPredicted else {
-                    throw StrokeRenderCoordinatorError
-                        .invalidAuthoritativeSample
-                }
-                guard dab.ordinal == expectedOrdinal else {
-                    throw StrokeRenderCoordinatorError.ordinalDiscontinuity(
-                        expected: expectedOrdinal,
-                        actual: dab.ordinal
-                    )
-                }
-                let (nextOrdinal, overflow) = expectedOrdinal
-                    .addingReportingOverflow(1)
-                guard !overflow else {
-                    throw AuthoritativeStrokeQueueError.ordinalOverflow
-                }
-                settledTransferWorkScratch.append(
-                    AuthoritativeStrokeWork(dab: dab)
-                )
-                expectedOrdinal = nextOrdinal
-            }
-            var replayedGenerator = candidateGenerator
-            var replayedDabIndex = 0
-            switch chunk.sample.phase {
-            case .began:
-                try replayedGenerator.begin(chunk.sample) { dab in
-                    guard replayedDabIndex < chunk.dabs.count,
-                          chunk.dabs[replayedDabIndex].attributes == dab
-                    else {
-                        throw StrokeRenderCoordinatorError
-                            .settledReplayCheckpointMismatch
-                    }
-                    replayedDabIndex += 1
-                }
-            case .moved:
-                try replayedGenerator.append(chunk.sample) { dab in
-                    guard replayedDabIndex < chunk.dabs.count,
-                          chunk.dabs[replayedDabIndex].attributes == dab
-                    else {
-                        throw StrokeRenderCoordinatorError
-                            .settledReplayCheckpointMismatch
-                    }
-                    replayedDabIndex += 1
-                }
-            case .ended:
-                try replayedGenerator.finish(chunk.sample) { dab in
-                    guard replayedDabIndex < chunk.dabs.count,
-                          chunk.dabs[replayedDabIndex].attributes == dab
-                    else {
-                        throw StrokeRenderCoordinatorError
-                            .settledReplayCheckpointMismatch
-                    }
-                    replayedDabIndex += 1
-                }
-            case .cancelled:
-                throw StrokeRenderCoordinatorError.invalidLifecycle
-            }
-            guard replayedDabIndex == chunk.dabs.count,
-                  replayedGenerator == generatorAfter
-            else {
-                throw StrokeRenderCoordinatorError
-                    .settledReplayCheckpointMismatch
-            }
-            let expectedGeneratorDabCount = chunk.sample.phase == .ended
-                ? 0
-                : expectedOrdinal
-            guard generatorAfter.emittedDabCount
-                    == expectedGeneratorDabCount
-            else {
-                throw StrokeRenderCoordinatorError
-                    .settledReplayCheckpointMismatch
-            }
-            candidateGenerator = replayedGenerator
-            let rederivedSample = candidateDeriver.rederive(chunk.sample)
-            guard rederivedSample == chunk.sample else {
-                throw StrokeRenderCoordinatorError
-                    .settledReplayCheckpointMismatch
-            }
-        }
+        var candidateGenerator = generator
+        var candidateInputDeriver = inputDeriver
+        let replayStartingOrdinal = authoritativeQueue.nextExpectedOrdinal
+        var candidateLifecycle = SettledReplayLifecycleCandidate(
+            hasBegun: hasBegun,
+            hasFinished: hasFinished,
+            expectedOrdinal: replayStartingOrdinal
+        )
+        try validateSettledReplayStructure(
+            chunks,
+            candidate: &candidateLifecycle
+        )
+        try advanceSettledReplayInputChunks(
+            chunks,
+            inputDeriver: &candidateInputDeriver
+        )
+        try advanceSettledReplayGeneratorChunks(
+            chunks,
+            startingExpectedOrdinal: replayStartingOrdinal,
+            generator: &candidateGenerator
+        )
 
         try authoritativeQueue.preflightAppend(settledTransferWorkScratch)
         var candidateMetadata = commitMetadata
@@ -340,15 +236,318 @@ public final class StrokeRenderCoordinator {
                 generatedSamples: []
             ),
             generator: candidateGenerator,
-            inputDeriver: candidateDeriver,
+            inputDeriver: candidateInputDeriver,
             commitMetadata: candidateMetadata,
             maximumReturnedDabCount: max(
                 maximumReturnedDabCount,
                 settledTransferWorkScratch.count
             ),
-            hasBegun: candidateHasBegun,
-            hasFinished: candidateHasFinished
+            hasBegun: candidateLifecycle.hasBegun,
+            hasFinished: candidateLifecycle.hasFinished
         )
+    }
+
+    @inline(never)
+    private func validateSettledReplayStructure(
+        _ chunks: borrowing [TransientStrokeChunk],
+        candidate: inout SettledReplayLifecycleCandidate
+    ) throws {
+        for index in chunks.indices {
+            try validateSettledReplayLifecycle(
+                chunks[index],
+                index: index,
+                finalIndex: chunks.index(before: chunks.endIndex),
+                candidate: &candidate
+            )
+            try appendSettledReplayWork(
+                chunks[index],
+                expectedOrdinal: &candidate.expectedOrdinal
+            )
+        }
+    }
+
+    @inline(never)
+    private func advanceSettledReplayInputChunks(
+        _ chunks: borrowing [TransientStrokeChunk],
+        inputDeriver: inout BrushInputDeriver
+    ) throws {
+        for index in chunks.indices {
+            try Self.validateSettledReplayInputTransition(
+                chunks[index],
+                inputDeriver: &inputDeriver
+            )
+        }
+    }
+
+    @inline(never)
+    private func advanceSettledReplayGeneratorChunks(
+        _ chunks: borrowing [TransientStrokeChunk],
+        startingExpectedOrdinal: UInt64,
+        generator: inout BrushStrokeGenerator
+    ) throws {
+        var expectedOrdinal = startingExpectedOrdinal
+        for index in chunks.indices {
+            let (ordinalAfterChunk, overflow) = expectedOrdinal
+                .addingReportingOverflow(UInt64(chunks[index].dabs.count))
+            guard !overflow else {
+                throw AuthoritativeStrokeQueueError.ordinalOverflow
+            }
+            try Self.advanceSettledReplayGeneratorChunk(
+                chunks[index],
+                expectedOrdinal: ordinalAfterChunk,
+                generator: &generator
+            )
+            expectedOrdinal = ordinalAfterChunk
+        }
+    }
+
+    @inline(never)
+    private static func advanceSettledReplayGeneratorChunk(
+        _ chunk: borrowing TransientStrokeChunk,
+        expectedOrdinal: UInt64,
+        generator: inout BrushStrokeGenerator
+    ) throws {
+        try validateSettledReplayGeneratorBefore(
+            chunk,
+            generator: &generator
+        )
+        try advanceSettledReplayGeneratorChunkAfterBeforeCheck(
+            chunk,
+            expectedOrdinal: expectedOrdinal,
+            generator: &generator
+        )
+    }
+
+    @inline(never)
+    private static func advanceSettledReplayGeneratorChunkAfterBeforeCheck(
+        _ chunk: borrowing TransientStrokeChunk,
+        expectedOrdinal: UInt64,
+        generator: inout BrushStrokeGenerator
+    ) throws {
+        try replaySettledGeneratorTransition(
+            chunk,
+            expectedOrdinal: expectedOrdinal,
+            generator: &generator
+        )
+    }
+
+    @inline(never)
+    private func validateSettledReplayLifecycle(
+        _ chunk: borrowing TransientStrokeChunk,
+        index: Int,
+        finalIndex: Int,
+        candidate: inout SettledReplayLifecycleCandidate
+    ) throws {
+        switch chunk.sample.phase {
+        case .began:
+            guard index == 0, !candidate.hasBegun,
+                  !candidate.hasFinished
+            else {
+                throw StrokeRenderCoordinatorError.invalidLifecycle
+            }
+            candidate.hasBegun = true
+        case .moved:
+            guard candidate.hasBegun, !candidate.hasFinished else {
+                throw StrokeRenderCoordinatorError.invalidLifecycle
+            }
+        case .ended:
+            guard candidate.hasBegun, !candidate.hasFinished,
+                  index == finalIndex
+            else {
+                throw StrokeRenderCoordinatorError.invalidLifecycle
+            }
+            candidate.hasFinished = true
+        case .cancelled:
+            throw StrokeRenderCoordinatorError.invalidLifecycle
+        }
+        guard chunk.sample.kind == .actual
+                || chunk.sample.kind == .coalesced
+        else {
+            throw StrokeRenderCoordinatorError.invalidAuthoritativeSample
+        }
+        guard chunk.generatorSnapshotAfterSample != nil else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+    }
+
+    @inline(never)
+    private func appendSettledReplayWork(
+        _ chunk: borrowing TransientStrokeChunk,
+        expectedOrdinal: inout UInt64
+    ) throws {
+        for transientDab in chunk.dabs {
+            let dab = transientDab.attributes
+            guard !dab.isPredicted else {
+                throw StrokeRenderCoordinatorError.invalidAuthoritativeSample
+            }
+            guard dab.ordinal == expectedOrdinal else {
+                throw StrokeRenderCoordinatorError.ordinalDiscontinuity(
+                    expected: expectedOrdinal,
+                    actual: dab.ordinal
+                )
+            }
+            let (nextOrdinal, overflow) = expectedOrdinal
+                .addingReportingOverflow(1)
+            guard !overflow else {
+                throw AuthoritativeStrokeQueueError.ordinalOverflow
+            }
+            settledTransferWorkScratch.append(
+                AuthoritativeStrokeWork(dab: dab)
+            )
+            expectedOrdinal = nextOrdinal
+        }
+    }
+
+    @inline(never)
+    private static func replaySettledGeneratorTransition(
+        _ chunk: borrowing TransientStrokeChunk,
+        expectedOrdinal: UInt64,
+        generator: inout BrushStrokeGenerator
+    ) throws {
+        let replayedDabCount: Int
+        switch chunk.sample.phase {
+        case .began:
+            replayedDabCount = try Self.replaySettledBegin(
+                chunk,
+                generator: &generator
+            )
+        case .moved:
+            replayedDabCount = try Self.replaySettledAppend(
+                chunk,
+                generator: &generator
+            )
+        case .ended:
+            replayedDabCount = try Self.replaySettledFinish(
+                chunk,
+                generator: &generator
+            )
+        case .cancelled:
+            throw StrokeRenderCoordinatorError.invalidLifecycle
+        }
+        try Self.validateSettledReplayStateAfter(
+            chunk,
+            expectedOrdinal: expectedOrdinal,
+            replayedDabCount: replayedDabCount,
+            generator: &generator
+        )
+    }
+
+    @inline(never)
+    private static func validateSettledReplayGeneratorBefore(
+        _ chunk: borrowing TransientStrokeChunk,
+        generator: inout BrushStrokeGenerator
+    ) throws {
+        guard let checkpoint = chunk.generatorSnapshotBeforeSample,
+              checkpoint == generator
+        else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+    }
+
+    @inline(never)
+    private static func validateSettledReplayInputTransition(
+        _ chunk: borrowing TransientStrokeChunk,
+        inputDeriver: inout BrushInputDeriver
+    ) throws {
+        guard chunk.inputDeriverSnapshotBeforeSample == .some(inputDeriver) else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+        let rederivedSample = inputDeriver.rederive(chunk.sample)
+        guard rederivedSample == chunk.sample else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+    }
+
+    @inline(never)
+    private static func replaySettledBegin(
+        _ chunk: borrowing TransientStrokeChunk,
+        generator: inout BrushStrokeGenerator
+    ) throws -> Int {
+        var replayedDabCount = 0
+        try generator.begin(chunk.sample) { dab in
+            try validateSettledReplayDab(
+                dab,
+                at: &replayedDabCount,
+                in: chunk
+            )
+        }
+        return replayedDabCount
+    }
+
+    @inline(never)
+    private static func replaySettledAppend(
+        _ chunk: borrowing TransientStrokeChunk,
+        generator: inout BrushStrokeGenerator
+    ) throws -> Int {
+        var replayedDabCount = 0
+        try generator.append(chunk.sample) { dab in
+            try validateSettledReplayDab(
+                dab,
+                at: &replayedDabCount,
+                in: chunk
+            )
+        }
+        return replayedDabCount
+    }
+
+    @inline(never)
+    private static func replaySettledFinish(
+        _ chunk: borrowing TransientStrokeChunk,
+        generator: inout BrushStrokeGenerator
+    ) throws -> Int {
+        var replayedDabCount = 0
+        try generator.finish(chunk.sample) { dab in
+            try validateSettledReplayDab(
+                dab,
+                at: &replayedDabCount,
+                in: chunk
+            )
+        }
+        return replayedDabCount
+    }
+
+    @inline(never)
+    private static func validateSettledReplayStateAfter(
+        _ chunk: borrowing TransientStrokeChunk,
+        expectedOrdinal: UInt64,
+        replayedDabCount: Int,
+        generator: inout BrushStrokeGenerator
+    ) throws {
+        guard let checkpoint = chunk.generatorSnapshotAfterSample else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+        guard replayedDabCount == chunk.dabs.count,
+              checkpoint == generator
+        else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+        let expectedGeneratorDabCount = chunk.sample.phase == .ended
+            ? 0
+            : expectedOrdinal
+        guard generator.emittedDabCount == expectedGeneratorDabCount else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+    }
+
+    private static func validateSettledReplayDab(
+        _ dab: borrowing LogicalDab,
+        at index: inout Int,
+        in chunk: borrowing TransientStrokeChunk
+    ) throws {
+        guard index < chunk.dabs.count,
+              chunk.dabs[index].attributes == dab
+        else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+        index += 1
     }
 
     public func commit(

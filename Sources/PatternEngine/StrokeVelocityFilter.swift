@@ -82,6 +82,7 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
         appendSegment(
             start: originTime,
             end: time,
+            duration: deltaTime,
             speed: speed
         )
         originPosition = position
@@ -149,15 +150,19 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
         endingAtOrBefore windowStart: TimeInterval,
         currentTime: TimeInterval
     ) {
-        let relativeWindowStart = windowStart - segmentTimeBase
         let relativeCurrentTime = currentTime - segmentTimeBase
+        let relativeWindowStart = relativeWindowStart(
+            absoluteWindowStart: windowStart,
+            currentTime: currentTime,
+            relativeCurrentTime: relativeCurrentTime
+        )
         while segmentCount > 0,
               endsAtOrBeforeWindowStart(
                   Double(
                       segmentSlots.segment(at: oldestSegmentIndex).endOffset
                   ),
                   windowStart: relativeWindowStart,
-                  currentTime: relativeCurrentTime
+                  currentTime: currentTime
               ) {
             oldestSegmentIndex = (oldestSegmentIndex + 1) % Self.segmentCapacity
             segmentCount -= 1
@@ -172,17 +177,19 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
         if end <= windowStart {
             return true
         }
-        let boundary = end + Self.windowDuration
+        let absoluteEnd = segmentTimeBase + end
+        let boundary = absoluteEnd + Self.windowDuration
         return boundary.isFinite && boundary <= currentTime
     }
 
     private mutating func appendSegment(
         start: TimeInterval,
         end: TimeInterval,
+        duration: TimeInterval,
         speed: Float
     ) {
         if segmentCount == 0 {
-            segmentTimeBase = start
+            segmentTimeBase = end
         }
         if segmentCount == Self.segmentCapacity {
             oldestSegmentIndex = (oldestSegmentIndex + 1) % Self.segmentCapacity
@@ -191,8 +198,15 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
         }
 
         let index = (oldestSegmentIndex + segmentCount) % Self.segmentCapacity
-        let startOffset = Float(start - segmentTimeBase)
-        let endOffset = Float(end - segmentTimeBase)
+        let startOffset: Float
+        let endOffset: Float
+        if segmentCount == 0 {
+            startOffset = -Float(min(duration, Self.windowDuration))
+            endOffset = 0
+        } else {
+            startOffset = Float(start - segmentTimeBase)
+            endOffset = Float(end - segmentTimeBase)
+        }
         precondition(
             startOffset.isFinite && endOffset.isFinite,
             "Velocity-window offsets must remain finite"
@@ -215,7 +229,11 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
         var weightedDistance = 0.0
         var coveredDuration = 0.0
         let relativeCurrentTime = currentTime - segmentTimeBase
-        let relativeWindowStart = windowStart - segmentTimeBase
+        let relativeWindowStart = relativeWindowStart(
+            absoluteWindowStart: windowStart,
+            currentTime: currentTime,
+            relativeCurrentTime: relativeCurrentTime
+        )
 
         for offset in 0..<segmentCount {
             let index = (oldestSegmentIndex + offset) % Self.segmentCapacity
@@ -254,6 +272,17 @@ public struct StrokeVelocityFilter: Equatable, Sendable {
             return lastFiniteVelocity
         }
         return min(BrushInputContract.maximumWorldVelocity, Float(result))
+    }
+
+    private func relativeWindowStart(
+        absoluteWindowStart: TimeInterval,
+        currentTime: TimeInterval,
+        relativeCurrentTime: TimeInterval
+    ) -> TimeInterval {
+        if absoluteWindowStart < currentTime {
+            return absoluteWindowStart - segmentTimeBase
+        }
+        return relativeCurrentTime - Self.windowDuration
     }
 
 }

@@ -75,7 +75,7 @@ struct CompiledBrushOutputProgram: Equatable, Sendable {
 
 /// Fixed output layout in the serialized `BrushDynamicOutput.allCases` order.
 /// The source dictionary is consumed only by the off-path compiler.
-struct CompiledBrushSensorProgram: Equatable, Sendable {
+final class CompiledBrushSensorProgram: Equatable, Sendable {
     let size: CompiledBrushOutputProgram
     let flow: CompiledBrushOutputProgram
     let opacity: CompiledBrushOutputProgram
@@ -90,6 +90,143 @@ struct CompiledBrushSensorProgram: Equatable, Sendable {
     let saturation: CompiledBrushOutputProgram
     let brightness: CompiledBrushOutputProgram
     let secondaryColorMix: CompiledBrushOutputProgram
+
+    init(
+        size: CompiledBrushOutputProgram,
+        flow: CompiledBrushOutputProgram,
+        opacity: CompiledBrushOutputProgram,
+        spacing: CompiledBrushOutputProgram,
+        rotation: CompiledBrushOutputProgram,
+        scatter: CompiledBrushOutputProgram,
+        hardness: CompiledBrushOutputProgram,
+        grain: CompiledBrushOutputProgram,
+        offsetX: CompiledBrushOutputProgram,
+        offsetY: CompiledBrushOutputProgram,
+        hue: CompiledBrushOutputProgram,
+        saturation: CompiledBrushOutputProgram,
+        brightness: CompiledBrushOutputProgram,
+        secondaryColorMix: CompiledBrushOutputProgram
+    ) {
+        self.size = size
+        self.flow = flow
+        self.opacity = opacity
+        self.spacing = spacing
+        self.rotation = rotation
+        self.scatter = scatter
+        self.hardness = hardness
+        self.grain = grain
+        self.offsetX = offsetX
+        self.offsetY = offsetY
+        self.hue = hue
+        self.saturation = saturation
+        self.brightness = brightness
+        self.secondaryColorMix = secondaryColorMix
+    }
+
+    static func == (
+        lhs: CompiledBrushSensorProgram,
+        rhs: CompiledBrushSensorProgram
+    ) -> Bool {
+        lhs === rhs
+            || (sizeEqual(lhs, rhs)
+                && flowEqual(lhs, rhs)
+                && opacityEqual(lhs, rhs)
+                && spacingEqual(lhs, rhs)
+                && rotationEqual(lhs, rhs)
+                && scatterEqual(lhs, rhs)
+                && hardnessEqual(lhs, rhs)
+                && grainEqual(lhs, rhs)
+                && offsetXEqual(lhs, rhs)
+                && offsetYEqual(lhs, rhs)
+                && hueEqual(lhs, rhs)
+                && saturationEqual(lhs, rhs)
+                && brightnessEqual(lhs, rhs)
+                && secondaryColorMixEqual(lhs, rhs))
+    }
+
+    @inline(never)
+    private static func sizeEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.size == rhs.size }
+
+    @inline(never)
+    private static func flowEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.flow == rhs.flow }
+
+    @inline(never)
+    private static func opacityEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.opacity == rhs.opacity }
+
+    @inline(never)
+    private static func spacingEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.spacing == rhs.spacing }
+
+    @inline(never)
+    private static func rotationEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.rotation == rhs.rotation }
+
+    @inline(never)
+    private static func scatterEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.scatter == rhs.scatter }
+
+    @inline(never)
+    private static func hardnessEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.hardness == rhs.hardness }
+
+    @inline(never)
+    private static func grainEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.grain == rhs.grain }
+
+    @inline(never)
+    private static func offsetXEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.offsetX == rhs.offsetX }
+
+    @inline(never)
+    private static func offsetYEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.offsetY == rhs.offsetY }
+
+    @inline(never)
+    private static func hueEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.hue == rhs.hue }
+
+    @inline(never)
+    private static func saturationEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.saturation == rhs.saturation }
+
+    @inline(never)
+    private static func brightnessEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.brightness == rhs.brightness }
+
+    @inline(never)
+    private static func secondaryColorMixEqual(
+        _ lhs: CompiledBrushSensorProgram,
+        _ rhs: CompiledBrushSensorProgram
+    ) -> Bool { lhs.secondaryColorMix == rhs.secondaryColorMix }
 }
 
 struct BrushOrderedDynamicValues: Equatable, Sendable {
@@ -114,7 +251,7 @@ public enum BrushBackendKind: String, Codable, Hashable, Sendable {
     case canvasInteraction
 }
 
-public struct BrushStageCProgramMetadata: Equatable, Sendable {
+public final class BrushStageCProgramMetadata: Equatable, Sendable {
     public let normalization: BrushSensorNormalizationDefinition
     public let sensorProgram: BrushSensorProgramDefinition
     public let stabilization: BrushStabilizationDefinition
@@ -124,6 +261,100 @@ public struct BrushStageCProgramMetadata: Equatable, Sendable {
     public let declaredEndpointLag: Float?
     public let usesTravelDirection: Bool
     let compiledSensorProgram: CompiledBrushSensorProgram
+
+    init(
+        normalization: BrushSensorNormalizationDefinition,
+        sensorProgram: BrushSensorProgramDefinition,
+        stabilization: BrushStabilizationDefinition,
+        direction: BrushDirectionDefinition,
+        emission: BrushEmissionDefinition,
+        tipSupports: [BrushTipSupportDefinition],
+        declaredEndpointLag: Float?,
+        usesTravelDirection: Bool,
+        compiledSensorProgram: CompiledBrushSensorProgram
+    ) {
+        self.normalization = normalization
+        self.sensorProgram = sensorProgram
+        self.stabilization = stabilization
+        self.direction = direction
+        self.emission = emission
+        self.tipSupports = tipSupports
+        self.declaredEndpointLag = declaredEndpointLag
+        self.usesTravelDirection = usesTravelDirection
+        self.compiledSensorProgram = compiledSensorProgram
+    }
+
+    public static func == (
+        lhs: BrushStageCProgramMetadata,
+        rhs: BrushStageCProgramMetadata
+    ) -> Bool {
+        lhs === rhs
+            || (normalizationsEqual(lhs, rhs)
+                && sensorProgramsEqual(lhs, rhs)
+                && stabilizationsEqual(lhs, rhs)
+                && directionsEqual(lhs, rhs)
+                && emissionsEqual(lhs, rhs)
+                && tipSupportsEqual(lhs, rhs)
+                && endpointLagsEqual(lhs, rhs)
+                && travelDirectionFlagsEqual(lhs, rhs)
+                && compiledSensorProgramsEqual(lhs, rhs))
+    }
+
+    @inline(never)
+    private static func normalizationsEqual(
+        _ lhs: BrushStageCProgramMetadata,
+        _ rhs: BrushStageCProgramMetadata
+    ) -> Bool { lhs.normalization == rhs.normalization }
+
+    @inline(never)
+    private static func sensorProgramsEqual(
+        _ lhs: BrushStageCProgramMetadata,
+        _ rhs: BrushStageCProgramMetadata
+    ) -> Bool { lhs.sensorProgram == rhs.sensorProgram }
+
+    @inline(never)
+    private static func stabilizationsEqual(
+        _ lhs: BrushStageCProgramMetadata,
+        _ rhs: BrushStageCProgramMetadata
+    ) -> Bool { lhs.stabilization == rhs.stabilization }
+
+    @inline(never)
+    private static func directionsEqual(
+        _ lhs: BrushStageCProgramMetadata,
+        _ rhs: BrushStageCProgramMetadata
+    ) -> Bool { lhs.direction == rhs.direction }
+
+    @inline(never)
+    private static func emissionsEqual(
+        _ lhs: BrushStageCProgramMetadata,
+        _ rhs: BrushStageCProgramMetadata
+    ) -> Bool { lhs.emission == rhs.emission }
+
+    @inline(never)
+    private static func tipSupportsEqual(
+        _ lhs: BrushStageCProgramMetadata,
+        _ rhs: BrushStageCProgramMetadata
+    ) -> Bool { lhs.tipSupports == rhs.tipSupports }
+
+    @inline(never)
+    private static func endpointLagsEqual(
+        _ lhs: BrushStageCProgramMetadata,
+        _ rhs: BrushStageCProgramMetadata
+    ) -> Bool { lhs.declaredEndpointLag == rhs.declaredEndpointLag }
+
+    @inline(never)
+    private static func travelDirectionFlagsEqual(
+        _ lhs: BrushStageCProgramMetadata,
+        _ rhs: BrushStageCProgramMetadata
+    ) -> Bool { lhs.usesTravelDirection == rhs.usesTravelDirection }
+
+    @inline(never)
+    private static func compiledSensorProgramsEqual(
+        _ lhs: BrushStageCProgramMetadata,
+        _ rhs: BrushStageCProgramMetadata
+    ) -> Bool {
+        lhs.compiledSensorProgram == rhs.compiledSensorProgram
+    }
 }
 
 /// Immutable stroke-finalization program selected before input begins.
@@ -199,14 +430,77 @@ public final class BrushProgram: Equatable, Sendable {
 
     public static func == (lhs: BrushProgram, rhs: BrushProgram) -> Bool {
         lhs === rhs
-            || (lhs.definition == rhs.definition
-                && lhs.dynamics == rhs.dynamics
-                && lhs.termination == rhs.termination
-                && lhs.requiredCapabilities == rhs.requiredCapabilities
-                && lhs.ignoredOptionalCapabilityIdentifiers
-                    == rhs.ignoredOptionalCapabilityIdentifiers
-                && lhs.requestedBackend == rhs.requestedBackend
-                && lhs.stageC == rhs.stageC)
+            || (definitionsEqual(lhs, rhs)
+                && dynamicsEqual(lhs, rhs)
+                && terminationsEqual(lhs, rhs)
+                && requiredCapabilitiesEqual(lhs, rhs)
+                && ignoredOptionalCapabilitiesEqual(lhs, rhs)
+                && requestedBackendsEqual(lhs, rhs)
+                && stageCMetadataEqual(lhs, rhs))
+    }
+
+    @inline(never)
+    private static func definitionsEqual(
+        _ lhs: BrushProgram,
+        _ rhs: BrushProgram
+    ) -> Bool {
+        lhs.definition == rhs.definition
+    }
+
+    @inline(never)
+    private static func dynamicsEqual(
+        _ lhs: BrushProgram,
+        _ rhs: BrushProgram
+    ) -> Bool {
+        lhs.dynamics == rhs.dynamics
+    }
+
+    @inline(never)
+    private static func terminationsEqual(
+        _ lhs: BrushProgram,
+        _ rhs: BrushProgram
+    ) -> Bool {
+        lhs.termination == rhs.termination
+    }
+
+    @inline(never)
+    private static func requiredCapabilitiesEqual(
+        _ lhs: BrushProgram,
+        _ rhs: BrushProgram
+    ) -> Bool {
+        lhs.requiredCapabilities == rhs.requiredCapabilities
+    }
+
+    @inline(never)
+    private static func ignoredOptionalCapabilitiesEqual(
+        _ lhs: BrushProgram,
+        _ rhs: BrushProgram
+    ) -> Bool {
+        lhs.ignoredOptionalCapabilityIdentifiers
+            == rhs.ignoredOptionalCapabilityIdentifiers
+    }
+
+    @inline(never)
+    private static func requestedBackendsEqual(
+        _ lhs: BrushProgram,
+        _ rhs: BrushProgram
+    ) -> Bool {
+        lhs.requestedBackend == rhs.requestedBackend
+    }
+
+    @inline(never)
+    private static func stageCMetadataEqual(
+        _ lhs: BrushProgram,
+        _ rhs: BrushProgram
+    ) -> Bool {
+        switch (lhs.stageC, rhs.stageC) {
+        case (nil, nil):
+            true
+        case let (.some(lhsMetadata), .some(rhsMetadata)):
+            lhsMetadata == rhsMetadata
+        case (.some, nil), (nil, .some):
+            false
+        }
     }
 
     public var replayContract: BrushReplayContract {

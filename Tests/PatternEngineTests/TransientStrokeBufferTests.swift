@@ -743,7 +743,7 @@ func estimatedUpdateSupportsMultiplePartialPropertyResolutions() throws {
 }
 
 @Test
-func locationResolutionRederivesVelocityFromExactInputCheckpoint() throws {
+func locationResolutionPlanReturnsRawSuffixFromExactInputCheckpoint() throws {
     var deriver = BrushInputDeriver()
     let began = deriver.derive(
         StrokeSample(
@@ -818,12 +818,12 @@ func locationResolutionRederivesVelocityFromExactInputCheckpoint() throws {
     #expect(plan.generatorBeforeReplacement == generatorBefore)
     #expect(plan.mergedSample.timestamp == 0.01)
     #expect(plan.mergedSample.position.x == 10)
-    #expect(plan.mergedSample.velocity == 1_000)
-    #expect(plan.mergedSample.artisticVelocity == 1_000)
+    #expect(plan.mergedSample.velocity == estimated.velocity)
+    #expect(plan.mergedSample.artisticVelocity == estimated.artisticVelocity)
     #expect(plan.samplesToReplay.count == 1)
     #expect(plan.samplesToReplay[0].position.x == 2)
-    #expect(plan.samplesToReplay[0].velocity == 800)
-    #expect(plan.samplesToReplay[0].artisticVelocity == 900)
+    #expect(plan.samplesToReplay[0].velocity == later.velocity)
+    #expect(plan.samplesToReplay[0].artisticVelocity == later.artisticVelocity)
 }
 
 @Test

@@ -18,12 +18,167 @@ func independentlyCompiledProgramsUseSemanticEquality() throws {
     let definition = try legacyDefinition()
     let first = try BrushProgramCompiler.compile(definition)
     let second = try BrushProgramCompiler.compile(definition)
-    let different = try BrushProgramCompiler.compile(
+    let changedDefinitionProgram = try BrushProgramCompiler.compile(
         replacing(definition, seedPolicy: .fixed(99))
     )
+    let changedDynamicsProgram = try BrushProgramCompiler.compile(
+        replacing(
+            definition,
+            dynamics: replacing(
+                definition.dynamics,
+                size: nativeConstant(0.5)
+            )
+        )
+    )
+    let stageCDefinition = try stageCV2Definition()
+    let firstStageCProgram = try BrushProgramCompiler.compile(stageCDefinition)
+    let secondStageCProgram = try BrushProgramCompiler.compile(stageCDefinition)
+    let stageC = try #require(firstStageCProgram.stageC)
+    let changedStageC = BrushStageCProgramMetadata(
+        normalization: stageC.normalization,
+        sensorProgram: stageC.sensorProgram,
+        stabilization: stageC.stabilization,
+        direction: stageC.direction,
+        emission: stageC.emission,
+        tipSupports: stageC.tipSupports,
+        declaredEndpointLag: (stageC.declaredEndpointLag ?? 0) + 1,
+        usesTravelDirection: stageC.usesTravelDirection,
+        compiledSensorProgram: stageC.compiledSensorProgram
+    )
+    let compiledSensorProgram = stageC.compiledSensorProgram
+    let rotation = compiledSensorProgram.rotation
+    let rotationTerm = try #require(rotation.term0)
+    let changedRotationTerm = CompiledBrushSensorTerm(
+        input: rotationTerm.input,
+        samples: rotationTerm.samples,
+        inputInverted: rotationTerm.inputInverted,
+        missingInputValue: rotationTerm.missingInputValue,
+        responseScale: rotationTerm.responseScale + 1,
+        responseOffset: rotationTerm.responseOffset,
+        responseLowerClamp: rotationTerm.responseLowerClamp,
+        responseUpperClamp: rotationTerm.responseUpperClamp,
+        jitter: rotationTerm.jitter,
+        operation: rotationTerm.operation
+    )
+    let changedRotation = CompiledBrushOutputProgram(
+        baseValue: rotation.baseValue,
+        term0: changedRotationTerm,
+        term1: rotation.term1,
+        term2: rotation.term2,
+        term3: rotation.term3
+    )
+    let changedCompiledSensorProgram = CompiledBrushSensorProgram(
+        size: compiledSensorProgram.size,
+        flow: compiledSensorProgram.flow,
+        opacity: compiledSensorProgram.opacity,
+        spacing: compiledSensorProgram.spacing,
+        rotation: changedRotation,
+        scatter: compiledSensorProgram.scatter,
+        hardness: compiledSensorProgram.hardness,
+        grain: compiledSensorProgram.grain,
+        offsetX: compiledSensorProgram.offsetX,
+        offsetY: compiledSensorProgram.offsetY,
+        hue: compiledSensorProgram.hue,
+        saturation: compiledSensorProgram.saturation,
+        brightness: compiledSensorProgram.brightness,
+        secondaryColorMix: compiledSensorProgram.secondaryColorMix
+    )
 
+    let singleFieldVariants = [
+        BrushProgram(
+            definition: changedDefinitionProgram.definition,
+            dynamics: first.dynamics,
+            termination: first.termination,
+            requiredCapabilities: first.requiredCapabilities,
+            ignoredOptionalCapabilityIdentifiers:
+                first.ignoredOptionalCapabilityIdentifiers,
+            requestedBackend: first.requestedBackend,
+            stageC: first.stageC
+        ),
+        BrushProgram(
+            definition: first.definition,
+            dynamics: changedDynamicsProgram.dynamics,
+            termination: first.termination,
+            requiredCapabilities: first.requiredCapabilities,
+            ignoredOptionalCapabilityIdentifiers:
+                first.ignoredOptionalCapabilityIdentifiers,
+            requestedBackend: first.requestedBackend,
+            stageC: first.stageC
+        ),
+        BrushProgram(
+            definition: first.definition,
+            dynamics: first.dynamics,
+            termination: first.termination == .cap
+                ? .pressureRelease(maximumWorldLength: 1)
+                : .cap,
+            requiredCapabilities: first.requiredCapabilities,
+            ignoredOptionalCapabilityIdentifiers:
+                first.ignoredOptionalCapabilityIdentifiers,
+            requestedBackend: first.requestedBackend,
+            stageC: first.stageC
+        ),
+        BrushProgram(
+            definition: first.definition,
+            dynamics: first.dynamics,
+            termination: first.termination,
+            requiredCapabilities: first.requiredCapabilities == [.wetMix]
+                ? []
+                : [.wetMix],
+            ignoredOptionalCapabilityIdentifiers:
+                first.ignoredOptionalCapabilityIdentifiers,
+            requestedBackend: first.requestedBackend,
+            stageC: first.stageC
+        ),
+        BrushProgram(
+            definition: first.definition,
+            dynamics: first.dynamics,
+            termination: first.termination,
+            requiredCapabilities: first.requiredCapabilities,
+            ignoredOptionalCapabilityIdentifiers:
+                first.ignoredOptionalCapabilityIdentifiers
+                    == ["different.optional"]
+                    ? []
+                    : ["different.optional"],
+            requestedBackend: first.requestedBackend,
+            stageC: first.stageC
+        ),
+        BrushProgram(
+            definition: first.definition,
+            dynamics: first.dynamics,
+            termination: first.termination,
+            requiredCapabilities: first.requiredCapabilities,
+            ignoredOptionalCapabilityIdentifiers:
+                first.ignoredOptionalCapabilityIdentifiers,
+            requestedBackend: first.requestedBackend == .deposition
+                ? .canvasInteraction
+                : .deposition,
+            stageC: first.stageC
+        ),
+        BrushProgram(
+            definition: first.definition,
+            dynamics: first.dynamics,
+            termination: first.termination,
+            requiredCapabilities: first.requiredCapabilities,
+            ignoredOptionalCapabilityIdentifiers:
+                first.ignoredOptionalCapabilityIdentifiers,
+            requestedBackend: first.requestedBackend,
+            stageC: stageC
+        ),
+    ]
+
+    #expect(first == first)
     #expect(first == second)
-    #expect(first != different)
+    #expect(firstStageCProgram == secondStageCProgram)
+    #expect(stageC != changedStageC)
+    #expect(compiledSensorProgram != changedCompiledSensorProgram)
+    let stageCAlias = stageC
+    let compiledSensorProgramAlias = compiledSensorProgram
+    #expect(stageCAlias === stageC)
+    #expect(compiledSensorProgramAlias === compiledSensorProgram)
+    #expect(singleFieldVariants.count == 7)
+    for variant in singleFieldVariants {
+        #expect(first != variant)
+    }
 }
 
 @Test(arguments: AnchorRecipeFixtures.all)
