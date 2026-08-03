@@ -7,7 +7,9 @@ package enum StrokePreparationAllocationProbeStage: UInt8, Sendable {
     case predictionCPU
     case estimatedCPU
     case batchPackaging
-    case privateSurfaceEncoding
+    case surfaceRecordPacking
+    case surfaceMetalSubmission
+    case strokeLifecycleCPU
 }
 
 package struct StrokePreparationAllocationProbe: Sendable {
@@ -36,8 +38,13 @@ package struct StrokePreparationAllocationProbe: Sendable {
         armHandler()
     }
 
-    func disarmAndRecord(_ stage: StrokePreparationAllocationProbeStage) {
-        recordHandler(stage, disarmHandler())
+    @discardableResult
+    func disarmAndRecord(
+        _ stage: StrokePreparationAllocationProbeStage
+    ) -> UInt64 {
+        let count = disarmHandler()
+        recordHandler(stage, count)
+        return count
     }
 }
 
@@ -93,18 +100,215 @@ struct StrokePreparationExecutorProbe: Equatable, Sendable {
     let projectionRanOnMainThread: Bool
 }
 
+enum StrokeStageCFailureInjectionSeam: UInt8, CaseIterable, Sendable {
+    case beforeRetainedProjection
+    case afterRetainedProjection
+    case beforeCandidatePage
+    case afterCandidatePage
+    case beforeTransientCheckpointUpdate
+    case afterTransientCheckpointUpdate
+    case afterCandidateAccepted
+    case beforePreparedPreflight
+    case afterPreparedPreflight
+    case beforeCoordinatorReserve
+    case afterCoordinatorReserve
+    case beforeCoordinatorFinalize
+    case afterCoordinatorFinalize
+    case beforeQueueInstall
+    case afterQueueInstall
+    case beforeArenaRetentionCommit
+    case afterArenaRetentionCommit
+    case beforeArenaPublish
+    case afterArenaPublish
+    case beforeSurfaceEncoding
+    case afterSurfaceEncoding
+    case beforeAcknowledgementResume
+    case afterAcknowledgementResume
+    case beforeFinishGate
+    case afterFinishGate
+}
+
+struct StrokeStageCFailureInjectionContext: Equatable, Sendable {
+    let generation: UInt64
+    let drainPhase: UInt8?
+    let sampleIndex: Int
+    let consumedWorkUnits: Int
+}
+
+struct StrokeStageCInjectedFailure: Error, Equatable, Sendable {
+    let seam: StrokeStageCFailureInjectionSeam
+}
+
+struct StrokeStageCFailureInjection: Sendable {
+    private let handler: @Sendable (
+        StrokeStageCFailureInjectionSeam,
+        StrokeStageCFailureInjectionContext
+    ) throws -> Void
+
+    init(
+        handler: @escaping @Sendable (
+            StrokeStageCFailureInjectionSeam,
+            StrokeStageCFailureInjectionContext
+        ) throws -> Void
+    ) {
+        self.handler = handler
+    }
+
+    init(failingAt seam: StrokeStageCFailureInjectionSeam) {
+        self.init { observed, _ in
+            if observed == seam {
+                throw StrokeStageCInjectedFailure(seam: observed)
+            }
+        }
+    }
+
+    func callAsFunction(
+        _ seam: StrokeStageCFailureInjectionSeam,
+        context: StrokeStageCFailureInjectionContext
+    ) throws {
+        try handler(seam, context)
+    }
+}
+
 struct StrokePreparedProjectedRecord: Equatable, Sendable {
     let depositionRecord: ProjectedDepositionRecord
     let dirtyRect: PixelRect
     let radialPage: RadialPageCoordinate?
 }
 
+struct StrokePreparedLogicalDabView: RandomAccessCollection, Sendable {
+    typealias Index = Int
+
+    let startIndex = 0
+    let endIndex: Int
+    private let page: StrokePreparedOutputPage?
+    private let token: UInt64?
+
+    static let empty = StrokePreparedLogicalDabView(
+        page: nil,
+        token: nil,
+        count: 0
+    )
+
+    fileprivate init(
+        page: StrokePreparedOutputPage?,
+        token: UInt64?,
+        count: Int
+    ) {
+        self.page = page
+        self.token = token
+        endIndex = count
+    }
+
+    subscript(position: Int) -> LogicalDab {
+        precondition(indices.contains(position))
+        return page!.logicalDab(at: position, token: token!)
+    }
+}
+
+struct StrokePreparedDirtyRegionView: RandomAccessCollection, Sendable {
+    typealias Index = Int
+
+    let startIndex = 0
+    let endIndex: Int
+    private let page: StrokePreparedOutputPage?
+    private let token: UInt64?
+
+    static let empty = StrokePreparedDirtyRegionView(
+        page: nil,
+        token: nil,
+        count: 0
+    )
+
+    fileprivate init(
+        page: StrokePreparedOutputPage?,
+        token: UInt64?,
+        count: Int
+    ) {
+        self.page = page
+        self.token = token
+        endIndex = count
+    }
+
+    subscript(position: Int) -> PixelRect {
+        precondition(indices.contains(position))
+        return page!.dirtyRegion(at: position, token: token!)
+    }
+}
+
+/// One output page is borrowed by Main at a time. The scheduler swaps its
+/// pre-reserved scratch buffers into this reference-owned page, so a retained
+/// batch can never create Array COW on the next actor resume. ACK is the sole
+/// operation that returns and clears the page. Views are lease-scoped: every
+/// element must be consumed before ACK. A stale view deliberately traps rather
+/// than reading storage that may have been reused by a later batch.
+private final class StrokePreparedOutputPage: @unchecked Sendable {
+    private var logicalDabs: [LogicalDab] = []
+    private var dirtyRegions: [PixelRect] = []
+    private var borrowedToken: UInt64?
+
+    init(logicalDabCapacity: Int, dirtyRegionCapacity: Int) {
+        logicalDabs.reserveCapacity(logicalDabCapacity)
+        dirtyRegions.reserveCapacity(dirtyRegionCapacity)
+    }
+
+    func lend(
+        token: UInt64,
+        logicalDabScratch: inout [LogicalDab],
+        dirtyRegionScratch: inout [PixelRect]
+    ) -> (StrokePreparedLogicalDabView, StrokePreparedDirtyRegionView) {
+        precondition(borrowedToken == nil)
+        precondition(logicalDabs.isEmpty)
+        precondition(dirtyRegions.isEmpty)
+        swap(&logicalDabs, &logicalDabScratch)
+        swap(&dirtyRegions, &dirtyRegionScratch)
+        borrowedToken = token
+        return (
+            StrokePreparedLogicalDabView(
+                page: self,
+                token: token,
+                count: logicalDabs.count
+            ),
+            StrokePreparedDirtyRegionView(
+                page: self,
+                token: token,
+                count: dirtyRegions.count
+            )
+        )
+    }
+
+    func reclaim(token: UInt64) {
+        precondition(borrowedToken == token)
+        logicalDabs.removeAll(keepingCapacity: true)
+        dirtyRegions.removeAll(keepingCapacity: true)
+        borrowedToken = nil
+    }
+
+    func cancelBorrow() {
+        logicalDabs.removeAll(keepingCapacity: true)
+        dirtyRegions.removeAll(keepingCapacity: true)
+        borrowedToken = nil
+    }
+
+    var isBorrowed: Bool { borrowedToken != nil }
+
+    func logicalDab(at index: Int, token: UInt64) -> LogicalDab {
+        precondition(borrowedToken == token)
+        return logicalDabs[index]
+    }
+
+    func dirtyRegion(at index: Int, token: UInt64) -> PixelRect {
+        precondition(borrowedToken == token)
+        return dirtyRegions[index]
+    }
+}
+
 struct StrokePreparedDepositionBatch: Sendable {
     let generation: UInt64
     let sequence: UInt64
     let frameToken: UInt64?
-    let logicalDabs: [LogicalDab]
-    let dirtyRegions: [PixelRect]
+    let logicalDabs: StrokePreparedLogicalDabView
+    let dirtyRegions: StrokePreparedDirtyRegionView
     let authoritativeInstanceCount: Int
     let predictedInstanceCount: Int
     let predictionProvenanceBoundary: PredictionProvenanceBoundary
@@ -115,6 +319,13 @@ struct StrokePreparedDepositionBatch: Sendable {
     let surfaceLease: StrokePreparedSurfaceLease?
     let surfaceSnapshot: StrokePrivateSurfaceEncoderSnapshot?
     let preparationCPUNanoseconds: UInt64
+
+    var isSyntheticZeroWorkContinuation: Bool {
+        surfaceLease == nil
+            && frameToken != nil
+            && authoritativeInstanceCount == 0
+            && predictedInstanceCount == 0
+    }
 }
 
 struct StrokeScheduledFrame: Equatable, Sendable {
@@ -123,7 +334,7 @@ struct StrokeScheduledFrame: Equatable, Sendable {
     let authoritativeRemaining: Int
     let predictedRemaining: Int
     let targetFrameDurationNanoseconds: UInt64
-    fileprivate let token: UInt64
+    let token: UInt64
 }
 
 struct StrokeFrameSchedulerSnapshot: Equatable, Sendable {
@@ -138,6 +349,12 @@ struct StrokeFrameSchedulerSnapshot: Equatable, Sendable {
     let maximumPreparationWorkUnitsPerFrame: Int
     let commitRequested: Bool
     let frameOutstanding: Bool
+    let authoritativeCandidateContinuationPending: Bool
+    let authoritativeCandidatePageCount: UInt64
+    let authoritativeCandidateResumeCount: UInt64
+    let authoritativeCandidateLogicalHighWater: Int
+    let authoritativeCandidateProjectionHighWater: Int
+    let synchronousCompatibilityReplayInvocationCount: UInt64
     let retainedActualSampleCount: Int
     let retainedPredictedSampleCount: Int
     let transientMutationVersion: UInt64
@@ -145,6 +362,9 @@ struct StrokeFrameSchedulerSnapshot: Equatable, Sendable {
     let generatedProjectionHighWater: Int
     let generatedLogicalDabStorageCapacity: Int
     let generatedProjectionStorageCapacity: Int
+    let transientChunkStorageCapacity: Int
+    let settledChunkStorageCapacity: Int
+    let perMutationSettledStorageCapacity: Int
     let projectionImageHighWater: Int
     let projectionCellHighWater: Int
     let projectionFragmentHighWater: Int
@@ -154,12 +374,88 @@ struct StrokeFrameSchedulerSnapshot: Equatable, Sendable {
     let projectionStorageAllocationCount: UInt64
 }
 
+package struct StrokeStageCContinuationMetrics: Equatable, Sendable {
+    package let pageCount: UInt64
+    package let resumeCount: UInt64
+    package let logicalPageHighWater: Int
+    package let emittedAuthoritativeDabCount: UInt64
+    package let phaseHits: StrokeStageCContinuationPhaseHits
+    package let settledTransferWorkUnitCount: UInt64
+    package let firstAllocationIncident:
+        StrokeStageCAuthoritativeAllocationIncident?
+    package let lastAllocationIncident:
+        StrokeStageCAuthoritativeAllocationIncident?
+}
+
+package struct StrokeStageCContinuationPhaseHits:
+    OptionSet,
+    Equatable,
+    Sendable
+{
+    package let rawValue: UInt8
+
+    package init(rawValue: UInt8) {
+        self.rawValue = rawValue
+    }
+
+    package static let retainedProjection = Self(rawValue: 1 << 0)
+    package static let candidateEmission = Self(rawValue: 1 << 1)
+    package static let candidateStorage = Self(rawValue: 1 << 2)
+    package static let settledTransfer = Self(rawValue: 1 << 3)
+    package static let arenaRetention = Self(rawValue: 1 << 4)
+    package static let finalInstall = Self(rawValue: 1 << 5)
+
+    package static let candidateLifecycle: Self = [
+        .candidateEmission,
+        .candidateStorage,
+        .settledTransfer,
+        .arenaRetention,
+        .finalInstall,
+    ]
+    package static let fullLifecycle: Self = [
+        .retainedProjection,
+        .candidateEmission,
+        .candidateStorage,
+        .settledTransfer,
+        .arenaRetention,
+        .finalInstall,
+    ]
+}
+
+package struct StrokeStageCAuthoritativeAllocationIncident:
+    Equatable,
+    Sendable
+{
+    package let eventOrdinal: UInt64
+    package let allocationCount: UInt64
+    package let phase: UInt8?
+    package let sampleIndex: Int?
+    package let pageIndex: Int?
+    package let workUnits: Int?
+}
+
 #if DEBUG
 struct StrokeTransientPreparationSnapshot: Equatable, Sendable {
     let actualSamples: [WorldStrokeSample]
     let predictedSamples: [WorldStrokeSample]
     let actualDabs: [TransientStrokeDab]
     let predictedDabs: [TransientStrokeDab]
+}
+
+struct StrokeStageCCleanupSnapshot: Equatable, Sendable {
+    let arenaOccupiedSlotCount: Int
+    let arenaHasActiveTransaction: Bool
+    let arenaHasActiveOperation: Bool
+    let projectedCarryCount: Int
+    let coordinatorIsPresent: Bool
+    let coordinatorAuthoritativeQueueDepth: Int
+    let schedulerAuthoritativeQueueDepth: Int
+    let schedulerPredictionQueueDepth: Int
+    let hasCandidateContinuation: Bool
+    let hasOutstandingFrame: Bool
+    let hasOutstandingSurfaceLease: Bool
+    let hasOutstandingZeroWorkContinuation: Bool
+    let hasBorrowedPreparedOutputPage: Bool
 }
 
 struct StrokeEstimatedUpdateDiagnosticSnapshot: Equatable, Sendable {
@@ -193,10 +489,125 @@ private struct StrokePredictionGenerationLimitReached: Error {
     let reason: PredictionOverloadReasons
 }
 
+private enum StrokeAuthoritativeCandidateDrainPhase: UInt8, Sendable {
+    case retainedProjection
+    case candidateEmission
+    case candidateStorage
+    case settledTransfer
+    case arenaRetention
+    case finalInstall
+}
+
+/// Actor-confined reference ownership is intentional. A page publication may
+/// suspend while this continuation is also installed in actor state. Keeping
+/// one reference prevents the resumed mutation from copying the buffer's
+/// pre-reserved arrays merely because the prior async frame has not yet been
+/// destroyed under scheduler contention.
+private final class StrokeAuthoritativeCandidateDrain: @unchecked Sendable {
+    let generation: UInt64
+    let samples: [StrokeSample]
+    let isFinishing: Bool
+    let arenaTransaction: TransientStrokeDabArena.ReservationTransaction
+    var sampleIndex: Int
+    var generator: BrushStrokeGenerator
+    var inputDeriver: BrushInputDeriver
+    var buffer: TransientStrokeBuffer
+    var cursor: BrushStrokeGenerator.EmissionCursor?
+    var currentSample: WorldStrokeSample?
+    var inputDeriverBeforeCurrentSample: BrushInputDeriver?
+    var currentTransientStart: Int
+    var currentPageIndex: Int
+    var hasPublishedCandidatePage: Bool
+    var stagingSurfaceLayer: StrokePrivateSurfaceLayer
+    var phase: StrokeAuthoritativeCandidateDrainPhase
+    var retainedChunkIndex: Int
+    var retainedDabIndex: Int
+    var currentResumeWorkUnits: Int
+    var replacementClearIssued: Bool
+    var actualStoreCursor: TransientStrokeDabArena.ActualStoreCursor?
+    var arenaCommitCursor: TransientStrokeDabArena.CommitCursor?
+    var preparedArenaCommit: TransientStrokeDabArena.PreparedCommit?
+    var settledTransferCursor: SettledStageCTransferCursor?
+    var preparedSettledTransfer: PreparedSettledStageCTransfer?
+
+    init(
+        generation: UInt64,
+        samples: [StrokeSample],
+        isFinishing: Bool,
+        arenaTransaction: TransientStrokeDabArena.ReservationTransaction,
+        sampleIndex: Int,
+        generator: BrushStrokeGenerator,
+        inputDeriver: BrushInputDeriver,
+        buffer: TransientStrokeBuffer,
+        cursor: BrushStrokeGenerator.EmissionCursor?,
+        currentSample: WorldStrokeSample?,
+        inputDeriverBeforeCurrentSample: BrushInputDeriver?,
+        currentTransientStart: Int,
+        currentPageIndex: Int,
+        hasPublishedCandidatePage: Bool,
+        stagingSurfaceLayer: StrokePrivateSurfaceLayer,
+        phase: StrokeAuthoritativeCandidateDrainPhase,
+        retainedChunkIndex: Int,
+        retainedDabIndex: Int,
+        currentResumeWorkUnits: Int,
+        replacementClearIssued: Bool,
+        actualStoreCursor: TransientStrokeDabArena.ActualStoreCursor?,
+        arenaCommitCursor: TransientStrokeDabArena.CommitCursor?,
+        preparedArenaCommit: TransientStrokeDabArena.PreparedCommit?,
+        settledTransferCursor: SettledStageCTransferCursor?,
+        preparedSettledTransfer: PreparedSettledStageCTransfer?
+    ) {
+        self.generation = generation
+        self.samples = samples
+        self.isFinishing = isFinishing
+        self.arenaTransaction = arenaTransaction
+        self.sampleIndex = sampleIndex
+        self.generator = generator
+        self.inputDeriver = inputDeriver
+        self.buffer = buffer
+        self.cursor = cursor
+        self.currentSample = currentSample
+        self.inputDeriverBeforeCurrentSample =
+            inputDeriverBeforeCurrentSample
+        self.currentTransientStart = currentTransientStart
+        self.currentPageIndex = currentPageIndex
+        self.hasPublishedCandidatePage = hasPublishedCandidatePage
+        self.stagingSurfaceLayer = stagingSurfaceLayer
+        self.phase = phase
+        self.retainedChunkIndex = retainedChunkIndex
+        self.retainedDabIndex = retainedDabIndex
+        self.currentResumeWorkUnits = currentResumeWorkUnits
+        self.replacementClearIssued = replacementClearIssued
+        self.actualStoreCursor = actualStoreCursor
+        self.arenaCommitCursor = arenaCommitCursor
+        self.preparedArenaCommit = preparedArenaCommit
+        self.settledTransferCursor = settledTransferCursor
+        self.preparedSettledTransfer = preparedSettledTransfer
+    }
+}
+
 /// Actor-isolated frame admission and submission state. The contained
 /// deposition scheduler is never shared across executors; callers exchange
 /// immutable records and frame values only.
 actor StrokeFrameScheduler {
+    package var stageCContinuationMetrics:
+        StrokeStageCContinuationMetrics
+    {
+        StrokeStageCContinuationMetrics(
+            pageCount: authoritativeCandidatePageCount,
+            resumeCount: authoritativeCandidateResumeCount,
+            logicalPageHighWater: authoritativeCandidateLogicalHighWater,
+            emittedAuthoritativeDabCount:
+                authoritativeGenerator?.emittedDabCount ?? 0,
+            phaseHits: authoritativeCandidatePhaseHits,
+            settledTransferWorkUnitCount:
+                authoritativeCandidateSettledTransferWorkUnitCount,
+            firstAllocationIncident:
+                firstAuthoritativeAllocationIncident,
+            lastAllocationIncident: lastAuthoritativeAllocationIncident
+        )
+    }
+
     var snapshot: StrokeFrameSchedulerSnapshot {
         let frame = scheduler.diagnosticSnapshot
         return StrokeFrameSchedulerSnapshot(
@@ -212,7 +623,22 @@ actor StrokeFrameScheduler {
             maximumPreparationWorkUnitsPerFrame:
                 maximumPreparationWorkUnitsPerFrame,
             commitRequested: commitRequested,
-            frameOutstanding: outstandingFrame != nil,
+            frameOutstanding: outstandingFrame != nil
+                || outstandingSurfaceLease != nil
+                || outstandingZeroWorkContinuationToken != nil,
+            authoritativeCandidateContinuationPending:
+                authoritativeCandidateDrain != nil,
+            authoritativeCandidatePageCount:
+                authoritativeCandidatePageCount,
+            authoritativeCandidateResumeCount:
+                authoritativeCandidateResumeCount,
+            authoritativeCandidateLogicalHighWater:
+                authoritativeCandidateLogicalHighWater,
+            authoritativeCandidateProjectionHighWater:
+                authoritativeCandidateProjectionHighWater,
+            synchronousCompatibilityReplayInvocationCount:
+                preparationCoordinator?
+                    .synchronousCompatibilityReplayInvocationCount ?? 0,
             retainedActualSampleCount:
                 transientStrokeBuffer?.actualSampleCount ?? 0,
             retainedPredictedSampleCount:
@@ -227,6 +653,10 @@ actor StrokeFrameScheduler {
                 generatedLogicalDabScratch.capacity,
             generatedProjectionStorageCapacity:
                 generatedProjectionScratch.capacity,
+            transientChunkStorageCapacity: transientChunkScratch.capacity,
+            settledChunkStorageCapacity: settledChunkScratch.capacity,
+            perMutationSettledStorageCapacity:
+                perMutationSettledScratch.capacity,
             projectionImageHighWater: projectionImageHighWater,
             projectionCellHighWater: projectionCellHighWater,
             projectionFragmentHighWater: projectionFragmentHighWater,
@@ -254,6 +684,28 @@ actor StrokeFrameScheduler {
         )
     }
 
+    var stageCCleanupSnapshotForTesting: StrokeStageCCleanupSnapshot {
+        let arena = transientDabArena.diagnosticSnapshot
+        let frame = scheduler.diagnosticSnapshot
+        return StrokeStageCCleanupSnapshot(
+            arenaOccupiedSlotCount: arena.occupiedSlotCount,
+            arenaHasActiveTransaction: arena.hasActiveTransaction,
+            arenaHasActiveOperation: arena.hasActiveOperation,
+            projectedCarryCount: projectedCarry.count,
+            coordinatorIsPresent: preparationCoordinator != nil,
+            coordinatorAuthoritativeQueueDepth:
+                preparationCoordinator?.snapshot.authoritativeQueueDepth ?? 0,
+            schedulerAuthoritativeQueueDepth: frame.authoritativePending,
+            schedulerPredictionQueueDepth: frame.predictedPending,
+            hasCandidateContinuation: authoritativeCandidateDrain != nil,
+            hasOutstandingFrame: outstandingFrame != nil,
+            hasOutstandingSurfaceLease: outstandingSurfaceLease != nil,
+            hasOutstandingZeroWorkContinuation:
+                outstandingZeroWorkContinuationToken != nil,
+            hasBorrowedPreparedOutputPage: preparedOutputPage.isBorrowed
+        )
+    }
+
 
     var lastEstimatedUpdateSnapshotForTesting:
         StrokeEstimatedUpdateDiagnosticSnapshot?
@@ -264,15 +716,20 @@ actor StrokeFrameScheduler {
 
     private let budget: DepositionFrameBudget
     private let targetFrameDurationNanoseconds: UInt64
+    private let preparationClock: @Sendable () -> UInt64
+    private let stageCFailureInjection: StrokeStageCFailureInjection?
     private var scheduler: FrameScheduler
     private var activeGeneration: UInt64?
     private var cancelledGeneration: UInt64?
     private var commitRequested = false
     private var outstandingFrame: StrokeScheduledFrame?
+    private var outstandingZeroWorkContinuationToken: UInt64?
+    private var outstandingPreparedOutputPageToken: UInt64?
     private var nextFrameToken: UInt64 = 1
     private var authoritativeScratch: [ProjectedDepositionRecord] = []
     private var predictedScratch: [ProjectedDepositionRecord] = []
     private var maximumPreparationWorkUnitsPerFrame = 0
+    private var authoritativeAllocationProbeIsArmed = false
     private var preparationCoordinator: StrokeRenderCoordinator?
     private var authoritativeGenerator: BrushStrokeGenerator?
     private var authoritativeInputDeriver: BrushInputDeriver?
@@ -285,6 +742,7 @@ actor StrokeFrameScheduler {
     private var projectedCarry: StrokePreparedProjectedQueue
     private var preparedOutputScratch: [StrokePreparedProjectedRecord] = []
     private var preparedDirtyOutputScratch: [PixelRect] = []
+    private let preparedOutputPage: StrokePreparedOutputPage
     private var privateSurfaceEncoder: StrokePrivateSurfaceEncoder?
     private let reusablePrivateSurfaceEncoder = StrokePrivateSurfaceEncoder()
     private var preparationAllocationProbe:
@@ -294,6 +752,22 @@ actor StrokeFrameScheduler {
     private var preparationMutationRevision: UInt64 = 0
     private var preparationHasBegun = false
     private var preparationHasFinished = false
+    private var authoritativeCandidateDrain:
+        StrokeAuthoritativeCandidateDrain?
+    private var candidatePageForcedSurfaceLayer:
+        StrokePrivateSurfaceLayer?
+    private var authoritativeCandidatePageCount: UInt64 = 0
+    private var authoritativeCandidateResumeCount: UInt64 = 0
+    private var authoritativeCandidateLogicalHighWater = 0
+    private var authoritativeCandidateProjectionHighWater = 0
+    private var authoritativeCandidatePhaseHits:
+        StrokeStageCContinuationPhaseHits = []
+    private var authoritativeCandidateSettledTransferWorkUnitCount: UInt64 = 0
+    private var authoritativeAllocationEventCount: UInt64 = 0
+    private var firstAuthoritativeAllocationIncident:
+        StrokeStageCAuthoritativeAllocationIncident?
+    private var lastAuthoritativeAllocationIncident:
+        StrokeStageCAuthoritativeAllocationIncident?
     #if DEBUG
     private var lastEstimatedUpdateSnapshot:
         StrokeEstimatedUpdateDiagnosticSnapshot?
@@ -330,10 +804,24 @@ actor StrokeFrameScheduler {
 
     init(
         budget: DepositionFrameBudget,
-        targetFramesPerSecond: Int
+        targetFramesPerSecond: Int,
+        preparationClock: @escaping @Sendable () -> UInt64 = {
+            DispatchTime.now().uptimeNanoseconds
+        },
+        stageCFailureInjection: StrokeStageCFailureInjection? = nil
     ) {
         precondition(targetFramesPerSecond > 0)
         self.budget = budget
+        preparedOutputPage = StrokePreparedOutputPage(
+            logicalDabCapacity:
+                TransientStrokeBufferContract.wholeStrokeDabCapacity,
+            dirtyRegionCapacity: max(
+                budget.maximumAuthoritativeInstances,
+                budget.maximumPredictedInstances
+            )
+        )
+        self.preparationClock = preparationClock
+        self.stageCFailureInjection = stageCFailureInjection
         targetFrameDurationNanoseconds = UInt64(
             1_000_000_000 / targetFramesPerSecond
         )
@@ -529,7 +1017,6 @@ actor StrokeFrameScheduler {
                     return .prepared(
                         try await makePreparedOutputBatch(
                             generation: generation,
-                            logicalDabs: [],
                             predictionProvenanceBoundary:
                                 currentPredictionProvenanceBoundary,
                             coordinatorSnapshot:
@@ -558,6 +1045,12 @@ actor StrokeFrameScheduler {
                     reason: reason
                 )
             }
+        } catch let error as StrokeStageCInjectedFailure {
+            cancelPreparedStroke(generation: message.generation)
+            return .failed(
+                generation: message.generation,
+                failure: .injectedStageC(error.seam)
+            )
         } catch let error as StrokeRenderCoordinatorError {
             cancelPreparedStroke(generation: message.generation)
             return .failed(
@@ -633,7 +1126,8 @@ actor StrokeFrameScheduler {
 
     func acknowledgePreparedFrame(
         generation: UInt64,
-        frameToken: UInt64
+        frameToken: UInt64,
+        resumeAuthoritativeContinuation: Bool = true
     ) async -> StrokePreparationResult? {
         do {
             try requireActive(generation)
@@ -654,19 +1148,32 @@ actor StrokeFrameScheduler {
                     consumedCount = 0
                 }
             } else {
-                guard let frame = outstandingFrame,
-                      frame.token == frameToken
-                else {
+                if let frame = outstandingFrame,
+                   frame.token == frameToken
+                {
+                    consumedCount = frame.authoritative.count
+                        + frame.predicted.count
+                    try markSubmitted(frame, generation: generation)
+                } else if outstandingZeroWorkContinuationToken == frameToken {
+                    consumedCount = 0
+                    outstandingZeroWorkContinuationToken = nil
+                } else {
                     throw StrokeFrameSchedulerError.invalidPreparedFrame
                 }
-                consumedCount = frame.authoritative.count
-                    + frame.predicted.count
-                try markSubmitted(frame, generation: generation)
+            }
+            // The caller has consumed both page views before sending ACK. The
+            // page must be reclaimed before any continuation can refill the
+            // scheduler scratch buffers and publish another result.
+            if let pageToken = outstandingPreparedOutputPageToken {
+                guard pageToken == frameToken else {
+                    throw StrokeFrameSchedulerError.invalidPreparedFrame
+                }
+                preparedOutputPage.reclaim(token: frameToken)
+                outstandingPreparedOutputPageToken = nil
             }
             projectedCarry.removeFirst(consumedCount)
             if let next = try await makePreparedOutputBatch(
                 generation: generation,
-                logicalDabs: [],
                 predictionProvenanceBoundary:
                     currentPredictionProvenanceBoundary,
                 coordinatorSnapshot: preparationCoordinator?.snapshot,
@@ -680,22 +1187,91 @@ actor StrokeFrameScheduler {
             ) {
                 return .prepared(next)
             }
+            candidatePageForcedSurfaceLayer = nil
+            if resumeAuthoritativeContinuation,
+               authoritativeCandidateDrain != nil
+            {
+                try injectStageCFailure(
+                    .beforeAcknowledgementResume,
+                    generation: generation
+                )
+                let resumed = try await resumeAuthoritativeCandidateDrain(
+                    generatorRanOnMainThread: false,
+                    preparationCPUStartedAt: preparationClock()
+                )
+                try injectStageCFailure(
+                    .afterAcknowledgementResume,
+                    generation: generation
+                )
+                return .prepared(resumed)
+            }
             if pendingCommitBarrierGeneration == generation {
                 pendingCommitBarrierGeneration = nil
                 return .commitBarrierReached(generation: generation)
             }
             return nil
+        } catch let error as StrokeStageCInjectedFailure {
+            cancelPreparedStroke(generation: generation)
+            return .failed(
+                generation: generation,
+                failure: .injectedStageC(error.seam)
+            )
+        } catch let error as StrokeRenderCoordinatorError {
+            cancelPreparedStroke(generation: generation)
+            return .failed(
+                generation: generation,
+                failure: .coordinator(error)
+            )
+        } catch let error as BrushCornerEmitterError {
+            cancelPreparedStroke(generation: generation)
+            return .failed(
+                generation: generation,
+                failure: .cornerEmission(error)
+            )
+        } catch let error as AuthoritativeStrokeQueueError {
+            cancelPreparedStroke(generation: generation)
+            return .failed(
+                generation: generation,
+                failure: .authoritativeQueue(error)
+            )
         } catch let error as StrokeFrameSchedulerError {
             cancelPreparedStroke(generation: generation)
             return .failed(
                 generation: generation,
                 failure: .scheduler(error)
             )
+        } catch let error as DepositionStampPackingError {
+            cancelPreparedStroke(generation: generation)
+            return .failed(
+                generation: generation,
+                failure: .stampPacking(error)
+            )
         } catch let error as StrokePrivateSurfaceEncodingError {
             cancelPreparedStroke(generation: generation)
             return .failed(
                 generation: generation,
                 failure: .privateSurfaceEncoding(error)
+            )
+        } catch let error as TransientStrokeBufferError {
+            cancelPreparedStroke(generation: generation)
+            return .failed(
+                generation: generation,
+                failure: .transientBuffer(error)
+            )
+        } catch let error as TransientStrokeDabArena.ReservationError {
+            cancelPreparedStroke(generation: generation)
+            if case let .capacityExceeded(maximum) = error {
+                return .failed(
+                    generation: generation,
+                    failure: .dabArenaCapacityExceeded(
+                        actual: maximum + 1,
+                        maximum: maximum
+                    )
+                )
+            }
+            return .failed(
+                generation: generation,
+                failure: .unexpected(String(describing: error))
             )
         } catch {
             cancelPreparedStroke(generation: generation)
@@ -707,7 +1283,10 @@ actor StrokeFrameScheduler {
     }
 
     func begin(generation: UInt64) throws {
-        guard activeGeneration == nil else {
+        guard activeGeneration == nil,
+              outstandingPreparedOutputPageToken == nil,
+              !preparedOutputPage.isBorrowed
+        else {
             throw StrokeFrameSchedulerError.invalidLifecycle
         }
         scheduler.reset()
@@ -715,12 +1294,22 @@ actor StrokeFrameScheduler {
         cancelledGeneration = nil
         commitRequested = false
         outstandingFrame = nil
+        outstandingZeroWorkContinuationToken = nil
+        outstandingPreparedOutputPageToken = nil
         outstandingSurfaceLease = nil
         pendingCommitBarrierGeneration = nil
         maximumPreparationWorkUnitsPerFrame = 0
         preparationMutationRevision = 0
         preparationHasBegun = false
         preparationHasFinished = false
+        authoritativeCandidateDrain = nil
+        candidatePageForcedSurfaceLayer = nil
+        authoritativeCandidatePageCount = 0
+        authoritativeCandidateResumeCount = 0
+        authoritativeCandidateLogicalHighWater = 0
+        authoritativeCandidateProjectionHighWater = 0
+        authoritativeCandidatePhaseHits = []
+        authoritativeCandidateSettledTransferWorkUnitCount = 0
         #if DEBUG
         lastEstimatedUpdateSnapshot = nil
         #endif
@@ -735,8 +1324,21 @@ actor StrokeFrameScheduler {
         configuration: StrokePreparationConfiguration,
         actualSamples: [StrokeSample]
     ) async throws -> StrokePreparedDepositionBatch {
-        let preparationCPUStartedAt = DispatchTime.now().uptimeNanoseconds
-        try begin(generation: generation)
+        let preparationCPUStartedAt = preparationClock()
+        preparationAllocationProbe = configuration.allocationProbe
+        let lifecycleProbe = preparationAllocationProbe
+        lifecycleProbe?.arm()
+        var lifecycleProbeIsArmed = lifecycleProbe != nil
+        do {
+            try begin(generation: generation)
+        } catch {
+            if lifecycleProbeIsArmed {
+                lifecycleProbe?.disarmAndRecord(.strokeLifecycleCPU)
+                lifecycleProbeIsArmed = false
+            }
+            preparationAllocationProbe = nil
+            throw error
+        }
         do {
             let coordinator = try StrokeRenderCoordinator(
                 program: configuration.program,
@@ -769,7 +1371,10 @@ actor StrokeFrameScheduler {
             } else {
                 privateSurfaceEncoder = nil
             }
-            preparationAllocationProbe = configuration.allocationProbe
+            if lifecycleProbeIsArmed {
+                lifecycleProbe?.disarmAndRecord(.strokeLifecycleCPU)
+                lifecycleProbeIsArmed = false
+            }
             let generatorRanOnMainThread = executionIsOnMainThread()
             return try await prepareActualMutation(
                 generation: generation,
@@ -779,6 +1384,10 @@ actor StrokeFrameScheduler {
                 preparationCPUStartedAt: preparationCPUStartedAt
             )
         } catch {
+            if lifecycleProbeIsArmed {
+                lifecycleProbe?.disarmAndRecord(.strokeLifecycleCPU)
+                lifecycleProbeIsArmed = false
+            }
             cancelPreparedStroke(generation: generation)
             throw error
         }
@@ -858,7 +1467,7 @@ actor StrokeFrameScheduler {
         acceptedCount: Int? = nil,
         submittedSampleCount: Int? = nil
     ) async throws -> StrokePreparedDepositionBatch {
-        let preparationCPUStartedAt = DispatchTime.now().uptimeNanoseconds
+        let preparationCPUStartedAt = preparationClock()
         let allocationProbe = preparationAllocationProbe
         allocationProbe?.arm()
         var allocationProbeIsArmed = allocationProbe != nil
@@ -874,6 +1483,7 @@ actor StrokeFrameScheduler {
         )
         let submittedSampleCount = submittedSampleCount ?? samples.count
         guard !commitRequested,
+              authoritativeCandidateDrain == nil,
               submittedSampleCount >= mailboxAcceptedSampleCount,
               let coordinator = preparationCoordinator,
               let authoritativeGenerator,
@@ -1092,8 +1702,9 @@ actor StrokeFrameScheduler {
         )
         let transfer = settledChunkScratch.isEmpty
             ? nil
-            : try coordinator.prepareSettledReplayTransfer(
-                settledChunkScratch
+            : try prepareSettledTransfer(
+                settledChunkScratch,
+                coordinator: coordinator
             )
         if let transfer {
             try coordinator.reserveForDownstreamAcceptance(
@@ -1127,11 +1738,10 @@ actor StrokeFrameScheduler {
         allocationProbe?.disarmAndRecord(.predictionCPU)
         allocationProbeIsArmed = false
         let preparationCPUNanoseconds =
-            DispatchTime.now().uptimeNanoseconds
+            preparationClock()
                 - preparationCPUStartedAt
         return try await makePreparedOutputBatch(
             generation: generation,
-            logicalDabs: generatedLogicalDabScratch,
             predictionProvenanceBoundary:
                 currentPredictionProvenanceBoundary,
             coordinatorSnapshot: coordinator.snapshot,
@@ -1156,7 +1766,7 @@ actor StrokeFrameScheduler {
         generation: UInt64,
         sample: StrokeSample
     ) async throws -> StrokePreparationResult {
-        let preparationCPUStartedAt = DispatchTime.now().uptimeNanoseconds
+        let preparationCPUStartedAt = preparationClock()
         let allocationProbe = preparationAllocationProbe
         allocationProbe?.arm()
         var allocationProbeIsArmed = allocationProbe != nil
@@ -1660,8 +2270,9 @@ actor StrokeFrameScheduler {
 
         let transfer = settledChunkScratch.isEmpty
             ? nil
-            : try coordinator.prepareSettledReplayTransfer(
-                settledChunkScratch
+            : try prepareSettledTransfer(
+                settledChunkScratch,
+                coordinator: coordinator
             )
         if let transfer {
             try coordinator.reserveForDownstreamAcceptance(
@@ -1712,12 +2323,11 @@ actor StrokeFrameScheduler {
         allocationProbe?.disarmAndRecord(.estimatedCPU)
         allocationProbeIsArmed = false
         let preparationCPUNanoseconds =
-            DispatchTime.now().uptimeNanoseconds
+            preparationClock()
                 - preparationCPUStartedAt
         return .prepared(
             try await makePreparedOutputBatch(
                 generation: generation,
-                logicalDabs: generatedLogicalDabScratch,
                 predictionProvenanceBoundary:
                     currentPredictionProvenanceBoundary,
                 coordinatorSnapshot: coordinator.snapshot,
@@ -1791,8 +2401,25 @@ actor StrokeFrameScheduler {
 
     func requestCommit(generation: UInt64) throws {
         try requireActive(generation)
-        guard !commitRequested else {
+        guard !commitRequested,
+              authoritativeCandidateDrain == nil
+        else {
             throw StrokeFrameSchedulerError.invalidLifecycle
+        }
+        if preparationCoordinator != nil {
+            guard preparationHasFinished,
+                  outstandingFrame == nil,
+                  outstandingSurfaceLease == nil,
+                  outstandingZeroWorkContinuationToken == nil,
+                  outstandingPreparedOutputPageToken == nil,
+                  !preparedOutputPage.isBorrowed,
+                  projectedCarry.count == 0,
+                  scheduler.authoritativeIsDrained,
+                  scheduler.predictedCount == 0,
+                  candidatePageForcedSurfaceLayer == nil
+            else {
+                throw StrokeFrameSchedulerError.invalidLifecycle
+            }
         }
         if let coordinator = preparationCoordinator,
            let buffer = transientStrokeBuffer
@@ -1814,8 +2441,9 @@ actor StrokeFrameScheduler {
             )
             let transfer = settledChunkScratch.isEmpty
                 ? nil
-                : try coordinator.prepareSettledReplayTransfer(
-                    settledChunkScratch
+                : try prepareSettledTransfer(
+                    settledChunkScratch,
+                    coordinator: coordinator
                 )
             if let transfer {
                 try coordinator.reserveForDownstreamAcceptance(
@@ -1847,7 +2475,12 @@ actor StrokeFrameScheduler {
         generation: UInt64
     ) throws -> StrokeScheduledFrame? {
         try requireActive(generation)
-        guard outstandingFrame == nil else {
+        guard outstandingFrame == nil,
+              outstandingSurfaceLease == nil,
+              outstandingZeroWorkContinuationToken == nil,
+              outstandingPreparedOutputPageToken == nil,
+              !preparedOutputPage.isBorrowed
+        else {
             throw StrokeFrameSchedulerError.invalidPreparedFrame
         }
         let includePrediction = scheduler.authoritativeIsDrained
@@ -1862,12 +2495,7 @@ actor StrokeFrameScheduler {
         else {
             return nil
         }
-        let token = nextFrameToken
-        let (successor, overflow) = token.addingReportingOverflow(1)
-        guard !overflow else {
-            throw StrokeFrameSchedulerError.frameTokenOverflow
-        }
-        nextFrameToken = successor
+        let token = try takeFrameToken()
         let frame = StrokeScheduledFrame(
             authoritative: scheduled.authoritative,
             predicted: scheduled.predicted,
@@ -1883,6 +2511,16 @@ actor StrokeFrameScheduler {
         )
         outstandingFrame = frame
         return frame
+    }
+
+    private func takeFrameToken() throws -> UInt64 {
+        let token = nextFrameToken
+        let (successor, overflow) = token.addingReportingOverflow(1)
+        guard !overflow else {
+            throw StrokeFrameSchedulerError.frameTokenOverflow
+        }
+        nextFrameToken = successor
+        return token
     }
 
     func markSubmitted(
@@ -1918,9 +2556,17 @@ actor StrokeFrameScheduler {
     func isCommitReady(generation: UInt64) -> Bool {
         guard activeGeneration == generation else { return false }
         return commitRequested
+            && (preparationCoordinator == nil || preparationHasFinished)
+            && authoritativeCandidateDrain == nil
             && scheduler.authoritativeIsDrained
             && scheduler.predictedCount == 0
             && outstandingFrame == nil
+            && outstandingSurfaceLease == nil
+            && outstandingZeroWorkContinuationToken == nil
+            && outstandingPreparedOutputPageToken == nil
+            && !preparedOutputPage.isBorrowed
+            && projectedCarry.count == 0
+            && candidatePageForcedSurfaceLayer == nil
     }
 
     func cancel(generation: UInt64) {
@@ -1940,15 +2586,7 @@ actor StrokeFrameScheduler {
         preparationCPUStartedAt: UInt64? = nil
     ) async throws -> StrokePreparedDepositionBatch {
         let preparationCPUStartedAt = preparationCPUStartedAt
-            ?? DispatchTime.now().uptimeNanoseconds
-        let allocationProbe = preparationAllocationProbe
-        allocationProbe?.arm()
-        var allocationProbeIsArmed = allocationProbe != nil
-        defer {
-            if allocationProbeIsArmed {
-                allocationProbe?.disarmAndRecord(.authoritativeCPU)
-            }
-        }
+            ?? preparationClock()
         try requireActive(generation)
         guard !commitRequested,
               let coordinator = preparationCoordinator,
@@ -1964,7 +2602,6 @@ actor StrokeFrameScheduler {
         else {
             throw StrokeFrameSchedulerError.invalidLifecycle
         }
-        transientStrokeBuffer = nil
         if !preparationHasBegun {
             guard samples.first?.phase == .began,
                   samples.dropFirst().allSatisfy({
@@ -1987,6 +2624,30 @@ actor StrokeFrameScheduler {
                 throw StrokeFrameSchedulerError.invalidLifecycle
             }
         }
+
+        if candidateGenerator.program.stageC != nil {
+            return try await beginAuthoritativeCandidateDrain(
+                generation: generation,
+                samples: samples,
+                generator: candidateGenerator,
+                inputDeriver: candidateDeriver,
+                buffer: consume candidateBuffer,
+                generatorRanOnMainThread: generatorRanOnMainThread,
+                isFinishing: isFinishing,
+                preparationCPUStartedAt: preparationCPUStartedAt
+            )
+        }
+
+        let allocationProbe = preparationAllocationProbe
+        allocationProbe?.arm()
+        var allocationProbeIsArmed = allocationProbe != nil
+        defer {
+            if allocationProbeIsArmed {
+                allocationProbe?.disarmAndRecord(.authoritativeCPU)
+            }
+        }
+
+        transientStrokeBuffer = nil
 
         transientDabScratch.removeAll(keepingCapacity: true)
         transientChunkScratch.removeAll(keepingCapacity: true)
@@ -2132,8 +2793,9 @@ actor StrokeFrameScheduler {
 
         let coordinatorTransfer = settledChunkScratch.isEmpty
             ? nil
-            : try coordinator.prepareSettledReplayTransfer(
-                settledChunkScratch
+            : try prepareSettledTransfer(
+                settledChunkScratch,
+                coordinator: coordinator
             )
         if let coordinatorTransfer {
             try coordinator.reserveForDownstreamAcceptance(
@@ -2170,11 +2832,10 @@ actor StrokeFrameScheduler {
         allocationProbe?.disarmAndRecord(.authoritativeCPU)
         allocationProbeIsArmed = false
         let preparationCPUNanoseconds =
-            DispatchTime.now().uptimeNanoseconds
+            preparationClock()
                 - preparationCPUStartedAt
         return try await makePreparedOutputBatch(
             generation: generation,
-            logicalDabs: generatedLogicalDabScratch,
             predictionProvenanceBoundary:
                 currentPredictionProvenanceBoundary,
             coordinatorSnapshot: coordinator.snapshot,
@@ -2204,6 +2865,962 @@ actor StrokeFrameScheduler {
         )
     }
 
+    private func beginAuthoritativeCandidateDrain(
+        generation: UInt64,
+        samples: [StrokeSample],
+        generator: BrushStrokeGenerator,
+        inputDeriver: BrushInputDeriver,
+        buffer: consuming TransientStrokeBuffer,
+        generatorRanOnMainThread: Bool,
+        isFinishing: Bool,
+        preparationCPUStartedAt: UInt64
+    ) async throws -> StrokePreparedDepositionBatch {
+        transientStrokeBuffer = nil
+        transientDabScratch.removeAll(keepingCapacity: true)
+        transientChunkScratch.removeAll(keepingCapacity: true)
+        settledChunkScratch.removeAll(keepingCapacity: true)
+        generatedLogicalDabScratch.removeAll(keepingCapacity: true)
+        generatedProjectionScratch.removeAll(keepingCapacity: true)
+        let transaction = try transientDabArena.beginTransaction(
+            replacingPrediction: false
+        )
+        authoritativeCandidateDrain = StrokeAuthoritativeCandidateDrain(
+            generation: generation,
+            samples: samples,
+            isFinishing: isFinishing,
+            arenaTransaction: transaction,
+            sampleIndex: 0,
+            generator: generator,
+            inputDeriver: inputDeriver,
+            buffer: buffer,
+            cursor: nil,
+            currentSample: nil,
+            inputDeriverBeforeCurrentSample: nil,
+            currentTransientStart: 0,
+            currentPageIndex: 0,
+            hasPublishedCandidatePage: false,
+            stagingSurfaceLayer:
+                buffer.replayContract.mode == .appendOnly
+                    && !buffer.actualChunks.contains {
+                        !$0.sample
+                            .estimatedPropertiesExpectingUpdates.isEmpty
+                    }
+                    ? .authoritative
+                    : .prediction,
+            phase: buffer.actualChunks.isEmpty
+                ? .candidateEmission
+                : .retainedProjection,
+            retainedChunkIndex: 0,
+            retainedDabIndex: 0,
+            currentResumeWorkUnits: 0,
+            replacementClearIssued: false,
+            actualStoreCursor: nil,
+            arenaCommitCursor: nil,
+            preparedArenaCommit: nil,
+            settledTransferCursor: nil,
+            preparedSettledTransfer: nil
+        )
+        do {
+            return try await resumeAuthoritativeCandidateDrain(
+                generatorRanOnMainThread: generatorRanOnMainThread,
+                preparationCPUStartedAt: preparationCPUStartedAt
+            )
+        } catch {
+            transaction.rollback()
+            authoritativeCandidateDrain = nil
+            throw error
+        }
+    }
+
+    private func resumeAuthoritativeCandidateDrain(
+        generatorRanOnMainThread: Bool,
+        preparationCPUStartedAt: UInt64
+    ) async throws -> StrokePreparedDepositionBatch {
+        guard let drain = authoritativeCandidateDrain,
+              let coordinator = preparationCoordinator,
+              let viewport = preparationViewport,
+              let strategy = preparationTilingStrategy
+        else {
+            throw StrokeFrameSchedulerError.invalidLifecycle
+        }
+        armAuthoritativeAllocationProbe()
+        defer { disarmAuthoritativeAllocationProbe(drain: drain) }
+        // Take unique ownership before mutating the buffer. Keeping the actor
+        // property's copy alive would force Array COW on every continuation
+        // resume. Every path reinstalls the drain before its only suspension
+        // point; terminal publish has no active transaction left to expose.
+        authoritativeCandidateDrain = nil
+        defer {
+            // A synchronous failure can escape before a continuation is
+            // reinstalled. The outer process/ack catch will reset the stroke,
+            // but it cannot see this uniquely-owned local transaction; close
+            // it here so failure injection never leaves arena ownership live.
+            if authoritativeCandidateDrain == nil {
+                drain.arenaTransaction.rollback()
+            }
+        }
+        recordCandidatePhase(drain.phase)
+        authoritativeCandidateResumeCount &+= 1
+        generatedLogicalDabScratch.removeAll(keepingCapacity: true)
+        generatedProjectionScratch.removeAll(keepingCapacity: true)
+        perSampleLogicalDabScratch.removeAll(keepingCapacity: true)
+        drain.currentResumeWorkUnits = 0
+
+        if drain.phase == .retainedProjection {
+            try injectStageCFailure(
+                .beforeRetainedProjection,
+                generation: drain.generation,
+                drain: drain
+            )
+            let pageProjectedCapacity = min(
+                budget.maximumAuthoritativeInstances,
+                budget.maximumPendingAuthoritativeInstances
+            )
+            let maximumWorkUnits = LogicalDabBatch.maximumDabCount
+            var pageIsFull = false
+            retainedProjection: while drain.retainedChunkIndex
+                < drain.buffer.actualChunks.count
+            {
+                let chunk = drain.buffer.actualChunks[
+                    drain.retainedChunkIndex
+                ]
+                while drain.retainedDabIndex < chunk.dabs.count {
+                    if drain.currentResumeWorkUnits >= maximumWorkUnits
+                        || (
+                            drain.currentResumeWorkUnits > 0
+                                && preparationClock()
+                                    - preparationCPUStartedAt
+                                    >= budget.cpuPreparationNanoseconds
+                        )
+                    {
+                        pageIsFull = true
+                        break retainedProjection
+                    }
+                    let dab = chunk.dabs[drain.retainedDabIndex]
+                    guard try appendProjectedRecordsToPage(
+                        for: dab.attributes,
+                        strategy: strategy,
+                        to: &generatedProjectionScratch,
+                        maximumRecordCount: pageProjectedCapacity
+                    ) else {
+                        pageIsFull = true
+                        break retainedProjection
+                    }
+                    drain.retainedDabIndex += 1
+                    drain.currentResumeWorkUnits += 1
+                }
+                if drain.retainedDabIndex == chunk.dabs.count {
+                    drain.retainedChunkIndex += 1
+                    drain.retainedDabIndex = 0
+                }
+            }
+            let retainedProjectionComplete = drain.retainedChunkIndex
+                == drain.buffer.actualChunks.count
+            try injectStageCFailure(
+                .afterRetainedProjection,
+                generation: drain.generation,
+                drain: drain
+            )
+            if retainedProjectionComplete {
+                setCandidatePhase(.candidateEmission, on: drain)
+            }
+            if pageIsFull
+                || !generatedProjectionScratch.isEmpty
+                || (!retainedProjectionComplete
+                    && drain.currentResumeWorkUnits > 0)
+            {
+                try installStagedCandidateProjectionPage(drain)
+                drain.hasPublishedCandidatePage = true
+                authoritativeCandidateDrain = drain
+                return try await makeCandidateDrainBatch(
+                    drain: drain,
+                    coordinator: coordinator,
+                    generatorRanOnMainThread: generatorRanOnMainThread,
+                    isFinishing: false,
+                    preparationCPUStartedAt: preparationCPUStartedAt
+                )
+            }
+        }
+
+        if drain.phase == .candidateStorage {
+            let storageCompleted = try resumeCandidateActualStorage(
+                drain,
+                preparationCPUStartedAt: preparationCPUStartedAt
+            )
+            if !storageCompleted
+                || drain.currentResumeWorkUnits
+                    >= LogicalDabBatch.maximumDabCount
+            {
+                try installCheckpointedAuthoritativeCandidatePage(drain)
+                drain.hasPublishedCandidatePage = true
+                authoritativeCandidateDrain = drain
+                return try await makeCandidateDrainBatch(
+                    drain: drain,
+                    coordinator: coordinator,
+                    generatorRanOnMainThread: generatorRanOnMainThread,
+                    isFinishing: false,
+                    preparationCPUStartedAt: preparationCPUStartedAt
+                )
+            }
+        }
+        if drain.phase == .settledTransfer {
+            return try await continueAfterCandidateEmission(
+                drain,
+                coordinator: coordinator,
+                generatorRanOnMainThread: generatorRanOnMainThread,
+                preparationCPUStartedAt: preparationCPUStartedAt
+            )
+        }
+
+        while drain.sampleIndex < drain.samples.count {
+            if drain.cursor == nil {
+                let inputBefore = drain.inputDeriver
+                let worldSample = drain.inputDeriver.derive(
+                    drain.samples[drain.sampleIndex],
+                    viewport: viewport
+                )
+                let remainingDabCapacity = max(
+                    0,
+                    TransientStrokeBufferContract.wholeStrokeDabCapacity
+                        - transientDabScratch.count
+                )
+                drain.cursor = try drain.generator.emissionCursor(
+                    for: worldSample,
+                    maximumPathSubdivisionCount:
+                        Self.maximumPathSubdivisionCount(
+                            forRemainingDabCapacity: remainingDabCapacity
+                        )
+                )
+                drain.currentSample = worldSample
+                let retainsReplaceableActual =
+                    drain.buffer.replayContract.mode != .appendOnly
+                        || drain.buffer.actualChunks.contains {
+                            !$0.sample
+                                .estimatedPropertiesExpectingUpdates.isEmpty
+                        }
+                drain.stagingSurfaceLayer =
+                    !worldSample.estimatedPropertiesExpectingUpdates.isEmpty
+                        || retainsReplaceableActual
+                        ? .prediction
+                        : .authoritative
+                drain.inputDeriverBeforeCurrentSample = inputBefore
+                drain.currentTransientStart = transientDabScratch.count
+                drain.currentPageIndex = 0
+            }
+
+            guard var cursor = drain.cursor else {
+                throw StrokeFrameSchedulerError.invalidLifecycle
+            }
+            let pageProjectedCapacity =
+                min(
+                    budget.maximumAuthoritativeInstances,
+                    budget.maximumPendingAuthoritativeInstances
+                )
+            if pageProjectedCapacity <= 0 {
+                try installPartialAuthoritativeCandidatePage(drain)
+                drain.hasPublishedCandidatePage = true
+                authoritativeCandidateDrain = drain
+                return try await makeCandidateDrainBatch(
+                    drain: drain,
+                    coordinator: coordinator,
+                    generatorRanOnMainThread: generatorRanOnMainThread,
+                    isFinishing: false,
+                    preparationCPUStartedAt: preparationCPUStartedAt
+                )
+            }
+            let page: BrushStrokeGenerator.EmissionPage?
+            var yieldedAcceptedPrefix = false
+            var pausedBeforeCandidate = false
+            try injectStageCFailure(
+                .beforeCandidatePage,
+                generation: drain.generation,
+                drain: drain
+            )
+            page = try cursor.emitNextPageDeciding { dab in
+                if !self.generatedLogicalDabScratch.isEmpty,
+                   self.preparationClock()
+                    - preparationCPUStartedAt
+                        >= self.budget.cpuPreparationNanoseconds
+                {
+                    pausedBeforeCandidate = true
+                    return .pause
+                }
+                guard try self.appendPreparedActualDabToPage(
+                    dab,
+                    strategy: strategy,
+                    maximumDabCount:
+                        TransientStrokeBufferContract
+                            .wholeStrokeDabCapacity,
+                    maximumProjectedCount: pageProjectedCapacity
+                ) else {
+                    if self.generatedLogicalDabScratch.isEmpty {
+                        throw StrokeFrameSchedulerError
+                            .projectedInstanceCapacityExceeded(
+                                actual: pageProjectedCapacity + 1,
+                                maximum: pageProjectedCapacity
+                            )
+                    }
+                        pausedBeforeCandidate = true
+                        return .pause
+                }
+                drain.currentResumeWorkUnits += 1
+                return .accept
+            }
+            yieldedAcceptedPrefix = yieldedAcceptedPrefix
+                || pausedBeforeCandidate
+            try injectStageCFailure(
+                .afterCandidatePage,
+                generation: drain.generation,
+                drain: drain
+            )
+            if yieldedAcceptedPrefix {
+                // The cursor calls its sink before it commits identity/random
+                // state. `cursor` therefore owns the accepted prefix and the
+                // rejected candidate remains the exact next candidate.
+                drain.cursor = cursor
+                drain.currentPageIndex += 1
+                try installPartialAuthoritativeCandidatePage(drain)
+                drain.hasPublishedCandidatePage = true
+                authoritativeCandidateDrain = drain
+                return try await makeCandidateDrainBatch(
+                    drain: drain,
+                    coordinator: coordinator,
+                    generatorRanOnMainThread: generatorRanOnMainThread,
+                    isFinishing: false,
+                    preparationCPUStartedAt: preparationCPUStartedAt
+                )
+            }
+            guard let page else {
+                throw StrokeFrameSchedulerError.invalidLifecycle
+            }
+            drain.cursor = cursor
+
+            if page.hasMore {
+                drain.currentPageIndex += 1
+                try installPartialAuthoritativeCandidatePage(drain)
+                drain.hasPublishedCandidatePage = true
+                authoritativeCandidateDrain = drain
+                return try await makeCandidateDrainBatch(
+                    drain: drain,
+                    coordinator: coordinator,
+                    generatorRanOnMainThread: generatorRanOnMainThread,
+                    isFinishing: false,
+                    preparationCPUStartedAt: preparationCPUStartedAt
+                )
+            }
+
+            guard let completedGenerator = cursor.completedGenerator,
+                  let worldSample = drain.currentSample,
+                  let inputBefore =
+                    drain.inputDeriverBeforeCurrentSample
+            else {
+                throw StrokeFrameSchedulerError.invalidLifecycle
+            }
+            _ = worldSample
+            _ = inputBefore
+            _ = completedGenerator
+            setCandidatePhase(.candidateStorage, on: drain)
+            let storageCompleted = try resumeCandidateActualStorage(
+                drain,
+                preparationCPUStartedAt: preparationCPUStartedAt
+            )
+            if !storageCompleted {
+                try installPartialAuthoritativeCandidatePage(drain)
+                drain.hasPublishedCandidatePage = true
+                authoritativeCandidateDrain = drain
+                return try await makeCandidateDrainBatch(
+                    drain: drain,
+                    coordinator: coordinator,
+                    generatorRanOnMainThread: generatorRanOnMainThread,
+                    isFinishing: false,
+                    preparationCPUStartedAt: preparationCPUStartedAt
+                )
+            }
+
+            let preparationDeadlineReached =
+                drain.currentResumeWorkUnits > 0
+                && preparationClock() - preparationCPUStartedAt
+                    >= budget.cpuPreparationNanoseconds
+            if drain.sampleIndex < drain.samples.count,
+               (!generatedLogicalDabScratch.isEmpty
+                   || preparationDeadlineReached)
+            {
+                try installCheckpointedAuthoritativeCandidatePage(drain)
+                drain.hasPublishedCandidatePage = true
+                authoritativeCandidateDrain = drain
+                return try await makeCandidateDrainBatch(
+                    drain: drain,
+                    coordinator: coordinator,
+                    generatorRanOnMainThread: generatorRanOnMainThread,
+                    isFinishing: false,
+                    preparationCPUStartedAt: preparationCPUStartedAt
+                )
+            }
+        }
+
+        setCandidatePhase(.settledTransfer, on: drain)
+        if !generatedLogicalDabScratch.isEmpty
+            || !generatedProjectionScratch.isEmpty
+        {
+            try installCheckpointedAuthoritativeCandidatePage(drain)
+            drain.hasPublishedCandidatePage = true
+            authoritativeCandidateDrain = drain
+            return try await makeCandidateDrainBatch(
+                drain: drain,
+                coordinator: coordinator,
+                generatorRanOnMainThread: generatorRanOnMainThread,
+                isFinishing: false,
+                preparationCPUStartedAt: preparationCPUStartedAt
+            )
+        }
+        return try await continueAfterCandidateEmission(
+            drain,
+            coordinator: coordinator,
+            generatorRanOnMainThread: generatorRanOnMainThread,
+            preparationCPUStartedAt: preparationCPUStartedAt
+        )
+    }
+
+    private func continueAfterCandidateEmission(
+        _ drain: StrokeAuthoritativeCandidateDrain,
+        coordinator: StrokeRenderCoordinator,
+        generatorRanOnMainThread: Bool,
+        preparationCPUStartedAt: UInt64
+    ) async throws -> StrokePreparedDepositionBatch {
+        if !settledChunkScratch.isEmpty,
+           drain.preparedSettledTransfer == nil
+        {
+            if drain.settledTransferCursor == nil {
+                guard let trustedFinalGenerator = settledChunkScratch.last?
+                    .generatorSnapshotAfterSample
+                else {
+                    throw StrokeFrameSchedulerError
+                        .missingGeneratorCheckpoint
+                }
+                drain.settledTransferCursor = try coordinator
+                    .beginSettledStageCTransfer(
+                        expectedChunkCount: settledChunkScratch.count,
+                        trustedStartingGenerator:
+                            coordinator.generatorSnapshot,
+                        trustedFinalGenerator: trustedFinalGenerator
+                    )
+            }
+            guard var transferCursor = drain.settledTransferCursor else {
+                throw StrokeFrameSchedulerError.invalidLifecycle
+            }
+            let remainingWork = LogicalDabBatch.maximumDabCount
+                - drain.currentResumeWorkUnits
+            if remainingWork > 0 {
+                var remainingTransferWork = remainingWork
+                while remainingTransferWork > 0 {
+                    let step = try coordinator.resumeSettledStageCTransfer(
+                        &transferCursor,
+                        chunks: settledChunkScratch,
+                        maximumWorkUnits: 1
+                    )
+                    switch step {
+                    case let .pending(consumedWorkUnits):
+                        drain.currentResumeWorkUnits += consumedWorkUnits
+                        authoritativeCandidateSettledTransferWorkUnitCount &+=
+                            UInt64(consumedWorkUnits)
+                        remainingTransferWork -= consumedWorkUnits
+                        drain.settledTransferCursor = transferCursor
+                    case let .prepared(prepared, consumedWorkUnits):
+                        drain.currentResumeWorkUnits += consumedWorkUnits
+                        authoritativeCandidateSettledTransferWorkUnitCount &+=
+                            UInt64(consumedWorkUnits)
+                        remainingTransferWork -= consumedWorkUnits
+                        drain.settledTransferCursor = nil
+                        drain.preparedSettledTransfer = prepared
+                    }
+                    if drain.preparedSettledTransfer != nil
+                        || (drain.currentResumeWorkUnits > 0
+                            && preparationClock()
+                                - preparationCPUStartedAt
+                                >= budget.cpuPreparationNanoseconds)
+                    {
+                        break
+                    }
+                }
+            }
+            if drain.preparedSettledTransfer == nil {
+                try installCheckpointedAuthoritativeCandidatePage(drain)
+                drain.hasPublishedCandidatePage = true
+                authoritativeCandidateDrain = drain
+                return try await makeCandidateDrainBatch(
+                    drain: drain,
+                    coordinator: coordinator,
+                    generatorRanOnMainThread: generatorRanOnMainThread,
+                    isFinishing: false,
+                    preparationCPUStartedAt: preparationCPUStartedAt
+                )
+            }
+        }
+        setCandidatePhase(.arenaRetention, on: drain)
+        if drain.arenaCommitCursor == nil {
+            try injectStageCFailure(
+                .beforeArenaRetentionCommit,
+                generation: drain.generation,
+                drain: drain
+            )
+            drain.arenaCommitCursor = try drain.arenaTransaction.beginCommit(
+                expectedActualChunkCount: drain.buffer.actualChunks.count,
+                expectedPredictedChunkCount:
+                    drain.buffer.predictedChunks.count
+            )
+        }
+        guard var arenaCommitCursor = drain.arenaCommitCursor else {
+            throw StrokeFrameSchedulerError.invalidLifecycle
+        }
+        let remainingWork = LogicalDabBatch.maximumDabCount
+            - drain.currentResumeWorkUnits
+        if remainingWork > 0 {
+            let step = try drain.arenaTransaction.resumeCommit(
+                &arenaCommitCursor,
+                retainingActual: drain.buffer.actualChunks,
+                retainingPredicted: drain.buffer.predictedChunks,
+                maximumWorkUnits: remainingWork,
+                shouldYield: {
+                    self.preparationClock()
+                        - preparationCPUStartedAt
+                        >= self.budget.cpuPreparationNanoseconds
+                }
+            )
+            switch step {
+            case let .pending(consumedWorkUnits):
+                drain.currentResumeWorkUnits += consumedWorkUnits
+                drain.arenaCommitCursor = arenaCommitCursor
+            case let .prepared(prepared, consumedWorkUnits):
+                drain.currentResumeWorkUnits += consumedWorkUnits
+                drain.arenaCommitCursor = nil
+                drain.preparedArenaCommit = prepared
+                setCandidatePhase(.finalInstall, on: drain)
+                try injectStageCFailure(
+                    .afterArenaRetentionCommit,
+                    generation: drain.generation,
+                    drain: drain
+                )
+            }
+        }
+        if drain.phase != .finalInstall {
+            try installCheckpointedAuthoritativeCandidatePage(drain)
+            drain.hasPublishedCandidatePage = true
+            authoritativeCandidateDrain = drain
+            return try await makeCandidateDrainBatch(
+                drain: drain,
+                coordinator: coordinator,
+                generatorRanOnMainThread: generatorRanOnMainThread,
+                isFinishing: false,
+                preparationCPUStartedAt: preparationCPUStartedAt
+            )
+        }
+        return try await finalizeAuthoritativeCandidateDrain(
+            drain,
+            coordinator: coordinator,
+            generatorRanOnMainThread: generatorRanOnMainThread,
+            preparationCPUStartedAt: preparationCPUStartedAt
+        )
+    }
+
+    private func resumeCandidateActualStorage(
+        _ drain: StrokeAuthoritativeCandidateDrain,
+        preparationCPUStartedAt: UInt64
+    ) throws -> Bool {
+        guard let completedGenerator = drain.cursor?.completedGenerator,
+              let worldSample = drain.currentSample,
+              let inputBefore = drain.inputDeriverBeforeCurrentSample
+        else {
+            throw StrokeFrameSchedulerError.invalidLifecycle
+        }
+        let transientStart = drain.currentTransientStart
+        let transientCount = transientDabScratch.count - transientStart
+        if drain.actualStoreCursor == nil {
+            drain.actualStoreCursor = try drain.arenaTransaction
+                .beginActualStore(count: transientCount)
+        }
+        guard var storeCursor = drain.actualStoreCursor else {
+            throw StrokeFrameSchedulerError.invalidLifecycle
+        }
+        let remainingWork = LogicalDabBatch.maximumDabCount
+            - drain.currentResumeWorkUnits
+        guard remainingWork > 0 else {
+            drain.actualStoreCursor = storeCursor
+            return false
+        }
+        let step = try drain.arenaTransaction.resumeActualStore(
+            &storeCursor,
+            maximumWorkUnits: remainingWork,
+            shouldYield: {
+                self.preparationClock()
+                    - preparationCPUStartedAt
+                    >= self.budget.cpuPreparationNanoseconds
+            }
+        ) { offset in
+            transientDabScratch[transientStart + offset]
+        }
+        switch step {
+        case let .pending(consumedWorkUnits):
+            drain.currentResumeWorkUnits += consumedWorkUnits
+            drain.actualStoreCursor = storeCursor
+            return false
+        case let .stored(slice, consumedWorkUnits):
+            drain.currentResumeWorkUnits += consumedWorkUnits
+            let chunk = TransientStrokeChunk(
+                sample: worldSample,
+                dabs: slice,
+                generatorSnapshotAfterSample: completedGenerator,
+                inputDeriverSnapshotBeforeSample: inputBefore
+            )
+            perMutationSettledScratch.removeAll(keepingCapacity: true)
+            try injectStageCFailure(
+                .beforeTransientCheckpointUpdate,
+                generation: drain.generation,
+                drain: drain
+            )
+            let mutation = drain.buffer.appendActual(
+                chunk,
+                settledInto: &perMutationSettledScratch
+            )
+            if let rejection = mutation.rejection {
+                throw capacityError(
+                    for: rejection,
+                    limits: drain.buffer.activeReplayLimits
+                )
+            }
+            settledChunkScratch.append(
+                contentsOf: perMutationSettledScratch
+            )
+            try injectStageCFailure(
+                .afterTransientCheckpointUpdate,
+                generation: drain.generation,
+                drain: drain
+            )
+            drain.generator = completedGenerator
+            drain.cursor = nil
+            drain.currentSample = nil
+            drain.inputDeriverBeforeCurrentSample = nil
+            drain.actualStoreCursor = nil
+            drain.sampleIndex += 1
+            setCandidatePhase(.candidateEmission, on: drain)
+            try injectStageCFailure(
+                .afterCandidateAccepted,
+                generation: drain.generation,
+                drain: drain
+            )
+            return true
+        }
+    }
+
+    private func makeCandidateDrainBatch(
+        drain: StrokeAuthoritativeCandidateDrain,
+        coordinator: StrokeRenderCoordinator,
+        generatorRanOnMainThread: Bool,
+        isFinishing: Bool,
+        preparationCPUStartedAt: UInt64
+    ) async throws -> StrokePreparedDepositionBatch {
+        authoritativeCandidatePageCount &+= 1
+        authoritativeCandidateLogicalHighWater = max(
+            authoritativeCandidateLogicalHighWater,
+            generatedLogicalDabScratch.count
+        )
+        let projectedWork = max(
+            generatedProjectionScratch.count,
+            max(
+                authoritativeProjectedScratch.count,
+                replayProjectedScratch.count
+            )
+        )
+        authoritativeCandidateProjectionHighWater = max(
+            authoritativeCandidateProjectionHighWater,
+            projectedWork
+        )
+        maximumPreparationWorkUnitsPerFrame = max(
+            maximumPreparationWorkUnitsPerFrame,
+            drain.currentResumeWorkUnits
+        )
+        // Batch packaging has its own allocation stage. Close the CPU stage
+        // before that probe is armed so continuation pages remain separately
+        // measurable instead of nesting/resetting the same counter.
+        disarmAuthoritativeAllocationProbe(drain: drain)
+        let batch = try await makePreparedOutputBatch(
+            generation: drain.generation,
+            predictionProvenanceBoundary:
+                currentPredictionProvenanceBoundary,
+            coordinatorSnapshot: coordinator.snapshot,
+            executorProbe: StrokePreparationExecutorProbe(
+                generatorRanOnMainThread: generatorRanOnMainThread,
+                projectionRanOnMainThread: executionIsOnMainThread()
+            ),
+            isFinishing: isFinishing,
+            emitEmpty: true,
+            predictionAdmission: nil,
+            forcedSurfaceLayer: drain.stagingSurfaceLayer,
+            preparationCPUNanoseconds:
+                preparationClock()
+                    - preparationCPUStartedAt
+        )!
+        // A terminal candidate page can contain logical dabs that project to
+        // no visible records. Without a surface or continuation lease there
+        // will be no acknowledgement callback to retire the page-scoped
+        // layer override, so retire it synchronously once the cursor and all
+        // projected work are fully drained.
+        if authoritativeCandidateDrain == nil,
+           batch.frameToken == nil,
+           projectedCarry.count == 0,
+           scheduler.authoritativeIsDrained,
+           scheduler.predictedCount == 0
+        {
+            candidatePageForcedSurfaceLayer = nil
+        }
+        return batch
+    }
+
+    private func setCandidatePhase(
+        _ phase: StrokeAuthoritativeCandidateDrainPhase,
+        on drain: StrokeAuthoritativeCandidateDrain
+    ) {
+        drain.phase = phase
+        recordCandidatePhase(phase)
+    }
+
+    private func recordCandidatePhase(
+        _ phase: StrokeAuthoritativeCandidateDrainPhase
+    ) {
+        let hit: StrokeStageCContinuationPhaseHits = switch phase {
+        case .retainedProjection: .retainedProjection
+        case .candidateEmission: .candidateEmission
+        case .candidateStorage: .candidateStorage
+        case .settledTransfer: .settledTransfer
+        case .arenaRetention: .arenaRetention
+        case .finalInstall: .finalInstall
+        }
+        authoritativeCandidatePhaseHits.insert(hit)
+    }
+
+    private func armAuthoritativeAllocationProbe() {
+        guard let preparationAllocationProbe else { return }
+        precondition(!authoritativeAllocationProbeIsArmed)
+        preparationAllocationProbe.arm()
+        authoritativeAllocationProbeIsArmed = true
+    }
+
+    private func disarmAuthoritativeAllocationProbe(
+        drain: StrokeAuthoritativeCandidateDrain? = nil
+    ) {
+        guard authoritativeAllocationProbeIsArmed else { return }
+        let allocationCount = preparationAllocationProbe?
+            .disarmAndRecord(.authoritativeCPU) ?? 0
+        authoritativeAllocationProbeIsArmed = false
+        authoritativeAllocationEventCount &+= 1
+        guard allocationCount > 0 else { return }
+        let incident = StrokeStageCAuthoritativeAllocationIncident(
+            eventOrdinal: authoritativeAllocationEventCount,
+            allocationCount: allocationCount,
+            phase: drain?.phase.rawValue,
+            sampleIndex: drain?.sampleIndex,
+            pageIndex: drain?.currentPageIndex,
+            workUnits: drain?.currentResumeWorkUnits
+        )
+        if firstAuthoritativeAllocationIncident == nil {
+            firstAuthoritativeAllocationIncident = incident
+        }
+        lastAuthoritativeAllocationIncident = incident
+    }
+
+    private func installPartialAuthoritativeCandidatePage(
+        _ drain: StrokeAuthoritativeCandidateDrain
+    ) throws {
+        authoritativeProjectedScratch.removeAll(keepingCapacity: true)
+        replayProjectedScratch.removeAll(keepingCapacity: true)
+        authoritativeProjectedScratch.append(
+            contentsOf: generatedProjectionScratch
+        )
+        try preflightPreparedMutation(
+            generation: drain.generation,
+            authoritative: authoritativeProjectedScratch,
+            replay: replayProjectedScratch,
+            candidateDrain: drain
+        )
+        try injectStageCFailure(
+            .beforeQueueInstall,
+            generation: drain.generation,
+            drain: drain
+        )
+        installPreparedQueues(
+            authoritative: authoritativeProjectedScratch,
+            replay: replayProjectedScratch
+        )
+        try injectStageCFailure(
+            .afterQueueInstall,
+            generation: drain.generation,
+            drain: drain
+        )
+        candidatePageForcedSurfaceLayer = drain.stagingSurfaceLayer
+        if !drain.replacementClearIssued,
+           drain.stagingSurfaceLayer == .prediction {
+            privateSurfaceEncoder?.beginPredictionReplacement()
+            drain.replacementClearIssued = true
+        }
+    }
+
+    private func installCheckpointedAuthoritativeCandidatePage(
+        _ drain: StrokeAuthoritativeCandidateDrain
+    ) throws {
+        authoritativeProjectedScratch.removeAll(keepingCapacity: true)
+        replayProjectedScratch.removeAll(keepingCapacity: true)
+        authoritativeProjectedScratch.append(
+            contentsOf: generatedProjectionScratch
+        )
+        try preflightPreparedMutation(
+            generation: drain.generation,
+            authoritative: authoritativeProjectedScratch,
+            replay: replayProjectedScratch,
+            candidateDrain: drain
+        )
+        try injectStageCFailure(
+            .beforeQueueInstall,
+            generation: drain.generation,
+            drain: drain
+        )
+        installPreparedQueues(
+            authoritative: authoritativeProjectedScratch,
+            replay: replayProjectedScratch
+        )
+        try injectStageCFailure(
+            .afterQueueInstall,
+            generation: drain.generation,
+            drain: drain
+        )
+        candidatePageForcedSurfaceLayer = drain.stagingSurfaceLayer
+        if !drain.replacementClearIssued,
+           drain.stagingSurfaceLayer == .prediction {
+            privateSurfaceEncoder?.beginPredictionReplacement()
+            drain.replacementClearIssued = true
+        }
+    }
+
+    private func installStagedCandidateProjectionPage(
+        _ drain: StrokeAuthoritativeCandidateDrain
+    ) throws {
+        try installPartialAuthoritativeCandidatePage(drain)
+    }
+
+    private func finalizeAuthoritativeCandidateDrain(
+        _ drain: StrokeAuthoritativeCandidateDrain,
+        coordinator: StrokeRenderCoordinator,
+        generatorRanOnMainThread: Bool,
+        preparationCPUStartedAt: UInt64
+    ) async throws -> StrokePreparedDepositionBatch {
+        guard let preparedArenaCommit = drain.preparedArenaCommit else {
+            throw StrokeFrameSchedulerError.invalidLifecycle
+        }
+        guard generatedLogicalDabScratch.isEmpty,
+              generatedProjectionScratch.isEmpty
+        else {
+            // Candidate emission must publish every logical/projection page
+            // before entering the terminal O(1) install phase.
+            throw StrokeFrameSchedulerError.invalidLifecycle
+        }
+        authoritativeProjectedScratch.removeAll(keepingCapacity: true)
+        replayProjectedScratch.removeAll(keepingCapacity: true)
+        candidatePageForcedSurfaceLayer = drain.stagingSurfaceLayer
+        try preflightPreparedMutation(
+            generation: drain.generation,
+            authoritative: authoritativeProjectedScratch,
+            replay: replayProjectedScratch,
+            candidateDrain: drain
+        )
+        let transfer = drain.preparedSettledTransfer
+        if let transfer {
+            try injectStageCFailure(
+                .beforeCoordinatorReserve,
+                generation: drain.generation,
+                drain: drain
+            )
+            try coordinator.reserveForDownstreamAcceptance(
+                transfer,
+                retireAfterAcceptance: true
+            )
+            try injectStageCFailure(
+                .afterCoordinatorReserve,
+                generation: drain.generation,
+                drain: drain
+            )
+        }
+        try injectStageCFailure(
+            .beforeQueueInstall,
+            generation: drain.generation,
+            drain: drain
+        )
+        installPreparedQueues(
+            authoritative: authoritativeProjectedScratch,
+            replay: replayProjectedScratch
+        )
+        try injectStageCFailure(
+            .afterQueueInstall,
+            generation: drain.generation,
+            drain: drain
+        )
+        if let transfer {
+            try injectStageCFailure(
+                .beforeCoordinatorFinalize,
+                generation: drain.generation,
+                drain: drain
+            )
+            coordinator.finalizeAndRetireAfterDownstreamAcceptance(transfer)
+            try injectStageCFailure(
+                .afterCoordinatorFinalize,
+                generation: drain.generation,
+                drain: drain
+            )
+        }
+        try injectStageCFailure(
+            .beforeArenaPublish,
+            generation: drain.generation,
+            drain: drain
+        )
+        drain.arenaTransaction.publish(preparedArenaCommit)
+        try injectStageCFailure(
+            .afterArenaPublish,
+            generation: drain.generation,
+            drain: drain
+        )
+        authoritativeGenerator = drain.generator
+        authoritativeInputDeriver = drain.inputDeriver
+        transientStrokeBuffer = drain.buffer
+        preparationHasBegun = true
+        if drain.isFinishing {
+            try injectStageCFailure(
+                .beforeFinishGate,
+                generation: drain.generation,
+                drain: drain
+            )
+        }
+        preparationHasFinished = drain.isFinishing
+        if drain.isFinishing {
+            try injectStageCFailure(
+                .afterFinishGate,
+                generation: drain.generation,
+                drain: drain
+            )
+        }
+        preparationMutationRevision &+= 1
+        authoritativeCandidateDrain = nil
+        if !drain.hasPublishedCandidatePage,
+           (!replayProjectedScratch.isEmpty
+            || authoritativeProjectedScratch.isEmpty)
+        {
+            privateSurfaceEncoder?.beginPredictionReplacement()
+        }
+        return try await makeCandidateDrainBatch(
+            drain: drain,
+            coordinator: coordinator,
+            generatorRanOnMainThread: generatorRanOnMainThread,
+            isFinishing: drain.isFinishing,
+            preparationCPUStartedAt: preparationCPUStartedAt
+        )
+    }
+
     private func appendProjectedChunks<Chunks: Collection>(
         _ chunks: Chunks,
         to destination: inout [StrokePreparedProjectedRecord],
@@ -2224,11 +3841,31 @@ actor StrokeFrameScheduler {
         }
     }
 
+    private func prepareSettledTransfer(
+        _ chunks: [TransientStrokeChunk],
+        coordinator: StrokeRenderCoordinator
+    ) throws -> PreparedStrokeCoordinatorEmission {
+        try coordinator.prepareSettledReplayTransfer(
+            chunks,
+            trustedStartingGenerator: coordinator.generatorSnapshot,
+            trustedFinalGenerator:
+                chunks.last?.generatorSnapshotAfterSample
+        )
+    }
+
     private func preflightPreparedMutation(
         generation: UInt64,
         authoritative: [StrokePreparedProjectedRecord],
-        replay: [StrokePreparedProjectedRecord]
+        replay: [StrokePreparedProjectedRecord],
+        candidateDrain: StrokeAuthoritativeCandidateDrain? = nil
     ) throws {
+        if let candidateDrain {
+            try injectStageCFailure(
+                .beforePreparedPreflight,
+                generation: generation,
+                drain: candidateDrain
+            )
+        }
         guard outstandingFrame == nil,
               projectedCarry.count == 0,
               scheduler.authoritativeCount == 0,
@@ -2274,6 +3911,13 @@ actor StrokeFrameScheduler {
                 )
             }
         }
+        if let candidateDrain {
+            try injectStageCFailure(
+                .afterPreparedPreflight,
+                generation: generation,
+                drain: candidateDrain
+            )
+        }
     }
 
     private func installPreparedQueues(
@@ -2306,7 +3950,6 @@ actor StrokeFrameScheduler {
 
     private func makePreparedOutputBatch(
         generation: UInt64,
-        logicalDabs: [LogicalDab],
         predictionProvenanceBoundary: PredictionProvenanceBoundary?,
         coordinatorSnapshot: StrokeRenderSnapshot?,
         executorProbe: StrokePreparationExecutorProbe,
@@ -2325,7 +3968,10 @@ actor StrokeFrameScheduler {
             )
         } else {
             preparedOutputScratch.removeAll(keepingCapacity: true)
-            guard emitEmpty else { return nil }
+            guard emitEmpty else {
+                precondition(generatedLogicalDabScratch.isEmpty)
+                return nil
+            }
         }
         let fallbackBoundary = PredictionProvenanceBoundary(
             coordinatorRevision: 0,
@@ -2340,8 +3986,10 @@ actor StrokeFrameScheduler {
             commitMetadata: StrokeCommitMetadata()
         )
         let surfaceLayer: StrokePrivateSurfaceLayer
-        if let forcedSurfaceLayer {
-            surfaceLayer = forcedSurfaceLayer
+        let effectiveForcedSurfaceLayer = forcedSurfaceLayer
+            ?? candidatePageForcedSurfaceLayer
+        if let effectiveForcedSurfaceLayer {
+            surfaceLayer = effectiveForcedSurfaceLayer
         } else if let frame, !frame.authoritative.isEmpty {
             surfaceLayer = .authoritative
         } else if let frame, !frame.predicted.isEmpty {
@@ -2353,12 +4001,28 @@ actor StrokeFrameScheduler {
         }
         let surfaceLease: StrokePreparedSurfaceLease?
         if let privateSurfaceEncoder {
+            if authoritativeCandidateDrain != nil
+                || candidatePageForcedSurfaceLayer != nil
+            {
+                try injectStageCFailure(
+                    .beforeSurfaceEncoding,
+                    generation: generation
+                )
+            }
             surfaceLease = try await privateSurfaceEncoder.encode(
                 generation: generation,
                 records: preparedOutputScratch,
                 layer: surfaceLayer,
                 allocationProbe: preparationAllocationProbe
             )
+            if authoritativeCandidateDrain != nil
+                || candidatePageForcedSurfaceLayer != nil
+            {
+                try injectStageCFailure(
+                    .afterSurfaceEncoding,
+                    generation: generation
+                )
+            }
         } else {
             surfaceLease = nil
         }
@@ -2382,12 +4046,50 @@ actor StrokeFrameScheduler {
         for record in preparedOutputScratch {
             preparedDirtyOutputScratch.append(record.dirtyRect)
         }
+        // A token is also required when projection produced no frame (for
+        // example, a fully clipped logical-dab page). It is the lifetime lease
+        // for the output page even when there is no GPU surface to submit.
+        let zeroWorkContinuationToken: UInt64?
+        if surfaceLease == nil,
+           frame == nil,
+           (authoritativeCandidateDrain != nil
+               || !generatedLogicalDabScratch.isEmpty
+               || !preparedDirtyOutputScratch.isEmpty)
+        {
+            precondition(outstandingZeroWorkContinuationToken == nil)
+            zeroWorkContinuationToken = try takeFrameToken()
+            outstandingZeroWorkContinuationToken = zeroWorkContinuationToken
+        } else {
+            zeroWorkContinuationToken = nil
+        }
+        // Complete every throwable operation before lending the page. Failure
+        // before this point is recovered by normal stroke cancellation without
+        // ever stranding swapped scratch buffers in a published batch.
+        let sequence = try takePreparationSequence()
+        let frameToken = surfaceLease?.token
+            ?? frame?.token
+            ?? zeroWorkContinuationToken
+        let logicalDabView: StrokePreparedLogicalDabView
+        let dirtyRegionView: StrokePreparedDirtyRegionView
+        if let frameToken {
+            (logicalDabView, dirtyRegionView) = preparedOutputPage.lend(
+                token: frameToken,
+                logicalDabScratch: &generatedLogicalDabScratch,
+                dirtyRegionScratch: &preparedDirtyOutputScratch
+            )
+            outstandingPreparedOutputPageToken = frameToken
+        } else {
+            precondition(generatedLogicalDabScratch.isEmpty)
+            precondition(preparedDirtyOutputScratch.isEmpty)
+            logicalDabView = .empty
+            dirtyRegionView = .empty
+        }
         let batch = StrokePreparedDepositionBatch(
             generation: generation,
-            sequence: try takePreparationSequence(),
-            frameToken: surfaceLease?.token ?? frame?.token,
-            logicalDabs: logicalDabs,
-            dirtyRegions: preparedDirtyOutputScratch,
+            sequence: sequence,
+            frameToken: frameToken,
+            logicalDabs: logicalDabView,
+            dirtyRegions: dirtyRegionView,
             authoritativeInstanceCount:
                 frame?.authoritative.count ?? 0,
             predictedInstanceCount: frame?.predicted.count ?? 0,
@@ -2412,6 +4114,32 @@ actor StrokeFrameScheduler {
         to records: inout [StrokePreparedProjectedRecord],
         maximumRecordCount: Int
     ) throws {
+        guard try appendProjectedRecordsToPage(
+            for: dab,
+            strategy: strategy,
+            to: &records,
+            maximumRecordCount: maximumRecordCount
+        ) else {
+            let (actual, overflow) = records.count.addingReportingOverflow(
+                projectionScratch.fragments.count
+            )
+            throw StrokeFrameSchedulerError
+                .projectedInstanceCapacityExceeded(
+                    actual: overflow ? .max : actual,
+                    maximum: maximumRecordCount
+                )
+        }
+    }
+
+    /// Returns `false` when the dab fits an empty page but not the remaining
+    /// slots in this page. An indivisible dab that exceeds the full page stays
+    /// a typed failure. No destination or logical state is mutated on pause.
+    private func appendProjectedRecordsToPage(
+        for dab: LogicalDab,
+        strategy: TilingStrategy,
+        to records: inout [StrokePreparedProjectedRecord],
+        maximumRecordCount: Int
+    ) throws -> Bool {
         let footprint = StampFootprint(
             brushToWorld: dab.brushToWorld,
             localBounds: AxisAlignedRect(
@@ -2434,20 +4162,12 @@ actor StrokeFrameScheduler {
                 projectionScratch.fragments.count
             )
         }
-        guard records.count < maximumRecordCount else {
-            throw StrokeFrameSchedulerError
-                .projectedInstanceCapacityExceeded(
-                    actual: maximumRecordCount + 1,
-                    maximum: maximumRecordCount
-                )
-        }
-        let remaining = maximumRecordCount - records.count
         do {
             try TilingProjection.project(
                 footprint,
                 using: strategy,
                 into: projectionScratch,
-                maximumFragmentCount: remaining
+                maximumFragmentCount: maximumRecordCount
             )
         } catch is TilingProjectionError {
             throw StrokeFrameSchedulerError
@@ -2460,12 +4180,8 @@ actor StrokeFrameScheduler {
             .addingReportingOverflow(
                 projectionScratch.fragments.count
             )
-        guard !overflow, projectedCount <= maximumRecordCount else {
-            throw StrokeFrameSchedulerError
-                .projectedInstanceCapacityExceeded(
-                    actual: overflow ? .max : projectedCount,
-                    maximum: maximumRecordCount
-                )
+        if overflow || projectedCount > maximumRecordCount {
+            return false
         }
         for fragment in projectionScratch.fragments {
             var isometryOrdinal: UInt8?
@@ -2513,6 +4229,7 @@ actor StrokeFrameScheduler {
             generatedProjectionHighWater,
             records.count
         )
+        return true
     }
 
     private func appendPreparedActualDab(
@@ -2521,19 +4238,41 @@ actor StrokeFrameScheduler {
         maximumDabCount: Int,
         maximumProjectedCount: Int
     ) throws {
-        guard generatedLogicalDabScratch.count < maximumDabCount else {
+        guard try appendPreparedActualDabToPage(
+            dab,
+            strategy: strategy,
+            maximumDabCount: maximumDabCount,
+            maximumProjectedCount: maximumProjectedCount
+        ) else {
+            let (actual, overflow) = generatedProjectionScratch.count
+                .addingReportingOverflow(projectionScratch.fragments.count)
+            throw StrokeFrameSchedulerError
+                .projectedInstanceCapacityExceeded(
+                    actual: overflow ? .max : actual,
+                    maximum: maximumProjectedCount
+                )
+        }
+    }
+
+    private func appendPreparedActualDabToPage(
+        _ dab: LogicalDab,
+        strategy: TilingStrategy,
+        maximumDabCount: Int,
+        maximumProjectedCount: Int
+    ) throws -> Bool {
+        guard transientDabScratch.count < maximumDabCount else {
             throw StrokeFrameSchedulerError.generatedDabCapacityExceeded(
                 actual: maximumDabCount + 1,
                 maximum: maximumDabCount
             )
         }
         let projectedStart = generatedProjectionScratch.count
-        try appendProjectedRecords(
+        guard try appendProjectedRecordsToPage(
             for: dab,
             strategy: strategy,
             to: &generatedProjectionScratch,
             maximumRecordCount: maximumProjectedCount
-        )
+        ) else { return false }
         perSampleLogicalDabScratch.append(dab)
         transientDabScratch.append(
             TransientStrokeDab(
@@ -2544,6 +4283,7 @@ actor StrokeFrameScheduler {
         )
         generatedLogicalDabScratch.append(dab)
         recordGenerationScratchHighWater()
+        return true
     }
 
     private func appendPreparedEstimatedActualDab(
@@ -2721,6 +4461,25 @@ actor StrokeFrameScheduler {
         return overflow ? .max : sum
     }
 
+    private func injectStageCFailure(
+        _ seam: StrokeStageCFailureInjectionSeam,
+        generation: UInt64,
+        drain: StrokeAuthoritativeCandidateDrain? = nil
+    ) throws {
+        guard let stageCFailureInjection else { return }
+        let effectiveDrain = drain ?? authoritativeCandidateDrain
+        try stageCFailureInjection(
+            seam,
+            context: StrokeStageCFailureInjectionContext(
+                generation: generation,
+                drainPhase: effectiveDrain?.phase.rawValue,
+                sampleIndex: effectiveDrain?.sampleIndex ?? 0,
+                consumedWorkUnits:
+                    effectiveDrain?.currentResumeWorkUnits ?? 0
+            )
+        )
+    }
+
     /// The interpolator uses at most sixteen linearized path segments per dab
     /// at the supported spacing range. One extra dab of headroom preserves
     /// spacing carry while keeping adversarial path work explicitly bounded.
@@ -2737,6 +4496,16 @@ actor StrokeFrameScheduler {
     }
 
     private func cancelPreparedStroke(generation: UInt64) {
+        precondition(!authoritativeAllocationProbeIsArmed)
+        let lifecycleProbe = preparationAllocationProbe
+        lifecycleProbe?.arm()
+        defer {
+            lifecycleProbe?.disarmAndRecord(.strokeLifecycleCPU)
+            preparationAllocationProbe = nil
+        }
+        authoritativeCandidateDrain?.arenaTransaction.rollback()
+        authoritativeCandidateDrain = nil
+        candidatePageForcedSurfaceLayer = nil
         preparationCoordinator?.cancel()
         preparationCoordinator = nil
         authoritativeGenerator = nil
@@ -2749,6 +4518,9 @@ actor StrokeFrameScheduler {
         privateSurfaceEncoder?.resetAfterCancellation()
         privateSurfaceEncoder = nil
         outstandingSurfaceLease = nil
+        outstandingZeroWorkContinuationToken = nil
+        outstandingPreparedOutputPageToken = nil
+        preparedOutputPage.cancelBorrow()
         pendingCommitBarrierGeneration = nil
         projectedCarry.reset()
         preparationHasBegun = false
@@ -2772,6 +4544,9 @@ actor StrokeFrameScheduler {
         scheduler.reset()
         outstandingFrame = nil
         outstandingSurfaceLease = nil
+        outstandingZeroWorkContinuationToken = nil
+        outstandingPreparedOutputPageToken = nil
+        candidatePageForcedSurfaceLayer = nil
         pendingCommitBarrierGeneration = nil
         commitRequested = false
         activeGeneration = nil

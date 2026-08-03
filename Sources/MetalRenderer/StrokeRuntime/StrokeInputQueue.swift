@@ -178,6 +178,23 @@ struct StrokeInputQueue: Sendable {
         case let .begin(generation, _, samples),
              let .appendAuthoritative(generation, samples),
              let .finish(generation, samples):
+            let maximumBatchSampleCount =
+                TransientStrokeBufferContract.wholeStrokeSampleCapacity
+            guard samples.count <= maximumBatchSampleCount else {
+                let current = authoritativeSampleCount
+                cancelForCapacityFailure(
+                    generation: generation,
+                    current: current,
+                    incoming: samples.count,
+                    maximum: maximumBatchSampleCount
+                )
+                throw StrokeInputQueueError.authoritativeCapacityExceeded(
+                    generation: generation,
+                    current: current,
+                    incoming: samples.count,
+                    maximum: maximumBatchSampleCount
+                )
+            }
             guard samples.count
                 <= authoritativeCapacity - authoritativeSampleCount
             else {
@@ -428,7 +445,8 @@ struct StrokeInputQueue: Sendable {
     private mutating func cancelForCapacityFailure(
         generation: UInt64,
         current: Int,
-        incoming: Int
+        incoming: Int,
+        maximum: Int? = nil
     ) {
         authoritative.reset()
         prediction.reset()
@@ -440,7 +458,7 @@ struct StrokeInputQueue: Sendable {
             reason: .authoritativeCapacityExceeded(
                 current: current,
                 incoming: incoming,
-                maximum: authoritativeCapacity
+                maximum: maximum ?? authoritativeCapacity
             )
         )
     }
@@ -513,6 +531,7 @@ enum StrokePreparationFailure: Error, Equatable, Sendable {
     case privateSurfaceEncoding(StrokePrivateSurfaceEncodingError)
     case transientBuffer(TransientStrokeBufferError)
     case dabArenaCapacityExceeded(actual: Int, maximum: Int)
+    case injectedStageC(StrokeStageCFailureInjectionSeam)
     case unexpected(String)
 }
 
@@ -937,7 +956,11 @@ final class StrokePreparationMailbox: Sendable {
     }
 
     func takePreparedFrameAcknowledgement()
-        -> (generation: UInt64, token: UInt64)?
+        -> (
+            generation: UInt64,
+            token: UInt64,
+            resumeAuthoritativeContinuation: Bool
+        )?
     {
         state.withLock { state in
             guard !state.workerIsProcessing,
@@ -949,7 +972,11 @@ final class StrokePreparationMailbox: Sendable {
             state.workerIsProcessing = true
             state.pendingAcknowledgement = nil
             state.acknowledgementInFlight = acknowledgement
-            return (acknowledgement.generation, acknowledgement.token)
+            return (
+                acknowledgement.generation,
+                acknowledgement.token,
+                state.discardedGeneration != acknowledgement.generation
+            )
         }
     }
 
@@ -1121,6 +1148,96 @@ final class StrokePreparationMailbox: Sendable {
     }
 }
 
+#if DEBUG
+struct StrokePreparationResultOwnershipProbeSnapshot: Equatable, Sendable {
+    let workerAcknowledgementCount: Int
+    let acknowledgementArrivedBeforeResultRelease: Bool
+    let mainWaitTimedOut: Bool
+}
+
+/// Deterministic test gate for the zero-work ownership boundary. Main arms the
+/// window before consuming a borrowed result. If the worker receives an ACK
+/// before Main releases that result, the worker records the violation and
+/// waits, preventing the test itself from racing the ownership observation.
+final class StrokePreparationResultOwnershipProbe: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var isArmed = false
+    private var resultOwnershipIsReleased = false
+    private var workerHasObservedAcknowledgement = false
+    private var workerAcknowledgementCount = 0
+    private var acknowledgementArrivedBeforeResultRelease = false
+    private var mainWaitTimedOut = false
+
+    var snapshot: StrokePreparationResultOwnershipProbeSnapshot {
+        condition.withLock {
+            StrokePreparationResultOwnershipProbeSnapshot(
+                workerAcknowledgementCount: workerAcknowledgementCount,
+                acknowledgementArrivedBeforeResultRelease:
+                    acknowledgementArrivedBeforeResultRelease,
+                mainWaitTimedOut: mainWaitTimedOut
+            )
+        }
+    }
+
+    func beginResultOwnershipWindow() {
+        condition.withLock {
+            precondition(!isArmed)
+            isArmed = true
+            resultOwnershipIsReleased = false
+            workerHasObservedAcknowledgement = false
+        }
+    }
+
+    func markResultOwnershipReleased() {
+        condition.withLock {
+            guard isArmed else { return }
+            resultOwnershipIsReleased = true
+            condition.broadcast()
+        }
+    }
+
+    func cancelResultOwnershipWindow() {
+        condition.withLock {
+            guard isArmed else { return }
+            resultOwnershipIsReleased = true
+            isArmed = false
+            condition.broadcast()
+        }
+    }
+
+    func observeWorkerAcknowledgement() {
+        condition.lock()
+        guard isArmed else {
+            condition.unlock()
+            return
+        }
+        workerAcknowledgementCount += 1
+        workerHasObservedAcknowledgement = true
+        acknowledgementArrivedBeforeResultRelease =
+            acknowledgementArrivedBeforeResultRelease
+                || !resultOwnershipIsReleased
+        condition.broadcast()
+        while !resultOwnershipIsReleased {
+            condition.wait()
+        }
+        isArmed = false
+        condition.unlock()
+    }
+
+    func waitForWorkerObservation() {
+        condition.lock()
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while isArmed && !workerHasObservedAcknowledgement {
+            guard condition.wait(until: deadline) else {
+                mainWaitTimedOut = true
+                break
+            }
+        }
+        condition.unlock()
+    }
+}
+#endif
+
 /// One long-lived drain task services a stroke mailbox. Input methods remain
 /// synchronous and bounded; all preparation crosses to the coordinator actor.
 final class StrokePreparationBridge: Sendable {
@@ -1129,6 +1246,10 @@ final class StrokePreparationBridge: Sendable {
     private let scheduler: StrokeFrameScheduler
     private let wake: AsyncStream<Void>.Continuation
     private let workerTask: Task<Void, Never>
+    #if DEBUG
+    private let resultOwnershipProbe:
+        OSAllocatedUnfairLock<StrokePreparationResultOwnershipProbe?>
+    #endif
 
     init(
         budget: DepositionFrameBudget,
@@ -1142,6 +1263,13 @@ final class StrokePreparationBridge: Sendable {
         let pair = AsyncStream<Void>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
+        #if DEBUG
+        let resultOwnershipProbe =
+            OSAllocatedUnfairLock<StrokePreparationResultOwnershipProbe?>(
+                initialState: nil
+            )
+        self.resultOwnershipProbe = resultOwnershipProbe
+        #endif
         self.mailbox = mailbox
         self.scheduler = scheduler
         wake = pair.continuation
@@ -1153,10 +1281,17 @@ final class StrokePreparationBridge: Sendable {
                     if let acknowledgement = mailbox
                         .takePreparedFrameAcknowledgement()
                     {
+                        #if DEBUG
+                        resultOwnershipProbe.withLock { $0 }?
+                            .observeWorkerAcknowledgement()
+                        #endif
                         let result = await scheduler
                             .acknowledgePreparedFrame(
                                 generation: acknowledgement.generation,
-                                frameToken: acknowledgement.token
+                                frameToken: acknowledgement.token,
+                                resumeAuthoritativeContinuation:
+                                    acknowledgement
+                                        .resumeAuthoritativeContinuation
                             )
                         mailbox.completePreparedFrameAcknowledgement(
                             generation: acknowledgement.generation,
@@ -1221,6 +1356,39 @@ final class StrokePreparationBridge: Sendable {
             token: token
         )
         wake.yield()
+        #if DEBUG
+        resultOwnershipProbe.withLock { $0 }?
+            .waitForWorkerObservation()
+        #endif
+    }
+
+    #if DEBUG
+    func setResultOwnershipProbeForTesting(
+        _ probe: StrokePreparationResultOwnershipProbe?
+    ) {
+        resultOwnershipProbe.withLock { $0 = probe }
+    }
+
+    func beginResultOwnershipWindowForTesting() {
+        resultOwnershipProbe.withLock { $0 }?
+            .beginResultOwnershipWindow()
+    }
+
+    func markResultOwnershipReleasedForTesting() {
+        resultOwnershipProbe.withLock { $0 }?
+            .markResultOwnershipReleased()
+    }
+
+    func cancelResultOwnershipWindowForTesting() {
+        resultOwnershipProbe.withLock { $0 }?
+            .cancelResultOwnershipWindow()
+    }
+    #endif
+
+    package func stageCContinuationMetricsForAllocationHarness() async
+        -> StrokeStageCContinuationMetrics
+    {
+        await scheduler.stageCContinuationMetrics
     }
 
     #if DEBUG

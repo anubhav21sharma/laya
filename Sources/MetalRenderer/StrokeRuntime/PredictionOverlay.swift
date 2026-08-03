@@ -175,12 +175,12 @@ public final class PredictionOverlay {
     /// Renderer hot-path variant. Both the submitted footprint and the next
     /// footprint are retained in preallocated storage.
     @discardableResult
-    func planReplacementInPlace(
+    func planReplacementInPlace<DirtyRegions: Collection>(
         epoch: UInt64,
         provenance: PredictionProvenanceBoundary?,
         admission: PredictionOverlayAdmission,
-        dirtyRegions: [PixelRect]
-    ) -> Bool {
+        dirtyRegions: DirtyRegions
+    ) -> Bool where DirtyRegions.Element == PixelRect {
         guard epoch > surface.visibleEpoch,
               !hasPlannedReplacement || epoch > plannedEpoch else {
             return false

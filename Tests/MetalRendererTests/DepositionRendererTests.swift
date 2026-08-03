@@ -736,7 +736,7 @@ struct DepositionRendererTests {
             sample: depositionSample(.ended),
             maximumRetainedBytes: 1_000_000
         )
-        _ = try setup.renderer.finishCommitForHarness()
+        try await prepareOffMainCommit(setup.renderer)
         let committed = depositionTextureBytes(
             try setup.renderer.renderOffscreenDisplayForHarness(
                 width: 64,
@@ -1581,7 +1581,7 @@ struct DepositionRendererTests {
             sample: depositionSample(.ended, x: 48),
             maximumRetainedBytes: 1_000_000
         )
-        try await prepareOffMainCommit(setup.renderer)
+        _ = try setup.renderer.finishCommitForHarness()
         let preview = depositionTextureBytes(
             try setup.renderer.renderOffscreenDisplayForHarness(
                 width: 64,
@@ -2187,6 +2187,660 @@ struct DepositionRendererTests {
                     == false
             )
         }
+    }
+
+    @Test
+    func stageCAppendOnlyFixtureRejectsReplayLimits() {
+        #expect(throws: BrushDefinitionValidationError.invalidReplay) {
+            _ = try stageCMetalTestProgram(
+                id: "test.renderer.stage-c-invalid-append-only-limits",
+                replayMode: .appendOnly,
+                replayLimits: BrushRecipePolicy.replayTailLimits
+            )
+        }
+    }
+
+    @Test
+    @MainActor
+    func stageCTimedRadialPagingMatchesIncrementallyDrainedCanonicalPixels()
+        async throws
+    {
+        let radial = FiniteSymmetryConfiguration.radial(
+            RadialSymmetryConfiguration(
+                kind: .mandala,
+                rayCount: 32,
+                center: WorldPoint(x: 32, y: 32)
+            )
+        )
+        guard let paged = try makeDepositionRendererSetup(finite: radial),
+              let incremental = try makeDepositionRendererSetup(finite: radial)
+        else { return }
+        let program = try stageCMetalTestProgram(
+            id: "test.renderer.stage-c-radial-paging",
+            baseSpacingFraction: 0.1,
+            replayMode: .appendOnly,
+            emission: BrushEmissionDefinition(
+                mode: .time,
+                timeInterval: 1.0 / 240
+            )
+        )
+        let pagedBrush = try await paged.compileBrush(
+            definition: program.definition
+        )
+        let incrementalBrush = try await incremental.compileBrush(
+            definition: program.definition
+        )
+        try paged.renderer.activateDrawBrush(pagedBrush)
+        try incremental.renderer.activateDrawBrush(incrementalBrush)
+
+        let pagedToken = RendererOperationToken(rawValue: 91_100)
+        let incrementalToken = RendererOperationToken(rawValue: 91_101)
+        let began = timedDepositionSample(
+            .began,
+            x: 40,
+            timestamp: 0
+        )
+        var pagedDabs: [LogicalDab] = []
+        paged.renderer.onLogicalDabsGenerated = { pagedDabs.append($0) }
+        try paged.renderer.beginStroke(
+            token: pagedToken,
+            sample: began,
+            style: depositionStyle(
+                pagedBrush,
+                compositeMode: .draw,
+                diameter: 32
+            )
+        )
+        try incremental.renderer.beginStroke(
+            token: incrementalToken,
+            sample: began,
+            style: depositionStyle(
+                incrementalBrush,
+                compositeMode: .draw,
+                diameter: 32
+            )
+        )
+        try await drainOffMainPreparedFrames(
+            paged.renderer,
+            minimumFrameCount: 1
+        )
+        try await drainOffMainPreparedFrames(
+            incremental.renderer,
+            minimumFrameCount: 1
+        )
+
+        // One input interval is intentionally large enough for the production
+        // encoder to cross the per-frame projection budget. The assertion
+        // below uses the surface encoder's measured cumulative work rather
+        // than inferring it from ray count. The reference drains three smaller
+        // prefixes to prove input partitioning does not change final pixels.
+        for candidateIndex in stride(from: 40, through: 120, by: 40) {
+            let fraction = Float(candidateIndex) / 160
+            try incremental.renderer.appendStroke(
+                token: incrementalToken,
+                sample: timedDepositionSample(
+                    .moved,
+                    x: 40 + 16 * fraction,
+                    timestamp: Double(candidateIndex) / 240
+                )
+            )
+            try await drainOffMainPreparedFrames(
+                incremental.renderer,
+                minimumFrameCount: 1
+            )
+        }
+        let ended = timedDepositionSample(
+            .ended,
+            x: 56,
+            timestamp: 160.0 / 240
+        )
+        try paged.renderer.requestStrokeCommit(
+            token: pagedToken,
+            sample: ended,
+            maximumRetainedBytes: 1_000_000
+        )
+        try incremental.renderer.requestStrokeCommit(
+            token: incrementalToken,
+            sample: ended,
+            maximumRetainedBytes: 1_000_000
+        )
+        try await prepareOffMainCommit(paged.renderer)
+        try await prepareOffMainCommit(incremental.renderer)
+        let pagedScheduler = await paged.renderer
+            .offMainSchedulerSnapshotForTesting()
+        let pagedSurface = try #require(
+            paged.renderer.offMainSurfaceSnapshotForTesting
+        )
+        #expect(pagedScheduler.authoritativeCandidatePageCount > 1)
+        #expect(pagedScheduler.authoritativeCandidateResumeCount > 1)
+        #expect(
+            pagedScheduler.synchronousCompatibilityReplayInvocationCount == 0
+        )
+        #expect(
+            pagedScheduler.authoritativeCandidateProjectionHighWater <= 4_096
+        )
+        #expect(
+            pagedScheduler.maximumPreparationWorkUnitsPerFrame <= 4_096
+        )
+        #expect(pagedSurface.encodedInstanceCount > 4_096)
+
+        _ = try paged.renderer.finishCommitForHarness()
+        _ = try incremental.renderer.finishCommitForHarness()
+        let pagedPixels = depositionTextureBytes(
+            try paged.renderer.copyCanonicalForHarness()
+        )
+        let incrementalPixels = depositionTextureBytes(
+            try incremental.renderer.copyCanonicalForHarness()
+        )
+        #expect(pagedDabs.count == 161)
+        #expect(pagedDabs.map(\.ordinal) == Array(0...UInt64(160)))
+        #expect(pagedPixels.contains { $0 != 0 })
+        #expect(pagedPixels == incrementalPixels)
+        #expect(paged.renderer.isIdle)
+        #expect(incremental.renderer.isIdle)
+    }
+
+    @Test
+    @MainActor
+    func stageCOffCanvasMultiPageZeroWorkCommitsAndReusesProductionRoute()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup(finite: .plain)
+        else { return }
+        let program = try stageCMetalTestProgram(
+            id: "test.renderer.stage-c-zero-work-production",
+            replayMode: .appendOnly,
+            emission: BrushEmissionDefinition(
+                mode: .time,
+                timeInterval: 1.0 / 240
+            )
+        )
+        let brush = try await setup.compileBrush(
+            definition: program.definition
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let resultOwnershipProbe = StrokePreparationResultOwnershipProbe()
+        setup.renderer.setStrokePreparationResultOwnershipProbeForTesting(
+            resultOwnershipProbe
+        )
+        let canonicalBefore = depositionTextureBytes(
+            try setup.renderer.copyCanonicalForHarness()
+        )
+        let revisionBefore = setup.renderer.harnessRevision
+        let revisionBytesBefore =
+            setup.renderer.harnessRasterRevisionResidentBytes
+        let documentDomainLockedBefore =
+            setup.renderer.documentDomainLocked
+        let radialGeometryLockedBefore =
+            setup.renderer.radialGeometryLocked
+        let offCanvasToken = RendererOperationToken(rawValue: 91_110)
+        var offCanvasDabs: [LogicalDab] = []
+        var offCanvasCompletions: [RendererOperationCompletion] = []
+        setup.renderer.onLogicalDabsGenerated = {
+            offCanvasDabs.append($0)
+        }
+        setup.renderer.onOperationCompleted = {
+            offCanvasCompletions.append($0)
+        }
+
+        try setup.renderer.beginStroke(
+            token: offCanvasToken,
+            sample: timedDepositionSample(
+                .began,
+                x: -10_000,
+                timestamp: 0
+            ),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 8
+            )
+        )
+        try setup.renderer.requestStrokeCommit(
+            token: offCanvasToken,
+            sample: timedDepositionSample(
+                .ended,
+                x: -10_000,
+                timestamp: 1_025.0 / 240
+            ),
+            maximumRetainedBytes: 1_000_000
+        )
+        try await prepareOffMainNoOpCompletion(setup.renderer)
+
+        let zeroWorkScheduler = await setup.renderer
+            .offMainSchedulerSnapshotForTesting()
+        #expect(zeroWorkScheduler.authoritativeCandidatePageCount > 2)
+        #expect(zeroWorkScheduler.authoritativeCandidateResumeCount > 2)
+        #expect(
+            zeroWorkScheduler.synchronousCompatibilityReplayInvocationCount
+                == 0
+        )
+        #expect(zeroWorkScheduler.authoritativeCandidateProjectionHighWater == 0)
+        #expect(
+            setup.renderer.offMainZeroWorkLeaseCountForTesting > 1
+        )
+
+        #expect(!setup.renderer.isIdle)
+        #expect(
+            !setup.renderer.offMainStrokeWorkspaceIsAvailableForTesting
+        )
+        #expect(offCanvasCompletions.count == 1)
+        if offCanvasCompletions.count == 1,
+           case let .operationSuccess(completedToken) =
+            offCanvasCompletions[0]
+        {
+            #expect(completedToken == offCanvasToken)
+        } else {
+            Issue.record(
+                "Clipped no-op commit must publish exactly one operation success"
+            )
+        }
+        #expect(offCanvasDabs.count == 1_026)
+        #expect(
+            offCanvasDabs.map(\.ordinal) == Array(0...UInt64(1_025))
+        )
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
+        )
+        #expect(setup.renderer.harnessRevision == revisionBefore)
+        #expect(
+            setup.renderer.harnessRasterRevisionResidentBytes
+                == revisionBytesBefore
+        )
+        #expect(
+            setup.renderer.documentDomainLocked
+                == documentDomainLockedBefore
+        )
+        #expect(
+            setup.renderer.radialGeometryLocked
+                == radialGeometryLockedBefore
+        )
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+        #expect(setup.renderer.isIdle)
+        let resultOwnership = resultOwnershipProbe.snapshot
+        #expect(resultOwnership.workerAcknowledgementCount > 1)
+        #expect(
+            !resultOwnership.acknowledgementArrivedBeforeResultRelease
+        )
+        #expect(!resultOwnership.mainWaitTimedOut)
+        #expect(
+            setup.renderer.offMainStrokeWorkspaceIsAvailableForTesting
+        )
+        #expect(
+            setup.renderer.harnessRasterRevisionResidentBytes
+                == revisionBytesBefore
+        )
+        #expect(
+            setup.renderer.documentDomainLocked
+                == documentDomainLockedBefore
+        )
+        #expect(
+            setup.renderer.radialGeometryLocked
+                == radialGeometryLockedBefore
+        )
+
+        setup.renderer.onLogicalDabsGenerated = nil
+        setup.renderer.onOperationCompleted = nil
+        let visibleToken = RendererOperationToken(rawValue: 91_111)
+        try setup.renderer.beginStroke(
+            token: visibleToken,
+            sample: timedDepositionSample(
+                .began,
+                x: 16,
+                timestamp: 10
+            ),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 8
+            )
+        )
+        try setup.renderer.requestStrokeCommit(
+            token: visibleToken,
+            sample: timedDepositionSample(
+                .ended,
+                x: 48,
+                timestamp: 10 + 4.0 / 240
+            ),
+            maximumRetainedBytes: 1_000_000
+        )
+        try await prepareOffMainCommit(setup.renderer)
+        _ = try setup.renderer.finishCommitForHarness()
+
+        #expect(setup.renderer.isIdle)
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) != canonicalBefore
+        )
+        let ownershipAfterVisibleStroke = resultOwnershipProbe.snapshot
+        #expect(
+            ownershipAfterVisibleStroke.workerAcknowledgementCount
+                == resultOwnership.workerAcknowledgementCount
+        )
+        #expect(
+            !ownershipAfterVisibleStroke
+                .acknowledgementArrivedBeforeResultRelease
+        )
+        #expect(!ownershipAfterVisibleStroke.mainWaitTimedOut)
+    }
+
+    @Test
+    @MainActor
+    func stageCVisibleCandidateContinuationRejectsOvertakingThenRapidlyReuses()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup(finite: .plain)
+        else { return }
+        let firstProgram = try stageCMetalTestProgram(
+            id: "test.renderer.stage-c-visible-continuation-first",
+            replayMode: .appendOnly,
+            emission: BrushEmissionDefinition(
+                mode: .time,
+                timeInterval: 1.0 / 240
+            )
+        )
+        let replacementProgram = try stageCMetalTestProgram(
+            id: "test.renderer.stage-c-visible-continuation-replacement",
+            replayMode: .appendOnly,
+            emission: BrushEmissionDefinition(
+                mode: .time,
+                timeInterval: 1.0 / 240
+            )
+        )
+        let firstBrush = try await setup.compileBrush(
+            definition: firstProgram.definition
+        )
+        let replacementBrush = try await setup.compileBrush(
+            definition: replacementProgram.definition
+        )
+        try setup.renderer.activateDrawBrush(firstBrush)
+
+        // Seed two valid raster references so the undo and redo restore routes
+        // reach the renderer's active-stroke gate rather than failing because
+        // of a forged or missing history payload.
+        var seedReceipt: RasterMutationReceipt?
+        setup.renderer.onOperationCompleted = { completion in
+            if case let .rasterSuccess(receipt) = completion {
+                seedReceipt = receipt
+            }
+        }
+        try setup.renderer.requestClearForHarness(
+            token: RendererOperationToken(rawValue: 91_120),
+            maximumRetainedBytes: 1_000_000,
+            forceFailure: false
+        )
+        try setup.renderer.finishRasterOperationForHarness()
+        let history = try #require(seedReceipt)
+        setup.renderer.onOperationCompleted = nil
+        let canonicalBefore = depositionTextureBytes(
+            try setup.renderer.copyCanonicalForHarness()
+        )
+
+        let cancellationCount = setup.renderer
+            .offMainTerminalCancellationPublicationCountForTesting
+        let token = RendererOperationToken(rawValue: 91_121)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: timedDepositionSample(
+                .began,
+                x: 16,
+                timestamp: 0
+            ),
+            style: depositionStyle(
+                firstBrush,
+                compositeMode: .draw,
+                diameter: 16
+            )
+        )
+        try await drainOffMainPreparedFrames(
+            setup.renderer,
+            minimumFrameCount: 1
+        )
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: timedDepositionSample(
+                .moved,
+                x: 48,
+                timestamp: 513.0 / 240
+            )
+        )
+        let paused = try await awaitOffMainCandidateContinuationResult(
+            setup.renderer
+        )
+        #expect(paused.mailbox.pendingResultCount == 1)
+        #expect(paused.mailbox.awaitingPreparedFrameSubmission)
+        #expect(paused.scheduler.authoritativeCandidateContinuationPending)
+        #expect(
+            paused.scheduler.synchronousCompatibilityReplayInvocationCount
+                == 0
+        )
+
+        #expect(throws: MetalRendererError.commitPendingInput) {
+            try setup.renderer.requestResizeForHarness(
+                token: RendererOperationToken(rawValue: 91_122),
+                to: PixelSize(width: 96, height: 80),
+                maximumRetainedBytes: 1_000_000,
+                forceResourceAllocationFailure: false
+            )
+        }
+        #expect(throws: MetalRendererError.commitPendingInput) {
+            try setup.renderer.requestClearForHarness(
+                token: RendererOperationToken(rawValue: 91_123),
+                maximumRetainedBytes: 1_000_000,
+                forceFailure: false
+            )
+        }
+        #expect(throws: MetalRendererError.commitPendingInput) {
+            try setup.renderer.requestRasterRestoreForHarness(
+                token: RendererOperationToken(rawValue: 91_124),
+                revision: history.before,
+                forceFailure: false
+            )
+        }
+        #expect(throws: MetalRendererError.commitPendingInput) {
+            try setup.renderer.requestRasterRestoreForHarness(
+                token: RendererOperationToken(rawValue: 91_125),
+                revision: history.after,
+                forceFailure: false
+            )
+        }
+        #expect(
+            throws: MetalRendererError.compiledBrushActivationRequiresIdle
+        ) {
+            try setup.renderer.activateDrawBrush(replacementBrush)
+        }
+        let afterConflicts = await setup.renderer
+            .offMainSchedulerSnapshotForTesting()
+        #expect(afterConflicts.authoritativeCandidateContinuationPending)
+        #expect(setup.renderer.activeStroke?.token == token)
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
+        )
+
+        try setup.renderer.cancelStroke(token: token)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+        let cancelled = await setup.renderer
+            .offMainSchedulerSnapshotForTesting()
+        #expect(!cancelled.authoritativeCandidateContinuationPending)
+        #expect(cancelled.activeGeneration == nil)
+        #expect(setup.renderer.isIdle)
+        #expect(
+            setup.renderer
+                .offMainTerminalCancellationPublicationCountForTesting
+                == cancellationCount + 1
+        )
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
+        )
+
+        try setup.renderer.activateDrawBrush(replacementBrush)
+        let nextToken = RendererOperationToken(rawValue: 91_126)
+        try setup.renderer.beginStroke(
+            token: nextToken,
+            sample: timedDepositionSample(
+                .began,
+                x: 20,
+                timestamp: 10
+            ),
+            style: depositionStyle(
+                replacementBrush,
+                compositeMode: .draw,
+                diameter: 16
+            )
+        )
+        try setup.renderer.requestStrokeCommit(
+            token: nextToken,
+            sample: timedDepositionSample(
+                .ended,
+                x: 44,
+                timestamp: 10 + 4.0 / 240
+            ),
+            maximumRetainedBytes: 1_000_000
+        )
+        try await prepareOffMainCommit(setup.renderer)
+        _ = try setup.renderer.finishCommitForHarness()
+        #expect(setup.renderer.isIdle)
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) != canonicalBefore
+        )
+
+        setup.renderer.releaseRasterRevisions([
+            history.before.id,
+            history.after.id,
+        ])
+    }
+
+    @Test
+    @MainActor
+    func stageCZeroWorkCandidateContinuationCancelsWithoutStaleRapidReuse()
+        async throws
+    {
+        guard let setup = try makeDepositionRendererSetup(finite: .plain)
+        else { return }
+        let program = try stageCMetalTestProgram(
+            id: "test.renderer.stage-c-zero-work-continuation-cancel",
+            replayMode: .appendOnly,
+            emission: BrushEmissionDefinition(
+                mode: .time,
+                timeInterval: 1.0 / 240
+            )
+        )
+        let brush = try await setup.compileBrush(
+            definition: program.definition
+        )
+        try setup.renderer.activateDrawBrush(brush)
+        let canonicalBefore = depositionTextureBytes(
+            try setup.renderer.copyCanonicalForHarness()
+        )
+        let cancellationCount = setup.renderer
+            .offMainTerminalCancellationPublicationCountForTesting
+        var publishedDabs: [LogicalDab] = []
+        setup.renderer.onLogicalDabsGenerated = {
+            publishedDabs.append($0)
+        }
+
+        let token = RendererOperationToken(rawValue: 91_130)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: timedDepositionSample(
+                .began,
+                x: -10_000,
+                timestamp: 0
+            ),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 16
+            )
+        )
+        try await drainOffMainPreparedFrames(
+            setup.renderer,
+            minimumFrameCount: 0
+        )
+        #expect(publishedDabs.map(\.ordinal) == [0])
+        publishedDabs.removeAll(keepingCapacity: true)
+
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: timedDepositionSample(
+                .moved,
+                x: -10_000,
+                timestamp: 1_025.0 / 240
+            )
+        )
+        let paused = try await awaitOffMainCandidateContinuationResult(
+            setup.renderer
+        )
+        #expect(paused.mailbox.pendingResultCount == 1)
+        #expect(paused.mailbox.awaitingPreparedFrameSubmission)
+        #expect(paused.scheduler.authoritativeCandidateContinuationPending)
+        #expect(paused.scheduler.authoritativeCandidateProjectionHighWater == 0)
+        #expect(
+            paused.scheduler.synchronousCompatibilityReplayInvocationCount
+                == 0
+        )
+
+        try setup.renderer.cancelStroke(token: token)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+        let cancelled = await setup.renderer
+            .offMainSchedulerSnapshotForTesting()
+        #expect(!cancelled.authoritativeCandidateContinuationPending)
+        #expect(cancelled.activeGeneration == nil)
+        #expect(setup.renderer.isIdle)
+        #expect(publishedDabs.isEmpty)
+        #expect(
+            setup.renderer
+                .offMainTerminalCancellationPublicationCountForTesting
+                == cancellationCount + 1
+        )
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == canonicalBefore
+        )
+
+        let nextToken = RendererOperationToken(rawValue: 91_131)
+        try setup.renderer.beginStroke(
+            token: nextToken,
+            sample: timedDepositionSample(
+                .began,
+                x: 20,
+                timestamp: 10
+            ),
+            style: depositionStyle(
+                brush,
+                compositeMode: .draw,
+                diameter: 16
+            )
+        )
+        try setup.renderer.requestStrokeCommit(
+            token: nextToken,
+            sample: timedDepositionSample(
+                .ended,
+                x: 44,
+                timestamp: 10 + 4.0 / 240
+            ),
+            maximumRetainedBytes: 1_000_000
+        )
+        try await prepareOffMainCommit(setup.renderer)
+        _ = try setup.renderer.finishCommitForHarness()
+        #expect(publishedDabs.count == 5)
+        #expect(publishedDabs.map(\.ordinal) == Array(0...UInt64(4)))
+        #expect(setup.renderer.isIdle)
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) != canonicalBefore
+        )
     }
 
     @Test
@@ -3812,13 +4466,45 @@ private func prepareOffMainCommit(
             _ = try renderer.completeNextPendingInteractiveFrame()
         }
         try renderer.prepareCompiledCommitIfReady()
+        if renderer.isIdle {
+            return
+        }
         if renderer.activeStroke?.pendingRevisions != nil {
             return
         }
         await Task.yield()
     }
+    let mailbox = renderer.offMainPreparationMailboxSnapshotForTesting
+    let scheduler = await renderer.offMainSchedulerSnapshotForTesting()
+    print(
+        "OFF_MAIN_COMMIT_TIMEOUT "
+            + "mailbox=\(String(describing: mailbox)) "
+            + "scheduler=\(String(describing: scheduler)) "
+            + "pending_surface=\(renderer.hasPendingOffMainSurfaceLeaseForTesting) "
+            + "submitted_surface=\(renderer.hasSubmittedOffMainSurfaceLeaseForTesting)"
+    )
     throw MetalRendererError.commandFailed(
         "off-main test commit preparation exceeded its bound"
+    )
+}
+
+@MainActor
+private func prepareOffMainNoOpCompletion(
+    _ renderer: GridRenderer
+) async throws {
+    for _ in 0..<20_000 {
+        try renderer.drainCompletedInteractiveOperations()
+        if renderer.hasPendingOffMainSurfaceLeaseForTesting {
+            _ = try renderer.completeNextPendingInteractiveFrame()
+        }
+        try renderer.prepareCompiledCommitIfReady()
+        if renderer.activeStroke == nil {
+            return
+        }
+        await Task.yield()
+    }
+    throw MetalRendererError.commandFailed(
+        "off-main no-op completion exceeded its bound"
     )
 }
 
@@ -3881,6 +4567,31 @@ private func awaitOffMainWorkspaceAvailable(
 }
 
 @MainActor
+private func awaitOffMainCandidateContinuationResult(
+    _ renderer: GridRenderer
+) async throws -> (
+    mailbox: StrokePreparationMailboxSnapshot,
+    scheduler: StrokeFrameSchedulerSnapshot
+) {
+    for _ in 0..<20_000 {
+        if let mailbox = renderer.offMainPreparationMailboxSnapshotForTesting,
+           mailbox.pendingResultCount > 0,
+           mailbox.awaitingPreparedFrameSubmission
+        {
+            let scheduler = await renderer
+                .offMainSchedulerSnapshotForTesting()
+            if scheduler.authoritativeCandidateContinuationPending {
+                return (mailbox, scheduler)
+            }
+        }
+        await Task.yield()
+    }
+    throw MetalRendererError.commandFailed(
+        "off-main candidate continuation did not pause at a prepared result"
+    )
+}
+
+@MainActor
 private func awaitOffMainRendererFailure(
     _ renderer: GridRenderer
 ) async throws -> MetalRendererError {
@@ -3926,7 +4637,8 @@ private func depositionPixelDigest(_ bytes: [UInt8]) -> String {
 
 @MainActor
 private func makeDepositionRendererSetup(
-    tiling: TilingKind = .grid
+    tiling: TilingKind = .grid,
+    finite: FiniteSymmetryConfiguration? = nil
 )
     throws -> DepositionRendererSetup?
 {
@@ -3936,14 +4648,22 @@ private func makeDepositionRendererSetup(
         return nil
     }
     let library = try depositionRendererLibrary(device: device)
+    let configuration: TilingCanvasConfiguration = if let finite {
+        try TilingCanvasConfiguration(
+            pixelSize: PixelSize(width: 64, height: 64),
+            finiteConfiguration: finite
+        )
+    } else {
+        try TilingCanvasConfiguration(
+            pixelSize: PixelSize(width: 64, height: 64),
+            tiling: tiling
+        )
+    }
     let renderer = try GridRenderer(
         device: device,
         library: library,
         drawableSize: PatternSize(width: 64, height: 64),
-        configuration: TilingCanvasConfiguration(
-            pixelSize: PixelSize(width: 64, height: 64),
-            tiling: tiling
-        )
+        configuration: configuration
     )
     let profile = try BrushDeviceProfile(
         registryID: device.registryID,
@@ -4001,6 +4721,18 @@ private func depositionSample(
     .mouse(
         position: ScreenPoint(x: x, y: y),
         timestamp: 0,
+        phase: phase
+    )
+}
+
+private func timedDepositionSample(
+    _ phase: StrokePhase,
+    x: Float,
+    timestamp: TimeInterval
+) -> StrokeSample {
+    .mouse(
+        position: ScreenPoint(x: x, y: 32),
+        timestamp: timestamp,
         phase: phase
     )
 }

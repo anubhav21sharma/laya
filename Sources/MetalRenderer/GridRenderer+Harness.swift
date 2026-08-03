@@ -669,6 +669,7 @@ extension GridRenderer {
             let observedRevision = progressWaiter.currentRevision
             try advanceStrokePreparationForAllocationHarness()
             try prepareCompiledCommitIfReady()
+            if activeStroke == nil { return }
             if activeStroke?.pendingRevisions != nil {
                 return
             }

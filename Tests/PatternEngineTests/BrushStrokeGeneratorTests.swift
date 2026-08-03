@@ -525,6 +525,75 @@ func schemaV2GeneratorPageRetryResumesAtTheRejectedDab() throws {
 }
 
 @Test
+func schemaV2GeneratorPausePreservesExactRejectedCandidateAndRealErrors()
+    throws
+{
+    enum Rejected: Error { case once }
+    var generator = try stageCGenerator(
+        id: "test.generator.emission.page-pause",
+        emission: BrushEmissionDefinition(mode: .time, timeInterval: 0.1),
+        seed: 0xC1_11_15
+    )
+    generator.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    let startingCursor = try generator.emissionCursor(
+        for: generatorSample(x: 0, timestamp: 1, phase: .ended),
+        maximumPathSubdivisionCount: 4_096
+    )
+
+    var paused = startingCursor
+    var acceptedBeforePause: [DabAttributes] = []
+    var rejectedByPause: DabAttributes?
+    let pausePage = try paused.emitNextPageDeciding { dab in
+        if dab.ordinal == 4 {
+            rejectedByPause = dab
+            return .pause
+        }
+        acceptedBeforePause.append(dab)
+        return .accept
+    }
+    #expect(pausePage == .init(emittedCount: 3, hasMore: true))
+    #expect(acceptedBeforePause.map(\.ordinal) == [1, 2, 3])
+    #expect(rejectedByPause?.ordinal == 4)
+
+    var failed = startingCursor
+    var acceptedBeforeError: [DabAttributes] = []
+    var rejectedByError: DabAttributes?
+    #expect(throws: Rejected.once) {
+        _ = try failed.emitNextPageDeciding { dab in
+            if dab.ordinal == 4 {
+                rejectedByError = dab
+                throw Rejected.once
+            }
+            acceptedBeforeError.append(dab)
+            return .accept
+        }
+    }
+
+    // Full cursor equality covers the merger's canonical candidate key and
+    // every random/ordinal continuation owner, not only the visible dab.
+    #expect(paused == failed)
+    #expect(acceptedBeforePause == acceptedBeforeError)
+    #expect(rejectedByPause == rejectedByError)
+
+    var resumed: [DabAttributes] = []
+    let resumedPage = try paused.emitNextPage { resumed.append($0) }
+    var baseline = startingCursor
+    var expected: [DabAttributes] = []
+    let baselinePage = try baseline.emitNextPage { expected.append($0) }
+
+    #expect(resumed.first == rejectedByPause)
+    #expect(acceptedBeforePause + resumed == expected)
+    #expect(
+        pausePage.emittedCount + resumedPage.emittedCount
+            == baselinePage.emittedCount
+    )
+    #expect(resumedPage.hasMore == baselinePage.hasMore)
+    #expect(paused.completedGenerator == baseline.completedGenerator)
+}
+
+@Test
 func schemaV2PagedGeneratorMatchesCompatibilityTraceAcrossLifecycleAndCorners()
     throws
 {

@@ -50,10 +50,12 @@ struct RadialSymmetryKernel: Equatable, Sendable {
         var polygonA: [SIMD2<Float>] = []
         var polygonB: [SIMD2<Float>] = []
         var result: [TilingImage] = []
+        var sortScratch: [TilingImage] = []
         try! populateImages(
             intersecting: worldBounds,
             polygonA: &polygonA,
             polygonB: &polygonB,
+            sortScratch: &sortScratch,
             result: &result
         )
         return result
@@ -63,6 +65,7 @@ struct RadialSymmetryKernel: Equatable, Sendable {
         intersecting worldBounds: AxisAlignedRect,
         polygonA: inout [SIMD2<Float>],
         polygonB: inout [SIMD2<Float>],
+        sortScratch: inout [TilingImage],
         result: inout [TilingImage],
         maximumImageCount: Int? = nil
     ) throws {
@@ -144,7 +147,11 @@ struct RadialSymmetryKernel: Equatable, Sendable {
                 )
             }
         }
-        result.sort(by: radialImagePrecedes)
+        allocationFreeStableSort(
+            &result,
+            scratch: &sortScratch,
+            by: radialImagePrecedes
+        )
     }
 
     private func foldedLogicalPoint(
@@ -502,15 +509,22 @@ private func radialConvexClip(
 private func radialBounds(
     _ points: [SIMD2<Float>]
 ) -> AxisAlignedRect {
-    AxisAlignedRect(
-        minimum: SIMD2(
-            points.map(\.x).min()!,
-            points.map(\.y).min()!
-        ),
-        maximum: SIMD2(
-            points.map(\.x).max()!,
-            points.map(\.y).max()!
+    precondition(!points.isEmpty)
+    var minimum = points[0]
+    var maximum = points[0]
+    for point in points.dropFirst() {
+        minimum = SIMD2(
+            min(minimum.x, point.x),
+            min(minimum.y, point.y)
         )
+        maximum = SIMD2(
+            max(maximum.x, point.x),
+            max(maximum.y, point.y)
+        )
+    }
+    return AxisAlignedRect(
+        minimum: minimum,
+        maximum: maximum
     )
 }
 

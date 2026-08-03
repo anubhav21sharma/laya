@@ -45,13 +45,18 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
     private var storage: [TransientStrokeDab?]
     private var slotGeneration: [UInt64]
     private var slotTransaction: [UInt64]
-    private var retainedMarker: [UInt64]
+    private var retainedMarkerA: [UInt64]
+    private var retainedMarkerB: [UInt64]
     private var actualSearchCursor = 0
     private var predictionSearchCursor = 0
     private var nextTransaction: UInt64 = 1
     private var nextGeneration: UInt64 = 1
     private var nextRetainedMarker: UInt64 = 1
     private var activeTransaction: UInt64?
+    private var activeOperation: UInt64?
+    private var nextOperation: UInt64 = 1
+    private var activeRetainedLaneIsA = true
+    private var activeRetainedMarker: UInt64 = 0
 
     public struct DiagnosticSnapshot: Equatable, Sendable {
         public struct OccupiedSlot: Equatable, Sendable {
@@ -62,6 +67,8 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
         }
 
         public let occupiedSlotCount: Int
+        public let hasActiveTransaction: Bool
+        public let hasActiveOperation: Bool
         public let actualSearchCursor: Int
         public let predictionSearchCursor: Int
         public let committedGenerationChecksum: UInt64
@@ -73,7 +80,7 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
         var committedGenerationChecksum: UInt64 = 0
         var occupiedSlots: [DiagnosticSnapshot.OccupiedSlot] = []
         occupiedSlots.reserveCapacity(Self.retainedCapacity * 2)
-        for slot in storage.indices where slotGeneration[slot] != 0 {
+        for slot in storage.indices where isSlotLive(slot) {
             occupiedSlotCount += 1
             committedGenerationChecksum &+= slotGeneration[slot]
             occupiedSlots.append(
@@ -81,12 +88,16 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
                     index: slot,
                     dab: storage[slot]!,
                     generation: slotGeneration[slot],
-                    retainedMarker: retainedMarker[slot]
+                    retainedMarker: activeRetainedLaneIsA
+                        ? retainedMarkerA[slot]
+                        : retainedMarkerB[slot]
                 )
             )
         }
         return DiagnosticSnapshot(
             occupiedSlotCount: occupiedSlotCount,
+            hasActiveTransaction: activeTransaction != nil,
+            hasActiveOperation: activeOperation != nil,
             actualSearchCursor: actualSearchCursor,
             predictionSearchCursor: predictionSearchCursor,
             committedGenerationChecksum: committedGenerationChecksum,
@@ -100,19 +111,16 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
         storage = [TransientStrokeDab?](repeating: nil, count: capacity)
         slotGeneration = [UInt64](repeating: 0, count: capacity)
         slotTransaction = [UInt64](repeating: 0, count: capacity)
-        retainedMarker = [UInt64](repeating: 0, count: capacity)
+        retainedMarkerA = [UInt64](repeating: 0, count: capacity)
+        retainedMarkerB = [UInt64](repeating: 0, count: capacity)
     }
 
     public func reset() {
-        storage.indices.forEach {
-            storage[$0] = nil
-            slotGeneration[$0] = 0
-            slotTransaction[$0] = 0
-            retainedMarker[$0] = 0
-        }
         actualSearchCursor = 0
         predictionSearchCursor = 0
         activeTransaction = nil
+        activeOperation = nil
+        activeRetainedMarker = 0
     }
 
     public func beginTransaction(
@@ -173,9 +181,41 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
             count: Int,
             elementAt: (Int) -> TransientStrokeDab
         ) throws -> TransientStrokeDabSlice {
-            try arena.storeActual(
+            var cursor = try beginActualStore(count: count)
+            while true {
+                switch try resumeActualStore(
+                    &cursor,
+                    maximumWorkUnits: .max,
+                    elementAt: elementAt
+                ) {
+                case .pending:
+                    continue
+                case let .stored(slice, _):
+                    return slice
+                }
+            }
+        }
+
+        public func beginActualStore(
+            count: Int
+        ) throws -> ActualStoreCursor {
+            try arena.beginActualStore(
                 transaction: identifier,
-                count: count,
+                count: count
+            )
+        }
+
+        public func resumeActualStore(
+            _ cursor: inout ActualStoreCursor,
+            maximumWorkUnits: Int,
+            shouldYield: () -> Bool = { false },
+            elementAt: (Int) -> TransientStrokeDab
+        ) throws -> ActualStoreProgress {
+            try arena.resumeActualStore(
+                transaction: identifier,
+                cursor: &cursor,
+                maximumWorkUnits: maximumWorkUnits,
+                shouldYield: shouldYield,
                 elementAt: elementAt
             )
         }
@@ -212,11 +252,56 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
             retainingActual actualChunks: [TransientStrokeChunk],
             retainingPredicted predictedChunks: [TransientStrokeChunk]
         ) throws {
-            try arena.commit(
-                identifier,
-                retainingActual: actualChunks,
-                retainingPredicted: predictedChunks
+            var cursor = try beginCommit(
+                expectedActualChunkCount: actualChunks.count,
+                expectedPredictedChunkCount: predictedChunks.count
             )
+            while true {
+                switch try resumeCommit(
+                    &cursor,
+                    retainingActual: actualChunks,
+                    retainingPredicted: predictedChunks,
+                    maximumWorkUnits: .max
+                ) {
+                case .pending:
+                    continue
+                case let .prepared(prepared, _):
+                    publish(prepared)
+                    return
+                }
+            }
+        }
+
+        public func beginCommit(
+            expectedActualChunkCount: Int,
+            expectedPredictedChunkCount: Int
+        ) throws -> CommitCursor {
+            try arena.beginCommit(
+                transaction: identifier,
+                expectedActualChunkCount: expectedActualChunkCount,
+                expectedPredictedChunkCount: expectedPredictedChunkCount
+            )
+        }
+
+        public func resumeCommit(
+            _ cursor: inout CommitCursor,
+            retainingActual actualChunks: borrowing [TransientStrokeChunk],
+            retainingPredicted predictedChunks: borrowing [TransientStrokeChunk],
+            maximumWorkUnits: Int,
+            shouldYield: () -> Bool = { false }
+        ) throws -> CommitProgress {
+            try arena.resumeCommit(
+                transaction: identifier,
+                cursor: &cursor,
+                actualChunks: actualChunks,
+                predictedChunks: predictedChunks,
+                maximumWorkUnits: maximumWorkUnits,
+                shouldYield: shouldYield
+            )
+        }
+
+        public func publish(_ prepared: PreparedCommit) {
+            arena.publish(transaction: identifier, prepared: prepared)
         }
 
         public func commit<
@@ -245,120 +330,109 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
         }
     }
 
+    public enum ActualStoreProgress: Sendable {
+        case pending(consumedWorkUnits: Int)
+        case stored(
+            TransientStrokeDabSlice,
+            consumedWorkUnits: Int
+        )
+    }
+
+    public struct ActualStoreCursor: Sendable {
+        fileprivate enum Phase: UInt8, Sendable {
+            case search
+            case store
+        }
+
+        fileprivate let transaction: UInt64
+        fileprivate let operation: UInt64
+        fileprivate let regionStart: Int
+        fileprivate let regionCapacity: Int
+        fileprivate let searchOrigin: Int
+        fileprivate let count: Int
+        fileprivate var phase: Phase
+        fileprivate var scannedSlotCount: Int
+        fileprivate var freeRunLength: Int
+        fileprivate var start: Int?
+        fileprivate var generation: UInt64?
+        fileprivate var storedCount: Int
+    }
+
+    public enum CommitProgress: Sendable {
+        case pending(consumedWorkUnits: Int)
+        case prepared(PreparedCommit, consumedWorkUnits: Int)
+    }
+
+    public struct PreparedCommit: Sendable {
+        fileprivate let transaction: UInt64
+        fileprivate let operation: UInt64
+        fileprivate let targetLaneIsA: Bool
+        fileprivate let marker: UInt64
+    }
+
+    public struct CommitCursor: Sendable {
+        fileprivate enum Phase: UInt8, Sendable {
+            case markActual
+            case markPrediction
+            case final
+        }
+
+        fileprivate let transaction: UInt64
+        fileprivate let operation: UInt64
+        fileprivate let marker: UInt64
+        fileprivate let targetLaneIsA: Bool
+        fileprivate let expectedActualChunkCount: Int
+        fileprivate let expectedPredictedChunkCount: Int
+        fileprivate var phase: Phase
+        fileprivate var chunkIndex: Int
+        fileprivate var slotOffset: Int
+        fileprivate var boundSlice: SliceDescriptor?
+    }
+
+    fileprivate struct SliceDescriptor: Equatable, Sendable {
+        let regionStart: Int
+        let regionCapacity: Int
+        let start: Int
+        let count: Int
+        let generation: UInt64
+    }
+
     private func storeActual(
         transaction: UInt64,
         _ dabs: [TransientStrokeDab],
         range: Range<Int>
     ) throws -> TransientStrokeDabSlice {
-        guard activeTransaction == transaction else {
-            throw ReservationError.inactiveTransaction
-        }
-        let count = range.count
-        guard (0 ... Self.retainedCapacity).contains(count) else {
-            throw ReservationError.capacityExceeded(
-                Self.retainedCapacity
-            )
-        }
-        let start = try freeActualStart(count: count)
-        let generation = reserveGeneration()
-        var offset = 0
-        while offset < count {
-            let slot = (start + offset) % Self.actualCapacity
-            storage[slot] = dabs[range.lowerBound + offset]
-            slotGeneration[slot] = generation
-            slotTransaction[slot] = transaction
-            offset += 1
-        }
-        actualSearchCursor = (start + count) % Self.actualCapacity
-        return TransientStrokeDabSlice(
-            arena: self,
+        try storeSynchronously(
+            transaction: transaction,
             regionStart: 0,
             regionCapacity: Self.actualCapacity,
-            start: start,
-            count: count,
-            generation: generation
+            count: range.count
+        ) { dabs[range.lowerBound + $0] }
+    }
+
+    private func beginActualStore(
+        transaction: UInt64,
+        count: Int
+    ) throws -> ActualStoreCursor {
+        try beginStore(
+            transaction: transaction,
+            regionStart: 0,
+            regionCapacity: Self.actualCapacity,
+            searchOrigin: actualSearchCursor,
+            count: count
         )
     }
 
-    private func storeActual(
+    private func beginStore(
         transaction: UInt64,
-        count: Int,
-        elementAt: (Int) -> TransientStrokeDab
-    ) throws -> TransientStrokeDabSlice {
-        guard activeTransaction == transaction else {
-            throw ReservationError.inactiveTransaction
-        }
-        guard (0 ... Self.retainedCapacity).contains(count) else {
-            throw ReservationError.capacityExceeded(
-                Self.retainedCapacity
-            )
-        }
-        let start = try freeActualStart(count: count)
-        let generation = reserveGeneration()
-        var offset = 0
-        while offset < count {
-            let slot = (start + offset) % Self.actualCapacity
-            storage[slot] = elementAt(offset)
-            slotGeneration[slot] = generation
-            slotTransaction[slot] = transaction
-            offset += 1
-        }
-        actualSearchCursor = (start + count) % Self.actualCapacity
-        return TransientStrokeDabSlice(
-            arena: self,
-            regionStart: 0,
-            regionCapacity: Self.actualCapacity,
-            start: start,
-            count: count,
-            generation: generation
-        )
-    }
-
-    private func storePredicted(
-        transaction: UInt64,
-        _ dabs: [TransientStrokeDab],
-        range: Range<Int>
-    ) throws -> TransientStrokeDabSlice {
-        guard activeTransaction == transaction else {
-            throw ReservationError.inactiveTransaction
-        }
-        let count = range.count
-        guard (0 ... Self.retainedCapacity).contains(count)
+        regionStart: Int,
+        regionCapacity: Int,
+        searchOrigin: Int,
+        count: Int
+    ) throws -> ActualStoreCursor {
+        guard activeTransaction == transaction,
+              activeOperation == nil
         else {
-            throw ReservationError.capacityExceeded(
-                Self.retainedCapacity
-            )
-        }
-        let regionStart = Self.actualCapacity
-        let start = try freePredictionStart(count: count)
-        let generation = reserveGeneration()
-        var offset = 0
-        while offset < count {
-            let slot = regionStart
-                + (start + offset) % Self.predictionCapacity
-            storage[slot] = dabs[range.lowerBound + offset]
-            slotGeneration[slot] = generation
-            slotTransaction[slot] = transaction
-            offset += 1
-        }
-        predictionSearchCursor =
-            (start + count) % Self.predictionCapacity
-        return TransientStrokeDabSlice(
-            arena: self,
-            regionStart: regionStart,
-            regionCapacity: Self.predictionCapacity,
-            start: start,
-            count: count,
-            generation: generation
-        )
-    }
-
-    private func storePredicted(
-        transaction: UInt64,
-        count: Int,
-        elementAt: (Int) -> TransientStrokeDab
-    ) throws -> TransientStrokeDabSlice {
-        guard activeTransaction == transaction else {
             throw ReservationError.inactiveTransaction
         }
         guard (0 ... Self.retainedCapacity).contains(count) else {
@@ -366,28 +440,200 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
                 Self.retainedCapacity
             )
         }
-        let regionStart = Self.actualCapacity
-        let start = try freePredictionStart(count: count)
-        let generation = reserveGeneration()
-        var offset = 0
-        while offset < count {
-            let slot = regionStart
-                + (start + offset) % Self.predictionCapacity
-            storage[slot] = elementAt(offset)
-            slotGeneration[slot] = generation
-            slotTransaction[slot] = transaction
-            offset += 1
-        }
-        predictionSearchCursor =
-            (start + count) % Self.predictionCapacity
-        return TransientStrokeDabSlice(
-            arena: self,
+        let operation = nextOperation
+        nextOperation &+= 1
+        precondition(nextOperation != 0)
+        activeOperation = operation
+        return ActualStoreCursor(
+            transaction: transaction,
+            operation: operation,
             regionStart: regionStart,
-            regionCapacity: Self.predictionCapacity,
-            start: start,
+            regionCapacity: regionCapacity,
+            searchOrigin: searchOrigin,
             count: count,
-            generation: generation
+            phase: .search,
+            scannedSlotCount: 0,
+            freeRunLength: 0,
+            start: count == 0 ? searchOrigin : nil,
+            generation: nil,
+            storedCount: 0
         )
+    }
+
+    private func resumeActualStore(
+        transaction: UInt64,
+        cursor: inout ActualStoreCursor,
+        maximumWorkUnits: Int,
+        shouldYield: () -> Bool = { false },
+        elementAt: (Int) -> TransientStrokeDab
+    ) throws -> ActualStoreProgress {
+        guard maximumWorkUnits > 0,
+              activeTransaction == transaction,
+              cursor.transaction == transaction,
+              activeOperation == cursor.operation
+        else {
+            throw ReservationError.inactiveTransaction
+        }
+        var consumedWorkUnits = 0
+        if cursor.count == 0 {
+            let generation = reserveGeneration()
+            activeOperation = nil
+            return .stored(
+                TransientStrokeDabSlice(
+                    arena: self,
+                    regionStart: cursor.regionStart,
+                    regionCapacity: cursor.regionCapacity,
+                    start: cursor.searchOrigin,
+                    count: 0,
+                    generation: generation
+                ),
+                consumedWorkUnits: 1
+            )
+        }
+        while consumedWorkUnits < maximumWorkUnits {
+            if consumedWorkUnits > 0, shouldYield() {
+                return .pending(consumedWorkUnits: consumedWorkUnits)
+            }
+            switch cursor.phase {
+            case .search:
+                let maximumScannedSlotCount = cursor.regionCapacity
+                    + cursor.count - 1
+                guard cursor.scannedSlotCount < maximumScannedSlotCount
+                else {
+                    throw ReservationError.capacityExceeded(
+                        cursor.regionCapacity
+                    )
+                }
+                let relativeSlot = (cursor.searchOrigin
+                    + cursor.scannedSlotCount) % cursor.regionCapacity
+                let slot = cursor.regionStart + relativeSlot
+                cursor.scannedSlotCount += 1
+                consumedWorkUnits += 1
+                if !isSlotLive(slot) {
+                    cursor.freeRunLength += 1
+                } else {
+                    cursor.freeRunLength = 0
+                }
+                if cursor.freeRunLength == cursor.count {
+                    let firstOffset = cursor.scannedSlotCount
+                        - cursor.count
+                    cursor.start = (cursor.searchOrigin + firstOffset)
+                        % cursor.regionCapacity
+                    cursor.generation = reserveGeneration()
+                    cursor.phase = .store
+                }
+            case .store:
+                guard let start = cursor.start,
+                      let generation = cursor.generation
+                else {
+                    throw ReservationError.inactiveTransaction
+                }
+                let slot = cursor.regionStart
+                    + (start + cursor.storedCount)
+                        % cursor.regionCapacity
+                storage[slot] = elementAt(cursor.storedCount)
+                slotGeneration[slot] = generation
+                slotTransaction[slot] = transaction
+                retainedMarkerA[slot] = 0
+                retainedMarkerB[slot] = 0
+                cursor.storedCount += 1
+                consumedWorkUnits += 1
+                if cursor.storedCount == cursor.count {
+                    if cursor.regionStart == 0 {
+                        actualSearchCursor = (start + cursor.count)
+                            % cursor.regionCapacity
+                    } else {
+                        predictionSearchCursor = (start + cursor.count)
+                            % cursor.regionCapacity
+                    }
+                    activeOperation = nil
+                    return .stored(
+                        TransientStrokeDabSlice(
+                            arena: self,
+                            regionStart: cursor.regionStart,
+                            regionCapacity: cursor.regionCapacity,
+                            start: start,
+                            count: cursor.count,
+                            generation: generation
+                        ),
+                        consumedWorkUnits: consumedWorkUnits
+                    )
+                }
+            }
+        }
+        return .pending(consumedWorkUnits: consumedWorkUnits)
+    }
+
+    private func storeActual(
+        transaction: UInt64,
+        count: Int,
+        elementAt: (Int) -> TransientStrokeDab
+    ) throws -> TransientStrokeDabSlice {
+        try storeSynchronously(
+            transaction: transaction,
+            regionStart: 0,
+            regionCapacity: Self.actualCapacity,
+            count: count,
+            elementAt: elementAt
+        )
+    }
+
+    private func storePredicted(
+        transaction: UInt64,
+        _ dabs: [TransientStrokeDab],
+        range: Range<Int>
+    ) throws -> TransientStrokeDabSlice {
+        try storeSynchronously(
+            transaction: transaction,
+            regionStart: Self.actualCapacity,
+            regionCapacity: Self.predictionCapacity,
+            count: range.count
+        ) { dabs[range.lowerBound + $0] }
+    }
+
+    private func storePredicted(
+        transaction: UInt64,
+        count: Int,
+        elementAt: (Int) -> TransientStrokeDab
+    ) throws -> TransientStrokeDabSlice {
+        try storeSynchronously(
+            transaction: transaction,
+            regionStart: Self.actualCapacity,
+            regionCapacity: Self.predictionCapacity,
+            count: count,
+            elementAt: elementAt
+        )
+    }
+
+    private func storeSynchronously(
+        transaction: UInt64,
+        regionStart: Int,
+        regionCapacity: Int,
+        count: Int,
+        elementAt: (Int) -> TransientStrokeDab
+    ) throws -> TransientStrokeDabSlice {
+        var cursor = try beginStore(
+            transaction: transaction,
+            regionStart: regionStart,
+            regionCapacity: regionCapacity,
+            searchOrigin: regionStart == 0
+                ? actualSearchCursor
+                : predictionSearchCursor,
+            count: count
+        )
+        while true {
+            switch try resumeActualStore(
+                transaction: transaction,
+                cursor: &cursor,
+                maximumWorkUnits: .max,
+                elementAt: elementAt
+            ) {
+            case .pending:
+                continue
+            case let .stored(slice, _):
+                return slice
+            }
+        }
     }
 
     private func freeActualStart(count: Int) throws -> Int {
@@ -397,9 +643,9 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
                 (actualSearchCursor + distance) % Self.actualCapacity
             var isFree = true
             for offset in 0 ..< count
-            where slotGeneration[
+            where isSlotLive(
                 (candidate + offset) % Self.actualCapacity
-            ] != 0
+            )
             {
                 isFree = false
                 break
@@ -418,10 +664,10 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
                     % Self.predictionCapacity
             var isFree = true
             for offset in 0 ..< count
-            where slotGeneration[
+            where isSlotLive(
                 regionStart
                     + (candidate + offset) % Self.predictionCapacity
-            ] != 0
+            )
             {
                 isFree = false
                 break
@@ -440,44 +686,160 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
         return generation
     }
 
-    private func commit(
-        _ transaction: UInt64,
-        retainingActual actualChunks: [TransientStrokeChunk],
-        retainingPredicted predictedChunks: [TransientStrokeChunk]
-    ) throws {
-        guard activeTransaction == transaction else {
+    private func beginCommit(
+        transaction: UInt64,
+        expectedActualChunkCount: Int,
+        expectedPredictedChunkCount: Int
+    ) throws -> CommitCursor {
+        guard activeTransaction == transaction,
+              activeOperation == nil,
+              expectedActualChunkCount >= 0,
+              expectedPredictedChunkCount >= 0
+        else {
             throw ReservationError.inactiveTransaction
         }
+        let operation = nextOperation
+        nextOperation &+= 1
+        precondition(nextOperation != 0)
+        activeOperation = operation
         let marker = nextRetainedMarker
         nextRetainedMarker &+= 1
         precondition(nextRetainedMarker != 0)
-        var chunkIndex = actualChunks.startIndex
-        while chunkIndex < actualChunks.endIndex {
-            actualChunks[chunkIndex].dabs.markRetained(
-                in: self,
-                marker: marker
-            )
-            chunkIndex += 1
+        return CommitCursor(
+            transaction: transaction,
+            operation: operation,
+            marker: marker,
+            targetLaneIsA: !activeRetainedLaneIsA,
+            expectedActualChunkCount: expectedActualChunkCount,
+            expectedPredictedChunkCount: expectedPredictedChunkCount,
+            phase: .markActual,
+            chunkIndex: 0,
+            slotOffset: 0,
+            boundSlice: nil
+        )
+    }
+
+    private func resumeCommit(
+        transaction: UInt64,
+        cursor: inout CommitCursor,
+        actualChunks: borrowing [TransientStrokeChunk],
+        predictedChunks: borrowing [TransientStrokeChunk],
+        maximumWorkUnits: Int,
+        shouldYield: () -> Bool = { false }
+    ) throws -> CommitProgress {
+        guard maximumWorkUnits > 0,
+              activeTransaction == transaction,
+              cursor.transaction == transaction,
+              activeOperation == cursor.operation,
+              actualChunks.count == cursor.expectedActualChunkCount,
+              predictedChunks.count == cursor.expectedPredictedChunkCount
+        else {
+            throw ReservationError.inactiveTransaction
         }
-        chunkIndex = predictedChunks.startIndex
-        while chunkIndex < predictedChunks.endIndex {
-            predictedChunks[chunkIndex].dabs.markRetained(
-                in: self,
-                marker: marker
-            )
-            chunkIndex += 1
-        }
-        var slot = storage.startIndex
-        while slot < storage.endIndex {
-            if slotGeneration[slot] != 0,
-               retainedMarker[slot] != marker
-            {
-                storage[slot] = nil
-                slotGeneration[slot] = 0
+        var consumedWorkUnits = 0
+        while consumedWorkUnits < maximumWorkUnits {
+            if consumedWorkUnits > 0, shouldYield() {
+                return .pending(consumedWorkUnits: consumedWorkUnits)
             }
-            slotTransaction[slot] = 0
-            slot += 1
+            switch cursor.phase {
+            case .markActual:
+                if cursor.chunkIndex == actualChunks.count {
+                    cursor.phase = .markPrediction
+                    cursor.chunkIndex = 0
+                    cursor.slotOffset = 0
+                    cursor.boundSlice = nil
+                    continue
+                }
+                try markCommitSource(
+                    chunks: actualChunks,
+                    cursor: &cursor,
+                    consumedWorkUnits: &consumedWorkUnits
+                )
+            case .markPrediction:
+                if cursor.chunkIndex == predictedChunks.count {
+                    cursor.phase = .final
+                    continue
+                }
+                try markCommitSource(
+                    chunks: predictedChunks,
+                    cursor: &cursor,
+                    consumedWorkUnits: &consumedWorkUnits
+                )
+            case .final:
+                consumedWorkUnits += 1
+                return .prepared(
+                    PreparedCommit(
+                        transaction: transaction,
+                        operation: cursor.operation,
+                        targetLaneIsA: cursor.targetLaneIsA,
+                        marker: cursor.marker
+                    ),
+                    consumedWorkUnits: consumedWorkUnits
+                )
+            }
         }
+        return .pending(consumedWorkUnits: consumedWorkUnits)
+    }
+
+    private func markCommitSource(
+        chunks: borrowing [TransientStrokeChunk],
+        cursor: inout CommitCursor,
+        consumedWorkUnits: inout Int
+    ) throws {
+        let descriptor = chunks[cursor.chunkIndex].dabs.descriptor(in: self)
+        if cursor.boundSlice == nil {
+            cursor.boundSlice = descriptor
+            consumedWorkUnits += 1
+            guard descriptor != nil else {
+                cursor.chunkIndex += 1
+                cursor.slotOffset = 0
+                return
+            }
+            return
+        } else if descriptor != cursor.boundSlice {
+            throw ReservationError.inactiveTransaction
+        }
+        guard let boundSlice = cursor.boundSlice else { return }
+        guard cursor.slotOffset < boundSlice.count else {
+            cursor.boundSlice = nil
+            cursor.slotOffset = 0
+            cursor.chunkIndex += 1
+            return
+        }
+        let slot = boundSlice.regionStart
+            + (boundSlice.start + cursor.slotOffset)
+                % boundSlice.regionCapacity
+        guard slotGeneration[slot] == boundSlice.generation,
+              isSlotLive(slot)
+        else {
+            throw ReservationError.inactiveTransaction
+        }
+        if cursor.targetLaneIsA {
+            retainedMarkerA[slot] = cursor.marker
+        } else {
+            retainedMarkerB[slot] = cursor.marker
+        }
+        cursor.slotOffset += 1
+        consumedWorkUnits += 1
+        if cursor.slotOffset == boundSlice.count {
+            cursor.boundSlice = nil
+            cursor.slotOffset = 0
+            cursor.chunkIndex += 1
+        }
+    }
+
+    private func publish(
+        transaction: UInt64,
+        prepared: PreparedCommit
+    ) {
+        precondition(
+            activeTransaction == transaction
+                && prepared.transaction == transaction
+                && activeOperation == prepared.operation
+        )
+        activeRetainedLaneIsA = prepared.targetLaneIsA
+        activeRetainedMarker = prepared.marker
+        activeOperation = nil
         activeTransaction = nil
     }
 
@@ -487,34 +849,26 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
         predictionCursorBefore: Int
     ) {
         guard activeTransaction == transaction else { return }
-        for slot in storage.indices
-        where slotTransaction[slot] == transaction
-        {
-            storage[slot] = nil
-            slotGeneration[slot] = 0
-            slotTransaction[slot] = 0
-        }
         actualSearchCursor = actualCursorBefore
         predictionSearchCursor = predictionCursorBefore
+        activeOperation = nil
         activeTransaction = nil
     }
 
-    fileprivate func markRetained(
-        regionStart: Int,
-        regionCapacity: Int,
-        start: Int,
-        count: Int,
-        generation: UInt64,
-        marker: UInt64
-    ) {
-        var offset = 0
-        while offset < count {
-            let slot = regionStart
-                + (start + offset) % regionCapacity
-            precondition(slotGeneration[slot] == generation)
-            retainedMarker[slot] = marker
-            offset += 1
+    private func isSlotLive(_ slot: Int) -> Bool {
+        guard slotGeneration[slot] != 0 else { return false }
+        let isCommitted: Bool
+        if activeRetainedMarker == 0 {
+            isCommitted = false
+        } else if activeRetainedLaneIsA {
+            isCommitted = retainedMarkerA[slot] == activeRetainedMarker
+        } else {
+            isCommitted = retainedMarkerB[slot] == activeRetainedMarker
         }
+        let isTentative = activeTransaction.map {
+            slotTransaction[slot] == $0
+        } ?? false
+        return isCommitted || isTentative
     }
 
     fileprivate func dab(
@@ -526,7 +880,7 @@ public final class TransientStrokeDabArena: @unchecked Sendable {
     ) -> TransientStrokeDab {
         let slot = regionStart + (start + offset) % regionCapacity
         precondition(
-            slotGeneration[slot] == generation,
+            slotGeneration[slot] == generation && isSlotLive(slot),
             "Transient dab slice no longer owns its arena storage"
         )
         return storage[slot]!
@@ -612,10 +966,9 @@ public struct TransientStrokeDabSlice:
         }
     }
 
-    fileprivate func markRetained(
-        in arena: TransientStrokeDabArena,
-        marker: UInt64
-    ) {
+    fileprivate func descriptor(
+        in arena: TransientStrokeDabArena
+    ) -> TransientStrokeDabArena.SliceDescriptor? {
         guard case let .arena(
             owner,
             regionStart,
@@ -623,17 +976,18 @@ public struct TransientStrokeDabSlice:
             start,
             count,
             generation
-        ) = storage else {
-            return
+        ) = storage,
+        owner === arena,
+        count > 0
+        else {
+            return nil
         }
-        precondition(owner === arena)
-        arena.markRetained(
+        return TransientStrokeDabArena.SliceDescriptor(
             regionStart: regionStart,
             regionCapacity: regionCapacity,
             start: start,
             count: count,
-            generation: generation,
-            marker: marker
+            generation: generation
         )
     }
 

@@ -276,9 +276,13 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
             return nil
         }
         allocationProbe?.arm()
+        packRecords(records)
+        allocationProbe?.disarmAndRecord(.surfaceRecordPacking)
+
+        allocationProbe?.arm()
         guard let commandBuffer = resources.commandQueue.makeCommandBuffer()
         else {
-            allocationProbe?.disarmAndRecord(.privateSurfaceEncoding)
+            allocationProbe?.disarmAndRecord(.surfaceMetalSubmission)
             throw StrokePrivateSurfaceEncodingError.commandBufferUnavailable
         }
         commandBuffer.label = "Off-main Stroke Surface"
@@ -298,7 +302,7 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
                     commandBuffer: commandBuffer
                 )
             }
-            try encodeRecords(
+            try encodePreparedRecords(
                 records,
                 into: layer == .authoritative
                     ? resources.authoritativeTexture
@@ -309,7 +313,7 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
                 commandBuffer: commandBuffer
             )
         } catch {
-            allocationProbe?.disarmAndRecord(.privateSurfaceEncoding)
+            allocationProbe?.disarmAndRecord(.surfaceMetalSubmission)
             throw error
         }
         let commandOutcome = await withCheckedContinuation { continuation in
@@ -325,7 +329,7 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
             commandBuffer.commit()
             // The continuation may resume this actor on a different worker.
             // Disarm the TLS probe synchronously on the encoding thread.
-            allocationProbe?.disarmAndRecord(.privateSurfaceEncoding)
+            allocationProbe?.disarmAndRecord(.surfaceMetalSubmission)
         }
         if configuration.forceCommandFailure {
             throw StrokePrivateSurfaceEncodingError.commandFailed(
@@ -399,7 +403,19 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
         encoder.endEncoding()
     }
 
-    private func encodeRecords(
+    private func packRecords(
+        _ records: [StrokePreparedProjectedRecord]
+    ) {
+        let destination = resources.uploadBuffer.contents().bindMemory(
+            to: PatternDepositionStampInstance.self,
+            capacity: resources.maximumRecordCount
+        )
+        for index in records.indices {
+            destination[index] = records[index].depositionRecord.instance
+        }
+    }
+
+    private func encodePreparedRecords(
         _ records: [StrokePreparedProjectedRecord],
         into texture: any MTLTexture,
         clear: Bool,
@@ -407,15 +423,6 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
     ) throws {
         guard let configuration else {
             preconditionFailure("Stroke surface encoder is not configured")
-        }
-        if !records.isEmpty {
-            let destination = resources.uploadBuffer.contents().bindMemory(
-                to: PatternDepositionStampInstance.self,
-                capacity: resources.maximumRecordCount
-            )
-            for (offset, record) in records.enumerated() {
-                destination[offset] = record.depositionRecord.instance
-            }
         }
         let pass = resources.depositionPassDescriptor
         pass.colorAttachments[0].texture = texture

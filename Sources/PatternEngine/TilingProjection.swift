@@ -83,9 +83,11 @@ public final class TilingProjectionScratch: @unchecked Sendable {
     public internal(set) var fragments: [CellFragment] = []
     public private(set) var storageAllocationCount: UInt64 = 0
     var images: [TilingImage] = []
+    var imageSortScratch: [TilingImage] = []
     var cells: [CellIndex] = []
     var polygonA: [SIMD2<Float>] = []
     var polygonB: [SIMD2<Float>] = []
+    var fragmentSortScratch: [CellFragment] = []
 
     public var storageDiagnostics: TilingProjectionStorageDiagnostics {
         TilingProjectionStorageDiagnostics(
@@ -107,9 +109,11 @@ public final class TilingProjectionScratch: @unchecked Sendable {
         precondition(maximumFragmentCount > 0)
         fragments.reserveCapacity(maximumFragmentCount)
         images.reserveCapacity(maximumFragmentCount)
+        imageSortScratch.reserveCapacity(maximumFragmentCount)
         cells.reserveCapacity(maximumFragmentCount)
         polygonA.reserveCapacity(16)
         polygonB.reserveCapacity(16)
+        fragmentSortScratch.reserveCapacity(maximumFragmentCount)
     }
 
     fileprivate func replace(
@@ -254,10 +258,12 @@ public enum TilingProjection {
         validateBrushToWorld(footprint.brushToWorld)
         let capacitiesBefore = (
             scratch.images.capacity,
+            scratch.imageSortScratch.capacity,
             scratch.cells.capacity,
             scratch.polygonA.capacity,
             scratch.polygonB.capacity,
-            scratch.fragments.capacity
+            scratch.fragments.capacity,
+            scratch.fragmentSortScratch.capacity
         )
         let localMinimum = footprint.localBounds.minimum
         let localMaximum = footprint.localBounds.maximum
@@ -373,7 +379,11 @@ public enum TilingProjection {
                 scratch.fragments.append(fragment)
             }
         }
-        scratch.fragments.sort(by: fragmentPrecedes)
+        allocationFreeStableSort(
+            &scratch.fragments,
+            scratch: &scratch.fragmentSortScratch,
+            by: fragmentPrecedes
+        )
         recordProjectionScratchGrowth(
             scratch,
             capacitiesBefore: capacitiesBefore
@@ -531,21 +541,27 @@ public enum TilingProjection {
 
 private func recordProjectionScratchGrowth(
     _ scratch: TilingProjectionScratch,
-    capacitiesBefore: (Int, Int, Int, Int, Int)
+    capacitiesBefore: (Int, Int, Int, Int, Int, Int, Int)
 ) {
     if scratch.images.capacity > capacitiesBefore.0 {
         scratch.recordStorageAllocation()
     }
-    if scratch.cells.capacity > capacitiesBefore.1 {
+    if scratch.imageSortScratch.capacity > capacitiesBefore.1 {
         scratch.recordStorageAllocation()
     }
-    if scratch.polygonA.capacity > capacitiesBefore.2 {
+    if scratch.cells.capacity > capacitiesBefore.2 {
         scratch.recordStorageAllocation()
     }
-    if scratch.polygonB.capacity > capacitiesBefore.3 {
+    if scratch.polygonA.capacity > capacitiesBefore.3 {
         scratch.recordStorageAllocation()
     }
-    if scratch.fragments.capacity > capacitiesBefore.4 {
+    if scratch.polygonB.capacity > capacitiesBefore.4 {
+        scratch.recordStorageAllocation()
+    }
+    if scratch.fragments.capacity > capacitiesBefore.5 {
+        scratch.recordStorageAllocation()
+    }
+    if scratch.fragmentSortScratch.capacity > capacitiesBefore.6 {
         scratch.recordStorageAllocation()
     }
 }

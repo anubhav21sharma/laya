@@ -8,8 +8,26 @@ func stageCMetalTestProgram(
     stationaryDirection: Float = 0,
     baseSpacingFraction: Float = 0.1,
     replayMode: BrushReplayMode = .replayTail,
-    replayLimits: BrushReplayLimits = BrushRecipePolicy.replayTailLimits
+    replayLimits: BrushReplayLimits? = nil,
+    emission: BrushEmissionDefinition = BrushEmissionDefinition(
+        mode: .distance,
+        timeInterval: nil
+    )
 ) throws -> BrushProgram {
+    let resolvedReplayLimits: BrushReplayLimits?
+    switch replayMode {
+    case .appendOnly:
+        guard replayLimits == nil else {
+            throw BrushDefinitionValidationError.invalidReplay
+        }
+        resolvedReplayLimits = nil
+    case .replayTail:
+        resolvedReplayLimits = replayLimits
+            ?? BrushRecipePolicy.replayTailLimits
+    case .boundedWholeStroke:
+        resolvedReplayLimits = replayLimits
+            ?? BrushRecipePolicy.wholeStrokeLimits
+    }
     let base = try LegacyBrushRecipeAdapter.definition(
         from: .legacyEquivalent,
         displayName: id
@@ -50,9 +68,9 @@ func stageCMetalTestProgram(
         .cap
     case .replayTail, .boundedWholeStroke:
         .boundedCorrection(
-            maximumSamples: replayLimits.maximumSamples,
+            maximumSamples: resolvedReplayLimits!.maximumSamples,
             maximumWorldLength: 4_096,
-            maximumDabs: replayLimits.maximumDabs
+            maximumDabs: resolvedReplayLimits!.maximumDabs
         )
     }
     let definition = try BrushDefinition(
@@ -80,7 +98,7 @@ func stageCMetalTestProgram(
         stabilization: base.stabilization,
         taper: .none,
         replayMode: replayMode,
-        replayLimits: replayLimits,
+        replayLimits: resolvedReplayLimits,
         termination: termination,
         seedPolicy: .perStroke,
         limits: base.limits,
@@ -98,7 +116,7 @@ func stageCMetalTestProgram(
             maximumAngularStep: maximumAngularStep,
             stationaryDirection: stationaryDirection
         ),
-        emission: BrushEmissionDefinition(mode: .distance, timeInterval: nil),
+        emission: emission,
         tipSupports: [.analyticEllipse]
     )
     return try BrushProgramCompiler.compile(definition)

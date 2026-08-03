@@ -38,6 +38,8 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         let maximumSingleEventCount: UInt64
         let firstHalfAllocationCount: UInt64
         let lastHalfAllocationCount: UInt64
+        let firstAllocationEventIndex: Int?
+        let lastAllocationEventIndex: Int?
     }
 
     private let lock = NSLock()
@@ -45,14 +47,18 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
     private var predictionCPU: [UInt64] = []
     private var estimatedCPU: [UInt64] = []
     private var batchPackaging: [UInt64] = []
-    private var privateSurfaceEncoding: [UInt64] = []
+    private var surfaceRecordPacking: [UInt64] = []
+    private var surfaceMetalSubmission: [UInt64] = []
+    private var strokeLifecycleCPU: [UInt64] = []
 
     init() {
         authoritativeCPU.reserveCapacity(256)
         predictionCPU.reserveCapacity(256)
         estimatedCPU.reserveCapacity(256)
         batchPackaging.reserveCapacity(512)
-        privateSurfaceEncoding.reserveCapacity(512)
+        surfaceRecordPacking.reserveCapacity(512)
+        surfaceMetalSubmission.reserveCapacity(512)
+        strokeLifecycleCPU.reserveCapacity(64)
     }
 
     func record(
@@ -69,8 +75,12 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
             estimatedCPU.append(count)
         case .batchPackaging:
             batchPackaging.append(count)
-        case .privateSurfaceEncoding:
-            privateSurfaceEncoding.append(count)
+        case .surfaceRecordPacking:
+            surfaceRecordPacking.append(count)
+        case .surfaceMetalSubmission:
+            surfaceMetalSubmission.append(count)
+        case .strokeLifecycleCPU:
+            strokeLifecycleCPU.append(count)
         }
         lock.unlock()
     }
@@ -84,7 +94,9 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         case .predictionCPU: predictionCPU
         case .estimatedCPU: estimatedCPU
         case .batchPackaging: batchPackaging
-        case .privateSurfaceEncoding: privateSurfaceEncoding
+        case .surfaceRecordPacking: surfaceRecordPacking
+        case .surfaceMetalSubmission: surfaceMetalSubmission
+        case .strokeLifecycleCPU: strokeLifecycleCPU
         }
         let result = Snapshot(
             eventCount: counts.count,
@@ -93,7 +105,11 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
             firstHalfAllocationCount:
                 counts.prefix(counts.count / 2).reduce(0, +),
             lastHalfAllocationCount:
-                counts.suffix(counts.count / 2).reduce(0, +)
+                counts.suffix(counts.count / 2).reduce(0, +),
+            firstAllocationEventIndex:
+                counts.firstIndex(where: { $0 > 0 }),
+            lastAllocationEventIndex:
+                counts.lastIndex(where: { $0 > 0 })
         )
         lock.unlock()
         return result
@@ -105,7 +121,9 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         predictionCPU.removeAll(keepingCapacity: true)
         estimatedCPU.removeAll(keepingCapacity: true)
         batchPackaging.removeAll(keepingCapacity: true)
-        privateSurfaceEncoding.removeAll(keepingCapacity: true)
+        surfaceRecordPacking.removeAll(keepingCapacity: true)
+        surfaceMetalSubmission.removeAll(keepingCapacity: true)
+        strokeLifecycleCPU.removeAll(keepingCapacity: true)
         lock.unlock()
     }
 }
@@ -1981,7 +1999,10 @@ private struct BrushInputAllocationProbeHarness {
         let estimated = measurements.snapshot(for: .estimatedCPU)
         let prediction = measurements.snapshot(for: .predictionCPU)
         let packaging = measurements.snapshot(for: .batchPackaging)
-        let surface = measurements.snapshot(for: .privateSurfaceEncoding)
+        let surfacePacking = measurements.snapshot(for: .surfaceRecordPacking)
+        let surfaceMetal = measurements.snapshot(for: .surfaceMetalSubmission)
+        let stageCMetrics = await renderer
+            .offMainStageCContinuationMetricsForAllocationHarness()
         let workspaceInstallationDelta = renderer
             .offMainStrokeWorkspaceInstallationCountForTesting
             - warmedWorkspaceInstallationCount
@@ -2010,10 +2031,12 @@ private struct BrushInputAllocationProbeHarness {
                 + "\(packaging.maximumSingleEventCount) "
                 + "workspace=\(workspaceInstallationDelta)/"
                 + "\(workspaceIdentityChanged ? 1 : 0) "
-                + "surface_driver=\(surface.allocationCount)/"
-                + "\(surface.firstHalfAllocationCount)/"
-                + "\(surface.lastHalfAllocationCount)/"
-                + "\(surface.maximumSingleEventCount)"
+                + "surface_pack=\(surfacePacking.allocationCount)/"
+                + "\(surfacePacking.maximumSingleEventCount) "
+                + "surface_metal=\(surfaceMetal.allocationCount)/"
+                + "\(surfaceMetal.firstHalfAllocationCount)/"
+                + "\(surfaceMetal.lastHalfAllocationCount)/"
+                + "\(surfaceMetal.maximumSingleEventCount)"
         )
         let actorStages: [(
             String,
@@ -2030,14 +2053,19 @@ private struct BrushInputAllocationProbeHarness {
             )
         }
         for (name, snapshot, expectedCount) in actorStages {
-            guard snapshot.eventCount == expectedCount,
+            guard snapshot.eventCount >= expectedCount,
                   snapshot.allocationCount == 0
             else {
                 throw ProbeHarnessError.offMainAllocationRegression(
                     "\(name) events=\(snapshot.eventCount)/\(expectedCount) "
                         + "first=\(snapshot.firstHalfAllocationCount) "
                         + "last=\(snapshot.lastHalfAllocationCount) "
-                        + "max=\(snapshot.maximumSingleEventCount)"
+                        + "max=\(snapshot.maximumSingleEventCount) "
+                        + "firstEvent="
+                        + "\(String(describing: snapshot.firstAllocationEventIndex)) "
+                        + "lastEvent="
+                        + "\(String(describing: snapshot.lastAllocationEventIndex)) "
+                        + Self.allocationIncidentSummary(stageCMetrics)
                 )
             }
         }
@@ -2059,17 +2087,27 @@ private struct BrushInputAllocationProbeHarness {
                     + "identityChanged=\(workspaceIdentityChanged)"
             )
         }
-        guard surface.eventCount >= measuredEventCount
+        guard surfacePacking.eventCount >= measuredEventCount
                 + measuredPredictionEventCount,
-              surface.lastHalfAllocationCount
-                <= surface.firstHalfAllocationCount,
-              surface.maximumSingleEventCount <= 64
+              surfacePacking.allocationCount == 0
         else {
             throw ProbeHarnessError.offMainAllocationRegression(
-                "surface events=\(surface.eventCount) "
-                    + "first=\(surface.firstHalfAllocationCount) "
-                    + "last=\(surface.lastHalfAllocationCount) "
-                    + "max=\(surface.maximumSingleEventCount)/64"
+                "surface packing events=\(surfacePacking.eventCount) "
+                    + "allocations=\(surfacePacking.allocationCount) "
+                    + "max=\(surfacePacking.maximumSingleEventCount)"
+            )
+        }
+        guard surfaceMetal.eventCount >= measuredEventCount
+                + measuredPredictionEventCount,
+              surfaceMetal.lastHalfAllocationCount
+                <= surfaceMetal.firstHalfAllocationCount,
+              surfaceMetal.maximumSingleEventCount <= 64
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "surface Metal events=\(surfaceMetal.eventCount) "
+                    + "first=\(surfaceMetal.firstHalfAllocationCount) "
+                    + "last=\(surfaceMetal.lastHalfAllocationCount) "
+                    + "max=\(surfaceMetal.maximumSingleEventCount)/64"
             )
         }
         print(
@@ -2079,8 +2117,370 @@ private struct BrushInputAllocationProbeHarness {
                 + "estimated=\(estimated.allocationCount) "
                 + "prediction=\(prediction.allocationCount) "
                 + "packaging=\(packaging.allocationCount) "
-                + "surface_driver_mallocs=\(surface.allocationCount)"
+                + "surface_pack=0 "
+                + "surface_metal_mallocs=\(surfaceMetal.allocationCount)"
         )
+        try await runOffMainStageCContinuationProbe(
+            probe: probe,
+            root: root
+        )
+    }
+
+    @MainActor
+    private static func runOffMainStageCContinuationProbe(
+        probe: AllocatorProbe,
+        root: URL
+    ) async throws {
+        try await runOffMainStageCContinuationFixture(
+            probe: probe,
+            root: root,
+            label: "periodic",
+            finiteConfiguration: nil,
+            projectionMultiplicity: 4,
+            minimumEmittedDabCount: 512
+        )
+        try await runOffMainStageCContinuationFixture(
+            probe: probe,
+            root: root,
+            label: "radial-32",
+            finiteConfiguration: .radial(
+                RadialSymmetryConfiguration(
+                    kind: .mandala,
+                    rayCount: 32,
+                    center: WorldPoint(x: 32, y: 32)
+                )
+            ),
+            projectionMultiplicity: 32,
+            minimumEmittedDabCount: 128
+        )
+    }
+
+    @MainActor
+    private static func runOffMainStageCContinuationFixture(
+        probe: AllocatorProbe,
+        root: URL,
+        label: String,
+        finiteConfiguration: FiniteSymmetryConfiguration?,
+        projectionMultiplicity: UInt64,
+        minimumEmittedDabCount: UInt64
+    ) async throws {
+        let setup = try await makeRendererSetup(
+            root: root,
+            usesOffMainNativeInk: true,
+            finiteConfiguration: finiteConfiguration
+        )
+        let renderer = setup.renderer
+        let measurements = ActorAllocationMeasurements()
+        renderer.setStrokePreparationAllocationProbeForHarness(
+            StrokePreparationAllocationProbe(
+                identity: 2,
+                arm: { probe.arm() },
+                disarm: { probe.disarm() },
+                record: { stage, count in
+                    measurements.record(stage, count: count)
+                }
+            )
+        )
+        let style = StrokeRenderStyle(
+            color: .black,
+            diameter: 20,
+            compositeMode: .draw,
+            eraserStrength: 1,
+            program: setup.brush.program,
+            renderIdentity: setup.brush.renderIdentity,
+            seed: 0xC1_20
+        )
+        // Cross both the logical-dab and projected-instance replay-tail
+        // limits so the production settled-prefix transfer performs work.
+        let continuationTraceDistance: Float = 2_560
+
+        // Exercise every continuation phase once before measuring so arena,
+        // queue, projection and private-surface storage are all at steady
+        // capacity. The second trace uses the same distance and route.
+        let warmToken = RendererOperationToken(rawValue: 3)
+        try renderer.beginStroke(
+            token: warmToken,
+            sample: sample(.began, x: 0),
+            style: style
+        )
+        try await drainToQuiescence(renderer: renderer)
+        try renderer.appendStroke(
+            token: warmToken,
+            sample: sample(.moved, x: continuationTraceDistance)
+        )
+        try await drainToQuiescence(renderer: renderer)
+        try renderer.finishStrokeTransient(
+            token: warmToken,
+            sample: sample(.ended, x: continuationTraceDistance)
+        )
+        try await drainToQuiescence(renderer: renderer)
+        try renderer.cancelStroke(token: warmToken)
+        try await drainToQuiescence(renderer: renderer)
+
+        let measuredLifecycleCount = 8
+        var mainLifecycleSeries: [UInt64] = []
+        var actorLifecycleSeries: [UInt64] = []
+        mainLifecycleSeries.reserveCapacity(measuredLifecycleCount)
+        actorLifecycleSeries.reserveCapacity(measuredLifecycleCount)
+        for iteration in 0..<measuredLifecycleCount {
+        let measuredToken = RendererOperationToken(
+            rawValue: UInt64(4 + iteration)
+        )
+        measurements.reset()
+        var mainLifecycleAllocations: UInt64 = 0
+        probe.arm()
+        do {
+            try renderer.beginStroke(
+                token: measuredToken,
+                sample: sample(.began, x: 0),
+                style: style
+            )
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
+        mainLifecycleAllocations += probe.disarm()
+        try await drainToQuiescence(renderer: renderer)
+        let metricsBefore = await renderer
+            .offMainStageCContinuationMetricsForAllocationHarness()
+        let authoritativeBefore = measurements.snapshot(for: .authoritativeCPU)
+        probe.arm()
+        do {
+            try renderer.appendStroke(
+                token: measuredToken,
+                sample: sample(.moved, x: continuationTraceDistance)
+            )
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
+        let mainHotEnqueueAllocations = probe.disarm()
+        try await drainToQuiescence(renderer: renderer)
+        let metricsAfter = await renderer
+            .offMainStageCContinuationMetricsForAllocationHarness()
+        let authoritativeAfter = measurements.snapshot(for: .authoritativeCPU)
+        probe.arm()
+        do {
+            try renderer.finishStrokeTransient(
+                token: measuredToken,
+                sample: sample(.ended, x: continuationTraceDistance)
+            )
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
+        mainLifecycleAllocations += probe.disarm()
+        try await drainToQuiescence(renderer: renderer)
+        let metricsAfterFinish = await renderer
+            .offMainStageCContinuationMetricsForAllocationHarness()
+        let emittedDabDelta = metricsAfter.emittedAuthoritativeDabCount
+            - metricsBefore.emittedAuthoritativeDabCount
+        let pageDelta = metricsAfter.pageCount - metricsBefore.pageCount
+        let resumeDelta = metricsAfter.resumeCount - metricsBefore.resumeCount
+        let settledTransferWork =
+            metricsAfter.settledTransferWorkUnitCount
+                - metricsBefore.settledTransferWorkUnitCount
+        let authoritativeEventDelta = authoritativeAfter.eventCount
+            - authoritativeBefore.eventCount
+        let logicalWorkPages =
+            (emittedDabDelta + UInt64(LogicalDabBatch.maximumDabCount - 1))
+                / UInt64(LogicalDabBatch.maximumDabCount)
+        let projectedWork = emittedDabDelta * projectionMultiplicity
+        let projectionWorkPages =
+            (projectedWork + 4_095) / 4_096
+        // Candidate emission, transient storage and arena commit can each
+        // consume one 512-work page; projection has its own 4,096-instance
+        // ceiling. Sixteen bounds the fixed phase transitions and final ACK.
+        let maximumContinuationEventCount =
+            logicalWorkPages * 3 + projectionWorkPages + 16
+
+        probe.arm()
+        do {
+            try renderer.cancelStroke(token: measuredToken)
+        } catch {
+            _ = probe.disarm()
+            throw error
+        }
+        mainLifecycleAllocations += probe.disarm()
+        try await drainToQuiescence(renderer: renderer)
+        let authoritative = measurements.snapshot(for: .authoritativeCPU)
+        let packaging = measurements.snapshot(for: .batchPackaging)
+        let surfacePacking = measurements.snapshot(for: .surfaceRecordPacking)
+        let surfaceMetal = measurements.snapshot(for: .surfaceMetalSubmission)
+        let lifecycle = measurements.snapshot(for: .strokeLifecycleCPU)
+
+        guard mainHotEnqueueAllocations == 0,
+              authoritative.eventCount > 1,
+              authoritative.allocationCount == 0,
+              UInt64(authoritative.eventCount)
+                <= maximumContinuationEventCount
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "Stage C continuation authoritative events="
+                    + "\(authoritative.eventCount) allocations="
+                    + "\(authoritative.allocationCount) max="
+                    + "\(authoritative.maximumSingleEventCount) firstEvent="
+                    + "\(String(describing: authoritative.firstAllocationEventIndex)) "
+                    + "lastEvent="
+                    + "\(String(describing: authoritative.lastAllocationEventIndex)) "
+                    + "mainHot=\(mainHotEnqueueAllocations) "
+                    + "ceiling=\(maximumContinuationEventCount) "
+                    + Self.allocationIncidentSummary(metricsAfter)
+            )
+        }
+        guard metricsAfter.pageCount > metricsBefore.pageCount + 1,
+              metricsAfter.resumeCount > metricsBefore.resumeCount + 1,
+              metricsAfter.logicalPageHighWater > 0,
+              metricsAfter.logicalPageHighWater
+                <= LogicalDabBatch.maximumDabCount,
+              emittedDabDelta > minimumEmittedDabCount,
+              pageDelta == resumeDelta,
+              pageDelta == UInt64(authoritativeEventDelta),
+              pageDelta <= maximumContinuationEventCount,
+              resumeDelta <= maximumContinuationEventCount,
+              settledTransferWork > 0,
+              metricsAfterFinish.phaseHits.isSuperset(of: .fullLifecycle)
+        else {
+            let pageSummary = "\(metricsBefore.pageCount)->"
+                + "\(metricsAfter.pageCount)"
+            let resumeSummary = "\(metricsBefore.resumeCount)->"
+                + "\(metricsAfter.resumeCount)"
+            let dabSummary =
+                "\(metricsBefore.emittedAuthoritativeDabCount)->"
+                    + "\(metricsAfter.emittedAuthoritativeDabCount)"
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "Stage C fixture did not exceed its candidate threshold: pages="
+                    + pageSummary + " label=" + label + " resumes="
+                    + resumeSummary
+                    + " logicalHighWater="
+                    + "\(metricsAfter.logicalPageHighWater) dabs="
+                    + dabSummary + " eventCeiling="
+                    + "\(maximumContinuationEventCount) phases=0x"
+                    + String(metricsAfterFinish.phaseHits.rawValue, radix: 16)
+                    + " settledWork=\(settledTransferWork) "
+                    + "authoritativeEventDelta=\(authoritativeEventDelta)"
+            )
+        }
+        guard packaging.eventCount >= authoritative.eventCount,
+              packaging.allocationCount == 0
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "Stage C continuation packaging events="
+                    + "\(packaging.eventCount)/\(authoritative.eventCount) "
+                    + "allocations=\(packaging.allocationCount)"
+            )
+        }
+        guard surfacePacking.eventCount > 0,
+              surfacePacking.eventCount <= packaging.eventCount,
+              surfacePacking.allocationCount == 0
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "Stage C continuation surface packing events="
+                    + "\(surfacePacking.eventCount)/"
+                    + "\(authoritative.eventCount) allocations="
+                    + "\(surfacePacking.allocationCount) max="
+                    + "\(surfacePacking.maximumSingleEventCount)"
+            )
+        }
+        guard surfaceMetal.eventCount > 0,
+              surfaceMetal.eventCount <= packaging.eventCount,
+              surfaceMetal.lastHalfAllocationCount
+                <= surfaceMetal.firstHalfAllocationCount,
+              surfaceMetal.maximumSingleEventCount <= 64
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "Stage C continuation surface Metal events="
+                    + "\(surfaceMetal.eventCount)/"
+                    + "\(authoritative.eventCount) first="
+                    + "\(surfaceMetal.firstHalfAllocationCount) last="
+                    + "\(surfaceMetal.lastHalfAllocationCount) max="
+                    + "\(surfaceMetal.maximumSingleEventCount)/64"
+            )
+        }
+        guard lifecycle.eventCount == 2,
+              lifecycle.maximumSingleEventCount <= 64,
+              mainLifecycleAllocations <= 512,
+              renderer.offMainStrokeWorkspaceIsAvailableForAllocationHarness
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "Stage C lifecycle events=\(lifecycle.eventCount)/2 "
+                    + "actorTotal=\(lifecycle.allocationCount) actorMax="
+                    + "\(lifecycle.maximumSingleEventCount)/64 mainTotal="
+                    + "\(mainLifecycleAllocations)/512 workspaceAvailable="
+                    + "\(renderer.offMainStrokeWorkspaceIsAvailableForAllocationHarness)"
+            )
+        }
+        mainLifecycleSeries.append(mainLifecycleAllocations)
+        actorLifecycleSeries.append(lifecycle.allocationCount)
+        print(
+            "ALLOCATOR PROBE STAGE C CONTINUATION PASS events="
+                + "\(authoritative.eventCount) label=\(label) "
+                + "authoritative=0 packaging=0 "
+                + "main_hot=0 main_lifecycle="
+                + "\(mainLifecycleAllocations) actor_lifecycle="
+                + "\(lifecycle.allocationCount)/"
+                + "\(lifecycle.maximumSingleEventCount) "
+                + "surface_pack=0 surface_metal_mallocs="
+                + "\(surfaceMetal.allocationCount)"
+        )
+        }
+        let mainFirstHalf = mainLifecycleSeries
+            .prefix(measuredLifecycleCount / 2).reduce(0, +)
+        let mainLastHalf = mainLifecycleSeries
+            .suffix(measuredLifecycleCount / 2).reduce(0, +)
+        let actorFirstHalf = actorLifecycleSeries
+            .prefix(measuredLifecycleCount / 2).reduce(0, +)
+        let actorLastHalf = actorLifecycleSeries
+            .suffix(measuredLifecycleCount / 2).reduce(0, +)
+        guard mainLastHalf <= mainFirstHalf + 8,
+              actorLastHalf <= actorFirstHalf + 8
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "Stage C lifecycle allocation growth label=\(label) main="
+                    + "\(mainFirstHalf)->\(mainLastHalf) actor="
+                    + "\(actorFirstHalf)->\(actorLastHalf)"
+            )
+        }
+        print(
+            "ALLOCATOR PROBE STAGE C LIFECYCLE STABLE label=\(label) "
+                + "runs=\(measuredLifecycleCount) main="
+                + "\(mainFirstHalf)/\(mainLastHalf) actor="
+                + "\(actorFirstHalf)/\(actorLastHalf)"
+        )
+    }
+
+    @MainActor
+    private static func drainToQuiescence(
+        renderer: GridRenderer
+    ) async throws {
+        for _ in 0..<20_000 {
+            if renderer.strokePreparationIsQuiescentForAllocationHarness {
+                return
+            }
+            try renderer.advanceStrokePreparationForAllocationHarness()
+            await Task.yield()
+        }
+        throw ProbeHarnessError.offMainAllocationRegression(
+            "Stage C continuation failed to reach quiescence"
+        )
+    }
+
+    private static func allocationIncidentSummary(
+        _ metrics: StrokeStageCContinuationMetrics
+    ) -> String {
+        func describe(
+            _ incident: StrokeStageCAuthoritativeAllocationIncident?
+        ) -> String {
+            guard let incident else { return "none" }
+            return "event=\(incident.eventOrdinal),count="
+                + "\(incident.allocationCount),phase="
+                + "\(String(describing: incident.phase)),sample="
+                + "\(String(describing: incident.sampleIndex)),page="
+                + "\(String(describing: incident.pageIndex)),work="
+                + "\(String(describing: incident.workUnits))"
+        }
+        return "stageCIncidents[first=\(describe(metrics.firstAllocationIncident));"
+            + "last=\(describe(metrics.lastAllocationIncident))]"
     }
 
     @MainActor
@@ -2110,7 +2510,8 @@ private struct BrushInputAllocationProbeHarness {
     @MainActor
     private static func makeRendererSetup(
         root: URL,
-        usesOffMainNativeInk: Bool = false
+        usesOffMainNativeInk: Bool = false,
+        finiteConfiguration: FiniteSymmetryConfiguration? = nil
     ) async throws
         -> RendererSetup
     {
@@ -2168,7 +2569,11 @@ private struct BrushInputAllocationProbeHarness {
             definition: definition
         )
         try renderer.activateDrawBrush(brush)
-        try renderer.applyTiling(.squareRotation)
+        if let finiteConfiguration {
+            try renderer.applyFiniteConfiguration(finiteConfiguration)
+        } else {
+            try renderer.applyTiling(.squareRotation)
+        }
         return RendererSetup(renderer: renderer, brush: brush)
     }
 

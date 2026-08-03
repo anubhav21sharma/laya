@@ -110,6 +110,57 @@ public struct AuthoritativeStrokeQueue: Sendable {
         highWater = max(highWater, count)
     }
 
+    /// Validates accounting for authoritative work that downstream already
+    /// accepted. The caller must also prove the queue has no borrowed or
+    /// retained work before recording the transfer.
+    func preflightRetiredTransfer(
+        startingOrdinal: UInt64,
+        count incomingCount: Int
+    ) throws {
+        guard incomingCount >= 0 else {
+            throw AuthoritativeStrokeQueueError.invalidCapacity(incomingCount)
+        }
+        guard incomingCount <= availableCapacity else {
+            throw AuthoritativeStrokeQueueError.capacityExceeded(
+                current: count,
+                incoming: incomingCount,
+                maximum: capacity
+            )
+        }
+        let incoming = UInt64(incomingCount)
+        let (_, overflow) = startingOrdinal.addingReportingOverflow(incoming)
+        guard !overflow else {
+            throw AuthoritativeStrokeQueueError.ordinalOverflow
+        }
+        guard startingOrdinal == nextExpectedOrdinal else {
+            throw AuthoritativeStrokeQueueError.noncontiguousOrdinal(
+                expected: nextExpectedOrdinal,
+                actual: startingOrdinal
+            )
+        }
+        let (_, submittedOverflow) = submittedCount
+            .addingReportingOverflow(incoming)
+        guard !submittedOverflow else {
+            throw AuthoritativeStrokeQueueError.ordinalOverflow
+        }
+    }
+
+    /// Advances compact accounting for work accepted and retired downstream.
+    /// `preflightRetiredTransfer(startingOrdinal:count:)` must have succeeded
+    /// while the queue remained exclusively owned and empty.
+    mutating func recordPrevalidatedRetiredTransfer(
+        startingOrdinal: UInt64,
+        count transferredCount: Int
+    ) {
+        precondition(isEmpty && !hasPreparedFrame)
+        precondition(startingOrdinal == nextExpectedOrdinal)
+        precondition(transferredCount >= 0 && transferredCount <= capacity)
+        let transferred = UInt64(transferredCount)
+        nextExpectedOrdinal = startingOrdinal &+ transferred
+        submittedCount &+= transferred
+        highWater = max(highWater, transferredCount)
+    }
+
     /// Records high-water and submission accounting for work that downstream
     /// already accepted. The caller preflighted the append while this queue was
     /// empty, so no frame-token allocation or recoverable failure remains.

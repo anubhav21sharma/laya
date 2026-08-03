@@ -2534,10 +2534,39 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         else {
             return
         }
+        let settledRegions = liveStroke.dirtyRegions(
+            clippedTo: storagePixelSize
+        )
+        let replayRegions = replayStroke.dirtyRegions(
+            clippedTo: storagePixelSize
+        )
+        if settledRegions.rectangles.isEmpty,
+           replayRegions.rectangles.isEmpty
+        {
+            finalizeNoOpStrokeCommit(execution)
+            return
+        }
         execution.pendingRevisions = try allocateCurrentStrokeRevisions(
             maximumRetainedBytes: maximumRetainedBytes
         )
         activeStroke = execution
+    }
+
+    /// A completely clipped stroke is a successful operation but not a
+    /// raster mutation. It must not manufacture an empty history pair merely
+    /// to drive the ordinary commit completion path.
+    private func finalizeNoOpStrokeCommit(
+        _ execution: ActiveStrokeExecution
+    ) {
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        let runtimeEndEvents = endStrokeRuntimeIfPossible()
+        activeStroke = nil
+        resetLiveState(invalidateStrokeEvents: false)
+        stageStrokeRuntimeEvents(runtimeEndEvents)
+        stageRendererEvent(
+            .operationCompleted(.operationSuccess(execution.token))
+        )
     }
 
     private func allocateCurrentStrokeRevisions(
@@ -2718,6 +2747,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 let observedRevision = progressRegistration.currentRevision
                 try drainCompletedInteractiveOperationsCore()
                 try prepareCompiledCommitIfReadyCore()
+                if activeStroke == nil { break }
                 if activeStroke?.pendingRevisions != nil {
                     break
                 }
@@ -2740,8 +2770,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     )
                 }
             }
-            try prepareCompiledCommitIfReadyCore()
-            frames.append(try submitPendingInteractiveCommitCore())
+            if activeStroke != nil {
+                try prepareCompiledCommitIfReadyCore()
+                frames.append(try submitPendingInteractiveCommitCore())
+            }
             try drainCompletedInteractiveOperationsCore()
 
             while true {
@@ -2853,6 +2885,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             for _ in 0..<maximumFrameAttempts {
                 try drainCompletedInteractiveOperationsCore()
                 try prepareCompiledCommitIfReadyCore()
+                if activeStroke == nil { break }
                 if activeStroke?.pendingRevisions != nil {
                     break
                 }
@@ -2869,12 +2902,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     try completeNextPendingInteractiveFrameCore()
                 )
             }
-            try prepareCompiledCommitIfReadyCore()
-            frames.append(
-                try submitPendingInteractiveCommitCore(
-                    forceFailure: forceCommitFailure
+            if activeStroke != nil {
+                try prepareCompiledCommitIfReadyCore()
+                frames.append(
+                    try submitPendingInteractiveCommitCore(
+                        forceFailure: forceCommitFailure
+                    )
                 )
-            )
+            }
             try drainCompletedInteractiveOperationsCore()
             return GPUFrameMetrics(
                 cpuEncodeMilliseconds: frames.reduce(0) {
@@ -3224,55 +3259,104 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func drainStrokePreparationResultsCore() throws {
         guard let bridge = strokePreparationBridge else { return }
         bridge.drainResults(into: &strokePreparationResultScratch)
-        for result in strokePreparationResultScratch {
-            guard result.generation == strokePreparationGeneration else {
-                continue
-            }
-            switch result {
-            case let .prepared(batch):
-                try installPreparedStrokeBatch(batch)
-            case .predictionWasShed:
-                break
-            case .estimatedUpdateWasIgnored:
-                break
-            case let .estimatedUpdateWasRejected(
-                _,
-                error,
-                capacityFailure
-            ):
-                if let capacityFailure {
-                    throw rendererError(for: capacityFailure)
+        #if DEBUG
+        let observesSyntheticZeroWorkAcknowledgement =
+            strokePreparationResultScratch.contains { result in
+                if case let .prepared(batch) = result {
+                    return batch.isSyntheticZeroWorkContinuation
                 }
-                throw error
-            case .commitBarrierReached:
-                guard let maximumRetainedBytes =
-                    pendingPreparationCommitRetainedBytes
-                else {
+                return false
+            }
+        if observesSyntheticZeroWorkAcknowledgement {
+            bridge.beginResultOwnershipWindowForTesting()
+        }
+        #endif
+        var deferredZeroWorkAcknowledgement:
+            (generation: UInt64, token: UInt64)?
+        do {
+            for result in strokePreparationResultScratch {
+                guard result.generation == strokePreparationGeneration else {
+                    continue
+                }
+                switch result {
+                case let .prepared(batch):
+                    let acknowledgement = try installPreparedStrokeBatch(batch)
+                    if let acknowledgement {
+                        precondition(deferredZeroWorkAcknowledgement == nil)
+                        deferredZeroWorkAcknowledgement = acknowledgement
+                    }
+                case .predictionWasShed:
+                    break
+                case .estimatedUpdateWasIgnored:
+                    break
+                case let .estimatedUpdateWasRejected(
+                    _,
+                    error,
+                    capacityFailure
+                ):
+                    if let capacityFailure {
+                        throw rendererError(for: capacityFailure)
+                    }
+                    throw error
+                case .commitBarrierReached:
+                    guard let maximumRetainedBytes =
+                        pendingPreparationCommitRetainedBytes
+                    else {
+                        throw MetalRendererError.invalidStrokeLifecycle
+                    }
+                    pendingPreparationCommitRetainedBytes = nil
+                    try markOffMainStrokeCommitReady(
+                        maximumRetainedBytes: maximumRetainedBytes
+                    )
+                case let .cancelled(generation, _):
+                    if strokeWorkspaceState == .retiring(generation) {
+                        finishStrokeWorkspaceRetirement(
+                            generation: generation
+                        )
+                        continue
+                    }
                     throw MetalRendererError.invalidStrokeLifecycle
+                case let .failed(_, failure):
+                    if case let .retiring(generation) = strokeWorkspaceState,
+                       generation == result.generation
+                    {
+                        finishStrokeWorkspaceRetirement(
+                            generation: generation
+                        )
+                        continue
+                    }
+                    throw rendererError(for: failure)
                 }
-                pendingPreparationCommitRetainedBytes = nil
-                try markOffMainStrokeCommitReady(
-                    maximumRetainedBytes: maximumRetainedBytes
-                )
-            case let .cancelled(generation, _):
-                if strokeWorkspaceState == .retiring(generation) {
-                    finishStrokeWorkspaceRetirement(
-                        generation: generation
-                    )
-                    continue
-                }
-                throw MetalRendererError.invalidStrokeLifecycle
-            case let .failed(_, failure):
-                if case let .retiring(generation) = strokeWorkspaceState,
-                   generation == result.generation
-                {
-                    finishStrokeWorkspaceRetirement(
-                        generation: generation
-                    )
-                    continue
-                }
-                throw rendererError(for: failure)
             }
+        } catch {
+            strokePreparationResultScratch.removeAll(keepingCapacity: true)
+            #if DEBUG
+            if observesSyntheticZeroWorkAcknowledgement {
+                bridge.cancelResultOwnershipWindowForTesting()
+            }
+            #endif
+            throw error
+        }
+        // Prepared dab/dirty views are valid only through ACK. Release every
+        // result that owns those views before returning the page lease.
+        strokePreparationResultScratch.removeAll(keepingCapacity: true)
+        #if DEBUG
+        if observesSyntheticZeroWorkAcknowledgement {
+            bridge.markResultOwnershipReleasedForTesting()
+        }
+        #endif
+        if let deferredZeroWorkAcknowledgement {
+            try bridge.acknowledgePreparedFrame(
+                generation: deferredZeroWorkAcknowledgement.generation,
+                token: deferredZeroWorkAcknowledgement.token
+            )
+            lastOffMainZeroWorkLeaseCount += 1
+        } else {
+            #if DEBUG
+            if observesSyntheticZeroWorkAcknowledgement {
+                bridge.cancelResultOwnershipWindowForTesting()
+            }
+            #endif
         }
     }
 
@@ -3309,6 +3393,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         case .coordinator,
              .cornerEmission,
              .authoritativeQueue,
+             .injectedStageC,
              .scheduler,
              .stampPacking,
              .privateSurfaceEncoding,
@@ -3335,7 +3420,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     private func installPreparedStrokeBatch(
         _ batch: StrokePreparedDepositionBatch
-    ) throws {
+    ) throws -> (generation: UInt64, token: UInt64)? {
         guard batch.generation == strokePreparationGeneration,
               pendingPreparedWorkerFrame == nil,
               pendingPreparedSurfaceFrame == nil,
@@ -3398,6 +3483,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             if totalInstanceCount == 0 {
                 lastOffMainZeroWorkLeaseCount += 1
             }
+        } else if batch.isSyntheticZeroWorkContinuation
+        {
+            // A clipped page has no GPU submission to return its synthetic
+            // lease. Defer the acknowledgement until the caller releases the
+            // immutable result payload that owns this page's logical dabs.
         } else if batch.frameToken != nil || totalInstanceCount != 0 {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -3423,6 +3513,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         if let scheduler = activeStroke?.frozenHarnessScheduler {
             recordBrushLabScheduler(scheduler)
         }
+        if batch.isSyntheticZeroWorkContinuation,
+           let token = batch.frameToken
+        {
+            return (batch.generation, token)
+        }
+        return nil
     }
 
     private func acknowledgeSubmittedPreparationFrame(
@@ -4061,6 +4157,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         strokeMetalSurfaceInstallationCount
     }
 
+    package var offMainStrokeWorkspaceIsAvailableForAllocationHarness: Bool {
+        strokeWorkspaceState == .available
+    }
+
     var offMainCoordinatorSnapshotForHarness: StrokeRenderSnapshot? {
         lastOffMainCoordinatorSnapshot
     }
@@ -4078,7 +4178,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         forceOffMainStrokeCommandFailureForTesting = force
     }
 
+    package func offMainStageCContinuationMetricsForAllocationHarness()
+        async -> StrokeStageCContinuationMetrics
+    {
+        await (strokePreparationBridge ?? warmedStrokePreparationBridge)
+            .stageCContinuationMetricsForAllocationHarness()
+    }
+
     #if DEBUG
+    func setStrokePreparationResultOwnershipProbeForTesting(
+        _ probe: StrokePreparationResultOwnershipProbe?
+    ) {
+        precondition(isIdle)
+        warmedStrokePreparationBridge
+            .setResultOwnershipProbeForTesting(probe)
+    }
+
     var compatibilityInkCoordinatorSnapshotForTesting:
         StrokeRenderSnapshot?
     {
@@ -4414,6 +4529,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         resultScratch.reserveCapacity(1)
         for _ in 0..<10_000 {
             bridge.drainResults(into: &resultScratch)
+            var deferredAcknowledgement: (generation: UInt64, token: UInt64)?
             for result in resultScratch {
                 switch result {
                 case let .cancelled(cancelledGeneration, _)
@@ -4421,16 +4537,25 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     return
                 case let .prepared(batch):
                     if let lease = batch.surfaceLease {
-                        try bridge.acknowledgePreparedFrame(
-                            generation: lease.generation,
-                            token: lease.token
+                        deferredAcknowledgement = (
+                            lease.generation,
+                            lease.token
                         )
+                    } else if let token = batch.frameToken {
+                        deferredAcknowledgement = (batch.generation, token)
                     }
                 case let .failed(_, failure):
                     throw rendererError(for: failure)
                 default:
                     break
                 }
+            }
+            resultScratch.removeAll(keepingCapacity: true)
+            if let deferredAcknowledgement {
+                try bridge.acknowledgePreparedFrame(
+                    generation: deferredAcknowledgement.generation,
+                    token: deferredAcknowledgement.token
+                )
             }
             await Task.yield()
         }
@@ -4461,6 +4586,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             if resultScratch.isEmpty {
                 deferredDrainCount += 1
             }
+            var deferredAcknowledgement: (generation: UInt64, token: UInt64)?
             for result in resultScratch {
                 switch result {
                 case let .prepared(batch):
@@ -4519,10 +4645,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                                     ?? "off-main trace composite failed"
                             )
                         }
-                        try bridge.acknowledgePreparedFrame(
-                            generation: lease.generation,
-                            token: lease.token
+                        deferredAcknowledgement = (
+                            lease.generation,
+                            lease.token
                         )
+                    } else if let token = batch.frameToken {
+                        zeroWorkLeaseCount += 1
+                        deferredAcknowledgement = (batch.generation, token)
                     }
                 case .predictionWasShed:
                     break
@@ -4544,6 +4673,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 case let .failed(_, failure):
                     throw rendererError(for: failure)
                 }
+            }
+            resultScratch.removeAll(keepingCapacity: true)
+            if let deferredAcknowledgement {
+                try bridge.acknowledgePreparedFrame(
+                    generation: deferredAcknowledgement.generation,
+                    token: deferredAcknowledgement.token
+                )
             }
             let mailbox = bridge.mailbox.snapshot
             let inputReached = coordinatorSnapshot?

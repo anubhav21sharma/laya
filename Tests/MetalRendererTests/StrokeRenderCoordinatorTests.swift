@@ -111,6 +111,25 @@ struct StrokeRenderCoordinatorTests {
 
         #expect(projectedCount > 0)
         #expect(frameCount == projectedCount)
+        var finishing: StrokePreparedDepositionBatch? = try await executor
+            .finishPreparedStroke(
+                generation: 88,
+                actualSamples: [sample(index: 1, phase: .ended)]
+            )
+        while let frame = finishing,
+              let token = frame.frameToken
+        {
+            guard case let .prepared(next)? = await executor
+                .acknowledgePreparedFrame(
+                    generation: 88,
+                    frameToken: token
+                )
+            else {
+                finishing = nil
+                continue
+            }
+            finishing = next
+        }
         try await executor.requestCommit(generation: 88)
         #expect(await executor.isCommitReady(generation: 88))
     }
@@ -424,6 +443,63 @@ struct StrokeRenderCoordinatorTests {
         try queue.retire(remainder)
         #expect(queue.submittedCount == 9)
         #expect(queue.isEmpty)
+    }
+
+    @Test
+    func compactRetiredTransferAdvancesAccountingWithoutQueueStorage() throws {
+        var queue = try AuthoritativeStrokeQueue(capacity: 4)
+
+        try queue.preflightRetiredTransfer(
+            startingOrdinal: 0,
+            count: 4
+        )
+        queue.recordPrevalidatedRetiredTransfer(
+            startingOrdinal: 0,
+            count: 4
+        )
+
+        #expect(queue.isEmpty)
+        #expect(queue.count == 0)
+        #expect(queue.highWater == 4)
+        #expect(queue.nextExpectedOrdinal == 4)
+        #expect(queue.submittedCount == 4)
+    }
+
+    @Test
+    func compactRetiredTransferRejectsCapacityOrdinalAndOverflowExactly()
+        throws
+    {
+        let queue = try AuthoritativeStrokeQueue(capacity: 4)
+
+        #expect(
+            throws: AuthoritativeStrokeQueueError.capacityExceeded(
+                current: 0,
+                incoming: 5,
+                maximum: 4
+            )
+        ) {
+            try queue.preflightRetiredTransfer(
+                startingOrdinal: 0,
+                count: 5
+            )
+        }
+        #expect(
+            throws: AuthoritativeStrokeQueueError.noncontiguousOrdinal(
+                expected: 0,
+                actual: 1
+            )
+        ) {
+            try queue.preflightRetiredTransfer(
+                startingOrdinal: 1,
+                count: 1
+            )
+        }
+        #expect(throws: AuthoritativeStrokeQueueError.ordinalOverflow) {
+            try queue.preflightRetiredTransfer(
+                startingOrdinal: UInt64.max,
+                count: 1
+            )
+        }
     }
 
     @Test
@@ -891,7 +967,11 @@ struct StrokeRenderCoordinatorTests {
         #expect(heldGenerator.emittedDabCount == 0)
         #expect(heldGenerator != initialGenerator)
 
-        let transfer = try coordinator.prepareSettledReplayTransfer(chunks)
+        let transfer = try coordinator.prepareSettledReplayTransfer(
+            chunks,
+            trustedStartingGenerator: initialGenerator,
+            trustedFinalGenerator: heldGenerator
+        )
         try coordinator.reserveForDownstreamAcceptance(
             transfer,
             retireAfterAcceptance: true
@@ -905,6 +985,194 @@ struct StrokeRenderCoordinatorTests {
         )
         #expect(moved.work.first?.ordinal == 0)
         #expect(moved.work.allSatisfy { $0.dab.isPredicted == false })
+    }
+
+    @Test
+    func stageCCompactTransferPagesValidationAndInstallsAtomically() throws {
+        let coordinator = try makeStageCCoordinator(
+            program: stageCMetalTestProgram(
+                id: "test.coordinator-stage-c-compact-transfer"
+            ),
+            capacity: 64
+        )
+        let initialGenerator = coordinator.generatorSnapshot
+        let chunks = settledReplayChunks(
+            samples: [
+                stageCSample(x: 16, y: 256, phase: .began),
+                stageCSample(x: 48, y: 256, phase: .moved),
+            ],
+            generator: initialGenerator,
+            inputDeriver: coordinator.inputDeriverSnapshot
+        )
+        let expectedGenerator = try #require(
+            chunks.last?.generatorSnapshotAfterSample
+        )
+        var expectedDeriver = coordinator.inputDeriverSnapshot
+        for chunk in chunks {
+            _ = expectedDeriver.rederive(chunk.sample)
+        }
+        let expectedDabCount = chunks.reduce(0) { $0 + $1.dabs.count }
+        let expectedLastOrdinal = chunks.last?.dabs.last?.attributes.ordinal
+        let before = coordinator.snapshot
+        var cursor = try coordinator.beginSettledStageCTransfer(
+            expectedChunkCount: 2,
+            trustedStartingGenerator: initialGenerator,
+            trustedFinalGenerator: expectedGenerator
+        )
+        var prepared: PreparedSettledStageCTransfer?
+        var pageCount = 0
+
+        while prepared == nil {
+            let step = try coordinator.resumeSettledStageCTransfer(
+                &cursor,
+                chunks: chunks,
+                maximumWorkUnits: 1
+            )
+            pageCount += 1
+            switch step {
+            case let .pending(consumedWorkUnits):
+                #expect(consumedWorkUnits == 1)
+                #expect(coordinator.snapshot == before)
+                #expect(coordinator.generatorSnapshot == initialGenerator)
+            case let .prepared(candidate, consumedWorkUnits):
+                #expect(consumedWorkUnits == 1)
+                prepared = candidate
+            }
+        }
+
+        let candidate = try #require(prepared)
+        #expect(pageCount == 4 + expectedDabCount)
+        #expect(candidate.sampleCount == 2)
+        #expect(candidate.dabCount == expectedDabCount)
+        #expect(candidate.lastOrdinal == expectedLastOrdinal)
+        #expect(coordinator.snapshot == before)
+        try coordinator.reserveForDownstreamAcceptance(
+            candidate,
+            retireAfterAcceptance: true
+        )
+        #expect(coordinator.snapshot == before)
+
+        coordinator.finalizeAndRetireAfterDownstreamAcceptance(candidate)
+
+        #expect(coordinator.generatorSnapshot == expectedGenerator)
+        #expect(coordinator.inputDeriverSnapshot == expectedDeriver)
+        #expect(coordinator.snapshot.authoritativeQueueDepth == 0)
+        #expect(
+            coordinator.snapshot.authoritativeSubmittedDabCount
+                == UInt64(expectedDabCount)
+        )
+        #expect(coordinator.snapshot.commitMetadata.inputSampleCount == 2)
+        #expect(
+            coordinator.snapshot.commitMetadata.emittedDabCount
+                == UInt64(expectedDabCount)
+        )
+        #expect(
+            coordinator.snapshot.commitMetadata.lastEmittedOrdinal
+                == expectedLastOrdinal
+        )
+    }
+
+    @Test
+    func stageCCompactTransferBoundsZeroDabCheckpointWork() throws {
+        let coordinator = try makeStageCCoordinator(
+            program: stageCMetalTestProgram(
+                id: "test.coordinator-stage-c-compact-zero-dab",
+                usesTravelDirection: true
+            ),
+            capacity: 8
+        )
+        let initialGenerator = coordinator.generatorSnapshot
+        let chunks = settledReplayChunks(
+            samples: [stageCSample(x: 16, y: 256, phase: .began)],
+            generator: initialGenerator,
+            inputDeriver: coordinator.inputDeriverSnapshot
+        )
+        let finalGenerator = try #require(
+            chunks.first?.generatorSnapshotAfterSample
+        )
+        #expect(chunks.first?.dabs.isEmpty == true)
+        var cursor = try coordinator.beginSettledStageCTransfer(
+            expectedChunkCount: 1,
+            trustedStartingGenerator: initialGenerator,
+            trustedFinalGenerator: finalGenerator
+        )
+
+        let header = try coordinator.resumeSettledStageCTransfer(
+            &cursor,
+            chunks: chunks,
+            maximumWorkUnits: 1
+        )
+        guard case let .pending(headerWork) = header else {
+            Issue.record("zero-dab header unexpectedly completed transfer")
+            return
+        }
+        #expect(headerWork == 1)
+
+        let footer = try coordinator.resumeSettledStageCTransfer(
+            &cursor,
+            chunks: chunks,
+            maximumWorkUnits: 1
+        )
+        guard case let .prepared(prepared, footerWork) = footer else {
+            Issue.record("zero-dab footer did not complete transfer")
+            return
+        }
+        #expect(footerWork == 1)
+        #expect(prepared.sampleCount == 1)
+        #expect(prepared.dabCount == 0)
+        #expect(prepared.lastOrdinal == nil)
+    }
+
+    @Test
+    func stageCCompactTransferRejectsChunkMutationAcrossPages() throws {
+        let coordinator = try makeStageCCoordinator(
+            program: stageCMetalTestProgram(
+                id: "test.coordinator-stage-c-compact-stable-source",
+                usesTravelDirection: true
+            ),
+            capacity: 8
+        )
+        let initialGenerator = coordinator.generatorSnapshot
+        let firstChunks = settledReplayChunks(
+            samples: [stageCSample(x: 16, y: 256, phase: .began)],
+            generator: initialGenerator,
+            inputDeriver: coordinator.inputDeriverSnapshot
+        )
+        let replacementChunks = settledReplayChunks(
+            samples: [stageCSample(x: 80, y: 256, phase: .began)],
+            generator: initialGenerator,
+            inputDeriver: coordinator.inputDeriverSnapshot
+        )
+        let replacementFinal = try #require(
+            replacementChunks.first?.generatorSnapshotAfterSample
+        )
+        #expect(firstChunks.first?.dabs.isEmpty == true)
+        #expect(replacementChunks.first?.dabs.isEmpty == true)
+        var cursor = try coordinator.beginSettledStageCTransfer(
+            expectedChunkCount: 1,
+            trustedStartingGenerator: initialGenerator,
+            trustedFinalGenerator: replacementFinal
+        )
+        let header = try coordinator.resumeSettledStageCTransfer(
+            &cursor,
+            chunks: firstChunks,
+            maximumWorkUnits: 1
+        )
+        guard case .pending = header else {
+            Issue.record("chunk header unexpectedly completed transfer")
+            return
+        }
+
+        #expect(
+            throws: StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        ) {
+            _ = try coordinator.resumeSettledStageCTransfer(
+                &cursor,
+                chunks: replacementChunks,
+                maximumWorkUnits: 1
+            )
+        }
     }
 
     @Test
@@ -946,12 +1214,17 @@ struct StrokeRenderCoordinatorTests {
         ) {
             _ = try coordinator.prepareSettledReplayTransfer([
                 omittingStabilizerState,
-            ])
+            ], trustedStartingGenerator: initialGenerator,
+            trustedFinalGenerator: delayedGenerator)
         }
         #expect(coordinator.snapshot == before)
         #expect(coordinator.generatorSnapshot == initialGenerator)
 
-        let retry = try coordinator.prepareSettledReplayTransfer(valid)
+        let retry = try coordinator.prepareSettledReplayTransfer(
+            valid,
+            trustedStartingGenerator: initialGenerator,
+            trustedFinalGenerator: delayedGenerator
+        )
         try coordinator.abandon(retry)
         #expect(coordinator.snapshot == before)
     }

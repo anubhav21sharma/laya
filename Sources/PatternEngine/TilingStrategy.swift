@@ -315,6 +315,7 @@ public struct TilingStrategy: Equatable, Sendable {
                 intersecting: worldBounds,
                 polygonA: &scratch.polygonA,
                 polygonB: &scratch.polygonB,
+                sortScratch: &scratch.imageSortScratch,
                 result: &scratch.images
             )
         }
@@ -365,6 +366,7 @@ public struct TilingStrategy: Equatable, Sendable {
                 intersecting: worldBounds,
                 polygonA: &scratch.polygonA,
                 polygonB: &scratch.polygonB,
+                sortScratch: &scratch.imageSortScratch,
                 result: &scratch.images,
                 maximumImageCount: maximumImageCount
             )

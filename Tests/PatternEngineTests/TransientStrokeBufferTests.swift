@@ -1441,4 +1441,257 @@ func failedPredictionReplacementRetryPreservesPriorPredictionStorage()
     )
 }
 
+@Test
+func actualArenaStorageResumesWithinAnExplicitWorkQuota() throws {
+    let arena = TransientStrokeDabArena()
+    let transaction = try arena.beginTransaction(
+        replacingPrediction: false
+    )
+    var cursor = try transaction.beginActualStore(count: 1_025)
+    var stored: TransientStrokeDabSlice?
+    var pageWork: [Int] = []
+
+    while stored == nil {
+        switch try transaction.resumeActualStore(
+            &cursor,
+            maximumWorkUnits: 512,
+            elementAt: { transientDab($0) }
+        ) {
+        case let .pending(consumedWorkUnits):
+            pageWork.append(consumedWorkUnits)
+        case let .stored(slice, consumedWorkUnits):
+            pageWork.append(consumedWorkUnits)
+            stored = slice
+        }
+    }
+
+    let slice = try #require(stored)
+    #expect(pageWork.count == 5)
+    #expect(pageWork.allSatisfy { (1 ... 512).contains($0) })
+    #expect(slice.count == 1_025)
+    #expect(slice[0] == transientDab(0))
+    #expect(slice[1_024] == transientDab(1_024))
+    transaction.rollback()
+    #expect(arena.diagnosticSnapshot.occupiedSlotCount == 0)
+}
+
+@Test
+func arenaRetirementResumesWithoutScanningUnoccupiedCapacity() throws {
+    let arena = TransientStrokeDabArena()
+    let first = try arena.beginTransaction(replacingPrediction: false)
+    let retained = try first.storeActual(count: 1_025) {
+        transientDab($0)
+    }
+    try first.commit(
+        retainingActual: [
+            TransientStrokeChunk(
+                sample: transientSample(0),
+                dabs: retained
+            ),
+        ],
+        retainingPredicted: [TransientStrokeChunk]()
+    )
+    #expect(arena.diagnosticSnapshot.occupiedSlotCount == 1_025)
+
+    let removal = try arena.beginTransaction(replacingPrediction: false)
+    let noActual = [TransientStrokeChunk]()
+    let noPrediction = [TransientStrokeChunk]()
+    var cursor = try removal.beginCommit(
+        expectedActualChunkCount: 0,
+        expectedPredictedChunkCount: 0
+    )
+    var work: [Int] = []
+    commit: while true {
+        switch try removal.resumeCommit(
+            &cursor,
+            retainingActual: noActual,
+            retainingPredicted: noPrediction,
+            maximumWorkUnits: 512
+        ) {
+        case let .pending(consumedWorkUnits):
+            work.append(consumedWorkUnits)
+        case let .prepared(prepared, consumedWorkUnits):
+            work.append(consumedWorkUnits)
+            removal.publish(prepared)
+            break commit
+        }
+    }
+
+    #expect(work == [1])
+    #expect(arena.diagnosticSnapshot.occupiedSlotCount == 0)
+}
+
+@Test
+func mixedLegacyAndResumableReservationsRollbackEveryOwnedSlot() throws {
+    let arena = TransientStrokeDabArena()
+    let transaction = try arena.beginTransaction(
+        replacingPrediction: true
+    )
+    let actual = (0..<8).map { transientDab($0) }
+    _ = try transaction.storeActual(actual, range: actual.indices)
+    _ = try transaction.storePredicted(count: 7) {
+        transientDab(100 + $0, predicted: true)
+    }
+    var cursor = try transaction.beginActualStore(count: 9)
+    store: while true {
+        switch try transaction.resumeActualStore(
+            &cursor,
+            maximumWorkUnits: 3,
+            elementAt: { transientDab(200 + $0) }
+        ) {
+        case .pending:
+            continue
+        case .stored:
+            break store
+        }
+    }
+    #expect(arena.diagnosticSnapshot.occupiedSlotCount == 24)
+
+    transaction.rollback()
+
+    #expect(arena.diagnosticSnapshot.occupiedSlotCount == 0)
+}
+
+@Test
+func partialArenaRetentionRollbackKeepsPriorEpochReadable() throws {
+    let arena = TransientStrokeDabArena()
+    let originalTransaction = try arena.beginTransaction(
+        replacingPrediction: false
+    )
+    let original = try originalTransaction.storeActual(count: 600) {
+        transientDab($0)
+    }
+    let originalChunks = [
+        TransientStrokeChunk(
+            sample: transientSample(0),
+            dabs: original
+        ),
+    ]
+    try originalTransaction.commit(
+        retainingActual: originalChunks,
+        retainingPredicted: [TransientStrokeChunk]()
+    )
+
+    let replacementTransaction = try arena.beginTransaction(
+        replacingPrediction: false
+    )
+    let replacement = try replacementTransaction.storeActual(count: 600) {
+        transientDab(1_000 + $0)
+    }
+    let replacementChunks = [
+        TransientStrokeChunk(
+            sample: transientSample(1),
+            dabs: replacement
+        ),
+    ]
+    var cursor = try replacementTransaction.beginCommit(
+        expectedActualChunkCount: 1,
+        expectedPredictedChunkCount: 0
+    )
+    let firstPage = try replacementTransaction.resumeCommit(
+        &cursor,
+        retainingActual: replacementChunks,
+        retainingPredicted: [TransientStrokeChunk](),
+        maximumWorkUnits: 512
+    )
+    guard case .pending(consumedWorkUnits: 512) = firstPage else {
+        Issue.record("Expected a partial inactive-lane retention page")
+        replacementTransaction.rollback()
+        return
+    }
+
+    replacementTransaction.rollback()
+
+    #expect(original[0] == transientDab(0))
+    #expect(original[599] == transientDab(599))
+    #expect(arena.diagnosticSnapshot.occupiedSlotCount == 600)
+}
+
+@Test
+func actualArenaStorageHonorsDeadlineAfterOneProgressUnit() throws {
+    let arena = TransientStrokeDabArena()
+    let transaction = try arena.beginTransaction(
+        replacingPrediction: false
+    )
+    var cursor = try transaction.beginActualStore(count: 2)
+
+    let first = try transaction.resumeActualStore(
+        &cursor,
+        maximumWorkUnits: 512,
+        shouldYield: { true },
+        elementAt: { transientDab($0) }
+    )
+    guard case .pending(consumedWorkUnits: 1) = first else {
+        Issue.record("Expected deadline yield after one storage work unit")
+        transaction.rollback()
+        return
+    }
+
+    var stored: TransientStrokeDabSlice?
+    while stored == nil {
+        switch try transaction.resumeActualStore(
+            &cursor,
+            maximumWorkUnits: 512,
+            elementAt: { transientDab($0) }
+        ) {
+        case .pending:
+            continue
+        case let .stored(slice, _):
+            stored = slice
+        }
+    }
+    #expect(stored?.count == 2)
+    transaction.rollback()
+}
+
+@Test
+func arenaRetentionHonorsDeadlineAfterOneProgressUnit() throws {
+    let arena = TransientStrokeDabArena()
+    let transaction = try arena.beginTransaction(
+        replacingPrediction: false
+    )
+    let retained = try transaction.storeActual(count: 3) {
+        transientDab($0)
+    }
+    let chunks = [
+        TransientStrokeChunk(
+            sample: transientSample(0),
+            dabs: retained
+        ),
+    ]
+    var cursor = try transaction.beginCommit(
+        expectedActualChunkCount: 1,
+        expectedPredictedChunkCount: 0
+    )
+
+    let first = try transaction.resumeCommit(
+        &cursor,
+        retainingActual: chunks,
+        retainingPredicted: [TransientStrokeChunk](),
+        maximumWorkUnits: 512,
+        shouldYield: { true }
+    )
+    guard case .pending(consumedWorkUnits: 1) = first else {
+        Issue.record("Expected deadline yield after one retention work unit")
+        transaction.rollback()
+        return
+    }
+
+    commit: while true {
+        switch try transaction.resumeCommit(
+            &cursor,
+            retainingActual: chunks,
+            retainingPredicted: [TransientStrokeChunk](),
+            maximumWorkUnits: 512
+        ) {
+        case .pending:
+            continue
+        case let .prepared(prepared, _):
+            transaction.publish(prepared)
+            break commit
+        }
+    }
+    #expect(arena.diagnosticSnapshot.occupiedSlotCount == 3)
+}
+
 private func requireSendable<T: Sendable>(_: T) {}

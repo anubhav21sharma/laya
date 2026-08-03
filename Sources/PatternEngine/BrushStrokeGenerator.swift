@@ -129,6 +129,11 @@ extension BrushStrokeGenerator {
         public let hasMore: Bool
     }
 
+    public enum EmissionSinkDecision: Equatable, Sendable {
+        case accept
+        case pause
+    }
+
     /// A copyable, exact continuation for one schema-v2 input sample.
     ///
     /// This is the bounded production-facing generation API. The older
@@ -615,6 +620,19 @@ extension BrushStrokeGenerator {
         public mutating func emitNextPage(
             _ emit: (DabAttributes) throws -> Void
         ) throws -> EmissionPage {
+            try emitNextPageDeciding { dab in
+                try emit(dab)
+                return .accept
+            }
+        }
+
+        /// Offers candidates to a sink that may pause before accepting the
+        /// current candidate. A pause preserves the exact candidate,
+        /// generator random stream and logical ordinal for the next resume.
+        @discardableResult
+        public mutating func emitNextPageDeciding(
+            _ emit: (DabAttributes) throws -> EmissionSinkDecision
+        ) throws -> EmissionPage {
             var emittedCount = 0
             while !isComplete {
                 let allowEmission = emittedCount
@@ -633,10 +651,16 @@ extension BrushStrokeGenerator {
                             "Prepared cursor advance must expose a candidate"
                         )
                     }
-                    try generator.emitAcceptedCandidate(
+                    let wasAccepted = try generator.offerCandidate(
                         candidate,
                         emit: emit
                     )
+                    guard wasAccepted else {
+                        return EmissionPage(
+                            emittedCount: emittedCount,
+                            hasMore: true
+                        )
+                    }
                     commitPreparedCandidate()
                     emittedCount += 1
                 case .noDab:
@@ -2849,6 +2873,16 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         _ candidate: StrokeEmissionCandidate,
         emit: (DabAttributes) throws -> Void
     ) throws {
+        _ = try offerCandidate(candidate) { dab in
+            try emit(dab)
+            return .accept
+        }
+    }
+
+    private mutating func offerCandidate(
+        _ candidate: StrokeEmissionCandidate,
+        emit: (DabAttributes) throws -> EmissionSinkDecision
+    ) throws -> Bool {
         try Self.preflightLogicalIdentity(
             emittedDabCount: emittedDabCount
         )
@@ -2862,10 +2896,11 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             ordinal: emittedDabCount,
             randomValues: proposedRandom.nextValues()
         )
-        try emit(dab)
+        guard try emit(dab) == .accept else { return false }
         random = proposedRandom
         emittedDabCount &+= 1
         installAcceptedCandidate(candidate, dab: dab)
+        return true
     }
 
     static func preflightLogicalIdentity(

@@ -14,6 +14,7 @@ public enum StrokeRenderCoordinatorError: Error, Equatable, Sendable {
     case authoritativeQueueNotEmpty
     case transactionAlreadyReserved
     case transactionTokenOverflow
+    case invalidSettledTransferWorkLimit(Int)
     case stalePreparedEmission(expectedRevision: UInt64, actualRevision: UInt64)
 }
 
@@ -36,7 +37,59 @@ public struct PreparedStrokeCoordinatorEmission: Sendable {
     fileprivate let hasFinished: Bool
 }
 
-private struct SettledReplayLifecycleCandidate {
+struct PreparedSettledStageCTransfer: Sendable {
+    let sampleCount: Int
+    let dabCount: Int
+    let lastOrdinal: UInt64?
+
+    fileprivate let coordinatorIdentity: UUID
+    fileprivate let token: UInt64
+    fileprivate let baseRevision: UInt64
+    fileprivate let startingOrdinal: UInt64
+    fileprivate let generator: BrushStrokeGenerator
+    fileprivate let inputDeriver: BrushInputDeriver
+    fileprivate let commitMetadata: StrokeCommitMetadata
+    fileprivate let maximumReturnedDabCount: Int
+    fileprivate let hasBegun: Bool
+    fileprivate let hasFinished: Bool
+}
+
+enum SettledStageCTransferStep: Sendable {
+    case pending(consumedWorkUnits: Int)
+    case prepared(
+        PreparedSettledStageCTransfer,
+        consumedWorkUnits: Int
+    )
+}
+
+private enum SettledStageCTransferPhase: Sendable {
+    case chunkHeader
+    case dab
+    case chunkFooter
+}
+
+struct SettledStageCTransferCursor: Sendable {
+    fileprivate let coordinatorIdentity: UUID
+    fileprivate let baseRevision: UInt64
+    fileprivate let expectedChunkCount: Int
+    fileprivate let startingOrdinal: UInt64
+    fileprivate let trustedFinalGenerator: BrushStrokeGenerator
+    fileprivate var chunkIndex: Int
+    fileprivate var dabIndex: Int
+    fileprivate var phase: SettledStageCTransferPhase
+    fileprivate var expectedOrdinal: UInt64
+    fileprivate var sampleCount: Int
+    fileprivate var dabCount: Int
+    fileprivate var lastOrdinal: UInt64?
+    fileprivate var generator: BrushStrokeGenerator
+    fileprivate var inputDeriver: BrushInputDeriver
+    fileprivate var lifecycle: SettledReplayLifecycleCandidate
+    fileprivate var currentSample: WorldStrokeSample?
+    fileprivate var currentDabCount: Int
+    fileprivate var currentGeneratorCheckpoint: BrushStrokeGenerator?
+}
+
+private struct SettledReplayLifecycleCandidate: Sendable {
     var hasBegun: Bool
     var hasFinished: Bool
     var expectedOrdinal: UInt64
@@ -62,6 +115,7 @@ public final class StrokeRenderCoordinator {
 
     var generatorSnapshot: BrushStrokeGenerator { generator }
     var inputDeriverSnapshot: BrushInputDeriver { inputDeriver }
+    private(set) var synchronousCompatibilityReplayInvocationCount: UInt64 = 0
     public var predictionProvenanceBoundary:
         PredictionProvenanceBoundary
     {
@@ -190,8 +244,188 @@ public final class StrokeRenderCoordinator {
         )
     }
 
+    func beginSettledStageCTransfer(
+        expectedChunkCount: Int,
+        trustedStartingGenerator: BrushStrokeGenerator,
+        trustedFinalGenerator: BrushStrokeGenerator
+    ) throws -> SettledStageCTransferCursor {
+        try requireIdleTransaction()
+        guard expectedChunkCount > 0,
+              generator.program.stageC != nil,
+              trustedStartingGenerator == generator,
+              trustedFinalGenerator.program == generator.program
+        else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+        return SettledStageCTransferCursor(
+            coordinatorIdentity: coordinatorIdentity,
+            baseRevision: revision,
+            expectedChunkCount: expectedChunkCount,
+            startingOrdinal: authoritativeQueue.nextExpectedOrdinal,
+            trustedFinalGenerator: trustedFinalGenerator,
+            chunkIndex: 0,
+            dabIndex: 0,
+            phase: .chunkHeader,
+            expectedOrdinal: authoritativeQueue.nextExpectedOrdinal,
+            sampleCount: 0,
+            dabCount: 0,
+            lastOrdinal: nil,
+            generator: generator,
+            inputDeriver: inputDeriver,
+            lifecycle: SettledReplayLifecycleCandidate(
+                hasBegun: hasBegun,
+                hasFinished: hasFinished,
+                expectedOrdinal: authoritativeQueue.nextExpectedOrdinal
+            ),
+            currentSample: nil,
+            currentDabCount: 0,
+            currentGeneratorCheckpoint: nil
+        )
+    }
+
+    func resumeSettledStageCTransfer(
+        _ cursor: inout SettledStageCTransferCursor,
+        chunks: borrowing [TransientStrokeChunk],
+        maximumWorkUnits: Int
+    ) throws -> SettledStageCTransferStep {
+        guard maximumWorkUnits > 0 else {
+            throw StrokeRenderCoordinatorError
+                .invalidSettledTransferWorkLimit(maximumWorkUnits)
+        }
+        guard cursor.coordinatorIdentity == coordinatorIdentity else {
+            throw StrokeRenderCoordinatorError
+                .preparedEmissionOriginMismatch
+        }
+        guard cursor.baseRevision == revision else {
+            throw StrokeRenderCoordinatorError.stalePreparedEmission(
+                expectedRevision: revision,
+                actualRevision: cursor.baseRevision
+            )
+        }
+        try requireIdleTransaction()
+        guard chunks.count == cursor.expectedChunkCount,
+              cursor.chunkIndex < chunks.endIndex
+        else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+
+        var consumedWorkUnits = 0
+        while consumedWorkUnits < maximumWorkUnits {
+            let chunk = chunks[cursor.chunkIndex]
+            switch cursor.phase {
+            case .chunkHeader:
+                try validateSettledReplayLifecycle(
+                    chunk,
+                    index: cursor.chunkIndex,
+                    finalIndex: chunks.index(before: chunks.endIndex),
+                    candidate: &cursor.lifecycle
+                )
+                try Self.validateSettledReplayInputTransition(
+                    chunk,
+                    inputDeriver: &cursor.inputDeriver
+                )
+                let (nextSampleCount, sampleOverflow) = cursor.sampleCount
+                    .addingReportingOverflow(1)
+                guard !sampleOverflow else {
+                    throw AuthoritativeStrokeQueueError.ordinalOverflow
+                }
+                cursor.sampleCount = nextSampleCount
+                cursor.currentSample = chunk.sample
+                cursor.currentDabCount = chunk.dabs.count
+                cursor.currentGeneratorCheckpoint =
+                    chunk.generatorSnapshotAfterSample
+                cursor.phase = chunk.dabs.isEmpty ? .chunkFooter : .dab
+                consumedWorkUnits += 1
+
+            case .dab:
+                guard cursor.currentSample == .some(chunk.sample),
+                      chunk.dabs.count == cursor.currentDabCount,
+                      cursor.dabIndex < chunk.dabs.count
+                else {
+                    throw StrokeRenderCoordinatorError
+                        .settledReplayCheckpointMismatch
+                }
+                let dab = chunk.dabs[cursor.dabIndex].attributes
+                guard !dab.isPredicted else {
+                    throw StrokeRenderCoordinatorError
+                        .invalidAuthoritativeSample
+                }
+                guard dab.ordinal == cursor.expectedOrdinal else {
+                    throw StrokeRenderCoordinatorError.ordinalDiscontinuity(
+                        expected: cursor.expectedOrdinal,
+                        actual: dab.ordinal
+                    )
+                }
+                let (nextOrdinal, ordinalOverflow) = cursor.expectedOrdinal
+                    .addingReportingOverflow(1)
+                let (nextDabCount, countOverflow) = cursor.dabCount
+                    .addingReportingOverflow(1)
+                guard !ordinalOverflow, !countOverflow else {
+                    throw AuthoritativeStrokeQueueError.ordinalOverflow
+                }
+                cursor.expectedOrdinal = nextOrdinal
+                cursor.lifecycle.expectedOrdinal = nextOrdinal
+                cursor.dabCount = nextDabCount
+                cursor.lastOrdinal = dab.ordinal
+                cursor.dabIndex += 1
+                if cursor.dabIndex == chunk.dabs.count {
+                    cursor.phase = .chunkFooter
+                }
+                consumedWorkUnits += 1
+
+            case .chunkFooter:
+                guard cursor.currentSample == .some(chunk.sample),
+                      chunk.dabs.count == cursor.currentDabCount,
+                      chunk.generatorSnapshotAfterSample
+                        == cursor.currentGeneratorCheckpoint,
+                      let checkpoint = chunk.generatorSnapshotAfterSample,
+                      checkpoint.program == cursor.generator.program
+                else {
+                    throw StrokeRenderCoordinatorError
+                        .settledReplayCheckpointMismatch
+                }
+                let expectedCheckpointCount = chunk.sample.phase == .ended
+                    ? 0
+                    : cursor.expectedOrdinal
+                guard checkpoint.emittedDabCount == expectedCheckpointCount
+                else {
+                    throw StrokeRenderCoordinatorError
+                        .settledReplayCheckpointMismatch
+                }
+                cursor.generator = checkpoint
+                cursor.chunkIndex += 1
+                cursor.dabIndex = 0
+                cursor.phase = .chunkHeader
+                cursor.currentSample = nil
+                cursor.currentDabCount = 0
+                cursor.currentGeneratorCheckpoint = nil
+                consumedWorkUnits += 1
+
+                if cursor.chunkIndex == cursor.expectedChunkCount {
+                    guard cursor.generator == cursor.trustedFinalGenerator
+                    else {
+                        throw StrokeRenderCoordinatorError
+                            .settledReplayCheckpointMismatch
+                    }
+                    let prepared = try registerPreparedSettledStageCTransfer(
+                        cursor
+                    )
+                    return .prepared(
+                        prepared,
+                        consumedWorkUnits: consumedWorkUnits
+                    )
+                }
+            }
+        }
+        return .pending(consumedWorkUnits: consumedWorkUnits)
+    }
+
     func prepareSettledReplayTransfer(
-        _ chunks: borrowing [TransientStrokeChunk]
+        _ chunks: borrowing [TransientStrokeChunk],
+        trustedStartingGenerator: BrushStrokeGenerator? = nil,
+        trustedFinalGenerator: BrushStrokeGenerator? = nil
     ) throws -> PreparedStrokeCoordinatorEmission {
         try requireIdleTransaction()
         guard !chunks.isEmpty else {
@@ -215,11 +449,22 @@ public final class StrokeRenderCoordinator {
             chunks,
             inputDeriver: &candidateInputDeriver
         )
-        try advanceSettledReplayGeneratorChunks(
-            chunks,
-            startingExpectedOrdinal: replayStartingOrdinal,
-            generator: &candidateGenerator
-        )
+        if generator.program.stageC != nil {
+            try installSettledStageCCheckpoints(
+                chunks,
+                startingExpectedOrdinal: replayStartingOrdinal,
+                trustedStartingGenerator: trustedStartingGenerator,
+                trustedFinalGenerator: trustedFinalGenerator,
+                generator: &candidateGenerator
+            )
+        } else {
+            synchronousCompatibilityReplayInvocationCount &+= 1
+            try advanceSettledReplayGeneratorChunks(
+                chunks,
+                startingExpectedOrdinal: replayStartingOrdinal,
+                generator: &candidateGenerator
+            )
+        }
 
         try authoritativeQueue.preflightAppend(settledTransferWorkScratch)
         var candidateMetadata = commitMetadata
@@ -245,6 +490,56 @@ public final class StrokeRenderCoordinator {
             hasBegun: candidateLifecycle.hasBegun,
             hasFinished: candidateLifecycle.hasFinished
         )
+    }
+
+    /// Stage C generation is already complete on the scheduler actor. Replay
+    /// here would synchronously drain the compatibility adapter and defeat the
+    /// bounded cursor contract, so promote only actor-bound checkpoints after
+    /// validating their complete ordinal/program/final chain.
+    @inline(never)
+    private func installSettledStageCCheckpoints(
+        _ chunks: borrowing [TransientStrokeChunk],
+        startingExpectedOrdinal: UInt64,
+        trustedStartingGenerator: BrushStrokeGenerator?,
+        trustedFinalGenerator: BrushStrokeGenerator?,
+        generator: inout BrushStrokeGenerator
+    ) throws {
+        guard let trustedStartingGenerator,
+              trustedStartingGenerator == generator,
+              let trustedFinalGenerator,
+              trustedFinalGenerator.program == generator.program
+        else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+        var expectedOrdinal = startingExpectedOrdinal
+        var finalCheckpoint: BrushStrokeGenerator?
+        for index in chunks.indices {
+            let chunk = chunks[index]
+            let (ordinalAfterChunk, overflow) = expectedOrdinal
+                .addingReportingOverflow(UInt64(chunk.dabs.count))
+            guard !overflow,
+                  let checkpoint = chunk.generatorSnapshotAfterSample,
+                  checkpoint.program == generator.program
+            else {
+                throw StrokeRenderCoordinatorError
+                    .settledReplayCheckpointMismatch
+            }
+            let expectedCheckpointCount = chunk.sample.phase == .ended
+                ? 0
+                : ordinalAfterChunk
+            guard checkpoint.emittedDabCount == expectedCheckpointCount else {
+                throw StrokeRenderCoordinatorError
+                    .settledReplayCheckpointMismatch
+            }
+            finalCheckpoint = checkpoint
+            expectedOrdinal = ordinalAfterChunk
+        }
+        guard finalCheckpoint == trustedFinalGenerator else {
+            throw StrokeRenderCoordinatorError
+                .settledReplayCheckpointMismatch
+        }
+        generator = trustedFinalGenerator
     }
 
     @inline(never)
@@ -549,6 +844,35 @@ public final class StrokeRenderCoordinator {
         )
     }
 
+    func reserveForDownstreamAcceptance(
+        _ prepared: PreparedSettledStageCTransfer,
+        retireAfterAcceptance: Bool = true
+    ) throws {
+        try validatePreparedTransaction(
+            prepared,
+            expectedReservation: false
+        )
+        guard retireAfterAcceptance else {
+            throw StrokeRenderCoordinatorError.invalidLifecycle
+        }
+        guard !authoritativeQueue.hasPreparedFrame else {
+            throw StrokeRenderCoordinatorError
+                .authoritativeFrameAlreadyPrepared
+        }
+        guard authoritativeQueue.isEmpty else {
+            throw StrokeRenderCoordinatorError.authoritativeQueueNotEmpty
+        }
+        try authoritativeQueue.preflightRetiredTransfer(
+            startingOrdinal: prepared.startingOrdinal,
+            count: prepared.dabCount
+        )
+        transactionState = .reserved(
+            token: prepared.token,
+            baseRevision: prepared.baseRevision,
+            retireAfterAcceptance: true
+        )
+    }
+
     /// Finalizes a prevalidated candidate after downstream ownership has been
     /// accepted. No fallible work is permitted beyond this boundary.
     func finalizeAfterDownstreamAcceptance(
@@ -576,8 +900,29 @@ public final class StrokeRenderCoordinator {
         installAndConsume(prepared)
     }
 
+    func finalizeAndRetireAfterDownstreamAcceptance(
+        _ prepared: PreparedSettledStageCTransfer
+    ) {
+        preconditionReservedTransaction(
+            prepared,
+            retireAfterAcceptance: true
+        )
+        authoritativeQueue.recordPrevalidatedRetiredTransfer(
+            startingOrdinal: prepared.startingOrdinal,
+            count: prepared.dabCount
+        )
+        installAndConsume(prepared)
+    }
+
     public func abandon(
         _ prepared: PreparedStrokeCoordinatorEmission
+    ) throws {
+        try validatePreparedTransaction(prepared, expectedReservation: nil)
+        transactionState = .idle
+    }
+
+    func abandon(
+        _ prepared: PreparedSettledStageCTransfer
     ) throws {
         try validatePreparedTransaction(prepared, expectedReservation: nil)
         transactionState = .idle
@@ -777,6 +1122,54 @@ public final class StrokeRenderCoordinator {
         )
     }
 
+    private func registerPreparedSettledStageCTransfer(
+        _ cursor: borrowing SettledStageCTransferCursor
+    ) throws -> PreparedSettledStageCTransfer {
+        precondition(
+            transactionState == .idle,
+            "A stroke coordinator may issue only one transaction at a time"
+        )
+        let token = nextTransactionToken
+        let (successor, tokenOverflow) = token.addingReportingOverflow(1)
+        guard !tokenOverflow else {
+            throw StrokeRenderCoordinatorError.transactionTokenOverflow
+        }
+        let (inputSampleCount, sampleOverflow) = commitMetadata
+            .inputSampleCount
+            .addingReportingOverflow(UInt64(cursor.sampleCount))
+        let (emittedDabCount, dabOverflow) = commitMetadata
+            .emittedDabCount
+            .addingReportingOverflow(UInt64(cursor.dabCount))
+        guard !sampleOverflow, !dabOverflow else {
+            throw AuthoritativeStrokeQueueError.ordinalOverflow
+        }
+        var candidateMetadata = commitMetadata
+        candidateMetadata.inputSampleCount = inputSampleCount
+        candidateMetadata.emittedDabCount = emittedDabCount
+        candidateMetadata.lastEmittedOrdinal =
+            cursor.lastOrdinal ?? commitMetadata.lastEmittedOrdinal
+        nextTransactionToken = successor
+        transactionState = .prepared(token: token, baseRevision: revision)
+        return PreparedSettledStageCTransfer(
+            sampleCount: cursor.sampleCount,
+            dabCount: cursor.dabCount,
+            lastOrdinal: cursor.lastOrdinal,
+            coordinatorIdentity: coordinatorIdentity,
+            token: token,
+            baseRevision: revision,
+            startingOrdinal: cursor.startingOrdinal,
+            generator: cursor.generator,
+            inputDeriver: cursor.inputDeriver,
+            commitMetadata: candidateMetadata,
+            maximumReturnedDabCount: max(
+                maximumReturnedDabCount,
+                cursor.dabCount
+            ),
+            hasBegun: cursor.lifecycle.hasBegun,
+            hasFinished: cursor.lifecycle.hasFinished
+        )
+    }
+
     private func validatePreparedTransaction(
         _ prepared: PreparedStrokeCoordinatorEmission,
         expectedReservation: Bool?
@@ -814,6 +1207,43 @@ public final class StrokeRenderCoordinator {
         }
     }
 
+    private func validatePreparedTransaction(
+        _ prepared: PreparedSettledStageCTransfer,
+        expectedReservation: Bool?
+    ) throws {
+        guard prepared.coordinatorIdentity == coordinatorIdentity else {
+            throw StrokeRenderCoordinatorError
+                .preparedEmissionOriginMismatch
+        }
+        guard prepared.baseRevision == revision else {
+            throw StrokeRenderCoordinatorError.stalePreparedEmission(
+                expectedRevision: revision,
+                actualRevision: prepared.baseRevision
+            )
+        }
+        switch transactionState {
+        case .idle:
+            throw StrokeRenderCoordinatorError
+                .preparedEmissionAlreadyConsumed
+        case let .prepared(token, baseRevision):
+            guard expectedReservation != true,
+                  token == prepared.token,
+                  baseRevision == prepared.baseRevision
+            else {
+                throw StrokeRenderCoordinatorError
+                    .preparedEmissionTokenMismatch
+            }
+        case let .reserved(token, baseRevision, _):
+            guard expectedReservation != false,
+                  token == prepared.token,
+                  baseRevision == prepared.baseRevision
+            else {
+                throw StrokeRenderCoordinatorError
+                    .preparedEmissionTokenMismatch
+            }
+        }
+    }
+
     private func preconditionReservedTransaction(
         _ prepared: PreparedStrokeCoordinatorEmission,
         retireAfterAcceptance: Bool
@@ -832,8 +1262,41 @@ public final class StrokeRenderCoordinator {
         )
     }
 
+    private func preconditionReservedTransaction(
+        _ prepared: PreparedSettledStageCTransfer,
+        retireAfterAcceptance: Bool
+    ) {
+        precondition(
+            prepared.coordinatorIdentity == coordinatorIdentity,
+            "Cannot finalize a foreign stroke coordinator transaction"
+        )
+        precondition(
+            transactionState == .reserved(
+                token: prepared.token,
+                baseRevision: prepared.baseRevision,
+                retireAfterAcceptance: retireAfterAcceptance
+            ) && prepared.baseRevision == revision,
+            "Stroke coordinator transaction was not reserved"
+        )
+    }
+
     private func installAndConsume(
         _ prepared: PreparedStrokeCoordinatorEmission
+    ) {
+        generator = prepared.generator
+        inputDeriver = prepared.inputDeriver
+        var currentMetadata = prepared.commitMetadata
+        currentMetadata.submittedDabCount = authoritativeQueue.submittedCount
+        commitMetadata = currentMetadata
+        maximumReturnedDabCount = prepared.maximumReturnedDabCount
+        hasBegun = prepared.hasBegun
+        hasFinished = prepared.hasFinished
+        transactionState = .idle
+        revision &+= 1
+    }
+
+    private func installAndConsume(
+        _ prepared: PreparedSettledStageCTransfer
     ) {
         generator = prepared.generator
         inputDeriver = prepared.inputDeriver
