@@ -92,8 +92,6 @@ measure input_loop "$debug_binary" advanceSettledReplayInputChunks non-external 
 measure input_transition "$debug_binary" validateSettledReplayInputTransition non-external swift-function
 measure generator_loop "$debug_binary" C35advanceSettledReplayGeneratorChunks non-external swift-function
 measure generator_chunk "$debug_binary" C34advanceSettledReplayGeneratorChunk33_ non-external swift-function
-measure generator_before "$debug_binary" validateSettledReplayGeneratorBefore non-external swift-function
-measure after_before "$debug_binary" advanceSettledReplayGeneratorChunkAfterBeforeCheck non-external swift-function
 measure transition "$debug_binary" replaySettledGeneratorTransition non-external swift-function
 measure replay_begin "$debug_binary" replaySettledBegin non-external swift-function
 measure replay_append "$debug_binary" replaySettledAppend non-external swift-function
@@ -211,7 +209,6 @@ generator_semantic=$((generator_eq + generator_semantic))
 structural=$((p + structure + $(maximum "$lifecycle" "$append_work")))
 input=$((p + input_loop + input_transition + input_eq + filter_eq + filter_storage_eq))
 generator_base=$((p + generator_loop + generator_chunk))
-before_path=$((generator_before + generator_semantic))
 
 measure generator_begin "$debug_binary" BrushStrokeGeneratorV5begin external fragment
 measure generator_append "$debug_binary" BrushStrokeGeneratorV6append_4emityAA05WorldD6SampleV_yAA10LogicalDabVKXEtKF external fragment
@@ -220,9 +217,9 @@ begin_path=$((replay_begin + generator_begin + begin_partial + begin_closure + v
 append_path=$((replay_append + generator_append + append_partial + append_closure + validate_dab))
 finish_path=$((replay_finish + generator_finish + finish_partial + finish_closure + validate_dab))
 replay_path=$(maximum "$begin_path" "$append_path" "$finish_path")
-after_path=$((after_before + transition + $(maximum \
+after_path=$((transition + $(maximum \
   $((state_after + generator_semantic)) "$replay_path")))
-generator=$((generator_base + $(maximum "$before_path" "$after_path")))
+generator=$((generator_base + after_path))
 
 require_composite structural "$structural"
 require_composite input "$input"

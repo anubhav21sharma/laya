@@ -47,7 +47,6 @@ private func estimatedTransientChunk(
     expecting: StrokeEstimatedProperties,
     pressure: Float,
     snapshot: BrushStrokeGenerator? = nil,
-    generatorBefore: BrushStrokeGenerator? = nil,
     inputBefore: BrushInputDeriver? = nil
 ) -> TransientStrokeChunk {
     TransientStrokeChunk(
@@ -60,7 +59,6 @@ private func estimatedTransientChunk(
             pressure: pressure
         ),
         dabs: [],
-        generatorSnapshotBeforeSample: generatorBefore,
         generatorSnapshotAfterSample: snapshot,
         inputDeriverSnapshotBeforeSample: inputBefore
     )
@@ -153,11 +151,13 @@ func zeroDabDirectionalBeginRemainsAReplayStateTransition() throws {
     let afterBegin = generator
     #expect(beginDabs.isEmpty)
 
-    var buffer = transientBuffer(mode: .replayTail)
+    var buffer = transientBuffer(
+        mode: .replayTail,
+        initialGeneratorSnapshot: beforeBegin
+    )
     let beginUpdate = buffer.appendActual(TransientStrokeChunk(
         sample: begin,
         dabs: [],
-        generatorSnapshotBeforeSample: beforeBegin,
         generatorSnapshotAfterSample: afterBegin
     ))
 
@@ -167,7 +167,6 @@ func zeroDabDirectionalBeginRemainsAReplayStateTransition() throws {
     #expect(buffer.authoritativeGeneratorSnapshot == afterBegin)
 
     let moved = transientSample(10, capabilities: [])
-    let beforeMove = generator
     var movedDabs: [DabAttributes] = []
     try generator.append(
         moved,
@@ -178,7 +177,6 @@ func zeroDabDirectionalBeginRemainsAReplayStateTransition() throws {
         dabs: movedDabs.map {
             TransientStrokeDab(attributes: $0, projectedInstanceCount: 1)
         },
-        generatorSnapshotBeforeSample: beforeMove,
         generatorSnapshotAfterSample: generator
     ))
 
@@ -186,6 +184,75 @@ func zeroDabDirectionalBeginRemainsAReplayStateTransition() throws {
     #expect(buffer.actualSampleCount == 2)
     #expect(buffer.actualChunks.first?.dabs.isEmpty == true)
     #expect(buffer.authoritativeGeneratorSnapshot == generator)
+}
+
+@Test
+func cancelRestoresInitialGeneratorBoundaryForFirstEstimatedReplay() throws {
+    let initialGenerator = transientGenerator(seed: 0x82)
+    var buffer = transientBuffer(
+        mode: .replayTail,
+        initialGeneratorSnapshot: initialGenerator
+    )
+    _ = buffer.appendActual(transientChunk(
+        0,
+        snapshot: transientGenerator(seed: 0x83)
+    ))
+
+    buffer.cancel()
+
+    _ = buffer.appendActual(estimatedTransientChunk(
+        1,
+        estimationUpdateIndex: 82,
+        estimatedProperties: [.pressure],
+        expecting: [.pressure],
+        pressure: 0.25,
+        snapshot: transientGenerator(seed: 0x84),
+        inputBefore: BrushInputDeriver()
+    ))
+    let plan = try buffer.planEstimatedUpdate(transientSample(
+        2,
+        kind: .estimatedUpdate,
+        estimationUpdateIndex: 82,
+        estimatedProperties: [.pressure],
+        pressure: 0.75
+    ))
+
+    #expect(plan.generatorBeforeReplacement == initialGenerator)
+}
+
+@Test
+func directSettlementAdvancesBoundaryBeforeFirstRetainedEstimate() throws {
+    let initialGenerator = transientGenerator(seed: 0x85)
+    let settledGenerator = transientGenerator(seed: 0x86)
+    var buffer = transientBuffer(
+        mode: .appendOnly,
+        initialGeneratorSnapshot: initialGenerator
+    )
+    let settled = buffer.appendActual(transientChunk(
+        0,
+        snapshot: settledGenerator
+    ))
+    #expect(settled.settledPrefix.count == 1)
+    #expect(buffer.actualChunks.isEmpty)
+
+    _ = buffer.appendActual(estimatedTransientChunk(
+        1,
+        estimationUpdateIndex: 85,
+        estimatedProperties: [.pressure],
+        expecting: [.pressure],
+        pressure: 0.25,
+        snapshot: transientGenerator(seed: 0x87),
+        inputBefore: BrushInputDeriver()
+    ))
+    let plan = try buffer.planEstimatedUpdate(transientSample(
+        2,
+        kind: .estimatedUpdate,
+        estimationUpdateIndex: 85,
+        estimatedProperties: [.pressure],
+        pressure: 0.75
+    ))
+
+    #expect(plan.generatorBeforeReplacement == settledGenerator)
 }
 
 private func declaredReplayRecipe(
@@ -207,7 +274,8 @@ private func declaredReplayRecipe(
 }
 
 private func transientBuffer(
-    mode: BrushReplayMode
+    mode: BrushReplayMode,
+    initialGeneratorSnapshot: BrushStrokeGenerator? = nil
 ) -> TransientStrokeBuffer {
     let limits: BrushReplayLimits?
     switch mode {
@@ -223,7 +291,10 @@ private func transientBuffer(
         replayMode: mode,
         replayLimits: limits
     )
-    return TransientStrokeBuffer(replayContract: recipe.replayContract)
+    return TransientStrokeBuffer(
+        replayContract: recipe.replayContract,
+        initialGeneratorSnapshot: initialGeneratorSnapshot
+    )
 }
 
 @Test
@@ -850,7 +921,6 @@ func locationResolutionPlanReturnsRawSuffixFromExactInputCheckpoint() throws {
         TransientStrokeChunk(
             sample: estimated,
             dabs: [],
-            generatorSnapshotBeforeSample: generatorBefore,
             generatorSnapshotAfterSample: transientGenerator(seed: 71),
             inputDeriverSnapshotBeforeSample: beforeEstimated
         )
@@ -897,8 +967,7 @@ func predictedEstimatedUpdateRebuildsOnlyPrediction() throws {
             estimatedProperties: [.pressure],
             expecting: [.pressure],
             pressure: 0.2,
-            snapshot: transientGenerator(seed: 81),
-            generatorBefore: authoritativeSnapshot
+            snapshot: transientGenerator(seed: 81)
         ),
         transientChunk(2, kind: .predicted),
     ])

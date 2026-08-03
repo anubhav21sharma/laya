@@ -3799,7 +3799,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func ingestGeneratedSample(
         _ sample: WorldStrokeSample,
         dabs dabRange: Range<Int>,
-        generatorBeforeSample: BrushStrokeGenerator?,
         generatorSnapshot: BrushStrokeGenerator,
         inputDeriverBeforeSample: BrushInputDeriver,
         isFinishing: Bool,
@@ -3832,7 +3831,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let chunk = TransientStrokeChunk(
             sample: sample,
             dabs: transientDabs,
-            generatorSnapshotBeforeSample: generatorBeforeSample,
             generatorSnapshotAfterSample: generatorSnapshot,
             inputDeriverSnapshotBeforeSample: inputDeriverBeforeSample
         )

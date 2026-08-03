@@ -591,7 +591,7 @@ struct StrokeRenderCoordinatorTests {
     }
 
     @Test
-    func settledReplayTransferRejectsMismatchedFrozenCheckpoints()
+    func settledReplayTransferRejectsMismatchedFrozenInputCheckpoint()
         throws
     {
         let coordinator = try makeCoordinator(capacity: 16)
@@ -602,28 +602,6 @@ struct StrokeRenderCoordinatorTests {
             inputDeriver: coordinator.inputDeriverSnapshot
         )
         let validChunk = try #require(valid.first)
-        var mismatchedGenerator = coordinator.generatorSnapshot
-        var deriver = coordinator.inputDeriverSnapshot
-        let worldSample = deriver.derive(
-            sample(index: 4, phase: .began),
-            viewport: coordinatorViewport()
-        )
-        mismatchedGenerator.begin(worldSample) { _ in }
-        let mismatched = TransientStrokeChunk(
-            sample: validChunk.sample,
-            dabs: validChunk.dabs,
-            generatorSnapshotBeforeSample: mismatchedGenerator,
-            generatorSnapshotAfterSample:
-                validChunk.generatorSnapshotAfterSample,
-            inputDeriverSnapshotBeforeSample:
-                validChunk.inputDeriverSnapshotBeforeSample
-        )
-
-        #expect(throws: StrokeRenderCoordinatorError.self) {
-            _ = try coordinator.prepareSettledReplayTransfer([mismatched])
-        }
-        #expect(coordinator.snapshot == before)
-
         var mismatchedInputDeriver = coordinator.inputDeriverSnapshot
         _ = mismatchedInputDeriver.derive(
             sample(index: 4, phase: .began),
@@ -632,8 +610,6 @@ struct StrokeRenderCoordinatorTests {
         let inputMismatch = TransientStrokeChunk(
             sample: validChunk.sample,
             dabs: validChunk.dabs,
-            generatorSnapshotBeforeSample:
-                validChunk.generatorSnapshotBeforeSample,
             generatorSnapshotAfterSample:
                 validChunk.generatorSnapshotAfterSample,
             inputDeriverSnapshotBeforeSample: mismatchedInputDeriver
@@ -688,8 +664,6 @@ struct StrokeRenderCoordinatorTests {
         let wrongEnd = TransientStrokeChunk(
             sample: validChunk.sample,
             dabs: validChunk.dabs,
-            generatorSnapshotBeforeSample:
-                validChunk.generatorSnapshotBeforeSample,
             generatorSnapshotAfterSample: coordinator.generatorSnapshot,
             inputDeriverSnapshotBeforeSample:
                 validChunk.inputDeriverSnapshotBeforeSample
@@ -717,8 +691,6 @@ struct StrokeRenderCoordinatorTests {
         let wrongState = TransientStrokeChunk(
             sample: validChunk.sample,
             dabs: validChunk.dabs,
-            generatorSnapshotBeforeSample:
-                validChunk.generatorSnapshotBeforeSample,
             generatorSnapshotAfterSample: wrongStateWithMatchingCount,
             inputDeriverSnapshotBeforeSample:
                 validChunk.inputDeriverSnapshotBeforeSample
@@ -756,8 +728,6 @@ struct StrokeRenderCoordinatorTests {
                     projectedInstanceCount: 1
                 ),
             ],
-            generatorSnapshotBeforeSample:
-                validChunk.generatorSnapshotBeforeSample,
             generatorSnapshotAfterSample:
                 validChunk.generatorSnapshotAfterSample,
             inputDeriverSnapshotBeforeSample:
@@ -781,8 +751,6 @@ struct StrokeRenderCoordinatorTests {
                     projectedInstanceCount: 1
                 ),
             ],
-            generatorSnapshotBeforeSample:
-                validChunk.generatorSnapshotBeforeSample,
             generatorSnapshotAfterSample:
                 validChunk.generatorSnapshotAfterSample,
             inputDeriverSnapshotBeforeSample:
@@ -967,8 +935,6 @@ struct StrokeRenderCoordinatorTests {
         let omittingStabilizerState = TransientStrokeChunk(
             sample: validChunk.sample,
             dabs: validChunk.dabs,
-            generatorSnapshotBeforeSample:
-                validChunk.generatorSnapshotBeforeSample,
             generatorSnapshotAfterSample: initialGenerator,
             inputDeriverSnapshotBeforeSample:
                 validChunk.inputDeriverSnapshotBeforeSample
@@ -1349,7 +1315,6 @@ private func settledReplayChunks(
     var generator = initialGenerator
     var inputDeriver = initialInputDeriver
     return samples.map { sample in
-        let generatorBefore = generator
         let inputDeriverBefore = inputDeriver
         let worldSample = inputDeriver.derive(
             sample,
@@ -1374,7 +1339,6 @@ private func settledReplayChunks(
                     projectedInstanceCount: 1
                 )
             },
-            generatorSnapshotBeforeSample: generatorBefore,
             generatorSnapshotAfterSample: generator,
             inputDeriverSnapshotBeforeSample: inputDeriverBefore
         )

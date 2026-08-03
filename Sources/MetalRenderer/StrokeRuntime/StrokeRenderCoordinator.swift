@@ -307,23 +307,6 @@ public final class StrokeRenderCoordinator {
         expectedOrdinal: UInt64,
         generator: inout BrushStrokeGenerator
     ) throws {
-        try validateSettledReplayGeneratorBefore(
-            chunk,
-            generator: &generator
-        )
-        try advanceSettledReplayGeneratorChunkAfterBeforeCheck(
-            chunk,
-            expectedOrdinal: expectedOrdinal,
-            generator: &generator
-        )
-    }
-
-    @inline(never)
-    private static func advanceSettledReplayGeneratorChunkAfterBeforeCheck(
-        _ chunk: borrowing TransientStrokeChunk,
-        expectedOrdinal: UInt64,
-        generator: inout BrushStrokeGenerator
-    ) throws {
         try replaySettledGeneratorTransition(
             chunk,
             expectedOrdinal: expectedOrdinal,
@@ -431,19 +414,6 @@ public final class StrokeRenderCoordinator {
             replayedDabCount: replayedDabCount,
             generator: &generator
         )
-    }
-
-    @inline(never)
-    private static func validateSettledReplayGeneratorBefore(
-        _ chunk: borrowing TransientStrokeChunk,
-        generator: inout BrushStrokeGenerator
-    ) throws {
-        guard let checkpoint = chunk.generatorSnapshotBeforeSample,
-              checkpoint == generator
-        else {
-            throw StrokeRenderCoordinatorError
-                .settledReplayCheckpointMismatch
-        }
     }
 
     @inline(never)

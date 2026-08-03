@@ -9,6 +9,7 @@ func compiledProgramAndStrokeReplayStateHaveBoundedValueFootprints() {
     #expect(MemoryLayout<StrokeVelocityFilter>.size <= 1_024)
     #expect(MemoryLayout<BrushInputDeriver>.size <= 1_088)
     #expect(MemoryLayout<BrushStrokeGenerator>.size <= 2_048)
+    #expect(MemoryLayout<TransientStrokeChunk>.size <= 3_072)
     #expect(MemoryLayout<TransientStrokeChunk>.size <= 4_096)
     #expect(MemoryLayout<TransientStrokeBuffer>.size <= 8_192)
 }

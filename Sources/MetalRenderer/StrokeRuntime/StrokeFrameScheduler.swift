@@ -748,15 +748,17 @@ actor StrokeFrameScheduler {
                     budget.maximumPendingAuthoritativeInstances
             )
             preparationCoordinator = coordinator
-            authoritativeGenerator = BrushStrokeGenerator(
+            let initialGenerator = BrushStrokeGenerator(
                 program: configuration.program,
                 nominalDiameter: configuration.nominalDiameter,
                 color: configuration.color,
                 seed: configuration.seed
             )
+            authoritativeGenerator = initialGenerator
             authoritativeInputDeriver = BrushInputDeriver()
             transientStrokeBuffer = TransientStrokeBuffer(
-                replayContract: configuration.program.replayContract
+                replayContract: configuration.program.replayContract,
+                initialGeneratorSnapshot: initialGenerator
             )
             transientDabArena.reset()
             preparationTilingStrategy = configuration.tilingStrategy
@@ -958,9 +960,9 @@ actor StrokeFrameScheduler {
                 sample,
                 viewport: viewport
             )
-            let generatorBefore = candidateGenerator
             perSampleLogicalDabScratch.removeAll(keepingCapacity: true)
             let transientStart = transientDabScratch.count
+            let projectedStart = generatedProjectionScratch.count
             do {
                 let remainingDabCapacity = max(
                     0,
@@ -1022,6 +1024,13 @@ actor StrokeFrameScheduler {
             } catch is StrokePathInterpolationError {
                 overload.insert(.logicalDabs)
                 predictionIsFull = true
+            } catch is BrushCornerEmitterError {
+                rollbackPreparedPredictionSampleScratch(
+                    transientStart: transientStart,
+                    projectedStart: projectedStart
+                )
+                overload.insert(.logicalDabs)
+                predictionIsFull = true
             }
             let transientCount = transientDabScratch.count - transientStart
             let slice = try arenaTransaction.storePredicted(
@@ -1033,7 +1042,6 @@ actor StrokeFrameScheduler {
                 TransientStrokeChunk(
                     sample: worldSample,
                     dabs: slice,
-                    generatorSnapshotBeforeSample: generatorBefore,
                     generatorSnapshotAfterSample: candidateGenerator,
                     inputDeriverSnapshotBeforeSample: inputBefore
                 )
@@ -1284,10 +1292,10 @@ actor StrokeFrameScheduler {
                 estimatedReplacementSampleScratch[sampleIndex] =
                     replayedSample
                 rederivedSampleCount += 1
-                let generatorBefore = replayGenerator
                 var candidateGenerator = replayGenerator
                 perSampleLogicalDabScratch.removeAll(keepingCapacity: true)
                 let transientStart = transientDabScratch.count
+                let projectedStart = generatedProjectionScratch.count
                 if isPredictedReplay, !predictionWasTruncated {
                     let priorGeneratedPredictionDabCount =
                         generatedPredictionDabCount
@@ -1373,6 +1381,13 @@ actor StrokeFrameScheduler {
                             predictionWasTruncated = true
                             predictionOverload.insert(limit.reason)
                         } catch is StrokePathInterpolationError {
+                            predictionWasTruncated = true
+                            predictionOverload.insert(.logicalDabs)
+                        } catch is BrushCornerEmitterError {
+                            rollbackPreparedPredictionSampleScratch(
+                                transientStart: transientStart,
+                                projectedStart: projectedStart
+                            )
                             predictionWasTruncated = true
                             predictionOverload.insert(.logicalDabs)
                         }
@@ -1483,7 +1498,6 @@ actor StrokeFrameScheduler {
                     TransientStrokeChunk(
                         sample: replayedSample,
                         dabs: slice,
-                        generatorSnapshotBeforeSample: generatorBefore,
                         generatorSnapshotAfterSample: replayGenerator,
                         inputDeriverSnapshotBeforeSample: inputBefore
                     )
@@ -1995,7 +2009,6 @@ actor StrokeFrameScheduler {
                 sample,
                 viewport: viewport
             )
-            let generatorBefore = candidateGenerator
             perSampleLogicalDabScratch.removeAll(keepingCapacity: true)
             let transientStart = transientDabScratch.count
             let projectionExecutionRanOnMainThread =
@@ -2071,7 +2084,6 @@ actor StrokeFrameScheduler {
             let chunk = TransientStrokeChunk(
                 sample: worldSample,
                 dabs: slice,
-                generatorSnapshotBeforeSample: generatorBefore,
                 generatorSnapshotAfterSample: candidateGenerator,
                 inputDeriverSnapshotBeforeSample: inputBefore
             )
@@ -2599,6 +2611,15 @@ actor StrokeFrameScheduler {
                     generatedProjectionScratch.count - projectedStart
             )
         )
+    }
+
+    private func rollbackPreparedPredictionSampleScratch(
+        transientStart: Int,
+        projectedStart: Int
+    ) {
+        perSampleLogicalDabScratch.removeAll(keepingCapacity: true)
+        transientDabScratch.removeSubrange(transientStart...)
+        generatedProjectionScratch.removeSubrange(projectedStart...)
     }
 
     private func recordGenerationScratchHighWater() {

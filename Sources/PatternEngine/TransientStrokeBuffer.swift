@@ -665,24 +665,23 @@ public func == (
 ///
 /// Chunks are the indivisible promotion unit. Keeping sample, dabs, and the
 /// generator state after that sample together gives replay a deterministic
-/// boundary without retaining renderer or platform objects.
+/// boundary without retaining renderer or platform objects. The state before
+/// a chunk is the buffer replay boundary or the preceding chunk's after-state;
+/// storing it again here would duplicate the largest hot-path value.
 public struct TransientStrokeChunk: Equatable, Sendable {
     public let sample: WorldStrokeSample
     public let dabs: TransientStrokeDabSlice
-    public let generatorSnapshotBeforeSample: BrushStrokeGenerator?
     public let generatorSnapshotAfterSample: BrushStrokeGenerator?
     public let inputDeriverSnapshotBeforeSample: BrushInputDeriver?
 
     public init(
         sample: WorldStrokeSample,
         dabs: [TransientStrokeDab],
-        generatorSnapshotBeforeSample: BrushStrokeGenerator? = nil,
         generatorSnapshotAfterSample: BrushStrokeGenerator? = nil,
         inputDeriverSnapshotBeforeSample: BrushInputDeriver? = nil
     ) {
         self.sample = sample
         self.dabs = TransientStrokeDabSlice(dabs)
-        self.generatorSnapshotBeforeSample = generatorSnapshotBeforeSample
         self.generatorSnapshotAfterSample = generatorSnapshotAfterSample
         self.inputDeriverSnapshotBeforeSample =
             inputDeriverSnapshotBeforeSample
@@ -691,13 +690,11 @@ public struct TransientStrokeChunk: Equatable, Sendable {
     public init(
         sample: WorldStrokeSample,
         dabs: TransientStrokeDabSlice,
-        generatorSnapshotBeforeSample: BrushStrokeGenerator? = nil,
         generatorSnapshotAfterSample: BrushStrokeGenerator? = nil,
         inputDeriverSnapshotBeforeSample: BrushInputDeriver? = nil
     ) {
         self.sample = sample
         self.dabs = dabs
-        self.generatorSnapshotBeforeSample = generatorSnapshotBeforeSample
         self.generatorSnapshotAfterSample = generatorSnapshotAfterSample
         self.inputDeriverSnapshotBeforeSample =
             inputDeriverSnapshotBeforeSample
@@ -927,7 +924,10 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
     private var actualProjectedInstanceCountStorage: Int
     private var predictedProjectedInstanceCountStorage: Int
 
-    public init(replayContract: BrushReplayContract) {
+    public init(
+        replayContract: BrushReplayContract,
+        initialGeneratorSnapshot: BrushStrokeGenerator? = nil
+    ) {
         self.replayContract = replayContract
         requestedMode = replayContract.mode
         mode = replayContract.mode
@@ -947,7 +947,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         degradationCount = 0
         settledPrefixPromotionCount = 0
         replayWindowShorteningCount = 0
-        replayStartGeneratorSnapshot = nil
+        replayStartGeneratorSnapshot = initialGeneratorSnapshot
         authoritativeGeneratorSnapshot = nil
         predictedGeneratorSnapshot = nil
         actualDabCountStorage = 0
@@ -1088,6 +1088,9 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
             }
             if clearedPrediction {
                 advanceReplayEpoch()
+            }
+            if let snapshot = chunk.generatorSnapshotAfterSample {
+                replayStartGeneratorSnapshot = snapshot
             }
             settled.append(chunk)
             return TransientStrokeBufferMutation(
@@ -1670,6 +1673,10 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
 
     /// Clears all transient state and restores the recipe-requested mode.
     public mutating func cancel() {
+        var initialGenerator = replayStartGeneratorSnapshot
+            ?? authoritativeGeneratorSnapshot
+            ?? predictedGeneratorSnapshot
+        initialGenerator?.cancel()
         advanceMutationVersion()
         mode = requestedMode
         actualChunks.removeAll(keepingCapacity: true)
@@ -1679,7 +1686,7 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         degradationCount = 0
         settledPrefixPromotionCount = 0
         replayWindowShorteningCount = 0
-        replayStartGeneratorSnapshot = nil
+        replayStartGeneratorSnapshot = initialGenerator
         authoritativeGeneratorSnapshot = nil
         predictedGeneratorSnapshot = nil
         actualDabCountStorage = 0
@@ -1767,13 +1774,11 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
         let replay = Array(chunks.dropFirst(index + 1).map(\.sample))
         let deriverCheckpoint =
             originalChunk.inputDeriverSnapshotBeforeSample
-        let generatorBefore =
-            originalChunk.generatorSnapshotBeforeSample
-                ?? (index == 0
-                    ? (target == .authoritative
-                        ? replayStartGeneratorSnapshot
-                        : authoritativeGeneratorSnapshot)
-                    : chunks[index - 1].generatorSnapshotAfterSample)
+        let generatorBefore = index == 0
+            ? (target == .authoritative
+                ? replayStartGeneratorSnapshot
+                : authoritativeGeneratorSnapshot)
+            : chunks[index - 1].generatorSnapshotAfterSample
         return EstimatedStrokeUpdatePlan(
             target: target,
             sourceReplayEpoch: mutationVersion,
@@ -1878,17 +1883,15 @@ public struct TransientStrokeBuffer: Equatable, Sendable {
                     : predictedChunks[index].sample
             )
         }
-        let generatorBefore =
-            originalChunk.generatorSnapshotBeforeSample
-                ?? (matchedIndex == 0
-                    ? (target == .authoritative
-                        ? replayStartGeneratorSnapshot
-                        : authoritativeGeneratorSnapshot)
-                    : (target == .authoritative
-                        ? actualChunks[matchedIndex - 1]
-                            .generatorSnapshotAfterSample
-                        : predictedChunks[matchedIndex - 1]
-                            .generatorSnapshotAfterSample))
+        let generatorBefore = matchedIndex == 0
+            ? (target == .authoritative
+                ? replayStartGeneratorSnapshot
+                : authoritativeGeneratorSnapshot)
+            : (target == .authoritative
+                ? actualChunks[matchedIndex - 1]
+                    .generatorSnapshotAfterSample
+                : predictedChunks[matchedIndex - 1]
+                    .generatorSnapshotAfterSample)
         return BorrowedEstimatedStrokeUpdatePlan(
             target: target,
             sourceReplayEpoch: mutationVersion,

@@ -935,6 +935,282 @@ struct StrokeFrameSchedulerTests {
     }
 
     @Test
+    func predictedCornerOverflowShedsPredictionWithoutCancellingActualState()
+        async throws
+    {
+        let scheduler = try preparationScheduler()
+        let generation: UInt64 = 456
+        let configuration = try preparationConfiguration(
+            program: stageCMetalTestProgram(
+                id: "test.scheduler-stage-c-predicted-corner-overflow",
+                usesTravelDirection: true,
+                maximumAngularStep: .pi / 180,
+                baseSpacingFraction: 0.05
+            )
+        )
+        let began = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: configuration,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .began,
+                    x: 40,
+                    timestamp: 0
+                ),
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 80,
+                    timestamp: 1
+                ),
+            ]
+        )
+        try await acknowledgeAll(
+            began,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let actualBefore =
+            await scheduler.transientPreparationSnapshotForTesting
+
+        let prediction = try await scheduler.replacePreparedPrediction(
+            generation: generation,
+            samples: [
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 40,
+                    timestamp: 2,
+                    kind: .predicted
+                ),
+            ]
+        )
+
+        #expect(
+            prediction.predictionAdmission?.overload
+                .contains(.logicalDabs) == true
+        )
+        #expect(prediction.logicalDabs.isEmpty)
+        let afterPrediction =
+            await scheduler.transientPreparationSnapshotForTesting
+        #expect(afterPrediction.actualSamples == actualBefore.actualSamples)
+        #expect(afterPrediction.actualDabs == actualBefore.actualDabs)
+        #expect(afterPrediction.predictedDabs.isEmpty)
+        try await acknowledgeAll(
+            prediction,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let appended = try await scheduler.appendPreparedStroke(
+            generation: generation,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 120,
+                    timestamp: 3
+                ),
+            ]
+        )
+        #expect(!appended.logicalDabs.isEmpty)
+        try await acknowledgeAll(
+            appended,
+            scheduler: scheduler,
+            generation: generation
+        )
+        await scheduler.cancel(generation: generation)
+    }
+
+    @Test
+    func predictedLateCornerKeyOverflowRollsBackAllSampleWork() async throws {
+        let scheduler = try preparationScheduler()
+        let generation: UInt64 = 458
+        let configuration = try preparationConfiguration(
+            program: stageCMetalTestProgram(
+                id: "test.scheduler-stage-c-predicted-late-key-overflow",
+                usesTravelDirection: true,
+                maximumAngularStep: .pi / 6,
+                baseSpacingFraction: 0.01
+            )
+        )
+        let began = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: configuration,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .began,
+                    x: 100,
+                    y: 100,
+                    timestamp: 0
+                ),
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 70,
+                    y: 70,
+                    timestamp: 1
+                ),
+            ]
+        )
+        try await acknowledgeAll(
+            began,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let actualBefore =
+            await scheduler.transientPreparationSnapshotForTesting
+
+        let prediction = try await scheduler.replacePreparedPrediction(
+            generation: generation,
+            samples: [
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 70,
+                    y: 68,
+                    timestamp: 10_000_000_001,
+                    kind: .predicted
+                ),
+            ]
+        )
+
+        #expect(
+            prediction.predictionAdmission?.overload
+                .contains(.logicalDabs) == true
+        )
+        #expect(prediction.logicalDabs.isEmpty)
+        let afterPrediction =
+            await scheduler.transientPreparationSnapshotForTesting
+        #expect(afterPrediction.actualSamples == actualBefore.actualSamples)
+        #expect(afterPrediction.actualDabs == actualBefore.actualDabs)
+        #expect(afterPrediction.predictedDabs.isEmpty)
+
+        try await acknowledgeAll(
+            prediction,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let appended = try await scheduler.appendPreparedStroke(
+            generation: generation,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 40,
+                    y: 40,
+                    timestamp: 2
+                ),
+            ]
+        )
+        #expect(!appended.logicalDabs.isEmpty)
+        try await acknowledgeAll(
+            appended,
+            scheduler: scheduler,
+            generation: generation
+        )
+        await scheduler.cancel(generation: generation)
+    }
+
+    @Test
+    func predictedEstimatedCornerOverflowDoesNotCancelActualState()
+        async throws
+    {
+        let scheduler = try preparationScheduler()
+        let generation: UInt64 = 457
+        let estimateIndex = 457
+        let configuration = try preparationConfiguration(
+            program: stageCMetalTestProgram(
+                id: "test.scheduler-stage-c-estimated-corner-overflow",
+                usesTravelDirection: true,
+                maximumAngularStep: .pi / 180,
+                baseSpacingFraction: 0.05
+            )
+        )
+        let began = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: configuration,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .began,
+                    x: 40,
+                    timestamp: 0
+                ),
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 80,
+                    timestamp: 1
+                ),
+            ]
+        )
+        try await acknowledgeAll(
+            began,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let prediction = try await scheduler.replacePreparedPrediction(
+            generation: generation,
+            samples: [
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 120,
+                    timestamp: 2,
+                    kind: .predicted,
+                    estimationUpdateIndex: estimateIndex,
+                    estimatedProperties: [.location]
+                ),
+            ]
+        )
+        try await acknowledgeAll(
+            prediction,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let actualBefore =
+            await scheduler.transientPreparationSnapshotForTesting
+
+        let result = await scheduler.process(.applyEstimatedUpdate(
+            generation: generation,
+            sample: stageCPreparationSample(
+                phase: .moved,
+                x: 40,
+                timestamp: 2,
+                kind: .estimatedUpdate,
+                estimationUpdateIndex: estimateIndex
+            )
+        ))
+        guard case let .prepared(corrected) = result else {
+            Issue.record("Expected predicted corner overflow to be shed")
+            return
+        }
+        #expect(
+            corrected.predictionAdmission?.overload
+                .contains(.logicalDabs) == true
+        )
+        #expect(corrected.logicalDabs.isEmpty)
+        let afterCorrection =
+            await scheduler.transientPreparationSnapshotForTesting
+        #expect(afterCorrection.actualSamples == actualBefore.actualSamples)
+        #expect(afterCorrection.actualDabs == actualBefore.actualDabs)
+        #expect(afterCorrection.predictedDabs.isEmpty)
+        try await acknowledgeAll(
+            corrected,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let appended = try await scheduler.appendPreparedStroke(
+            generation: generation,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 120,
+                    timestamp: 3
+                ),
+            ]
+        )
+        #expect(!appended.logicalDabs.isEmpty)
+        try await acknowledgeAll(
+            appended,
+            scheduler: scheduler,
+            generation: generation
+        )
+        await scheduler.cancel(generation: generation)
+    }
+
+    @Test
     func commitBarrierHasDedicatedCapacityAfterAuthoritativeQueueFills()
         throws
     {
@@ -1563,13 +1839,14 @@ struct StrokeFrameSchedulerTests {
     private func stageCPreparationSample(
         phase: StrokePhase,
         x: Float,
+        y: Float = 32,
         timestamp: TimeInterval,
         kind: StrokeSampleKind = .actual,
         estimationUpdateIndex: Int? = nil,
         estimatedProperties: StrokeEstimatedProperties = []
     ) -> StrokeSample {
         StrokeSample(
-            position: ScreenPoint(x: x, y: 32),
+            position: ScreenPoint(x: x, y: y),
             pressure: 0.5,
             timestamp: timestamp,
             phase: phase,

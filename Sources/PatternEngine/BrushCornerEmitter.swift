@@ -4,6 +4,7 @@ public enum BrushCornerEmitterError: Error, Equatable, Sendable {
     case invalidMaximumAngularStep
     case invalidSignedTurn
     case invalidStartingDirection
+    case canonicalKeyOverflow
     case capacityExceeded(
         requiredCandidateCount: Int,
         maximumCandidateCount: Int

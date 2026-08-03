@@ -572,6 +572,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         guard let stabilized = processStageCStabilizer(sample) else {
             return
         }
+        try validateCornerCanonicalDomain(for: stabilized)
         let attributed = InterpolatedStrokeSample(stabilized)
         guard hasAttributedPath else {
             try beginStageCAttributedPath(attributed, emit: emit)
@@ -614,6 +615,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         guard let stabilized = processStageCStabilizer(sample) else {
             return
         }
+        try validateCornerCanonicalDomain(for: stabilized)
         let attributed = InterpolatedStrokeSample(stabilized)
         guard hasAttributedPath else {
             try beginStageCAttributedPath(attributed, emit: emit)
@@ -659,6 +661,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         guard let stabilized = processStageCStabilizer(sample) else {
             return .completed
         }
+        try validateCornerCanonicalDomain(for: stabilized)
         let attributed = InterpolatedStrokeSample(stabilized)
         guard hasAttributedPath else {
             try beginStageCAttributedPath(attributed, emit: emit)
@@ -710,6 +713,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         guard let terminalSample = processStageCStabilizer(sample) else {
             return
         }
+        try validateCornerCanonicalDomain(for: terminalSample)
         let attributed = InterpolatedStrokeSample(terminalSample)
         guard hasAttributedPath else {
             try beginStageCAttributedPath(attributed, emit: emit)
@@ -783,6 +787,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         guard let terminalSample = processStageCStabilizer(sample) else {
             return
         }
+        try validateCornerCanonicalDomain(for: terminalSample)
         let attributed = InterpolatedStrokeSample(terminalSample)
         guard hasAttributedPath else {
             try beginStageCAttributedPath(attributed, emit: emit)
@@ -860,6 +865,7 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         guard let terminalSample = processStageCStabilizer(sample) else {
             return .completed
         }
+        try validateCornerCanonicalDomain(for: terminalSample)
         let attributed = InterpolatedStrokeSample(terminalSample)
         guard hasAttributedPath else {
             try beginStageCAttributedPath(attributed, emit: emit)
@@ -1011,8 +1017,11 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
             sourceDistance: sourceDistance,
             direction: startDirection,
             provenance: isPredicted ? .prediction : .authoritative,
-            timeKey: Self.canonicalKey(relativeTime, scale: 1_000_000_000),
-            distanceKey: Self.canonicalKey(
+            timeKey: try Self.canonicalKey(
+                relativeTime,
+                scale: 1_000_000_000
+            ),
+            distanceKey: try Self.canonicalKey(
                 sourceDistance,
                 scale: 1_000_000
             ),
@@ -1193,18 +1202,32 @@ public struct BrushStrokeGenerator: Equatable, Sendable {
         program.stageC?.direction.stationaryDirection ?? 0
     }
 
-    private static func canonicalKey(
+    private func validateCornerCanonicalDomain(
+        for sample: WorldStrokeSample
+    ) throws {
+        guard cornerEmitter != nil else { return }
+        let relativeTime = max(
+            0,
+            sample.timestamp - (strokeStartTimestamp ?? sample.timestamp)
+        )
+        _ = try Self.canonicalKey(relativeTime, scale: 1_000_000_000)
+        _ = try Self.canonicalKey(
+            Double(processedPathDistance),
+            scale: 1_000_000
+        )
+    }
+
+    static func canonicalKey(
         _ value: Double,
         scale: Double
-    ) -> Int64 {
-        let scaled = (value * scale).rounded(.toNearestOrEven)
-        precondition(
-            scaled.isFinite
-                && scaled >= Double(Int64.min)
-                && scaled <= Double(Int64.max),
-            "Stage C corner key must fit the canonical domain"
-        )
-        return Int64(scaled)
+    ) throws -> Int64 {
+        let scaled = value * scale
+        guard scaled.isFinite,
+              let key = Int64(exactly: scaled.rounded(.toNearestOrEven))
+        else {
+            throw BrushCornerEmitterError.canonicalKeyOverflow
+        }
+        return key
     }
 
     private mutating func nextDab(

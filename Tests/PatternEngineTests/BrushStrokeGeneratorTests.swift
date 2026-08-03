@@ -337,6 +337,108 @@ func typedCornerCapacityFailurePublishesNothingAndGeneratorRemainsReusable()
 }
 
 @Test
+func cornerCanonicalKeyBoundaryIsTypedTransactionalAndReusable() throws {
+    func generator(id: String, seed: UInt64) throws -> BrushStrokeGenerator {
+        try stageCGenerator(
+            id: id,
+            usesTravelDirection: true,
+            maximumAngularStep: .pi / 4,
+            seed: seed
+        )
+    }
+
+    let largestRepresentableInt64 = Double(Int64.max).nextDown
+    #expect(
+        try BrushStrokeGenerator.canonicalKey(
+            largestRepresentableInt64,
+            scale: 1
+        ) == Int64(exactly: largestRepresentableInt64)
+    )
+    #expect(
+        try BrushStrokeGenerator.canonicalKey(
+            Double(Int64.min),
+            scale: 1
+        ) == Int64.min
+    )
+    #expect(throws: BrushCornerEmitterError.canonicalKeyOverflow) {
+        try BrushStrokeGenerator.canonicalKey(
+            Double(Int64.max),
+            scale: 1
+        )
+    }
+
+    let safeTimestamp: TimeInterval = 2
+    var safe = try generator(id: "test.generator.corner-key-safe", seed: 0x74)
+    safe.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    try safe.append(
+        generatorSample(x: 10, timestamp: 1, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { _ in }
+    try safe.append(
+        generatorSample(x: 20, timestamp: safeTimestamp, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { _ in }
+    var boundaryDabs: [DabAttributes] = []
+    try safe.append(
+        generatorSample(
+            x: 20,
+            y: 10,
+            timestamp: safeTimestamp + 1,
+            phase: .moved
+        ),
+        maximumPathSubdivisionCount: 4_096
+    ) { boundaryDabs.append($0) }
+    #expect(!boundaryDabs.isEmpty)
+
+    var overflowing = try generator(
+        id: "test.generator.corner-key-overflow",
+        seed: 0x75
+    )
+    overflowing.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { _ in }
+    try overflowing.append(
+        generatorSample(x: 10, timestamp: 1, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { _ in }
+    let beforeOverflow = overflowing
+    var rejected: [DabAttributes] = []
+
+    #expect(throws: BrushCornerEmitterError.canonicalKeyOverflow) {
+        try overflowing.append(
+            generatorSample(x: 20, timestamp: 10_000_000_000, phase: .moved),
+            maximumPathSubdivisionCount: 4_096
+        ) { rejected.append($0) }
+    }
+    #expect(rejected.isEmpty)
+    #expect(overflowing == beforeOverflow)
+
+    var baseline = beforeOverflow
+    overflowing.cancel()
+    baseline.cancel()
+    var actual: [DabAttributes] = []
+    var expected: [DabAttributes] = []
+    overflowing.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { actual.append($0) }
+    baseline.begin(
+        generatorSample(x: 0, timestamp: 0, phase: .began)
+    ) { expected.append($0) }
+    try overflowing.append(
+        generatorSample(x: 10, timestamp: 1, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { actual.append($0) }
+    try baseline.append(
+        generatorSample(x: 10, timestamp: 1, phase: .moved),
+        maximumPathSubdivisionCount: 4_096
+    ) { expected.append($0) }
+    #expect(actual == expected)
+    #expect(overflowing == baseline)
+}
+
+@Test
 func exactReversalEmitsBoundedOrderedFanBeforeNumberingAndRandomConsumption()
     throws
 {
