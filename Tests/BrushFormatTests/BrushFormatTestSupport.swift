@@ -51,6 +51,7 @@ enum BrushFormatTestSupport {
 
     static func v2Package(
         metadata: BrushMetadata? = nil,
+        compatibility: BrushCompatibilityMetadata? = nil,
         sensorNormalization: BrushSensorNormalizationDefinition? = nil,
         sensorProgram: BrushSensorProgramDefinition? = nil,
         stabilizationV2: BrushStabilizationDefinition? = nil,
@@ -74,6 +75,7 @@ enum BrushFormatTestSupport {
             ),
             definition: v2Definition(
                 metadata: metadata,
+                compatibility: compatibility,
                 sensorNormalization: sensorNormalization,
                 sensorProgram: sensorProgram,
                 stabilizationV2: stabilizationV2,
@@ -87,6 +89,7 @@ enum BrushFormatTestSupport {
 
     static func v2Definition(
         metadata: BrushMetadata? = nil,
+        compatibility: BrushCompatibilityMetadata? = nil,
         sensorNormalization: BrushSensorNormalizationDefinition? = nil,
         sensorProgram: BrushSensorProgramDefinition? = nil,
         stabilizationV2: BrushStabilizationDefinition? = nil,
@@ -113,7 +116,7 @@ enum BrushFormatTestSupport {
             seedPolicy: base.seedPolicy,
             limits: base.limits,
             performanceIntent: base.performanceIntent,
-            compatibility: base.compatibility,
+            compatibility: compatibility ?? base.compatibility,
             sensorNormalization: sensorNormalization
                 ?? BrushSensorNormalizationDefinition(
                     fullScaleWorldVelocity: 2_000,

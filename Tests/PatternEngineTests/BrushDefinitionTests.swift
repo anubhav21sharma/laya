@@ -874,6 +874,82 @@ func definitionRejectsInteractionHaloBeyondTheBoundedMaterialPolicy() throws {
     }
 }
 
+@Test func schemaV2RejectsNonfiniteOrOutOfDomainResponsePayloads() throws {
+    func program(
+        response: BrushResponseDefinition
+    ) -> BrushSensorProgramDefinition {
+        var outputs = Dictionary(
+            uniqueKeysWithValues: BrushDynamicOutput.allCases.map {
+                ($0, BrushOutputProgramDefinition(
+                    baseValue: $0 == .rotation ? 0 : 1,
+                    terms: []
+                ))
+            }
+        )
+        outputs[.rotation] = BrushOutputProgramDefinition(
+            baseValue: 0,
+            terms: [BrushResponseTermDefinition(
+                input: .pressure,
+                response: response,
+                inputInverted: false,
+                missingInputValue: 0,
+                responseScale: 1,
+                responseOffset: 0,
+                responseLowerClamp: 0,
+                responseUpperClamp: 1,
+                jitter: 0,
+                operation: .add
+            )]
+        )
+        return BrushSensorProgramDefinition(outputs: outputs)
+    }
+
+    let constantField = "sensorProgram.rotation.response.constant"
+    for value in [Float.nan, .infinity, -.infinity] {
+        #expect(throws: BrushDefinitionValidationError.nonfinite(
+            field: constantField
+        )) {
+            _ = try BrushDefinition.stageCV2Fixture(
+                sensorProgram: program(response: .constant(value))
+            )
+        }
+    }
+    for value in [-Float.ulpOfOne, Float(1).nextUp] {
+        #expect(throws: BrushDefinitionValidationError.outOfRange(
+            field: constantField
+        )) {
+            _ = try BrushDefinition.stageCV2Fixture(
+                sensorProgram: program(response: .constant(value))
+            )
+        }
+    }
+
+    let exponentField =
+        "sensorProgram.rotation.response.boundedPower.exponent"
+    for exponent in [Float.nan, .infinity, -.infinity] {
+        #expect(throws: BrushDefinitionValidationError.nonfinite(
+            field: exponentField
+        )) {
+            _ = try BrushDefinition.stageCV2Fixture(
+                sensorProgram: program(
+                    response: .boundedPower(exponent: exponent)
+                )
+            )
+        }
+    }
+    for exponent in [Float(0.125).nextDown, Float(8).nextUp] {
+        #expect(throws: BrushDefinitionValidationError.outOfRange(
+            field: exponentField
+        )) {
+            _ = try BrushDefinition.stageCV2Fixture(
+                sensorProgram: program(
+                    response: .boundedPower(exponent: exponent)
+                )
+            )
+        }
+    }
+}
+
 private extension BrushDefinition {
     static func stageCV2Fixture(
         normalization: BrushSensorNormalizationDefinition =

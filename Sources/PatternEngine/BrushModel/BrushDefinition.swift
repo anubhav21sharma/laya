@@ -641,9 +641,10 @@ private enum BrushDefinitionValidator {
                         field: "sensorProgram.\(output.rawValue).term"
                     )
                 }
-                if case let .curve(curve) = term.response {
-                    try curveValidation(curve)
-                }
+                try responseValidation(
+                    term.response,
+                    field: "sensorProgram.\(output.rawValue).response"
+                )
                 if term.input == .direction || term.input == .azimuth
                     || term.input == .roll
                 {
@@ -767,6 +768,40 @@ private enum BrushDefinitionValidator {
             throw BrushDefinitionValidationError.outOfRange(
                 field: "sensorProgram.\(output.rawValue).baseValue"
             )
+        }
+    }
+
+    static func responseValidation(
+        _ response: BrushResponseDefinition,
+        field: String
+    ) throws {
+        switch response {
+        case let .constant(value):
+            guard value.isFinite else {
+                throw BrushDefinitionValidationError.nonfinite(
+                    field: "\(field).constant"
+                )
+            }
+            guard (0...1).contains(value) else {
+                throw BrushDefinitionValidationError.outOfRange(
+                    field: "\(field).constant"
+                )
+            }
+        case .linear:
+            break
+        case let .boundedPower(exponent):
+            guard exponent.isFinite else {
+                throw BrushDefinitionValidationError.nonfinite(
+                    field: "\(field).boundedPower.exponent"
+                )
+            }
+            guard (0.125...8).contains(exponent) else {
+                throw BrushDefinitionValidationError.outOfRange(
+                    field: "\(field).boundedPower.exponent"
+                )
+            }
+        case let .curve(curve):
+            try curveValidation(curve)
         }
     }
 

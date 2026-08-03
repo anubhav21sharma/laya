@@ -86,9 +86,10 @@ struct BrushContentHashTests {
         #expect(decoded.definition.schemaVersion == 2)
         #expect(BrushContentHash.legacySchemaVersion == 2)
         #expect(BrushContentHash.currentSchemaVersion == 3)
+        let digest = try decoded.contentHash
         #expect(
-            try decoded.contentHash
-                == "bd7bcd38c40ce5c200353d91ef8ff3f0bb958153217240ed192cfbab1bc7e076"
+            digest
+                == "1b50b2ccc39c1a4fd01f897331948eae020bef0aecfe20a814102c6198dbf05c"
         )
     }
 
@@ -299,5 +300,42 @@ struct BrushContentHashTests {
             )
         )
         #expect(try changed.contentHash == base.contentHash)
+    }
+
+    @Test
+    func schemaV2SourceSettingKeysAreProvenanceOnly() throws {
+        let base = try BrushFormatTestSupport.v2Package()
+        let changed = try BrushFormatTestSupport.v2Package(
+            compatibility: BrushCompatibilityMetadata(
+                nativeFeatureVersion: base.definition.compatibility
+                    .nativeFeatureVersion,
+                sourceSettingKeys: ["converter.only", "source.setting"],
+                requiredSemanticKeys: base.definition.compatibility
+                    .requiredSemanticKeys
+            )
+        )
+        let changedFeatureVersion = try BrushFormatTestSupport.v2Package(
+            compatibility: BrushCompatibilityMetadata(
+                nativeFeatureVersion: base.definition.compatibility
+                    .nativeFeatureVersion + 1,
+                sourceSettingKeys: base.definition.compatibility
+                    .sourceSettingKeys,
+                requiredSemanticKeys: base.definition.compatibility
+                    .requiredSemanticKeys
+            )
+        )
+        let changedRequiredSemantics = try BrushFormatTestSupport.v2Package(
+            compatibility: BrushCompatibilityMetadata(
+                nativeFeatureVersion: base.definition.compatibility
+                    .nativeFeatureVersion,
+                sourceSettingKeys: base.definition.compatibility
+                    .sourceSettingKeys,
+                requiredSemanticKeys: ["required.runtime.semantic"]
+            )
+        )
+
+        #expect(try changed.contentHash == base.contentHash)
+        #expect(try changedFeatureVersion.contentHash != base.contentHash)
+        #expect(try changedRequiredSemantics.contentHash != base.contentHash)
     }
 }

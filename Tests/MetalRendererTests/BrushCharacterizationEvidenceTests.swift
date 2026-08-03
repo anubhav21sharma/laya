@@ -1,7 +1,31 @@
+import CryptoKit
 import Foundation
 @testable import MetalRenderer
 import PatternEngine
 import Testing
+
+@Test
+func checkedInFoundationRasterBaselineMatchesPreTaskSixBytes() throws {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let url = repositoryRoot.appendingPathComponent(
+        "App/PatternSpike/Harness/Baselines/brush-foundation-v1.json"
+    )
+    let data = try Data(contentsOf: url)
+    let digest = SHA256.hash(data: data)
+        .map { String(format: "%02x", $0) }
+        .joined()
+    let baseline = try JSONDecoder().decode(
+        BrushCharacterizationBaseline.self,
+        from: data
+    )
+
+    #expect(digest ==
+        "1f2dd91d3b2de7147fa7043980d7cc1fc22412e33e19d4eb8e04a1ff691da5c8")
+    #expect(baseline.records.count == 8)
+}
 
 @Test
 func baselineRejectsDuplicateSceneAndMalformedDigest() throws {

@@ -39,6 +39,7 @@ public enum BrushContentHash {
             append(
                 package.definition,
                 includeDisplayMetadata: false,
+                includeSourceSettingKeys: false,
                 to: &writer
             )
             try appendStageC(package.definition, to: &writer)
@@ -143,6 +144,7 @@ public enum BrushContentHash {
     private static func append(
         _ definition: BrushDefinition,
         includeDisplayMetadata: Bool = true,
+        includeSourceSettingKeys: Bool = true,
         to writer: inout CanonicalBrushWriter
     ) {
         writer.string(definition.id.rawValue)
@@ -203,7 +205,9 @@ public enum BrushContentHash {
         writer.integer(definition.limits.maximumResidentBytes)
         writer.u8(performanceIntentTag(definition.performanceIntent))
         writer.u16(definition.compatibility.nativeFeatureVersion)
-        appendSorted(definition.compatibility.sourceSettingKeys, to: &writer)
+        if includeSourceSettingKeys {
+            appendSorted(definition.compatibility.sourceSettingKeys, to: &writer)
+        }
         appendSorted(definition.compatibility.requiredSemanticKeys, to: &writer)
     }
 

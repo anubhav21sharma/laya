@@ -136,7 +136,7 @@ let package = Package(
         ),
         .testTarget(
             name: "EditorCoreTests",
-            dependencies: ["EditorCore"],
+            dependencies: ["BrushFormat", "EditorCore"],
             resources: [.copy("Fixtures")]
         ),
         .testTarget(
