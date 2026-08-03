@@ -112,6 +112,39 @@ initializer allocation: a temporary four-element Array had previously relied
 on release scalarization. Scalar finite/range guards removed the allocation at
 its source rather than weakening the phase boundary.
 
+### Review RED 2 — omitted phase-helper descendants
+
+A second independent review found that the first corrected gate treated the
+cursor phase workers as leaves. The decisive omitted predicted-finish chain
+was `emitNextPage` 24,784 + `advanceOne` 976 + `prepareFinishSource` 19,104 +
+`stageCTimedCursor` 13,024 = 57,888 bytes before even charging the direct
+`TimedStrokeEmitter.prediction` frame. The complete truthful chain was 62,976
+bytes and therefore exceeded the 57,344-byte debug limit. The gate also
+calculated `timed_next_branch` without ever asserting or composing it. A
+temporary expanded gate reproduced the failure as `cursor_advance` 60,288
+bytes; that first diagnostic conservatively added the sequential
+`prepareSource` frame, while the audited call-graph formula uses the correct
+maximum of sequential direct callees and still fails on the complete predicted
+finish path.
+
+The correction stages finish work across two additional cursor phases.
+`finishSource` now prepares only the distance/head source; a predicted timed
+advance or authoritative timed termination executes on a later
+`advanceOne` iteration. The existing `SourceCursor` holds the partial source,
+so the split adds no heap state, full-cursor copy, allocation, or second owner.
+The debug frames fell from 19,104 bytes for the combined finish worker to
+12,512/6,528/12,528 bytes for finish preparation, predicted timed advance, and
+authoritative timed termination respectively.
+
+The stack gate now measures and composes every nontrivial direct descendant of
+the cursor phase workers: footprint/stabilizer/path/direction setup, reset,
+candidate and source preparation, corner traversal, timed begin/advance/
+prediction/finish, timed sample/candidate generation, and merger decisions.
+It also fails if a phase worker is invoked anywhere except its definition and
+the `advanceOne` dispatcher, and fails if any calculated `*_branch` composite
+is not consumed. Thus the prior omission and unused-branch failure modes are
+structurally guarded rather than documented only by review.
+
 This preserves exact retry semantics while remaining allocation-free. The
 fail-closed formula now charges:
 
@@ -201,9 +234,12 @@ stabilize the scheduler-facing API. The recommended cleanup point is after C12.
 - ARM64 stack gate: debug cursor composites <=57,344 and optimized public roots
   <=16 KiB under pinned Xcode 26.6 / Swift 6.3.3 / LLVM 21.0.0. Raw final
   components: structural 43,824; input 35,056; generator 48,960; dynamics
-  evaluator/native/full 10,080/24,128/24,672; accept 29,984; selection 23,488;
+  evaluator/native/full 10,080/24,128/24,672; accept 29,984; selection 29,584;
   prepared 12,368; commit 17,632; page 24,784; construct 36,208; advance/resume
   54,768;
+- stack-gate structural audit: 14 phase workers are dispatch-only and all 48
+  calculated branch composites are consumed; public timed `nextCandidate`
+  composite is explicitly gated at 7,952 bytes;
 - symbol selection is fail-closed: the fully qualified generator cursor page
   resolves once, while the deliberately broad timed/generator cursor fragment
   is rejected as ambiguous;

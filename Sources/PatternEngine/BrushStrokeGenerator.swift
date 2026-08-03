@@ -149,6 +149,8 @@ extension BrushStrokeGenerator {
             case beginSource
             case pendingSegment
             case finishSource
+            case finishTimedAdvance
+            case finishTimedTermination
             case path
             case afterPath
             case source
@@ -674,6 +676,12 @@ extension BrushStrokeGenerator {
             case .finishSource:
                 try prepareFinishSource()
                 return .noDab
+            case .finishTimedAdvance:
+                try prepareFinishTimedAdvance()
+                return .noDab
+            case .finishTimedTermination:
+                try prepareFinishTimedTermination()
+                return .noDab
             case .path:
                 try advancePath()
                 return .noDab
@@ -719,7 +727,8 @@ extension BrushStrokeGenerator {
             case .segmentCommit:
                 segmentCursor?.preparedCandidate
             case .prepare, .initialPath, .beginSource, .pendingSegment,
-                    .finishSource, .path, .afterPath,
+                    .finishSource, .finishTimedAdvance,
+                    .finishTimedTermination, .path, .afterPath,
                     .segmentPrepareSpatial,
                     .segmentPrepareTimed, .segmentDecide,
                     .segmentSettleDuplicate, .segmentLifecycle, .complete:
@@ -747,7 +756,8 @@ extension BrushStrokeGenerator {
                 segmentCursor = cursor
                 phase = .segmentLifecycle
             case .prepare, .initialPath, .beginSource, .pendingSegment,
-                    .finishSource, .path, .afterPath,
+                    .finishSource, .finishTimedAdvance,
+                    .finishTimedTermination, .path, .afterPath,
                     .segmentPrepareSpatial,
                     .segmentPrepareTimed, .segmentDecide,
                     .segmentSettleDuplicate, .segmentLifecycle, .complete:
@@ -1096,18 +1106,13 @@ extension BrushStrokeGenerator {
             }
             let isPredicted = sample.kind == .predicted
             if isPredicted {
-                let timed = try generator.stageCTimedCursor(
-                    to: attributed,
-                    sourceDistance: Double(generator.processedPathDistance),
-                    direction: generator.lastDirection,
-                    isPredicted: true
-                )
                 prepareSource(
                     distance: nil,
                     timedHead: nil,
-                    timedCursor: timed,
+                    timedCursor: nil,
                     purpose: .resetAndComplete
                 )
+                phase = .finishTimedAdvance
                 return
             }
             let finish = try generator.stageCCandidate(
@@ -1122,23 +1127,53 @@ extension BrushStrokeGenerator {
                         != attributed.position
                 ? finish
                 : nil
-            var timed: TimedStrokeEmissionCursor?
+            prepareSource(
+                distance: distance,
+                timedHead: nil,
+                timedCursor: nil,
+                purpose: .resetAndComplete
+            )
+            phase = .finishTimedTermination
+        }
+
+        @inline(never)
+        private mutating func prepareFinishTimedAdvance() throws {
+            guard let attributed else {
+                preconditionFailure("Missing predicted finish input")
+            }
+            guard var cursor = sourceCursor else {
+                preconditionFailure("Missing predicted finish source")
+            }
+            cursor.timedCursor = try generator.stageCTimedCursor(
+                to: attributed,
+                sourceDistance: Double(generator.processedPathDistance),
+                direction: generator.lastDirection,
+                isPredicted: true
+            )
+            sourceCursor = cursor
+            phase = .source
+        }
+
+        @inline(never)
+        private mutating func prepareFinishTimedTermination() throws {
+            guard let attributed else {
+                preconditionFailure("Missing authoritative finish input")
+            }
+            guard var cursor = sourceCursor else {
+                preconditionFailure("Missing authoritative finish source")
+            }
             if generator.stageCUsesTimedEmission,
                var emitter = generator.timedEmitter
             {
-                timed = try emitter.finish(at: TimedStrokePoint(
+                cursor.timedCursor = try emitter.finish(at: TimedStrokePoint(
                     sample: attributed,
                     sourceDistance: Double(generator.processedPathDistance),
                     direction: generator.lastDirection
                 ))
                 generator.timedEmitter = emitter
             }
-            prepareSource(
-                distance: distance,
-                timedHead: nil,
-                timedCursor: timed,
-                purpose: .resetAndComplete
-            )
+            sourceCursor = cursor
+            phase = .source
         }
 
         private mutating func prepareSource(

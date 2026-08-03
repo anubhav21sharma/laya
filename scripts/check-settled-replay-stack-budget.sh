@@ -82,6 +82,47 @@ require_composite() {
     "$name" "$value" "$maximum"
 }
 
+require_phase_worker_dispatch_only() {
+  local source=$1
+  shift
+  local worker
+  local occurrences
+  for worker in "$@"; do
+    occurrences=$(grep -Ec "${worker}\\(" "$source")
+    if (( occurrences != 2 )); then
+      printf 'STACK STRUCTURE FAIL worker=%s occurrences=%s expected=2\n' \
+        "$worker" "$occurrences" >&2
+      exit 1
+    fi
+  done
+  printf 'STACK STRUCTURE PASS phase_workers=%s dispatch=advanceOne\n' "$#"
+}
+
+require_all_branch_composites_consumed() {
+  local source=$1
+  local name
+  local occurrences
+  local count=0
+  while IFS= read -r name; do
+    occurrences=$(grep -o "$name" "$source" | wc -l | tr -d ' ')
+    if (( occurrences < 2 )); then
+      printf 'STACK STRUCTURE FAIL composite=%s occurrences=%s expected_at_least=2\n' \
+        "$name" "$occurrences" >&2
+      exit 1
+    fi
+    count=$((count + 1))
+  done < <(sed -n 's/^\([a-z][a-z0-9_]*_branch\)=.*/\1/p' "$source")
+  printf 'STACK STRUCTURE PASS consumed_composites=%s\n' "$count"
+}
+
+generator_source="$script_directory/../Sources/PatternEngine/BrushStrokeGenerator.swift"
+require_phase_worker_dispatch_only "$generator_source" \
+  prepareInitialPath prepareBeginSource preparePendingSegment \
+  prepareFinishSource prepareFinishTimedAdvance \
+  prepareFinishTimedTermination advancePath afterPath advanceSource \
+  prepareSegmentSpatial prepareSegmentTimed decideSegment \
+  settleSegmentDuplicate advanceSegmentLifecycle
+
 # Coordinator frames and closures. Private fragments include the source-level
 # function name plus enough mangling context to exclude closure/partial symbols.
 measure p "$debug_binary" prepareSettledReplayTransfer external swift-function
@@ -151,6 +192,32 @@ measure cursor_after_path "$debug_binary" EmissionCursorV9afterPath non-external
 measure cursor_begin_source "$debug_binary" EmissionCursorV18prepareBeginSource non-external fragment
 measure cursor_prepare_segment "$debug_binary" EmissionCursorV21preparePendingSegment non-external fragment
 measure cursor_finish_source "$debug_binary" EmissionCursorV19prepareFinishSource non-external fragment
+measure cursor_prepare_source "$debug_binary" EmissionCursorV13prepareSource non-external fragment
+measure cursor_stage_c_timed "$debug_binary" BrushStrokeGeneratorV17stageCTimedCursor non-external fragment
+measure cursor_finish_timed_advance "$debug_binary" EmissionCursorV25prepareFinishTimedAdvance non-external fragment
+measure cursor_finish_timed_termination "$debug_binary" EmissionCursorV29prepareFinishTimedTermination non-external fragment
+measure cursor_complete "$debug_binary" EmissionCursorV8complete non-external fragment
+measure generator_reset "$debug_binary" BrushStrokeGeneratorV17resetRuntimeState non-external fragment
+measure footprint_validate "$debug_binary" BrushStrokeFootprintEnvelope33_FCAB7D0E8C2617936E49D6F33D25623ALLV8validate non-external fragment
+measure generator_stabilizer "$debug_binary" BrushStrokeGeneratorV23processStageCStabilizer non-external fragment
+measure stabilizer_process "$debug_binary" StrokeStabilizerV9processV2 external fragment
+measure generator_corner_validate "$debug_binary" BrushStrokeGeneratorV29validateCornerCanonicalDomain non-external fragment
+measure generator_timed_init "$debug_binary" BrushStrokeGeneratorV23initializeTimedEmission non-external fragment
+measure stage_c_candidate "$debug_binary" stageCCandidate33_FCAB7D0E8C2617936E49D6F33D25623ALL6sample14sourceDistance9direction4kind11isPredicted14cornerSequence non-external swift-function
+measure stage_c_sample "$debug_binary" BrushStrokeGeneratorV12stageCSample non-external fragment
+measure timed_begin "$debug_binary" TimedStrokeEmitterV5begin external fragment
+measure timed_advance "$debug_binary" TimedStrokeEmitterV7advance external fragment
+measure timed_prediction "$debug_binary" TimedStrokeEmitterV10prediction external fragment
+measure timed_finish "$debug_binary" TimedStrokeEmitterV6finish external fragment
+measure corner_cursor "$debug_binary" BrushCornerEmitterV6cursor external fragment
+measure corner_next "$debug_binary" BrushCornerEmissionCursorV13nextCandidate external fragment
+measure direction_begin "$debug_binary" BrushDirectionTrackerV5begin external fragment
+measure direction_update "$debug_binary" BrushDirectionTrackerV6update external swift-function
+measure path_begin "$debug_binary" CentripetalCatmullRomPathInterpolatorV5begin external fragment
+measure path_advance "$debug_binary" CentripetalCatmullRomPathInterpolatorV13advanceCursor external fragment
+measure path_cancel "$debug_binary" CentripetalCatmullRomPathInterpolatorV6cancel external fragment
+measure path_next "$debug_binary" AttributedStrokePathAdvanceCursorV11nextSegment external fragment
+measure emission_merger_next "$debug_binary" StrokeEmissionMergerV4next external fragment
 measure cursor_source_candidate "$debug_binary" BrushStrokeGeneratorV14EmissionCursorV06SourceG0 non-external swift-function
 measure cursor_spatial "$debug_binary" prepareSpatialCandidate non-external swift-function
 measure cursor_decide "$debug_binary" decidePreparedCandidates non-external swift-function
@@ -378,15 +445,6 @@ cursor_evaluate_branch=$((cursor_evaluate + $(maximum \
 cursor_accept_composite=$((cursor_accept + $(maximum \
   "$cursor_identity" "$cursor_random" "$cursor_evaluate_branch" \
   "$cursor_install")))
-cursor_prepare_branch=$cursor_prepare
-cursor_initial_branch=$cursor_initial
-cursor_begin_branch=$cursor_begin_source
-cursor_pending_segment_branch=$cursor_prepare_segment
-cursor_finish_preparation_branch=$cursor_finish_source
-cursor_after_branch=$cursor_after_path
-cursor_path_branch=$cursor_path
-cursor_source_branch=$((cursor_source + cursor_source_candidate \
-  + cursor_source_commit))
 timed_optional_angle_branch=$((timed_optional_angle \
   + timed_normalized_angle))
 timed_interpolated_branch=$((timed_interpolated + $(maximum \
@@ -400,17 +458,50 @@ timed_candidate_branch=$((timed_candidate + $(maximum \
   "$timed_finite" "$timed_canonical")))
 timed_next_branch=$((timed_next + timed_candidate_branch))
 timed_consume_branch=$((timed_consume + timed_candidate_branch))
-cursor_segment_spatial_branch=$((cursor_segment_spatial + cursor_spatial))
+stabilizer_branch=$((generator_stabilizer + stabilizer_process))
+timed_initialization_branch=$((generator_timed_init + timed_begin))
+stage_c_timed_branch=$((cursor_stage_c_timed + $(maximum \
+  "$stage_c_sample" "$timed_advance" "$timed_prediction")))
+cursor_complete_branch=$((cursor_complete + generator_reset))
+cursor_prepare_branch=$((cursor_prepare + $(maximum \
+  "$footprint_validate" "$generator_reset" "$stabilizer_branch" \
+  "$generator_corner_validate" "$direction_update" "$path_advance" \
+  "$cursor_complete_branch")))
+cursor_initial_branch=$((cursor_initial + $(maximum \
+  "$path_begin" "$timed_initialization_branch" "$direction_begin")))
+cursor_begin_branch=$((cursor_begin_source + $(maximum \
+  "$stage_c_candidate" "$cursor_prepare_source")))
+cursor_pending_segment_branch=$((cursor_prepare_segment + $(maximum \
+  "$stage_c_candidate" "$corner_cursor" "$stage_c_timed_branch")))
+cursor_finish_preparation_branch=$((cursor_finish_source + $(maximum \
+  "$stage_c_candidate" "$cursor_prepare_source")))
+cursor_finish_timed_advance_branch=$((cursor_finish_timed_advance \
+  + stage_c_timed_branch))
+cursor_finish_timed_termination_branch=$(( \
+  cursor_finish_timed_termination + timed_finish))
+cursor_after_branch=$((cursor_after_path + $(maximum \
+  "$path_cancel" "$stage_c_timed_branch" "$cursor_prepare_source")))
+cursor_path_branch=$((cursor_path + $(maximum \
+  "$path_next" "$direction_update")))
+cursor_source_candidate_branch=$((cursor_source_candidate + $(maximum \
+  "$timed_next_branch" "$emission_merger_next" \
+  "$cursor_source_commit")))
+cursor_source_branch=$((cursor_source + cursor_source_candidate_branch))
+cursor_segment_spatial_branch=$((cursor_segment_spatial + cursor_spatial \
+  + $(maximum "$stage_c_candidate" "$corner_next")))
 cursor_segment_timed_branch=$((cursor_segment_timed + timed_consume_branch))
-cursor_segment_decide_branch=$((cursor_segment_decide + cursor_decide))
+cursor_segment_decide_branch=$((cursor_segment_decide + cursor_decide \
+  + emission_merger_next))
 cursor_segment_settle_branch=$((cursor_segment_settle \
-  + cursor_segment_commit_prepared + cursor_commit))
+  + cursor_segment_commit_prepared + cursor_commit + corner_next))
 cursor_segment_lifecycle_branch=$((cursor_segment_lifecycle \
   + cursor_segment_finish))
 cursor_advance_branch=$(maximum \
   "$cursor_prepare_branch" "$cursor_initial_branch" \
   "$cursor_begin_branch" "$cursor_pending_segment_branch" \
-  "$cursor_finish_preparation_branch" "$cursor_path_branch" \
+  "$cursor_finish_preparation_branch" \
+  "$cursor_finish_timed_advance_branch" \
+  "$cursor_finish_timed_termination_branch" "$cursor_path_branch" \
   "$cursor_after_branch" \
   "$cursor_source_branch" "$cursor_segment_spatial_branch" \
   "$cursor_segment_timed_branch" "$cursor_segment_decide_branch" \
@@ -430,7 +521,9 @@ printf 'STACK COMPONENT dynamics_evaluator=%s dynamics_native=%s dynamics=%s cur
   "$dynamics_branch" "$cursor_accept_composite" \
   "$cursor_selection_branch" "$cursor_prepared_branch" \
   "$cursor_commit_branch" "$cursor_page"
+require_all_branch_composites_consumed "$0"
 require_composite cursor_construct "$cursor_construct_composite" "$generator_debug_limit"
+require_composite timed_next "$timed_next_branch" "$generator_debug_limit"
 require_composite cursor_advance "$cursor_advance_composite" "$generator_debug_limit"
 require_composite cursor_resume "$cursor_advance_composite" "$generator_debug_limit"
 
