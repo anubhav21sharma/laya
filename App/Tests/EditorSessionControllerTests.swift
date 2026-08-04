@@ -581,6 +581,7 @@ func rasterSuccessRecordsTheCapturedEraseTool() throws {
     try commitControllerStroke(controller, renderer: renderer)
 
     let command = try #require(controller.lastRecordedRasterCommandForTesting)
+    #expect(command.layerID == LayerStack.compatibilityLayerID)
     #expect(command.kind == .erase)
     #expect(releaseCalls == [[]])
     #expect(controller.model.canUndo)
@@ -589,6 +590,157 @@ func rasterSuccessRecordsTheCapturedEraseTool() throws {
     #expect(renderer.isIdle)
 
     renderer.releaseRasterRevisions([command.before.id, command.after.id])
+}
+
+@Test
+@MainActor
+func layerBoundHistorySurvivesReorderAndActiveLayerChanges() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let compatibility = try LayerDescriptor(
+        id: LayerStack.compatibilityLayerID,
+        name: "Compatibility"
+    )
+    let second = try LayerDescriptor(
+        id: controllerLayerID(2),
+        name: "Second"
+    )
+    let stack = try LayerStack(
+        layers: [compatibility, second],
+        activeLayerID: compatibility.id
+    )
+    var restoredLayerIDs: [UUID] = []
+    let controller = EditorSessionController(
+        renderer: renderer,
+        layerStack: stack,
+        requestRasterRestore: { token, layerID, revision in
+            restoredLayerIDs.append(layerID)
+            try renderer.requestRasterRestore(
+                token: token,
+                revision: revision
+            )
+        }
+    )
+
+    try commitControllerStroke(controller, renderer: renderer)
+    let raster = try #require(controller.lastRecordedRasterCommandForTesting)
+    #expect(raster.layerID == compatibility.id)
+    try controller.moveLayer(compatibility.id, to: 1)
+    try controller.setActiveLayer(second.id)
+
+    controller.undo()
+    #expect(controller.layerStackForTesting.activeLayerID == compatibility.id)
+    controller.undo()
+    #expect(
+        controller.layerStackForTesting.orderedLayerIDs
+            == [compatibility.id, second.id]
+    )
+    controller.undo()
+    #expect(restoredLayerIDs == [compatibility.id])
+    try renderer.finishRasterOperationForHarness()
+
+    controller.redo()
+    #expect(restoredLayerIDs == [compatibility.id, compatibility.id])
+    try renderer.finishRasterOperationForHarness()
+    renderer.releaseRasterRevisions([raster.before.id, raster.after.id])
+}
+
+@Test
+@MainActor
+func layerMutationIsRejectedWhileDrawingWithoutChangingTheStack() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+    let before = controller.layerStackForTesting
+    controller.handleStrokeSample(controllerSample(.began))
+
+    #expect(throws: EditorSessionLayerError.mutationRequiresIdle) {
+        try controller.renameLayer(
+            LayerStack.compatibilityLayerID,
+            to: "Changed"
+        )
+    }
+    #expect(controller.layerStackForTesting == before)
+
+    controller.handleStrokeSample(controllerSample(.cancelled))
+    try awaitControllerRendererIdleForHarness(renderer)
+}
+
+@Test
+@MainActor
+func missingHistoryTargetFailsBeforeRendererMutationAndPreservesCursor()
+    throws
+{
+    guard let renderer = try makeControllerRenderer() else { return }
+    let size = PixelSize(width: 64, height: 64)
+    let regions = PixelRegionSet(
+        [PixelRect(minX: 0, minY: 0, maxX: 1, maxY: 1)!],
+        clippedTo: size
+    )
+    let before = RasterRevisionReference(
+        id: StoredRasterRevisionID(rawValue: 900),
+        pixelSize: size,
+        regions: regions,
+        retainedBytes: 8
+    )
+    let after = RasterRevisionReference(
+        id: StoredRasterRevisionID(rawValue: 901),
+        pixelSize: size,
+        regions: regions,
+        retainedBytes: 8
+    )
+    let history = DocumentHistory(initialDocumentIsEmpty: false)
+    _ = history.appendSuccessful(.raster(RasterHistoryCommand(
+        layerID: controllerLayerID(99),
+        kind: .draw,
+        before: before,
+        after: after
+    )))
+    var restoreCount = 0
+    let controller = EditorSessionController(
+        renderer: renderer,
+        documentHistory: history,
+        requestRasterRestore: { _, _, _ in restoreCount += 1 }
+    )
+    var errors: [MetalRendererError] = []
+    controller.onError = { errors.append($0) }
+    let bytes = try canonicalBytes(renderer)
+
+    controller.undo()
+
+    #expect(restoreCount == 0)
+    #expect(controller.historyAvailabilityForTesting.canUndo)
+    #expect(!controller.historyAvailabilityForTesting.canRedo)
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(try canonicalBytes(renderer) == bytes)
+    #expect(errors.count == 1)
+}
+
+@Test
+@MainActor
+func clearAndResizeCommandsUseTheExplicitCompatibilityLayer() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    let controller = EditorSessionController(renderer: renderer)
+
+    controller.clear()
+    try renderer.finishRasterOperationForHarness()
+    #expect(
+        controller.lastRecordedRasterCommandForTesting?.layerID
+            == LayerStack.compatibilityLayerID
+    )
+    controller.handleTileSize(PixelSize(width: 96, height: 80))
+    try renderer.finishRasterOperationForHarness()
+    #expect(
+        controller.lastRecordedResizeCommandForTesting?.layerID
+            == LayerStack.compatibilityLayerID
+    )
+
+    if let clear = controller.lastRecordedRasterCommandForTesting,
+       let resize = controller.lastRecordedResizeCommandForTesting
+    {
+        renderer.releaseRasterRevisions([
+            clear.before.id, clear.after.id,
+            resize.before.id, resize.after.id,
+        ])
+    }
 }
 
 @Test
@@ -668,7 +820,8 @@ func failureKeepsHistoryCursorAvailabilityAndWholeRasterUnchanged() throws {
     var errors: [MetalRendererError] = []
     let controller = EditorSessionController(
         renderer: renderer,
-        requestRasterRestore: { token, revision in
+        requestRasterRestore: { token, layerID, revision in
+            #expect(layerID == LayerStack.compatibilityLayerID)
             try renderer.requestRasterRestoreForHarness(
                 token: token,
                 revision: revision,
@@ -705,6 +858,13 @@ func failureKeepsHistoryCursorAvailabilityAndWholeRasterUnchanged() throws {
     #expect(errors.count == 1)
 
     renderer.releaseRasterRevisions([command.before.id, command.after.id])
+}
+
+private func controllerLayerID(_ value: Int) -> UUID {
+    UUID(uuidString: String(
+        format: "00000000-0000-0000-0000-%012d",
+        value
+    ))!
 }
 
 @Test

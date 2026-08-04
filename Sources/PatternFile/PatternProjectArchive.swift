@@ -90,6 +90,65 @@ public enum PatternProjectArchiveIO {
     }
 }
 
+public extension PatternPaintTileCodec {
+    static func decodeArchive(
+        _ archive: PatternProjectArchive,
+        surfaceManifestPaths: [String],
+        maximumDecodedBytes: Int = PatternPaintTileCodec.maximumDecodedBytes
+    ) throws -> [PatternPaintTileSurface] {
+        var manifestPaths = Set<String>()
+        for path in surfaceManifestPaths {
+            guard manifestPaths.insert(path).inserted else {
+                throw PatternPaintTileError.duplicatePath(path)
+            }
+        }
+        var surfaces: [PatternPaintTileSurface] = []
+        surfaces.reserveCapacity(surfaceManifestPaths.count)
+        for path in surfaceManifestPaths {
+            let data: Data
+            do {
+                data = try archive.data(for: path)
+            } catch {
+                throw PatternPaintTileError.missingPayload(path)
+            }
+            surfaces.append(try decodeManifestMetadata(data))
+        }
+        try validateMetadata(surfaces)
+
+        var payloads: [String: Data] = [:]
+        var decodedBytes = 0
+        for record in surfaces.flatMap(\.tiles) {
+            guard !manifestPaths.contains(record.file) else {
+                throw PatternPaintTileError.duplicatePath(record.file)
+            }
+            let payload: Data
+            do {
+                payload = try archive.data(for: record.file)
+            } catch {
+                throw PatternPaintTileError.missingPayload(record.file)
+            }
+            let (sum, overflow) = decodedBytes.addingReportingOverflow(
+                payload.count
+            )
+            let actual = overflow ? Int.max : sum
+            guard !overflow, actual <= maximumDecodedBytes else {
+                throw PatternPaintTileError.decodedByteLimitExceeded(
+                    actual: actual,
+                    maximum: maximumDecodedBytes
+                )
+            }
+            decodedBytes = sum
+            payloads[record.file] = payload
+        }
+        try validate(
+            surfaces,
+            payloadsByPath: payloads,
+            maximumDecodedBytes: maximumDecodedBytes
+        )
+        return surfaces
+    }
+}
+
 enum PatternProjectArchiveSaveInjection: Equatable { case none; case beforeReplacement }
 
 extension PatternProjectArchiveIO {

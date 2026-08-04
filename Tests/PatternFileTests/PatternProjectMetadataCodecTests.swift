@@ -6,6 +6,134 @@ import Testing
 @Suite("Pattern project metadata codec")
 struct PatternProjectMetadataCodecTests {
     @Test
+    func schemaFourIsTheOnlyWriteVersionAndSchemaThreeStillDecodes()
+        throws
+    {
+        #expect(PatternProjectFormat.currentSchemaVersion == 4)
+        let encoded = try PatternProjectMetadataCodec.encode(
+            fixture(preset: .grid)
+        )
+        #expect(try jsonObject(encoded.manifest)["schemaVersion"] as? Int == 4)
+
+        let schemaThree = PatternProjectMetadataFiles(
+            manifest: try mutateJSON(encoded.manifest) {
+                $0["schemaVersion"] = 3
+            },
+            symmetry: encoded.symmetry,
+            layersByPath: encoded.layersByPath,
+            surfacesByPath: encoded.surfacesByPath
+        )
+        let decoded = try PatternProjectMetadataCodec.decode(schemaThree)
+        #expect(decoded.sourceSchemaVersion == 3)
+        #expect(decoded.wasMigrated)
+    }
+
+    @Test
+    func schemaFourTiledSurfaceManifestRoundTripsWithoutPNGIndirection()
+        throws
+    {
+        let legacy = try fixture(preset: .grid)
+        let layer = try #require(legacy.layers.first)
+        let tiled = PatternProjectPaintTileSurface(
+            manifestFile: "surfaces/layer.tiles.json",
+            pixelSize: legacy.canvasSize,
+            tiles: []
+        )
+        let metadata = PatternProjectMetadata(
+            documentID: legacy.documentID,
+            title: legacy.title,
+            appVersion: legacy.appVersion,
+            createdAt: legacy.createdAt,
+            modifiedAt: legacy.modifiedAt,
+            canvasSize: legacy.canvasSize,
+            viewport: legacy.viewport,
+            documentConfiguration: legacy.documentConfiguration,
+            documentDomainLocked: legacy.documentDomainLocked,
+            radialGeometryLocked: legacy.radialGeometryLocked,
+            activeLayerID: legacy.activeLayerID,
+            layers: [PatternProjectLayer(
+                id: layer.id,
+                name: layer.name,
+                order: layer.order,
+                surface: .paintTiles(tiled)
+            )]
+        )
+
+        let files = try PatternProjectMetadataCodec.encode(metadata)
+        #expect(files.surfacesByPath[tiled.manifestFile] != nil)
+        let layerJSON = try jsonObject(
+            try #require(files.layersByPath.values.first)
+        )
+        #expect(layerJSON["surfaceKind"] as? Int == 2)
+        #expect(layerJSON["rasterFile"] == nil)
+
+        let decoded = try PatternProjectMetadataCodec.decode(files)
+        #expect(decoded.metadata == metadata)
+    }
+
+    @Test
+    func legacyLayerMigrationPreservesEightAndRejectsNineBeforeDroppingAny()
+        throws
+    {
+        let base = try fixture(preset: .grid)
+        let layers = (0..<8).map { index in
+            PatternProjectLayer(
+                id: UUID(uuidString: String(
+                    format: "00000000-0000-0000-0000-%012d",
+                    index + 1
+                ))!,
+                name: "Layer \(index + 1)",
+                order: index,
+                surface: .singleRaster(PatternProjectRasterReference(
+                    file: "rasters/layer-\(index).png",
+                    pixelSize: base.canvasSize
+                ))
+            )
+        }
+        let metadata = PatternProjectMetadata(
+            documentID: base.documentID,
+            title: base.title,
+            appVersion: base.appVersion,
+            createdAt: base.createdAt,
+            modifiedAt: base.modifiedAt,
+            canvasSize: base.canvasSize,
+            viewport: base.viewport,
+            documentConfiguration: base.documentConfiguration,
+            radialGeometryLocked: false,
+            activeLayerID: layers[6].id,
+            layers: layers
+        )
+        let encoded = try PatternProjectMetadataCodec.encode(metadata)
+        let schemaTwo = PatternProjectMetadataFiles(
+            manifest: try mutateJSON(encoded.manifest) {
+                $0["schemaVersion"] = 2
+            },
+            symmetry: try mutateJSON(encoded.symmetry) {
+                $0.removeValue(forKey: "documentDomainLocked")
+            },
+            layersByPath: encoded.layersByPath,
+            surfacesByPath: encoded.surfacesByPath
+        )
+        let decoded = try PatternProjectMetadataCodec.decode(schemaTwo)
+        #expect(decoded.metadata.layers == layers)
+        #expect(decoded.metadata.activeLayerID == layers[6].id)
+
+        let nine = PatternProjectMetadataFiles(
+            manifest: try mutateJSON(schemaTwo.manifest) {
+                var paths = $0["layerFiles"] as! [String]
+                paths.append("layers/ninth.json")
+                $0["layerFiles"] = paths
+            },
+            symmetry: schemaTwo.symmetry,
+            layersByPath: schemaTwo.layersByPath,
+            surfacesByPath: schemaTwo.surfacesByPath
+        )
+        #expect(throws: PatternProjectLoadError.layerCountOutOfRange(9)) {
+            try PatternProjectMetadataCodec.decode(nine)
+        }
+    }
+
+    @Test
     func currentFormatRoundTripsEveryStablePreset() throws {
         for preset in SymmetryPresetID.allCases {
             let metadata = try fixture(preset: preset)

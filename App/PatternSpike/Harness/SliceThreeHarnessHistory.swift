@@ -84,6 +84,7 @@ final class SliceThreeHarnessHistory {
         try append(
             .raster(
                 RasterHistoryCommand(
+                    layerID: LayerStack.compatibilityLayerID,
                     kind: kind,
                     before: receipt.before,
                     after: receipt.after
@@ -96,6 +97,7 @@ final class SliceThreeHarnessHistory {
         try append(
             .tileResize(
                 TileResizeHistoryCommand(
+                    layerID: LayerStack.compatibilityLayerID,
                     before: receipt.before,
                     after: receipt.after
                 )

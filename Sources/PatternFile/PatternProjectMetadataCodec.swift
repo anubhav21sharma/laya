@@ -3,7 +3,7 @@ import PatternEngine
 
 public enum PatternProjectMetadataCodec {
     public static let maximumMetadataBytesPerFile = 1_048_576
-    public static let maximumLayerCount = 256
+    public static let maximumLayerCount = 8
 
     public static func encode(
         _ metadata: PatternProjectMetadata
@@ -65,7 +65,8 @@ public enum PatternProjectMetadataCodec {
                     rasterFile: raster.file,
                     rasterWidth: raster.pixelSize.width,
                     rasterHeight: raster.pixelSize.height,
-                    radialSurfaceManifestFile: nil
+                    radialSurfaceManifestFile: nil,
+                    paintTileSurfaceManifestFile: nil
                 )
             case let .radialPages(surface):
                 layerWire = LayerWire(
@@ -83,7 +84,8 @@ public enum PatternProjectMetadataCodec {
                     rasterFile: nil,
                     rasterWidth: nil,
                     rasterHeight: nil,
-                    radialSurfaceManifestFile: surface.manifestFile
+                    radialSurfaceManifestFile: surface.manifestFile,
+                    paintTileSurfaceManifestFile: nil
                 )
                 let surfaceWire = RadialSurfaceWire(
                     layoutVersion: surface.layoutVersion,
@@ -103,6 +105,33 @@ public enum PatternProjectMetadataCodec {
                 )
                 surfacesByPath[surface.manifestFile] =
                     try encodeJSON(surfaceWire)
+            case let .paintTiles(surface):
+                layerWire = LayerWire(
+                    id: layer.id,
+                    kind: layer.kind.rawValue,
+                    name: layer.name,
+                    order: layer.order,
+                    opacity: layer.opacity,
+                    blendMode: layer.blendMode.rawValue,
+                    isVisible: layer.isVisible,
+                    isLocked: layer.isLocked,
+                    originX: layer.origin?.x,
+                    originY: layer.origin?.y,
+                    surfaceKind: SurfaceKindWire.paintTiles.rawValue,
+                    rasterFile: nil,
+                    rasterWidth: nil,
+                    rasterHeight: nil,
+                    radialSurfaceManifestFile: nil,
+                    paintTileSurfaceManifestFile: surface.manifestFile
+                )
+                let nativeSurface = PatternPaintTileSurface(
+                    layerID: layer.id,
+                    pixelSize: surface.pixelSize,
+                    tiles: surface.tiles
+                )
+                try PatternPaintTileCodec.validateMetadata([nativeSurface])
+                surfacesByPath[surface.manifestFile] =
+                    try PatternPaintTileCodec.encodeManifest(nativeSurface)
             }
             layersByPath[path] = try encodeJSON(layerWire)
         }
@@ -126,6 +155,7 @@ public enum PatternProjectMetadataCodec {
         case PatternProjectFormat.legacySchemaVersion:
             return try decodeLegacy(manifest: manifest, files: files)
         case PatternProjectFormat.previousSchemaVersion,
+             PatternProjectFormat.layeredSchemaVersion,
              PatternProjectFormat.currentSchemaVersion:
             return try decodeCurrent(
                 manifest: manifest,
@@ -168,6 +198,8 @@ private extension PatternProjectMetadataCodec {
                 || manifest.schemaVersion
                     == PatternProjectFormat.previousSchemaVersion
                 || manifest.schemaVersion
+                    == PatternProjectFormat.layeredSchemaVersion
+                || manifest.schemaVersion
                     == PatternProjectFormat.currentSchemaVersion
         else {
             throw PatternProjectLoadError.unsupportedSchema(
@@ -204,11 +236,14 @@ private extension PatternProjectMetadataCodec {
                     layerData,
                     path: path
                 )
-                if layer.surfaceKind
-                    == SurfaceKindWire.radialPages.rawValue
+                if layer.surfaceKind == SurfaceKindWire.radialPages.rawValue
+                    || layer.surfaceKind == SurfaceKindWire.paintTiles.rawValue
                 {
-                    guard let surfacePath =
-                        layer.radialSurfaceManifestFile
+                    let surfacePath = layer.surfaceKind
+                        == SurfaceKindWire.radialPages.rawValue
+                        ? layer.radialSurfaceManifestFile
+                        : layer.paintTileSurfaceManifestFile
+                    guard let surfacePath
                     else {
                         throw PatternProjectLoadError.invalidLayer(layer.id)
                     }
@@ -333,7 +368,7 @@ private extension PatternProjectMetadataCodec {
             schemaVersion: sourceSchemaVersion
         )
         let documentDomainLocked: Bool
-        if sourceSchemaVersion == PatternProjectFormat.currentSchemaVersion {
+        if sourceSchemaVersion >= PatternProjectFormat.layeredSchemaVersion {
             guard let locked = symmetry.documentDomainLocked else {
                 throw PatternProjectLoadError.symmetryConfigurationMismatch
             }
@@ -609,6 +644,36 @@ private extension PatternProjectMetadataCodec {
                     compiled: compiled
                 )
                 surface = .radialPages(radial)
+            case .paintTiles:
+                guard schemaVersion
+                        == PatternProjectFormat.currentSchemaVersion,
+                      let manifestFile = wire.paintTileSurfaceManifestFile
+                else {
+                    throw PatternProjectLoadError.invalidLayer(wire.id)
+                }
+                try validateResourcePath(manifestFile)
+                guard let surfaceData = files.surfacesByPath[manifestFile]
+                else {
+                    throw PatternProjectLoadError.missingMetadata(manifestFile)
+                }
+                let native: PatternPaintTileSurface
+                do {
+                    native = try PatternPaintTileCodec
+                        .decodeManifestMetadata(surfaceData)
+                } catch {
+                    throw PatternProjectLoadError.invalidLayer(wire.id)
+                }
+                guard native.layerID == wire.id else {
+                    throw PatternProjectLoadError.layerIdentityMismatch(
+                        expected: wire.id,
+                        actual: native.layerID
+                    )
+                }
+                surface = .paintTiles(PatternProjectPaintTileSurface(
+                    manifestFile: manifestFile,
+                    pixelSize: native.pixelSize,
+                    tiles: native.tiles
+                ))
             }
         }
 
@@ -832,6 +897,39 @@ private extension PatternProjectMetadataCodec {
                     surface.pages.count
                 )
             }
+        case let .paintTiles(surface):
+            try validateResourcePath(surface.manifestFile)
+            guard resourcePaths.insert(surface.manifestFile).inserted else {
+                throw PatternProjectLoadError.resourcePathCollision(
+                    surface.manifestFile
+                )
+            }
+            if layer.kind == .pattern {
+                guard surface.pixelSize == canvasSize else {
+                    throw PatternProjectLoadError.invalidRasterSize(
+                        layerID: layer.id,
+                        width: surface.pixelSize.width,
+                        height: surface.pixelSize.height
+                    )
+                }
+            }
+            let native = PatternPaintTileSurface(
+                layerID: layer.id,
+                pixelSize: surface.pixelSize,
+                tiles: surface.tiles
+            )
+            do {
+                try PatternPaintTileCodec.validateMetadata([native])
+            } catch {
+                throw PatternProjectLoadError.invalidLayer(layer.id)
+            }
+            for tile in surface.tiles {
+                guard resourcePaths.insert(tile.file).inserted else {
+                    throw PatternProjectLoadError.resourcePathCollision(
+                        tile.file
+                    )
+                }
+            }
         }
     }
 
@@ -978,6 +1076,8 @@ private extension PatternProjectMetadataCodec {
             [raster.file]
         case let .radialPages(surface):
             [surface.manifestFile] + surface.pages.map(\.file)
+        case let .paintTiles(surface):
+            [surface.manifestFile] + surface.tiles.map(\.file)
         }
     }
 
@@ -1179,11 +1279,13 @@ private struct LayerWire: Codable {
     let rasterWidth: Int?
     let rasterHeight: Int?
     let radialSurfaceManifestFile: String?
+    let paintTileSurfaceManifestFile: String?
 }
 
 private enum SurfaceKindWire: UInt32 {
     case single = 0
     case radialPages = 1
+    case paintTiles = 2
 }
 
 private struct RadialSurfaceWire: Codable {

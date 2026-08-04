@@ -342,6 +342,10 @@ private extension PatternProjectPackageCodec {
                 for page in surface.pages {
                     expected[page.file] = pageSize
                 }
+            case .paintTiles:
+                // Activated atomically with the tiled renderer persistence
+                // route. This compatibility package API remains PNG-only.
+                break
             }
         }
         return expected

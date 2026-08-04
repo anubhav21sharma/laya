@@ -1,3 +1,4 @@
+import Foundation
 import PatternEngine
 
 public enum RasterEditKind: UInt8, Equatable, Sendable {
@@ -7,17 +8,20 @@ public enum RasterEditKind: UInt8, Equatable, Sendable {
 }
 
 public struct RasterHistoryCommand: Equatable, Sendable {
+    public let layerID: UUID
     public let kind: RasterEditKind
     public let before: RasterRevisionReference
     public let after: RasterRevisionReference
 
     public init(
+        layerID: UUID,
         kind: RasterEditKind,
         before: RasterRevisionReference,
         after: RasterRevisionReference
     ) {
         precondition(before.pixelSize == after.pixelSize)
         precondition(before.regions == after.regions)
+        self.layerID = layerID
         self.kind = kind
         self.before = before
         self.after = after
@@ -39,13 +43,16 @@ public struct MetadataChange<Value: Equatable & Sendable>: Equatable, Sendable {
 }
 
 public struct TileResizeHistoryCommand: Equatable, Sendable {
+    public let layerID: UUID
     public let before: RasterRevisionReference
     public let after: RasterRevisionReference
 
     public init(
+        layerID: UUID,
         before: RasterRevisionReference,
         after: RasterRevisionReference
     ) {
+        self.layerID = layerID
         self.before = before
         self.after = after
     }
@@ -55,6 +62,92 @@ public struct TileResizeHistoryCommand: Equatable, Sendable {
     }
 }
 
+public struct LayerStackSnapshot: Equatable, Sendable {
+    public let layers: [LayerDescriptor]
+    public let activeLayerID: UUID
+
+    public init(layers: [LayerDescriptor], activeLayerID: UUID) {
+        self.layers = layers
+        self.activeLayerID = activeLayerID
+    }
+
+    public var orderedLayerIDs: [UUID] { layers.map(\.id) }
+}
+
+public struct LayerStackMetadataCommand: Equatable, Sendable {
+    public let before: LayerStackSnapshot
+    public let after: LayerStackSnapshot
+
+    public init(before: LayerStackSnapshot, after: LayerStackSnapshot) {
+        self.before = before
+        self.after = after
+    }
+}
+
+public enum LayerDeletionHistoryError: Error, Equatable, Sendable {
+    case retainedRevisionMissing(StoredRasterRevisionID)
+}
+
+public struct LayerDeletionHistoryCommand: Equatable, Sendable {
+    public let removedLayer: LayerDescriptor
+    public let removedOrder: Int
+    public let activeLayerIDBefore: UUID
+    public let activeLayerIDAfter: UUID
+    public let rasterRevision: RasterRevisionReference
+
+    public init(
+        removedLayer: LayerDescriptor,
+        removedOrder: Int,
+        activeLayerIDBefore: UUID,
+        activeLayerIDAfter: UUID,
+        rasterRevision: RasterRevisionReference
+    ) {
+        precondition(removedOrder >= 0)
+        self.removedLayer = removedLayer
+        self.removedOrder = removedOrder
+        self.activeLayerIDBefore = activeLayerIDBefore
+        self.activeLayerIDAfter = activeLayerIDAfter
+        self.rasterRevision = rasterRevision
+    }
+
+    public init(
+        removal: LayerRemoval,
+        rasterRevision: RasterRevisionReference
+    ) {
+        self.init(
+            removedLayer: removal.descriptor,
+            removedOrder: removal.order,
+            activeLayerIDBefore: removal.activeLayerIDBefore,
+            activeLayerIDAfter: removal.activeLayerIDAfter,
+            rasterRevision: rasterRevision
+        )
+    }
+
+    public func restoreMetadata(
+        into stack: inout LayerStack,
+        revisionIsAvailable: (StoredRasterRevisionID) -> Bool
+    ) throws {
+        guard revisionIsAvailable(rasterRevision.id) else {
+            throw LayerDeletionHistoryError.retainedRevisionMissing(
+                rasterRevision.id
+            )
+        }
+
+        var restored = stack
+        try restored.restore(
+            LayerRemoval(
+                descriptor: removedLayer,
+                order: removedOrder,
+                activeLayerIDBefore: activeLayerIDBefore,
+                activeLayerIDAfter: activeLayerIDAfter
+            )
+        )
+        stack = restored
+    }
+
+    public var retainedBytes: Int { rasterRevision.retainedBytes }
+}
+
 public enum DocumentHistoryCommand: Equatable, Sendable {
     case raster(RasterHistoryCommand)
     case tiling(MetadataChange<TilingKind>)
@@ -62,14 +155,18 @@ public enum DocumentHistoryCommand: Equatable, Sendable {
         MetadataChange<PeriodicSymmetryConfiguration>
     )
     case tileResize(TileResizeHistoryCommand)
+    case layerMetadata(LayerStackMetadataCommand)
+    case layerDeletion(LayerDeletionHistoryCommand)
 
     public var retainedBytes: Int {
         switch self {
         case let .raster(command):
             command.retainedBytes
-        case .tiling, .periodicConfiguration:
+        case .tiling, .periodicConfiguration, .layerMetadata:
             0
         case let .tileResize(command):
+            command.retainedBytes
+        case let .layerDeletion(command):
             command.retainedBytes
         }
     }
@@ -78,10 +175,12 @@ public enum DocumentHistoryCommand: Equatable, Sendable {
         switch self {
         case let .raster(command):
             [command.before.id, command.after.id]
-        case .tiling, .periodicConfiguration:
+        case .tiling, .periodicConfiguration, .layerMetadata:
             []
         case let .tileResize(command):
             [command.before.id, command.after.id]
+        case let .layerDeletion(command):
+            [command.rasterRevision.id]
         }
     }
 }
@@ -291,7 +390,8 @@ public final class DocumentHistory {
             case .clear:
                 true
             }
-        case .tiling, .periodicConfiguration, .tileResize:
+        case .tiling, .periodicConfiguration, .tileResize,
+             .layerMetadata, .layerDeletion:
             startingEmpty
         }
     }

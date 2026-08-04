@@ -193,6 +193,11 @@ enum PatternProjectBridge {
                 ))
             }
             storage = .radialPages(pages)
+        case .paintTiles:
+            // The native tile archive contract lands before the renderer
+            // storage route. Do not pretend PNG-backed renderer state can
+            // consume it until that switch is installed.
+            throw PatternProjectBridgeError.unsupportedLayerModel
         }
         let documentDomainLocked: Bool
         if project.metadata.sourceSchemaVersion

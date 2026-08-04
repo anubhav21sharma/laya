@@ -1,6 +1,11 @@
 import EditorCore
+import Foundation
 import PatternEngine
 import Testing
+
+private let historyLayerID = UUID(
+    uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+)!
 
 @Test
 func navigationMovesCursorOnlyAfterSuccess() throws {
@@ -141,7 +146,11 @@ func tileResizeRetainsBothDifferentlySizedFullRasterRevisions() throws {
         pixelSize: afterSize,
         retainedBytes: 20_480
     )
-    let command = TileResizeHistoryCommand(before: before, after: after)
+    let command = TileResizeHistoryCommand(
+        layerID: historyLayerID,
+        before: before,
+        after: after
+    )
     let history = DocumentHistory(maximumBytes: 100_000)
 
     try history.validateNewCommand(retainedBytes: command.retainedBytes)
@@ -159,6 +168,144 @@ func tileResizeRetainsBothDifferentlySizedFullRasterRevisions() throws {
     let redo = try #require(try history.beginRedo())
     #expect(redo.command == .tileResize(command))
     try history.finishNavigation(token: redo.token, succeeded: false)
+}
+
+@Test
+func rasterAndResizeCommandsRetainTheirOriginalLayerTarget() throws {
+    let raster = makeRasterCommand(bytes: 16)
+    let resize = TileResizeHistoryCommand(
+        layerID: layerIDForHistory(2),
+        before: makeFullRasterReference(
+            id: 10,
+            pixelSize: PixelSize(width: 64, height: 64),
+            retainedBytes: 8
+        ),
+        after: makeFullRasterReference(
+            id: 11,
+            pixelSize: PixelSize(width: 32, height: 32),
+            retainedBytes: 8
+        )
+    )
+    let history = DocumentHistory()
+    _ = history.appendSuccessful(raster)
+    _ = history.appendSuccessful(.layerMetadata(LayerStackMetadataCommand(
+        before: LayerStackSnapshot(
+            layers: [
+                try LayerDescriptor(id: historyLayerID, name: "First"),
+                try LayerDescriptor(
+                    id: layerIDForHistory(2),
+                    name: "Second"
+                ),
+            ],
+            activeLayerID: historyLayerID
+        ),
+        after: LayerStackSnapshot(
+            layers: [
+                try LayerDescriptor(
+                    id: layerIDForHistory(2),
+                    name: "Second"
+                ),
+                try LayerDescriptor(id: historyLayerID, name: "First"),
+            ],
+            activeLayerID: layerIDForHistory(2)
+        )
+    )))
+    _ = history.appendSuccessful(.tileResize(resize))
+
+    let undoResize = try #require(try history.beginUndo())
+    guard case let .tileResize(selectedResize) = undoResize.command else {
+        Issue.record("Expected layer-bound resize")
+        return
+    }
+    #expect(selectedResize.layerID == layerIDForHistory(2))
+    try history.finishNavigation(token: undoResize.token, succeeded: true)
+
+    let undoMetadata = try #require(try history.beginUndo())
+    try history.finishNavigation(token: undoMetadata.token, succeeded: true)
+    let undoRaster = try #require(try history.beginUndo())
+    guard case let .raster(selectedRaster) = undoRaster.command else {
+        Issue.record("Expected layer-bound raster")
+        return
+    }
+    #expect(selectedRaster.layerID == historyLayerID)
+}
+
+@Test
+func layerDeletionRetainsExactDescriptorOrderFallbackAndRasterRevision()
+    throws
+{
+    let removed = try LayerDescriptor(
+        id: layerIDForHistory(7),
+        name: "Removed",
+        isVisible: false,
+        opacity: 0.375,
+        isLocked: true,
+        blendMode: .screen
+    )
+    let revision = makeFullRasterReference(
+        id: 77,
+        pixelSize: PixelSize(width: 64, height: 64),
+        retainedBytes: 512
+    )
+    let command = LayerDeletionHistoryCommand(
+        removedLayer: removed,
+        removedOrder: 1,
+        activeLayerIDBefore: removed.id,
+        activeLayerIDAfter: historyLayerID,
+        rasterRevision: revision
+    )
+    let wrapped = DocumentHistoryCommand.layerDeletion(command)
+
+    #expect(command.removedLayer == removed)
+    #expect(command.removedOrder == 1)
+    #expect(command.activeLayerIDBefore == removed.id)
+    #expect(command.activeLayerIDAfter == historyLayerID)
+    #expect(command.rasterRevision == revision)
+    #expect(wrapped.retainedBytes == 512)
+    #expect(wrapped.revisionIDs == [revision.id])
+}
+
+@Test
+func layerDeletionRestoreChecksRetainedRevisionBeforeMetadataMutation()
+    throws
+{
+    let first = try LayerDescriptor(id: historyLayerID, name: "First")
+    let removed = try LayerDescriptor(
+        id: layerIDForHistory(8),
+        name: "Removed"
+    )
+    var stack = try LayerStack(
+        layers: [first, removed],
+        activeLayerID: removed.id
+    )
+    let removal = try stack.delete(removed.id)
+    let revision = makeFullRasterReference(
+        id: 88,
+        pixelSize: PixelSize(width: 64, height: 64),
+        retainedBytes: 128
+    )
+    let command = LayerDeletionHistoryCommand(
+        removal: removal,
+        rasterRevision: revision
+    )
+    let afterDeletion = stack
+
+    #expect(throws: LayerDeletionHistoryError.retainedRevisionMissing(
+        revision.id
+    )) {
+        try command.restoreMetadata(
+            into: &stack,
+            revisionIsAvailable: { _ in false }
+        )
+    }
+    #expect(stack == afterDeletion)
+
+    try command.restoreMetadata(
+        into: &stack,
+        revisionIsAvailable: { $0 == revision.id }
+    )
+    #expect(stack.layers == [first, removed])
+    #expect(stack.activeLayerID == removed.id)
 }
 
 @Test
@@ -370,6 +517,18 @@ private func makeRasterCommand(
         retainedBytes: bytes / 2
     )
     return .raster(
-        RasterHistoryCommand(kind: kind, before: before, after: after)
+        RasterHistoryCommand(
+            layerID: historyLayerID,
+            kind: kind,
+            before: before,
+            after: after
+        )
     )
+}
+
+private func layerIDForHistory(_ value: Int) -> UUID {
+    UUID(uuidString: String(
+        format: "00000000-0000-0000-0000-%012d",
+        value
+    ))!
 }

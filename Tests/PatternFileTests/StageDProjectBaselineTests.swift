@@ -21,7 +21,18 @@ struct StageDProjectBaselineTests {
                 rastersByPath: decoded.rastersByPath
             )
             let reencodedHash = try stageDSHA256(reencoded)
-            #expect(reencodedHash == fixture.reencodedSHA256, Comment(rawValue: fixture.name))
+            // The frozen hash is the schema-v3 authority. Schema v4 changes
+            // manifest bytes intentionally, so retain the old authority and
+            // verify the replacement through independently decoded semantic
+            // equality plus deterministic archive equality below.
+            #expect(
+                reencodedHash != fixture.schemaThreeReencodedSHA256,
+                Comment(rawValue: fixture.name)
+            )
+            let reopened = try PatternProjectPackageCodec.open(reencoded)
+            #expect(reopened.metadata.sourceSchemaVersion == 4)
+            #expect(reopened.metadata.metadata == decoded.metadata.metadata)
+            #expect(reopened.rastersByPath == fixture.expectedRasters)
             let repeated = try PatternProjectPackageCodec.encode(
                 metadata: decoded.metadata.metadata,
                 rastersByPath: decoded.rastersByPath
@@ -37,7 +48,7 @@ private struct StageDProjectArchiveFixture: Sendable {
     let archive: Data
     let expectedRasters: [String: PatternRasterImage]
     let inputSHA256: String
-    let reencodedSHA256: String
+    let schemaThreeReencodedSHA256: String
 
     func archiveSHA256() throws -> String { try stageDSHA256(archive) }
 }
@@ -77,7 +88,7 @@ private func stageDLegacySingleRasterArchive() throws -> StageDProjectArchiveFix
         archive: try PatternProjectArchiveCodec.encode(entries: entries),
         expectedRasters: [rasterPath: raster],
         inputSHA256: "0d670938b2b95253f8dc3147833b2497b07ba5838d218a08de51f292915ba894",
-        reencodedSHA256: "1c04150a60fc56e34cea2ca3fc0ebc1ebc463e06125d0e0300e88580de74c97a"
+        schemaThreeReencodedSHA256: "1c04150a60fc56e34cea2ca3fc0ebc1ebc463e06125d0e0300e88580de74c97a"
     )
 }
 
@@ -96,18 +107,33 @@ private func stageDSchemaTwoLayerMetadataArchive() throws -> StageDProjectArchiv
         name: "schema-v2-layer-metadata", schemaVersion: 2,
         archive: try PatternProjectArchiveCodec.encode(entries: entries), expectedRasters: rasters,
         inputSHA256: "c1904ed355876513cd9a461a13dd3e70c15929dcc6b95437c28552240ad4c0cf",
-        reencodedSHA256: "cbde346d978c422c19c183aef2467d72393393414f2359b7f0fac92a81730950"
+        schemaThreeReencodedSHA256: "cbde346d978c422c19c183aef2467d72393393414f2359b7f0fac92a81730950"
     )
 }
 
 private func stageDSchemaThreeRadialArchive() throws -> StageDProjectArchiveFixture {
     let (metadata, rasters) = try stageDRadialMetadata()
+    let files = try PatternProjectMetadataCodec.encode(metadata)
+    var entries = try stageDEntries(files)
+    let v4Manifest = String(
+        decoding: entries["manifest.json"]!,
+        as: UTF8.self
+    )
+    entries["manifest.json"] = Data(
+        v4Manifest.replacingOccurrences(
+            of: "\"schemaVersion\" : 4",
+            with: "\"schemaVersion\" : 3"
+        ).utf8
+    )
+    for (path, raster) in rasters {
+        entries[path] = try PatternRasterPNGCodec.encode(raster)
+    }
     return StageDProjectArchiveFixture(
         name: "schema-v3-radial-pages", schemaVersion: 3,
-        archive: try PatternProjectPackageCodec.encode(metadata: metadata, rastersByPath: rasters),
+        archive: try PatternProjectArchiveCodec.encode(entries: entries),
         expectedRasters: rasters,
         inputSHA256: "21b573da781e279c85559fd6d348a3faa38fdc48b8b98e62f549d1f06817e7ec",
-        reencodedSHA256: "21b573da781e279c85559fd6d348a3faa38fdc48b8b98e62f549d1f06817e7ec"
+        schemaThreeReencodedSHA256: "21b573da781e279c85559fd6d348a3faa38fdc48b8b98e62f549d1f06817e7ec"
     )
 }
 

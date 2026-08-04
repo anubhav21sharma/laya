@@ -4,7 +4,8 @@ import PatternEngine
 public enum PatternProjectFormat {
     public static let legacySchemaVersion = 1
     public static let previousSchemaVersion = 2
-    public static let currentSchemaVersion = 3
+    public static let layeredSchemaVersion = 3
+    public static let currentSchemaVersion = 4
     public static let canonicalSurfaceLayoutVersion = 1
     public static let radialSurfaceLayoutVersion = 1
 
@@ -74,9 +75,26 @@ public struct PatternProjectRadialSurface: Equatable, Sendable {
     }
 }
 
+public struct PatternProjectPaintTileSurface: Equatable, Sendable {
+    public let manifestFile: String
+    public let pixelSize: PixelSize
+    public let tiles: [PatternPaintTileRecord]
+
+    public init(
+        manifestFile: String,
+        pixelSize: PixelSize,
+        tiles: [PatternPaintTileRecord]
+    ) {
+        self.manifestFile = manifestFile
+        self.pixelSize = pixelSize
+        self.tiles = tiles
+    }
+}
+
 public enum PatternProjectLayerSurface: Equatable, Sendable {
     case singleRaster(PatternProjectRasterReference)
     case radialPages(PatternProjectRadialSurface)
+    case paintTiles(PatternProjectPaintTileSurface)
 }
 
 public struct PatternProjectLayer: Equatable, Sendable {

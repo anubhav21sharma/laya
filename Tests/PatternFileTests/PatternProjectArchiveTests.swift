@@ -1,9 +1,97 @@
 import Foundation
+import PatternEngine
 @testable import PatternFile
 import Testing
 
 @Suite("Pattern project archive")
 struct PatternProjectArchiveTests {
+    @Test
+    func nativeTileArchiveEnforcesAggregateBytesAndManifestPathSeparation()
+        throws
+    {
+        let layerID = UUID(
+            uuidString: "11111111-2222-3333-4444-555555555555"
+        )!
+        let tileID = UUID(
+            uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )!
+        let manifestPath = "surfaces/layer.tiles.json"
+        let payloadPath = "tiles/layer-0-0.rgba16f"
+        let payload = Data(repeating: 0, count: 524_288)
+        let bounds = PatternPaintTileBounds(
+            minX: 0,
+            minY: 0,
+            width: 256,
+            height: 256
+        )
+        let record = try PatternPaintTileCodec.makeRecord(
+            layerID: layerID,
+            id: tileID,
+            coordinate: PatternPaintTileCoordinate(x: 0, y: 0),
+            logicalBounds: bounds,
+            rasterRevision: 7,
+            file: payloadPath,
+            payload: payload
+        )
+        let manifest = try PatternPaintTileCodec.encodeManifest(
+            PatternPaintTileSurface(
+                layerID: layerID,
+                pixelSize: PixelSize(width: 256, height: 256),
+                tiles: [record]
+            )
+        )
+        let archive = try PatternProjectArchiveCodec.open(
+            PatternProjectArchiveCodec.encode(entries: [
+                manifestPath: manifest,
+                payloadPath: payload,
+            ])
+        )
+
+        let decoded = try PatternPaintTileCodec.decodeArchive(
+            archive,
+            surfaceManifestPaths: [manifestPath]
+        )
+        #expect(decoded[0].tiles == [record])
+        #expect(throws: PatternPaintTileError.decodedByteLimitExceeded(
+            actual: 524_288,
+            maximum: 524_287
+        )) {
+            try PatternPaintTileCodec.decodeArchive(
+                archive,
+                surfaceManifestPaths: [manifestPath],
+                maximumDecodedBytes: 524_287
+            )
+        }
+
+        let collision = try PatternPaintTileCodec.makeRecord(
+            layerID: layerID,
+            id: tileID,
+            coordinate: PatternPaintTileCoordinate(x: 0, y: 0),
+            logicalBounds: bounds,
+            rasterRevision: 7,
+            file: manifestPath,
+            payload: payload
+        )
+        let collisionManifest = try PatternPaintTileCodec.encodeManifest(
+            PatternPaintTileSurface(
+                layerID: layerID,
+                pixelSize: PixelSize(width: 256, height: 256),
+                tiles: [collision]
+            )
+        )
+        let collisionArchive = try PatternProjectArchiveCodec.open(
+            PatternProjectArchiveCodec.encode(entries: [
+                manifestPath: collisionManifest,
+            ])
+        )
+        #expect(throws: PatternPaintTileError.duplicatePath(manifestPath)) {
+            try PatternPaintTileCodec.decodeArchive(
+                collisionArchive,
+                surfaceManifestPaths: [manifestPath]
+            )
+        }
+    }
+
     @Test
     func storedZIPRoundTripsDeterministically() throws {
         let entries: [String: Data] = [
