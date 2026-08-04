@@ -9,6 +9,8 @@ package enum StrokePreparationAllocationProbeStage: UInt8, Sendable {
     case batchPackaging
     case surfaceRecordPacking
     case surfaceMetalSubmission
+    case surfaceTilePartition
+    case surfaceTileLease
     case strokeLifecycleCPU
 }
 
@@ -1039,64 +1041,65 @@ actor StrokeFrameScheduler {
                 return .commitBarrierReached(generation: generation)
             case let .cancel(generation, reason):
                 resetPredictionBatchAssembly()
-                cancel(generation: generation)
+                if let cleanup = cancel(generation: generation) {
+                    return .failed(
+                        generation: generation,
+                        failure: .tileSurface(cleanup)
+                    )
+                }
                 return .cancelled(
                     generation: generation,
                     reason: reason
                 )
             }
         } catch let error as StrokeStageCInjectedFailure {
-            cancelPreparedStroke(generation: message.generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: message.generation,
                 failure: .injectedStageC(error.seam)
             )
         } catch let error as StrokeRenderCoordinatorError {
-            cancelPreparedStroke(generation: message.generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: message.generation,
                 failure: .coordinator(error)
             )
         } catch let error as BrushCornerEmitterError {
-            cancelPreparedStroke(generation: message.generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: message.generation,
                 failure: .cornerEmission(error)
             )
         } catch let error as AuthoritativeStrokeQueueError {
-            cancelPreparedStroke(generation: message.generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: message.generation,
                 failure: .authoritativeQueue(error)
             )
         } catch let error as StrokeFrameSchedulerError {
-            cancelPreparedStroke(generation: message.generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: message.generation,
                 failure: .scheduler(error)
             )
         } catch let error as DepositionStampPackingError {
-            cancelPreparedStroke(generation: message.generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: message.generation,
                 failure: .stampPacking(error)
             )
         } catch let error as StrokePrivateSurfaceEncodingError {
-            cancelPreparedStroke(generation: message.generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: message.generation,
                 failure: .privateSurfaceEncoding(error)
             )
+        } catch let error as StrokeTileSurfaceError {
+            return failureAfterCleanup(
+                generation: message.generation,
+                failure: .tileSurface(error)
+            )
         } catch let error as TransientStrokeBufferError {
-            cancelPreparedStroke(generation: message.generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: message.generation,
                 failure: .transientBuffer(error)
             )
         } catch let error as TransientStrokeDabArena.ReservationError {
-            cancelPreparedStroke(generation: message.generation)
             if case let .capacityExceeded(maximum) = error {
-                return .failed(
+                return failureAfterCleanup(
                     generation: message.generation,
                     failure: .dabArenaCapacityExceeded(
                         actual: maximum + 1,
@@ -1104,13 +1107,12 @@ actor StrokeFrameScheduler {
                     )
                 )
             }
-            return .failed(
+            return failureAfterCleanup(
                 generation: message.generation,
                 failure: .unexpected(String(describing: error))
             )
         } catch {
-            cancelPreparedStroke(generation: message.generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: message.generation,
                 failure: .unexpected(String(describing: error))
             )
@@ -1129,6 +1131,47 @@ actor StrokeFrameScheduler {
         frameToken: UInt64,
         resumeAuthoritativeContinuation: Bool = true
     ) async -> StrokePreparationResult? {
+        if activeGeneration == nil,
+           cancelledGeneration == generation,
+           let lease = outstandingSurfaceLease
+        {
+            guard lease.token == frameToken,
+                  lease.generation == generation
+            else {
+                return .failed(
+                    generation: generation,
+                    failure: .scheduler(.invalidPreparedFrame)
+                )
+            }
+            do {
+                try privateSurfaceEncoder?.acknowledge(lease)
+                outstandingSurfaceLease = nil
+                if let pageToken = outstandingPreparedOutputPageToken {
+                    guard pageToken == frameToken else {
+                        throw StrokeFrameSchedulerError.invalidPreparedFrame
+                    }
+                    preparedOutputPage.reclaim(token: frameToken)
+                    outstandingPreparedOutputPageToken = nil
+                }
+                privateSurfaceEncoder = nil
+                return nil
+            } catch let error as StrokeTileSurfaceError {
+                return .failed(
+                    generation: generation,
+                    failure: .tileSurface(error)
+                )
+            } catch let error as StrokeFrameSchedulerError {
+                return .failed(
+                    generation: generation,
+                    failure: .scheduler(error)
+                )
+            } catch {
+                return .failed(
+                    generation: generation,
+                    failure: .unexpected(String(describing: error))
+                )
+            }
+        }
         do {
             try requireActive(generation)
             let consumedCount: Int
@@ -1138,7 +1181,7 @@ actor StrokeFrameScheduler {
                 else {
                     throw StrokeFrameSchedulerError.invalidPreparedFrame
                 }
-                privateSurfaceEncoder?.acknowledge(lease)
+                try privateSurfaceEncoder?.acknowledge(lease)
                 outstandingSurfaceLease = nil
                 if let frame = outstandingFrame {
                     consumedCount = frame.authoritative.count
@@ -1211,57 +1254,53 @@ actor StrokeFrameScheduler {
             }
             return nil
         } catch let error as StrokeStageCInjectedFailure {
-            cancelPreparedStroke(generation: generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: generation,
                 failure: .injectedStageC(error.seam)
             )
         } catch let error as StrokeRenderCoordinatorError {
-            cancelPreparedStroke(generation: generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: generation,
                 failure: .coordinator(error)
             )
         } catch let error as BrushCornerEmitterError {
-            cancelPreparedStroke(generation: generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: generation,
                 failure: .cornerEmission(error)
             )
         } catch let error as AuthoritativeStrokeQueueError {
-            cancelPreparedStroke(generation: generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: generation,
                 failure: .authoritativeQueue(error)
             )
         } catch let error as StrokeFrameSchedulerError {
-            cancelPreparedStroke(generation: generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: generation,
                 failure: .scheduler(error)
             )
         } catch let error as DepositionStampPackingError {
-            cancelPreparedStroke(generation: generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: generation,
                 failure: .stampPacking(error)
             )
         } catch let error as StrokePrivateSurfaceEncodingError {
-            cancelPreparedStroke(generation: generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: generation,
                 failure: .privateSurfaceEncoding(error)
             )
+        } catch let error as StrokeTileSurfaceError {
+            return failureAfterCleanup(
+                generation: generation,
+                failure: .tileSurface(error)
+            )
         } catch let error as TransientStrokeBufferError {
-            cancelPreparedStroke(generation: generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: generation,
                 failure: .transientBuffer(error)
             )
         } catch let error as TransientStrokeDabArena.ReservationError {
-            cancelPreparedStroke(generation: generation)
             if case let .capacityExceeded(maximum) = error {
-                return .failed(
+                return failureAfterCleanup(
                     generation: generation,
                     failure: .dabArenaCapacityExceeded(
                         actual: maximum + 1,
@@ -1269,13 +1308,12 @@ actor StrokeFrameScheduler {
                     )
                 )
             }
-            return .failed(
+            return failureAfterCleanup(
                 generation: generation,
                 failure: .unexpected(String(describing: error))
             )
         } catch {
-            cancelPreparedStroke(generation: generation)
-            return .failed(
+            return failureAfterCleanup(
                 generation: generation,
                 failure: .unexpected(String(describing: error))
             )
@@ -1288,6 +1326,14 @@ actor StrokeFrameScheduler {
               !preparedOutputPage.isBorrowed
         else {
             throw StrokeFrameSchedulerError.invalidLifecycle
+        }
+        if outstandingSurfaceLease == nil, let privateSurfaceEncoder {
+            if let cleanup = privateSurfaceEncoder.resetAfterCancellation(
+                frameDisposition: .unpublished
+            ) {
+                throw cleanup
+            }
+            self.privateSurfaceEncoder = nil
         }
         scheduler.reset()
         activeGeneration = generation
@@ -1366,7 +1412,7 @@ actor StrokeFrameScheduler {
             preparationTilingStrategy = configuration.tilingStrategy
             preparationViewport = configuration.viewport
             if let descriptor = configuration.metalResourceDescriptor {
-                reusablePrivateSurfaceEncoder.configure(descriptor)
+                try reusablePrivateSurfaceEncoder.configure(descriptor)
                 privateSurfaceEncoder = reusablePrivateSurfaceEncoder
             } else {
                 privateSurfaceEncoder = nil
@@ -1388,7 +1434,9 @@ actor StrokeFrameScheduler {
                 lifecycleProbe?.disarmAndRecord(.strokeLifecycleCPU)
                 lifecycleProbeIsArmed = false
             }
-            cancelPreparedStroke(generation: generation)
+            if let cleanup = cancelPreparedStroke(generation: generation) {
+                throw cleanup
+            }
             throw error
         }
     }
@@ -1410,7 +1458,9 @@ actor StrokeFrameScheduler {
                 isFinishing: false
             )
         } catch {
-            cancelPreparedStroke(generation: generation)
+            if let cleanup = cancelPreparedStroke(generation: generation) {
+                throw cleanup
+            }
             throw error
         }
     }
@@ -1434,7 +1484,9 @@ actor StrokeFrameScheduler {
                 isFinishing: false
             )
         } catch {
-            cancelPreparedStroke(generation: generation)
+            if let cleanup = cancelPreparedStroke(generation: generation) {
+                throw cleanup
+            }
             throw error
         }
     }
@@ -1456,7 +1508,9 @@ actor StrokeFrameScheduler {
                 isFinishing: true
             )
         } catch {
-            cancelPreparedStroke(generation: generation)
+            if let cleanup = cancelPreparedStroke(generation: generation) {
+                throw cleanup
+            }
             throw error
         }
     }
@@ -2569,9 +2623,10 @@ actor StrokeFrameScheduler {
             && candidatePageForcedSurfaceLayer == nil
     }
 
-    func cancel(generation: UInt64) {
-        guard activeGeneration == generation else { return }
-        cancelPreparedStroke(generation: generation)
+    @discardableResult
+    func cancel(generation: UInt64) -> StrokeTileSurfaceError? {
+        guard activeGeneration == generation else { return nil }
+        return cancelPreparedStroke(generation: generation)
     }
 
     /// Generates one authoritative input message against actor-owned tentative
@@ -4495,7 +4550,23 @@ actor StrokeFrameScheduler {
         return max(1, overflow ? .max : count)
     }
 
-    private func cancelPreparedStroke(generation: UInt64) {
+    private func failureAfterCleanup(
+        generation: UInt64,
+        failure: StrokePreparationFailure
+    ) -> StrokePreparationResult {
+        if let cleanup = cancelPreparedStroke(generation: generation) {
+            return .failed(
+                generation: generation,
+                failure: .tileSurface(cleanup)
+            )
+        }
+        return .failed(generation: generation, failure: failure)
+    }
+
+    @discardableResult
+    private func cancelPreparedStroke(
+        generation: UInt64
+    ) -> StrokeTileSurfaceError? {
         precondition(!authoritativeAllocationProbeIsArmed)
         let lifecycleProbe = preparationAllocationProbe
         lifecycleProbe?.arm()
@@ -4515,12 +4586,20 @@ actor StrokeFrameScheduler {
         transientDabArena.reset()
         preparationTilingStrategy = nil
         preparationViewport = nil
-        privateSurfaceEncoder?.resetAfterCancellation()
-        privateSurfaceEncoder = nil
-        outstandingSurfaceLease = nil
+        let preserveMainOwnedSurfaceLease = outstandingSurfaceLease != nil
+        let cleanupFailure = privateSurfaceEncoder?.resetAfterCancellation(
+            frameDisposition: preserveMainOwnedSurfaceLease
+                ? .mainOwnsLease : .unpublished
+        )
+        if !preserveMainOwnedSurfaceLease, cleanupFailure == nil {
+            privateSurfaceEncoder = nil
+            outstandingSurfaceLease = nil
+        }
         outstandingZeroWorkContinuationToken = nil
-        outstandingPreparedOutputPageToken = nil
-        preparedOutputPage.cancelBorrow()
+        if !preserveMainOwnedSurfaceLease {
+            outstandingPreparedOutputPageToken = nil
+            preparedOutputPage.cancelBorrow()
+        }
         pendingCommitBarrierGeneration = nil
         projectedCarry.reset()
         preparationHasBegun = false
@@ -4528,7 +4607,11 @@ actor StrokeFrameScheduler {
         #if DEBUG
         lastEstimatedUpdateSnapshot = nil
         #endif
-        cancelCurrentGeneration(generation)
+        cancelCurrentGeneration(
+            generation,
+            preserveMainOwnedSurfaceLease: preserveMainOwnedSurfaceLease
+        )
+        return cleanupFailure
     }
 
     private func requireActive(_ generation: UInt64) throws {
@@ -4540,12 +4623,19 @@ actor StrokeFrameScheduler {
         }
     }
 
-    private func cancelCurrentGeneration(_ generation: UInt64) {
+    private func cancelCurrentGeneration(
+        _ generation: UInt64,
+        preserveMainOwnedSurfaceLease: Bool = false
+    ) {
         scheduler.reset()
         outstandingFrame = nil
-        outstandingSurfaceLease = nil
+        if !preserveMainOwnedSurfaceLease {
+            outstandingSurfaceLease = nil
+        }
         outstandingZeroWorkContinuationToken = nil
-        outstandingPreparedOutputPageToken = nil
+        if !preserveMainOwnedSurfaceLease {
+            outstandingPreparedOutputPageToken = nil
+        }
         candidatePageForcedSurfaceLayer = nil
         pendingCommitBarrierGeneration = nil
         commitRequested = false

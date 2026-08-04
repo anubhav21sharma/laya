@@ -118,14 +118,67 @@ public enum PaintTileBudget {
     }
 }
 
+struct PaintTilePinCounts: Equatable, Sendable,
+    ExpressibleByDictionaryLiteral
+{
+    private var active = 0
+    private var dirty = 0
+    private var historyBefore = 0
+    private var visible = 0
+    private var inFlight = 0
+
+    init() {}
+
+    init(dictionaryLiteral elements: (PaintTilePinReason, Int)...) {
+        self.init()
+        for (reason, count) in elements { self[reason] = count }
+    }
+
+    subscript(_ reason: PaintTilePinReason) -> Int? {
+        get {
+            let count = switch reason {
+            case .active: active
+            case .dirty: dirty
+            case .historyBefore: historyBefore
+            case .visible: visible
+            case .inFlight: inFlight
+            }
+            return count == 0 ? nil : count
+        }
+        set {
+            let count = newValue ?? 0
+            switch reason {
+            case .active: active = count
+            case .dirty: dirty = count
+            case .historyBefore: historyBefore = count
+            case .visible: visible = count
+            case .inFlight: inFlight = count
+            }
+        }
+    }
+
+    var isPinned: Bool {
+        active > 0 || dirty > 0 || historyBefore > 0
+            || visible > 0 || inFlight > 0
+    }
+
+    var dictionary: [PaintTilePinReason: Int] {
+        var result: [PaintTilePinReason: Int] = [:]
+        for reason in PaintTilePinReason.allCases {
+            if let count = self[reason] { result[reason] = count }
+        }
+        return result
+    }
+}
+
 public struct PaintTileResidency: Equatable, Sendable {
     struct Entry: Equatable, Sendable {
         let byteCount: Int
         var lastUseEpoch: UInt64
-        var pinCounts: [PaintTilePinReason: Int]
+        var pinCounts: PaintTilePinCounts
 
         var isPinned: Bool {
-            pinCounts.values.contains { $0 > 0 }
+            pinCounts.isPinned
         }
     }
 
@@ -243,7 +296,7 @@ public struct PaintTileResidency: Equatable, Sendable {
             stagedBytes -= removed.byteCount
             evicted.append(victim)
         }
-        var counts: [PaintTilePinReason: Int] = [:]
+        var counts = PaintTilePinCounts()
         for reason in reasons {
             try Self.increment(reason, in: &counts)
         }
@@ -268,6 +321,65 @@ public struct PaintTileResidency: Equatable, Sendable {
         entries[identity] = entry
     }
 
+    func preflightPinExisting(
+        _ identities: [PaintTileIdentity],
+        reasons: [PaintTilePinReason]
+    ) throws {
+        let (_, epochOverflow) = nextUseEpoch.addingReportingOverflow(
+            UInt64(identities.count)
+        )
+        guard !epochOverflow else {
+            throw PaintTileResidencyError.useEpochOverflow
+        }
+        for identity in identities {
+            guard let entry = entries[identity] else {
+                throw PaintTileResidencyError.missingIdentity(identity)
+            }
+            for reason in reasons {
+                guard (entry.pinCounts[reason] ?? 0) < Int.max else {
+                    throw PaintTileResidencyError.pinCountOverflow(
+                        reason: reason
+                    )
+                }
+            }
+        }
+    }
+
+    func preflightPinExisting(
+        _ identity: PaintTileIdentity,
+        reasons: [PaintTilePinReason]
+    ) throws {
+        guard let entry = entries[identity] else {
+            throw PaintTileResidencyError.missingIdentity(identity)
+        }
+        for reason in reasons {
+            guard (entry.pinCounts[reason] ?? 0) < Int.max else {
+                throw PaintTileResidencyError.pinCountOverflow(reason: reason)
+            }
+        }
+    }
+
+    func preflightUseEpochAdvance(by count: Int) throws {
+        guard count >= 0, let count = UInt64(exactly: count) else {
+            throw PaintTileResidencyError.useEpochOverflow
+        }
+        let (_, overflow) = nextUseEpoch.addingReportingOverflow(count)
+        guard !overflow else { throw PaintTileResidencyError.useEpochOverflow }
+    }
+
+    mutating func pinExistingPreflighted(
+        _ identity: PaintTileIdentity,
+        reasons: [PaintTilePinReason]
+    ) {
+        var entry = entries[identity]!
+        nextUseEpoch += 1
+        entry.lastUseEpoch = nextUseEpoch
+        for reason in reasons {
+            entry.pinCounts[reason] = (entry.pinCounts[reason] ?? 0) + 1
+        }
+        entries[identity] = entry
+    }
+
     public mutating func unpin(
         _ identity: PaintTileIdentity,
         reason: PaintTilePinReason
@@ -279,7 +391,7 @@ public struct PaintTileResidency: Equatable, Sendable {
             throw PaintTileResidencyError.unbalancedUnpin(reason: reason)
         }
         if count == 1 {
-            entry.pinCounts.removeValue(forKey: reason)
+            entry.pinCounts[reason] = nil
         } else {
             entry.pinCounts[reason] = count - 1
         }
@@ -349,7 +461,7 @@ public struct PaintTileResidency: Equatable, Sendable {
 
     private static func increment(
         _ reason: PaintTilePinReason,
-        in counts: inout [PaintTilePinReason: Int]
+        in counts: inout PaintTilePinCounts
     ) throws {
         let current = counts[reason] ?? 0
         let (next, overflow) = current.addingReportingOverflow(1)

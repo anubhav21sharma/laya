@@ -19,9 +19,14 @@ enum StrokePrivateSurfaceEncodingError: Error, Equatable, Sendable {
     case leaseTokenOverflow
 }
 
+enum StrokeSurfacePreparationBackend: @unchecked Sendable {
+    case legacy(StrokeMetalSurfaceResources)
+    case tiledTest(StrokeTileSurfaceResources)
+}
+
 /// Immutable per-stroke bindings for a renderer-warmed Metal workspace.
 struct StrokeMetalResourceDescriptor: @unchecked Sendable {
-    let surfaces: StrokeMetalSurfaceResources
+    let backend: StrokeSurfacePreparationBackend
     let brushRenderIdentity: BrushRenderIdentity
     let pipelineState: any MTLRenderPipelineState
     let materialUniforms: PatternDepositionMaterialUniforms
@@ -30,6 +35,7 @@ struct StrokeMetalResourceDescriptor: @unchecked Sendable {
     let primaryGrain: (any MTLTexture)?
     let secondaryGrain: (any MTLTexture)?
     let frameUniforms: PatternGridFrameUniforms
+    let radialLayout: RadialSectorLayout?
     let forceCommandFailure: Bool
 
     @MainActor
@@ -41,7 +47,7 @@ struct StrokeMetalResourceDescriptor: @unchecked Sendable {
     ) {
         let compiledResources = brush.resources
         let textures = compiledResources.depositionMaterial.textures
-        self.surfaces = surfaces
+        backend = .legacy(surfaces)
         brushRenderIdentity = brush.renderIdentity
         pipelineState = compiledResources.depositionPipeline.state
         materialUniforms = compiledResources.depositionMaterial.uniforms
@@ -50,6 +56,30 @@ struct StrokeMetalResourceDescriptor: @unchecked Sendable {
         primaryGrain = textures[.primaryGrain]
         secondaryGrain = textures[.secondaryGrain]
         self.frameUniforms = frameUniforms
+        radialLayout = nil
+        self.forceCommandFailure = forceCommandFailure
+    }
+
+    @MainActor
+    init(
+        tiledTestSurfaces surfaces: StrokeTileSurfaceResources,
+        brush: CompiledBrushRenderState,
+        frameUniforms: PatternGridFrameUniforms,
+        radialLayout: RadialSectorLayout? = nil,
+        forceCommandFailure: Bool
+    ) {
+        let compiledResources = brush.resources
+        let textures = compiledResources.depositionMaterial.textures
+        backend = .tiledTest(surfaces)
+        brushRenderIdentity = brush.renderIdentity
+        pipelineState = surfaces.pipeline.state
+        materialUniforms = compiledResources.depositionMaterial.uniforms
+        primaryShape = textures[.primaryShape]
+        secondaryShape = textures[.secondaryShape]
+        primaryGrain = textures[.primaryGrain]
+        secondaryGrain = textures[.secondaryGrain]
+        self.frameUniforms = frameUniforms
+        self.radialLayout = radialLayout
         self.forceCommandFailure = forceCommandFailure
     }
 }
@@ -149,6 +179,11 @@ final class StrokeMetalSurfaceResources: @unchecked Sendable {
 
 /// Immutable, bounded surface handoff. It retains one per-stroke resource
 /// holder; no command queue, encoder, or mutable CPU buffer is exposed to Main.
+enum StrokePreparedSurfaceLeaseBacking: @unchecked Sendable {
+    case legacy(StrokeMetalSurfaceResources)
+    case tiled(StrokeTileSurfaceLeaseBacking)
+}
+
 struct StrokePreparedSurfaceLease: Sendable {
     let generation: UInt64
     let token: UInt64
@@ -159,7 +194,25 @@ struct StrokePreparedSurfaceLease: Sendable {
     let clearedPredictionSurface: Bool
     let encodingRanOnMainThread: Bool
 
-    fileprivate let resources: StrokeMetalSurfaceResources
+    let backing: StrokePreparedSurfaceLeaseBacking
+    let newBindingCount: Int
+
+    fileprivate var resources: StrokeMetalSurfaceResources {
+        guard case let .legacy(resources) = backing else {
+            preconditionFailure("Tiled leases do not expose full-canvas textures")
+        }
+        return resources
+    }
+
+    var tiledBindings: [StrokePreparedTileBinding] {
+        guard case let .tiled(backing) = backing else { return [] }
+        return backing.visibleBindings
+    }
+
+    var bindingDeltaCoordinates: [PaintTileCoordinate] {
+        guard case let .tiled(backing) = backing else { return [] }
+        return backing.bindingDeltaCoordinates
+    }
 
     @MainActor
     var authoritativeTexture: any MTLTexture {
@@ -180,6 +233,9 @@ package struct StrokePrivateSurfaceEncoderSnapshot: Equatable, Sendable {
     package let maximumUploadBytes: Int
     package let authoritativeSurfaceIsInitialized: Bool
     package let predictionSurfaceIsInitialized: Bool
+    package let residentTileHighWater: Int
+    package let tileReferenceHighWater: Int
+    package let bindingChunkCount: Int
 }
 
 private struct StrokePrivateSurfaceCommandOutcome: Sendable {
@@ -195,7 +251,25 @@ private struct StrokePrivateSurfaceCommandOutcome: Sendable {
 /// transferring the encoder to another owner.
 final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
     var snapshot: StrokePrivateSurfaceEncoderSnapshot {
-        StrokePrivateSurfaceEncoderSnapshot(
+        if let tiled = tiledEncoder {
+            let value = tiled.snapshot
+            return StrokePrivateSurfaceEncoderSnapshot(
+                encodedFrameCount: encodedFrameCount,
+                encodedInstanceCount: encodedInstanceCount,
+                surfaceCount: 2,
+                surfaceLeaseHighWater: value.hasOutstandingLease
+                    ? 1 : surfaceLeaseHighWater,
+                maximumUploadBytes: tiledMaximumUploadBytes,
+                authoritativeSurfaceIsInitialized:
+                    value.authoritativeVisibleTileCount > 0,
+                predictionSurfaceIsInitialized:
+                    value.predictionVisibleTileCount > 0,
+                residentTileHighWater: value.residentTileHighWater,
+                tileReferenceHighWater: value.tileReferenceHighWater,
+                bindingChunkCount: value.bindingChunkCount
+            )
+        }
+        return StrokePrivateSurfaceEncoderSnapshot(
             encodedFrameCount: encodedFrameCount,
             encodedInstanceCount: encodedInstanceCount,
             surfaceCount: 2,
@@ -205,15 +279,24 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
             authoritativeSurfaceIsInitialized:
                 authoritativeSurfaceIsInitialized,
             predictionSurfaceIsInitialized:
-                predictionSurfaceIsInitialized
+                predictionSurfaceIsInitialized,
+            residentTileHighWater: 0,
+            tileReferenceHighWater: 0,
+            bindingChunkCount: 0
         )
     }
 
     private var configuration: StrokeMetalResourceDescriptor?
     private var resources: StrokeMetalSurfaceResources {
         precondition(configuration != nil)
-        return configuration!.surfaces
+        guard case let .legacy(resources) = configuration!.backend else {
+            preconditionFailure("Legacy resources requested for tiled backend")
+        }
+        return resources
     }
+    private let reusableTiledEncoder = StrokeTileSurfaceEncoder()
+    private var tiledEncoder: StrokeTileSurfaceEncoder?
+    private var tiledMaximumUploadBytes = 0
     private var authoritativeSurfaceIsInitialized = false
     private var predictionSurfaceIsInitialized = false
     private var predictionIsVisible = false
@@ -226,7 +309,7 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
 
     init() {}
 
-    func configure(_ configuration: StrokeMetalResourceDescriptor) {
+    func configure(_ configuration: StrokeMetalResourceDescriptor) throws {
         precondition(!hasOutstandingLease)
         self.configuration = configuration
         authoritativeSurfaceIsInitialized = false
@@ -237,11 +320,57 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
         encodedFrameCount = 0
         encodedInstanceCount = 0
         surfaceLeaseHighWater = 0
+        switch configuration.backend {
+        case .legacy:
+            tiledEncoder = nil
+            tiledMaximumUploadBytes = 0
+        case let .tiledTest(resources):
+            try reusableTiledEncoder.configure(
+                StrokeTileEncodingConfiguration(
+                    resources: resources,
+                    materialUniforms: configuration.materialUniforms,
+                    primaryShape: configuration.primaryShape,
+                    secondaryShape: configuration.secondaryShape,
+                    primaryGrain: configuration.primaryGrain,
+                    secondaryGrain: configuration.secondaryGrain,
+                    frameUniforms: configuration.frameUniforms,
+                    radialLayout: configuration.radialLayout,
+                    forceCommandFailure: configuration.forceCommandFailure
+                ),
+                generation: resources.generation
+            )
+            tiledEncoder = reusableTiledEncoder
+            tiledMaximumUploadBytes = resources.maximumTileReferenceCount
+                * MemoryLayout<PatternDepositionStampInstance>.stride
+        }
     }
 
-    func resetAfterCancellation() {
+    func resetAfterCancellation(
+        frameDisposition: StrokeTileFrameDisposition
+    ) -> StrokeTileSurfaceError? {
+        if let tiledEncoder {
+            do {
+                try tiledEncoder.cancel(frameDisposition: frameDisposition)
+            } catch let error as StrokeTileSurfaceError {
+                return error
+            } catch let error as PaintTileStoreError {
+                return .store(error)
+            } catch let error as TiledRasterSurfaceError {
+                return .surface(error)
+            } catch {
+                return .commandFailed(String(describing: error))
+            }
+        }
+        if frameDisposition == .mainOwnsLease, hasOutstandingLease {
+            // Main may continue reading the immutable handoff until exact ACK.
+            // Keep the encoder/resources alive so the ACK can return its pins
+            // and finish the already-requested tiled retirement.
+            return nil
+        }
         configuration = nil
         hasOutstandingLease = false
+        tiledEncoder = nil
+        return nil
     }
 
     /// Marks the next prediction-layer encode as the first chunk of an atomic
@@ -249,6 +378,10 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
     /// of clearing work already encoded for the replacement.
     func beginPredictionReplacement() {
         precondition(!hasOutstandingLease)
+        if let tiledEncoder {
+            tiledEncoder.beginPredictionReplacement()
+            return
+        }
         predictionReplacementNeedsClear = true
     }
 
@@ -260,6 +393,26 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
     ) async throws -> StrokePreparedSurfaceLease? {
         guard let configuration else { return nil }
         precondition(!hasOutstandingLease)
+        if let tiledEncoder {
+            let lease = try await tiledEncoder.encode(
+                generation: generation,
+                records: records,
+                layer: layer,
+                allocationProbe: allocationProbe
+            )
+            if lease != nil {
+                hasOutstandingLease = true
+                surfaceLeaseHighWater = max(surfaceLeaseHighWater, 1)
+                encodedFrameCount = Self.saturatingIncrement(
+                    encodedFrameCount
+                )
+                encodedInstanceCount = Self.saturatingAdd(
+                    encodedInstanceCount,
+                    UInt64(records.count)
+                )
+            }
+            return lease
+        }
         guard records.count <= resources.maximumRecordCount else {
             throw StrokePrivateSurfaceEncodingError.recordLimitExceeded(
                 actual: records.count,
@@ -377,12 +530,18 @@ final class StrokePrivateSurfaceEncoder: @unchecked Sendable {
             clearedAuthoritativeSurface: clearsAuthoritative,
             clearedPredictionSurface: clearsPrediction,
             encodingRanOnMainThread: encodingRanOnMainThread,
-            resources: resources
+            backing: .legacy(resources),
+            newBindingCount: 0
         )
     }
 
-    func acknowledge(_ lease: StrokePreparedSurfaceLease) {
+    func acknowledge(_ lease: StrokePreparedSurfaceLease) throws {
         precondition(hasOutstandingLease)
+        if let tiledEncoder {
+            try tiledEncoder.acknowledge(lease)
+            hasOutstandingLease = false
+            return
+        }
         precondition(lease.resources === resources)
         hasOutstandingLease = false
     }

@@ -92,6 +92,26 @@ struct DepositionPipelineLibraryTests {
         #expect(context.pipelines.debugPreparedPipelineCount == 0)
     }
 
+    @Test
+    func tilePreparationDerivesAndCachesRGBA16FloatBinding() async throws {
+        guard let context = try makeContext() else { return }
+        let compiledKey = key(pixelFormat: .bgra8Unorm)
+
+        let first = try await context.pipelines.prepareRGBA16Float(
+            matching: compiledKey
+        )
+        let second = try await context.pipelines.prepareRGBA16Float(
+            matching: compiledKey
+        )
+
+        #expect(first === second)
+        #expect(first.key.brush == compiledKey.brush)
+        #expect(first.key.abiVersion == compiledKey.abiVersion)
+        #expect(first.key.sampleCount == compiledKey.sampleCount)
+        #expect(first.key.colorPixelFormatRawValue
+            == MTLPixelFormat.rgba16Float.rawValue)
+    }
+
     private func key(
         abiVersion: UInt16 = DepositionABI.version,
         pixelFormat: MTLPixelFormat = .bgra8Unorm,

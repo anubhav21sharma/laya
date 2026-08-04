@@ -112,6 +112,20 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
         return try await task.value
     }
 
+    /// Prepares the sparse paint-tile variant without reusing the compiled
+    /// brush's legacy BGRA8 target binding.
+    public func prepareRGBA16Float(
+        matching compiledKey: DepositionPipelineKey
+    ) async throws -> DepositionPipelineBinding {
+        try await prepare(for: DepositionPipelineKey(
+            brush: compiledKey.brush,
+            abiVersion: compiledKey.abiVersion,
+            colorPixelFormatRawValue:
+                MTLPixelFormat.rgba16Float.rawValue,
+            sampleCount: compiledKey.sampleCount
+        ))
+    }
+
     public func preparedBinding(
         for key: DepositionPipelineKey
     ) throws -> DepositionPipelineBinding {

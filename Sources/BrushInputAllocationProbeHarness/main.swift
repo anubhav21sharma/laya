@@ -49,6 +49,8 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
     private var batchPackaging: [UInt64] = []
     private var surfaceRecordPacking: [UInt64] = []
     private var surfaceMetalSubmission: [UInt64] = []
+    private var surfaceTilePartition: [UInt64] = []
+    private var surfaceTileLease: [UInt64] = []
     private var strokeLifecycleCPU: [UInt64] = []
 
     init() {
@@ -58,6 +60,8 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         batchPackaging.reserveCapacity(512)
         surfaceRecordPacking.reserveCapacity(512)
         surfaceMetalSubmission.reserveCapacity(512)
+        surfaceTilePartition.reserveCapacity(512)
+        surfaceTileLease.reserveCapacity(512)
         strokeLifecycleCPU.reserveCapacity(64)
     }
 
@@ -79,6 +83,10 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
             surfaceRecordPacking.append(count)
         case .surfaceMetalSubmission:
             surfaceMetalSubmission.append(count)
+        case .surfaceTilePartition:
+            surfaceTilePartition.append(count)
+        case .surfaceTileLease:
+            surfaceTileLease.append(count)
         case .strokeLifecycleCPU:
             strokeLifecycleCPU.append(count)
         }
@@ -96,6 +104,8 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         case .batchPackaging: batchPackaging
         case .surfaceRecordPacking: surfaceRecordPacking
         case .surfaceMetalSubmission: surfaceMetalSubmission
+        case .surfaceTilePartition: surfaceTilePartition
+        case .surfaceTileLease: surfaceTileLease
         case .strokeLifecycleCPU: strokeLifecycleCPU
         }
         let result = Snapshot(
@@ -115,6 +125,24 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         return result
     }
 
+    func counts(
+        for stage: StrokePreparationAllocationProbeStage
+    ) -> [UInt64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return switch stage {
+        case .authoritativeCPU: authoritativeCPU
+        case .predictionCPU: predictionCPU
+        case .estimatedCPU: estimatedCPU
+        case .batchPackaging: batchPackaging
+        case .surfaceRecordPacking: surfaceRecordPacking
+        case .surfaceMetalSubmission: surfaceMetalSubmission
+        case .surfaceTilePartition: surfaceTilePartition
+        case .surfaceTileLease: surfaceTileLease
+        case .strokeLifecycleCPU: strokeLifecycleCPU
+        }
+    }
+
     func reset() {
         lock.lock()
         authoritativeCPU.removeAll(keepingCapacity: true)
@@ -123,6 +151,8 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         batchPackaging.removeAll(keepingCapacity: true)
         surfaceRecordPacking.removeAll(keepingCapacity: true)
         surfaceMetalSubmission.removeAll(keepingCapacity: true)
+        surfaceTilePartition.removeAll(keepingCapacity: true)
+        surfaceTileLease.removeAll(keepingCapacity: true)
         strokeLifecycleCPU.removeAll(keepingCapacity: true)
         lock.unlock()
     }
@@ -198,7 +228,8 @@ private final class TenMinuteTraceAllocationMeasurements:
                 break
             }
         case .authoritativeCPU, .predictionCPU, .estimatedCPU,
-             .batchPackaging, .surfaceRecordPacking:
+             .batchPackaging, .surfaceRecordPacking,
+             .surfaceTilePartition, .surfaceTileLease:
             switch window {
             case .first:
                 firstHotEventCount += 1
@@ -368,6 +399,11 @@ private struct BrushInputAllocationProbeHarness {
                 try runTipSupportSpacingProbe(probe: probe)
             case "--sensor-program":
                 try runSensorProgramProbe(probe: probe)
+            case "--stage-d-tiles":
+                try await runStageDTileSurfaceProbe(
+                    probe: probe,
+                    root: root
+                )
             case "--production":
                 try await runProduction(probe: probe, root: root)
             case "--ten-minute-trace":
@@ -384,6 +420,53 @@ private struct BrushInputAllocationProbeHarness {
             )
             exit(1)
         }
+    }
+
+    @MainActor
+    private static func runStageDTileSurfaceProbe(
+        probe: AllocatorProbe,
+        root: URL
+    ) async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw ProbeHarnessError.metalUnavailable
+        }
+        let measurements = ActorAllocationMeasurements()
+        try await StrokeTileAllocationProbeHarness.run(
+            device: device,
+            library: rendererLibrary(device: device, root: root),
+            probe: StrokePreparationAllocationProbe(
+                identity: 0xD5,
+                arm: { probe.arm() },
+                disarm: { probe.disarm() },
+                record: { stage, count in
+                    measurements.record(stage, count: count)
+                }
+            )
+        )
+        let partition = measurements.snapshot(for: .surfaceTilePartition)
+        let lease = measurements.snapshot(for: .surfaceTileLease)
+        let metal = measurements.snapshot(for: .surfaceMetalSubmission)
+        guard partition.eventCount >= 5,
+              lease.eventCount >= 10,
+              partition.allocationCount == 0,
+              lease.allocationCount == 0
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "Stage D tile partition=\(partition.eventCount)/"
+                    + "\(partition.allocationCount) lease="
+                    + "\(lease.eventCount)/\(lease.allocationCount) "
+                    + "partition_series="
+                    + "\(measurements.counts(for: .surfaceTilePartition)) "
+                    + "lease_series="
+                    + "\(measurements.counts(for: .surfaceTileLease))"
+            )
+        }
+        print(
+            "ALLOCATOR PROBE STAGE D TILES PASS partition="
+                + "\(partition.eventCount)/0 lease="
+                + "\(lease.eventCount)/0 metal_driver="
+                + "\(metal.eventCount)/\(metal.allocationCount)"
+        )
     }
 
     private static func runSelfTest(probe: AllocatorProbe) throws {
@@ -2245,6 +2328,10 @@ private struct BrushInputAllocationProbeHarness {
         let packaging = measurements.snapshot(for: .batchPackaging)
         let surfacePacking = measurements.snapshot(for: .surfaceRecordPacking)
         let surfaceMetal = measurements.snapshot(for: .surfaceMetalSubmission)
+        let surfaceTilePartition = measurements.snapshot(
+            for: .surfaceTilePartition
+        )
+        let surfaceTileLease = measurements.snapshot(for: .surfaceTileLease)
         let stageCMetrics = await renderer
             .offMainStageCContinuationMetricsForAllocationHarness()
         let workspaceInstallationDelta = renderer
@@ -2280,7 +2367,11 @@ private struct BrushInputAllocationProbeHarness {
                 + "surface_metal=\(surfaceMetal.allocationCount)/"
                 + "\(surfaceMetal.firstHalfAllocationCount)/"
                 + "\(surfaceMetal.lastHalfAllocationCount)/"
-                + "\(surfaceMetal.maximumSingleEventCount)"
+                + "\(surfaceMetal.maximumSingleEventCount) "
+                + "tile_partition=\(surfaceTilePartition.eventCount)/"
+                + "\(surfaceTilePartition.allocationCount) "
+                + "tile_lease=\(surfaceTileLease.eventCount)/"
+                + "\(surfaceTileLease.allocationCount)"
         )
         let actorStages: [(
             String,
@@ -2354,6 +2445,23 @@ private struct BrushInputAllocationProbeHarness {
                     + "max=\(surfaceMetal.maximumSingleEventCount)/64"
             )
         }
+        let tiledExpectedEventCount = measuredEventCount
+            + measuredPredictionEventCount
+        guard (surfaceTilePartition.eventCount == 0
+                && surfaceTileLease.eventCount == 0)
+                || (surfaceTilePartition.eventCount >= tiledExpectedEventCount
+                    && surfaceTileLease.eventCount >= tiledExpectedEventCount
+                    && surfaceTilePartition.allocationCount == 0
+                    && surfaceTileLease.allocationCount == 0)
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "tiled surface partition="
+                    + "\(surfaceTilePartition.eventCount)/"
+                    + "\(surfaceTilePartition.allocationCount) lease="
+                    + "\(surfaceTileLease.eventCount)/"
+                    + "\(surfaceTileLease.allocationCount)"
+            )
+        }
         print(
             "ALLOCATOR PROBE OFF-MAIN PASS application=0 workspace=0 "
                 + "main=0 "
@@ -2362,7 +2470,9 @@ private struct BrushInputAllocationProbeHarness {
                 + "prediction=\(prediction.allocationCount) "
                 + "packaging=\(packaging.allocationCount) "
                 + "surface_pack=0 "
-                + "surface_metal_mallocs=\(surfaceMetal.allocationCount)"
+                + "surface_metal_mallocs=\(surfaceMetal.allocationCount) "
+                + "tile_partition=\(surfaceTilePartition.allocationCount) "
+                + "tile_lease=\(surfaceTileLease.allocationCount)"
         )
         try await runOffMainStageCContinuationProbe(
             probe: probe,
@@ -2551,6 +2661,10 @@ private struct BrushInputAllocationProbeHarness {
         let packaging = measurements.snapshot(for: .batchPackaging)
         let surfacePacking = measurements.snapshot(for: .surfaceRecordPacking)
         let surfaceMetal = measurements.snapshot(for: .surfaceMetalSubmission)
+        let surfaceTilePartition = measurements.snapshot(
+            for: .surfaceTilePartition
+        )
+        let surfaceTileLease = measurements.snapshot(for: .surfaceTileLease)
         let lifecycle = measurements.snapshot(for: .strokeLifecycleCPU)
 
         guard mainHotEnqueueAllocations == 0,
@@ -2641,6 +2755,24 @@ private struct BrushInputAllocationProbeHarness {
                     + "\(surfaceMetal.maximumSingleEventCount)/64"
             )
         }
+        guard (surfaceTilePartition.eventCount == 0
+                && surfaceTileLease.eventCount == 0)
+                || (surfaceTilePartition.eventCount > 0
+                    && surfaceTilePartition.eventCount
+                        <= packaging.eventCount
+                    && surfaceTileLease.eventCount > 0
+                    && surfaceTileLease.eventCount <= packaging.eventCount
+                    && surfaceTilePartition.allocationCount == 0
+                    && surfaceTileLease.allocationCount == 0)
+        else {
+            throw ProbeHarnessError.offMainAllocationRegression(
+                "Stage D tiled continuation partition="
+                    + "\(surfaceTilePartition.eventCount)/"
+                    + "\(surfaceTilePartition.allocationCount) lease="
+                    + "\(surfaceTileLease.eventCount)/"
+                    + "\(surfaceTileLease.allocationCount)"
+            )
+        }
         guard lifecycle.eventCount == 2,
               lifecycle.maximumSingleEventCount <= 64,
               mainLifecycleAllocations <= 512,
@@ -2665,7 +2797,9 @@ private struct BrushInputAllocationProbeHarness {
                 + "\(lifecycle.allocationCount)/"
                 + "\(lifecycle.maximumSingleEventCount) "
                 + "surface_pack=0 surface_metal_mallocs="
-                + "\(surfaceMetal.allocationCount)"
+                + "\(surfaceMetal.allocationCount) tile_partition="
+                + "\(surfaceTilePartition.allocationCount) tile_lease="
+                + "\(surfaceTileLease.allocationCount)"
         )
         }
         let mainFirstHalf = mainLifecycleSeries

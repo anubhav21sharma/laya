@@ -170,7 +170,55 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         }
     }
 
+    public func reserveSortedUniqueTiles(
+        at coordinates: [PaintTileCoordinate],
+        pinReasons: [PaintTilePinReason],
+        failureInjection: PaintTileAllocationFailureInjection? = nil
+    ) throws -> PaintTileLease {
+        try withLock {
+            try store.reserveSortedUnique(
+                surfaceID: surfaceID,
+                layerID: layerID,
+                generation: currentGeneration,
+                pixelSize: pixelSize,
+                coordinates: coordinates,
+                pinReasons: pinReasons,
+                failureInjection: failureInjection
+            )
+        }
+    }
+
+    func reserveSortedUniqueStrokeTiles(
+        at coordinates: [PaintTileCoordinate],
+        pinReasons: [PaintTilePinReason],
+        workspace: PaintTileStrokeLeaseWorkspace,
+        failureInjection: PaintTileAllocationFailureInjection? = nil
+    ) throws -> PaintTileLease {
+        try withLock {
+            try store.reserveSortedUniqueForStroke(
+                surfaceID: surfaceID,
+                layerID: layerID,
+                generation: currentGeneration,
+                pixelSize: pixelSize,
+                coordinates: coordinates,
+                pinReasons: pinReasons,
+                workspace: workspace,
+                failureInjection: failureInjection
+            )
+        }
+    }
+
     public func markDirty(_ lease: PaintTileLease) throws {
+        try markDirty(
+            lease,
+            coordinates: lease.bindings.map(\.descriptor.coordinate)
+        )
+    }
+
+    public func markDirty(
+        _ lease: PaintTileLease,
+        coordinates: [PaintTileCoordinate]
+    ) throws {
         guard lease.layerID == layerID else {
             throw TiledRasterSurfaceError.leaseLayerMismatch(
                 expected: layerID,
@@ -184,11 +232,99 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
             try store.markModified(
                 lease,
                 surfaceID: surfaceID,
-                currentGeneration: currentGeneration
+                currentGeneration: currentGeneration,
+                coordinates: coordinates
             )
-            dirtyCoordinates.formUnion(
-                lease.bindings.map(\.descriptor.coordinate)
+            dirtyCoordinates.formUnion(coordinates)
+            currentRevision = RasterRevision(
+                rawValue: currentRevision.rawValue + 1
             )
+        }
+    }
+
+    func makeProvisionalBindings(
+        for lease: PaintTileLease,
+        coordinates: [PaintTileCoordinate],
+        workspace: PaintTileProvisionalWorkspace
+    ) throws -> PaintTileProvisionalReservation {
+        guard lease.layerID == layerID else {
+            throw TiledRasterSurfaceError.leaseLayerMismatch(
+                expected: layerID,
+                actual: lease.layerID
+            )
+        }
+        return try withLock {
+            try store.makeProvisionalBindings(
+                for: lease,
+                surfaceID: surfaceID,
+                currentGeneration: currentGeneration,
+                coordinates: coordinates,
+                workspace: workspace
+            )
+        }
+    }
+
+    func commitProvisionalBindings(
+        _ provisional: PaintTileProvisionalReservation,
+        for lease: PaintTileLease,
+        modifiedCoordinates: [PaintTileCoordinate],
+        knownClearCoordinates: [PaintTileCoordinate]
+    ) throws -> PaintTileLease {
+        try withLock {
+            guard currentRevision.rawValue < UInt64.max else {
+                throw TiledRasterSurfaceError.revisionOverflow
+            }
+            let committed = try store.commitProvisionalBindings(
+                provisional,
+                for: lease,
+                surfaceID: surfaceID,
+                currentGeneration: currentGeneration,
+                modifiedCoordinates: modifiedCoordinates,
+                knownClearCoordinates: knownClearCoordinates
+            )
+            dirtyCoordinates.formUnion(modifiedCoordinates)
+            dirtyCoordinates.subtract(knownClearCoordinates)
+            currentRevision = RasterRevision(
+                rawValue: currentRevision.rawValue + 1
+            )
+            return committed
+        }
+    }
+
+    func cancelProvisionalBindings(
+        _ provisional: PaintTileProvisionalReservation
+    ) throws {
+        try store.cancelProvisionalBindings(provisional)
+    }
+
+    func completeProvisionalBindings(
+        _ provisional: PaintTileProvisionalReservation
+    ) {
+        store.completeProvisionalBindings(provisional)
+    }
+
+    func markKnownClear(
+        _ lease: PaintTileLease,
+        coordinates: [PaintTileCoordinate]
+    ) throws {
+        guard lease.layerID == layerID else {
+            throw TiledRasterSurfaceError.leaseLayerMismatch(
+                expected: layerID,
+                actual: lease.layerID
+            )
+        }
+        guard !coordinates.isEmpty else { return }
+        try withLock {
+            guard currentRevision.rawValue < UInt64.max else {
+                throw TiledRasterSurfaceError.revisionOverflow
+            }
+            try store.markKnownClear(
+                lease,
+                surfaceID: surfaceID,
+                currentGeneration: currentGeneration,
+                coordinates: coordinates
+            )
+            dirtyCoordinates.subtract(coordinates)
             currentRevision = RasterRevision(
                 rawValue: currentRevision.rawValue + 1
             )

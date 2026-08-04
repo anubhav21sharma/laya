@@ -3427,6 +3427,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
              .scheduler,
              .stampPacking,
              .privateSurfaceEncoding,
+             .tileSurface,
              .transientBuffer,
              .unexpected:
             return .commandFailed(

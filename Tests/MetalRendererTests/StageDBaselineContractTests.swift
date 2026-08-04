@@ -8,7 +8,7 @@ import Testing
 @Suite("Stage D baseline renderer contracts", .serialized)
 struct StageDBaselineContractTests {
     @Test
-    func baselinePaintSurfaceAllocationsRemainEnumeratedUntilTaskFive() throws {
+    func legacyProductionPaintAllocationsRemainEnumeratedUntilTaskSix() throws {
         #expect(
             try stageDBaselinePaintAllocations() == [
                 StageDPaintAllocation(
@@ -33,6 +33,23 @@ struct StageDBaselineContractTests {
                 ),
             ]
         )
+    }
+
+    @Test
+    func tiledTestSeamContainsNoFullCanvasPaintAllocation() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/MetalRenderer/StrokeRuntime/StrokeTileSurfaceResources.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(!source.contains("texture2DDescriptor"))
+        #expect(source.contains("TiledRasterSurface"))
+        #expect(source.contains("PaintTileStore"))
     }
 
     @Test
@@ -292,7 +309,7 @@ private let stageDLifecycleTransitions: [StageDLifecycleTransition] = [
     .init(name: "cancel-failure", exercise: { try await stageDLifecycleProbe(.cancelFailure) }),
     .init(name: "clear", exercise: { try await stageDLifecycleProbe(.clear) }),
     .init(name: "undo-redo", exercise: { try await stageDLifecycleProbe(.undoRedo) }),
-    // Stage D has no layer model yet; this covers the current Stage C owner.
+    // Task 5 preserves the Stage C production owner; Task 6 switches it.
     .init(name: "stage-c-stroke-ownership", exercise: { try await stageDLifecycleProbe(.stageCStrokeOwnership) }),
     .init(name: "resize-mode-switch", exercise: { try await stageDLifecycleProbe(.resizeModeSwitch) }),
     .init(name: "export-committed-snapshot", exercise: { try await stageDLifecycleProbe(.exportCommittedSnapshot) }),

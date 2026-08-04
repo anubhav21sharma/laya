@@ -529,6 +529,7 @@ enum StrokePreparationFailure: Error, Equatable, Sendable {
     case scheduler(StrokeFrameSchedulerError)
     case stampPacking(DepositionStampPackingError)
     case privateSurfaceEncoding(StrokePrivateSurfaceEncodingError)
+    case tileSurface(StrokeTileSurfaceError)
     case transientBuffer(TransientStrokeBufferError)
     case dabArenaCapacityExceeded(actual: Int, maximum: Int)
     case injectedStageC(StrokeStageCFailureInjectionSeam)

@@ -4310,6 +4310,508 @@ extension StrokeFrameSchedulerTests {
         }
     }
 
+    @Test
+    @MainActor
+    func tiledTestBackendRunsThroughSchedulerWithoutChangingLegacySelection()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD5_01
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 32
+        )
+        let tiled = try StrokeTileSurfaceResources(
+            device: setup.device,
+            store: store,
+            layerID: UUID(
+                uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            )!,
+            pixelSize: PixelSize(width: 512, height: 512),
+            generation: generation,
+            maximumRecordCount: 4_096,
+            maximumTileReferenceCount: 16_384,
+            pipeline: setup.tilePipeline,
+            namespaceLease: .testing(generation: generation)
+        )
+        let descriptor = StrokeMetalResourceDescriptor(
+            tiledTestSurfaces: tiled,
+            brush: setup.brush,
+            frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+            forceCommandFailure: false
+        )
+        guard case .tiledTest = descriptor.backend else {
+            Issue.record("Expected explicit tiled test backend")
+            return
+        }
+        let legacy = try StrokeMetalSurfaceResources(
+            device: setup.device,
+            pixelSize: PixelSize(width: 512, height: 512),
+            maximumRecordCount: 4_096
+        )
+        let legacyDescriptor = StrokeMetalResourceDescriptor(
+            surfaces: legacy,
+            brush: setup.brush,
+            frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+            forceCommandFailure: false
+        )
+        guard case .legacy = legacyDescriptor.backend else {
+            Issue.record("Existing construction must remain legacy")
+            return
+        }
+
+        let scheduler = StrokeFrameScheduler(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120,
+            preparationClock: { 0 }
+        )
+        let configuration = try preparationConfiguration(
+            program: stageCMetalTestProgram(
+                id: "test.scheduler.stage-d-tiled",
+                replayMode: .appendOnly
+            ),
+            metalResourceDescriptor: descriptor
+        )
+        let began = await scheduler.process(.begin(
+            generation: generation,
+            configuration: configuration,
+            samples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 0
+            )]
+        ))
+        guard case let .prepared(first)? = began,
+              let firstLease = first.surfaceLease
+        else {
+            Issue.record("Expected tiled begin lease")
+            return
+        }
+        #expect(!firstLease.tiledBindings.isEmpty)
+        #expect(first.surfaceSnapshot?.surfaceCount == 2)
+        #expect(first.surfaceSnapshot?.residentTileHighWater ?? 0 > 0)
+        let afterAck = await scheduler.acknowledgePreparedFrame(
+            generation: generation,
+            frameToken: firstLease.token
+        )
+        if case let .prepared(continuation)? = afterAck {
+            try await acknowledgeAll(
+                continuation,
+                scheduler: scheduler,
+                generation: generation
+            )
+        } else if case let .failed(_, failure)? = afterAck {
+            Issue.record("Tiled ACK failed: \(failure)")
+        }
+        #expect(store.snapshot().activeLeaseCount == 0)
+
+        let appended = await scheduler.process(.appendAuthoritative(
+            generation: generation,
+            samples: [stageCPreparationSample(
+                phase: .moved,
+                x: 320,
+                timestamp: 1.0 / 120
+            )]
+        ))
+        guard case let .prepared(second)? = appended,
+              let secondLease = second.surfaceLease
+        else {
+            Issue.record("Expected tiled append lease")
+            return
+        }
+        #expect(secondLease.tiledBindings.count >= firstLease.tiledBindings.count)
+        await scheduler.cancel(generation: generation)
+        #expect((await scheduler.snapshot).activeGeneration == nil)
+        #expect(store.snapshot().activeLeaseCount == 1)
+        #expect(!store.snapshot().entries.isEmpty)
+
+        let cancelledAck = await scheduler.acknowledgePreparedFrame(
+            generation: generation,
+            frameToken: secondLease.token
+        )
+        #expect(cancelledAck == nil)
+        #expect(store.snapshot().activeLeaseCount == 0)
+        #expect(store.snapshot().entries.isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func tiledSchedulerRunsPredictionEstimateFinishAndImmediateReuse()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD5_10
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 32
+        )
+        let firstNamespace = StrokeTileSurfaceNamespaceLease.testing(
+            generation: generation
+        )
+        let firstResources = try StrokeTileSurfaceResources(
+            device: setup.device,
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 512, height: 512),
+            generation: generation,
+            maximumRecordCount: 4_096,
+            maximumTileReferenceCount: 16_384,
+            pipeline: setup.tilePipeline,
+            namespaceLease: firstNamespace
+        )
+        let firstDescriptor = StrokeMetalResourceDescriptor(
+            tiledTestSurfaces: firstResources,
+            brush: setup.brush,
+            frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+            forceCommandFailure: false
+        )
+        let scheduler = StrokeFrameScheduler(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120,
+            preparationClock: { 0 }
+        )
+        let configuration = try preparationConfiguration(
+            program: stageCMetalTestProgram(
+                id: "test.scheduler.stage-d-tiled-lifecycle",
+                replayMode: .appendOnly
+            ),
+            metalResourceDescriptor: firstDescriptor
+        )
+        let began = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: configuration,
+            actualSamples: [
+                stageCPreparationSample(
+                    phase: .began,
+                    x: 64,
+                    timestamp: 0
+                ),
+                stageCPreparationSample(
+                    phase: .moved,
+                    x: 96,
+                    timestamp: 1,
+                    estimationUpdateIndex: 701,
+                    estimatedProperties: .location
+                ),
+            ]
+        )
+        #expect(began.surfaceLease?.layer == .authoritative)
+        try await acknowledgeAll(
+            began,
+            scheduler: scheduler,
+            generation: generation
+        )
+
+        let prediction = try await scheduler.replacePreparedPrediction(
+            generation: generation,
+            samples: [stageCPreparationSample(
+                phase: .moved,
+                x: 128,
+                timestamp: 2,
+                kind: .predicted
+            )]
+        )
+        #expect(prediction.surfaceLease?.layer == .prediction)
+        try await acknowledgeAll(
+            prediction,
+            scheduler: scheduler,
+            generation: generation
+        )
+
+        let estimate = await scheduler.process(.applyEstimatedUpdate(
+            generation: generation,
+            sample: stageCPreparationSample(
+                phase: .moved,
+                x: 104,
+                timestamp: 1,
+                kind: .estimatedUpdate,
+                estimationUpdateIndex: 701
+            )
+        ))
+        guard case let .prepared(estimated)? = estimate else {
+            Issue.record("Expected tiled estimated replacement")
+            return
+        }
+        #expect(estimated.surfaceLease?.layer == .authoritative)
+        try await acknowledgeAll(
+            estimated,
+            scheduler: scheduler,
+            generation: generation
+        )
+
+        let appended = try await scheduler.appendPreparedStroke(
+            generation: generation,
+            actualSamples: [stageCPreparationSample(
+                phase: .moved,
+                x: 144,
+                timestamp: 3
+            )]
+        )
+        try await acknowledgeAll(
+            appended,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let finished = try await scheduler.finishPreparedStroke(
+            generation: generation,
+            actualSamples: [stageCPreparationSample(
+                phase: .ended,
+                x: 160,
+                timestamp: 4
+            )]
+        )
+        let finishing = try await drainPreparedBatchRecords(
+            finished,
+            scheduler: scheduler,
+            generation: generation
+        )
+        #expect(finishing.last?.isFinishing == true)
+        await scheduler.cancel(generation: generation)
+        #expect(store.snapshot().activeLeaseCount == 0)
+        #expect(store.snapshot().entries.isEmpty)
+
+        let reusedGeneration = generation + 1
+        let reusedNamespace = StrokeTileSurfaceNamespaceLease.testing(
+            generation: reusedGeneration
+        )
+        #expect(reusedNamespace.authoritativeSurfaceID
+            != firstNamespace.authoritativeSurfaceID)
+        #expect(reusedNamespace.predictionSurfaceID
+            != firstNamespace.predictionSurfaceID)
+        let reusedResources = try StrokeTileSurfaceResources(
+            device: setup.device,
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 512, height: 512),
+            generation: reusedGeneration,
+            maximumRecordCount: 4_096,
+            maximumTileReferenceCount: 16_384,
+            pipeline: setup.tilePipeline,
+            namespaceLease: reusedNamespace
+        )
+        let reusedConfiguration = try preparationConfiguration(
+            program: stageCMetalTestProgram(
+                id: "test.scheduler.stage-d-tiled-lifecycle-reused",
+                replayMode: .appendOnly
+            ),
+            metalResourceDescriptor: StrokeMetalResourceDescriptor(
+                tiledTestSurfaces: reusedResources,
+                brush: setup.brush,
+                frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+                forceCommandFailure: false
+            )
+        )
+        let reused = try await scheduler.beginPreparedStroke(
+            generation: reusedGeneration,
+            configuration: reusedConfiguration,
+            actualSamples: [stageCPreparationSample(
+                phase: .began,
+                x: 80,
+                timestamp: 10
+            )]
+        )
+        try await acknowledgeAll(
+            reused,
+            scheduler: scheduler,
+            generation: reusedGeneration
+        )
+        await scheduler.cancel(generation: reusedGeneration)
+        #expect(store.snapshot().activeLeaseCount == 0)
+        #expect(store.snapshot().entries.isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func tiledSchedulerCommandFailureRetiresAndReusesImmediately()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD5_20
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 16
+        )
+        func resources(_ value: UInt64) throws -> StrokeTileSurfaceResources {
+            try StrokeTileSurfaceResources(
+                device: setup.device,
+                store: store,
+                layerID: UUID(),
+                pixelSize: PixelSize(width: 512, height: 512),
+                generation: value,
+                maximumRecordCount: 4_096,
+                maximumTileReferenceCount: 16_384,
+                pipeline: setup.tilePipeline,
+                namespaceLease: .testing(generation: value)
+            )
+        }
+        let failingResources = try resources(generation)
+        let scheduler = StrokeFrameScheduler(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120,
+            preparationClock: { 0 }
+        )
+        let failed = await scheduler.process(.begin(
+            generation: generation,
+            configuration: try preparationConfiguration(
+                program: stageCMetalTestProgram(
+                    id: "test.scheduler.stage-d-tiled-failure",
+                    replayMode: .appendOnly
+                ),
+                metalResourceDescriptor: StrokeMetalResourceDescriptor(
+                    tiledTestSurfaces: failingResources,
+                    brush: setup.brush,
+                    frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+                    forceCommandFailure: true
+                )
+            ),
+            samples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 0
+            )]
+        ))
+        guard case let .failed(actual, .tileSurface(.commandFailed(_)))? = failed
+        else {
+            Issue.record("Expected typed tiled command failure")
+            return
+        }
+        #expect(actual == generation)
+        #expect(store.snapshot().activeLeaseCount == 0)
+        #expect(store.snapshot().entries.isEmpty)
+
+        let reusedGeneration = generation + 1
+        let goodResources = try resources(reusedGeneration)
+        let recovered = try await scheduler.beginPreparedStroke(
+            generation: reusedGeneration,
+            configuration: try preparationConfiguration(
+                program: stageCMetalTestProgram(
+                    id: "test.scheduler.stage-d-tiled-failure-reuse",
+                    replayMode: .appendOnly
+                ),
+                metalResourceDescriptor: StrokeMetalResourceDescriptor(
+                    tiledTestSurfaces: goodResources,
+                    brush: setup.brush,
+                    frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+                    forceCommandFailure: false
+                )
+            ),
+            actualSamples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 1
+            )]
+        )
+        try await acknowledgeAll(
+            recovered,
+            scheduler: scheduler,
+            generation: reusedGeneration
+        )
+        await scheduler.cancel(generation: reusedGeneration)
+        #expect(store.snapshot().entries.isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func tiledSchedulerMapsRadialProjectedPagesIntoCompactAtlas()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD5_30
+        let strategy = try TilingStrategy(
+            finiteConfiguration: .radial(RadialSymmetryConfiguration(
+                kind: .mandala,
+                rayCount: 12,
+                center: WorldPoint(x: 256, y: 256)
+            )),
+            canvasSize: PixelSize(width: 512, height: 512)
+        )
+        let layout = try #require(
+            strategy.compiledSymmetry.domain.finite?.radial.layout
+        )
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 64
+        )
+        let tiled = try StrokeTileSurfaceResources(
+            device: setup.device,
+            store: store,
+            layerID: UUID(),
+            pixelSize: layout.atlasPixelSize,
+            generation: generation,
+            maximumRecordCount: 4_096,
+            maximumTileReferenceCount: 16_384,
+            pipeline: setup.tilePipeline,
+            namespaceLease: .testing(generation: generation)
+        )
+        let scheduler = StrokeFrameScheduler(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120,
+            preparationClock: { 0 }
+        )
+        let began = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: try preparationConfiguration(
+                program: stageCMetalTestProgram(
+                    id: "test.scheduler.stage-d-tiled-radial",
+                    replayMode: .appendOnly
+                ),
+                strategy: strategy,
+                metalResourceDescriptor: StrokeMetalResourceDescriptor(
+                    tiledTestSurfaces: tiled,
+                    brush: setup.brush,
+                    frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+                    radialLayout: layout,
+                    forceCommandFailure: false
+                )
+            ),
+            actualSamples: [stageCPreparationSample(
+                phase: .began,
+                x: 320,
+                y: 256,
+                timestamp: 0
+            )]
+        )
+        let bindings = try #require(began.surfaceLease).tiledBindings
+        #expect(!bindings.isEmpty)
+        #expect(began.authoritativeInstanceCount > 0)
+        #expect(bindings.allSatisfy {
+            let coordinate = $0.descriptor.coordinate
+            return layout.residentPages.contains { page in
+                coordinate == PaintTileCoordinate(
+                    x: page.atlasSlot % layout.atlasColumns,
+                    y: page.atlasSlot / layout.atlasColumns
+                )
+            }
+        })
+        try await acknowledgeAll(
+            began,
+            scheduler: scheduler,
+            generation: generation
+        )
+        await scheduler.cancel(generation: generation)
+        #expect(store.snapshot().entries.isEmpty)
+    }
+
     private func assertInjectedFailureCleanupAndReuse(
         _ scheduler: StrokeFrameScheduler,
         failedGeneration: UInt64,
@@ -4403,7 +4905,8 @@ extension StrokeFrameSchedulerTests {
     @MainActor
     private func stageCSurfaceTestSetup() async throws -> (
         device: any MTLDevice,
-        brush: CompiledBrushRenderState
+        brush: CompiledBrushRenderState,
+        tilePipeline: DepositionPipelineBinding
     )? {
         guard let device = MTLCreateSystemDefaultDevice(),
               let commandQueue = device.makeCommandQueue()
@@ -4440,19 +4943,26 @@ extension StrokeFrameSchedulerTests {
             brushCacheBudgetBytes: 64 * 1_024 * 1_024,
             targetFramesPerSecond: 120
         )
+        let pipelines = DepositionPipelineLibrary(
+            device: device,
+            library: library
+        )
         let compiler = BrushCompiler(
             device: device,
             commandQueue: commandQueue,
             profile: profile,
-            pipelineLibrary: DepositionPipelineLibrary(
-                device: device,
-                library: library
-            )
+            pipelineLibrary: pipelines
         )
         let compiled = try await compiler.compileAndActivate(
             definition: StageFourAnchorDefinitions.ink
         )
-        return (device, compiled.renderState)
+        return (
+            device,
+            compiled.renderState,
+            try await pipelines.prepareRGBA16Float(
+                matching: compiled.depositionPipeline.key
+            )
+        )
     }
 
     private func stageCSurfaceFrameUniforms(

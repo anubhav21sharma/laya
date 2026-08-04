@@ -8,6 +8,38 @@ import Testing
 
 @Suite("Replaceable prediction overlay")
 struct PredictionOverlayTests {
+    @Test
+    func tileReplacementCommitsAndRollsBackWithoutLosingVisibleFootprint() throws {
+        var state = PredictionTileReplacementState(maximumTileCount: 8)
+        let first = [
+            PaintTileCoordinate(x: 0, y: 0),
+            PaintTileCoordinate(x: 1, y: 0),
+        ]
+        let second = [
+            PaintTileCoordinate(x: 1, y: 0),
+            PaintTileCoordinate(x: 0, y: 1),
+        ]
+
+        try state.beginReplacement(first)
+        #expect(state.visibleCoordinates.isEmpty)
+        #expect(state.plannedCoordinates == first)
+        #expect(state.priorCoordinatesToClear.isEmpty)
+        state.commitReplacement()
+        #expect(state.visibleCoordinates == first)
+
+        try state.beginReplacement(second)
+        #expect(state.priorCoordinatesToClear == first)
+        state.rollbackReplacement()
+        #expect(state.visibleCoordinates == first)
+        #expect(state.plannedCoordinates.isEmpty)
+        #expect(state.priorCoordinatesToClear.isEmpty)
+
+        try state.beginReplacement([])
+        #expect(state.priorCoordinatesToClear == first)
+        state.commitReplacement()
+        #expect(state.visibleCoordinates.isEmpty)
+    }
+
     @Test(arguments: [StrokeSampleKind.predicted, .estimatedUpdate])
     @MainActor
     func invalidBeginKindsAreRejectedBeforeStrokeMutation(
