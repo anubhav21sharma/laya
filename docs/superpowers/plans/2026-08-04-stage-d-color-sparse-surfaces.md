@@ -340,8 +340,9 @@ wiring changes:
 - Capture and restore operations are two-phase and generation-scoped. Publish
   occurs only after all tile blits complete. Release during in-flight work is
   deferred, and failure/cancel discards the entire provisional pair.
-- Keeps the old full-surface store only as a private compatibility helper until
-  Task 5 switches every production route; Task 6 then deletes it.
+- Keeps the old full-surface store as a private production compatibility helper
+  while Task 5 proves the tiled route behind an explicit test seam. Task 6 is
+  the only production switch and then deletes the helper.
 
 - [ ] Write RED tests for 1/2/4-tile capture/restore, empty-before, erase-to-
   empty, stale token, wrong layer/generation/format/coordinate, duplicate
@@ -359,10 +360,14 @@ wiring changes:
 
 **Files:**
 
+- Modify: `Sources/MetalRenderer/Raster/PaintTileStore.swift`
+- Modify: `Sources/MetalRenderer/Raster/TiledRasterSurface.swift`
+- Modify: `Sources/MetalRenderer/Deposition/DepositionPipelineLibrary.swift`
 - Modify: `Sources/MetalRenderer/StrokeRuntime/StrokePrivateSurfaceEncoder.swift`
 - Modify: `Sources/MetalRenderer/StrokeRuntime/PredictionOverlay.swift`
 - Modify: `Sources/MetalRenderer/StrokeRuntime/StrokeFrameScheduler.swift`
 - Create: `Sources/MetalRenderer/StrokeRuntime/StrokeTileSurfaceResources.swift`
+- Modify: `Tests/MetalRendererTests/StageDBaselineContractTests.swift`
 - Create: `Tests/MetalRendererTests/StrokeTileSurfaceEncoderTests.swift`
 - Modify: `Tests/MetalRendererTests/PredictionOverlayTests.swift`
 - Modify: `Tests/MetalRendererTests/StrokeFrameSchedulerTests.swift`
@@ -370,27 +375,73 @@ wiring changes:
 
 **Interfaces:**
 
-- Replaces the two full-canvas textures in `StrokeMetalSurfaceResources` with
-  sparse authoritative and prediction tile sets from Task 2.
-- `StrokePreparedSurfaceLease` carries immutable sorted dirty-tile bindings,
-  generation/token/layer, clear flags, and actual/predicted counts. The main
-  actor can read leased textures; the scheduler cannot mutate them until return.
-- Projected record bounds are partitioned by tile before encoding. Per-tile
-  scissor/coordinate uniforms preserve canonical positions and symmetry.
-- This task prepares the new path behind a test-only installation seam; Task 6 is
-  the single production switch.
+- Adds an explicit legacy-versus-tiled backend to
+  `StrokeMetalResourceDescriptor`. Normal application construction continues to
+  install the existing full-canvas BGRA8 backend; only tests and the allocation
+  harness may select the tiled backend in this task. Task 6 remains the single
+  production switch and deletes the legacy backend.
+- `StrokeTileSurfaceResources` owns sparse RGBA16F authoritative and prediction
+  `TiledRasterSurface`s from Task 2, one shared bounded store, an immutable
+  per-stroke layer/generation identity, and preallocated partition/upload
+  workspace. It receives a separately prepared RGBA16F deposition pipeline;
+  the compiled brush's current BGRA8 pipeline must never be bound to a tile.
+- Extend `PaintTileStore`/`TiledRasterSurface` with a checked, already-sorted
+  reserve/return path whose warmed bookkeeping does not allocate. The existing
+  convenience API may continue to canonicalize arbitrary caller arrays.
+- `StrokePreparedSurfaceLease` carries immutable, row-major sorted bindings for
+  every currently visible authoritative and prediction tile, not only the
+  current dirty delta. It also carries generation/token/layer, per-binding clear
+  state, and actual/predicted counts. Main may read those textures until exact
+  acknowledgement; the scheduler may neither mutate nor evict them meanwhile.
+- Projected support is clipped, partitioned, and deduplicated before encoding.
+  A separately checked tile-record-reference budget accounts for one projected
+  record intersecting multiple tiles; overflow fails typed before any store or
+  GPU mutation. Do not size this workspace from projected-record count alone.
+- Per-tile encoding preserves global canonical, clip, and grain coordinates by
+  retaining the full-storage frame uniforms, translating the Metal viewport by
+  the physical tile origin, and scissoring to the tile's valid extent. Radial
+  records map `RadialPageCoordinate` through `RadialSectorLayout` to the
+  resident atlas slot before selecting the physical tile; missing pages fail
+  typed and atomically.
+- Prediction replacement owns allocation-stable visible, planned, and
+  prior-to-clear tile-coordinate lists. The planned footprint publishes only
+  after GPU success; shorter, longer, overlapping, and empty replacements clear
+  only the preceding prediction footprint and failure preserves the old one.
+- Task 5 proves sparse geometry, lifecycle, and storage. Encoded-sRGB-to-linear
+  conversion and application consumption of tiled leases remain Task 6 work.
+- Correct Task 0's source-structure contract to inventory the legacy production
+  allocations separately from the tiled test seam. The tiled seam must contain
+  no full-canvas paint allocation, while the legacy inventory remains frozen
+  until Task 6 removes and inverts it.
 
-- [ ] Write RED tests for authoritative append, shorter/longer prediction
-  replacement, seam/corner partition, radial pages, tile allocation failure,
-  command failure, late completion, stale lease return, cancel, and immediate
-  reuse.
-- [ ] Prove an untouched 4096 canvas has zero stroke tiles and a long diagonal
-  owns only its intersecting tiles; no full-canvas texture may appear.
-- [ ] Prove actual ordinals deposit once, prediction on/off produces identical
-  committed candidate tile bytes, and prediction clears only its prior tiles.
-- [ ] Extend the release allocation probe to the warmed tile-partition and lease
-  paths; application-level input/prepare bookkeeping remains zero-allocation.
-- [ ] Run `swift test --filter 'StrokeTileSurfaceEncoderTests|PredictionOverlayTests|StrokeFrameSchedulerTests|StageCAcceptanceLifecycleTests'` and
+- [ ] First write pure partition RED tests for empty, one-tile, seam, corner,
+  deduplication, row-major ordering, long diagonal, clipped support, radial
+  logical-page-to-atlas mapping, missing radial page, and checked tile-reference
+  overflow. These tests must not require a Metal device.
+- [ ] Then write resource/encoder RED tests proving an untouched 4096 canvas
+  owns zero tiles, one dab allocates only intersecting tiles, no full-canvas
+  texture exists in the tiled backend, and an RGBA16F pipeline binding is used.
+- [ ] Add authoritative append and multi-frame tests proving each actual ordinal
+  deposits once per required tile, previously visible tiles remain readable in
+  the whole-visible lease, and exact ACK returns every pin.
+- [ ] Add shorter, longer, overlapping, multi-page, and empty prediction
+  replacement tests. Prediction enabled/disabled must produce identical
+  authoritative candidate tile bytes, and replacement may clear only its prior
+  prediction tiles.
+- [ ] Inject failure before tile allocation, partition/reference publication,
+  command encoding, completion, and lease publication. Cover late completion,
+  stale/wrong generation-token-layer ACK, cancel with Main ownership, deferred
+  retirement, and immediate next-stroke reuse; no partial footprint may publish.
+- [ ] Install the tiled backend only through a scheduler test seam and exercise
+  begin, authoritative append, prediction, estimated replacement, finish,
+  cancel, failure, radial pages, and immediate reuse. Run the unchanged Stage C
+  lifecycle against the legacy production backend to prove no early switch.
+- [ ] Extend the release allocation probe with explicit warmed
+  `surfaceTilePartition` and `surfaceTileLease` stages. Prewarm maximum bounded
+  storage before arming; application input, partition, lease bookkeeping, ACK,
+  cancel, and reuse remain zero-allocation. Report Metal driver allocation
+  separately instead of hiding it in application counts.
+- [ ] Run `swift test --filter 'StageDBaselineContractTests|StrokeTileSurfaceEncoderTests|PredictionOverlayTests|StrokeFrameSchedulerTests|StageCAcceptanceLifecycleTests'` and
   `scripts/run-brush-input-allocation-probe.sh all`.
 - [ ] Commit as `refactor(render): prepare sparse stroke surfaces`.
 
