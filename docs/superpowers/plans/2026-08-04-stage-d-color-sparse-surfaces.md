@@ -687,6 +687,9 @@ wiring changes:
 - Modify: `Sources/MetalRenderer/PeriodicRepeatExporter.swift`
 - Modify: `Sources/MetalRenderer/PeriodicBakedRepeatExporter.swift`
 - Modify: `App/PatternSpike/EditorSessionController.swift`
+- Create: `App/PatternSpike/Panels/LayerPanel.swift`
+- Modify: `App/PatternSpike/ContentView.swift`
+- Modify: `App/PatternSpike/Panels/EditorTopBar.swift`
 - Modify: `App/PatternSpike/Persistence/PatternProjectBridge.swift`
 - Modify: `Sources/SafeArchive/SafeArchive.swift`
 - Modify: `Sources/SafeArchive/SafeArchiveCodec.swift`
@@ -709,6 +712,15 @@ wiring changes:
 - Modify: `Tests/SafeArchiveTests/SafeArchiveIOTests.swift`
 
 **Interfaces:**
+
+Task 7 is implemented and reviewed in eight bounded subphases rather than as
+one integration commit: freeze Task 6 contracts; CPU reference plus immutable
+composite plans; GPU compositor/shared display-export kernel; atomic layer
+transactions plus production layer controls; persisted tile-ID bijection;
+bounded SafeArchive provider/consumer primitives; v4 streaming persistence and
+legacy migration; then exporter integration and eight-layer budget/failure
+traces. Each subphase receives RED tests, a focused gate, and scoped review
+before the next seam is activated.
 
 - Task 7 extends—not replaces—Task 6's generic registry and immutable sampling
   plan. `PreparedLayerCompositePlan` contains an immutable bottom-to-top visible
@@ -749,6 +761,9 @@ wiring changes:
   surface revision, byte order, payload bytes, and semantic hashes. Runtime
   `PaintTileID` and history-store namespaces are freshly allocated and are not
   serialized.
+- Canonicalize ZIP entry order, timestamps, compression settings, and metadata
+  under executable tests, then require unconditional save/load/save semantic
+  and byte equality. Do not infer byte stability from semantic hashing.
 - SafeArchive gains bounded `SafeArchiveEntryProvider` and
   `SafeArchiveEntryConsumer` chunk APIs. Project save provides manifest and tile
   entries lazily while holding one document snapshot lease from manifest freeze
@@ -792,7 +807,8 @@ wiring changes:
   declared-size mismatch, checksum failure, duplicate/unsafe path, aggregate
   overflow, provider/consumer throw at every chunk, atomic destination replace,
   snapshot mutation while saving, and exact lease closure. Peak payload memory
-  must be bounded by one tile plus fixed archive buffers, not archive size.
+  must be measured and bounded by one tile plus fixed archive buffers, not
+  inferred from chunked APIs or allowed to scale with archive size.
 - [ ] Add v1/v2/v3 fixtures covering translucent pixels, multiple declared
   layers, periodic cells, and radial pages. Require visual import parity within
   one encoded channel, no layer loss, and transactional failure for invalid or
@@ -802,9 +818,16 @@ wiring changes:
   flattened export against an independent CPU layer/color reference and prove
   native bytes remain lossless linear RGBA16F.
 - [ ] Run fully populated and sparse 2048 × 2048 eight-layer display/export
-  traces. Persistent plus page-in plus in-flight composition bytes must remain
+  traces without requiring all roughly 512 MiB of raw RGBA16F layer content to
+  be resident simultaneously. Persistent plus page-in plus in-flight
+  composition bytes must remain
   within the checked shared/transient budgets; leases, queues, page tables, and
   binding batches return to their warm baseline after completion or failure.
+- [ ] Enumerate prepare, allocation, upload, metadata, registry swap, GPU
+  completion, persistence provider/consumer, checksum, and atomic file-replace
+  failure seams. Every injected failure proves unchanged pixels, metadata,
+  history cursor, and generation; zero leaked leases/tokens; and immediate
+  successful reuse.
 - [ ] Run `swift test --filter 'LayerStackTests|LayerCompositorTests|LayerSurfaceTransactionTests|PersistedPaintTileIdentityMapTests|EditorSessionControllerTests|SafeArchiveCodecTests|SafeArchiveIOTests|PatternPaintTileCodecTests|PatternProjectArchiveTests|PatternProjectPackageCodecTests|PatternRasterExportCodecTests|PatternProjectBridgeTests'`.
 - [ ] Commit as `feat(layers): compose bounded linear tiles`.
 
@@ -818,6 +841,14 @@ wiring changes:
 - Create: `scripts/run-stage-d-acceptance.sh`
 - Create: `App/PatternSpike/Harness/StageDAppRouteEvidence.swift`
 - Create: `App/UITests/StageDAppRouteUITests.swift`
+- Modify: `App/PatternSpike/Debug/DebugPerformanceHUD.swift`
+- Modify: `App/PatternSpike/Debug/DebugPerformanceMonitor.swift`
+- Modify: `App/PatternSpike/ContentView.swift`
+- Modify: `Sources/MetalRenderer/GridRenderer.swift`
+- Modify: `Sources/MetalRenderer/Raster/DocumentPaintSurfaceStore.swift`
+- Modify: `Sources/MetalRenderer/Raster/PaintTileStore.swift`
+- Modify: `Sources/MetalRenderer/Compositing/SparseTileSamplingPlan.swift`
+- Modify: `Sources/MetalRenderer/StrokeRuntime/StrokeRuntimeTelemetry.swift`
 - Modify: `App/UITests/PatternSpikeMacUITests.swift`
 - Modify: `App/Tests/ContentViewLifecycleTests.swift`
 - Modify: `App/Tests/EditorSessionControllerTests.swift`
@@ -836,7 +867,7 @@ wiring changes:
 | Modes | plain; periodic grid, half-drop, brick, mirror-X, mirror-Y, mirror-XY, rotational, square-rotation, square-kaleidoscope, hexagons, rotation-3, rotation-6, kaleidoscope-60, kaleidoscope-30; radial rotation/mirror/mandala at minimum and maximum rays; resize crop/empty-fill | seam probes, logical-to-physical maps, stable hashes with prediction on/off, bounded radial storage |
 | Layers | one/eight layers, sparse/full, all blend modes, order, visibility, opacity, lock, active fallback, add/delete/undo/redo/resize | CPU/GPU blend parity, exact target layer/revision identity, transactional rollback, shared budget |
 | Persistence/export | v1/v2/v3 imports, v4 empty/periodic/radial/eight-layer, save/load/save, finite/repeat/baked/PNG | bounded streaming reads, stable IDs/revisions/hashes/bytes, independent flattened reference, one transfer conversion |
-| Sustained runtime | cold/warm, 10-second wall trace, 36,000-frame accelerated 10-minute trace, allocation/residency pressure, injected failure/reuse | JSONL plus summary: input provenance, replay, queues, prepare/submit/GPU/present p95/p99, allocations, page tables/bindings/leases, resident/high-water bytes |
+| Sustained runtime | cold/warm, 10-second wall trace, 36,000-sample no-sleep accelerated trace, allocation/residency pressure, injected failure/reuse | JSONL plus summary: input provenance, replay, queues, prepare/submit/GPU/present p95/p99, allocations, page tables/bindings/leases, resident/high-water bytes |
 | App/UI routes | color selection, draw/erase/clear, size/brush/layer changes, mode/resize, undo/redo, save/open/export, tilde HUD, digit/letter/command shortcuts while canvas vs numeric fields own focus | Xcode-hosted `PatternSpikeMacUITests` `.xcresult` plus app-written route manifest prove real control/key delivery, focus ownership, production sparse route, disabled/rejected states, and matching state/pixels |
 
 - [ ] Implement `StageDAcceptanceProbe` as the manifest aggregator for package
@@ -858,6 +889,10 @@ wiring changes:
   undo/redo, save/open/export, text-field focus/keyboard shortcuts, failed
   operation recovery, and immediate next action. Assert visible state,
   canonical bytes, history cursor, layer stack, generation, and pending tokens.
+- [ ] Add production layer controls before claiming any layer UI route. Configure
+  deterministic temporary open/save/export URLs at launch so automation never
+  depends on a native file-dialog interaction, while still proving the real app
+  command, persistence bridge, atomic replacement, and evidence route executed.
 - [ ] Run actual `XCUIApplication` controls in `StageDAppRouteUITests`: click
   draw/erase/clear, brush/size/layer/mode/resize, undo/redo, save/open/export;
   send tilde, digits, letters, Command-Z, and Command-Shift-Z first to canvas and
@@ -871,12 +906,18 @@ wiring changes:
   no dropped actual input, no GPU wait on input/main, all queues and lease/token
   counts at zero after quiescence, resident plus transient bytes within their
   configured budgets, and no per-event page-table rebuild or full-canvas source.
-- [ ] The 10-second and accelerated 10-minute gates use existing Stage B
+- [ ] Run two complementary sustained gates: the current production GPU/app
+  harness, which advances ten logical minutes in roughly ten wall-clock
+  seconds, and the existing no-sleep allocation/scheduler probe, which actually
+  processes 36,000 accelerated samples. Neither is described as 36,000 physical
+  presented frames. Both use existing Stage B
   thresholds: event-to-submit miss fraction `<= 1%`, early/late 400-frame
   `BenchmarkLongStrokeMetrics` limits, bounded queue high-water, stable warmed
-  capacities/allocation counts, and last-decile work no greater than
-  `max(firstDecile * 4, firstDecile + 100 ms)` for the accelerated scheduler
-  trace. Record CPU preparation, event-to-submit, GPU, presentation p95/p99,
+  capacities/allocation counts, the production probe's last-decile-per-event
+  bound `<= max(firstDecile * 2, firstDecile + 100_000 ns)`, and the separate
+  scheduler trace bound `<= max(firstDecile * 4, firstDecile + 100 ms)`.
+  Both flat-work gates must pass; neither substitutes for the other. Record CPU
+  preparation, event-to-submit, GPU, presentation p95/p99,
   missed-frame fraction, page-in/cache counts, and resident/in-flight high-water;
   do not claim physical 120 Hz performance from this evidence.
 - [ ] Run the focused color/surface/history/layer/persistence/export suite and
@@ -903,7 +944,11 @@ wiring changes:
 - [ ] Run the broad suite. It must contain only the exact frozen 27 Stage B issue
   records and no new issue. A resolved frozen record requires independent
   evidence plus an explicit reviewed baseline removal; never regenerate the
-  allowlist or golden from current output.
+  allowlist or golden from current output. Capture the expected nonzero `swift
+  test` output and validate it with
+  `scripts/verify-swift-testing-baseline.sh`; a raw nonzero status is not by
+  itself a regression and a raw green is not a substitute for allowlist
+  verification.
 - [ ] Run a fresh independent review over `ca5dff5..HEAD` against this plan and
   the parent corrective program. Resolve every Critical/Important finding,
   rerun the complete affected matrix plus broad/build gates, and require the
