@@ -155,7 +155,7 @@ struct PaintTileResidencyTests {
         }
         #expect(store.snapshot() == beforeStaleReturn)
         try store.release(visible, surfaceID: surfaceID, currentGeneration: 11)
-        #expect(try store.applyMemoryPressure(targetResidentBytes: 0).evictedIdentities.count == 1)
+        #expect(try store.applyMemoryPressure(targetResidentBytes: 0).evictedIdentities.isEmpty)
         #expect(store.snapshot().residentByteCount == 0)
     }
 
@@ -179,6 +179,117 @@ struct PaintTileResidencyTests {
             )
         }
         #expect(store.snapshot() == before)
+    }
+
+    @Test
+    func replacementRejectsPeakTransferAboveExplicitHeadroomWithoutMutation() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(
+            device: device,
+            byteBudget: bytes,
+            transferByteCapacity: bytes * 5 - 1
+        )
+        let surfaceID = UUID()
+        let layerID = UUID()
+        let size = PixelSize(width: 512, height: 256)
+        let old = try store.reserve(
+            surfaceID: surfaceID,
+            layerID: layerID,
+            generation: 1,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0)],
+            pinReasons: [.dirty]
+        )
+        try store.markModified(old, surfaceID: surfaceID, currentGeneration: 1)
+        try store.release(old, surfaceID: surfaceID, currentGeneration: 1)
+        let before = store.snapshot()
+
+        #expect(throws: PaintTileStoreError.transferCapacityExceeded(
+            requiredBytes: bytes * 5,
+            capacityBytes: bytes * 5 - 1,
+            residentBytes: bytes,
+            allocationBytes: bytes,
+            stagingBytes: bytes * 3
+        )) {
+            _ = try store.reserve(
+                surfaceID: surfaceID,
+                layerID: layerID,
+                generation: 1,
+                pixelSize: size,
+                coordinates: [.init(x: 1, y: 0)],
+                pinReasons: [.active]
+            )
+        }
+        #expect(store.snapshot() == before)
+    }
+
+    @Test
+    func replacementReportsBoundedPeakTextureAndStagingOwnership() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(
+            device: device,
+            byteBudget: bytes,
+            transferByteCapacity: bytes * 5
+        )
+        let surfaceID = UUID()
+        let layerID = UUID()
+        let size = PixelSize(width: 512, height: 256)
+        let old = try store.reserve(
+            surfaceID: surfaceID,
+            layerID: layerID,
+            generation: 1,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0)],
+            pinReasons: [.dirty]
+        )
+        try store.markModified(old, surfaceID: surfaceID, currentGeneration: 1)
+        try store.release(old, surfaceID: surfaceID, currentGeneration: 1)
+
+        let replacement = try store.reserve(
+            surfaceID: surfaceID,
+            layerID: layerID,
+            generation: 1,
+            pixelSize: size,
+            coordinates: [.init(x: 1, y: 0)],
+            pinReasons: [.active]
+        )
+
+        #expect(store.snapshot().lastTransferAccounting == PaintTileTransferAccounting(
+            residentTextureBytesBefore: bytes,
+            allocatedTextureBytes: bytes,
+            uploadStagingBytes: bytes,
+            readbackStagingBytes: bytes,
+            capturedPayloadBytes: bytes,
+            peakTrackedBytes: bytes * 5,
+            capacityBytes: bytes * 5
+        ))
+        #expect(store.snapshot().residentByteCount == bytes)
+        try store.release(replacement, surfaceID: surfaceID, currentGeneration: 1)
+    }
+
+    @Test
+    func pressureReportsTypedUnsatisfiedPinnedResidency() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes)
+        let surfaceID = UUID()
+        let layerID = UUID()
+        let lease = try store.reserve(
+            surfaceID: surfaceID,
+            layerID: layerID,
+            generation: 3,
+            pixelSize: PixelSize(width: 256, height: 256),
+            coordinates: [.init(x: 0, y: 0)],
+            pinReasons: [.inFlight]
+        )
+
+        #expect(try store.applyMemoryPressure(targetResidentBytes: 0) == .unsatisfied(
+            targetBytes: 0,
+            remainingResidentBytes: bytes,
+            pinnedBytes: bytes,
+            backingByteCount: 0,
+            evictedIdentities: []
+        ))
+        try store.release(lease, surfaceID: surfaceID, currentGeneration: 3)
     }
 
     private func identity(

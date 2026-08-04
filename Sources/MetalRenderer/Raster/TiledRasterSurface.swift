@@ -196,6 +196,12 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
     }
 
     public func returnLease(_ lease: PaintTileLease) throws {
+        guard lease.layerID == layerID else {
+            throw TiledRasterSurfaceError.leaseLayerMismatch(
+                expected: layerID,
+                actual: lease.layerID
+            )
+        }
         try withLock {
             try store.release(
                 lease,
@@ -264,6 +270,16 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
                     generation: currentGeneration
                 ),
                 entries: entries
+            )
+        }
+    }
+
+    public func payloadSnapshot() throws -> PaintTilePayloadSnapshot {
+        try withLock {
+            try store.payloadSnapshot(
+                surfaceID: surfaceID,
+                layerID: layerID,
+                generation: currentGeneration
             )
         }
     }

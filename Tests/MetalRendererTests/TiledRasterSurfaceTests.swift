@@ -36,6 +36,87 @@ struct TiledRasterSurfaceTests {
     }
 
     @Test
+    func returningFinalPristineLeaseRestoresZeroTextureEmptyState() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let surface = TiledRasterSurface(
+            device: device,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 512, height: 512),
+            byteBudget: bytes
+        )
+        let lease = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0)],
+            pinReasons: [.active]
+        )
+
+        try surface.returnLease(lease)
+
+        #expect(surface.isEmpty)
+        #expect(surface.residentTileCount == 0)
+        #expect(surface.residentByteCount == 0)
+    }
+
+    @Test
+    func pristineTileSurvivesNestedLeaseUntilLastReturn() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let surface = TiledRasterSurface(
+            device: device,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 512, height: 512),
+            byteBudget: bytes
+        )
+        let active = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0)],
+            pinReasons: [.active]
+        )
+        let visible = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0)],
+            pinReasons: [.visible]
+        )
+
+        try surface.returnLease(active)
+        #expect(!surface.isEmpty)
+        #expect(surface.residentTileCount == 1)
+
+        try surface.returnLease(visible)
+        #expect(surface.isEmpty)
+        #expect(surface.residentTileCount == 0)
+    }
+
+    @Test
+    func sharedStoreSurfaceCannotReturnAnotherLayersLease() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes * 2)
+        let sharedSurfaceID = UUID()
+        let first = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 512, height: 512),
+            surfaceID: sharedSurfaceID
+        )
+        let second = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 512, height: 512),
+            surfaceID: sharedSurfaceID
+        )
+        let lease = try first.reserveTiles(
+            at: [.init(x: 0, y: 0)],
+            pinReasons: [.active]
+        )
+        let before = first.backingSnapshot()
+
+        #expect(throws: TiledRasterSurfaceError.leaseLayerMismatch(
+            expected: second.layerID,
+            actual: first.layerID
+        )) {
+            try second.returnLease(lease)
+        }
+        #expect(first.backingSnapshot() == before)
+        try first.returnLease(lease)
+    }
+
+    @Test
     func crossingCornerReservesFourPhysicalTilesAndDirtyRevisionAdvancesOnce() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let surface = TiledRasterSurface(
@@ -75,6 +156,7 @@ struct TiledRasterSurfaceTests {
             at: [.init(x: 0, y: 0), .init(x: 1, y: 0)],
             pinReasons: [.historyBefore]
         )
+        try surface.markDirty(first)
         let before = surface.backingSnapshot()
         #expect(before.tileCoordinates == [.init(x: 0, y: 0), .init(x: 1, y: 0)])
         #expect(before.residentByteCount == bytes * 2)
@@ -161,6 +243,38 @@ struct TiledRasterSurfaceTests {
     }
 
     @Test
+    func payloadSnapshotCapturesAndRestoresModifiedResidentWithoutPressure() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let surface = TiledRasterSurface(
+            device: device,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256),
+            byteBudget: bytes
+        )
+        let lease = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0)],
+            pinReasons: [.dirty]
+        )
+        let expected = Data((0..<bytes).map {
+            UInt8(truncatingIfNeeded: $0 &* 19 &+ 7)
+        })
+        try upload(expected, into: lease.bindings[0].texture, device: device)
+        try surface.markDirty(lease)
+
+        let snapshot = try surface.payloadSnapshot()
+        #expect(snapshot.entries.count == 1)
+        #expect(snapshot.entries[0].payload == .rgba16Float(expected))
+        try upload(Data(count: bytes), into: lease.bindings[0].texture, device: device)
+        guard case let .rgba16Float(payload) = snapshot.entries[0].payload else {
+            Issue.record("Modified resident snapshot must contain RGBA16F bytes")
+            return
+        }
+        try upload(payload, into: lease.bindings[0].texture, device: device)
+        #expect(try download(lease.bindings[0].texture, device: device) == expected)
+        try surface.returnLease(lease)
+    }
+
+    @Test
     func failedReserveLeavesSurfaceAndBackingSnapshotBitForBitUnchanged() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let surface = TiledRasterSurface(
@@ -210,6 +324,9 @@ struct TiledRasterSurfaceTests {
         for frame in 0..<20_000 {
             let coordinate = warmCoordinates[frame & 3]
             let lease = try surface.reserveTiles(at: [coordinate], pinReasons: [.visible, .inFlight])
+            if frame < warmCoordinates.count {
+                try surface.markDirty(lease)
+            }
             try surface.returnLease(lease)
             if frame == 3 {
                 firstStable = surface.backingSnapshot()
