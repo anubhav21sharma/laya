@@ -576,6 +576,14 @@ with no unresolved Critical or Important issue.
 
 ## Stage D — Establish Correct Color And Bounded Paint Surfaces
 
+The three original tasks below define the approved Stage D outcome, but their
+file inventory predates the Stage B off-main surface runtime and the accepted
+Stage C lifecycle. They are superseded for execution by the just-in-time
+decomposition in
+[`2026-08-04-stage-d-color-sparse-surfaces.md`](2026-08-04-stage-d-color-sparse-surfaces.md).
+The Stage D exit and every program-wide constraint in this document remain
+binding.
+
 ### Task 12: Implement A Linear-Light Color Contract
 
 **Files:**
