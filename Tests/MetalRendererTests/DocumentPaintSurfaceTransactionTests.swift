@@ -1,4 +1,5 @@
 import Foundation
+import EditorCore
 import Metal
 @testable import MetalRenderer
 import PatternEngine
@@ -876,6 +877,602 @@ struct DocumentPaintSurfaceTransactionTests {
             coordinate,
         ])
     }
+
+    @Test
+    func publishedRestoreRemovesAndReplacesWithHistoryCursorAdvancingOnlyAfterSuccess() throws {
+        guard let fixture = try TransactionFixture.make(width: 256, height: 256)
+        else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let committed = try transactionCommitWithHistory(
+            fixture,
+            coordinates: [coordinate]
+        )
+        let pair = try #require(committed.historyPair)
+        let history = DocumentHistory()
+        let command = DocumentHistoryCommand.raster(RasterHistoryCommand(
+            layerID: fixture.layerID,
+            kind: .draw,
+            before: pair.before,
+            after: pair.after
+        ))
+        _ = history.appendSuccessful(command)
+
+        let undo = try #require(try history.beginUndo())
+        let preparedUndo = try fixture.coordinator.prepareRestore(
+            fixture.restoreRequest(
+                reference: pair.before,
+                expected: [.init(coordinate: coordinate, disposition: .remove)]
+            )
+        )
+        #expect(fixture.registry.snapshot().generation == 1)
+        #expect(history.canUndo)
+        #expect(!history.canRedo)
+        let encodedUndo = try fixture.coordinator.encodeRestore(preparedUndo)
+        let completedUndo = try fixture.coordinator.completeRestore(
+            encodedUndo,
+            as: .succeeded
+        )
+        let terminalUndo = try fixture.coordinator.prepareTerminalRestore(
+            completedUndo
+        )
+        let undoResult = try fixture.coordinator.publishRestore(terminalUndo)
+        #expect(undoResult.reference == pair.before)
+        #expect(undoResult.beforeGeneration == 1)
+        #expect(undoResult.afterGeneration == 2)
+        #expect(fixture.registry.snapshot().layers[0].references.isEmpty)
+        #expect(history.canUndo)
+        #expect(!history.canRedo)
+
+        try history.finishNavigation(token: undo.token, succeeded: true)
+        #expect(!history.canUndo)
+        #expect(history.canRedo)
+
+        let redo = try #require(try history.beginRedo())
+        let preparedRedo = try fixture.coordinator.prepareRestore(
+            fixture.restoreRequest(
+                reference: pair.after,
+                expected: [.init(coordinate: coordinate, disposition: .replace)]
+            )
+        )
+        let encodedRedo = try fixture.coordinator.encodeRestore(preparedRedo)
+        let completedRedo = try fixture.coordinator.completeRestore(
+            encodedRedo,
+            as: .succeeded
+        )
+        let terminalRedo = try fixture.coordinator.prepareTerminalRestore(
+            completedRedo
+        )
+        _ = try fixture.coordinator.publishRestore(terminalRedo)
+        try history.finishNavigation(token: redo.token, succeeded: true)
+        #expect(history.canUndo)
+        #expect(!history.canRedo)
+        #expect(fixture.registry.snapshot().layers[0].references.map(\.coordinate)
+            == [coordinate])
+    }
+
+    @Test
+    func publishedKnownClearRestoreIsIdempotentWhenActiveBaseAlreadyOmitsCoordinate() throws {
+        guard let fixture = try TransactionFixture.make(width: 256, height: 256)
+        else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let pair = try transactionCapturedPair(
+            fixture,
+            coordinates: [coordinate],
+            beforePresentCoordinates: [],
+            afterPresentCoordinates: [],
+            publish: true
+        )
+
+        for expectedGeneration in 1...2 {
+            let prepared = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: pair.after,
+                    expected: [
+                        .init(
+                            coordinate: coordinate,
+                            disposition: .remove
+                        ),
+                    ]
+                )
+            )
+            let encoded = try fixture.coordinator.encodeRestore(prepared)
+            let completed = try fixture.coordinator.completeRestore(
+                encoded,
+                as: .succeeded
+            )
+            let terminal = try fixture.coordinator.prepareTerminalRestore(
+                completed
+            )
+            let result = try fixture.coordinator.publishRestore(terminal)
+
+            #expect(result.afterGeneration == UInt64(expectedGeneration))
+            #expect(result.restoredCoordinates == [coordinate])
+            let registry = fixture.registry.snapshot()
+            #expect(registry.layers[0].references.isEmpty)
+            #expect(registry.activeTileLeaseCount == 0)
+            #expect(registry.preparedCandidateCount == 0)
+            #expect(fixture.revisions.snapshot().inFlightInstallLeaseCount == 0)
+            #expect(fixture.coordinator.snapshot().state == .idle)
+        }
+
+        try fixture.revisions.release(pair.revisionIDs)
+    }
+
+    @Test
+    func restoreRejectsProvisionalForgedForeignLayerGeometryAndDispositionAuthority() throws {
+        guard let fixture = try TransactionFixture.make(width: 256, height: 256)
+        else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let provisional = try transactionCapturedPair(
+            fixture,
+            coordinate: coordinate,
+            publish: false
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreReferenceUnavailable) {
+            _ = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: provisional.after,
+                    expected: [
+                        .init(coordinate: coordinate, disposition: .replace),
+                    ]
+                )
+            )
+        }
+        try fixture.revisions.discard(provisional)
+
+        let published = try transactionCapturedPair(
+            fixture,
+            coordinate: coordinate,
+            publish: true
+        )
+        let forged = RasterRevisionReference(
+            id: published.after.id,
+            pixelSize: published.after.pixelSize,
+            documentPixelSize: published.after.documentPixelSize,
+            regions: published.after.regions,
+            retainedBytes: published.after.retainedBytes + 1,
+            storage: published.after.storage
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreReferenceUnavailable) {
+            _ = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: forged,
+                    expected: [
+                        .init(coordinate: coordinate, disposition: .replace),
+                    ]
+                )
+            )
+        }
+
+        guard let foreignFixture = try TransactionFixture.make(
+            width: 256,
+            height: 256,
+            layerID: fixture.layerID
+        ) else { return }
+        let foreign = try transactionCapturedPair(
+            foreignFixture,
+            coordinate: coordinate,
+            publish: true
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreReferenceUnavailable) {
+            _ = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: foreign.after,
+                    expected: [
+                        .init(coordinate: coordinate, disposition: .replace),
+                    ]
+                )
+            )
+        }
+
+        let wrongLayer = UUID()
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreLayerMismatch(
+                expected: fixture.layerID,
+                actual: wrongLayer
+            )) {
+            _ = try fixture.coordinator.prepareRestore(
+                DocumentPaintSurfaceRestoreRequest(
+                    reference: published.after,
+                    targetGeometry: fixture.geometry,
+                    layerID: wrongLayer,
+                    expectedInstallDispositions: [
+                        .init(coordinate: coordinate, disposition: .replace),
+                    ]
+                )
+            )
+        }
+        let wrongGeometry = try transactionGeometry(width: 512, height: 256)
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreGeometryMismatch) {
+            _ = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: published.after,
+                    expected: [
+                        .init(coordinate: coordinate, disposition: .replace),
+                    ],
+                    targetGeometry: wrongGeometry
+                )
+            )
+        }
+        let wrongVisibleGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 128, height: 256),
+            storagePixelSize: fixture.geometry.storagePixelSize,
+            radialLayout: nil
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreGeometryMismatch) {
+            _ = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: published.after,
+                    expected: [
+                        .init(
+                            coordinate: coordinate,
+                            disposition: .replace
+                        ),
+                    ],
+                    targetGeometry: wrongVisibleGeometry
+                )
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreDispositionMismatch) {
+            _ = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: published.after,
+                    expected: [
+                        .init(coordinate: coordinate, disposition: .remove),
+                    ]
+                )
+            )
+        }
+        #expect(fixture.coordinator.snapshot().state == .idle)
+        try fixture.revisions.release(published.revisionIDs)
+        try foreignFixture.revisions.release(foreign.revisionIDs)
+    }
+
+    @Test
+    func restoreCancellationAtPreparedEncodedAndCompletedIsExactlyOnceAndReusable() throws {
+        for phase in 0..<3 {
+            guard let fixture = try TransactionFixture.make(
+                width: 256,
+                height: 256
+            ) else { return }
+            let coordinate = PaintTileCoordinate(x: 0, y: 0)
+            let pair = try transactionCapturedPair(
+                fixture,
+                coordinate: coordinate,
+                publish: true
+            )
+            let prepared = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: pair.after,
+                    expected: [
+                        .init(coordinate: coordinate, disposition: .replace),
+                    ]
+                )
+            )
+            switch phase {
+            case 0:
+                try fixture.coordinator.discard(prepared)
+                #expect(throws: DocumentPaintSurfaceTransactionError.staleHandle) {
+                    try fixture.coordinator.discard(prepared)
+                }
+            case 1:
+                let encoded = try fixture.coordinator.encodeRestore(prepared)
+                try fixture.coordinator.discard(encoded)
+                #expect(throws: DocumentPaintSurfaceTransactionError.staleHandle) {
+                    try fixture.coordinator.discard(encoded)
+                }
+            default:
+                let encoded = try fixture.coordinator.encodeRestore(prepared)
+                let completed = try fixture.coordinator.completeRestore(
+                    encoded,
+                    as: .succeeded
+                )
+                try fixture.coordinator.discard(completed)
+                #expect(throws: DocumentPaintSurfaceTransactionError.staleHandle) {
+                    try fixture.coordinator.discard(completed)
+                }
+            }
+            #expect(fixture.coordinator.snapshot().state == .idle)
+            #expect(fixture.registry.snapshot().activeTileLeaseCount == 0)
+            #expect(fixture.registry.snapshot().preparedCandidateCount == 0)
+            #expect(fixture.revisions.snapshot().inFlightInstallLeaseCount == 0)
+
+            let immediate = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: pair.after,
+                    expected: [
+                        .init(coordinate: coordinate, disposition: .replace),
+                    ]
+                )
+            )
+            try fixture.coordinator.discard(immediate)
+            try fixture.revisions.release(pair.revisionIDs)
+        }
+    }
+
+    @Test
+    func actualConsumeRejectionKeepsTerminalRestoreAndHistoryCursorRetryable() throws {
+        guard let fixture = try TransactionFixture.make(width: 256, height: 256)
+        else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let committed = try transactionCommitWithHistory(
+            fixture,
+            coordinates: [coordinate]
+        )
+        let pair = try #require(committed.historyPair)
+        let history = DocumentHistory()
+        _ = history.appendSuccessful(.raster(RasterHistoryCommand(
+            layerID: fixture.layerID,
+            kind: .draw,
+            before: pair.before,
+            after: pair.after
+        )))
+        let undo = try #require(try history.beginUndo())
+        let prepared = try fixture.coordinator.prepareRestore(
+            fixture.restoreRequest(
+                reference: pair.before,
+                expected: [.init(coordinate: coordinate, disposition: .remove)]
+            )
+        )
+        let encoded = try fixture.coordinator.encodeRestore(prepared)
+        let completed = try fixture.coordinator.completeRestore(
+            encoded,
+            as: .succeeded
+        )
+        let terminal = try fixture.coordinator.prepareTerminalRestore(completed)
+        let before = fixture.registry.snapshot()
+
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreConsumeFailed) {
+            _ = try fixture.coordinator.publishRestore(
+                terminal,
+                failureInjection: .init(failingAt: .restoreConsume)
+            )
+        }
+        #expect(fixture.registry.snapshot() == before)
+        #expect(fixture.coordinator.snapshot().phase == .restoreTerminalPrepared)
+        #expect(history.canUndo)
+        #expect(!history.canRedo)
+
+        _ = try fixture.coordinator.publishRestore(terminal)
+        try history.finishNavigation(token: undo.token, succeeded: true)
+        #expect(!history.canUndo)
+        #expect(history.canRedo)
+        #expect(fixture.coordinator.snapshot().state == .idle)
+    }
+
+    @Test
+    func restoreFailureSeamsRetainExactOwnershipAndAllowImmediateReuse() throws {
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+
+        guard let reserveFixture = try TransactionFixture.make(
+            width: 256,
+            height: 256
+        ) else { return }
+        let reservePair = try transactionCapturedPair(
+            reserveFixture,
+            coordinate: coordinate,
+            publish: true
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restorePreparationFailed) {
+            _ = try reserveFixture.coordinator.prepareRestore(
+                reserveFixture.restoreRequest(
+                    reference: reservePair.after,
+                    expected: [
+                        .init(coordinate: coordinate, disposition: .replace),
+                    ]
+                ),
+                failureInjection: .init(failingAt: .candidateReserve(0))
+            )
+        }
+        #expect(reserveFixture.coordinator.snapshot().state == .idle)
+        #expect(reserveFixture.registry.snapshot().activeTileLeaseCount == 0)
+        #expect(reserveFixture.revisions.snapshot().inFlightInstallLeaseCount == 0)
+        try reserveFixture.revisions.release(reservePair.revisionIDs)
+
+        for point in [
+            DocumentPaintSurfaceTransactionFailurePoint.restoreEncoding,
+            .restoreCompletion,
+            .restoreDestinationLeaseReturn,
+        ] {
+            guard let fixture = try TransactionFixture.make(
+                width: 256,
+                height: 256
+            ) else { return }
+            let pair = try transactionCapturedPair(
+                fixture,
+                coordinate: coordinate,
+                publish: true
+            )
+            let prepared = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: pair.after,
+                    expected: [
+                        .init(coordinate: coordinate, disposition: .replace),
+                    ]
+                )
+            )
+            if point == .restoreEncoding {
+                #expect(throws: DocumentPaintSurfaceTransactionError
+                    .restoreEncodingFailed) {
+                    _ = try fixture.coordinator.encodeRestore(
+                        prepared,
+                        failureInjection: .init(failingAt: point)
+                    )
+                }
+            } else {
+                let encoded = try fixture.coordinator.encodeRestore(prepared)
+                let expectedError: DocumentPaintSurfaceTransactionError =
+                    point == .restoreCompletion
+                        ? .restoreCompletionFailed
+                        : .destinationLeaseReturnFailed
+                #expect(throws: expectedError) {
+                    _ = try fixture.coordinator.completeRestore(
+                        encoded,
+                        as: .succeeded,
+                        failureInjection: .init(failingAt: point)
+                    )
+                }
+            }
+            #expect(fixture.coordinator.snapshot().state == .discardPending)
+            try fixture.coordinator.retryDiscard()
+            #expect(fixture.coordinator.snapshot().state == .idle)
+            #expect(fixture.registry.snapshot().activeTileLeaseCount == 0)
+            #expect(fixture.registry.snapshot().preparedCandidateCount == 0)
+            #expect(fixture.revisions.snapshot().inFlightInstallLeaseCount == 0)
+
+            let retry = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: pair.after,
+                    expected: [
+                        .init(coordinate: coordinate, disposition: .replace),
+                    ]
+                )
+            )
+            try fixture.coordinator.discard(retry)
+            try fixture.revisions.release(pair.revisionIDs)
+        }
+
+        guard let terminalFixture = try TransactionFixture.make(
+            width: 256,
+            height: 256
+        ) else { return }
+        let terminalPair = try transactionCapturedPair(
+            terminalFixture,
+            coordinate: coordinate,
+            publish: true
+        )
+        let prepared = try terminalFixture.coordinator.prepareRestore(
+            terminalFixture.restoreRequest(
+                reference: terminalPair.after,
+                expected: [
+                    .init(coordinate: coordinate, disposition: .replace),
+                ]
+            )
+        )
+        let encoded = try terminalFixture.coordinator.encodeRestore(prepared)
+        let completed = try terminalFixture.coordinator.completeRestore(
+            encoded,
+            as: .succeeded
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .terminalPreflightFailed) {
+            _ = try terminalFixture.coordinator.prepareTerminalRestore(
+                completed,
+                failureInjection: .init(failingAt: .restoreTerminalPreflight)
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .registryPreparationFailed) {
+            _ = try terminalFixture.coordinator.prepareTerminalRestore(
+                completed,
+                failureInjection: .init(failingAt: .restoreRegistryPrepare)
+            )
+        }
+        let terminal = try terminalFixture.coordinator
+            .prepareTerminalRestore(completed)
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreConsumeFailed) {
+            _ = try terminalFixture.coordinator.publishRestore(
+                terminal,
+                failureInjection: .init(failingAt: .restoreConsume)
+            )
+        }
+        try terminalFixture.coordinator.discard(terminal)
+        #expect(terminalFixture.coordinator.snapshot().state == .idle)
+        let immediate = try terminalFixture.coordinator.prepareRestore(
+            terminalFixture.restoreRequest(
+                reference: terminalPair.after,
+                expected: [
+                    .init(coordinate: coordinate, disposition: .replace),
+                ]
+            )
+        )
+        try terminalFixture.coordinator.discard(immediate)
+        try terminalFixture.revisions.release(terminalPair.revisionIDs)
+    }
+
+    @Test
+    func releaseDuringRestoreInstallDefersRevisionRemovalUntilConsume() throws {
+        guard let fixture = try TransactionFixture.make(width: 256, height: 256)
+        else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let pair = try transactionCapturedPair(
+            fixture,
+            coordinate: coordinate,
+            publish: true
+        )
+        let prepared = try fixture.coordinator.prepareRestore(
+            fixture.restoreRequest(
+                reference: pair.after,
+                expected: [.init(coordinate: coordinate, disposition: .replace)]
+            )
+        )
+        let encoded = try fixture.coordinator.encodeRestore(prepared)
+
+        try fixture.revisions.release([pair.after.id])
+        #expect(fixture.revisions.containsRevision(pair.after.id))
+        let completed = try fixture.coordinator.completeRestore(
+            encoded,
+            as: .succeeded
+        )
+        #expect(fixture.revisions.containsRevision(pair.after.id))
+        let terminal = try fixture.coordinator.prepareTerminalRestore(completed)
+        _ = try fixture.coordinator.publishRestore(terminal)
+
+        #expect(!fixture.revisions.containsRevision(pair.after.id))
+        #expect(fixture.registry.snapshot().layers[0].references.map(\.coordinate)
+            == [coordinate])
+        try fixture.revisions.release([pair.before.id])
+    }
+
+    @Test
+    func restoreDispositionAuthorityRejectsOrderAndDuplicatesBeforeLeasing() throws {
+        guard let fixture = try TransactionFixture.make(width: 512, height: 256)
+        else { return }
+        let first = PaintTileCoordinate(x: 0, y: 0)
+        let second = PaintTileCoordinate(x: 1, y: 0)
+        let pair = try transactionCapturedPair(
+            fixture,
+            coordinates: [first, second],
+            beforePresentCoordinates: [],
+            afterPresentCoordinates: [first, second],
+            publish: true
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .unsortedCoordinate(previous: second, current: first)) {
+            _ = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: pair.after,
+                    expected: [
+                        .init(coordinate: second, disposition: .replace),
+                        .init(coordinate: first, disposition: .replace),
+                    ]
+                )
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .duplicateCoordinate(first)) {
+            _ = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: pair.after,
+                    expected: [
+                        .init(coordinate: first, disposition: .replace),
+                        .init(coordinate: first, disposition: .replace),
+                    ]
+                )
+            )
+        }
+        #expect(fixture.revisions.snapshot().inFlightInstallLeaseCount == 0)
+        try fixture.revisions.release(pair.revisionIDs)
+    }
 }
 
 private final class TransactionTestMutationBackend:
@@ -888,6 +1485,16 @@ private final class TransactionTestMutationBackend:
     var discardShouldFail = false
     var onDiscardAndWaitUntilTerminal: (() -> Void)?
     private(set) var destinations: [DocumentPaintSurfaceMutationDestination] = []
+
+    func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws {
+        switch operation {
+        case let .mutation(_, destinations):
+            _ = destinations
+        case let .restore(payload):
+            _ = payload.reference
+            destinations = payload.destinations
+        }
+    }
 
     func encode(
         destinations: [DocumentPaintSurfaceMutationDestination]
@@ -932,11 +1539,15 @@ private struct TransactionFixture {
     let backend: TransactionTestMutationBackend
     let coordinator: DocumentPaintSurfaceTransaction
 
-    static func make(width: Int = 512, height: Int = 512) throws -> Self? {
+    static func make(
+        width: Int = 512,
+        height: Int = 512,
+        layerID requestedLayerID: UUID? = nil
+    ) throws -> Self? {
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue()
         else { return nil }
-        let layerID = UUID()
+        let layerID = requestedLayerID ?? UUID()
         let geometry = try transactionGeometry(width: width, height: height)
         let tileBytes = PaintTileDescriptor.residentByteCount
         let registry = try DocumentPaintSurfaceStore(
@@ -984,6 +1595,19 @@ private struct TransactionFixture {
             dirtyCoordinates: dirty,
             explicitlyRemovedCoordinates: removing,
             requiresHistoryPair: requiresHistoryPair
+        )
+    }
+
+    func restoreRequest(
+        reference: RasterRevisionReference,
+        expected: [DocumentPaintSurfaceRestoreTileExpectation],
+        targetGeometry: DocumentPaintGeometry? = nil
+    ) -> DocumentPaintSurfaceRestoreRequest {
+        DocumentPaintSurfaceRestoreRequest(
+            reference: reference,
+            targetGeometry: targetGeometry ?? geometry,
+            layerID: layerID,
+            expectedInstallDispositions: expected
         )
     }
 }
@@ -1043,6 +1667,91 @@ private func transactionCommitWithHistory(
     )
     let terminal = try fixture.coordinator.prepareTerminalCommit(completed)
     return try fixture.coordinator.publish(terminal)
+}
+
+private func transactionCapturedPair(
+    _ fixture: TransactionFixture,
+    coordinate: PaintTileCoordinate,
+    publish: Bool
+) throws -> PendingRasterRevisionPair {
+    try transactionCapturedPair(
+        fixture,
+        coordinates: [coordinate],
+        beforePresentCoordinates: [],
+        afterPresentCoordinates: [coordinate],
+        publish: publish
+    )
+}
+
+private func transactionCapturedPair(
+    _ fixture: TransactionFixture,
+    coordinates: [PaintTileCoordinate],
+    beforePresentCoordinates: [PaintTileCoordinate],
+    afterPresentCoordinates: [PaintTileCoordinate],
+    publish: Bool
+) throws -> PendingRasterRevisionPair {
+    let before = try TiledRasterRevisionEndpoint(
+        generation: 1,
+        pixelSize: fixture.geometry.storagePixelSize,
+        documentPixelSize: fixture.geometry.documentPixelSize,
+        coordinates: coordinates,
+        presentCoordinates: beforePresentCoordinates
+    )
+    let after = try TiledRasterRevisionEndpoint(
+        generation: 1,
+        pixelSize: fixture.geometry.storagePixelSize,
+        documentPixelSize: fixture.geometry.documentPixelSize,
+        coordinates: coordinates,
+        presentCoordinates: afterPresentCoordinates
+    )
+    let pair = try fixture.revisions.allocatePair(
+        layerID: fixture.layerID,
+        before: before,
+        after: after
+    )
+    let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: PaintTileDescriptor.pixelFormat,
+        width: PaintTileDescriptor.side,
+        height: PaintTileDescriptor.side,
+        mipmapped: false
+    )
+    textureDescriptor.storageMode = .shared
+    textureDescriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+    let texture = try #require(fixture.device.makeTexture(
+        descriptor: textureDescriptor
+    ))
+    let queue = try #require(fixture.device.makeCommandQueue())
+    let command = try #require(queue.makeCommandBuffer())
+    let beforePresent = Set(beforePresentCoordinates)
+    let afterPresent = Set(afterPresentCoordinates)
+    let beforeToken = try fixture.revisions.encodeCapture(
+        pair.before,
+        layerID: fixture.layerID,
+        generation: 1,
+        sources: coordinates.map {
+            beforePresent.contains($0)
+                ? .texture(coordinate: $0, texture: texture)
+                : .knownClear(coordinate: $0)
+        },
+        on: command
+    )
+    let afterToken = try fixture.revisions.encodeCapture(
+        pair.after,
+        layerID: fixture.layerID,
+        generation: 1,
+        sources: coordinates.map {
+            afterPresent.contains($0)
+                ? .texture(coordinate: $0, texture: texture)
+                : .knownClear(coordinate: $0)
+        },
+        on: command
+    )
+    command.commit()
+    command.waitUntilCompleted()
+    try fixture.revisions.finalize(beforeToken, as: .succeeded)
+    try fixture.revisions.finalize(afterToken, as: .succeeded)
+    if publish { try fixture.revisions.publish(pair) }
+    return pair
 }
 
 private func transactionSeedActive(

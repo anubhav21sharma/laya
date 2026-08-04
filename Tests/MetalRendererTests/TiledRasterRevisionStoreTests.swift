@@ -1415,6 +1415,66 @@ struct TiledRasterRevisionStoreTests {
         )
         try fixture.store.release(fixture.pair.revisionIDs)
     }
+
+    @Test
+    func coordinatorAbandonDistinguishesOwnedLeaseFromPostReservationFailure() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layerID = tiledRevisionLayerID(45)
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let fixture = try tiledRevisionCapturedPair(
+            device: device,
+            layerID: layerID,
+            generation: 12,
+            pixelSize: PixelSize(width: 256, height: 256),
+            beforePresentCoordinates: [],
+            afterPresentCoordinates: [coordinate]
+        )
+        try fixture.store.publish(fixture.pair)
+
+        let prepared = try fixture.store.beginPublishedInstall(
+            for: fixture.pair.after
+        )
+        #expect(try fixture.store.abandonInstallForCoordinatorIfOwned(
+            prepared,
+            layerID: layerID,
+            generation: 12
+        ) == .cancelled)
+        #expect(try fixture.store.abandonInstallForCoordinatorIfOwned(
+            prepared,
+            layerID: layerID,
+            generation: 12
+        ) == .alreadyTerminal)
+
+        let encoding = try fixture.store.beginPublishedInstall(
+            for: fixture.pair.after
+        )
+        let queue = try #require(device.makeCommandQueue())
+        let command = try #require(queue.makeCommandBuffer())
+        #expect(throws: TiledRasterRevisionStoreError.injectedFailure(
+            .commandEncoding
+        )) {
+            _ = try fixture.store.encodeInstall(
+                encoding,
+                layerID: layerID,
+                generation: 12,
+                targets: [
+                    .init(
+                        coordinate: coordinate,
+                        texture: try tiledRevisionTexture(device: device)
+                    ),
+                ],
+                on: command,
+                failureInjection: .init(failingAt: .commandEncoding)
+            )
+        }
+        #expect(try fixture.store.abandonInstallForCoordinatorIfOwned(
+            encoding,
+            layerID: layerID,
+            generation: 12
+        ) == .alreadyTerminal)
+        #expect(fixture.store.snapshot().inFlightInstallLeaseCount == 0)
+        try fixture.store.release(fixture.pair.revisionIDs)
+    }
 }
 
 private func tiledRevisionCapturedPair(

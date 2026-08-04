@@ -231,6 +231,12 @@ public struct TiledRasterRevisionStoreSnapshot:
     }
 }
 
+enum TiledRasterRevisionInstallAbandonResult: Equatable, Sendable {
+    case cancelled
+    case cancellationPending
+    case alreadyTerminal
+}
+
 enum TiledRasterRevisionHarnessPayload: Equatable {
     case knownClear
     case rgba16Float(Data)
@@ -1065,6 +1071,42 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
             case .encoding:
                 record.cancellationRequested = true
                 installRecords[lease.leaseID] = record
+            }
+        }
+    }
+
+    /// Narrow coordinator cleanup seam. `encodeInstall` may consume the lease
+    /// while unwinding a post-reservation encoding failure, so restore cleanup
+    /// must be able to distinguish a still-owned lease from an already-terminal
+    /// one without a blind, suppressed `cancelInstall` error.
+    func abandonInstallForCoordinatorIfOwned(
+        _ lease: TiledRasterRevisionInstallLease,
+        layerID: UUID,
+        generation: UInt64
+    ) throws -> TiledRasterRevisionInstallAbandonResult {
+        try withLock {
+            guard lease.storeIdentity == storeIdentity else {
+                throw TiledRasterRevisionStoreError.invalidInstallLease
+            }
+            guard var record = installRecords[lease.leaseID] else {
+                return .alreadyTerminal
+            }
+            _ = try validatedInstallRecord(
+                lease,
+                layerID: layerID,
+                generation: generation
+            )
+            switch record.state {
+            case .prepared, .readyToConsume:
+                releaseInstallLeaseLocked(lease.leaseID)
+                return .cancelled
+            case .encoding:
+                guard !record.cancellationRequested else {
+                    return .cancellationPending
+                }
+                record.cancellationRequested = true
+                installRecords[lease.leaseID] = record
+                return .cancellationPending
             }
         }
     }

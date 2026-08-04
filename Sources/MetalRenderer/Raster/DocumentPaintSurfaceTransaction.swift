@@ -92,6 +92,15 @@ public enum DocumentPaintSurfaceTransactionError:
     case terminalPreflightFailed
     case registryPreparationFailed
     case revisionPublishFailed
+    case restoreReferenceUnavailable
+    case restoreLayerMismatch(expected: UUID, actual: UUID)
+    case restoreGeometryMismatch
+    case restoreDispositionMismatch
+    case restorePreparationFailed
+    case restoreEncodingFailed
+    case restoreCompletionFailed
+    case restoreCommandFailed
+    case restoreConsumeFailed
     case cleanupFailed
 }
 
@@ -112,6 +121,12 @@ public enum DocumentPaintSurfaceTransactionFailurePoint:
     case terminalPreflight
     case registryPrepare
     case revisionPublish
+    case restoreEncoding
+    case restoreCompletion
+    case restoreDestinationLeaseReturn
+    case restoreTerminalPreflight
+    case restoreRegistryPrepare
+    case restoreConsume
     case cleanup
 }
 
@@ -159,6 +174,42 @@ public struct DocumentPaintSurfaceMutationRequest:
     }
 }
 
+public struct DocumentPaintSurfaceRestoreTileExpectation:
+    Equatable, Sendable
+{
+    public let coordinate: PaintTileCoordinate
+    public let disposition: TiledRasterRevisionInstallDisposition
+
+    public init(
+        coordinate: PaintTileCoordinate,
+        disposition: TiledRasterRevisionInstallDisposition
+    ) {
+        self.coordinate = coordinate
+        self.disposition = disposition
+    }
+}
+
+public struct DocumentPaintSurfaceRestoreRequest: Equatable, Sendable {
+    public let reference: RasterRevisionReference
+    public let targetGeometry: DocumentPaintGeometry
+    public let layerID: UUID
+    public let expectedInstallDispositions:
+        [DocumentPaintSurfaceRestoreTileExpectation]
+
+    public init(
+        reference: RasterRevisionReference,
+        targetGeometry: DocumentPaintGeometry,
+        layerID: UUID,
+        expectedInstallDispositions:
+            [DocumentPaintSurfaceRestoreTileExpectation]
+    ) {
+        self.reference = reference
+        self.targetGeometry = targetGeometry
+        self.layerID = layerID
+        self.expectedInstallDispositions = expectedInstallDispositions
+    }
+}
+
 public struct DocumentPaintSurfaceNoOp: Equatable, Sendable {
     public let kind: DocumentPaintSurfaceTransactionKind
     public let layerID: UUID
@@ -185,6 +236,14 @@ public struct DocumentPaintSurfaceCommitResult: Equatable, Sendable {
     public let afterGeneration: UInt64
     public let dirtyCoordinates: [PaintTileCoordinate]
     public let historyPair: PendingRasterRevisionPair?
+}
+
+public struct DocumentPaintSurfaceRestoreResult: Equatable, Sendable {
+    public let layerID: UUID
+    public let beforeGeneration: UInt64
+    public let afterGeneration: UInt64
+    public let reference: RasterRevisionReference
+    public let restoredCoordinates: [PaintTileCoordinate]
 }
 
 protocol DocumentPaintSurfaceTransactionHandle: Sendable {
@@ -241,6 +300,38 @@ public struct DocumentPaintTerminalCommit:
     let phase = DocumentPaintSurfaceTransactionPhase.terminalPrepared
 }
 
+public struct DocumentPaintPreparedRestore:
+    DocumentPaintSurfaceTransactionHandle, Equatable, Sendable
+{
+    let coordinatorIdentity: UUID
+    public let sequence: UInt64
+    let phase = DocumentPaintSurfaceTransactionPhase.restorePrepared
+}
+
+public struct DocumentPaintEncodedRestore:
+    DocumentPaintSurfaceTransactionHandle, Equatable, Sendable
+{
+    let coordinatorIdentity: UUID
+    public let sequence: UInt64
+    let phase = DocumentPaintSurfaceTransactionPhase.restoreEncoded
+}
+
+public struct DocumentPaintCompletedRestore:
+    DocumentPaintSurfaceTransactionHandle, Equatable, Sendable
+{
+    let coordinatorIdentity: UUID
+    public let sequence: UInt64
+    let phase = DocumentPaintSurfaceTransactionPhase.restoreCompleted
+}
+
+public struct DocumentPaintTerminalRestore:
+    DocumentPaintSurfaceTransactionHandle, Equatable, Sendable
+{
+    let coordinatorIdentity: UUID
+    public let sequence: UInt64
+    let phase = DocumentPaintSurfaceTransactionPhase.restoreTerminalPrepared
+}
+
 public struct DocumentPaintTransparencyReduction: Equatable, Sendable {
     public let inspectedCoordinates: [PaintTileCoordinate]
     public let fullyTransparentCoordinates: [PaintTileCoordinate]
@@ -250,6 +341,22 @@ struct DocumentPaintSurfaceMutationDestination: @unchecked Sendable {
     let coordinate: PaintTileCoordinate
     let logicalBounds: PixelRect
     let texture: any MTLTexture
+}
+
+/// Complete restore payload presented to the inert backend preflight. It is
+/// deliberately typed and contains no candidate, install lease, or registry
+/// commit token.
+struct DocumentPaintSurfaceRestoreBackendPayload: @unchecked Sendable {
+    let reference: RasterRevisionReference
+    let destinations: [DocumentPaintSurfaceMutationDestination]
+}
+
+enum DocumentPaintSurfaceBackendOperation: @unchecked Sendable {
+    case mutation(
+        kind: DocumentPaintSurfaceTransactionKind,
+        destinations: [DocumentPaintSurfaceMutationDestination]
+    )
+    case restore(DocumentPaintSurfaceRestoreBackendPayload)
 }
 
 struct DocumentPaintSurfaceMutationBackendEncoding:
@@ -282,6 +389,8 @@ struct DocumentPaintSurfaceMutationEvidence: Equatable, Sendable {
 protocol DocumentPaintSurfaceMutationBackend:
     AnyObject, Sendable
 {
+    func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws
+
     func encode(
         destinations: [DocumentPaintSurfaceMutationDestination]
     ) throws -> DocumentPaintSurfaceMutationBackendEncoding
@@ -341,6 +450,40 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         }
     }
 
+    private final class LiveRestore {
+        let sequence: UInt64
+        let request: DocumentPaintSurfaceRestoreRequest
+        let baseGeneration: UInt64
+        let baseBinding: DocumentPaintLayerBinding
+        let candidate: DocumentPaintSurfaceCandidate
+        var installLease: TiledRasterRevisionInstallLease?
+        var phase: DocumentPaintSurfaceTransactionPhase
+
+        var candidateBinding: DocumentPaintLayerBinding?
+        var destinationLease: PaintTileLease?
+        var commandBuffer: (any MTLCommandBuffer)?
+        var installOperation: TiledRasterRevisionOperationToken?
+        var preparedCommit: DocumentPaintPreparedCommit?
+        var result: DocumentPaintSurfaceRestoreResult?
+
+        init(
+            sequence: UInt64,
+            request: DocumentPaintSurfaceRestoreRequest,
+            baseGeneration: UInt64,
+            baseBinding: DocumentPaintLayerBinding,
+            candidate: DocumentPaintSurfaceCandidate,
+            installLease: TiledRasterRevisionInstallLease
+        ) {
+            self.sequence = sequence
+            self.request = request
+            self.baseGeneration = baseGeneration
+            self.baseBinding = baseBinding
+            self.candidate = candidate
+            self.installLease = installLease
+            phase = .restorePrepared
+        }
+    }
+
     private let identity = UUID()
     private let lock = NSLock()
     private let registry: DocumentPaintSurfaceStore
@@ -351,6 +494,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
     private var nextSequence: UInt64 = 1
     private var lastCompletedSequence: UInt64 = 0
     private var live: LiveTransaction?
+    private var liveRestore: LiveRestore?
 
     init(
         registry: DocumentPaintSurfaceStore,
@@ -368,13 +512,32 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
 
     public func snapshot() -> DocumentPaintSurfaceTransactionSnapshot {
         withLock {
-            guard let live else {
+            guard live != nil || liveRestore != nil else {
                 return .init(
                     state: .idle,
                     phase: nil,
                     sequence: nil,
                     candidateCoordinates: []
                 )
+            }
+            if let liveRestore {
+                let coordinates: [PaintTileCoordinate]
+                do {
+                    coordinates = try liveRestore.candidate
+                        .binding(for: liveRestore.request.layerID)
+                        .canonical.references.map(\.coordinate)
+                } catch {
+                    coordinates = []
+                }
+                return .init(
+                    state: Self.publicState(for: liveRestore.phase),
+                    phase: liveRestore.phase,
+                    sequence: liveRestore.sequence,
+                    candidateCoordinates: coordinates
+                )
+            }
+            guard let live else {
+                preconditionFailure("Live transaction state was lost")
             }
             let coordinates: [PaintTileCoordinate]
             do {
@@ -398,7 +561,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
     ) throws -> DocumentPaintMutationPreparation {
         try withLock {
-            guard live == nil else {
+            guard live == nil, liveRestore == nil else {
                 throw DocumentPaintSurfaceTransactionError
                     .transactionAlreadyLive
             }
@@ -530,6 +693,407 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         }
     }
 
+    public func prepareRestore(
+        _ request: DocumentPaintSurfaceRestoreRequest,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws -> DocumentPaintPreparedRestore {
+        try withLock {
+            guard live == nil, liveRestore == nil else {
+                throw DocumentPaintSurfaceTransactionError.transactionAlreadyLive
+            }
+            guard let referenceLayer = request.reference.layerID else {
+                throw DocumentPaintSurfaceTransactionError
+                    .restoreReferenceUnavailable
+            }
+            guard referenceLayer == request.layerID else {
+                throw DocumentPaintSurfaceTransactionError.restoreLayerMismatch(
+                    expected: referenceLayer,
+                    actual: request.layerID
+                )
+            }
+            guard request.reference.pixelSize
+                    == request.targetGeometry.storagePixelSize,
+                  request.reference.documentPixelSize
+                    == request.targetGeometry.documentPixelSize
+            else {
+                throw DocumentPaintSurfaceTransactionError
+                    .restoreGeometryMismatch
+            }
+            try Self.validateRestoreExpectations(
+                request.expectedInstallDispositions
+            )
+
+            let base: DocumentPaintSurfaceMutationBaseSnapshot
+            do {
+                base = try registry.captureMutationBase(for: request.layerID)
+            } catch DocumentPaintSurfaceStoreError.unknownLayerID {
+                throw DocumentPaintSurfaceTransactionError
+                    .unknownLayerID(request.layerID)
+            }
+            let installLease: TiledRasterRevisionInstallLease
+            do {
+                installLease = try revisionStore.beginPublishedInstall(
+                    for: request.reference
+                )
+            } catch {
+                throw DocumentPaintSurfaceTransactionError
+                    .restoreReferenceUnavailable
+            }
+            let actual = installLease.tiles.map {
+                DocumentPaintSurfaceRestoreTileExpectation(
+                    coordinate: $0.descriptor.coordinate,
+                    disposition: $0.disposition
+                )
+            }
+            guard actual == request.expectedInstallDispositions else {
+                try abandonRestoreInstall(installLease)
+                throw DocumentPaintSurfaceTransactionError
+                    .restoreDispositionMismatch
+            }
+
+            let replacements = actual.compactMap {
+                $0.disposition == .replace ? $0.coordinate : nil
+            }
+            for coordinate in replacements {
+                do {
+                    _ = try PaintTileDescriptor(
+                        coordinate: coordinate,
+                        logicalPixelSize:
+                            request.targetGeometry.storagePixelSize
+                    )
+                } catch {
+                    try abandonRestoreInstall(installLease)
+                    throw DocumentPaintSurfaceTransactionError
+                        .restoreGeometryMismatch
+                }
+            }
+            let baseCoordinates = base.binding.canonical.references
+                .map(\.coordinate)
+            let historicalRemovals = actual.compactMap {
+                $0.disposition == .remove ? $0.coordinate : nil
+            }
+            let removals: [PaintTileCoordinate]
+            if request.targetGeometry != base.geometry {
+                let replacementSet = Set(replacements)
+                removals = Array(Set(
+                    historicalRemovals
+                        + baseCoordinates.filter { !replacementSet.contains($0) }
+                )).sorted()
+            } else {
+                removals = historicalRemovals
+            }
+
+            guard nextSequence < UInt64.max else {
+                try abandonRestoreInstall(installLease)
+                throw DocumentPaintSurfaceTransactionError.sequenceOverflow
+            }
+            let sequence = nextSequence
+            var candidateForCleanup: DocumentPaintSurfaceCandidate?
+            let candidate: DocumentPaintSurfaceCandidate
+            let binding: DocumentPaintLayerBinding
+            let destinationLease: PaintTileLease
+            do {
+                candidate = try registry.makeCandidate(
+                    from: base,
+                    geometry: request.targetGeometry,
+                    dirtyCoordinatesByLayer: [request.layerID: replacements],
+                    removingCoordinatesByLayer: [request.layerID: removals],
+                    failureInjection: Self.candidateAllocationFailure(
+                        failureInjection
+                    )
+                )
+                candidateForCleanup = candidate
+                binding = try candidate.binding(for: request.layerID)
+                destinationLease = try binding.canonical.leaseExistingTiles(
+                    at: replacements,
+                    pinReasons: [.dirty, .inFlight]
+                )
+            } catch {
+                if let candidateForCleanup {
+                    do {
+                        try registry.discard(candidateForCleanup)
+                    } catch {
+                        try abandonRestoreInstall(installLease)
+                        throw DocumentPaintSurfaceTransactionError.cleanupFailed
+                    }
+                }
+                try abandonRestoreInstall(installLease)
+                throw DocumentPaintSurfaceTransactionError
+                    .restorePreparationFailed
+            }
+            nextSequence += 1
+            let current = LiveRestore(
+                sequence: sequence,
+                request: request,
+                baseGeneration: base.generation,
+                baseBinding: base.binding,
+                candidate: candidate,
+                installLease: installLease
+            )
+            current.candidateBinding = binding
+            current.destinationLease = destinationLease
+            liveRestore = current
+            return DocumentPaintPreparedRestore(
+                coordinatorIdentity: identity,
+                sequence: sequence
+            )
+        }
+    }
+
+    public func encodeRestore(
+        _ handle: DocumentPaintPreparedRestore,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws -> DocumentPaintEncodedRestore {
+        try withLock {
+            let current = try validatedRestore(handle)
+            guard let installLease = current.installLease,
+                  let destinationLease = current.destinationLease
+            else {
+                preconditionFailure("Prepared restore lost owned resources")
+            }
+            let destinations = destinationLease.bindings.map {
+                DocumentPaintSurfaceMutationDestination(
+                    coordinate: $0.descriptor.coordinate,
+                    logicalBounds: $0.descriptor.logicalBounds,
+                    texture: $0.texture
+                )
+            }
+            let payload = DocumentPaintSurfaceRestoreBackendPayload(
+                reference: current.request.reference,
+                destinations: destinations
+            )
+            do {
+                try mutationBackend.preflight(.restore(payload))
+                try Self.validateRestoreDestinations(
+                    destinations,
+                    expected: current.request.expectedInstallDispositions
+                )
+            } catch {
+                throw DocumentPaintSurfaceTransactionError.restoreEncodingFailed
+            }
+            guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError.restoreEncodingFailed
+            }
+            commandBuffer.label = "Document Paint Restore"
+            current.commandBuffer = commandBuffer
+            let encodingFailure: TiledRasterRevisionFailureInjection?
+            if failureInjection?.shouldFail(at: .restoreEncoding) == true {
+                encodingFailure = .init(failingAt: .commandEncoding)
+            } else {
+                encodingFailure = nil
+            }
+            do {
+                current.installOperation = try revisionStore.encodeInstall(
+                    installLease,
+                    layerID: installLease.layerID,
+                    generation: installLease.generation,
+                    targets: destinations.map {
+                        TiledRasterRevisionTileTarget(
+                            coordinate: $0.coordinate,
+                            texture: $0.texture
+                        )
+                    },
+                    on: commandBuffer,
+                    failureInjection: encodingFailure
+                )
+                commandBuffer.commit()
+            } catch {
+                current.commandBuffer = nil
+                current.installOperation = nil
+                do {
+                    let result = try revisionStore
+                        .abandonInstallForCoordinatorIfOwned(
+                            installLease,
+                            layerID: installLease.layerID,
+                            generation: installLease.generation
+                        )
+                    guard result != .cancellationPending else {
+                        current.phase = .discardPending
+                        throw DocumentPaintSurfaceTransactionError.cleanupFailed
+                    }
+                    current.installLease = nil
+                } catch {
+                    current.phase = .discardPending
+                    throw DocumentPaintSurfaceTransactionError.cleanupFailed
+                }
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError.restoreEncodingFailed
+            }
+            current.phase = .restoreEncoded
+            return DocumentPaintEncodedRestore(
+                coordinatorIdentity: identity,
+                sequence: current.sequence
+            )
+        }
+    }
+
+    public func completeRestore(
+        _ handle: DocumentPaintEncodedRestore,
+        as outcome: RasterRevisionOperationOutcome,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws -> DocumentPaintCompletedRestore {
+        try withLock {
+            let current = try validatedRestore(handle)
+            guard let commandBuffer = current.commandBuffer,
+                  let operation = current.installOperation,
+                  let binding = current.candidateBinding,
+                  let destinationLease = current.destinationLease
+            else {
+                preconditionFailure("Encoded restore lost owned resources")
+            }
+            commandBuffer.waitUntilCompleted()
+            let completionFailure: TiledRasterRevisionFailureInjection?
+            if failureInjection?.shouldFail(at: .restoreCompletion) == true {
+                completionFailure = .init(failingAt: .completion)
+            } else {
+                completionFailure = nil
+            }
+            do {
+                try revisionStore.finalize(
+                    operation,
+                    as: outcome,
+                    failureInjection: completionFailure
+                )
+                current.installOperation = nil
+                current.commandBuffer = nil
+                guard outcome == .succeeded else {
+                    current.installLease = nil
+                    current.phase = .discardPending
+                    throw DocumentPaintSurfaceTransactionError
+                        .restoreCommandFailed
+                }
+            } catch let error as DocumentPaintSurfaceTransactionError {
+                throw error
+            } catch {
+                if let installLease = current.installLease {
+                    do {
+                        let disposition = try revisionStore
+                            .abandonInstallForCoordinatorIfOwned(
+                                installLease,
+                                layerID: installLease.layerID,
+                                generation: installLease.generation
+                            )
+                        if disposition != .cancellationPending {
+                            current.installOperation = nil
+                            current.commandBuffer = nil
+                            current.installLease = nil
+                        }
+                    } catch {
+                        current.phase = .discardPending
+                        throw DocumentPaintSurfaceTransactionError.cleanupFailed
+                    }
+                }
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError
+                    .restoreCompletionFailed
+            }
+            if failureInjection?.shouldFail(
+                at: .restoreDestinationLeaseReturn
+            ) == true {
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError
+                    .destinationLeaseReturnFailed
+            }
+            do {
+                try binding.canonical.returnLease(destinationLease)
+                current.destinationLease = nil
+                current.candidateBinding = nil
+            } catch {
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError
+                    .destinationLeaseReturnFailed
+            }
+            current.phase = .restoreCompleted
+            return DocumentPaintCompletedRestore(
+                coordinatorIdentity: identity,
+                sequence: current.sequence
+            )
+        }
+    }
+
+    public func prepareTerminalRestore(
+        _ handle: DocumentPaintCompletedRestore,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws -> DocumentPaintTerminalRestore {
+        try withLock {
+            let current = try validatedRestore(handle)
+            if failureInjection?.shouldFail(
+                at: .restoreTerminalPreflight
+            ) == true {
+                throw DocumentPaintSurfaceTransactionError
+                    .terminalPreflightFailed
+            }
+            let prepared: DocumentPaintPreparedCommit
+            do {
+                if failureInjection?.shouldFail(
+                    at: .restoreRegistryPrepare
+                ) == true {
+                    throw DocumentPaintSurfaceTransactionError
+                        .registryPreparationFailed
+                }
+                prepared = try registry.prepareCommit(current.candidate)
+            } catch let error as DocumentPaintSurfaceTransactionError {
+                throw error
+            } catch {
+                throw DocumentPaintSurfaceTransactionError
+                    .registryPreparationFailed
+            }
+            current.result = DocumentPaintSurfaceRestoreResult(
+                layerID: current.request.layerID,
+                beforeGeneration: current.baseGeneration,
+                afterGeneration: current.candidate.generation,
+                reference: current.request.reference,
+                restoredCoordinates: current.request
+                    .expectedInstallDispositions.map(\.coordinate)
+            )
+            current.preparedCommit = prepared
+            current.phase = .restoreTerminalPrepared
+            return DocumentPaintTerminalRestore(
+                coordinatorIdentity: identity,
+                sequence: current.sequence
+            )
+        }
+    }
+
+    public func publishRestore(
+        _ handle: DocumentPaintTerminalRestore,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws -> DocumentPaintSurfaceRestoreResult {
+        try withLock {
+            let current = try validatedRestore(handle)
+            guard let prepared = current.preparedCommit,
+                  let installLease = current.installLease,
+                  let result = current.result
+            else {
+                preconditionFailure("Terminal restore lost owned resources")
+            }
+            let consumeFailure: TiledRasterRevisionFailureInjection?
+            if failureInjection?.shouldFail(at: .restoreConsume) == true {
+                consumeFailure = .init(failingAt: .consumeInstall)
+            } else {
+                consumeFailure = nil
+            }
+            do {
+                try revisionStore.consumeInstall(
+                    installLease,
+                    layerID: installLease.layerID,
+                    generation: installLease.generation,
+                    failureInjection: consumeFailure
+                )
+            } catch {
+                throw DocumentPaintSurfaceTransactionError.restoreConsumeFailed
+            }
+            registry.commitPreparedForCoordinator(prepared)
+            current.installLease = nil
+            current.preparedCommit = nil
+            current.phase = .published
+            lastCompletedSequence = current.sequence
+            liveRestore = nil
+            return result
+        }
+    }
+
     public func encodeMutation(
         _ handle: DocumentPaintPreparedMutation,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
@@ -564,6 +1128,10 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     throw DocumentPaintSurfaceTransactionError
                         .backendEncodingFailed
                 }
+                try mutationBackend.preflight(.mutation(
+                    kind: current.request.kind,
+                    destinations: destinations
+                ))
                 current.backendEncoding = try mutationBackend.encode(
                     destinations: destinations
                 )
@@ -985,10 +1553,48 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
     ) throws { try discardHandle(handle, failureInjection: failureInjection) }
 
+    public func discard(
+        _ handle: DocumentPaintPreparedRestore,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws {
+        try discardRestoreHandle(handle, failureInjection: failureInjection)
+    }
+
+    public func discard(
+        _ handle: DocumentPaintEncodedRestore,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws {
+        try discardRestoreHandle(handle, failureInjection: failureInjection)
+    }
+
+    public func discard(
+        _ handle: DocumentPaintCompletedRestore,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws {
+        try discardRestoreHandle(handle, failureInjection: failureInjection)
+    }
+
+    public func discard(
+        _ handle: DocumentPaintTerminalRestore,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws {
+        try discardRestoreHandle(handle, failureInjection: failureInjection)
+    }
+
     public func retryDiscard(
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
     ) throws {
         try withLock {
+            if let current = liveRestore {
+                guard current.phase == .discardPending else {
+                    throw DocumentPaintSurfaceTransactionError.wrongPhase(
+                        expected: .discardPending,
+                        actual: current.phase
+                    )
+                }
+                try cleanupRestore(current, failureInjection: failureInjection)
+                return
+            }
             guard let current = live else {
                 throw DocumentPaintSurfaceTransactionError.noLiveTransaction
             }
@@ -1064,6 +1670,87 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             current.phase = .discardPending
             try cleanup(current, failureInjection: failureInjection)
         }
+    }
+
+    private func discardRestoreHandle<
+        H: DocumentPaintSurfaceTransactionHandle
+    >(
+        _ handle: H,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection?
+    ) throws {
+        try withLock {
+            let current = try validatedRestore(handle)
+            current.phase = .discardPending
+            try cleanupRestore(current, failureInjection: failureInjection)
+        }
+    }
+
+    private func cleanupRestore(
+        _ current: LiveRestore,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection?
+    ) throws {
+        if failureInjection?.shouldFail(at: .cleanup) == true {
+            current.phase = .discardPending
+            throw DocumentPaintSurfaceTransactionError.cleanupFailed
+        }
+        if let operation = current.installOperation {
+            current.commandBuffer?.waitUntilCompleted()
+            do {
+                try revisionStore.finalize(operation, as: .cancelled)
+                current.installOperation = nil
+                current.commandBuffer = nil
+                current.installLease = nil
+            } catch {
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError.cleanupFailed
+            }
+        }
+        if let installLease = current.installLease {
+            do {
+                let disposition = try revisionStore
+                    .abandonInstallForCoordinatorIfOwned(
+                        installLease,
+                        layerID: installLease.layerID,
+                        generation: installLease.generation
+                    )
+                guard disposition != .cancellationPending else {
+                    current.phase = .discardPending
+                    throw DocumentPaintSurfaceTransactionError.cleanupFailed
+                }
+                current.installLease = nil
+            } catch let error as DocumentPaintSurfaceTransactionError {
+                throw error
+            } catch {
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError.cleanupFailed
+            }
+        }
+        if let destinationLease = current.destinationLease,
+           let binding = current.candidateBinding {
+            do {
+                try binding.canonical.returnLease(destinationLease)
+                current.destinationLease = nil
+                current.candidateBinding = nil
+            } catch {
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError
+                    .destinationLeaseReturnFailed
+            }
+        }
+        if let prepared = current.preparedCommit {
+            registry.cancelPrepared(prepared)
+            current.preparedCommit = nil
+        } else {
+            do {
+                try registry.discard(current.candidate)
+            } catch {
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError.cleanupFailed
+            }
+        }
+        current.phase = .discarded
+        lastCompletedSequence = current.sequence
+        liveRestore = nil
     }
 
     private func failAndCleanup(
@@ -1354,6 +2041,96 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             )
         }
         return live
+    }
+
+    private func validatedRestore<
+        H: DocumentPaintSurfaceTransactionHandle
+    >(
+        _ handle: H
+    ) throws -> LiveRestore {
+        guard handle.coordinatorIdentity == identity else {
+            throw DocumentPaintSurfaceTransactionError.foreignHandle
+        }
+        guard let liveRestore else {
+            if handle.sequence <= lastCompletedSequence {
+                throw DocumentPaintSurfaceTransactionError.staleHandle
+            }
+            throw DocumentPaintSurfaceTransactionError.noLiveTransaction
+        }
+        guard handle.sequence == liveRestore.sequence else {
+            throw DocumentPaintSurfaceTransactionError.staleHandle
+        }
+        guard handle.phase == liveRestore.phase else {
+            if handle.phase.rawValue < liveRestore.phase.rawValue {
+                throw DocumentPaintSurfaceTransactionError
+                    .handleAlreadyConsumed
+            }
+            throw DocumentPaintSurfaceTransactionError.wrongPhase(
+                expected: liveRestore.phase,
+                actual: handle.phase
+            )
+        }
+        return liveRestore
+    }
+
+    private func abandonRestoreInstall(
+        _ lease: TiledRasterRevisionInstallLease
+    ) throws {
+        do {
+            let disposition = try revisionStore
+                .abandonInstallForCoordinatorIfOwned(
+                    lease,
+                    layerID: lease.layerID,
+                    generation: lease.generation
+                )
+            guard disposition != .cancellationPending else {
+                throw DocumentPaintSurfaceTransactionError.cleanupFailed
+            }
+        } catch let error as DocumentPaintSurfaceTransactionError {
+            throw error
+        } catch {
+            throw DocumentPaintSurfaceTransactionError.cleanupFailed
+        }
+    }
+
+    private static func validateRestoreExpectations(
+        _ expectations: [DocumentPaintSurfaceRestoreTileExpectation]
+    ) throws {
+        for index in expectations.indices.dropFirst() {
+            let previous = expectations[index - 1].coordinate
+            let current = expectations[index].coordinate
+            if previous == current {
+                throw DocumentPaintSurfaceTransactionError
+                    .duplicateCoordinate(current)
+            }
+            guard previous < current else {
+                throw DocumentPaintSurfaceTransactionError
+                    .unsortedCoordinate(previous: previous, current: current)
+            }
+        }
+    }
+
+    private static func validateRestoreDestinations(
+        _ destinations: [DocumentPaintSurfaceMutationDestination],
+        expected: [DocumentPaintSurfaceRestoreTileExpectation]
+    ) throws {
+        let replacementCoordinates = expected.compactMap {
+            $0.disposition == .replace ? $0.coordinate : nil
+        }
+        guard destinations.map(\.coordinate) == replacementCoordinates else {
+            throw DocumentPaintSurfaceTransactionError
+                .restoreDispositionMismatch
+        }
+        for destination in destinations {
+            guard destination.texture.pixelFormat
+                    == PaintTileDescriptor.pixelFormat,
+                  destination.texture.width == PaintTileDescriptor.side,
+                  destination.texture.height == PaintTileDescriptor.side
+            else {
+                throw DocumentPaintSurfaceTransactionError
+                    .restoreEncodingFailed
+            }
+        }
     }
 
     private static func validateSortedUnique(
