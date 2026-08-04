@@ -2,49 +2,21 @@ import Foundation
 import Metal
 import PatternEngine
 
+struct RasterRevisionHarnessSnapshot: Equatable {
+    let reference: RasterRevisionReference
+    let retainedBytes: Data
+}
+
 public struct RasterRevisionOperationToken:
     Hashable, Sendable
 {
     private let storeIdentity: UInt64
     private let sequence: UInt64
 
-    fileprivate init(storeIdentity: UInt64, sequence: UInt64) {
+    init(storeIdentity: UInt64, sequence: UInt64) {
         self.storeIdentity = storeIdentity
         self.sequence = sequence
     }
-}
-
-public enum RasterRevisionOperationOutcome: Equatable, Sendable {
-    case succeeded
-    case failed
-    case cancelled
-}
-
-public struct PendingRasterRevisionPair: Equatable, Sendable {
-    public let before: RasterRevisionReference
-    public let after: RasterRevisionReference
-
-    init(
-        before: RasterRevisionReference,
-        after: RasterRevisionReference
-    ) {
-        precondition(before.id != after.id)
-        self.before = before
-        self.after = after
-    }
-
-    public var retainedBytes: Int {
-        before.retainedBytes + after.retainedBytes
-    }
-
-    public var revisionIDs: Set<StoredRasterRevisionID> {
-        Set([before.id, after.id])
-    }
-}
-
-struct RasterRevisionHarnessSnapshot: Equatable {
-    let reference: RasterRevisionReference
-    let retainedBytes: Data
 }
 
 /// Full-surface BGRA8 compatibility storage. New sparse paint routes use

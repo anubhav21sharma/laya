@@ -7,6 +7,8 @@ public enum TiledRasterRevisionFailurePoint: Equatable, Sendable {
     case tileCapture(Int)
     case commandEncoding
     case completion
+    case publish
+    case consumeInstall
 }
 
 public struct TiledRasterRevisionFailureInjection: Sendable {
@@ -26,6 +28,11 @@ public enum TiledRasterRevisionStoreError:
 {
     case emptyCoordinateSet
     case duplicateCoordinate(PaintTileCoordinate)
+    case unsortedCoordinate(
+        previous: PaintTileCoordinate,
+        current: PaintTileCoordinate
+    )
+    case coordinateOutsidePixelSize(PaintTileCoordinate)
     case coordinateSetMismatch
     case presentCoordinateOutsideDirtySet(PaintTileCoordinate)
     case missingRevision
@@ -78,6 +85,73 @@ public struct TiledRasterRevisionTileTarget: @unchecked Sendable {
     ) {
         self.coordinate = coordinate
         self.texture = texture
+    }
+}
+
+/// One exact sparse side of a before/after history pair. Tile coordinates are
+/// the authority; regions are only a deterministic compatibility and
+/// invalidation summary derived from the clipped logical bounds.
+public struct TiledRasterRevisionEndpoint: Equatable, Sendable {
+    public let generation: UInt64
+    public let pixelSize: PixelSize
+    public let documentPixelSize: PixelSize
+    public let coordinates: [PaintTileCoordinate]
+    public let presentCoordinates: [PaintTileCoordinate]
+    public let regions: PixelRegionSet
+
+    public init(
+        generation: UInt64,
+        pixelSize: PixelSize,
+        documentPixelSize: PixelSize,
+        coordinates: [PaintTileCoordinate],
+        presentCoordinates: [PaintTileCoordinate]
+    ) throws {
+        try Self.validateSortedUnique(coordinates)
+        try Self.validateSortedUnique(presentCoordinates)
+        let exact = Set(coordinates)
+        for coordinate in presentCoordinates where !exact.contains(coordinate) {
+            throw TiledRasterRevisionStoreError
+                .presentCoordinateOutsideDirtySet(coordinate)
+        }
+        var bounds: [PixelRect] = []
+        bounds.reserveCapacity(coordinates.count)
+        for coordinate in coordinates {
+            do {
+                bounds.append(try PaintTileDescriptor(
+                    coordinate: coordinate,
+                    logicalPixelSize: pixelSize
+                ).logicalBounds)
+            } catch PaintTileError.boundsArithmeticOverflow {
+                throw TiledRasterRevisionStoreError.byteCountOverflow
+            } catch {
+                throw TiledRasterRevisionStoreError
+                    .coordinateOutsidePixelSize(coordinate)
+            }
+        }
+        self.generation = generation
+        self.pixelSize = pixelSize
+        self.documentPixelSize = documentPixelSize
+        self.coordinates = coordinates
+        self.presentCoordinates = presentCoordinates
+        regions = PixelRegionSet(bounds, clippedTo: pixelSize)
+    }
+
+    private static func validateSortedUnique(
+        _ coordinates: [PaintTileCoordinate]
+    ) throws {
+        for index in coordinates.indices.dropFirst() {
+            let previous = coordinates[index - 1]
+            let current = coordinates[index]
+            if previous == current {
+                throw TiledRasterRevisionStoreError.duplicateCoordinate(current)
+            }
+            guard previous < current else {
+                throw TiledRasterRevisionStoreError.unsortedCoordinate(
+                    previous: previous,
+                    current: current
+                )
+            }
+        }
     }
 }
 
@@ -309,20 +383,49 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         let beforePresent = try validatedPresentCoordinates(
             beforePresentCoordinates,
             within: dirtyCoordinates
-        )
+        ).sorted()
         let afterPresent = try validatedPresentCoordinates(
             afterPresentCoordinates,
             within: dirtyCoordinates
+        ).sorted()
+        return try allocatePair(
+            layerID: layerID,
+            before: TiledRasterRevisionEndpoint(
+                generation: generation,
+                pixelSize: pixelSize,
+                documentPixelSize: pixelSize,
+                coordinates: dirtyCoordinates,
+                presentCoordinates: beforePresent
+            ),
+            after: TiledRasterRevisionEndpoint(
+                generation: generation,
+                pixelSize: pixelSize,
+                documentPixelSize: pixelSize,
+                coordinates: dirtyCoordinates,
+                presentCoordinates: afterPresent
+            ),
+            failureInjection: failureInjection
         )
+    }
+
+    public func allocatePair(
+        layerID: UUID,
+        before: TiledRasterRevisionEndpoint,
+        after: TiledRasterRevisionEndpoint,
+        failureInjection: TiledRasterRevisionFailureInjection? = nil
+    ) throws -> PendingRasterRevisionPair {
+        guard !before.coordinates.isEmpty || !after.coordinates.isEmpty else {
+            throw TiledRasterRevisionStoreError.emptyCoordinateSet
+        }
         let beforeLayout = try makeLayout(
-            coordinates: dirtyCoordinates,
-            present: beforePresent,
-            pixelSize: pixelSize
+            coordinates: before.coordinates,
+            present: Set(before.presentCoordinates),
+            pixelSize: before.pixelSize
         )
         let afterLayout = try makeLayout(
-            coordinates: dirtyCoordinates,
-            present: afterPresent,
-            pixelSize: pixelSize
+            coordinates: after.coordinates,
+            present: Set(after.presentCoordinates),
+            pixelSize: after.pixelSize
         )
         let pairBytes = try checkedSum(
             beforeLayout.retainedBytes,
@@ -368,31 +471,35 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 namespace: storeIdentity
             )
             nextRevisionID += 2
-            let revisionCoordinates = dirtyCoordinates.map(\.revisionCoordinate)
-            let storage = RasterRevisionStorage.tiledRGBA16Float(
+            let beforeStorage = RasterRevisionStorage.tiledRGBA16Float(
                 layerID: layerID,
-                generation: generation,
-                tileCoordinates: revisionCoordinates
+                generation: before.generation,
+                tileCoordinates: before.coordinates.map(\.revisionCoordinate)
             )
-            let before = RasterRevisionReference(
+            let afterStorage = RasterRevisionStorage.tiledRGBA16Float(
+                layerID: layerID,
+                generation: after.generation,
+                tileCoordinates: after.coordinates.map(\.revisionCoordinate)
+            )
+            let beforeReference = RasterRevisionReference(
                 id: beforeID,
-                pixelSize: pixelSize,
-                documentPixelSize: pixelSize,
-                regions: dirtyRegions,
+                pixelSize: before.pixelSize,
+                documentPixelSize: before.documentPixelSize,
+                regions: before.regions,
                 retainedBytes: beforeLayout.retainedBytes,
-                storage: storage
+                storage: beforeStorage
             )
-            let after = RasterRevisionReference(
+            let afterReference = RasterRevisionReference(
                 id: afterID,
-                pixelSize: pixelSize,
-                documentPixelSize: pixelSize,
-                regions: dirtyRegions,
+                pixelSize: after.pixelSize,
+                documentPixelSize: after.documentPixelSize,
+                regions: after.regions,
                 retainedBytes: afterLayout.retainedBytes,
-                storage: storage
+                storage: afterStorage
             )
             let pairID = beforeID
             entries[beforeID] = Entry(
-                reference: before,
+                reference: beforeReference,
                 pairID: pairID,
                 buffer: beforeBuffer,
                 slices: beforeLayout.slices,
@@ -403,7 +510,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 releaseRequested: false
             )
             entries[afterID] = Entry(
-                reference: after,
+                reference: afterReference,
                 pairID: pairID,
                 buffer: afterBuffer,
                 slices: afterLayout.slices,
@@ -414,12 +521,15 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 releaseRequested: false
             )
             pairs[pairID] = PairRecord(
-                before: before,
-                after: after,
+                before: beforeReference,
+                after: afterReference,
                 isPublished: false
             )
             residentByteCount += pairBytes
-            return PendingRasterRevisionPair(before: before, after: after)
+            return PendingRasterRevisionPair(
+                before: beforeReference,
+                after: afterReference
+            )
         }
     }
 
@@ -665,7 +775,10 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         }
     }
 
-    public func publish(_ pair: PendingRasterRevisionPair) throws {
+    public func publish(
+        _ pair: PendingRasterRevisionPair,
+        failureInjection: TiledRasterRevisionFailureInjection? = nil
+    ) throws {
         try withLock {
             guard let record = pairs[pair.before.id],
                   record.before == pair.before,
@@ -686,6 +799,9 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                   after.inFlightCount == 0
             else {
                 throw TiledRasterRevisionStoreError.pairNotReady
+            }
+            if failureInjection?.shouldFail(at: .publish) == true {
+                throw TiledRasterRevisionStoreError.injectedFailure(.publish)
             }
             entries[pair.before.id]!.lifetime = .published
             entries[pair.after.id]!.lifetime = .published
@@ -742,6 +858,23 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
     public func beginInstall(
         for reference: RasterRevisionReference
     ) throws -> TiledRasterRevisionInstallLease {
+        try beginInstall(for: reference, requiresPublishedPair: false)
+    }
+
+    /// Coordinator-only restore entry. Capture-ready provisional revisions are
+    /// intentionally accepted by `beginInstall` for compatibility, but an
+    /// irreversible history restore may lease only a published entry whose
+    /// owning pair has been published atomically.
+    public func beginPublishedInstall(
+        for reference: RasterRevisionReference
+    ) throws -> TiledRasterRevisionInstallLease {
+        try beginInstall(for: reference, requiresPublishedPair: true)
+    }
+
+    private func beginInstall(
+        for reference: RasterRevisionReference,
+        requiresPublishedPair: Bool
+    ) throws -> TiledRasterRevisionInstallLease {
         try withLock {
             guard reference.id.belongs(to: storeIdentity),
                   var entry = entries[reference.id],
@@ -760,6 +893,15 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                   let generation = reference.generation
             else {
                 throw TiledRasterRevisionStoreError.pairNotReady
+            }
+            if requiresPublishedPair {
+                guard entry.lifetime == .published,
+                      pair.isPublished,
+                      before.lifetime == .published,
+                      after.lifetime == .published
+                else {
+                    throw TiledRasterRevisionStoreError.pairNotReady
+                }
             }
             guard !installRecords.values.contains(where: {
                 $0.pairID == entry.pairID
@@ -870,7 +1012,8 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
     public func consumeInstall(
         _ lease: TiledRasterRevisionInstallLease,
         layerID: UUID,
-        generation: UInt64
+        generation: UInt64,
+        failureInjection: TiledRasterRevisionFailureInjection? = nil
     ) throws {
         try withLock {
             let record = try validatedInstallRecord(
@@ -884,6 +1027,11 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                   entry.inFlightCount > 0
             else {
                 throw TiledRasterRevisionStoreError.invalidInstallLease
+            }
+            if failureInjection?.shouldFail(at: .consumeInstall) == true {
+                throw TiledRasterRevisionStoreError.injectedFailure(
+                    .consumeInstall
+                )
             }
             installRecords.removeValue(forKey: lease.leaseID)
             entry.inFlightCount -= 1

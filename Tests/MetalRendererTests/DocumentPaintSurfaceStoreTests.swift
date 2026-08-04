@@ -21,6 +21,7 @@ struct DocumentPaintSurfaceStoreTests {
         let registry = try DocumentPaintSurfaceStore(
             device: device,
             byteBudget: tileBytes * 8,
+            transferByteCapacity: tileBytes * 9,
             geometry: geometry,
             layerIDs: [first, second],
             generation: 4
@@ -32,6 +33,7 @@ struct DocumentPaintSurfaceStoreTests {
         #expect(try registry.binding(for: first).canonical.references.isEmpty)
         #expect(try registry.binding(for: second).canonical.references.isEmpty)
         #expect(registry.tileStoreIdentity == registry.sharedTileStore.identity)
+        #expect(registry.sharedTileStore.transferByteCapacity == tileBytes * 9)
         #expect(registry.snapshot().tileByteBudget == tileBytes * 8)
         #expect(registry.snapshot().activeTileLeaseCount == 0)
         #expect(registry.snapshot().issuedNamespaceCount == 0)
@@ -518,6 +520,149 @@ struct DocumentPaintSurfaceStoreTests {
     }
 
     @Test
+    func candidatePrunesOnlyExactOwnedDirtyReferencesBeforePublication() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let baseCoordinate = PaintTileCoordinate(x: 0, y: 0)
+        let firstDirty = PaintTileCoordinate(x: 1, y: 0)
+        let secondDirty = PaintTileCoordinate(x: 2, y: 0)
+
+        let initial = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [baseCoordinate]]
+        )
+        registry.commitPrepared(try registry.prepareCommit(initial))
+        let candidate = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [firstDirty, secondDirty]]
+        )
+        let leasedView = try candidate.binding(for: layer).canonical
+        let firstReference = try #require(leasedView.references.first {
+            $0.coordinate == firstDirty
+        })
+        let lease = try leasedView.leaseExistingTiles(
+            at: [firstDirty],
+            pinReasons: [.visible]
+        )
+        let initialBytes = registry.sharedTileStore.snapshot().residentByteCount
+
+        #expect(throws: DocumentPaintSurfaceStoreError.unsortedCoordinate(
+            previous: secondDirty,
+            current: firstDirty
+        )) {
+            try registry.pruneFullyTransparentCoordinates(
+                [secondDirty, firstDirty],
+                from: candidate,
+                layerID: layer
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceStoreError
+            .duplicateCoordinate(firstDirty)) {
+            try registry.pruneFullyTransparentCoordinates(
+                [firstDirty, firstDirty],
+                from: candidate,
+                layerID: layer
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceStoreError
+            .unownedCandidateCoordinate(baseCoordinate)) {
+            try registry.pruneFullyTransparentCoordinates(
+                [baseCoordinate],
+                from: candidate,
+                layerID: layer
+            )
+        }
+
+        try registry.pruneFullyTransparentCoordinates(
+            [firstDirty],
+            from: candidate,
+            layerID: layer
+        )
+        let deferred = registry.sharedTileStore.snapshot()
+        #expect(deferred.preparedRetirementCount == 0)
+        #expect(deferred.pendingRetirementCount == 1)
+        #expect(deferred.residentByteCount == initialBytes)
+        #expect(candidate.ownedReferences.map(\.coordinate) == [secondDirty])
+        #expect(try candidate.binding(for: layer).canonical.references.map(
+            \.coordinate
+        ) == [baseCoordinate, secondDirty])
+        #expect(registry.sharedTileStore.isRetirementPending(firstReference))
+
+        try leasedView.returnLease(lease)
+        let returned = registry.sharedTileStore.snapshot()
+        #expect(returned.preparedRetirementCount == 0)
+        #expect(returned.pendingRetirementCount == 0)
+        #expect(returned.residentByteCount == initialBytes - tileBytes)
+
+        try registry.pruneFullyTransparentCoordinates(
+            [secondDirty],
+            from: candidate,
+            layerID: layer
+        )
+        let fullyPruned = registry.sharedTileStore.snapshot()
+        #expect(candidate.ownedReferences.isEmpty)
+        #expect(fullyPruned.residentByteCount == initialBytes - tileBytes * 2)
+        let beforeEmptyPrune = fullyPruned
+        try registry.pruneFullyTransparentCoordinates(
+            [],
+            from: candidate,
+            layerID: layer
+        )
+        #expect(registry.sharedTileStore.snapshot() == beforeEmptyPrune)
+
+        let prepared = try registry.prepareCommit(candidate)
+        #expect(registry.sharedTileStore.snapshot().preparedRetirementCount == 2)
+        registry.commitPreparedForCoordinator(prepared)
+        #expect(registry.sharedTileStore.snapshot().preparedRetirementCount == 0)
+        #expect(try registry.binding(for: layer).canonical.references.map(
+            \.coordinate
+        ) == [baseCoordinate])
+        #expect(throws: DocumentPaintSurfaceStoreError.candidateAlreadyConsumed) {
+            _ = try candidate.binding(for: layer)
+        }
+    }
+
+    @Test
+    func candidatePruneRejectsForeignAndStaleCandidatesWithoutMutation() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let stale = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [coordinate]]
+        )
+        let winner = try registry.makeCandidate()
+        registry.commitPrepared(try registry.prepareCommit(winner))
+        let staleSnapshot = registry.sharedTileStore.snapshot()
+        #expect(throws: DocumentPaintSurfaceStoreError.staleCandidate(
+            expectedGeneration: registry.generation,
+            actualGeneration: stale.baseGeneration
+        )) {
+            try registry.pruneFullyTransparentCoordinates(
+                [coordinate],
+                from: stale,
+                layerID: layer
+            )
+        }
+        #expect(registry.sharedTileStore.snapshot() == staleSnapshot)
+        try registry.discard(stale)
+
+        let foreignRegistry = try makeRegistry(device: device, layers: [layer])
+        let foreign = try foreignRegistry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [coordinate]]
+        )
+        let beforeForeign = registry.sharedTileStore.snapshot()
+        #expect(throws: DocumentPaintSurfaceStoreError.foreignCandidate) {
+            try registry.pruneFullyTransparentCoordinates(
+                [coordinate],
+                from: foreign,
+                layerID: layer
+            )
+        }
+        #expect(registry.sharedTileStore.snapshot() == beforeForeign)
+        try foreignRegistry.discard(foreign)
+    }
+
+    @Test
     func retirementDeletesImmediatelyOrAfterFinalLeaseAndCanBeCancelled() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let store = PaintTileStore(device: device, byteBudget: tileBytes * 3)
@@ -554,7 +699,11 @@ struct DocumentPaintSurfaceStoreTests {
             )
         }
         let immediatePlan = try store.prepareRetirement([immediate])
+        #expect(store.snapshot().preparedRetirementCount == 1)
+        #expect(store.snapshot().pendingRetirementCount == 0)
         store.requestRetirement(immediatePlan)
+        #expect(store.snapshot().preparedRetirementCount == 0)
+        #expect(store.snapshot().pendingRetirementCount == 0)
         #expect(try store.references(
             surfaceID: immediate.physicalSurfaceID,
             layerID: layer,
@@ -562,9 +711,13 @@ struct DocumentPaintSurfaceStoreTests {
         ).isEmpty)
 
         let deferredPlan = try store.prepareRetirement([deferred])
+        #expect(store.snapshot().preparedRetirementCount == 1)
         store.requestRetirement(deferredPlan)
+        #expect(store.snapshot().preparedRetirementCount == 0)
+        #expect(store.snapshot().pendingRetirementCount == 1)
         #expect(store.isRetirementPending(deferred))
         try store.release(lease, surfaceID: owner, currentGeneration: 2)
+        #expect(store.snapshot().pendingRetirementCount == 0)
         #expect(!store.isRetirementPending(deferred))
         #expect(try store.references(
             surfaceID: deferred.physicalSurfaceID,
@@ -573,7 +726,10 @@ struct DocumentPaintSurfaceStoreTests {
         ).isEmpty)
 
         let cancelPlan = try store.prepareRetirement([cancelled])
+        #expect(store.snapshot().preparedRetirementCount == 1)
         store.cancelRetirement(cancelPlan)
+        #expect(store.snapshot().preparedRetirementCount == 0)
+        #expect(store.snapshot().pendingRetirementCount == 0)
         #expect(try store.references(
             surfaceID: cancelled.physicalSurfaceID,
             layerID: layer,

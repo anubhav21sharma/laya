@@ -476,6 +476,8 @@ public struct PaintTileStoreSnapshot: Equatable, Sendable {
     public let activeLeaseCount: Int
     public let provisionalReservationCount: Int
     public let provisionalByteCount: Int
+    public let preparedRetirementCount: Int
+    public let pendingRetirementCount: Int
     public let entries: [PaintTileStoreEntrySnapshot]
     public let leastRecentlyUsedOrder: [PaintTileIdentity]
     public let lastTransferAccounting: PaintTileTransferAccounting?
@@ -1098,6 +1100,8 @@ public final class PaintTileStore: @unchecked Sendable {
                         if $1 != nil { $0 += 1 }
                     },
                 provisionalByteCount: provisionalByteCount,
+                preparedRetirementCount: preparedRetirements.count,
+                pendingRetirementCount: pendingRetirementKeys.count,
                 entries: entrySnapshots,
                 leastRecentlyUsedOrder: residency.leastRecentlyUsedOrder,
                 lastTransferAccounting: lastTransferAccounting

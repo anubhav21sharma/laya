@@ -18,6 +18,11 @@ public enum DocumentPaintSurfaceStoreError: Error, Equatable, Sendable {
     case staleGeneration(expected: UInt64, actual: UInt64)
     case generationOverflow
     case duplicateCoordinate(PaintTileCoordinate)
+    case unsortedCoordinate(
+        previous: PaintTileCoordinate,
+        current: PaintTileCoordinate
+    )
+    case unownedCandidateCoordinate(PaintTileCoordinate)
     case overlappingDirtyAndRemovedCoordinate(PaintTileCoordinate)
     case foreignCandidate
     case staleCandidate(expectedGeneration: UInt64, actualGeneration: UInt64)
@@ -25,6 +30,7 @@ public enum DocumentPaintSurfaceStoreError: Error, Equatable, Sendable {
     case ambiguousPreparedCandidate
     case preparedCandidateRequiresExplicitCancellation
     case namespaceIdentityOverflow
+    case transferByteCapacityOverflow
 }
 
 public struct DocumentPaintGeometry: Equatable, Sendable {
@@ -119,15 +125,19 @@ public final class DocumentPaintSurfaceCandidate: @unchecked Sendable {
     fileprivate let store: PaintTileStore
     fileprivate let geometry: DocumentPaintGeometry
     fileprivate let orderedLayerIDs: [UUID]
-    fileprivate let layerStates: [UUID: DocumentPaintLayerState]
     fileprivate let lock = NSLock()
     fileprivate var state: State = .open
     fileprivate var preparedCommit: DocumentPaintPreparedCommit?
+    fileprivate var layerStatesStorage: [UUID: DocumentPaintLayerState]
+    fileprivate var ownedReferencesStorage: [PaintTileReference]
 
     public let baseGeneration: UInt64
     public let generation: UInt64
-    public let ownedReferences: [PaintTileReference]
     public let ownedNamespaces: [DocumentPaintSurfaceNamespace]
+
+    public var ownedReferences: [PaintTileReference] {
+        withLock { ownedReferencesStorage }
+    }
 
     fileprivate init(
         registryIdentity: UUID,
@@ -146,35 +156,41 @@ public final class DocumentPaintSurfaceCandidate: @unchecked Sendable {
         self.orderedLayerIDs = orderedLayerIDs
         self.baseGeneration = baseGeneration
         self.generation = generation
-        self.layerStates = layerStates
-        self.ownedReferences = ownedReferences
+        layerStatesStorage = layerStates
+        ownedReferencesStorage = ownedReferences
         self.ownedNamespaces = ownedNamespaces
     }
 
     public func binding(for layerID: UUID) throws -> DocumentPaintLayerBinding {
-        lock.lock()
-        let isConsumed = state == .consumed
-        lock.unlock()
-        guard !isConsumed else {
-            throw DocumentPaintSurfaceStoreError.candidateAlreadyConsumed
-        }
-        guard let state = layerStates[layerID] else {
-            throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+        let layerState = try withLock {
+            guard state != .consumed else {
+                throw DocumentPaintSurfaceStoreError.candidateAlreadyConsumed
+            }
+            guard let layerState = layerStatesStorage[layerID] else {
+                throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+            }
+            return layerState
         }
         let view = try TiledRasterCoordinateReferenceView(
             storeIdentity: store.identity,
-            surfaceID: state.logicalSurfaceID,
+            surfaceID: layerState.logicalSurfaceID,
             layerID: layerID,
             pixelSize: geometry.storagePixelSize,
             generation: generation,
-            revision: state.revision,
-            references: state.references
+            revision: layerState.revision,
+            references: layerState.references
         )
         return DocumentPaintLayerBinding(
             layerID: layerID,
             generation: generation,
             canonical: try TiledRasterSurface(store: store, referenceView: view)
         )
+    }
+
+    fileprivate func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
     }
 }
 
@@ -242,9 +258,32 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
 
     let sharedTileStore: PaintTileStore
 
+    public convenience init(
+        device: any MTLDevice,
+        byteBudget: Int,
+        geometry: DocumentPaintGeometry,
+        layerIDs: [UUID],
+        generation: UInt64 = 0
+    ) throws {
+        let (transferByteCapacity, overflow) = byteBudget
+            .multipliedReportingOverflow(by: 3)
+        guard !overflow else {
+            throw DocumentPaintSurfaceStoreError.transferByteCapacityOverflow
+        }
+        try self.init(
+            device: device,
+            byteBudget: byteBudget,
+            transferByteCapacity: transferByteCapacity,
+            geometry: geometry,
+            layerIDs: layerIDs,
+            generation: generation
+        )
+    }
+
     public init(
         device: any MTLDevice,
         byteBudget: Int,
+        transferByteCapacity: Int,
         geometry: DocumentPaintGeometry,
         layerIDs: [UUID],
         generation: UInt64 = 0
@@ -273,7 +312,8 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         }
         sharedTileStore = PaintTileStore(
             device: device,
-            byteBudget: byteBudget
+            byteBudget: byteBudget,
+            transferByteCapacity: transferByteCapacity
         )
         currentGeometry = geometry
         currentGeneration = generation
@@ -455,11 +495,17 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             guard candidate.registryIdentity == identity,
                   candidate.store === sharedTileStore
             else { throw DocumentPaintSurfaceStoreError.foreignCandidate }
-            candidate.lock.lock()
-            let candidateState = candidate.state
-            candidate.lock.unlock()
-            guard candidateState == .open else {
-                throw DocumentPaintSurfaceStoreError.candidateAlreadyConsumed
+            let candidateSnapshot = try candidate.withLock { () throws -> (
+                layers: [UUID: DocumentPaintLayerState],
+                ownedReferences: [PaintTileReference]
+            ) in
+                guard candidate.state == .open else {
+                    throw DocumentPaintSurfaceStoreError.candidateAlreadyConsumed
+                }
+                return (
+                    candidate.layerStatesStorage,
+                    candidate.ownedReferencesStorage
+                )
             }
             guard candidate.baseGeneration == currentGeneration else {
                 throw DocumentPaintSurfaceStoreError.staleCandidate(
@@ -470,7 +516,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             guard preparedCandidateIdentity == nil else {
                 throw DocumentPaintSurfaceStoreError.ambiguousPreparedCandidate
             }
-            let retained = Set(candidate.layerStates.values.flatMap(\.references))
+            let retained = Set(candidateSnapshot.layers.values.flatMap(\.references))
             let replaced = activeLayers.values
                 .flatMap(\.references)
                 .filter { !retained.contains($0) }
@@ -481,7 +527,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             let candidateRetirement: PaintTilePreparedRetirement
             do {
                 candidateRetirement = try sharedTileStore.prepareRetirement(
-                    candidate.ownedReferences
+                    candidateSnapshot.ownedReferences
                 )
             } catch {
                 sharedTileStore.cancelRetirement(replacedRetirement)
@@ -492,10 +538,11 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                 replacedRetirement: replacedRetirement,
                 candidateRetirement: candidateRetirement
             )
-            candidate.lock.lock()
-            candidate.state = .prepared
-            candidate.preparedCommit = prepared
-            candidate.lock.unlock()
+            candidate.withLock {
+                precondition(candidate.state == .open)
+                candidate.state = .prepared
+                candidate.preparedCommit = prepared
+            }
             preparedCandidateIdentity = ObjectIdentifier(candidate)
             return prepared
         }
@@ -506,23 +553,34 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
     public func commitPrepared(_ prepared: DocumentPaintPreparedCommit) {
         withLock {
             let candidate = prepared.candidate
-            candidate.lock.lock()
-            let isPrepared = candidate.state == .prepared
-                && candidate.preparedCommit === prepared
-            candidate.lock.unlock()
+            let isPrepared = candidate.withLock {
+                candidate.state == .prepared
+                    && candidate.preparedCommit === prepared
+            }
             guard isPrepared,
                   preparedCandidateIdentity == ObjectIdentifier(candidate)
             else { return }
-            sharedTileStore.requestRetirement(prepared.replacedRetirement)
-            sharedTileStore.cancelRetirement(prepared.candidateRetirement)
-            activeLayers = candidate.layerStates
-            currentGeneration = candidate.generation
-            currentGeometry = candidate.geometry
-            candidate.lock.lock()
-            candidate.state = .consumed
-            candidate.preparedCommit = nil
-            candidate.lock.unlock()
-            preparedCandidateIdentity = nil
+            commitPreparedLocked(prepared)
+        }
+    }
+
+    /// Coordinator-only irreversible terminal. Every fallible preflight must
+    /// finish before this call; unlike the compatibility terminal, misuse is a
+    /// programmer error and cannot silently leave a published revision pair
+    /// without its matching registry generation.
+    func commitPreparedForCoordinator(_ prepared: DocumentPaintPreparedCommit) {
+        withLock {
+            let candidate = prepared.candidate
+            precondition(candidate.registryIdentity == identity)
+            precondition(candidate.store === sharedTileStore)
+            precondition(
+                preparedCandidateIdentity == ObjectIdentifier(candidate)
+            )
+            candidate.withLock {
+                precondition(candidate.state == .prepared)
+                precondition(candidate.preparedCommit === prepared)
+            }
+            commitPreparedLocked(prepared)
         }
     }
 
@@ -532,20 +590,20 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
     public func cancelPrepared(_ prepared: DocumentPaintPreparedCommit) {
         withLock {
             let candidate = prepared.candidate
-            candidate.lock.lock()
-            let isPrepared = candidate.state == .prepared
-                && candidate.preparedCommit === prepared
-            candidate.lock.unlock()
+            let isPrepared = candidate.withLock {
+                candidate.state == .prepared
+                    && candidate.preparedCommit === prepared
+            }
             guard isPrepared,
                   preparedCandidateIdentity == ObjectIdentifier(candidate)
             else { return }
+            candidate.withLock {
+                candidate.state = .consumed
+                candidate.preparedCommit = nil
+            }
+            preparedCandidateIdentity = nil
             sharedTileStore.cancelRetirement(prepared.replacedRetirement)
             sharedTileStore.requestRetirement(prepared.candidateRetirement)
-            candidate.lock.lock()
-            candidate.state = .consumed
-            candidate.preparedCommit = nil
-            candidate.lock.unlock()
-            preparedCandidateIdentity = nil
         }
     }
 
@@ -554,9 +612,10 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             guard candidate.registryIdentity == identity,
                   candidate.store === sharedTileStore
             else { throw DocumentPaintSurfaceStoreError.foreignCandidate }
-            candidate.lock.lock()
-            let candidateState = candidate.state
-            candidate.lock.unlock()
+            let candidateSnapshot = candidate.withLock {
+                (candidate.state, candidate.ownedReferencesStorage)
+            }
+            let candidateState = candidateSnapshot.0
             guard candidateState != .consumed else {
                 throw DocumentPaintSurfaceStoreError.candidateAlreadyConsumed
             }
@@ -565,12 +624,77 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                     .preparedCandidateRequiresExplicitCancellation
             }
             let retirement = try sharedTileStore.prepareRetirement(
-                candidate.ownedReferences
+                candidateSnapshot.1
             )
+            candidate.withLock { candidate.state = .consumed }
             sharedTileStore.requestRetirement(retirement)
-            candidate.lock.lock()
-            candidate.state = .consumed
-            candidate.lock.unlock()
+        }
+    }
+
+    /// Removes exact, fully transparent candidate-owned dirty tiles before the
+    /// candidate can be prepared for publication. Coordinates are authority:
+    /// callers must provide a sorted, duplicate-free set and may never prune a
+    /// shared reference inherited from the active generation.
+    public func pruneFullyTransparentCoordinates(
+        _ coordinates: [PaintTileCoordinate],
+        from candidate: DocumentPaintSurfaceCandidate,
+        layerID: UUID
+    ) throws {
+        try withLock {
+            guard candidate.registryIdentity == identity,
+                  candidate.store === sharedTileStore
+            else { throw DocumentPaintSurfaceStoreError.foreignCandidate }
+            guard activeLayers[layerID] != nil else {
+                throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+            }
+            guard candidate.baseGeneration == currentGeneration else {
+                throw DocumentPaintSurfaceStoreError.staleCandidate(
+                    expectedGeneration: currentGeneration,
+                    actualGeneration: candidate.baseGeneration
+                )
+            }
+            try Self.validateSortedUnique(coordinates)
+            let references = try candidate.withLock { () throws
+                -> [PaintTileReference] in
+                guard candidate.state == .open else {
+                    throw DocumentPaintSurfaceStoreError.candidateAlreadyConsumed
+                }
+                guard let layer = candidate.layerStatesStorage[layerID] else {
+                    throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+                }
+                return try coordinates.map { coordinate in
+                    guard let reference = candidate.ownedReferencesStorage
+                        .first(where: {
+                            $0.layerID == layerID
+                                && $0.coordinate == coordinate
+                        }),
+                          layer.references.first(where: {
+                              $0.coordinate == coordinate
+                          }) == reference
+                    else {
+                        throw DocumentPaintSurfaceStoreError
+                            .unownedCandidateCoordinate(coordinate)
+                    }
+                    return reference
+                }
+            }
+            guard !references.isEmpty else { return }
+
+            let retirement = try sharedTileStore.prepareRetirement(references)
+            candidate.withLock {
+                precondition(candidate.state == .open)
+                let removed = Set(references)
+                let layer = candidate.layerStatesStorage[layerID]!
+                candidate.layerStatesStorage[layerID] = DocumentPaintLayerState(
+                    logicalSurfaceID: layer.logicalSurfaceID,
+                    revision: layer.revision,
+                    references: layer.references.filter { !removed.contains($0) }
+                )
+                candidate.ownedReferencesStorage.removeAll {
+                    removed.contains($0)
+                }
+            }
+            sharedTileStore.requestRetirement(retirement)
         }
     }
 
@@ -741,6 +865,24 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         sharedTileStore.requestRetirement(plan)
     }
 
+    private func commitPreparedLocked(
+        _ prepared: DocumentPaintPreparedCommit
+    ) {
+        let candidate = prepared.candidate
+        candidate.withLock {
+            // The logical publication is guaranteed first. Retirement work is
+            // nonthrowing but may mutate hash tables, so it follows the swap.
+            activeLayers = candidate.layerStatesStorage
+            currentGeneration = candidate.generation
+            currentGeometry = candidate.geometry
+            candidate.state = .consumed
+            candidate.preparedCommit = nil
+        }
+        preparedCandidateIdentity = nil
+        sharedTileStore.requestRetirement(prepared.replacedRetirement)
+        sharedTileStore.cancelRetirement(prepared.candidateRetirement)
+    }
+
     private static func sortedUnique(
         _ coordinates: [PaintTileCoordinate]
     ) throws -> [PaintTileCoordinate] {
@@ -751,6 +893,24 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                 .duplicateCoordinate(sorted[index])
         }
         return sorted
+    }
+
+    private static func validateSortedUnique(
+        _ coordinates: [PaintTileCoordinate]
+    ) throws {
+        for index in coordinates.indices.dropFirst() {
+            let previous = coordinates[index - 1]
+            let current = coordinates[index]
+            if previous == current {
+                throw DocumentPaintSurfaceStoreError.duplicateCoordinate(current)
+            }
+            guard previous < current else {
+                throw DocumentPaintSurfaceStoreError.unsortedCoordinate(
+                    previous: previous,
+                    current: current
+                )
+            }
+        }
     }
 
     private func withLock<T>(_ body: () throws -> T) rethrows -> T {
