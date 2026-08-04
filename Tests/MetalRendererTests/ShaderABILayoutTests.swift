@@ -72,6 +72,84 @@ func compositeWireValuesAreAppendOnly() {
 }
 
 @Test
+func documentPaintMutationWireContractIsFrozen() {
+    #expect(PatternDocumentPaintMutationABIVersion == 1)
+    #expect(PatternBufferIndexDocumentPaintMutationUniforms == 12)
+    #expect(PatternBufferIndexDocumentPaintMutationReduction == 13)
+    #expect(PatternBufferIndexDocumentPaintMutationSourceBytes == 14)
+    #expect(PatternTextureIndexDocumentPaintBase == 22)
+    #expect(PatternTextureIndexDocumentPaintAuthoritative == 23)
+    #expect(PatternTextureIndexDocumentPaintDestination == 24)
+    #expect(PatternDocumentPaintFlagBaseKnownClear == 1)
+    #expect(PatternDocumentPaintFlagAuthoritativeKnownClear == 2)
+    #expect(PatternDocumentPaintFlagRadialTargetMask == 4)
+
+    #expect(MemoryLayout<PatternDocumentPaintMutationUniforms>.size == 80)
+    #expect(MemoryLayout<PatternDocumentPaintMutationUniforms>.stride == 80)
+    #expect(MemoryLayout<PatternDocumentPaintMutationUniforms>.alignment == 16)
+    let swiftOffsets: [Int?] = [
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+            of: \.logicalExtent
+        ),
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+            of: \.sourceOrigin
+        ),
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+            of: \.destinationOrigin
+        ),
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+            of: \.copyExtent
+        ),
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+            of: \.logicalPage
+        ),
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+            of: \.reserved0
+        ),
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+            of: \.parameters
+        ),
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+            of: \.compositeMode
+        ),
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(of: \.flags),
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+            of: \.sourceBytesPerRow
+        ),
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+            of: \.sourceByteOffset
+        ),
+    ]
+    let expectedOffsets: [Int?] = [0, 8, 16, 24, 32, 40, 48, 64, 68, 72, 76]
+    #expect(swiftOffsets == expectedOffsets)
+    let cOffsets = [
+        PatternDocumentPaintMutationUniformsOffsetLogicalExtent(),
+        PatternDocumentPaintMutationUniformsOffsetSourceOrigin(),
+        PatternDocumentPaintMutationUniformsOffsetDestinationOrigin(),
+        PatternDocumentPaintMutationUniformsOffsetCopyExtent(),
+        PatternDocumentPaintMutationUniformsOffsetLogicalPage(),
+        PatternDocumentPaintMutationUniformsOffsetReserved0(),
+        PatternDocumentPaintMutationUniformsOffsetParameters(),
+        PatternDocumentPaintMutationUniformsOffsetCompositeMode(),
+        PatternDocumentPaintMutationUniformsOffsetFlags(),
+        PatternDocumentPaintMutationUniformsOffsetSourceBytesPerRow(),
+        PatternDocumentPaintMutationUniformsOffsetSourceByteOffset(),
+    ]
+    #expect(cOffsets == expectedOffsets.map { numericCast($0!) })
+
+    #expect(MemoryLayout<PatternDocumentPaintMutationReduction>.size == 8)
+    #expect(MemoryLayout<PatternDocumentPaintMutationReduction>.stride == 8)
+    #expect(MemoryLayout<PatternDocumentPaintMutationReduction>.alignment == 4)
+    #expect(MemoryLayout<PatternDocumentPaintMutationReduction>.offset(
+        of: \.maximumAlphaBits
+    ) == 0)
+    #expect(MemoryLayout<PatternDocumentPaintMutationReduction>.offset(
+        of: \.invalid
+    ) == 4)
+    #expect(ShaderABI.isValid)
+}
+
+@Test
 func gridUniformAndProjectedStampLayoutsMatchTheMetalContract() {
     #expect(MemoryLayout<PatternGridFrameUniforms>.size == 96)
     #expect(MemoryLayout<PatternGridFrameUniforms>.stride == 96)

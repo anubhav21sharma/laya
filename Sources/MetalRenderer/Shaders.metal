@@ -2266,3 +2266,195 @@ fragment float4 patternSparseSamplingFallbackFragment(
         fraction
     );
 }
+
+static bool patternDocumentPaintIsValidPremultiplied(float4 value) {
+    return all(isfinite(value))
+        && value.a >= 0.0
+        && value.a <= 1.0
+        && all(value.rgb >= float3(0.0))
+        && all(value.rgb <= float3(value.a + 0.00001));
+}
+
+static void patternDocumentPaintStoreAndReduce(
+    float4 value,
+    bool inputWasValid,
+    uint2 texel,
+    uint2 logicalExtent,
+    texture2d<float, access::write> destination,
+    device atomic_uint* reduction
+) {
+    const bool inLogicalBounds = all(texel < logicalExtent);
+    if (!inLogicalBounds) {
+        destination.write(float4(0.0), texel);
+        return;
+    }
+
+    const bool outputWasValid = patternDocumentPaintIsValidPremultiplied(value);
+    const half4 stored = half4(value);
+    const float4 storedValue = float4(stored);
+    destination.write(storedValue, texel);
+    if (
+        !inputWasValid
+        || !outputWasValid
+        || !patternDocumentPaintIsValidPremultiplied(storedValue)
+    ) {
+        atomic_store_explicit(&reduction[1], 1u, memory_order_relaxed);
+        return;
+    }
+    atomic_fetch_max_explicit(
+        &reduction[0],
+        as_type<uint>(storedValue.a),
+        memory_order_relaxed
+    );
+}
+
+kernel void patternDocumentPaintStrokeMutation(
+    texture2d<float, access::read> base
+        [[texture(PatternTextureIndexDocumentPaintBase)]],
+    texture2d<float, access::read> authoritative
+        [[texture(PatternTextureIndexDocumentPaintAuthoritative)]],
+    texture2d<float, access::write> destination
+        [[texture(PatternTextureIndexDocumentPaintDestination)]],
+    constant PatternDocumentPaintMutationUniforms& mutation
+        [[buffer(PatternBufferIndexDocumentPaintMutationUniforms)]],
+    device atomic_uint* reduction
+        [[buffer(PatternBufferIndexDocumentPaintMutationReduction)]],
+    uint2 texel [[thread_position_in_grid]]
+) {
+    if (any(texel >= uint2(destination.get_width(), destination.get_height()))) {
+        return;
+    }
+    if (any(texel >= mutation.logicalExtent)) {
+        destination.write(float4(0.0), texel);
+        return;
+    }
+    const float4 baseValue =
+        (mutation.flags & PatternDocumentPaintFlagBaseKnownClear) != 0
+        ? float4(0.0)
+        : base.read(texel);
+    const float4 authoritativeValue =
+        (mutation.flags & PatternDocumentPaintFlagAuthoritativeKnownClear) != 0
+        ? float4(0.0)
+        : authoritative.read(texel);
+    const bool inputWasValid =
+        patternDocumentPaintIsValidPremultiplied(baseValue)
+        && patternDocumentPaintIsValidPremultiplied(authoritativeValue);
+    const float4 result = patternCompositeLive(
+        authoritativeValue,
+        float4(0.0),
+        baseValue,
+        mutation.compositeMode,
+        mutation.parameters.x,
+        mutation.parameters.y,
+        mutation.parameters.z
+    );
+    patternDocumentPaintStoreAndReduce(
+        result,
+        inputWasValid,
+        texel,
+        mutation.logicalExtent,
+        destination,
+        reduction
+    );
+}
+
+kernel void patternDocumentPaintResizeMutation(
+    texture2d<float, access::read> source
+        [[texture(PatternTextureIndexDocumentPaintBase)]],
+    texture2d<float, access::write> destination
+        [[texture(PatternTextureIndexDocumentPaintDestination)]],
+    constant PatternDocumentPaintMutationUniforms& mutation
+        [[buffer(PatternBufferIndexDocumentPaintMutationUniforms)]],
+    constant PatternRadialFrameUniforms& targetRadial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    device atomic_uint* reduction
+        [[buffer(PatternBufferIndexDocumentPaintMutationReduction)]],
+    uint2 texel [[thread_position_in_grid]]
+) {
+    if (any(texel >= uint2(destination.get_width(), destination.get_height()))) {
+        return;
+    }
+    if (any(texel >= mutation.logicalExtent)) {
+        destination.write(float4(0.0), texel);
+        return;
+    }
+
+    const bool atOrAfterDestination = all(texel >= mutation.destinationOrigin);
+    const uint2 relative = atOrAfterDestination
+        ? texel - mutation.destinationOrigin
+        : uint2(0);
+    bool shouldCopy = atOrAfterDestination && all(relative < mutation.copyExtent);
+    if (
+        shouldCopy
+        && (mutation.flags & PatternDocumentPaintFlagRadialTargetMask) != 0
+    ) {
+        const int2 logicalTexel = mutation.logicalPage * 256 + int2(texel);
+        shouldCopy = patternRadialOrbitIntersectsCanvas(
+            float2(logicalTexel) + 0.5,
+            targetRadial
+        );
+    }
+
+    const uint2 sourceTexel = mutation.sourceOrigin + relative;
+    const float4 value = shouldCopy ? source.read(sourceTexel) : float4(0.0);
+    patternDocumentPaintStoreAndReduce(
+        value,
+        !shouldCopy || patternDocumentPaintIsValidPremultiplied(value),
+        texel,
+        mutation.logicalExtent,
+        destination,
+        reduction
+    );
+}
+
+kernel void patternDocumentPaintEncodedImportMutation(
+    texture2d<float, access::write> destination
+        [[texture(PatternTextureIndexDocumentPaintDestination)]],
+    constant PatternDocumentPaintMutationUniforms& mutation
+        [[buffer(PatternBufferIndexDocumentPaintMutationUniforms)]],
+    device atomic_uint* reduction
+        [[buffer(PatternBufferIndexDocumentPaintMutationReduction)]],
+    const device uchar* sourceBytes
+        [[buffer(PatternBufferIndexDocumentPaintMutationSourceBytes)]],
+    uint2 texel [[thread_position_in_grid]]
+) {
+    if (any(texel >= uint2(destination.get_width(), destination.get_height()))) {
+        return;
+    }
+    if (any(texel >= mutation.logicalExtent)) {
+        destination.write(float4(0.0), texel);
+        return;
+    }
+
+    const uint offset = mutation.sourceByteOffset
+        + texel.y * mutation.sourceBytesPerRow
+        + texel.x * 4;
+    const uint blueByte = uint(sourceBytes[offset]);
+    const uint greenByte = uint(sourceBytes[offset + 1]);
+    const uint redByte = uint(sourceBytes[offset + 2]);
+    const uint alphaByte = uint(sourceBytes[offset + 3]);
+    float4 value = float4(0.0);
+    if (alphaByte != 0) {
+        const float alpha = float(alphaByte) / 255.0;
+        const float inverseAlphaByte = 1.0 / float(alphaByte);
+        const float3 encodedStraight = clamp(
+            float3(redByte, greenByte, blueByte) * inverseAlphaByte,
+            0.0,
+            1.0
+        );
+        value = float4(
+            patternSRGBChannelToLinear(encodedStraight.r) * alpha,
+            patternSRGBChannelToLinear(encodedStraight.g) * alpha,
+            patternSRGBChannelToLinear(encodedStraight.b) * alpha,
+            alpha
+        );
+    }
+    patternDocumentPaintStoreAndReduce(
+        value,
+        true,
+        texel,
+        mutation.logicalExtent,
+        destination,
+        reduction
+    );
+}

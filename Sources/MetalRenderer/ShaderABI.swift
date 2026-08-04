@@ -102,7 +102,71 @@ public enum ShaderABI {
             && MemoryLayout<PatternCompositeUniforms>.offset(
                 of: \.parameters
             ) == 0
+            && documentPaintMutationIsValid
             && sparseSamplingIsValid
+    }
+
+    private static var documentPaintMutationIsValid: Bool {
+        MemoryLayout<PatternDocumentPaintMutationUniforms>.size == 80
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.stride == 80
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.alignment == 16
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.logicalExtent
+            ) == 0
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.sourceOrigin
+            ) == 8
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.destinationOrigin
+            ) == 16
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.copyExtent
+            ) == 24
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.logicalPage
+            ) == 32
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.reserved0
+            ) == 40
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.parameters
+            ) == 48
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.compositeMode
+            ) == 64
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.flags
+            ) == 68
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.sourceBytesPerRow
+            ) == 72
+            && MemoryLayout<PatternDocumentPaintMutationUniforms>.offset(
+                of: \.sourceByteOffset
+            ) == 76
+            && MemoryLayout<PatternDocumentPaintMutationReduction>.size == 8
+            && MemoryLayout<PatternDocumentPaintMutationReduction>.stride == 8
+            && MemoryLayout<PatternDocumentPaintMutationReduction>.alignment == 4
+            && MemoryLayout<PatternDocumentPaintMutationReduction>.offset(
+                of: \.maximumAlphaBits
+            ) == 0
+            && MemoryLayout<PatternDocumentPaintMutationReduction>.offset(
+                of: \.invalid
+            ) == 4
+            && PatternDocumentPaintMutationUniformsOffsetLogicalExtent() == 0
+            && PatternDocumentPaintMutationUniformsOffsetSourceOrigin() == 8
+            && PatternDocumentPaintMutationUniformsOffsetDestinationOrigin()
+                == 16
+            && PatternDocumentPaintMutationUniformsOffsetCopyExtent() == 24
+            && PatternDocumentPaintMutationUniformsOffsetLogicalPage() == 32
+            && PatternDocumentPaintMutationUniformsOffsetReserved0() == 40
+            && PatternDocumentPaintMutationUniformsOffsetParameters() == 48
+            && PatternDocumentPaintMutationUniformsOffsetCompositeMode() == 64
+            && PatternDocumentPaintMutationUniformsOffsetFlags() == 68
+            && PatternDocumentPaintMutationUniformsOffsetSourceBytesPerRow()
+                == 72
+            && PatternDocumentPaintMutationUniformsOffsetSourceByteOffset()
+                == 76
+            && PatternDocumentPaintMutationABIVersion == 1
     }
 
     private static var depositionStampInstanceIsValid: Bool {

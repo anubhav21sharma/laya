@@ -198,6 +198,73 @@ typedef struct PatternCompositeUniforms {
     PatternFloat4 parameters;
 } PatternCompositeUniforms;
 
+typedef struct PatternDocumentPaintMutationUniforms {
+    PatternUInt2 logicalExtent;
+    PatternUInt2 sourceOrigin;
+    PatternUInt2 destinationOrigin;
+    PatternUInt2 copyExtent;
+    PatternInt2 logicalPage;
+    PatternUInt2 reserved0;
+    // (stroke opacity, accumulation limit, eraser strength, reserved)
+    PatternFloat4 parameters;
+    PatternUInt32 compositeMode;
+    PatternUInt32 flags;
+    PatternUInt32 sourceBytesPerRow;
+    PatternUInt32 sourceByteOffset;
+} PatternDocumentPaintMutationUniforms;
+
+typedef struct PatternDocumentPaintMutationReduction {
+    PatternUInt32 maximumAlphaBits;
+    PatternUInt32 invalid;
+} PatternDocumentPaintMutationReduction;
+
+#ifndef __METAL_VERSION__
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetLogicalExtent(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, logicalExtent);
+}
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetSourceOrigin(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, sourceOrigin);
+}
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetDestinationOrigin(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, destinationOrigin);
+}
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetCopyExtent(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, copyExtent);
+}
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetLogicalPage(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, logicalPage);
+}
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetReserved0(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, reserved0);
+}
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetParameters(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, parameters);
+}
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetCompositeMode(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, compositeMode);
+}
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetFlags(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, flags);
+}
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetSourceBytesPerRow(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, sourceBytesPerRow);
+}
+static inline size_t
+PatternDocumentPaintMutationUniformsOffsetSourceByteOffset(void) {
+    return offsetof(PatternDocumentPaintMutationUniforms, sourceByteOffset);
+}
+#endif
+
 typedef struct PatternSparseSamplingUniforms {
     PatternUInt2 outputSize;
     PatternFloat2 sourceOrigin;
@@ -316,6 +383,12 @@ PATTERN_WIRE_CONSTANT PatternUInt32
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexSparsePageEntries = 9;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexSparseBindingRemap = 10;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexSparseTextureArguments = 11;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternBufferIndexDocumentPaintMutationUniforms = 12;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternBufferIndexDocumentPaintMutationReduction = 13;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternBufferIndexDocumentPaintMutationSourceBytes = 14;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexCanonical = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexLive = 1;
@@ -324,6 +397,17 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushGrain = 3;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexReplayLive = 4;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexRadialPageTable = 5;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexSparseFallbackBase = 6;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexDocumentPaintBase = 22;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternTextureIndexDocumentPaintAuthoritative = 23;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternTextureIndexDocumentPaintDestination = 24;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintMutationABIVersion = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintFlagBaseKnownClear = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDocumentPaintFlagAuthoritativeKnownClear = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintFlagRadialTargetMask = 4;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseMaximumFallbackTextures = 16;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseMaximumTier2Textures = 512;
