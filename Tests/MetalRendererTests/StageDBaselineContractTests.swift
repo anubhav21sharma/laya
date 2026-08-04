@@ -67,6 +67,22 @@ struct StageDBaselineContractTests {
     @MainActor
     func stageCLifecycleInventoryHasOneNamedOwner() async throws {
         #expect(stageDLifecycleTransitions.count == 12)
+        #expect(
+            stageDLifecycleTransitions.map(\.name) == [
+                "initialize-import-existing-snapshot",
+                "begin",
+                "append-actual-coalesced",
+                "replace-prediction",
+                "prepare-submit-display",
+                "finish-commit",
+                "cancel-failure",
+                "clear",
+                "undo-redo",
+                "stage-c-stroke-ownership",
+                "resize-mode-switch",
+                "export-committed-snapshot",
+            ]
+        )
         for transition in stageDLifecycleTransitions {
             try await transition.exercise()
         }
@@ -267,7 +283,7 @@ private struct StageDLifecycleTransition: Sendable {
 }
 
 private let stageDLifecycleTransitions: [StageDLifecycleTransition] = [
-    .init(name: "initialize-import", exercise: { try await stageDLifecycleProbe(.initializeImport) }),
+    .init(name: "initialize-import-existing-snapshot", exercise: { try await stageDLifecycleProbe(.initializeImportSnapshotRestore) }),
     .init(name: "begin", exercise: { try await stageDLifecycleProbe(.begin) }),
     .init(name: "append-actual-coalesced", exercise: { try await stageDLifecycleProbe(.appendActual) }),
     .init(name: "replace-prediction", exercise: { try await stageDLifecycleProbe(.replacePrediction) }),
@@ -276,15 +292,16 @@ private let stageDLifecycleTransitions: [StageDLifecycleTransition] = [
     .init(name: "cancel-failure", exercise: { try await stageDLifecycleProbe(.cancelFailure) }),
     .init(name: "clear", exercise: { try await stageDLifecycleProbe(.clear) }),
     .init(name: "undo-redo", exercise: { try await stageDLifecycleProbe(.undoRedo) }),
-    .init(name: "layer-mutation", exercise: { try await stageDLifecycleProbe(.layerMutation) }),
-    .init(name: "resize-mode-switch-import", exercise: { try await stageDLifecycleProbe(.resizeModeSwitchImport) }),
-    .init(name: "export-save", exercise: { try await stageDLifecycleProbe(.exportSave) }),
+    // Stage D has no layer model yet; this covers the current Stage C owner.
+    .init(name: "stage-c-stroke-ownership", exercise: { try await stageDLifecycleProbe(.stageCStrokeOwnership) }),
+    .init(name: "resize-mode-switch", exercise: { try await stageDLifecycleProbe(.resizeModeSwitch) }),
+    .init(name: "export-committed-snapshot", exercise: { try await stageDLifecycleProbe(.exportCommittedSnapshot) }),
 ]
 
 private enum StageDLifecycleKind: Sendable {
-    case initializeImport, begin, appendActual, replacePrediction
+    case initializeImportSnapshotRestore, begin, appendActual, replacePrediction
     case prepareSubmitDisplay, finishCommit, cancelFailure, clear, undoRedo
-    case layerMutation, resizeModeSwitchImport, exportSave
+    case stageCStrokeOwnership, resizeModeSwitch, exportCommittedSnapshot
 }
 
 @MainActor
@@ -299,7 +316,6 @@ private func stageDLifecycleProbe(_ kind: StageDLifecycleKind) async throws {
     try setup.renderer.activateDrawBrush(brush)
     let initial = depositionTextureBytes(try setup.renderer.copyCanonicalForHarness())
     #expect(!initial.contains { $0 != 0 })
-    guard kind != .initializeImport else { return }
 
     let token = RendererOperationToken(rawValue: 140_000)
     try setup.renderer.beginStroke(
@@ -315,6 +331,18 @@ private func stageDLifecycleProbe(_ kind: StageDLifecycleKind) async throws {
         sample: depositionSample(.moved, x: 40, y: 24)
     )
     guard kind != .appendActual else { return }
+
+    if kind == .stageCStrokeOwnership {
+        #expect(setup.renderer.hasActiveStroke)
+        try setup.renderer.cancelStroke(token: token)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == initial
+        )
+        return
+    }
 
     if kind == .replacePrediction {
         try setup.renderer.appendStroke(
@@ -347,13 +375,27 @@ private func stageDLifecycleProbe(_ kind: StageDLifecycleKind) async throws {
     guard kind != .finishCommit else { return }
 
     switch kind {
+    case .initializeImportSnapshotRestore:
+        let snapshot = try setup.renderer.captureCommittedDocument()
+        let restored = try GridRenderer(
+            device: setup.device,
+            library: setup.library,
+            drawableSize: PatternSize(width: 64, height: 64),
+            committedSnapshot: snapshot
+        )
+        #expect(restored.documentConfiguration == snapshot.documentConfiguration)
+        #expect(
+            depositionTextureBytes(
+                try restored.copyCanonicalForHarness()
+            ) == committed
+        )
     case .cancelFailure:
         let cancel = RendererOperationToken(rawValue: 140_001)
         try setup.renderer.beginStroke(token: cancel, sample: depositionSample(.began), style: depositionStyle(brush, compositeMode: .draw, diameter: 8))
         try setup.renderer.cancelStroke(token: cancel)
         try await awaitOffMainWorkspaceAvailable(setup.renderer)
         #expect(depositionTextureBytes(try setup.renderer.copyCanonicalForHarness()) == committed)
-    case .clear, .layerMutation:
+    case .clear:
         try setup.renderer.requestClearForHarness(token: RendererOperationToken(rawValue: 140_002), maximumRetainedBytes: 4_000_000, forceFailure: false)
         try setup.renderer.finishRasterOperationForHarness()
         #expect(!depositionTextureBytes(try setup.renderer.copyCanonicalForHarness()).contains { $0 != 0 })
@@ -373,12 +415,35 @@ private func stageDLifecycleProbe(_ kind: StageDLifecycleKind) async throws {
         try setup.renderer.finishRasterOperationForHarness()
         #expect(!depositionTextureBytes(try setup.renderer.copyCanonicalForHarness()).contains { $0 != 0 })
         setup.renderer.releaseRasterRevisions([clear.before.id, clear.after.id])
-    case .resizeModeSwitchImport:
+    case .resizeModeSwitch:
         try setup.renderer.requestResizeForHarness(token: RendererOperationToken(rawValue: 140_003), to: PixelSize(width: 80, height: 72), maximumRetainedBytes: 4_000_000, forceResourceAllocationFailure: false)
         try setup.renderer.finishRasterOperationForHarness()
         #expect(setup.renderer.pixelSize == PixelSize(width: 80, height: 72))
-    case .exportSave:
-        #expect(try setup.renderer.copyCanonicalForHarness().width == 64)
+        try setup.renderer.requestClearForHarness(token: RendererOperationToken(rawValue: 140_004), maximumRetainedBytes: 4_000_000, forceFailure: false)
+        try setup.renderer.finishRasterOperationForHarness()
+        #expect(!depositionTextureBytes(try setup.renderer.copyCanonicalForHarness()).contains { $0 != 0 })
+        try setup.renderer.reconcileGeometryLock(documentIsEmpty: true)
+        let periodic = SymmetryDocumentConfiguration.periodic(
+            .legacy(
+                presetID: .grid,
+                tileSize: PatternSize(width: 80, height: 72)
+            )
+        )
+        try setup.renderer.replaceEmptyDocumentConfiguration(
+            periodic,
+            pixelSize: PixelSize(width: 80, height: 72)
+        )
+        #expect(setup.renderer.documentConfiguration == periodic)
+    case .exportCommittedSnapshot:
+        let snapshot = try setup.renderer.captureCommittedDocument()
+        let export = try setup.renderer.exportFlattenedScene(
+            pixelSize: snapshot.canvasSize,
+            transparentBackground: true
+        )
+        #expect(export.pixelSize == snapshot.canvasSize)
+        #expect(export.hasTransparentBackground)
+        #expect(export.bgra8Bytes.count == snapshot.canvasSize.width * snapshot.canvasSize.height * 4)
+        #expect(export.bgra8Bytes.contains { $0 != 0 })
     default:
         break
     }

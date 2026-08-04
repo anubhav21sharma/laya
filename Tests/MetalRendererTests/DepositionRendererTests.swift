@@ -4385,6 +4385,8 @@ private func requireSendableRenderState<T: Sendable>(_: T) {}
 struct DepositionRendererSetup {
     let renderer: GridRenderer
     let compiler: BrushCompiler
+    let device: any MTLDevice
+    let library: any MTLLibrary
 
     func compileBrush(id: String) async throws -> CompiledBrush {
         try await compileBrush(
@@ -4685,7 +4687,12 @@ func makeDepositionRendererSetup(
         ),
         testHooks: .none
     )
-    return DepositionRendererSetup(renderer: renderer, compiler: compiler)
+    return DepositionRendererSetup(
+        renderer: renderer,
+        compiler: compiler,
+        device: device,
+        library: library
+    )
 }
 
 private func depositionRendererLibrary(
