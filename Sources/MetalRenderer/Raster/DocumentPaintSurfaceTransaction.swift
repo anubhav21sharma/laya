@@ -75,6 +75,16 @@ public enum DocumentPaintSurfaceTransactionError:
     case encodedImportGeometryMismatch(expected: PixelSize, actual: PixelSize)
     case encodedImportRadialUnsupported
     case emptyMutation
+    case missingStrokeAuthoritativeLease
+    case invalidStrokeCompositeParameters
+    case strokeSourceStoreMismatch
+    case strokeSourceOwnerMismatch
+    case strokeSourceLayerMismatch(expected: UUID, actual: UUID)
+    case strokeSourceGenerationMismatch(expected: UInt64, actual: UInt64)
+    case strokeSourceGeometryMismatch(expected: PixelSize, actual: PixelSize)
+    case strokeSourceRadialLayoutMismatch
+    case strokeSourceCoordinateMismatch
+    case strokeTextureAlias
     case backendEncodingFailed
     case backendCompletionFailed
     case backendDiscardFailed
@@ -273,6 +283,8 @@ struct DocumentPaintSurfaceTransactionOwnershipSnapshot:
     let commandBufferIdentity: ObjectIdentifier?
     let destinationLeaseID: PaintTileLeaseID?
     let resizeSourceLeaseID: PaintTileLeaseID?
+    let strokeBaseSourceLeaseID: PaintTileLeaseID?
+    let strokeAuthoritativeSourceLeaseID: PaintTileLeaseID?
     let baseSourceLeaseID: PaintTileLeaseID?
     let candidateSourceLeaseID: PaintTileLeaseID?
     let backendEncodingID: UUID?
@@ -303,6 +315,8 @@ struct DocumentPaintSurfaceTransactionOwnershipSnapshot:
         commandBufferIdentity: nil,
         destinationLeaseID: nil,
         resizeSourceLeaseID: nil,
+        strokeBaseSourceLeaseID: nil,
+        strokeAuthoritativeSourceLeaseID: nil,
         baseSourceLeaseID: nil,
         candidateSourceLeaseID: nil,
         backendEncodingID: nil,
@@ -448,6 +462,58 @@ struct DocumentPaintSurfaceMutationSource: @unchecked Sendable {
     let texture: any MTLTexture
 }
 
+enum DocumentPaintSurfaceReadSource: @unchecked Sendable {
+    case knownClear(
+        coordinate: PaintTileCoordinate,
+        logicalBounds: PixelRect
+    )
+    case texture(DocumentPaintSurfaceMutationSource)
+
+    var coordinate: PaintTileCoordinate {
+        switch self {
+        case let .knownClear(coordinate, _): coordinate
+        case let .texture(source): source.coordinate
+        }
+    }
+
+    var logicalBounds: PixelRect {
+        switch self {
+        case let .knownClear(_, logicalBounds): logicalBounds
+        case let .texture(source): source.logicalBounds
+        }
+    }
+}
+
+struct DocumentPaintStrokeCompositeParameters: Equatable, Sendable {
+    let mode: StrokeCompositeMode
+    let strokeOpacity: Float
+    let accumulationLimit: Float
+    let eraserStrength: Float
+
+    static let opaqueDraw = Self(
+        mode: .draw,
+        strokeOpacity: 1,
+        accumulationLimit: 1,
+        eraserStrength: 1
+    )
+
+    var isValid: Bool {
+        strokeOpacity.isFinite && (0...1).contains(strokeOpacity)
+            && accumulationLimit.isFinite
+            && (0...1).contains(accumulationLimit)
+            && eraserStrength.isFinite
+            && (0...1).contains(eraserStrength)
+    }
+}
+
+struct DocumentPaintSurfaceStrokeBackendPayload: @unchecked Sendable {
+    let geometry: DocumentPaintGeometry
+    let compositeParameters: DocumentPaintStrokeCompositeParameters
+    let baseSources: [DocumentPaintSurfaceReadSource]
+    let authoritativeSources: [DocumentPaintSurfaceReadSource]
+    let destinations: [DocumentPaintSurfaceMutationDestination]
+}
+
 struct DocumentPaintSurfaceResizeCopyMapping: Equatable, Sendable {
     let sourceCoordinate: PaintTileCoordinate
     let destinationCoordinate: PaintTileCoordinate
@@ -504,10 +570,8 @@ struct DocumentPaintSurfaceRestoreBackendPayload: @unchecked Sendable {
 }
 
 enum DocumentPaintSurfaceBackendOperation: @unchecked Sendable {
-    case mutation(
-        kind: DocumentPaintSurfaceTransactionKind,
-        destinations: [DocumentPaintSurfaceMutationDestination]
-    )
+    case stroke(DocumentPaintSurfaceStrokeBackendPayload)
+    case clear
     case resize(DocumentPaintSurfaceResizeBackendPayload)
     case encodedImport(DocumentPaintSurfaceEncodedImportBackendPayload)
     case restore(DocumentPaintSurfaceRestoreBackendPayload)
@@ -592,6 +656,10 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         var candidateBinding: DocumentPaintLayerBinding?
         var destinationLease: PaintTileLease?
         var resizeSourceLease: PaintTileLease?
+        var strokeBaseSourceLease: PaintTileLease?
+        var strokeAuthoritativeSourceOwner: StrokeTileSurfaceEncoder?
+        var strokeAuthoritativeSourceLease:
+            StrokeAuthoritativeMutationLease?
         var backendEncoding: DocumentPaintSurfaceMutationBackendEncoding?
         var reduction: DocumentPaintTransparencyReduction?
         var revisionPair: PendingRasterRevisionPair?
@@ -664,6 +732,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
     private let revisionStore: TiledRasterRevisionStore
     private let commandQueue: any MTLCommandQueue
     private let mutationBackend: any DocumentPaintSurfaceMutationBackend
+    private let allowKnownClearAuthoritativeStrokeSourcesForTesting: Bool
     private let afterBaseSnapshotForTesting: (@Sendable () throws -> Void)?
     private let afterEncodedImportReplacementAuthorityForTesting:
         (@Sendable () throws -> Void)?
@@ -677,6 +746,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         revisionStore: TiledRasterRevisionStore,
         commandQueue: any MTLCommandQueue,
         mutationBackend: any DocumentPaintSurfaceMutationBackend,
+        allowKnownClearAuthoritativeStrokeSourcesForTesting: Bool = false,
         afterBaseSnapshotForTesting: (@Sendable () throws -> Void)? = nil,
         afterEncodedImportReplacementAuthorityForTesting:
             (@Sendable () throws -> Void)? = nil
@@ -685,6 +755,12 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         self.revisionStore = revisionStore
         self.commandQueue = commandQueue
         self.mutationBackend = mutationBackend
+        #if DEBUG
+        self.allowKnownClearAuthoritativeStrokeSourcesForTesting =
+            allowKnownClearAuthoritativeStrokeSourcesForTesting
+        #else
+        self.allowKnownClearAuthoritativeStrokeSourcesForTesting = false
+        #endif
         self.afterBaseSnapshotForTesting = afterBaseSnapshotForTesting
         self.afterEncodedImportReplacementAuthorityForTesting =
             afterEncodedImportReplacementAuthorityForTesting
@@ -751,6 +827,10 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     },
                     destinationLeaseID: live.destinationLease?.id,
                     resizeSourceLeaseID: live.resizeSourceLease?.id,
+                    strokeBaseSourceLeaseID:
+                        live.strokeBaseSourceLease?.id,
+                    strokeAuthoritativeSourceLeaseID:
+                        live.strokeAuthoritativeSourceLease?.id,
                     baseSourceLeaseID: live.baseSourceLease?.id,
                     candidateSourceLeaseID: live.candidateSourceLease?.id,
                     backendEncodingID: live.backendEncoding?.rawValue,
@@ -769,9 +849,11 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     destinationLeaseCount: live.destinationLease == nil ? 0 : 1,
                     sourceLeaseCount: [
                         live.resizeSourceLease,
+                        live.strokeBaseSourceLease,
                         live.baseSourceLease,
                         live.candidateSourceLease,
-                    ].compactMap { $0 }.count,
+                    ].compactMap { $0 }.count
+                        + (live.strokeAuthoritativeSourceLease == nil ? 0 : 1),
                     backendEncodingCount: live.backendEncoding == nil ? 0 : 1,
                     revisionPairCount: live.revisionPair == nil ? 0 : 1,
                     commandBufferCount:
@@ -795,6 +877,8 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     },
                     destinationLeaseID: liveRestore.destinationLease?.id,
                     resizeSourceLeaseID: nil,
+                    strokeBaseSourceLeaseID: nil,
+                    strokeAuthoritativeSourceLeaseID: nil,
                     baseSourceLeaseID: nil,
                     candidateSourceLeaseID: nil,
                     backendEncodingID: nil,
@@ -1485,6 +1569,38 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         _ handle: DocumentPaintPreparedMutation,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
     ) throws -> DocumentPaintEncodedMutation {
+        try encodeMutation(
+            handle,
+            strokeSourceOwner: nil,
+            strokeSourceLease: nil,
+            strokeCompositeParameters: nil,
+            failureInjection: failureInjection
+        )
+    }
+
+    func encodeStrokeMutation(
+        _ handle: DocumentPaintPreparedMutation,
+        sourceOwner: StrokeTileSurfaceEncoder,
+        sourceLease: StrokeAuthoritativeMutationLease,
+        compositeParameters: DocumentPaintStrokeCompositeParameters,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws -> DocumentPaintEncodedMutation {
+        try encodeMutation(
+            handle,
+            strokeSourceOwner: sourceOwner,
+            strokeSourceLease: sourceLease,
+            strokeCompositeParameters: compositeParameters,
+            failureInjection: failureInjection
+        )
+    }
+
+    private func encodeMutation(
+        _ handle: DocumentPaintPreparedMutation,
+        strokeSourceOwner: StrokeTileSurfaceEncoder?,
+        strokeSourceLease: StrokeAuthoritativeMutationLease?,
+        strokeCompositeParameters: DocumentPaintStrokeCompositeParameters?,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection?
+    ) throws -> DocumentPaintEncodedMutation {
         try withLock {
             let current = try validated(handle)
             let binding: DocumentPaintLayerBinding
@@ -1604,11 +1720,144 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     throw DocumentPaintSurfaceTransactionError
                         .backendEncodingFailed
                 }
+            } else if current.request.kind == .clear {
+                operation = .clear
+            } else if current.request.kind == .stroke {
+                do {
+                    let authoritativeSources:
+                        [DocumentPaintSurfaceReadSource]
+                    let compositeParameters:
+                        DocumentPaintStrokeCompositeParameters
+                    if let strokeSourceOwner,
+                       let strokeSourceLease,
+                       let suppliedParameters = strokeCompositeParameters {
+                        try Self.validateStrokeAuthoritativeSource(
+                            strokeSourceLease,
+                            owner: strokeSourceOwner,
+                            registry: registry,
+                            request: current.request,
+                            generation: current.baseGeneration
+                        )
+                        guard suppliedParameters.isValid else {
+                            throw DocumentPaintSurfaceTransactionError
+                                .invalidStrokeCompositeParameters
+                        }
+                        current.strokeAuthoritativeSourceOwner =
+                            strokeSourceOwner
+                        current.strokeAuthoritativeSourceLease =
+                            strokeSourceLease
+                        authoritativeSources = strokeSourceLease.bindings.map {
+                            .texture(DocumentPaintSurfaceMutationSource(
+                                coordinate: $0.descriptor.coordinate,
+                                logicalBounds: $0.descriptor.logicalBounds,
+                                texture: $0.texture
+                            ))
+                        }
+                        compositeParameters = suppliedParameters
+                    } else {
+                        guard allowKnownClearAuthoritativeStrokeSourcesForTesting,
+                              strokeSourceOwner == nil,
+                              strokeSourceLease == nil,
+                              strokeCompositeParameters == nil
+                        else {
+                            throw DocumentPaintSurfaceTransactionError
+                                .missingStrokeAuthoritativeLease
+                        }
+                        authoritativeSources = try current.request
+                            .dirtyCoordinates.map { coordinate in
+                                let descriptor = try PaintTileDescriptor(
+                                    coordinate: coordinate,
+                                    logicalPixelSize: current.request
+                                        .candidateGeometry.storagePixelSize
+                                )
+                                return .knownClear(
+                                    coordinate: coordinate,
+                                    logicalBounds: descriptor.logicalBounds
+                                )
+                            }
+                        compositeParameters = .opaqueDraw
+                    }
+
+                    let baseReferenceCoordinates = Set(
+                        current.baseBinding.canonical.references
+                            .map(\.coordinate)
+                    )
+                    let presentBaseCoordinates = current.request
+                        .dirtyCoordinates.filter {
+                            baseReferenceCoordinates.contains($0)
+                        }
+                    if !presentBaseCoordinates.isEmpty {
+                        current.strokeBaseSourceLease = try current.baseBinding
+                            .canonical.leaseExistingTiles(
+                                at: presentBaseCoordinates,
+                                pinReasons: [.inFlight]
+                            )
+                    }
+                    let presentBaseSources = Dictionary(
+                        uniqueKeysWithValues:
+                            (current.strokeBaseSourceLease?.bindings ?? []).map {
+                                ($0.descriptor.coordinate, $0)
+                            }
+                    )
+                    let baseSources = try current.request.dirtyCoordinates.map {
+                        coordinate -> DocumentPaintSurfaceReadSource in
+                        if let binding = presentBaseSources[coordinate] {
+                            return .texture(
+                                DocumentPaintSurfaceMutationSource(
+                                    coordinate: coordinate,
+                                    logicalBounds:
+                                        binding.descriptor.logicalBounds,
+                                    texture: binding.texture
+                                )
+                            )
+                        }
+                        let descriptor = try PaintTileDescriptor(
+                            coordinate: coordinate,
+                            logicalPixelSize: current.request
+                                .baseGeometry.storagePixelSize
+                        )
+                        return .knownClear(
+                            coordinate: coordinate,
+                            logicalBounds: descriptor.logicalBounds
+                        )
+                    }
+                    let payload = DocumentPaintSurfaceStrokeBackendPayload(
+                        geometry: current.request.candidateGeometry,
+                        compositeParameters: compositeParameters,
+                        baseSources: baseSources,
+                        authoritativeSources: authoritativeSources,
+                        destinations: destinations
+                    )
+                    try Self.validateStrokePayload(
+                        payload,
+                        expectedCoordinates: current.request.dirtyCoordinates,
+                        allowsKnownClearAuthoritativeSources:
+                            strokeSourceLease == nil
+                                && allowKnownClearAuthoritativeStrokeSourcesForTesting
+                    )
+                    operation = .stroke(payload)
+                } catch {
+                    do {
+                        if let lease {
+                            try binding.canonical.returnLease(lease)
+                        }
+                        current.destinationLease = nil
+                        current.candidateBinding = nil
+                        try releaseStrokeSources(current)
+                    } catch {
+                        current.phase = .discardPending
+                        throw DocumentPaintSurfaceTransactionError.cleanupFailed
+                    }
+                    if let transactionError = error as?
+                        DocumentPaintSurfaceTransactionError {
+                        throw transactionError
+                    }
+                    throw DocumentPaintSurfaceTransactionError
+                        .backendEncodingFailed
+                }
             } else {
-                operation = .mutation(
-                    kind: current.request.kind,
-                    destinations: destinations
-                )
+                throw DocumentPaintSurfaceTransactionError
+                    .unsupportedMutationKind(current.request.kind)
             }
             do {
                 if failureInjection?.shouldFail(at: .mutationEncode) == true {
@@ -1619,17 +1868,18 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 current.backendEncoding = try mutationBackend.encode(operation)
             } catch {
                 do {
+                    if let lease {
+                        try binding.canonical.returnLease(lease)
+                    }
+                    current.destinationLease = nil
+                    current.candidateBinding = nil
+                    try releaseStrokeSources(current)
                     if let sourceLease = current.resizeSourceLease {
                         try current.baseBinding.canonical.returnLease(
                             sourceLease
                         )
                         current.resizeSourceLease = nil
                     }
-                    if let lease {
-                        try binding.canonical.returnLease(lease)
-                    }
-                    current.destinationLease = nil
-                    current.candidateBinding = nil
                 } catch {
                     current.phase = .discardPending
                     throw DocumentPaintSurfaceTransactionError.cleanupFailed
@@ -1705,6 +1955,21 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 }
             }
             current.candidateBinding = nil
+            if current.strokeBaseSourceLease != nil
+                || current.strokeAuthoritativeSourceLease != nil {
+                if failureInjection?.shouldFail(at: .sourceLeaseReturn) == true {
+                    current.phase = .discardPending
+                    throw DocumentPaintSurfaceTransactionError
+                        .sourceLeaseReturnFailed
+                }
+                do {
+                    try releaseStrokeSources(current)
+                } catch {
+                    current.phase = .discardPending
+                    throw DocumentPaintSurfaceTransactionError
+                        .sourceLeaseReturnFailed
+                }
+            }
             if let sourceLease = current.resizeSourceLease {
                 if failureInjection?.shouldFail(at: .sourceLeaseReturn) == true {
                     current.phase = .discardPending
@@ -2289,6 +2554,28 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         throw error
     }
 
+    private func releaseStrokeSources(
+        _ current: LiveTransaction
+    ) throws {
+        if let baseLease = current.strokeBaseSourceLease {
+            try current.baseBinding.canonical.returnLease(baseLease)
+            current.strokeBaseSourceLease = nil
+        }
+        switch (
+            current.strokeAuthoritativeSourceOwner,
+            current.strokeAuthoritativeSourceLease
+        ) {
+        case let (owner?, lease?):
+            try owner.returnAuthoritativeMutationLease(lease)
+            current.strokeAuthoritativeSourceOwner = nil
+            current.strokeAuthoritativeSourceLease = nil
+        case (nil, nil):
+            break
+        default:
+            throw DocumentPaintSurfaceTransactionError.cleanupFailed
+        }
+    }
+
     private func cleanup(
         _ current: LiveTransaction,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection?
@@ -2316,6 +2603,16 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 current.phase = .discardPending
                 throw DocumentPaintSurfaceTransactionError
                     .destinationLeaseReturnFailed
+            }
+        }
+        if current.strokeBaseSourceLease != nil
+            || current.strokeAuthoritativeSourceLease != nil {
+            do {
+                try releaseStrokeSources(current)
+            } catch {
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError
+                    .sourceLeaseReturnFailed
             }
         }
         if let sourceLease = current.resizeSourceLease {
@@ -2720,6 +3017,164 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                   destination.texture.height == PaintTileDescriptor.side
             else {
                 throw DocumentPaintSurfaceTransactionError.invalidResizeMapping
+            }
+        }
+    }
+
+    private static func validateStrokeAuthoritativeSource(
+        _ lease: StrokeAuthoritativeMutationLease,
+        owner: StrokeTileSurfaceEncoder,
+        registry: DocumentPaintSurfaceStore,
+        request: DocumentPaintSurfaceMutationRequest,
+        generation: UInt64
+    ) throws {
+        guard lease.storeIdentity == registry.tileStoreIdentity else {
+            throw DocumentPaintSurfaceTransactionError
+                .strokeSourceStoreMismatch
+        }
+        guard lease.layerID == request.layerID else {
+            throw DocumentPaintSurfaceTransactionError
+                .strokeSourceLayerMismatch(
+                    expected: request.layerID,
+                    actual: lease.layerID
+                )
+        }
+        guard lease.generation == generation else {
+            throw DocumentPaintSurfaceTransactionError
+                .strokeSourceGenerationMismatch(
+                    expected: generation,
+                    actual: lease.generation
+                )
+        }
+        let expectedSize = request.candidateGeometry.storagePixelSize
+        guard request.baseGeometry == request.candidateGeometry,
+              lease.pixelSize == expectedSize
+        else {
+            throw DocumentPaintSurfaceTransactionError
+                .strokeSourceGeometryMismatch(
+                    expected: expectedSize,
+                    actual: lease.pixelSize
+                )
+        }
+        guard lease.radialLayout == request.candidateGeometry.radialLayout else {
+            throw DocumentPaintSurfaceTransactionError
+                .strokeSourceRadialLayoutMismatch
+        }
+        guard lease.bindings.map(\.descriptor.coordinate)
+                == request.dirtyCoordinates
+        else {
+            throw DocumentPaintSurfaceTransactionError
+                .strokeSourceCoordinateMismatch
+        }
+        guard owner.ownsAuthoritativeMutationLease(lease) else {
+            throw DocumentPaintSurfaceTransactionError
+                .strokeSourceOwnerMismatch
+        }
+    }
+
+    static func validateStrokePayload(
+        _ payload: DocumentPaintSurfaceStrokeBackendPayload,
+        expectedCoordinates: [PaintTileCoordinate],
+        allowsKnownClearAuthoritativeSources: Bool
+    ) throws {
+        guard payload.compositeParameters.isValid,
+              payload.baseSources.map(\.coordinate) == expectedCoordinates,
+              payload.authoritativeSources.map(\.coordinate)
+                == expectedCoordinates,
+              payload.destinations.map(\.coordinate) == expectedCoordinates
+        else {
+            throw DocumentPaintSurfaceTransactionError
+                .strokeSourceCoordinateMismatch
+        }
+        for coordinate in expectedCoordinates {
+            let expected = try PaintTileDescriptor(
+                coordinate: coordinate,
+                logicalPixelSize: payload.geometry.storagePixelSize
+            )
+            guard payload.baseSources.first(where: {
+                $0.coordinate == coordinate
+            })?.logicalBounds == expected.logicalBounds,
+                payload.authoritativeSources.first(where: {
+                    $0.coordinate == coordinate
+                })?.logicalBounds == expected.logicalBounds,
+                payload.destinations.first(where: {
+                    $0.coordinate == coordinate
+                })?.logicalBounds == expected.logicalBounds
+            else {
+                throw DocumentPaintSurfaceTransactionError
+                    .strokeSourceGeometryMismatch(
+                        expected: payload.geometry.storagePixelSize,
+                        actual: payload.geometry.storagePixelSize
+                    )
+            }
+        }
+        for source in payload.baseSources {
+            switch source {
+            case .knownClear:
+                break
+            case let .texture(textureSource):
+                guard textureSource.texture.pixelFormat
+                        == PaintTileDescriptor.pixelFormat,
+                      textureSource.texture.width == PaintTileDescriptor.side,
+                      textureSource.texture.height == PaintTileDescriptor.side
+                else {
+                    throw DocumentPaintSurfaceTransactionError
+                        .strokeSourceGeometryMismatch(
+                            expected: payload.geometry.storagePixelSize,
+                            actual: payload.geometry.storagePixelSize
+                        )
+                }
+            }
+        }
+        for source in payload.authoritativeSources {
+            switch source {
+            case .knownClear:
+                guard allowsKnownClearAuthoritativeSources else {
+                    throw DocumentPaintSurfaceTransactionError
+                        .missingStrokeAuthoritativeLease
+                }
+            case let .texture(textureSource):
+                guard textureSource.texture.pixelFormat
+                        == PaintTileDescriptor.pixelFormat,
+                      textureSource.texture.width == PaintTileDescriptor.side,
+                      textureSource.texture.height == PaintTileDescriptor.side
+                else {
+                    throw DocumentPaintSurfaceTransactionError
+                        .strokeSourceGeometryMismatch(
+                            expected: payload.geometry.storagePixelSize,
+                            actual: payload.geometry.storagePixelSize
+                        )
+                }
+            }
+        }
+        var readTextureIdentities: Set<ObjectIdentifier> = []
+        for source in payload.baseSources + payload.authoritativeSources {
+            guard case let .texture(textureSource) = source else { continue }
+            let identity = ObjectIdentifier(textureSource.texture as AnyObject)
+            guard readTextureIdentities.insert(identity).inserted else {
+                throw DocumentPaintSurfaceTransactionError.strokeTextureAlias
+            }
+        }
+        var destinationTextureIdentities: Set<ObjectIdentifier> = []
+        for destination in payload.destinations {
+            let identity = ObjectIdentifier(destination.texture as AnyObject)
+            guard destinationTextureIdentities.insert(identity).inserted,
+                  !readTextureIdentities.contains(identity)
+            else {
+                throw DocumentPaintSurfaceTransactionError.strokeTextureAlias
+            }
+        }
+        for destination in payload.destinations {
+            guard destination.texture.pixelFormat
+                    == PaintTileDescriptor.pixelFormat,
+                  destination.texture.width == PaintTileDescriptor.side,
+                  destination.texture.height == PaintTileDescriptor.side
+            else {
+                throw DocumentPaintSurfaceTransactionError
+                    .strokeSourceGeometryMismatch(
+                        expected: payload.geometry.storagePixelSize,
+                        actual: payload.geometry.storagePixelSize
+                    )
             }
         }
     }

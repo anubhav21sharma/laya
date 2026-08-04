@@ -173,6 +173,140 @@ struct DocumentPaintSurfaceTransactionTests {
     }
 
     @Test
+    func clearBackendOperationHasNoReadSourcesOrDestinations() throws {
+        guard let fixture = try TransactionFixture.make() else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        try transactionSeedActive(fixture, coordinates: [coordinate])
+        let prepared = try transactionPrepared(
+            fixture.coordinator.prepareMutation(
+                fixture.request(
+                    kind: .clear,
+                    dirty: [],
+                    removing: [coordinate]
+                )
+            )
+        )
+
+        let encoded = try fixture.coordinator.encodeMutation(prepared)
+
+        #expect(fixture.backend.clearOperationCount == 1)
+        #expect(fixture.backend.strokePayload == nil)
+        #expect(fixture.backend.destinations.isEmpty)
+        try fixture.coordinator.discard(encoded)
+    }
+
+    @Test
+    func productionStrokeRejectsMissingTask5AuthoritativeLeaseWithoutLeaks()
+        throws
+    {
+        guard let fixture = try TransactionFixture.make(
+            allowsTestStrokeSources: false
+        ) else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let prepared = try transactionPrepared(
+            fixture.coordinator.prepareMutation(
+                fixture.request(dirty: [coordinate])
+            )
+        )
+
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .missingStrokeAuthoritativeLease) {
+            _ = try fixture.coordinator.encodeMutation(prepared)
+        }
+        let ownership = fixture.coordinator.ownershipSnapshotForTesting()
+        #expect(ownership.destinationLeaseID == nil)
+        #expect(ownership.strokeBaseSourceLeaseID == nil)
+        #expect(ownership.strokeAuthoritativeSourceLeaseID == nil)
+        #expect(fixture.backend.encodeCallCount == 0)
+        try fixture.coordinator.discard(prepared)
+    }
+
+    @Test
+    func strokePayloadOrdersPresentAndKnownClearCanonicalSourcesExactly()
+        throws
+    {
+        guard let fixture = try TransactionFixture.make(width: 512, height: 256)
+        else { return }
+        let present = PaintTileCoordinate(x: 0, y: 0)
+        let missing = PaintTileCoordinate(x: 1, y: 0)
+        try transactionSeedActive(fixture, coordinates: [present])
+        let prepared = try transactionPrepared(
+            fixture.coordinator.prepareMutation(
+                fixture.request(dirty: [present, missing])
+            )
+        )
+
+        let encoded = try fixture.coordinator.encodeMutation(prepared)
+
+        let payload = try #require(fixture.backend.strokePayload)
+        #expect(payload.baseSources.map(\.coordinate) == [present, missing])
+        #expect(payload.authoritativeSources.map(\.coordinate)
+            == [present, missing])
+        guard case .texture = payload.baseSources[0],
+              case .knownClear = payload.baseSources[1],
+              case .knownClear = payload.authoritativeSources[0],
+              case .knownClear = payload.authoritativeSources[1]
+        else {
+            Issue.record("Unexpected typed stroke source variants")
+            return
+        }
+        let ownership = fixture.coordinator.ownershipSnapshotForTesting()
+        #expect(ownership.strokeBaseSourceLeaseID != nil)
+        #expect(ownership.strokeAuthoritativeSourceLeaseID == nil)
+        try fixture.coordinator.discard(encoded)
+    }
+
+    @Test
+    func strokePayloadRejectsReadDestinationTextureAliasBeforeBackend() throws {
+        guard let fixture = try TransactionFixture.make(width: 256, height: 256)
+        else { return }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: PaintTileDescriptor.pixelFormat,
+            width: PaintTileDescriptor.side,
+            height: PaintTileDescriptor.side,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead, .renderTarget]
+        let texture = try #require(fixture.device.makeTexture(
+            descriptor: descriptor
+        ))
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let bounds = try PaintTileDescriptor(
+            coordinate: coordinate,
+            logicalPixelSize: fixture.geometry.storagePixelSize
+        ).logicalBounds
+        let source = DocumentPaintSurfaceMutationSource(
+            coordinate: coordinate,
+            logicalBounds: bounds,
+            texture: texture
+        )
+        let payload = DocumentPaintSurfaceStrokeBackendPayload(
+            geometry: fixture.geometry,
+            compositeParameters: .opaqueDraw,
+            baseSources: [.knownClear(
+                coordinate: coordinate,
+                logicalBounds: bounds
+            )],
+            authoritativeSources: [.texture(source)],
+            destinations: [.init(
+                coordinate: coordinate,
+                logicalBounds: bounds,
+                texture: texture
+            )]
+        )
+
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .strokeTextureAlias) {
+            try DocumentPaintSurfaceTransaction.validateStrokePayload(
+                payload,
+                expectedCoordinates: [coordinate],
+                allowsKnownClearAuthoritativeSources: false
+            )
+        }
+        #expect(fixture.backend.encodeCallCount == 0)
+    }
+
+    @Test
     func requestValidationRejectsWrongLayerGeometryOrderDuplicatesAndBounds() throws {
         guard let fixture = try TransactionFixture.make() else { return }
         let zero = PaintTileCoordinate(x: 0, y: 0)
@@ -2457,7 +2591,8 @@ struct DocumentPaintSurfaceTransactionTests {
             registry: registry,
             revisionStore: revisions,
             commandQueue: queue,
-            mutationBackend: TransactionTestMutationBackend()
+            mutationBackend: TransactionTestMutationBackend(),
+            allowKnownClearAuthoritativeStrokeSourcesForTesting: true
         )
         let winningRequest = DocumentPaintSurfaceMutationRequest(
             kind: .stroke,
@@ -2542,7 +2677,8 @@ struct DocumentPaintSurfaceTransactionTests {
             registry: registry,
             revisionStore: revisions,
             commandQueue: queue,
-            mutationBackend: winningBackend
+            mutationBackend: winningBackend,
+            allowKnownClearAuthoritativeStrokeSourcesForTesting: true
         )
         let winningCoordinate = PaintTileCoordinate(x: 1, y: 0)
         let winningRequest = DocumentPaintSurfaceMutationRequest(
@@ -3276,14 +3412,20 @@ private final class TransactionTestMutationBackend:
     var discardShouldFail = false
     var onDiscardAndWaitUntilTerminal: (() -> Void)?
     private(set) var destinations: [DocumentPaintSurfaceMutationDestination] = []
+    private(set) var strokePayload: DocumentPaintSurfaceStrokeBackendPayload?
+    private(set) var clearOperationCount = 0
     private(set) var resizePayload: DocumentPaintSurfaceResizeBackendPayload?
     private(set) var encodedImportPayload:
         DocumentPaintSurfaceEncodedImportBackendPayload?
 
     func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws {
         switch operation {
-        case let .mutation(_, destinations):
-            _ = destinations
+        case let .stroke(payload):
+            strokePayload = payload
+            destinations = payload.destinations
+        case .clear:
+            clearOperationCount += 1
+            destinations = []
         case let .resize(payload):
             resizePayload = payload
             destinations = payload.destinations
@@ -3301,8 +3443,11 @@ private final class TransactionTestMutationBackend:
     ) throws -> DocumentPaintSurfaceMutationBackendEncoding {
         encodeCallCount += 1
         switch operation {
-        case let .mutation(_, destinations):
-            self.destinations = destinations
+        case let .stroke(payload):
+            strokePayload = payload
+            destinations = payload.destinations
+        case .clear:
+            destinations = []
         case let .resize(payload):
             resizePayload = payload
             destinations = payload.destinations
@@ -3358,7 +3503,8 @@ private struct TransactionFixture {
         width: Int = 512,
         height: Int = 512,
         layerID requestedLayerID: UUID? = nil,
-        geometry requestedGeometry: DocumentPaintGeometry? = nil
+        geometry requestedGeometry: DocumentPaintGeometry? = nil,
+        allowsTestStrokeSources: Bool = true
     ) throws -> Self? {
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue()
@@ -3383,7 +3529,9 @@ private struct TransactionFixture {
             registry: registry,
             revisionStore: revisions,
             commandQueue: queue,
-            mutationBackend: backend
+            mutationBackend: backend,
+            allowKnownClearAuthoritativeStrokeSourcesForTesting:
+                allowsTestStrokeSources
         )
         return Self(
             device: device,

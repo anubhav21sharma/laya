@@ -696,6 +696,451 @@ struct StrokeTileSurfaceEncoderTests {
 
     @Test
     @MainActor
+    func terminalAuthoritativeLeasePinsWholeAuthenticatedStrokeAfterFrameAck()
+        async throws
+    {
+        guard let context = try await makeContext(pixelFormat: .rgba16Float)
+        else { return }
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 512, height: 512),
+            storagePixelSize: PixelSize(width: 512, height: 512),
+            radialLayout: nil
+        )
+        let registry = try DocumentPaintSurfaceStore(
+            device: context.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 16,
+            geometry: geometry,
+            layerIDs: [context.layerID],
+            generation: 7
+        )
+        let resources = try StrokeTileSurfaceResources(
+            device: context.device,
+            store: registry.sharedTileStore,
+            layerID: context.layerID,
+            pixelSize: geometry.storagePixelSize,
+            generation: 7,
+            maximumRecordCount: 32,
+            maximumTileReferenceCount: 128,
+            pipeline: context.pipeline,
+            namespaceLease: registry.issueStrokeNamespace(
+                layerID: context.layerID,
+                generation: 7
+            )
+        )
+        let encoder = StrokeTileSurfaceEncoder()
+        try encoder.configure(
+            StrokeTileEncodingConfiguration(
+                resources: resources,
+                materialUniforms: PatternDepositionMaterialUniforms(),
+                primaryShape: nil,
+                secondaryShape: nil,
+                primaryGrain: nil,
+                secondaryGrain: nil,
+                frameUniforms: frameUniforms(side: 512),
+                radialLayout: nil,
+                forceCommandFailure: false
+            ),
+            generation: 7
+        )
+        #expect(throws: StrokeTileSurfaceError.emptyAuthoritativeMutation) {
+            _ = try encoder.acquireAuthoritativeMutationLease()
+        }
+        #expect(!encoder.snapshot.isTerminallySealed)
+        let seamBounds = try #require(PixelRect(
+            minX: 250, minY: 250, maxX: 270, maxY: 270
+        ))
+        let frame = try #require(try await encoder.encode(
+            generation: 7,
+            records: [try projectedRecord(
+                ordinal: 0,
+                bounds: seamBounds
+            )],
+            layer: .authoritative,
+            allocationProbe: nil
+        ))
+
+        #expect(throws: StrokeTileSurfaceError.outstandingLease) {
+            _ = try encoder.acquireAuthoritativeMutationLease()
+        }
+        try encoder.acknowledge(frame)
+
+        let deltaBounds = try #require(PixelRect(
+            minX: 8, minY: 8, maxX: 12, maxY: 12
+        ))
+        let delta = try #require(try await encoder.encode(
+            generation: 7,
+            records: [try projectedRecord(
+                ordinal: 1,
+                bounds: deltaBounds
+            )],
+            layer: .authoritative,
+            allocationProbe: nil
+        ))
+        #expect(delta.tiledBindings.count == 1)
+        try encoder.acknowledge(delta)
+
+        let lease = try encoder.acquireAuthoritativeMutationLease()
+        #expect(lease.storeIdentity == registry.tileStoreIdentity)
+        #expect(lease.layerID == context.layerID)
+        #expect(lease.generation == 7)
+        #expect(lease.pixelSize == geometry.storagePixelSize)
+        #expect(lease.radialLayout == nil)
+        #expect(encoder.snapshot.isTerminallySealed)
+        #expect(lease.bindings.map(\.descriptor.coordinate) == [
+            PaintTileCoordinate(x: 0, y: 0),
+            PaintTileCoordinate(x: 1, y: 0),
+            PaintTileCoordinate(x: 0, y: 1),
+            PaintTileCoordinate(x: 1, y: 1),
+        ])
+        #expect(resources.snapshot.activeLeaseCount == 1)
+        try encoder.returnAuthoritativeMutationLease(lease)
+        #expect(resources.snapshot.activeLeaseCount == 0)
+        #expect(encoder.snapshot.isTerminallySealed)
+        #expect(throws: StrokeTileSurfaceError.staleLease) {
+            try encoder.returnAuthoritativeMutationLease(lease)
+        }
+        #expect(throws: StrokeTileSurfaceError.terminallySealed) {
+            _ = try encoder.acquireAuthoritativeMutationLease()
+        }
+        #expect(encoder.beginPredictionReplacement()
+            == StrokeTileSurfaceError.terminallySealed)
+        await #expect(throws: StrokeTileSurfaceError.terminallySealed) {
+            _ = try await encoder.encode(
+                generation: 7,
+                records: [try projectedRecord(
+                    ordinal: 2,
+                    bounds: deltaBounds
+                )],
+                layer: .authoritative,
+                allocationProbe: nil
+            )
+        }
+        #expect(throws: StrokeTileSurfaceError.terminallySealed) {
+            try encoder.configure(
+                StrokeTileEncodingConfiguration(
+                    resources: resources,
+                    materialUniforms: PatternDepositionMaterialUniforms(),
+                    primaryShape: nil,
+                    secondaryShape: nil,
+                    primaryGrain: nil,
+                    secondaryGrain: nil,
+                    frameUniforms: frameUniforms(side: 512),
+                    radialLayout: nil,
+                    forceCommandFailure: false
+                ),
+                generation: 7
+            )
+        }
+        try encoder.cancel(frameDisposition: .unpublished)
+        #expect(!encoder.snapshot.isTerminallySealed)
+    }
+
+    @Test
+    @MainActor
+    func transactionAuthenticatesImmutableWholeStrokeAndRetriesAfterPreflightFailure()
+        async throws
+    {
+        guard let context = try await makeContext(pixelFormat: .rgba16Float),
+              let queue = context.device.makeCommandQueue()
+        else { return }
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 256, height: 256),
+            storagePixelSize: PixelSize(width: 256, height: 256),
+            radialLayout: nil
+        )
+        let registry = try DocumentPaintSurfaceStore(
+            device: context.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 8,
+            geometry: geometry,
+            layerIDs: [context.layerID],
+            generation: 7
+        )
+        let resources = try StrokeTileSurfaceResources(
+            device: context.device,
+            store: registry.sharedTileStore,
+            layerID: context.layerID,
+            pixelSize: geometry.storagePixelSize,
+            generation: 7,
+            maximumRecordCount: 8,
+            maximumTileReferenceCount: 8,
+            pipeline: context.pipeline,
+            namespaceLease: registry.issueStrokeNamespace(
+                layerID: context.layerID,
+                generation: 7
+            )
+        )
+        let encoder = StrokeTileSurfaceEncoder()
+        try encoder.configure(
+            StrokeTileEncodingConfiguration(
+                resources: resources,
+                materialUniforms: PatternDepositionMaterialUniforms(),
+                primaryShape: nil,
+                secondaryShape: nil,
+                primaryGrain: nil,
+                secondaryGrain: nil,
+                frameUniforms: frameUniforms(side: 256),
+                radialLayout: nil,
+                forceCommandFailure: false
+            ),
+            generation: 7
+        )
+        let bounds = try #require(PixelRect(
+            minX: 8, minY: 8, maxX: 12, maxY: 12
+        ))
+        let record = try projectedRecord(ordinal: 0, bounds: bounds)
+        let frame = try #require(try await encoder.encode(
+            generation: 7,
+            records: [record],
+            layer: .authoritative,
+            allocationProbe: nil
+        ))
+        try encoder.acknowledge(frame)
+        let source = try encoder.acquireAuthoritativeMutationLease()
+        let sourceBytes = try download(
+            try #require(source.bindings.first).texture,
+            device: context.device
+        )
+
+        let backend = TerminalStrokeTransactionBackend()
+        let coordinator = DocumentPaintSurfaceTransaction(
+            registry: registry,
+            revisionStore: TiledRasterRevisionStore(
+                device: context.device,
+                maximumRetainedBytes:
+                    PaintTileDescriptor.residentByteCount * 8
+            ),
+            commandQueue: queue,
+            mutationBackend: backend
+        )
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let request = DocumentPaintSurfaceMutationRequest(
+            kind: .stroke,
+            layerID: context.layerID,
+            baseGeometry: geometry,
+            candidateGeometry: geometry,
+            dirtyCoordinates: [coordinate],
+            explicitlyRemovedCoordinates: [],
+            requiresHistoryPair: false
+        )
+        guard case let .prepared(prepared) = try coordinator
+            .prepareMutation(request)
+        else {
+            Issue.record("Non-empty stroke unexpectedly became a no-op")
+            return
+        }
+        let foreignRegistry = try DocumentPaintSurfaceStore(
+            device: context.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 2,
+            geometry: geometry,
+            layerIDs: [context.layerID],
+            generation: 7
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .strokeSourceStoreMismatch) {
+            _ = try coordinator.encodeStrokeMutation(
+                prepared,
+                sourceOwner: encoder,
+                sourceLease: source.replacingForTesting(
+                    storeIdentity: foreignRegistry.tileStoreIdentity
+                ),
+                compositeParameters: .opaqueDraw
+            )
+        }
+        let foreignLayer = UUID()
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .strokeSourceLayerMismatch(
+                expected: context.layerID,
+                actual: foreignLayer
+            )) {
+            _ = try coordinator.encodeStrokeMutation(
+                prepared,
+                sourceOwner: encoder,
+                sourceLease: source.replacingForTesting(layerID: foreignLayer),
+                compositeParameters: .opaqueDraw
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .strokeSourceGenerationMismatch(expected: 7, actual: 8)) {
+            _ = try coordinator.encodeStrokeMutation(
+                prepared,
+                sourceOwner: encoder,
+                sourceLease: source.replacingForTesting(generation: 8),
+                compositeParameters: .opaqueDraw
+            )
+        }
+        let foreignSize = PixelSize(width: 512, height: 256)
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .strokeSourceGeometryMismatch(
+                expected: geometry.storagePixelSize,
+                actual: foreignSize
+            )) {
+            _ = try coordinator.encodeStrokeMutation(
+                prepared,
+                sourceOwner: encoder,
+                sourceLease: source.replacingForTesting(pixelSize: foreignSize),
+                compositeParameters: .opaqueDraw
+            )
+        }
+        let differentMapping = try RadialSectorLayout(
+            maximumRadius: 100,
+            sectorAngleRadians: .pi / 6
+        )
+        #expect(differentMapping.atlasPixelSize == geometry.storagePixelSize)
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .strokeSourceRadialLayoutMismatch) {
+            _ = try coordinator.encodeStrokeMutation(
+                prepared,
+                sourceOwner: encoder,
+                sourceLease: source.replacingForTesting(
+                    radialLayout: differentMapping
+                ),
+                compositeParameters: .opaqueDraw
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .strokeSourceCoordinateMismatch) {
+            _ = try coordinator.encodeStrokeMutation(
+                prepared,
+                sourceOwner: encoder,
+                sourceLease: source.replacingForTesting(bindings: []),
+                compositeParameters: .opaqueDraw
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .strokeSourceCoordinateMismatch) {
+            _ = try coordinator.encodeStrokeMutation(
+                prepared,
+                sourceOwner: encoder,
+                sourceLease: source.replacingForTesting(
+                    bindings: source.bindings + source.bindings
+                ),
+                compositeParameters: .opaqueDraw
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .invalidStrokeCompositeParameters) {
+            _ = try coordinator.encodeStrokeMutation(
+                prepared,
+                sourceOwner: encoder,
+                sourceLease: source,
+                compositeParameters: DocumentPaintStrokeCompositeParameters(
+                    mode: .draw,
+                    strokeOpacity: .nan,
+                    accumulationLimit: 1,
+                    eraserStrength: 1
+                )
+            )
+        }
+        let wrongOwner = StrokeTileSurfaceEncoder()
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .strokeSourceOwnerMismatch) {
+            _ = try coordinator.encodeStrokeMutation(
+                prepared,
+                sourceOwner: wrongOwner,
+                sourceLease: source,
+                compositeParameters: .opaqueDraw
+            )
+        }
+        #expect(encoder.ownsAuthoritativeMutationLease(source))
+        #expect(backend.preflightCount == 0)
+
+        backend.failPreflight = true
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .backendEncodingFailed) {
+            _ = try coordinator.encodeStrokeMutation(
+                prepared,
+                sourceOwner: encoder,
+                sourceLease: source,
+                compositeParameters: .opaqueDraw
+            )
+        }
+        #expect(!encoder.snapshot
+            .hasOutstandingAuthoritativeMutationLease)
+        #expect(encoder.snapshot.isTerminallySealed)
+        #expect(throws: StrokeTileSurfaceError.terminallySealed) {
+            _ = try encoder.acquireAuthoritativeMutationLease()
+        }
+        try encoder.cancel(frameDisposition: .unpublished)
+        let retryResources = try StrokeTileSurfaceResources(
+            device: context.device,
+            store: registry.sharedTileStore,
+            layerID: context.layerID,
+            pixelSize: geometry.storagePixelSize,
+            generation: 7,
+            maximumRecordCount: 8,
+            maximumTileReferenceCount: 8,
+            pipeline: context.pipeline,
+            namespaceLease: registry.issueStrokeNamespace(
+                layerID: context.layerID,
+                generation: 7
+            )
+        )
+        try encoder.configure(
+            StrokeTileEncodingConfiguration(
+                resources: retryResources,
+                materialUniforms: PatternDepositionMaterialUniforms(),
+                primaryShape: nil,
+                secondaryShape: nil,
+                primaryGrain: nil,
+                secondaryGrain: nil,
+                frameUniforms: frameUniforms(side: 256),
+                radialLayout: nil,
+                forceCommandFailure: false
+            ),
+            generation: 7
+        )
+        let retryFrame = try #require(try await encoder.encode(
+            generation: 7,
+            records: [record],
+            layer: .authoritative,
+            allocationProbe: nil
+        ))
+        try encoder.acknowledge(retryFrame)
+        let retrySource = try encoder.acquireAuthoritativeMutationLease()
+        backend.failPreflight = false
+        let encoded = try coordinator.encodeStrokeMutation(
+            prepared,
+            sourceOwner: encoder,
+            sourceLease: retrySource,
+            compositeParameters: .opaqueDraw
+        )
+        let payload = try #require(backend.strokePayload)
+        #expect(payload.baseSources.map(\.coordinate) == [coordinate])
+        #expect(payload.authoritativeSources.map(\.coordinate) == [coordinate])
+        guard case .knownClear = payload.baseSources[0],
+              case let .texture(authoritative) = payload.authoritativeSources[0]
+        else {
+            Issue.record("Expected clear canonical plus textured Task5 source")
+            return
+        }
+        #expect(ObjectIdentifier(authoritative.texture as AnyObject)
+            == ObjectIdentifier(retrySource.bindings[0].texture as AnyObject))
+        #expect(ObjectIdentifier(authoritative.texture as AnyObject)
+            != ObjectIdentifier(payload.destinations[0].texture as AnyObject))
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .sourceLeaseReturnFailed) {
+            _ = try coordinator.completeMutation(
+                encoded,
+                as: .succeeded,
+                failureInjection: .init(failingAt: .sourceLeaseReturn)
+            )
+        }
+        #expect(encoder.snapshot.hasOutstandingAuthoritativeMutationLease)
+        #expect(coordinator.ownershipSnapshotForTesting()
+            .strokeAuthoritativeSourceLeaseID != nil)
+        #expect(try download(
+            retrySource.bindings[0].texture,
+            device: context.device
+        ) == sourceBytes)
+        try coordinator.retryDiscard()
+        #expect(!encoder.snapshot
+            .hasOutstandingAuthoritativeMutationLease)
+        #expect(coordinator.ownershipSnapshotForTesting() == .empty)
+        try encoder.cancel(frameDisposition: .unpublished)
+    }
+
+    @Test
+    @MainActor
     func sameCoordinatePublishesIntoANewImmutableChunkSlot() async throws {
         guard let context = try await makeContext(pixelFormat: .rgba16Float)
         else { return }
@@ -2145,5 +2590,50 @@ private final class StrokeNamespaceRetirementRecorder: @unchecked Sendable {
         lock.lock()
         storage.append(token)
         lock.unlock()
+    }
+}
+
+private final class TerminalStrokeTransactionBackend:
+    DocumentPaintSurfaceMutationBackend, @unchecked Sendable
+{
+    var failPreflight = false
+    private(set) var preflightCount = 0
+    private(set) var strokePayload: DocumentPaintSurfaceStrokeBackendPayload?
+    private var activeEncodingIDs: Set<UUID> = []
+
+    func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws {
+        preflightCount += 1
+        if failPreflight { throw StrokeTileSurfaceError.commandFailed("test") }
+        if case let .stroke(payload) = operation { strokePayload = payload }
+    }
+
+    func encode(
+        _ operation: DocumentPaintSurfaceBackendOperation
+    ) throws -> DocumentPaintSurfaceMutationBackendEncoding {
+        if case let .stroke(payload) = operation { strokePayload = payload }
+        let encoding = DocumentPaintSurfaceMutationBackendEncoding()
+        activeEncodingIDs.insert(encoding.rawValue)
+        return encoding
+    }
+
+    func complete(
+        _ encoding: DocumentPaintSurfaceMutationBackendEncoding,
+        as outcome: RasterRevisionOperationOutcome
+    ) throws -> [DocumentPaintSurfaceMutationEvidence] {
+        _ = outcome
+        activeEncodingIDs.remove(encoding.rawValue)
+        return (strokePayload?.destinations ?? []).map {
+            DocumentPaintSurfaceMutationEvidence(
+                coordinate: $0.coordinate,
+                logicalBounds: $0.logicalBounds,
+                maximumAlpha: 1
+            )
+        }
+    }
+
+    func discardAndWaitUntilTerminal(
+        _ encoding: DocumentPaintSurfaceMutationBackendEncoding
+    ) throws {
+        activeEncodingIDs.remove(encoding.rawValue)
     }
 }
