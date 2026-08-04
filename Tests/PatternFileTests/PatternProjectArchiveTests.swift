@@ -6,6 +6,33 @@ import Testing
 @Suite("Pattern project archive")
 struct PatternProjectArchiveTests {
     @Test
+    func projectArchiveExposesBoundedReadsFromDeclaredEntrySizes() throws {
+        let path = "surfaces/oversized.tiles.json"
+        let byteCount = PatternPaintTileCodec.maximumManifestBytes + 1
+        let archive = try PatternProjectArchiveCodec.open(
+            PatternProjectArchiveCodec.encode(entries: [
+                path: Data(repeating: 0x20, count: byteCount),
+            ])
+        )
+
+        #expect(try archive.byteCount(for: path) == byteCount)
+        #expect(throws: PatternProjectArchiveError.entryTooLarge(
+            path: path,
+            actual: UInt64(byteCount),
+            maximum: UInt64(
+                PatternPaintTileCodec.maximumManifestBytes
+            )
+        )) {
+            try archive.data(
+                for: path,
+                maximumByteCount: UInt64(
+                    PatternPaintTileCodec.maximumManifestBytes
+                )
+            )
+        }
+    }
+
+    @Test
     func nativeTileArchiveEnforcesAggregateBytesAndManifestPathSeparation()
         throws
     {

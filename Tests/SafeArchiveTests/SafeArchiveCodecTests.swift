@@ -38,6 +38,37 @@ struct SafeArchiveCodecTests {
     }
 
     @Test
+    func boundedReadRejectsDeclaredEntrySizeBeforeMaterialization() throws {
+        let payload = Data(repeating: 0xA5, count: 17)
+        let encoded = try SafeArchiveCodec.encode(
+            entries: ["oversized.bin": payload],
+            limits: .testing
+        )
+        let archive = try SafeArchiveCodec.open(
+            encoded,
+            limits: .testing
+        )
+
+        #expect(try archive.byteCount(for: "oversized.bin") == 17)
+        #expect(throws: SafeArchiveError.entryTooLarge(
+            path: "oversized.bin",
+            actual: 17,
+            maximum: 16
+        )) {
+            try archive.data(
+                for: "oversized.bin",
+                maximumByteCount: 16
+            )
+        }
+        #expect(
+            try archive.data(
+                for: "oversized.bin",
+                maximumByteCount: 17
+            ) == payload
+        )
+    }
+
+    @Test
     func encoderRejectsEmptyUnsafeAndOversizedEntries() throws {
         let limits = SafeArchiveLimits(
             maximumEntryCount: 1,

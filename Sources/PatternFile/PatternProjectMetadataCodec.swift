@@ -186,8 +186,9 @@ private extension PatternProjectMetadataCodec {
     static func metadataFiles(
         from archive: PatternProjectArchive
     ) throws -> PatternProjectMetadataFiles {
-        let manifestData = try archive.data(
-            for: PatternProjectFormat.manifestPath
+        let manifestData = try boundedMetadataData(
+            for: PatternProjectFormat.manifestPath,
+            from: archive
         )
         let manifest: ManifestWire = try decodeJSON(
             manifestData,
@@ -222,12 +223,10 @@ private extension PatternProjectMetadataCodec {
             guard layersByPath[path] == nil else {
                 throw PatternProjectLoadError.invalidDocumentMetadata
             }
-            let layerData: Data
-            do {
-                layerData = try archive.data(for: path)
-            } catch PatternProjectArchiveError.missingEntry {
-                throw PatternProjectLoadError.missingMetadata(path)
-            }
+            let layerData = try boundedMetadataData(
+                for: path,
+                from: archive
+            )
             layersByPath[path] = layerData
             if manifest.schemaVersion
                 != PatternProjectFormat.legacySchemaVersion
@@ -255,34 +254,52 @@ private extension PatternProjectMetadataCodec {
                             .resourcePathCollision(surfacePath)
                     }
                     if surfacesByPath[surfacePath] == nil {
-                        do {
-                            surfacesByPath[surfacePath] =
-                                try archive.data(for: surfacePath)
-                        } catch PatternProjectArchiveError.missingEntry {
-                            throw PatternProjectLoadError.missingMetadata(
-                                surfacePath
+                        surfacesByPath[surfacePath] =
+                            try boundedMetadataData(
+                                for: surfacePath,
+                                from: archive
                             )
-                        }
                     }
                 }
             }
         }
-        let symmetry: Data
-        do {
-            symmetry = try archive.data(
-                for: PatternProjectFormat.symmetryPath
-            )
-        } catch PatternProjectArchiveError.missingEntry {
-            throw PatternProjectLoadError.missingMetadata(
-                PatternProjectFormat.symmetryPath
-            )
-        }
+        let symmetry = try boundedMetadataData(
+            for: PatternProjectFormat.symmetryPath,
+            from: archive
+        )
         return PatternProjectMetadataFiles(
             manifest: manifestData,
             symmetry: symmetry,
             layersByPath: layersByPath,
             surfacesByPath: surfacesByPath
         )
+    }
+
+    static func boundedMetadataData(
+        for path: String,
+        from archive: PatternProjectArchive
+    ) throws -> Data {
+        let byteCount: Int
+        do {
+            byteCount = try archive.byteCount(for: path)
+        } catch PatternProjectArchiveError.missingEntry {
+            throw PatternProjectLoadError.missingMetadata(path)
+        }
+        guard byteCount <= maximumMetadataBytesPerFile else {
+            throw PatternProjectLoadError.metadataTooLarge(
+                path: path,
+                actual: byteCount,
+                maximum: maximumMetadataBytesPerFile
+            )
+        }
+        do {
+            return try archive.data(
+                for: path,
+                maximumByteCount: UInt64(maximumMetadataBytesPerFile)
+            )
+        } catch PatternProjectArchiveError.missingEntry {
+            throw PatternProjectLoadError.missingMetadata(path)
+        }
     }
 
     static func decodeLegacy(

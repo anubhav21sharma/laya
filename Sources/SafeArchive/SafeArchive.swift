@@ -73,8 +73,23 @@ public struct SafeArchive: Sendable {
     }
 
     public func data(for path: String) throws -> Data {
+        try data(for: path, maximumByteCount: UInt64.max)
+    }
+
+    public func data(
+        for path: String,
+        maximumByteCount: UInt64
+    ) throws -> Data {
         guard let record = records[path] else {
             throw SafeArchiveError.missingEntry(path)
+        }
+        let byteCount = UInt64(record.dataRange.count)
+        guard byteCount <= maximumByteCount else {
+            throw SafeArchiveError.entryTooLarge(
+                path: path,
+                actual: byteCount,
+                maximum: maximumByteCount
+            )
         }
         return storage.subdata(in: record.dataRange)
     }

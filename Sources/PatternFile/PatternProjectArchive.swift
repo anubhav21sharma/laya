@@ -52,6 +52,27 @@ public struct PatternProjectArchive: Sendable {
         do { return try archive.data(for: path) }
         catch let error as SafeArchiveError { throw PatternProjectArchiveError(error) }
     }
+
+    public func data(
+        for path: String,
+        maximumByteCount: UInt64
+    ) throws -> Data {
+        do {
+            return try archive.data(
+                for: path,
+                maximumByteCount: maximumByteCount
+            )
+        } catch let error as SafeArchiveError {
+            throw PatternProjectArchiveError(error)
+        }
+    }
+
+    public func byteCount(for path: String) throws -> Int {
+        do { return try archive.byteCount(for: path) }
+        catch let error as SafeArchiveError {
+            throw PatternProjectArchiveError(error)
+        }
+    }
 }
 
 public enum PatternProjectArchiveCodec {
@@ -104,10 +125,25 @@ public extension PatternPaintTileCodec {
         }
         var surfaces: [PatternPaintTileSurface] = []
         surfaces.reserveCapacity(surfaceManifestPaths.count)
+
+        for path in surfaceManifestPaths {
+            let byteCount: Int
+            do {
+                byteCount = try archive.byteCount(for: path)
+            } catch {
+                throw PatternPaintTileError.missingPayload(path)
+            }
+            guard byteCount <= maximumManifestBytes else {
+                throw PatternPaintTileError.invalidManifest
+            }
+        }
         for path in surfaceManifestPaths {
             let data: Data
             do {
-                data = try archive.data(for: path)
+                data = try archive.data(
+                    for: path,
+                    maximumByteCount: UInt64(maximumManifestBytes)
+                )
             } catch {
                 throw PatternPaintTileError.missingPayload(path)
             }
@@ -115,20 +151,26 @@ public extension PatternPaintTileCodec {
         }
         try validateMetadata(surfaces)
 
-        var payloads: [String: Data] = [:]
         var decodedBytes = 0
         for record in surfaces.flatMap(\.tiles) {
             guard !manifestPaths.contains(record.file) else {
                 throw PatternPaintTileError.duplicatePath(record.file)
             }
-            let payload: Data
+            let byteCount: Int
             do {
-                payload = try archive.data(for: record.file)
+                byteCount = try archive.byteCount(for: record.file)
             } catch {
                 throw PatternPaintTileError.missingPayload(record.file)
             }
+            guard byteCount == record.byteCount else {
+                throw PatternPaintTileError.payloadByteCountMismatch(
+                    tileID: record.id,
+                    expected: record.byteCount,
+                    actual: byteCount
+                )
+            }
             let (sum, overflow) = decodedBytes.addingReportingOverflow(
-                payload.count
+                byteCount
             )
             let actual = overflow ? Int.max : sum
             guard !overflow, actual <= maximumDecodedBytes else {
@@ -138,6 +180,20 @@ public extension PatternPaintTileCodec {
                 )
             }
             decodedBytes = sum
+        }
+
+        var payloads: [String: Data] = [:]
+        payloads.reserveCapacity(surfaces.reduce(0) { $0 + $1.tiles.count })
+        for record in surfaces.flatMap(\.tiles) {
+            let payload: Data
+            do {
+                payload = try archive.data(
+                    for: record.file,
+                    maximumByteCount: UInt64(record.byteCount)
+                )
+            } catch {
+                throw PatternPaintTileError.missingPayload(record.file)
+            }
             payloads[record.file] = payload
         }
         try validate(
