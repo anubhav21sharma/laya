@@ -8,6 +8,74 @@ enum EditorSessionLayerError: Error, Equatable {
     case rendererStorageUnavailable(UUID)
 }
 
+enum EditorLayerRasterOperationCompletion {
+    case success(RendererOperationToken)
+    case failure(RendererOperationToken, MetalRendererError)
+}
+
+@MainActor
+protocol EditorLayerRasterStorage: AnyObject {
+    var onOperationCompleted:
+        ((EditorLayerRasterOperationCompletion) -> Void)? { get set }
+
+    func captureRevision(
+        for layerID: UUID,
+        maximumRetainedBytes: Int
+    ) throws -> RasterRevisionReference
+    func deleteLayer(_ layerID: UUID) throws
+    func containsRevision(_ id: StoredRasterRevisionID) -> Bool
+    func requestRestore(
+        token: RendererOperationToken,
+        layerID: UUID,
+        revision: RasterRevisionReference
+    ) throws
+    func requestDelete(
+        token: RendererOperationToken,
+        layerID: UUID,
+        revision: RasterRevisionReference
+    ) throws
+    func releaseRevisions(_ ids: Set<StoredRasterRevisionID>)
+}
+
+@MainActor
+private final class UnsupportedEditorLayerRasterStorage:
+    EditorLayerRasterStorage
+{
+    var onOperationCompleted:
+        ((EditorLayerRasterOperationCompletion) -> Void)?
+
+    func captureRevision(
+        for layerID: UUID,
+        maximumRetainedBytes _: Int
+    ) throws -> RasterRevisionReference {
+        throw EditorSessionLayerError.rendererStorageUnavailable(layerID)
+    }
+
+    func deleteLayer(_ layerID: UUID) throws {
+        throw EditorSessionLayerError.rendererStorageUnavailable(layerID)
+    }
+
+    func containsRevision(_: StoredRasterRevisionID) -> Bool { false }
+
+    func requestRestore(
+        token _: RendererOperationToken,
+        layerID: UUID,
+        revision _: RasterRevisionReference
+    ) throws {
+        throw EditorSessionLayerError.rendererStorageUnavailable(layerID)
+    }
+
+    func requestDelete(
+        token _: RendererOperationToken,
+        layerID: UUID,
+        revision _: RasterRevisionReference
+    ) throws {
+        throw EditorSessionLayerError.rendererStorageUnavailable(layerID)
+    }
+
+    func releaseRevisions(_: Set<StoredRasterRevisionID>) {}
+}
+
 @MainActor
 func handleEditorShortcut(
     _ shortcut: EditorShortcut,
@@ -72,6 +140,7 @@ final class EditorSessionController {
     /// reducer operation stays pending until this exact effect is applied.
     private var pendingRendererIdleMetadataEffect: EditorTransactionEffect?
     private let releaseRasterRevisions: (Set<StoredRasterRevisionID>) -> Void
+    private let layerRasterStorage: any EditorLayerRasterStorage
     private let requestRasterRestore: (
         RendererOperationToken,
         UUID,
@@ -115,6 +184,7 @@ final class EditorSessionController {
         let operationToken: EditorTransactionToken
         let historyToken: UInt64
         let targetPixelSize: PixelSize?
+        var layerStackAfterSuccess: LayerStack?
     }
 
     private struct AwaitedClear {
@@ -127,6 +197,7 @@ final class EditorSessionController {
         renderer: GridRenderer,
         layerStack: LayerStack = .compatibilityDefault(),
         documentHistory: DocumentHistory? = nil,
+        layerRasterStorage: (any EditorLayerRasterStorage)? = nil,
         releaseRasterRevisions: ((Set<StoredRasterRevisionID>) -> Void)? = nil,
         requestRasterRestore: ((
             RendererOperationToken,
@@ -166,6 +237,8 @@ final class EditorSessionController {
             initialDocumentIsEmpty: !renderer.documentDomainLocked
         )
         self.layerStack = layerStack
+        self.layerRasterStorage = layerRasterStorage
+            ?? UnsupportedEditorLayerRasterStorage()
         self.strokeSeedSessionEntropy = strokeSeedSessionEntropy
         self.releaseRasterRevisions = releaseRasterRevisions ?? {
             renderer.releaseRasterRevisions($0)
@@ -229,6 +302,9 @@ final class EditorSessionController {
         }
         renderer.onIdleStateChange = { [weak self] isIdle in
             self?.handleRendererIdleStateChange(isIdle)
+        }
+        self.layerRasterStorage.onOperationCompleted = { [weak self] completion in
+            self?.handleLayerRasterStorageCompletion(completion)
         }
         refreshDerivedModelState()
     }
@@ -872,7 +948,7 @@ final class EditorSessionController {
                 configuration,
                 pixelSize: targetPixelSize(for: configuration)
             )
-            releaseRasterRevisions(history.removeAll())
+            releaseHistoryRevisions(history.removeAll())
             refreshDerivedModelState()
         } catch let error as MetalRendererError {
             report(error)
@@ -904,6 +980,42 @@ final class EditorSessionController {
 
     func addLayer(_ descriptor: LayerDescriptor, at order: Int) throws {
         try mutateLayerStack { try $0.add(descriptor, at: order) }
+    }
+
+    func deleteLayer(_ id: UUID) throws {
+        guard transaction.state == .idle,
+              transaction.pendingOperation == nil,
+              renderer.isIdle
+        else {
+            throw EditorSessionLayerError.mutationRequiresIdle
+        }
+
+        var candidate = layerStack
+        let removal = try candidate.delete(id)
+        let revision = try layerRasterStorage.captureRevision(
+            for: id,
+            maximumRetainedBytes: history.maximumBytes
+        )
+        let command = DocumentHistoryCommand.layerDeletion(
+            LayerDeletionHistoryCommand(
+                removal: removal,
+                rasterRevision: revision
+            )
+        )
+        do {
+            try history.validateNewCommand(
+                retainedBytes: command.retainedBytes
+            )
+            try layerRasterStorage.deleteLayer(id)
+        } catch {
+            releaseHistoryRevisions([revision.id])
+            throw error
+        }
+
+        layerStack = candidate
+        let released = history.appendSuccessful(command)
+        releaseHistoryRevisions(released)
+        refreshDerivedModelState()
     }
 
     func moveLayer(_ id: UUID, to order: Int) throws {
@@ -959,7 +1071,7 @@ final class EditorSessionController {
         try history.validateNewCommand(retainedBytes: command.retainedBytes)
         layerStack = candidate
         let released = history.appendSuccessful(command)
-        releaseRasterRevisions(released)
+        releaseHistoryRevisions(released)
         refreshDerivedModelState()
     }
 
@@ -1192,7 +1304,7 @@ final class EditorSessionController {
                 )
             )
             if !released.isEmpty {
-                releaseRasterRevisions(released)
+                releaseHistoryRevisions(released)
             }
             apply(.operationCompleted(token, succeeded: true))
         case let .applyPeriodicConfiguration(token, configuration):
@@ -1220,7 +1332,7 @@ final class EditorSessionController {
                 )
             )
             if !released.isEmpty {
-                releaseRasterRevisions(released)
+                releaseHistoryRevisions(released)
             }
             apply(.operationCompleted(token, succeeded: true))
         case let .performCommand(token, command):
@@ -1308,7 +1420,8 @@ final class EditorSessionController {
                 return navigation.direction == .undo
                     ? command.before.documentPixelSize
                     : command.after.documentPixelSize
-            }()
+            }(),
+            layerStackAfterSuccess: nil
         )
 
         do {
@@ -1376,10 +1489,44 @@ final class EditorSessionController {
                 )
                 pendingHistoryNavigation = nil
                 apply(.operationCompleted(operationToken, succeeded: true))
-            case .layerDeletion:
-                throw EditorSessionLayerError.rendererStorageUnavailable(
-                    LayerStack.compatibilityLayerID
-                )
+            case let .layerDeletion(command):
+                var candidate = layerStack
+                switch navigation.direction {
+                case .undo:
+                    try command.restoreMetadata(
+                        into: &candidate,
+                        revisionIsAvailable: {
+                            layerRasterStorage.containsRevision($0)
+                        }
+                    )
+                    pendingHistoryNavigation?.layerStackAfterSuccess =
+                        candidate
+                    try layerRasterStorage.requestRestore(
+                        token: rendererToken(operationToken),
+                        layerID: command.removedLayer.id,
+                        revision: command.rasterRevision
+                    )
+                case .redo:
+                    let removal = try candidate.delete(
+                        command.removedLayer.id
+                    )
+                    guard removal.descriptor == command.removedLayer,
+                          removal.order == command.removedOrder,
+                          removal.activeLayerIDBefore
+                              == command.activeLayerIDBefore,
+                          removal.activeLayerIDAfter
+                              == command.activeLayerIDAfter
+                    else {
+                        throw LayerStackError.invalidRestoration
+                    }
+                    pendingHistoryNavigation?.layerStackAfterSuccess =
+                        candidate
+                    try layerRasterStorage.requestDelete(
+                        token: rendererToken(operationToken),
+                        layerID: command.removedLayer.id,
+                        revision: command.rasterRevision
+                    )
+                }
             }
         } catch {
             try history.finishNavigation(
@@ -1548,7 +1695,7 @@ final class EditorSessionController {
                 )
                 let released = history.appendSuccessful(.tileResize(command))
                 lastRecordedResizeCommandForTesting = command
-                releaseRasterRevisions(released)
+                releaseHistoryRevisions(released)
                 confirmPixelSizeAndClampDiameter(
                     receipt.after.documentPixelSize
                 )
@@ -1573,7 +1720,7 @@ final class EditorSessionController {
             )
             let released = history.appendSuccessful(.raster(command))
             lastRecordedRasterCommandForTesting = command
-            releaseRasterRevisions(released)
+            releaseHistoryRevisions(released)
             activeStrokeLayerID = nil
             apply(
                 .operationCompleted(
@@ -1630,6 +1777,59 @@ final class EditorSessionController {
             finishAwaitedClear(
                 token: completedToken,
                 result: .failure(error)
+            )
+        }
+        refreshDerivedModelState()
+        resumeDeferredPointerIfIdle()
+    }
+
+    private func handleLayerRasterStorageCompletion(
+        _ completion: EditorLayerRasterOperationCompletion
+    ) {
+        let token: RendererOperationToken
+        let failure: MetalRendererError?
+        switch completion {
+        case let .success(completedToken):
+            token = completedToken
+            failure = nil
+        case let .failure(completedToken, error):
+            token = completedToken
+            failure = error
+        }
+        let completedToken = editorToken(token)
+        guard let pendingHistoryNavigation,
+              pendingHistoryNavigation.operationToken == completedToken,
+              let candidate = pendingHistoryNavigation
+                .layerStackAfterSuccess
+        else {
+            preconditionFailure(
+                "Layer raster storage completed an unowned operation."
+            )
+        }
+
+        if let failure {
+            report(failure)
+            finishHistoryNavigationIfNeeded(
+                operationToken: completedToken,
+                succeeded: false
+            )
+            apply(
+                .operationCompleted(
+                    completedToken,
+                    succeeded: false
+                )
+            )
+        } else {
+            layerStack = candidate
+            finishHistoryNavigationIfNeeded(
+                operationToken: completedToken,
+                succeeded: true
+            )
+            apply(
+                .operationCompleted(
+                    completedToken,
+                    succeeded: true
+                )
             )
         }
         refreshDerivedModelState()
@@ -1892,6 +2092,13 @@ final class EditorSessionController {
         }
     }
 
+    private func releaseHistoryRevisions(
+        _ ids: Set<StoredRasterRevisionID>
+    ) {
+        releaseRasterRevisions(ids)
+        layerRasterStorage.releaseRevisions(ids)
+    }
+
     private func refreshDerivedModelState() {
         model.confirmDocumentConfiguration(renderer.documentConfiguration)
         model.confirmPixelSize(renderer.pixelSize)
@@ -1929,7 +2136,7 @@ final class EditorSessionController {
                 configuration,
                 pixelSize: targetPixelSize(for: configuration)
             )
-            releaseRasterRevisions(history.removeAll())
+            releaseHistoryRevisions(history.removeAll())
             refreshDerivedModelState()
         } catch let error as MetalRendererError {
             report(error)
