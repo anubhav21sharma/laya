@@ -239,6 +239,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         let layerID: UUID
         let generation: UInt64
         var state: InstallState
+        var cancellationRequested: Bool
     }
 
     private let device: any MTLDevice
@@ -706,7 +707,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
             let pairOperations = operations.values.filter {
                 $0.pairID == pair.before.id
             }
-            guard pairOperations.allSatisfy({ $0.kind == .install }) else {
+            guard pairOperations.isEmpty else {
                 throw TiledRasterRevisionStoreError.pairNotReady
             }
             removePair(pair.before.id)
@@ -775,7 +776,8 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 pairID: entry.pairID,
                 layerID: layerID,
                 generation: generation,
-                state: .prepared
+                state: .prepared,
+                cancellationRequested: false
             )
             entry.inFlightCount += 1
             entries[reference.id] = entry
@@ -810,6 +812,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 generation: generation
             )
             guard record.state == .prepared,
+                  !record.cancellationRequested,
                   let entry = entries[record.revisionID]
             else {
                 throw TiledRasterRevisionStoreError.invalidInstallLease
@@ -876,6 +879,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 generation: generation
             )
             guard record.state == .readyToConsume,
+                  !record.cancellationRequested,
                   var entry = entries[record.revisionID],
                   entry.inFlightCount > 0
             else {
@@ -886,6 +890,33 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
             entries[record.revisionID] = entry
             if entry.inFlightCount == 0, entry.releaseRequested {
                 removeRevision(record.revisionID)
+            }
+        }
+    }
+
+    /// Abandons a prepared or completed install lease. If its GPU copy is
+    /// already encoded, cancellation is tombstoned until finalization so the
+    /// retained source payload remains owned and accounted while Metal uses it.
+    public func cancelInstall(
+        _ lease: TiledRasterRevisionInstallLease,
+        layerID: UUID,
+        generation: UInt64
+    ) throws {
+        try withLock {
+            var record = try validatedInstallRecord(
+                lease,
+                layerID: layerID,
+                generation: generation
+            )
+            guard !record.cancellationRequested else {
+                throw TiledRasterRevisionStoreError.invalidInstallLease
+            }
+            switch record.state {
+            case .prepared, .readyToConsume:
+                releaseInstallLeaseLocked(lease.leaseID)
+            case .encoding:
+                record.cancellationRequested = true
+                installRecords[lease.leaseID] = record
             }
         }
     }
@@ -1249,7 +1280,8 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                       var record = installRecords[installLeaseID],
                       record.revisionID == revisionID,
                       record.pairID == entry.pairID,
-                      record.state == .prepared
+                      record.state == .prepared,
+                      !record.cancellationRequested
                 else {
                     throw TiledRasterRevisionStoreError.invalidInstallLease
                 }
@@ -1306,7 +1338,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
             else {
                 preconditionFailure("Install operation must own a live lease")
             }
-            if succeeded {
+            if succeeded, !record.cancellationRequested {
                 precondition(record.state == .encoding)
                 record.state = .readyToConsume
                 installRecords[leaseID] = record
@@ -1319,6 +1351,18 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         entries[operation.revisionID] = entry
         if entry.inFlightCount == 0, entry.releaseRequested {
             removeRevision(operation.revisionID)
+        }
+    }
+
+    private func releaseInstallLeaseLocked(_ leaseID: UInt64) {
+        guard let record = installRecords.removeValue(forKey: leaseID),
+              var entry = entries[record.revisionID]
+        else { return }
+        precondition(entry.inFlightCount > 0)
+        entry.inFlightCount -= 1
+        entries[record.revisionID] = entry
+        if entry.inFlightCount == 0, entry.releaseRequested {
+            removeRevision(record.revisionID)
         }
     }
 

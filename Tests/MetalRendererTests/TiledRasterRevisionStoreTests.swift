@@ -416,7 +416,7 @@ struct TiledRasterRevisionStoreTests {
     }
 
     @Test
-    func discardInvalidatesLiveInstallLeaseAndReleasesAllAccounting() throws {
+    func preEncodeCandidateFailureCanCancelRetryAndCompleteRelease() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let layerID = tiledRevisionLayerID(33)
         let coordinate = PaintTileCoordinate(x: 0, y: 0)
@@ -428,6 +428,187 @@ struct TiledRasterRevisionStoreTests {
             beforePresentCoordinates: [coordinate],
             afterPresentCoordinates: [coordinate]
         )
+        try fixture.store.publish(fixture.pair)
+        let lease = try fixture.store.beginInstall(for: fixture.pair.after)
+
+        #expect(throws: TiledRasterRevisionStoreError.layerMismatch(
+            expected: layerID,
+            actual: tiledRevisionLayerID(93)
+        )) {
+            try fixture.store.cancelInstall(
+                lease,
+                layerID: tiledRevisionLayerID(93),
+                generation: 9
+            )
+        }
+        #expect(throws: TiledRasterRevisionStoreError.generationMismatch(
+            expected: 9,
+            actual: 10
+        )) {
+            try fixture.store.cancelInstall(
+                lease,
+                layerID: layerID,
+                generation: 10
+            )
+        }
+        // Candidate allocation failed before encodeInstall; abandon the lease.
+        try fixture.store.cancelInstall(
+            lease,
+            layerID: layerID,
+            generation: 9
+        )
+        #expect(fixture.store.snapshot().inFlightInstallLeaseCount == 0)
+
+        let retry = try fixture.store.beginInstall(for: fixture.pair.after)
+        #expect(retry != lease)
+        try fixture.store.release([fixture.pair.after.id])
+        #expect(fixture.store.containsRevision(fixture.pair.after.id))
+        try fixture.store.cancelInstall(
+            retry,
+            layerID: layerID,
+            generation: 9
+        )
+        #expect(!fixture.store.containsRevision(fixture.pair.after.id))
+        #expect(fixture.store.residentBytes == fixture.pair.before.retainedBytes)
+        #expect(throws: TiledRasterRevisionStoreError.invalidInstallLease) {
+            try fixture.store.cancelInstall(
+                retry,
+                layerID: layerID,
+                generation: 9
+            )
+        }
+    }
+
+    @Test
+    func cancelReadyInstallUnpinsAndAllowsImmediateRetry() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layerID = tiledRevisionLayerID(34)
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let fixture = try tiledRevisionCapturedPair(
+            device: device,
+            layerID: layerID,
+            generation: 10,
+            pixelSize: PixelSize(width: 256, height: 256),
+            beforePresentCoordinates: [coordinate],
+            afterPresentCoordinates: [coordinate]
+        )
+        let lease = try fixture.store.beginInstall(for: fixture.pair.after)
+        let queue = try #require(device.makeCommandQueue())
+        let command = try #require(queue.makeCommandBuffer())
+        let operation = try fixture.store.encodeInstall(
+            lease,
+            layerID: layerID,
+            generation: 10,
+            targets: [
+                .init(
+                    coordinate: coordinate,
+                    texture: try tiledRevisionTexture(device: device)
+                ),
+            ],
+            on: command
+        )
+        command.commit()
+        command.waitUntilCompleted()
+        try tiledRevisionRequireCompleted(command)
+        try fixture.store.finalize(operation, as: .succeeded)
+
+        try fixture.store.cancelInstall(
+            lease,
+            layerID: layerID,
+            generation: 10
+        )
+        #expect(fixture.store.snapshot().inFlightInstallLeaseCount == 0)
+        let retry = try fixture.store.beginInstall(for: fixture.pair.after)
+        try fixture.store.cancelInstall(
+            retry,
+            layerID: layerID,
+            generation: 10
+        )
+        try fixture.store.discard(fixture.pair)
+    }
+
+    @Test
+    func cancelEncodingDefersUnpinUntilFinalizeAndAllowsRetry() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layerID = tiledRevisionLayerID(35)
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let fixture = try tiledRevisionCapturedPair(
+            device: device,
+            layerID: layerID,
+            generation: 11,
+            pixelSize: PixelSize(width: 256, height: 256),
+            beforePresentCoordinates: [coordinate],
+            afterPresentCoordinates: [coordinate]
+        )
+        let baselineBytes = fixture.store.residentBytes
+        let lease = try fixture.store.beginInstall(for: fixture.pair.after)
+        let queue = try #require(device.makeCommandQueue())
+        let command = try #require(queue.makeCommandBuffer())
+        let operation = try fixture.store.encodeInstall(
+            lease,
+            layerID: layerID,
+            generation: 11,
+            targets: [
+                .init(
+                    coordinate: coordinate,
+                    texture: try tiledRevisionTexture(device: device)
+                ),
+            ],
+            on: command
+        )
+
+        try fixture.store.cancelInstall(
+            lease,
+            layerID: layerID,
+            generation: 11
+        )
+        let deferred = fixture.store.snapshot()
+        #expect(deferred.inFlightInstallLeaseCount == 1)
+        #expect(deferred.inFlightOperationCount == 1)
+        #expect(deferred.residentBytes == baselineBytes)
+        #expect(throws: TiledRasterRevisionStoreError.pairNotReady) {
+            _ = try fixture.store.beginInstall(for: fixture.pair.after)
+        }
+
+        command.commit()
+        command.waitUntilCompleted()
+        try tiledRevisionRequireCompleted(command)
+        try fixture.store.finalize(operation, as: .succeeded)
+        let completed = fixture.store.snapshot()
+        #expect(completed.inFlightInstallLeaseCount == 0)
+        #expect(completed.inFlightOperationCount == 0)
+        #expect(completed.residentBytes == baselineBytes)
+        #expect(throws: TiledRasterRevisionStoreError.invalidInstallLease) {
+            try fixture.store.consumeInstall(
+                lease,
+                layerID: layerID,
+                generation: 11
+            )
+        }
+
+        let retry = try fixture.store.beginInstall(for: fixture.pair.after)
+        try fixture.store.cancelInstall(
+            retry,
+            layerID: layerID,
+            generation: 11
+        )
+        try fixture.store.discard(fixture.pair)
+    }
+
+    @Test
+    func discardWaitsForEncodingInstallBeforeReleasingAccounting() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layerID = tiledRevisionLayerID(36)
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let fixture = try tiledRevisionCapturedPair(
+            device: device,
+            layerID: layerID,
+            generation: 12,
+            pixelSize: PixelSize(width: 256, height: 256),
+            beforePresentCoordinates: [coordinate],
+            afterPresentCoordinates: [coordinate]
+        )
+        let baselineBytes = fixture.store.residentBytes
         let lease = try fixture.store.beginInstall(for: fixture.pair.after)
         let queue = try #require(device.makeCommandQueue())
         let command = try #require(queue.makeCommandBuffer())
@@ -435,15 +616,22 @@ struct TiledRasterRevisionStoreTests {
         let operation = try fixture.store.encodeInstall(
             lease,
             layerID: layerID,
-            generation: 9,
+            generation: 12,
             targets: [.init(coordinate: coordinate, texture: target)],
             on: command
         )
 
-        try fixture.store.discard(fixture.pair)
+        #expect(throws: TiledRasterRevisionStoreError.pairNotReady) {
+            try fixture.store.discard(fixture.pair)
+        }
+        #expect(fixture.store.residentBytes == baselineBytes)
+        #expect(fixture.store.snapshot().inFlightInstallLeaseCount == 1)
+        #expect(fixture.store.snapshot().inFlightOperationCount == 1)
         command.commit()
         command.waitUntilCompleted()
         try tiledRevisionRequireCompleted(command)
+        try fixture.store.finalize(operation, as: .succeeded)
+        try fixture.store.discard(fixture.pair)
 
         #expect(fixture.store.residentBytes == 0)
         #expect(fixture.store.snapshot().inFlightInstallLeaseCount == 0)
@@ -455,29 +643,27 @@ struct TiledRasterRevisionStoreTests {
             try fixture.store.consumeInstall(
                 lease,
                 layerID: layerID,
-                generation: 9
+                generation: 12
             )
         }
-        #expect(throws: TiledRasterRevisionStoreError.invalidInstallLease) {
-            _ = try fixture.store.encodeInstall(
-                lease,
-                layerID: layerID,
-                generation: 9,
-                targets: [
-                    .init(
-                        coordinate: coordinate,
-                        texture: try tiledRevisionTexture(device: device)
-                    ),
-                ],
-                on: try #require(device.makeCommandQueue()?.makeCommandBuffer())
-            )
-        }
+        let reusable = try fixture.store.allocatePair(
+            layerID: layerID,
+            generation: 13,
+            pixelSize: PixelSize(width: 256, height: 256),
+            dirtyRegions: tiledRevisionRegions(
+                for: [coordinate],
+                size: PixelSize(width: 256, height: 256)
+            ),
+            beforePresentCoordinates: [coordinate],
+            afterPresentCoordinates: [coordinate]
+        )
+        try fixture.store.discard(reusable)
     }
 
     @Test
     func failedInstallEncodingInvalidatesLeaseAndLeavesStoreReusable() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
-        let layerID = tiledRevisionLayerID(34)
+        let layerID = tiledRevisionLayerID(37)
         let coordinate = PaintTileCoordinate(x: 0, y: 0)
         let fixture = try tiledRevisionCapturedPair(
             device: device,
