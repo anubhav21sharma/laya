@@ -8,6 +8,112 @@ import Testing
 @Suite("Document paint surface transaction", .serialized)
 struct DocumentPaintSurfaceTransactionTests {
     @Test
+    func coordinatorHasOneStrictTerminalAndNoCompatibilityCalls() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MetalRenderer/Raster/DocumentPaintSurfaceTransaction.swift"
+            ),
+            encoding: .utf8
+        )
+        let fileManager = FileManager.default
+        func swiftFiles(below directory: URL) -> [URL] {
+            guard let enumerator = fileManager.enumerator(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { return [] }
+            return enumerator.compactMap { $0 as? URL }
+                .filter { $0.pathExtension == "swift" }
+                .sorted { $0.path < $1.path }
+        }
+        let metalRendererDirectory = root.appendingPathComponent(
+            "Sources/MetalRenderer"
+        )
+        let ownerImplementationPaths: Set<String> = [
+            "Compositing/SparseTileSamplingPipeline.swift",
+            "Compositing/SparseTileSamplingPlan.swift",
+            "Raster/DocumentPaintSurfaceStore.swift",
+            "Raster/DocumentPaintSurfaceTransaction.swift",
+            "StrokeRuntime/StrokePrivateSurfaceEncoder.swift",
+            "StrokeRuntime/StrokeTileSurfaceResources.swift",
+        ]
+        let productionMetalFiles = swiftFiles(below: metalRendererDirectory)
+            .filter { file in
+                let relative = file.path.replacingOccurrences(
+                    of: metalRendererDirectory.path + "/",
+                    with: ""
+                )
+                return !ownerImplementationPaths.contains(relative)
+                    && file.lastPathComponent != "GridRenderer+Harness.swift"
+            }
+        let productionAppFiles = swiftFiles(
+            below: root.appendingPathComponent("App/PatternSpike")
+        ).filter { !$0.path.contains("/BrushLab/") }
+        let integrationFiles = productionMetalFiles + productionAppFiles
+        let integrationSources = try integrationFiles.map {
+            ($0, try String(contentsOf: $0, encoding: .utf8))
+        }
+
+        #expect(source.components(
+            separatedBy: "registry.commitPreparedForCoordinator("
+        ).count - 1 == 1)
+        #expect(!source.contains("registry.commitPrepared("))
+        #expect(!source.contains("revisionStore.beginInstall("))
+        #expect(!source.contains("dirtyRegions:"))
+        let forbiddenIntegrationSymbols = [
+            "DocumentPaintSurfaceTransaction",
+            "DocumentPaintSurfaceMutationBackend",
+            "DocumentPaintSurfaceStore",
+            "StrokeTileSurfaceResources",
+            "StrokeTileSurfaceEncoder",
+            "tiledTestSurfaces:",
+            "SparseTileSourceRequest",
+            "SparseTileAcceptedSourceAdapter",
+            "sparseTileSourceRequests(",
+            "SparseTileSamplingPlan",
+            "SparseTileSamplingPlanCache",
+            "SparseTileSamplingGPUPlanCache",
+            "SparseTileSamplingPipeline",
+            "SparseTileSamplingEncoder",
+        ]
+        for (file, integrationSource) in integrationSources {
+            for symbol in forbiddenIntegrationSymbols {
+                #expect(
+                    !integrationSource.contains(symbol),
+                    "\(file.path) must not activate \(symbol) before Task 6"
+                )
+            }
+        }
+
+        let rendererSources = integrationSources
+            .filter {
+                $0.0.lastPathComponent.hasPrefix("GridRenderer")
+                    && $0.0.lastPathComponent != "GridRenderer+Harness.swift"
+            }
+            .map(\.1)
+            .joined(separator: "\n")
+        let descriptorConstructionCount = rendererSources.components(
+            separatedBy: "StrokeMetalResourceDescriptor("
+        ).count - 1
+        let legacySelectionCount = rendererSources.components(
+            separatedBy: "surfaces: strokeMetalSurfaceResources"
+        ).count - 1
+        #expect(descriptorConstructionCount > 0)
+        #expect(legacySelectionCount == descriptorConstructionCount)
+        let selectorSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MetalRenderer/StrokeRuntime/StrokePrivateSurfaceEncoder.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(selectorSource.contains("backend = .legacy(surfaces)"))
+    }
+
+    @Test
     func quiescenceOracleCapturesEveryObservableOwnershipDimension() throws {
         guard let fixture = try TransactionFixture.make() else { return }
         let history = DocumentHistory()

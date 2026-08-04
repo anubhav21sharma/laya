@@ -445,6 +445,56 @@ extension GridRenderer {
         )
     }
 
+    /// Test-only presentation seam for a caller-owned canonical texture. It
+    /// reuses the renderer's real display pipeline and radial page table while
+    /// keeping live paint, guides, the canvas outline, and the UI background
+    /// out of geometric support measurements.
+    func renderOffscreenCanonicalTextureForHarness(
+        _ canonicalTexture: any MTLTexture,
+        width: Int,
+        height: Int
+    ) throws -> RenderedFrame {
+        guard (1...4096).contains(width), (1...4096).contains(height),
+              canonicalTexture.width == storagePixelSize.width,
+              canonicalTexture.height == storagePixelSize.height
+        else { throw MetalRendererError.invalidDrawableSize }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .shared
+        descriptor.usage = [.renderTarget, .shaderRead]
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw MetalRendererError.textureAllocationFailed
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw MetalRendererError.commandBufferUnavailable
+        }
+        let start = CFAbsoluteTimeGetCurrent()
+        try encodeDisplay(
+            into: texture,
+            commandBuffer: commandBuffer,
+            showGridLines: false,
+            liveVisible: false,
+            canonicalTexture: canonicalTexture,
+            documentPixelMapping: true,
+            transparentBackground: true,
+            showCanvasBoundary: false
+        )
+        let cpuMilliseconds = elapsedMilliseconds(since: start)
+        commandBuffer.commit()
+        try waitForHarnessCommand(commandBuffer)
+        return RenderedFrame(
+            texture: texture,
+            metrics: metrics(
+                commandBuffer: commandBuffer,
+                cpuMilliseconds: cpuMilliseconds
+            )
+        )
+    }
+
     func renderDiagnosticFootprintForHarness(
         footprint: StampFootprint,
         radius: Float,
@@ -1144,9 +1194,13 @@ extension GridRenderer {
     func injectHarnessDab(
         at world: WorldPoint,
         radius requestedRadius: Float = GridCanvasContract.brushRadius,
-        coverageSymmetry: FootprintCoverageSymmetry = .halfTurnInvariant
+        coverageSymmetry: FootprintCoverageSymmetry = .halfTurnInvariant,
+        compositeMode: StrokeCompositeMode = .draw
     ) throws -> [CellFragment] {
-        try beginFrozenProjectionHarnessExecution(radius: requestedRadius)
+        try beginFrozenProjectionHarnessExecution(
+            radius: requestedRadius,
+            compositeMode: compositeMode
+        )
         counters = GridStructuralCounters()
         counters.newDabsThisEvent = 1
         counters.totalDabsThisStroke = 1

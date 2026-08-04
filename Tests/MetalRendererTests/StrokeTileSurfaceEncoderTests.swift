@@ -187,8 +187,10 @@ struct StrokeTileSurfaceEncoderTests {
             )
             let inputs = try layout.residentPages.enumerated().map {
                 index, page in
-                let x = page.coordinate.x * RadialSectorLayout.pageSide
-                let y = page.coordinate.y * RadialSectorLayout.pageSide
+                let physicalX = page.atlasSlot % layout.atlasColumns
+                let physicalY = page.atlasSlot / layout.atlasColumns
+                let x = physicalX * RadialSectorLayout.pageSide
+                let y = physicalY * RadialSectorLayout.pageSide
                 return StrokeTilePartitionInput(
                     recordIndex: index,
                     supportBounds: try #require(PixelRect(
@@ -255,11 +257,19 @@ struct StrokeTileSurfaceEncoderTests {
             maximumTileReferenceCount: 1,
             maximumTileCount: 1
         )
+        let physicalCoordinate = PaintTileCoordinate(
+            x: resident.atlasSlot % layout.atlasColumns,
+            y: resident.atlasSlot / layout.atlasColumns
+        )
+        let atlasOrigin = SIMD2(
+            physicalCoordinate.x * PaintTileDescriptor.side,
+            physicalCoordinate.y * PaintTileDescriptor.side
+        )
         let bounds = try #require(PixelRect(
-            minX: resident.coordinate.x * 256,
-            minY: resident.coordinate.y * 256,
-            maxX: resident.coordinate.x * 256 + 1,
-            maxY: resident.coordinate.y * 256 + 1
+            minX: atlasOrigin.x,
+            minY: atlasOrigin.y,
+            maxX: atlasOrigin.x + 1,
+            maxY: atlasOrigin.y + 1
         ))
 
         let range = try #require(try scratch.partition(
@@ -272,14 +282,12 @@ struct StrokeTileSurfaceEncoderTests {
             role: .authoritative,
             radialLayout: layout
         ).first)
-        #expect(range.physicalCoordinate == PaintTileCoordinate(
-            x: resident.atlasSlot % layout.atlasColumns,
-            y: resident.atlasSlot / layout.atlasColumns
-        ))
+        #expect(range.physicalCoordinate == physicalCoordinate)
         #expect(range.logicalOrigin == SIMD2(
             resident.coordinate.x * 256,
             resident.coordinate.y * 256
         ))
+        #expect(range.atlasOrigin == atlasOrigin)
 
         let missing = RadialPageCoordinate(
             x: layout.pageOrigin.x - 1,
@@ -1089,27 +1097,31 @@ struct StrokeTileSurfaceEncoderTests {
                 secondaryShape: nil,
                 primaryGrain: nil,
                 secondaryGrain: nil,
-                frameUniforms: frameUniforms(side: 1_024),
+                frameUniforms: frameUniforms(pixelSize: layout.atlasPixelSize),
                 radialLayout: layout,
                 forceCommandFailure: false
             ),
             generation: 7
         )
-        let logicalOrigin = SIMD2(
-            page.coordinate.x * PaintTileDescriptor.side,
-            page.coordinate.y * PaintTileDescriptor.side
+        let physicalCoordinate = PaintTileCoordinate(
+            x: page.atlasSlot % layout.atlasColumns,
+            y: page.atlasSlot / layout.atlasColumns
+        )
+        let atlasOrigin = SIMD2(
+            physicalCoordinate.x * PaintTileDescriptor.side,
+            physicalCoordinate.y * PaintTileDescriptor.side
         )
         let center = SIMD2<Float>(
-            Float(logicalOrigin.x + 128),
-            Float(logicalOrigin.y + 128)
+            Float(atlasOrigin.x + 128),
+            Float(atlasOrigin.y + 128)
         )
         let record = try projectedRecord(
             ordinal: 1,
             bounds: try #require(PixelRect(
-                minX: logicalOrigin.x + 120,
-                minY: logicalOrigin.y + 120,
-                maxX: logicalOrigin.x + 137,
-                maxY: logicalOrigin.y + 137
+                minX: atlasOrigin.x + 120,
+                minY: atlasOrigin.y + 120,
+                maxX: atlasOrigin.x + 137,
+                maxY: atlasOrigin.y + 137
             )),
             position: center,
             radialPage: page.coordinate
@@ -1121,10 +1133,7 @@ struct StrokeTileSurfaceEncoderTests {
             allocationProbe: nil
         ))
         let binding = try #require(lease.tiledBindings.first)
-        #expect(binding.descriptor.coordinate == PaintTileCoordinate(
-            x: page.atlasSlot % layout.atlasColumns,
-            y: page.atlasSlot / layout.atlasColumns
-        ))
+        #expect(binding.descriptor.coordinate == physicalCoordinate)
         let bytes = try download(binding.texture, device: context.device)
         #expect(regionContainsNonzero(
             bytes, x: 120..<137, y: 120..<137
@@ -2012,10 +2021,26 @@ struct StrokeTileSurfaceEncoderTests {
     }
 
     private func frameUniforms(side: Float) -> PatternGridFrameUniforms {
+        frameUniforms(width: side, height: side)
+    }
+
+    private func frameUniforms(
+        pixelSize: PixelSize
+    ) -> PatternGridFrameUniforms {
+        frameUniforms(
+            width: Float(pixelSize.width),
+            height: Float(pixelSize.height)
+        )
+    }
+
+    private func frameUniforms(
+        width: Float,
+        height: Float
+    ) -> PatternGridFrameUniforms {
         PatternGridFrameUniforms(
-            drawableSize: SIMD2(repeating: side),
-            worldCenter: SIMD2(repeating: side / 2),
-            tileSize: SIMD2(repeating: side),
+            drawableSize: SIMD2(width, height),
+            worldCenter: SIMD2(width / 2, height / 2),
+            tileSize: SIMD2(width, height),
             zoom: 1,
             gridLineWidth: 0,
             showGridLines: 0,
@@ -2024,7 +2049,7 @@ struct StrokeTileSurfaceEncoderTests {
             diagnosticMode: 0,
             compositeMode: 0,
             symmetryFamily: 0,
-            repeatSize: SIMD2(repeating: side),
+            repeatSize: SIMD2(width, height),
             latticeXAxis: SIMD2(1, 0),
             latticeYAxis: SIMD2(0, 1),
             latticeTranslation: .zero,

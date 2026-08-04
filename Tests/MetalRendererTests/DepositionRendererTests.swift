@@ -9,6 +9,267 @@ import Testing
 
 @Suite("Compiled deposition renderer")
 struct DepositionRendererTests {
+    @Test
+    func opaqueSupportOracleDefinesPlainDiskAndRejectsWrongGeometry() {
+        let authority = OpaqueStampSupportOracle.plainDisk(
+            pixelSize: PixelSize(width: 64, height: 48),
+            center: SIMD2<Float>(31.25, 19.75),
+            radius: 7.5
+        )
+        let exact = authority.analyticMask()
+
+        let exactComparison = authority.compare(exact)
+        #expect(exactComparison.isAccepted)
+        #expect(!authority.compare(exact.shifted(dx: 1, dy: 0)).isAccepted)
+        #expect(!authority.compare(exact.shifted(dx: 2, dy: 0)).isAccepted)
+        #expect(!authority.compare(exact.mirroredHorizontally()).isAccepted)
+        let expandedComparison = authority.compare(
+            exact.expandedSupportToTheRight(
+                by: exactComparison.supportBoundsEdgeTolerance + 1
+            )
+        )
+        #expect(!expandedComparison.isAccepted)
+        #expect(
+            expandedComparison.maximumSupportBoundsEdgeDelta
+                > expandedComparison.supportBoundsEdgeTolerance
+        )
+
+        let radialConfiguration = RadialSymmetryConfiguration(
+            kind: .rotation,
+            rayCount: 7,
+            center: WorldPoint(x: 31.5, y: 23.5),
+            referenceAngleRadians: -0.2
+        )
+        let radialAuthority = OpaqueStampSupportOracle.radialHardRound(
+            canvasSize: PixelSize(width: 64, height: 48),
+            sourceCenter: WorldPoint(x: 42.25, y: 27.75),
+            radius: 5.5,
+            configuration: radialConfiguration
+        )
+        let radialExact = radialAuthority.analyticMask()
+        #expect(radialAuthority.compare(radialExact).isAccepted)
+        // A displacement beyond the wider radial presentation annulus must
+        // still be rejected; the derived boundary is not a permissive match.
+        #expect(
+            !radialAuthority.compare(
+                radialExact.shifted(dx: 4, dy: 0)
+            ).isAccepted
+        )
+    }
+
+    @Test
+    func opaqueSupportOracleDefinesPeriodicWrapAndRadialOrbit() {
+        let periodic = OpaqueStampSupportOracle.periodicHardRound(
+            tileSize: PixelSize(width: 64, height: 80),
+            worldCenter: SIMD2<Float>(62.25, 31.75),
+            radius: 6.5,
+            tiling: .grid
+        )
+        let periodicMask = periodic.analyticMask()
+        #expect(periodic.compare(periodicMask).isAccepted)
+        #expect(!periodic.compare(
+            periodicMask.shifted(dx: 2, dy: 0)
+        ).isAccepted)
+
+        let radialConfiguration = RadialSymmetryConfiguration(
+            kind: .mandala,
+            rayCount: 7,
+            center: WorldPoint(x: 45.5, y: 39.5),
+            referenceAngleRadians: 0.19
+        )
+        let radial = OpaqueStampSupportOracle.radialHardRound(
+            canvasSize: PixelSize(width: 112, height: 96),
+            sourceCenter: WorldPoint(x: 73.25, y: 51.75),
+            radius: 4.75,
+            configuration: radialConfiguration
+        )
+        let radialMask = radial.analyticMask()
+        #expect(radial.compare(radialMask).isAccepted)
+        #expect(!radial.compare(
+            radialMask.mirroredHorizontally()
+        ).isAccepted)
+    }
+
+    @Test
+    @MainActor
+    func opaquePlainLegacyAndInactiveTiledDrawEraseMatchAuthority()
+        async throws
+    {
+        let pixelSize = PixelSize(width: 512, height: 512)
+        let finite = FiniteSymmetryConfiguration.plain
+        guard let draw = try makeDepositionRendererSetup(
+            finite: finite,
+            pixelSize: pixelSize
+        ), let erase = try makeDepositionRendererSetup(
+            finite: finite,
+            pixelSize: pixelSize
+        )
+        else { return }
+        let brush = try await draw.compileBrush(id: "opaque-oracle.plain")
+        let eraseBrush = try await erase.compileBrush(
+            id: "opaque-oracle.plain-erase"
+        )
+        try draw.renderer.activateDrawBrush(brush)
+        try erase.renderer.activateEraserBrush(eraseBrush)
+        let fixtures: [(WorldPoint, Float)] = [
+            (WorldPoint(x: 256.25, y: 256.75), 9.5),
+            (WorldPoint(x: 2.25, y: 7.75), 8.5),
+        ]
+        for (center, radius) in fixtures {
+            let authority = OpaqueStampSupportOracle.plainDisk(
+                pixelSize: pixelSize,
+                center: center.simd,
+                radius: radius
+            )
+
+            try draw.renderer.replaceCanonicalPixelsForHarness(
+                [UInt8](repeating: 0, count: pixelSize.width * pixelSize.height * 4)
+            )
+            _ = try draw.renderer.injectHarnessDab(
+                at: center,
+                radius: radius,
+                compositeMode: .draw
+            )
+            _ = try draw.renderer.finishCommitForHarness()
+            let legacyDraw = opaqueDrawMask(
+                depositionTextureBytes(
+                    try draw.renderer.copyCanonicalForHarness()
+                ),
+                pixelSize: pixelSize
+            )
+            let legacyDrawComparison = authority.compare(legacyDraw)
+            #expect(
+                legacyDrawComparison.isAccepted,
+                "legacy draw bounds \(String(describing: legacyDrawComparison))"
+            )
+
+            try erase.renderer.replaceCanonicalPixelsForHarness(
+                opaqueBlackBGRA(pixelSize: pixelSize)
+            )
+            _ = try erase.renderer.injectHarnessDab(
+                at: center,
+                radius: radius,
+                compositeMode: .erase
+            )
+            _ = try erase.renderer.finishCommitForHarness()
+            let legacyErase = opaqueEraseMask(
+                depositionTextureBytes(
+                    try erase.renderer.copyCanonicalForHarness()
+                ),
+                pixelSize: pixelSize
+            )
+            let legacyEraseComparison = authority.compare(legacyErase)
+            #expect(
+                legacyEraseComparison.isAccepted,
+                "legacy erase bounds \(String(describing: legacyEraseComparison))"
+            )
+
+            let tiledDrawResult = try await inactiveTask5P4OpaqueMask(
+                device: draw.device,
+                library: draw.library,
+                brush: brush,
+                pixelSize: pixelSize,
+                center: center.simd,
+                radius: radius,
+                compositeMode: .draw,
+                documentConfiguration: .finite(.plain),
+                exerciseFailureRecovery: center.x > 100,
+                presentationRenderer: nil
+            )
+            let tiledDrawComparison = authority.compare(tiledDrawResult.mask)
+            #expect(
+                tiledDrawComparison.isAccepted,
+                "tiled draw bounds \(String(describing: tiledDrawComparison))"
+            )
+            let tiledEraseResult = try await inactiveTask5P4OpaqueMask(
+                device: erase.device,
+                library: erase.library,
+                brush: eraseBrush,
+                pixelSize: pixelSize,
+                center: center.simd,
+                radius: radius,
+                compositeMode: .erase,
+                documentConfiguration: .finite(.plain),
+                exerciseFailureRecovery: false,
+                presentationRenderer: nil
+            )
+            let tiledEraseComparison = authority.compare(tiledEraseResult.mask)
+            #expect(
+                tiledEraseComparison.isAccepted,
+                "tiled erase bounds \(String(describing: tiledEraseComparison))"
+            )
+            expectCleanInactiveHandoff(tiledDrawResult)
+            expectCleanInactiveHandoff(tiledEraseResult)
+        }
+    }
+
+    @Test
+    @MainActor
+    func opaquePeriodicLegacyAndInactiveTiledDrawEraseMatchAuthority()
+        async throws
+    {
+        let size = PixelSize(width: 512, height: 512)
+        let center = WorldPoint(x: 509.25, y: 254.75)
+        let radius: Float = 9.5
+        let authority = OpaqueStampSupportOracle.periodicHardRound(
+            tileSize: size,
+            worldCenter: center.simd,
+            radius: radius,
+            tiling: .grid
+        )
+        let result = try await opaqueRendererDifferential(
+            documentConfiguration: .periodic(
+                .defaultConfiguration(
+                    presetID: .grid,
+                    canonicalRasterSize: size
+                )
+            ),
+            canvasSize: size,
+            center: center,
+            radius: radius,
+            exerciseFailureRecovery: true
+        )
+        expectOpaqueDifferential(result, matches: authority)
+        expectCleanInactiveHandoff(result)
+    }
+
+    @Test
+    @MainActor
+    func opaqueRadialLegacyAndInactiveTiledDrawEraseMatchAuthority()
+        async throws
+    {
+        let size = PixelSize(width: 512, height: 512)
+        let radialCenter = WorldPoint(x: 251.5, y: 263.5)
+        let sourceCenter = WorldPoint(x: 333.25, y: 319.75)
+        for kind in [
+            RadialSymmetryKind.rotation,
+            .mirror,
+            .mandala,
+        ] {
+            let configuration = RadialSymmetryConfiguration(
+                kind: kind,
+                rayCount: kind == .mirror ? 1 : 7,
+                center: radialCenter,
+                referenceAngleRadians: -0.35
+            )
+            let authority = OpaqueStampSupportOracle.radialHardRound(
+                canvasSize: size,
+                sourceCenter: sourceCenter,
+                radius: 6.5,
+                configuration: configuration
+            )
+            let result = try await opaqueRendererDifferential(
+                documentConfiguration: .finite(.radial(configuration)),
+                canvasSize: size,
+                center: sourceCenter,
+                radius: 6.5,
+                exerciseFailureRecovery: false
+            )
+            expectOpaqueDifferential(result, matches: authority)
+            expectCleanInactiveHandoff(result)
+        }
+    }
+
     // Retired Main scheduler duplicate; covered by
     // actorAppliesLocationPressureAzimuthAndAltitudeCorrections.
     @Test
@@ -64,7 +325,7 @@ struct DepositionRendererTests {
         )
         #expect(
             renderer.contains(
-                "func beginFrozenProjectionHarnessExecution(radius: Float)"
+                "func beginFrozenProjectionHarnessExecution("
             )
         )
         #expect(!renderer.contains("func beginHarnessExecution("))
@@ -4640,10 +4901,860 @@ private func depositionPixelDigest(_ bytes: [UInt8]) -> String {
     return String(format: "%016llx", digest)
 }
 
+private func opaqueDrawMask(
+    _ bytes: [UInt8],
+    pixelSize: PixelSize
+) -> OpaqueStampSupportOracle.Mask {
+    precondition(bytes.count == pixelSize.width * pixelSize.height * 4)
+    return OpaqueStampSupportOracle.Mask(
+        pixelSize: pixelSize,
+        values: stride(from: 3, to: bytes.count, by: 4).map {
+            bytes[$0] >= 128
+        }
+    )
+}
+
+private func opaqueEraseMask(
+    _ bytes: [UInt8],
+    pixelSize: PixelSize
+) -> OpaqueStampSupportOracle.Mask {
+    precondition(bytes.count == pixelSize.width * pixelSize.height * 4)
+    return OpaqueStampSupportOracle.Mask(
+        pixelSize: pixelSize,
+        values: stride(from: 3, to: bytes.count, by: 4).map {
+            bytes[$0] < 128
+        }
+    )
+}
+
+private func opaqueDifferenceMask(
+    before: [UInt8],
+    after: [UInt8],
+    pixelSize: PixelSize
+) -> OpaqueStampSupportOracle.Mask {
+    precondition(before.count == after.count)
+    precondition(before.count == pixelSize.width * pixelSize.height * 4)
+    var values = [Bool](
+        repeating: false,
+        count: pixelSize.width * pixelSize.height
+    )
+    for pixel in values.indices {
+        let offset = pixel * 4
+        values[pixel] = (0 ..< 4).contains { channel in
+            abs(Int(before[offset + channel]) - Int(after[offset + channel]))
+                >= 32
+        }
+    }
+    return OpaqueStampSupportOracle.Mask(
+        pixelSize: pixelSize,
+        values: values
+    )
+}
+
+private func opaqueBlackBGRA(pixelSize: PixelSize) -> [UInt8] {
+    var bytes = [UInt8](
+        repeating: 0,
+        count: pixelSize.width * pixelSize.height * 4
+    )
+    for alpha in stride(from: 3, to: bytes.count, by: 4) {
+        bytes[alpha] = 255
+    }
+    return bytes
+}
+
+private struct InactiveOpaqueSupportResult {
+    let mask: OpaqueStampSupportOracle.Mask
+    let handoffLeaseCount: Int
+    let postAcknowledgementLeaseCount: Int
+    let finalRegistry: DocumentPaintSurfaceStoreSnapshot
+    let finalStore: PaintTileStoreSnapshot
+    let finalEncoder: StrokeTileSurfaceEncoderSnapshot
+    let finalGPUCache: SparseTileSamplingGPUCacheSnapshot
+    let transientSurfaceIDs: Set<UUID>
+    let completion: SparseTileSamplingCompletionSnapshot
+    let failureRecoveryWasRequested: Bool
+    let failureRecoverySucceeded: Bool
+}
+
+private struct OpaqueRendererDifferentialResult {
+    let legacyDraw: OpaqueStampSupportOracle.Mask
+    let legacyErase: OpaqueStampSupportOracle.Mask
+    let tiledDraw: InactiveOpaqueSupportResult
+    let tiledErase: InactiveOpaqueSupportResult
+}
+
+@MainActor
+private func opaqueRendererDifferential(
+    documentConfiguration: SymmetryDocumentConfiguration,
+    canvasSize: PixelSize,
+    center: WorldPoint,
+    radius: Float,
+    exerciseFailureRecovery: Bool
+) async throws -> OpaqueRendererDifferentialResult {
+    func makeSetup() throws -> DepositionRendererSetup? {
+        switch documentConfiguration {
+        case let .periodic(configuration):
+            try makeDepositionRendererSetup(
+                tiling: configuration.presetID,
+                pixelSize: canvasSize
+            )
+        case let .finite(configuration):
+            try makeDepositionRendererSetup(
+                finite: configuration,
+                pixelSize: canvasSize
+            )
+        }
+    }
+    guard let draw = try makeSetup(), let erase = try makeSetup() else {
+        throw MetalRendererError.commandFailed("Metal device unavailable")
+    }
+    let brush = try await draw.compileBrush(id: "opaque-oracle.differential")
+    try draw.renderer.activateDrawBrush(brush)
+    try erase.renderer.activateEraserBrush(brush)
+
+    try draw.renderer.replaceCanonicalPixelsForHarness(
+        [UInt8](repeating: 0, count: draw.renderer.storagePixelSize.width
+            * draw.renderer.storagePixelSize.height * 4)
+    )
+    let legacyDrawBefore = try opaqueLegacyOutputBytes(
+        renderer: draw.renderer,
+        documentConfiguration: documentConfiguration,
+        canvasSize: canvasSize
+    )
+    _ = try draw.renderer.injectHarnessDab(
+        at: center,
+        radius: radius,
+        compositeMode: .draw
+    )
+    _ = try draw.renderer.finishCommitForHarness()
+    let legacyDraw = opaqueDifferenceMask(
+        before: legacyDrawBefore,
+        after: try opaqueLegacyOutputBytes(
+            renderer: draw.renderer,
+            documentConfiguration: documentConfiguration,
+            canvasSize: canvasSize
+        ),
+        pixelSize: canvasSize
+    )
+
+    try erase.renderer.replaceCanonicalPixelsForHarness(
+        opaqueBlackBGRA(pixelSize: erase.renderer.storagePixelSize)
+    )
+    let legacyEraseBefore = try opaqueLegacyOutputBytes(
+        renderer: erase.renderer,
+        documentConfiguration: documentConfiguration,
+        canvasSize: canvasSize
+    )
+    _ = try erase.renderer.injectHarnessDab(
+        at: center,
+        radius: radius,
+        compositeMode: .erase
+    )
+    _ = try erase.renderer.finishCommitForHarness()
+    let legacyErase = opaqueDifferenceMask(
+        before: legacyEraseBefore,
+        after: try opaqueLegacyOutputBytes(
+            renderer: erase.renderer,
+            documentConfiguration: documentConfiguration,
+            canvasSize: canvasSize
+        ),
+        pixelSize: canvasSize
+    )
+
+    return OpaqueRendererDifferentialResult(
+        legacyDraw: legacyDraw,
+        legacyErase: legacyErase,
+        tiledDraw: try await inactiveTask5P4OpaqueMask(
+            device: draw.device,
+            library: draw.library,
+            brush: brush,
+            pixelSize: canvasSize,
+            center: center.simd,
+            radius: radius,
+            compositeMode: .draw,
+            documentConfiguration: documentConfiguration,
+            exerciseFailureRecovery: exerciseFailureRecovery,
+            presentationRenderer: draw.renderer
+        ),
+        tiledErase: try await inactiveTask5P4OpaqueMask(
+            device: draw.device,
+            library: draw.library,
+            brush: brush,
+            pixelSize: canvasSize,
+            center: center.simd,
+            radius: radius,
+            compositeMode: .erase,
+            documentConfiguration: documentConfiguration,
+            exerciseFailureRecovery: false,
+            presentationRenderer: erase.renderer
+        )
+    )
+}
+
+@MainActor
+private func opaqueLegacyOutputBytes(
+    renderer: GridRenderer,
+    documentConfiguration: SymmetryDocumentConfiguration,
+    canvasSize: PixelSize
+) throws -> [UInt8] {
+    if case .finite(.radial) = documentConfiguration {
+        return depositionTextureBytes(
+            try renderer.renderOffscreenDisplayForHarness(
+                width: canvasSize.width,
+                height: canvasSize.height,
+                showGridLines: false
+            ).texture
+        )
+    }
+    return depositionTextureBytes(try renderer.copyCanonicalForHarness())
+}
+
+private func expectOpaqueDifferential(
+    _ result: OpaqueRendererDifferentialResult,
+    matches authority: OpaqueStampSupportOracle
+) {
+    #expect(authority.compare(result.legacyDraw).isAccepted)
+    #expect(authority.compare(result.legacyErase).isAccepted)
+    #expect(authority.compare(result.tiledDraw.mask).isAccepted)
+    #expect(authority.compare(result.tiledErase.mask).isAccepted)
+}
+
+private func expectCleanInactiveHandoff(
+    _ result: OpaqueRendererDifferentialResult
+) {
+    expectCleanInactiveHandoff(result.tiledDraw)
+    expectCleanInactiveHandoff(result.tiledErase)
+}
+
+private func expectCleanInactiveHandoff(
+    _ result: InactiveOpaqueSupportResult
+) {
+    #expect(result.handoffLeaseCount > 0)
+    #expect(result.postAcknowledgementLeaseCount > 0)
+    #expect(result.finalRegistry.issuedNamespaceCount == 0)
+    #expect(result.finalRegistry.preparedCandidateCount == 0)
+    #expect(result.finalStore.activeLeaseCount == 0)
+    #expect(result.finalStore.provisionalReservationCount == 0)
+    #expect(result.finalStore.provisionalByteCount == 0)
+    #expect(result.finalStore.preparedRetirementCount == 0)
+    #expect(result.finalStore.pendingRetirementCount == 0)
+    #expect(!result.finalStore.entries.contains {
+        result.transientSurfaceIDs.contains($0.surfaceID)
+    })
+    #expect(!result.finalEncoder.hasOutstandingLease)
+    #expect(result.finalEncoder.retainedLeaseWorkspaceBindingCount == 0)
+    #expect(result.finalEncoder.retainedProvisionalBindingCount == 0)
+    #expect(result.finalGPUCache.uploadRing?.activeSlotCount == 0)
+    #expect(result.completion.terminalCommandCount == 1)
+    #expect(result.completion.commandFailureCount == 0)
+    #expect(result.completion.planCompletionFailureCount == 0)
+    #expect(result.completion.pendingPlanCompletionCount == 0)
+    #expect(result.completion.pendingConsumerCompletionCount == 0)
+    #expect(
+        !result.failureRecoveryWasRequested
+            || result.failureRecoverySucceeded
+    )
+}
+
+@MainActor
+private func inactiveTask5P4OpaqueMask(
+    device: any MTLDevice,
+    library: any MTLLibrary,
+    brush: CompiledBrush,
+    pixelSize: PixelSize,
+    center: SIMD2<Float>,
+    radius: Float,
+    compositeMode: StrokeCompositeMode,
+    documentConfiguration: SymmetryDocumentConfiguration,
+    exerciseFailureRecovery: Bool,
+    presentationRenderer: GridRenderer?
+) async throws -> InactiveOpaqueSupportResult {
+    let layerID = UUID()
+    let strategy = try TilingStrategy(
+        documentConfiguration: documentConfiguration,
+        canvasSize: pixelSize
+    )
+    let radialLayout = strategy.compiledSymmetry.domain.finite?.radial.layout
+    let storagePixelSize = radialLayout?.atlasPixelSize ?? pixelSize
+    let addressing: SparseTileAddressing = if radialLayout != nil {
+        .radial(layout: radialLayout!)
+    } else if case .periodic = documentConfiguration {
+        .periodic(period: pixelSize)
+    } else {
+        .finite(pixelSize)
+    }
+    let transform = SparseTileOutputToSourceTransform.identity
+    let records = try opaqueProjectedRecords(
+        center: center,
+        radius: radius,
+        strategy: strategy
+    )
+    #expect(!records.isEmpty)
+    let maximumTileCount =
+        ((storagePixelSize.width + PaintTileDescriptor.side - 1)
+            / PaintTileDescriptor.side)
+        * ((storagePixelSize.height + PaintTileDescriptor.side - 1)
+            / PaintTileDescriptor.side)
+    let tilePipeline = try await DepositionPipelineLibrary(
+        device: device,
+        library: library
+    ).prepare(for: DepositionPipelineKey(
+        brush: brush.pipelineKey,
+        abiVersion: DepositionABI.version,
+        colorPixelFormatRawValue: MTLPixelFormat.rgba16Float.rawValue,
+        sampleCount: 1
+    ))
+    let geometry = try DocumentPaintGeometry(
+        documentPixelSize: pixelSize,
+        storagePixelSize: storagePixelSize,
+        radialLayout: radialLayout
+    )
+    let registry = try DocumentPaintSurfaceStore(
+        device: device,
+        byteBudget: max(1, maximumTileCount * 2)
+            * PaintTileDescriptor.residentByteCount,
+        geometry: geometry,
+        layerIDs: [layerID],
+        generation: 7
+    )
+    let sharedStore = registry.sharedTileStore
+    let namespace = try registry.issueStrokeNamespace(
+        layerID: layerID,
+        generation: 7
+    )
+    let transientSurfaceIDs: Set<UUID> = [
+        namespace.authoritative.surfaceID,
+        namespace.prediction.surfaceID,
+    ]
+    let resources = try StrokeTileSurfaceResources(
+        device: device,
+        store: sharedStore,
+        layerID: layerID,
+        pixelSize: storagePixelSize,
+        generation: 7,
+        maximumRecordCount: max(1, records.count),
+        maximumTileReferenceCount: max(
+            1,
+            maximumTileCount * max(1, records.count)
+        ),
+        pipeline: tilePipeline,
+        namespaceLease: namespace
+    )
+    let encoder = StrokeTileSurfaceEncoder()
+    try encoder.configure(
+        StrokeTileEncodingConfiguration(
+            resources: resources,
+            materialUniforms: DepositionMaterialBinding.harnessOpaque.uniforms,
+            primaryShape: nil,
+            secondaryShape: nil,
+            primaryGrain: nil,
+            secondaryGrain: nil,
+            frameUniforms: opaqueFrameUniforms(pixelSize: storagePixelSize),
+            radialLayout: radialLayout,
+            forceCommandFailure: false
+        ),
+        generation: 7
+    )
+    let frame = try #require(try await encoder.encode(
+        generation: 7,
+        records: records,
+        layer: .authoritative,
+        allocationProbe: nil
+    ))
+    let handoffLeaseCount = sharedStore.snapshot().activeLeaseCount
+    #expect(handoffLeaseCount > 0)
+
+    var requests: [SparseTileSourceRequest] = []
+    if compositeMode == .erase {
+        let registeredCanonical = try registry.binding(for: layerID).canonical
+        // Registry bindings are immutable publication views. The harness owns
+        // a mutable view of that exact registered physical namespace only to
+        // establish the opaque erase baseline before any Task5 work begins.
+        let canonical = TiledRasterSurface(
+            store: sharedStore,
+            layerID: layerID,
+            pixelSize: storagePixelSize,
+            surfaceID: registeredCanonical.surfaceID,
+            generation: 7
+        )
+        let coordinates = opaqueTileCoordinates(pixelSize: storagePixelSize)
+        let lease = try canonical.reserveTiles(
+            at: coordinates,
+            pinReasons: [.dirty]
+        )
+        for binding in lease.bindings {
+            try uploadOpaqueBlackTile(binding.texture, device: device)
+        }
+        try canonical.markDirty(lease)
+        try canonical.returnLease(lease)
+        requests.append(try SparseTileSourceRequest(
+            contentKey: SparseTileRoleContentKey(
+                role: .canonical,
+                contentRevision: canonical.revision.rawValue,
+                bindingChunkRevision: 1
+            ),
+            addressing: addressing,
+            surface: canonical,
+            changedCoordinates: coordinates,
+            disposition: .fullSnapshot
+        ))
+    }
+    requests.append(contentsOf: try frame.sparseTileSourceRequests(
+        addressing: addressing
+    ))
+    let key = SparseTileSamplingPlanKey(
+        documentGeneration: 7,
+        orderedLayers: [SparseTileLayerContentKey(
+            layerID: layerID,
+            roles: requests.map(\.contentKey)
+        )],
+        addressingRevision: 1,
+        outputGeometryRevision: 1,
+        outputToSourceTransform: transform
+    )
+    let planCache = SparseTileSamplingPlanCache()
+    let outputRegion: SparseTileOutputRegion
+    if let radialLayout {
+        let side = PaintTileDescriptor.side
+        outputRegion = try SparseTileOutputRegion(
+            minX: radialLayout.pageOrigin.x * side,
+            minY: radialLayout.pageOrigin.y * side,
+            maxX: (radialLayout.pageOrigin.x
+                + radialLayout.pageTableSize.width) * side,
+            maxY: (radialLayout.pageOrigin.y
+                + radialLayout.pageTableSize.height) * side
+        )
+    } else {
+        outputRegion = try SparseTileOutputRegion(
+            minX: 0,
+            minY: 0,
+            maxX: storagePixelSize.width,
+            maxY: storagePixelSize.height
+        )
+    }
+    let plan = try planCache.acquire(
+        key: key,
+        sources: requests,
+        outputRegion: outputRegion,
+        limits: opaqueSamplingPlanLimits
+    )
+    let pipeline = try SparseTileSamplingPipeline.prepare(
+        device: device,
+        library: library,
+        key: SparseTileSamplingPipelineKey(
+            backend: .directFallback,
+            outputPixelFormatRawValue: MTLPixelFormat.rgba16Float.rawValue,
+            sampleCount: 1,
+            abiVersion: SparseSamplingABI.version
+        )
+    )
+    let gpuCache = SparseTileSamplingGPUPlanCache(
+        device: device
+    )
+    var failureRecoverySucceeded = false
+    if exerciseFailureRecovery {
+        await gpuCache.injectFailureForNextBuild(.descriptorBuffer)
+        do {
+            _ = try await gpuCache.acquire(plan: plan, pipeline: pipeline)
+            Issue.record("Expected injected P4 plan-build failure")
+        } catch let error as SparseTileSamplingPipelineError {
+            #expect(error == .injectedFailure("descriptorBuffer"))
+            failureRecoverySucceeded = true
+        }
+        #expect(await gpuCache.completionSnapshot.pendingConsumerCompletionCount == 0)
+        #expect(sharedStore.snapshot().activeLeaseCount >= handoffLeaseCount)
+    }
+    let gpuPlan = try await gpuCache.acquire(plan: plan, pipeline: pipeline)
+    try encoder.acknowledge(frame)
+    let postAcknowledgementLeaseCount = sharedStore.snapshot().activeLeaseCount
+    #expect(postAcknowledgementLeaseCount > 0)
+    try plan.retire()
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .rgba16Float,
+        width: outputRegion.maxX - outputRegion.minX,
+        height: outputRegion.maxY - outputRegion.minY,
+        mipmapped: false
+    )
+    descriptor.storageMode = .shared
+    descriptor.usage = [.renderTarget, .shaderRead]
+    let target = try #require(device.makeTexture(descriptor: descriptor))
+    let parameters = SparseTileSamplingEncodeParameters(
+        outputToSourceTransform: transform,
+        compositeMode: compositeMode == .draw
+            ? PatternCompositeWireDraw : PatternCompositeWireErase,
+        liveVisible: true,
+        strokeOpacity: 1,
+        accumulationLimit: 1,
+        eraserStrength: 1
+    )
+    let prepared = try SparseTileSamplingEncoder.preflightEncode(
+        target: target,
+        plan: gpuPlan,
+        parameters: parameters
+    )
+    let queue = try #require(device.makeCommandQueue())
+    let commandBuffer = try #require(queue.makeCommandBuffer())
+    let pass = MTLRenderPassDescriptor()
+    pass.colorAttachments[0].texture = target
+    pass.colorAttachments[0].loadAction = .clear
+    pass.colorAttachments[0].storeAction = .store
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+    try prepared.encode(
+        commandBuffer: commandBuffer,
+        renderPassDescriptor: pass
+    )
+    await withCheckedContinuation { continuation in
+        commandBuffer.addCompletedHandler { _ in continuation.resume() }
+        commandBuffer.commit()
+    }
+    guard commandBuffer.status == .completed, commandBuffer.error == nil else {
+        throw MetalRendererError.commandFailed(
+            commandBuffer.error?.localizedDescription
+                ?? "inactive sparse sampler failed"
+        )
+    }
+    var bits = [UInt16](
+        repeating: 0,
+        count: target.width * target.height * 4
+    )
+    target.getBytes(
+        &bits,
+        bytesPerRow: target.width * 8,
+        from: MTLRegionMake2D(
+            0, 0, target.width, target.height
+        ),
+        mipmapLevel: 0
+    )
+    let sampledValues = stride(from: 3, to: bits.count, by: 4).map {
+        let alpha = Float(Float16(bitPattern: bits[$0]))
+        return compositeMode == .draw ? alpha >= 0.5 : alpha < 0.5
+    }
+    let displayedValues: [Bool]
+    if radialLayout == nil {
+        displayedValues = sampledValues
+    } else {
+        let renderer = try #require(presentationRenderer)
+        let packedTarget = try packOpaqueRadialLogicalPages(
+            target,
+            layout: radialLayout!,
+            device: device
+        )
+        let display = try renderer.renderOffscreenCanonicalTextureForHarness(
+            packedTarget,
+            width: pixelSize.width,
+            height: pixelSize.height
+        )
+        let after = depositionTextureBytes(display.texture)
+        if compositeMode == .draw {
+            displayedValues = stride(from: 3, to: after.count, by: 4).map {
+                after[$0] >= 128
+            }
+        } else {
+            let opaqueBaseline = try opaqueBlackLinearTexture(
+                device: device,
+                pixelSize: storagePixelSize
+            )
+            let before = depositionTextureBytes(
+                try renderer.renderOffscreenCanonicalTextureForHarness(
+                    opaqueBaseline,
+                    width: pixelSize.width,
+                    height: pixelSize.height
+                ).texture
+            )
+            displayedValues = opaqueDifferenceMask(
+                before: before,
+                after: after,
+                pixelSize: pixelSize
+            ).values
+        }
+    }
+    try encoder.cancel(frameDisposition: .unpublished)
+    let completion = await gpuCache.completionSnapshot
+    let finalRegistry = registry.snapshot()
+    let finalStore = sharedStore.snapshot()
+    let finalEncoder = encoder.snapshot
+    let finalGPUCache = await gpuCache.allocationSnapshot
+    return InactiveOpaqueSupportResult(
+        mask: OpaqueStampSupportOracle.Mask(
+            pixelSize: pixelSize,
+            values: displayedValues
+        ),
+        handoffLeaseCount: handoffLeaseCount,
+        postAcknowledgementLeaseCount: postAcknowledgementLeaseCount,
+        finalRegistry: finalRegistry,
+        finalStore: finalStore,
+        finalEncoder: finalEncoder,
+        finalGPUCache: finalGPUCache,
+        transientSurfaceIDs: transientSurfaceIDs,
+        completion: completion,
+        failureRecoveryWasRequested: exerciseFailureRecovery,
+        failureRecoverySucceeded: failureRecoverySucceeded
+    )
+}
+
+private func opaqueProjectedRecords(
+    center: SIMD2<Float>,
+    radius: Float,
+    strategy: TilingStrategy
+) throws -> [StrokePreparedProjectedRecord] {
+    let brushToWorld = Affine2D(
+        xAxis: SIMD2(radius, 0),
+        yAxis: SIMD2(0, radius),
+        translation: center
+    )
+    let dab = LogicalDab(
+        position: WorldPoint(center),
+        brushToWorld: brushToWorld,
+        radius: radius,
+        diameter: radius * 2,
+        spacing: 1,
+        flow: 1,
+        strokeOpacity: 1,
+        rotation: 0,
+        scatter: .zero,
+        hardness: 1,
+        grainOffset: .zero,
+        grainScale: 1,
+        grainRotation: 0,
+        color: .black,
+        colorAdjustment: .identity,
+        materialFamily: .ink,
+        materialContribution: 1,
+        sourceDistance: 0,
+        ordinal: 0,
+        isPredicted: false
+    )
+    let footprint = StampFootprint(
+        brushToWorld: brushToWorld,
+        localBounds: AxisAlignedRect(
+            minimum: SIMD2(-1, -1),
+            maximum: SIMD2(1, 1)
+        ),
+        coverageSymmetry: .oriented
+    )
+    return try TilingProjection.fragments(
+        for: footprint,
+        using: strategy
+    ).enumerated().map { offset, fragment in
+        let isometry = try #require(
+            strategy.compiledSymmetry.images.first {
+                $0.ordinal == fragment.imageOrdinal
+                    && $0.operation == fragment.operation
+            }
+        )
+        let radialPage = strategy.compiledSymmetry.domain.finite?.radial.layout
+            == nil
+            ? nil
+            : RadialPageCoordinate(
+                x: fragment.cell.column,
+                y: fragment.cell.row
+            )
+        return StrokePreparedProjectedRecord(
+            depositionRecord: ProjectedDepositionRecord(
+                identity: UInt64(offset),
+                instance: try PatternDepositionStampInstance(
+                    fragment: fragment,
+                    dab: dab,
+                    logicalOrdinal: 0,
+                    isometryOrdinal: isometry.ordinal
+                ),
+                radialPage: radialPage
+            ),
+            dirtyRect: TilingProjection.dirtyPixelRect(
+                for: fragment,
+                radius: radius
+            ),
+            radialPage: radialPage
+        )
+    }
+}
+
+private func opaqueFrameUniforms(
+    pixelSize: PixelSize
+) -> PatternGridFrameUniforms {
+    let size = SIMD2(Float(pixelSize.width), Float(pixelSize.height))
+    return PatternGridFrameUniforms(
+        drawableSize: size,
+        worldCenter: size * 0.5,
+        tileSize: size,
+        zoom: 1,
+        gridLineWidth: 0,
+        showGridLines: 0,
+        liveVisible: 1,
+        tilingKind: 0,
+        diagnosticMode: 0,
+        compositeMode: PatternCompositeWireDraw,
+        symmetryFamily: 0,
+        repeatSize: size,
+        latticeXAxis: SIMD2(1, 0),
+        latticeYAxis: SIMD2(0, 1),
+        latticeTranslation: .zero,
+        guideKind: 0,
+        showCanvasBoundary: 0
+    )
+}
+
+private func opaqueTileCoordinates(
+    pixelSize: PixelSize
+) -> [PaintTileCoordinate] {
+    let columns = (pixelSize.width + PaintTileDescriptor.side - 1)
+        / PaintTileDescriptor.side
+    let rows = (pixelSize.height + PaintTileDescriptor.side - 1)
+        / PaintTileDescriptor.side
+    return (0 ..< rows).flatMap { y in
+        (0 ..< columns).map { PaintTileCoordinate(x: $0, y: y) }
+    }
+}
+
+private func uploadOpaqueBlackTile(
+    _ texture: any MTLTexture,
+    device: any MTLDevice
+) throws {
+    let texel = [Float16(0).bitPattern, Float16(0).bitPattern,
+                 Float16(0).bitPattern, Float16(1).bitPattern]
+    let values = Array(
+        repeating: texel,
+        count: PaintTileDescriptor.side * PaintTileDescriptor.side
+    ).flatMap { $0 }
+    let byteCount = values.count * MemoryLayout<UInt16>.stride
+    let buffer = try #require(values.withUnsafeBytes {
+        device.makeBuffer(bytes: $0.baseAddress!, length: byteCount)
+    })
+    let queue = try #require(device.makeCommandQueue())
+    let commandBuffer = try #require(queue.makeCommandBuffer())
+    let blit = try #require(commandBuffer.makeBlitCommandEncoder())
+    blit.copy(
+        from: buffer,
+        sourceOffset: 0,
+        sourceBytesPerRow: PaintTileDescriptor.side * 8,
+        sourceBytesPerImage: byteCount,
+        sourceSize: MTLSize(
+            width: PaintTileDescriptor.side,
+            height: PaintTileDescriptor.side,
+            depth: 1
+        ),
+        to: texture,
+        destinationSlice: 0,
+        destinationLevel: 0,
+        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+    )
+    blit.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    guard commandBuffer.status == .completed else {
+        throw MetalRendererError.commandFailed("opaque tile upload failed")
+    }
+}
+
+/// Test-only, geometry-free packing step. P4 has already resolved signed
+/// logical radial pages through its real page table into `logicalTexture`.
+/// This blit merely places each complete logical page into the physical atlas
+/// slot consumed by the existing production radial display shader.
+private func packOpaqueRadialLogicalPages(
+    _ logicalTexture: any MTLTexture,
+    layout: RadialSectorLayout,
+    device: any MTLDevice
+) throws -> any MTLTexture {
+    let side = PaintTileDescriptor.side
+    precondition(logicalTexture.width == layout.pageTableSize.width * side)
+    precondition(logicalTexture.height == layout.pageTableSize.height * side)
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .rgba16Float,
+        width: layout.atlasPixelSize.width,
+        height: layout.atlasPixelSize.height,
+        mipmapped: false
+    )
+    descriptor.storageMode = .shared
+    descriptor.usage = [.shaderRead]
+    let atlas = try #require(device.makeTexture(descriptor: descriptor))
+    let queue = try #require(device.makeCommandQueue())
+    let commandBuffer = try #require(queue.makeCommandBuffer())
+    let blit = try #require(commandBuffer.makeBlitCommandEncoder())
+    for page in layout.residentPages {
+        let source = MTLOrigin(
+            x: (page.coordinate.x - layout.pageOrigin.x) * side,
+            y: (page.coordinate.y - layout.pageOrigin.y) * side,
+            z: 0
+        )
+        let destination = MTLOrigin(
+            x: (page.atlasSlot % layout.atlasColumns) * side,
+            y: (page.atlasSlot / layout.atlasColumns) * side,
+            z: 0
+        )
+        blit.copy(
+            from: logicalTexture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: source,
+            sourceSize: MTLSize(width: side, height: side, depth: 1),
+            to: atlas,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: destination
+        )
+    }
+    blit.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    guard commandBuffer.status == .completed else {
+        throw MetalRendererError.commandFailed(
+            commandBuffer.error?.localizedDescription
+                ?? "radial logical-page packing failed"
+        )
+    }
+    return atlas
+}
+
+private func opaqueBlackLinearTexture(
+    device: any MTLDevice,
+    pixelSize: PixelSize
+) throws -> any MTLTexture {
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .rgba16Float,
+        width: pixelSize.width,
+        height: pixelSize.height,
+        mipmapped: false
+    )
+    descriptor.storageMode = .shared
+    descriptor.usage = [.shaderRead]
+    let texture = try #require(device.makeTexture(descriptor: descriptor))
+    let texel = [
+        Float16(0).bitPattern,
+        Float16(0).bitPattern,
+        Float16(0).bitPattern,
+        Float16(1).bitPattern,
+    ]
+    let values = Array(
+        repeating: texel,
+        count: pixelSize.width * pixelSize.height
+    ).flatMap { $0 }
+    values.withUnsafeBytes { bytes in
+        texture.replace(
+            region: MTLRegionMake2D(0, 0, pixelSize.width, pixelSize.height),
+            mipmapLevel: 0,
+            withBytes: bytes.baseAddress!,
+            bytesPerRow: pixelSize.width * 8
+        )
+    }
+    return texture
+}
+
+private let opaqueSamplingPlanLimits = SparseTilePlanLimits(
+    maximumPageEntries: 64,
+    maximumPageChunks: 16,
+    maximumPageTableBytes: 64 * 32,
+    maximumBindingSlots: 512,
+    maximumBindingChunks: 16,
+    maximumBindingBytes: 512 * 64,
+    maximumTexturesPerBatch: 16,
+    maximumBatchCount: 64
+)
+
 @MainActor
 func makeDepositionRendererSetup(
     tiling: TilingKind = .grid,
-    finite: FiniteSymmetryConfiguration? = nil
+    finite: FiniteSymmetryConfiguration? = nil,
+    pixelSize: PixelSize = PixelSize(width: 64, height: 64)
 )
     throws -> DepositionRendererSetup?
 {
@@ -4655,19 +5766,22 @@ func makeDepositionRendererSetup(
     let library = try depositionRendererLibrary(device: device)
     let configuration: TilingCanvasConfiguration = if let finite {
         try TilingCanvasConfiguration(
-            pixelSize: PixelSize(width: 64, height: 64),
+            pixelSize: pixelSize,
             finiteConfiguration: finite
         )
     } else {
         try TilingCanvasConfiguration(
-            pixelSize: PixelSize(width: 64, height: 64),
+            pixelSize: pixelSize,
             tiling: tiling
         )
     }
     let renderer = try GridRenderer(
         device: device,
         library: library,
-        drawableSize: PatternSize(width: 64, height: 64),
+        drawableSize: PatternSize(
+            width: Float(pixelSize.width),
+            height: Float(pixelSize.height)
+        ),
         configuration: configuration
     )
     let profile = try BrushDeviceProfile(

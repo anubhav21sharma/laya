@@ -2647,12 +2647,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     /// Frozen projected-dab oracle entry point. It bypasses public stroke
     /// input entirely and exists only for deterministic capture fixtures.
     /// Interactive compiled-brush APIs never call this method.
-    func beginFrozenProjectionHarnessExecution(radius: Float) throws {
+    func beginFrozenProjectionHarnessExecution(
+        radius: Float,
+        compositeMode: StrokeCompositeMode = .draw
+    ) throws {
         guard activeStroke == nil else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        guard let brush = preparedBrush(for: .draw) else {
-            throw MetalRendererError.compiledBrushUnavailable(.draw)
+        guard let brush = preparedBrush(for: compositeMode) else {
+            throw MetalRendererError.compiledBrushUnavailable(compositeMode)
         }
         let token = RendererOperationToken(rawValue: nextHarnessTokenRawValue)
         nextHarnessTokenRawValue &+= 1
@@ -2662,7 +2665,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let style = StrokeRenderStyle(
             color: .black,
             diameter: radius * 2,
-            compositeMode: .draw,
+            compositeMode: compositeMode,
             eraserStrength: 1,
             program: brush.program,
             renderIdentity: brush.renderIdentity,

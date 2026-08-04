@@ -1471,7 +1471,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             } catch {
                 throw DocumentPaintSurfaceTransactionError.restoreConsumeFailed
             }
-            registry.commitPreparedForCoordinator(prepared)
+            commitPreparedTerminal(prepared)
             current.installLease = nil
             current.preparedCommit = nil
             current.phase = .published
@@ -2029,7 +2029,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                         .revisionPublishFailed
                 }
             }
-            registry.commitPreparedForCoordinator(prepared)
+            commitPreparedTerminal(prepared)
             current.preparedCommit = nil
             current.phase = .published
             lastCompletedSequence = current.sequence
@@ -2042,6 +2042,14 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         _ handle: DocumentPaintPreparedMutation,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
     ) throws { try discardHandle(handle, failureInjection: failureInjection) }
+
+    /// Single audited boundary for the irreversible registry publication used
+    /// by both mutation and restore terminals.
+    private func commitPreparedTerminal(
+        _ prepared: DocumentPaintPreparedCommit
+    ) {
+        registry.commitPreparedForCoordinator(prepared)
+    }
 
     public func discard(
         _ handle: DocumentPaintEncodedMutation,

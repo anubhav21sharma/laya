@@ -140,22 +140,27 @@ struct StrokeTilePartitionScratch: Sendable {
                         page.coordinate.x * side,
                         page.coordinate.y * side
                     )
-                    guard input.supportBounds.clipped(
-                        toLogicalPageAt: logicalOrigin,
-                        side: side
-                    ) != nil else { continue }
                     let coordinate = PaintTileCoordinate(
                         x: page.atlasSlot % radialLayout.atlasColumns,
                         y: page.atlasSlot / radialLayout.atlasColumns
                     )
+                    let atlasOrigin = SIMD2(
+                        coordinate.x * side,
+                        coordinate.y * side
+                    )
+                    // Projected radial instances and their support bounds are
+                    // expressed in packed-atlas coordinates. The logical page
+                    // identity selects the resident slot, but must not be used
+                    // as the raster-space intersection origin.
+                    guard input.supportBounds.clipped(
+                        toPageAt: atlasOrigin,
+                        side: side
+                    ) != nil else { continue }
                     try appendReference(
                         coordinate: coordinate,
                         recordIndex: input.recordIndex,
                         logicalOrigin: logicalOrigin,
-                        atlasOrigin: SIMD2(
-                            coordinate.x * side,
-                            coordinate.y * side
-                        )
+                        atlasOrigin: atlasOrigin
                     )
                     continue
                 }
@@ -304,7 +309,7 @@ struct StrokeTilePartitionScratch: Sendable {
 
 private extension PixelRect {
     func clipped(
-        toLogicalPageAt origin: SIMD2<Int>,
+        toPageAt origin: SIMD2<Int>,
         side: Int
     ) -> PixelRect? {
         let (maxX, overflowX) = origin.x.addingReportingOverflow(side)
@@ -1821,11 +1826,11 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                     && coordinatesToClear[clearIndex] == coordinate)
                 || range?.shouldClear == true
             guard range != nil || clear else { continue }
-            // A radial page can live in an arbitrary compact atlas slot. The
-            // packed stamp and grain/clip coordinates stay canonical, so the
-            // tile-local viewport must subtract the logical page origin, not
-            // the physical atlas coordinate.
-            let viewportOrigin = range?.logicalOrigin ?? SIMD2(
+            // Packed stamp, grain, and clip coordinates are physical atlas
+            // coordinates. A radial page can live in any compact atlas slot,
+            // so its tile-local viewport subtracts that physical origin while
+            // the logical origin remains page-table metadata for sampling.
+            let viewportOrigin = range?.atlasOrigin ?? SIMD2(
                 coordinate.x * PaintTileDescriptor.side,
                 coordinate.y * PaintTileDescriptor.side
             )
