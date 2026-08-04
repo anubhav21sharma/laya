@@ -1852,7 +1852,7 @@ struct StrokeTileSurfaceEncoderTests {
         let store = PaintTileStore(
             device: context.device,
             byteBudget: bytes * 4,
-            transferByteCapacity: bytes * 5
+            transferByteCapacity: bytes * 6
         )
         let resources = try StrokeTileSurfaceResources(
             device: context.device,
@@ -1901,10 +1901,11 @@ struct StrokeTileSurfaceEncoderTests {
         )
         await #expect(throws: StrokeTileSurfaceError.store(
             .transferCapacityExceeded(
-                requiredBytes: bytes * 8,
-                capacityBytes: bytes * 5,
+                requiredBytes: bytes * 9,
+                capacityBytes: bytes * 6,
                 residentBytes: bytes * 4,
                 allocationBytes: bytes * 4,
+                persistentZeroBytes: bytes,
                 stagingBytes: 0
             )
         )) {
@@ -1944,7 +1945,7 @@ struct StrokeTileSurfaceEncoderTests {
         let store = PaintTileStore(
             device: context.device,
             byteBudget: bytes * 2,
-            transferByteCapacity: bytes * 3
+            transferByteCapacity: bytes * 4
         )
         let firstSurface = TiledRasterSurface(
             store: store,
@@ -1994,10 +1995,11 @@ struct StrokeTileSurfaceEncoderTests {
         )
         #expect(store.snapshot().provisionalByteCount == bytes)
         #expect(throws: PaintTileStoreError.transferCapacityExceeded(
-            requiredBytes: bytes * 4,
-            capacityBytes: bytes * 3,
+            requiredBytes: bytes * 5,
+            capacityBytes: bytes * 4,
             residentBytes: bytes * 2,
             allocationBytes: bytes,
+            persistentZeroBytes: bytes,
             stagingBytes: bytes
         )) {
             _ = try secondSurface.makeProvisionalBindings(

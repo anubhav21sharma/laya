@@ -9,6 +9,24 @@ struct DocumentPaintSurfaceStoreTests {
     private let tileBytes = PaintTileDescriptor.residentByteCount
 
     @Test
+    func defaultTransferCapacityIncludesExactlyOnePersistentZeroTile() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 256, height: 256),
+            storagePixelSize: PixelSize(width: 256, height: 256),
+            radialLayout: nil
+        )
+        let registry = try DocumentPaintSurfaceStore(
+            device: device,
+            byteBudget: tileBytes * 2,
+            geometry: geometry,
+            layerIDs: [UUID()]
+        )
+
+        #expect(registry.sharedTileStore.transferByteCapacity == tileBytes * 7)
+    }
+
+    @Test
     func emptyRegistryHasGenericLayerBindingsAndCheckedGeometry() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let first = UUID()

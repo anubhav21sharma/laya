@@ -308,6 +308,95 @@ struct TiledRasterSurfaceTests {
     }
 
     @Test
+    func clearFanOutUsesOnePersistentZeroSourceAndProducesExactZeros() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        for tileCount in [1, 2, 4, 16] {
+            let store = PaintTileStore(
+                device: device,
+                byteBudget: bytes * tileCount,
+                transferByteCapacity: bytes * (tileCount + 1)
+            )
+            let surface = TiledRasterSurface(
+                store: store,
+                layerID: UUID(),
+                pixelSize: PixelSize(width: 256 * tileCount, height: 256)
+            )
+            let lease = try surface.reserveTiles(
+                at: (0..<tileCount).map { .init(x: $0, y: 0) },
+                pinReasons: [.active]
+            )
+
+            let snapshot = store.snapshot()
+            #expect(snapshot.persistentZeroAllocationBytes == bytes)
+            #expect(snapshot.persistentZeroAllocationCount == 1)
+            #expect(
+                snapshot.lastTransferAccounting?.persistentZeroAllocationBytes
+                    == bytes
+            )
+            #expect(
+                snapshot.lastTransferAccounting?.persistentZeroAllocationCount
+                    == 1
+            )
+            #expect(snapshot.lastTransferAccounting?.uploadStagingBytes == 0)
+            for binding in lease.bindings {
+                #expect(
+                    try download(binding.texture, device: device)
+                        == Data(count: bytes)
+                )
+            }
+            try surface.returnLease(lease)
+        }
+    }
+
+    @Test
+    func mixedClearAndPayloadRehydrateReusesPersistentZeroSource() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(
+            device: device,
+            byteBudget: bytes * 2,
+            transferByteCapacity: bytes * 8
+        )
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 512, height: 256)
+        )
+        let original = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0)],
+            pinReasons: [.dirty]
+        )
+        let payload = Data((0..<bytes).map {
+            UInt8(truncatingIfNeeded: $0 &* 29 &+ 17)
+        })
+        try upload(payload, into: original.bindings[0].texture, device: device)
+        try surface.markDirty(original)
+        try surface.returnLease(original)
+        _ = try surface.applyMemoryPressure(targetResidentBytes: 0)
+
+        let mixed = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0), .init(x: 1, y: 0)],
+            pinReasons: [.visible]
+        )
+
+        #expect(try download(mixed.bindings[0].texture, device: device) == payload)
+        #expect(
+            try download(mixed.bindings[1].texture, device: device)
+                == Data(count: bytes)
+        )
+        let snapshot = store.snapshot()
+        #expect(snapshot.persistentZeroAllocationBytes == bytes)
+        #expect(snapshot.persistentZeroAllocationCount == 1)
+        #expect(
+            snapshot.lastTransferAccounting?.persistentZeroAllocationBytes == 0
+        )
+        #expect(
+            snapshot.lastTransferAccounting?.persistentZeroAllocationCount == 0
+        )
+        #expect(snapshot.lastTransferAccounting?.uploadStagingBytes == bytes)
+        try surface.returnLease(mixed)
+    }
+
+    @Test
     func acceleratedWarmResidencyTraceHasFlatBytesTilesAndLeaseCount() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let surface = TiledRasterSurface(

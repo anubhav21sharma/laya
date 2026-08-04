@@ -41,6 +41,7 @@ public enum PaintTileStoreError: Error, Equatable, Sendable {
         capacityBytes: Int,
         residentBytes: Int,
         allocationBytes: Int,
+        persistentZeroBytes: Int,
         stagingBytes: Int
     )
     case foreignStoreReference
@@ -431,6 +432,8 @@ public struct PaintTilePayloadSnapshot: Equatable, Sendable {
 public struct PaintTileTransferAccounting: Equatable, Sendable {
     public let residentTextureBytesBefore: Int
     public let allocatedTextureBytes: Int
+    public let persistentZeroAllocationBytes: Int
+    public let persistentZeroAllocationCount: Int
     public let uploadStagingBytes: Int
     public let readbackStagingBytes: Int
     public let capturedPayloadBytes: Int
@@ -440,6 +443,8 @@ public struct PaintTileTransferAccounting: Equatable, Sendable {
     public init(
         residentTextureBytesBefore: Int,
         allocatedTextureBytes: Int,
+        persistentZeroAllocationBytes: Int,
+        persistentZeroAllocationCount: Int,
         uploadStagingBytes: Int,
         readbackStagingBytes: Int,
         capturedPayloadBytes: Int,
@@ -448,6 +453,8 @@ public struct PaintTileTransferAccounting: Equatable, Sendable {
     ) {
         self.residentTextureBytesBefore = residentTextureBytesBefore
         self.allocatedTextureBytes = allocatedTextureBytes
+        self.persistentZeroAllocationBytes = persistentZeroAllocationBytes
+        self.persistentZeroAllocationCount = persistentZeroAllocationCount
         self.uploadStagingBytes = uploadStagingBytes
         self.readbackStagingBytes = readbackStagingBytes
         self.capturedPayloadBytes = capturedPayloadBytes
@@ -473,6 +480,8 @@ public struct PaintTileStoreSnapshot: Equatable, Sendable {
     public let nextLeaseID: UInt64
     public let residentByteCount: Int
     public let backingByteCount: Int
+    public let persistentZeroAllocationBytes: Int
+    public let persistentZeroAllocationCount: Int
     public let activeLeaseCount: Int
     public let provisionalReservationCount: Int
     public let provisionalByteCount: Int
@@ -662,6 +671,11 @@ public final class PaintTileStore: @unchecked Sendable {
         let isNew: Bool
     }
 
+    private struct TransferResult {
+        let captured: [PaintTileIdentity: PaintTileBackingSnapshot]
+        let newlyAllocatedPersistentZeroSource: (any MTLBuffer)?
+    }
+
     private let device: any MTLDevice
     public let identity = PaintTileStoreIdentity()
     public let transferByteCapacity: Int
@@ -673,6 +687,8 @@ public final class PaintTileStore: @unchecked Sendable {
     private var nextLeaseID: UInt64 = 0
     private var stateRevision: UInt64 = 0
     private var lastTransferAccounting: PaintTileTransferAccounting?
+    private var persistentZeroSource: (any MTLBuffer)?
+    private var persistentZeroAllocationCount = 0
     private var provisionalReservations:
         [ProvisionalReservationRecord?] = Array(
             repeating: nil,
@@ -687,8 +703,13 @@ public final class PaintTileStore: @unchecked Sendable {
     private let provisionalTextureDescriptor: MTLTextureDescriptor
 
     public convenience init(device: any MTLDevice, byteBudget: Int) {
-        let (capacity, overflow) = byteBudget.multipliedReportingOverflow(by: 3)
-        precondition(!overflow)
+        // Preserve the established 3x transfer headroom and add only the one
+        // tile-sized shared allocation that this store may retain.
+        let (transferHeadroom, multiplicationOverflow) = byteBudget
+            .multipliedReportingOverflow(by: 3)
+        let (capacity, additionOverflow) = transferHeadroom
+            .addingReportingOverflow(PaintTileDescriptor.residentByteCount)
+        precondition(!multiplicationOverflow && !additionOverflow)
         self.init(
             device: device,
             byteBudget: byteBudget,
@@ -890,7 +911,9 @@ public final class PaintTileStore: @unchecked Sendable {
             }
             let accounting = try transferAccounting(
                 captureIdentities: evicted,
-                allocationCount: allocationCount
+                allocationBackings: requested.compactMap {
+                    $0.1.texture == nil ? ($0.1.backing ?? .knownClear) : nil
+                }
             )
             var allocations: [Allocation] = []
             allocations.reserveCapacity(allocationCount)
@@ -918,10 +941,11 @@ public final class PaintTileStore: @unchecked Sendable {
                     isNew: false
                 ))
             }
-            let captured = try transfer(
+            let transferResult = try transfer(
                 evicted: evicted,
                 allocations: allocations
             )
+            let captured = transferResult.captured
             let (leaseRawID, leaseOverflow) = nextLeaseID
                 .addingReportingOverflow(1)
             guard !leaseOverflow else {
@@ -973,6 +997,7 @@ public final class PaintTileStore: @unchecked Sendable {
             leases = stagedLeases
             nextLeaseID = leaseRawID
             stateRevision = nextRevision
+            installPersistentZeroSource(from: transferResult)
             lastTransferAccounting = accounting
             return PaintTileLease(
                 id: leaseID,
@@ -1094,6 +1119,9 @@ public final class PaintTileStore: @unchecked Sendable {
                 nextLeaseID: nextLeaseID,
                 residentByteCount: residency.residentByteCount,
                 backingByteCount: Self.backingByteCount(in: records),
+                persistentZeroAllocationBytes: persistentZeroSource == nil
+                    ? 0 : PaintTileDescriptor.residentByteCount,
+                persistentZeroAllocationCount: persistentZeroAllocationCount,
                 activeLeaseCount: leases.count,
                 provisionalReservationCount:
                     provisionalReservations.reduce(into: 0) {
@@ -1144,12 +1172,12 @@ public final class PaintTileStore: @unchecked Sendable {
             let identities = matching.map(\.value.identity)
             let accounting = try transferAccounting(
                 captureIdentities: identities,
-                allocationCount: 0
+                allocationBackings: []
             )
             let captured = try transfer(
                 evicted: identities,
                 allocations: []
-            )
+            ).captured
             let entries = try matching.map { _, record in
                 let backing = record.backing ?? captured[record.identity]
                 let payload: PaintTilePayload
@@ -1335,12 +1363,12 @@ public final class PaintTileStore: @unchecked Sendable {
             }
             evicted = uniqueEvictions
 
-            let allocationCount = requested.reduce(into: 0) {
-                if records[$1.0]?.texture == nil { $0 += 1 }
-            }
             let accounting = try transferAccounting(
                 captureIdentities: evicted,
-                allocationCount: allocationCount
+                allocationBackings: requested.compactMap {
+                    guard records[$0.0]?.texture == nil else { return nil }
+                    return records[$0.0]?.backing ?? .knownClear
+                }
             )
 
             var allocations: [Allocation] = []
@@ -1382,10 +1410,11 @@ public final class PaintTileStore: @unchecked Sendable {
                 ))
             }
 
-            let captured = try transfer(
+            let transferResult = try transfer(
                 evicted: evicted,
                 allocations: allocations
             )
+            let captured = transferResult.captured
             let (leaseRawID, leaseOverflow) = nextLeaseID
                 .addingReportingOverflow(1)
             guard !leaseOverflow else {
@@ -1453,6 +1482,7 @@ public final class PaintTileStore: @unchecked Sendable {
             nextTileID = stagedNextTileID
             nextLeaseID = leaseRawID
             stateRevision = nextStateRevision
+            installPersistentZeroSource(from: transferResult)
             lastTransferAccounting = accounting
             return PaintTileLease(
                 id: leaseID,
@@ -1723,21 +1753,27 @@ public final class PaintTileStore: @unchecked Sendable {
                 )
             allocationBytes = allocationOverflow ? .max : computedAllocationBytes
             let residentBytes = residency.residentByteCount
-            let (residentAndProvisional, provisionalOverflow) = residentBytes
+            let persistentZeroBytes = persistentZeroSource == nil
+                ? 0 : PaintTileDescriptor.residentByteCount
+            let (residentAndPersistent, persistentOverflow) = residentBytes
+                .addingReportingOverflow(persistentZeroBytes)
+            let (residentAndProvisional, provisionalOverflow) = residentAndPersistent
                 .addingReportingOverflow(provisionalByteCount)
             let (requiredBytes, requiredOverflow) = residentAndProvisional
                 .addingReportingOverflow(allocationBytes)
-            guard !allocationOverflow, !provisionalOverflow, !requiredOverflow,
+            guard !allocationOverflow, !persistentOverflow,
+                  !provisionalOverflow, !requiredOverflow,
                   requiredBytes <= transferByteCapacity
             else {
                 throw PaintTileStoreError.transferCapacityExceeded(
-                    requiredBytes: allocationOverflow || provisionalOverflow
-                        || requiredOverflow
+                    requiredBytes: allocationOverflow || persistentOverflow
+                        || provisionalOverflow || requiredOverflow
                         ? .max : requiredBytes,
                     capacityBytes: transferByteCapacity,
                     residentBytes: residentBytes,
                     allocationBytes: allocationOverflow
                         ? .max : allocationBytes,
+                    persistentZeroBytes: persistentZeroBytes,
                     stagingBytes: provisionalOverflow
                         ? .max : provisionalByteCount
                 )
@@ -1763,6 +1799,7 @@ public final class PaintTileStore: @unchecked Sendable {
                     capacityBytes: transferByteCapacity,
                     residentBytes: residentBytes,
                     allocationBytes: allocationBytes,
+                    persistentZeroBytes: persistentZeroBytes,
                     stagingBytes: provisionalByteCount
                 )
             }
@@ -2267,12 +2304,12 @@ public final class PaintTileStore: @unchecked Sendable {
             if !evicted.isEmpty {
                 let measured = try transferAccounting(
                     captureIdentities: evicted,
-                    allocationCount: 0
+                    allocationBackings: []
                 )
                 let captured = try transfer(
                     evicted: evicted,
                     allocations: []
-                )
+                ).captured
                 for identity in evicted {
                     guard let key = stagedRecords.first(where: {
                         $0.value.identity == identity
@@ -2556,7 +2593,7 @@ public final class PaintTileStore: @unchecked Sendable {
 
     private func transferAccounting(
         captureIdentities: [PaintTileIdentity],
-        allocationCount: Int
+        allocationBackings: [PaintTileBackingSnapshot]
     ) throws -> PaintTileTransferAccounting {
         let captureCount = captureIdentities.reduce(into: 0) {
             count, identity in
@@ -2567,10 +2604,29 @@ public final class PaintTileStore: @unchecked Sendable {
             count += 1
         }
         let allocatedBytes = try checkedMultiply(
-            allocationCount,
+            allocationBackings.count,
             PaintTileDescriptor.residentByteCount
         )
-        let uploadBytes = allocatedBytes
+        let uploadCount = allocationBackings.reduce(into: 0) {
+            if case .rgba16Float = $1 { $0 += 1 }
+        }
+        let uploadBytes = try checkedMultiply(
+            uploadCount,
+            PaintTileDescriptor.residentByteCount
+        )
+        let needsPersistentZeroSource = allocationBackings.contains {
+            switch $0 {
+            case .knownClear, .residentOnly: true
+            case .rgba16Float: false
+            }
+        }
+        let existingPersistentZeroBytes = persistentZeroSource == nil
+            ? 0 : PaintTileDescriptor.residentByteCount
+        let persistentZeroAllocationBytes =
+            needsPersistentZeroSource && persistentZeroSource == nil
+                ? PaintTileDescriptor.residentByteCount : 0
+        let persistentZeroAllocationCount =
+            persistentZeroAllocationBytes == 0 ? 0 : 1
         let readbackBytes = try checkedMultiply(
             captureCount,
             PaintTileDescriptor.residentByteCount
@@ -2581,20 +2637,31 @@ public final class PaintTileStore: @unchecked Sendable {
         ])
         let residentBytes = residency.residentByteCount
         let peakBytes = try checkedSum([
-            residentBytes, allocatedBytes, stagingBytes,
+            residentBytes,
+            allocatedBytes,
+            existingPersistentZeroBytes,
+            persistentZeroAllocationBytes,
+            stagingBytes,
         ])
         guard peakBytes <= transferByteCapacity else {
+            let persistentZeroBytes = try checkedSum([
+                existingPersistentZeroBytes,
+                persistentZeroAllocationBytes,
+            ])
             throw PaintTileStoreError.transferCapacityExceeded(
                 requiredBytes: peakBytes,
                 capacityBytes: transferByteCapacity,
                 residentBytes: residentBytes,
                 allocationBytes: allocatedBytes,
+                persistentZeroBytes: persistentZeroBytes,
                 stagingBytes: stagingBytes
             )
         }
         return PaintTileTransferAccounting(
             residentTextureBytesBefore: residentBytes,
             allocatedTextureBytes: allocatedBytes,
+            persistentZeroAllocationBytes: persistentZeroAllocationBytes,
+            persistentZeroAllocationCount: persistentZeroAllocationCount,
             uploadStagingBytes: uploadBytes,
             readbackStagingBytes: readbackBytes,
             capturedPayloadBytes: capturedBytes,
@@ -2606,7 +2673,7 @@ public final class PaintTileStore: @unchecked Sendable {
     private func transfer(
         evicted: [PaintTileIdentity],
         allocations: [Allocation]
-    ) throws -> [PaintTileIdentity: PaintTileBackingSnapshot] {
+    ) throws -> TransferResult {
         var captured: [PaintTileIdentity: PaintTileBackingSnapshot] = [:]
         var captureBuffers: [(PaintTileIdentity, any MTLBuffer)] = []
         for identity in evicted {
@@ -2628,7 +2695,10 @@ public final class PaintTileStore: @unchecked Sendable {
         }
 
         guard !captureBuffers.isEmpty || !allocations.isEmpty else {
-            return captured
+            return TransferResult(
+                captured: captured,
+                newlyAllocatedPersistentZeroSource: nil
+            )
         }
         guard let queue = device.makeCommandQueue() else {
             throw PaintTileStoreError.commandQueueUnavailable
@@ -2661,8 +2731,29 @@ public final class PaintTileStore: @unchecked Sendable {
                 destinationBytesPerImage: imageBytes
             )
         }
-        var sourceBuffers: [any MTLBuffer] = []
-        sourceBuffers.reserveCapacity(allocations.count)
+        let needsPersistentZeroSource = allocations.contains {
+            switch $0.sourceBacking {
+            case .knownClear, .residentOnly: true
+            case .rgba16Float: false
+            }
+        }
+        var newlyAllocatedPersistentZeroSource: (any MTLBuffer)?
+        if needsPersistentZeroSource, persistentZeroSource == nil {
+            guard let source = device.makeBuffer(
+                length: imageBytes,
+                options: .storageModeShared
+            ) else {
+                throw PaintTileStoreError.stagingBufferAllocationFailed
+            }
+            source.contents().initializeMemory(
+                as: UInt8.self,
+                repeating: 0,
+                count: imageBytes
+            )
+            newlyAllocatedPersistentZeroSource = source
+        }
+        var transientSourceBuffers: [any MTLBuffer] = []
+        transientSourceBuffers.reserveCapacity(allocations.count)
         for allocation in allocations {
             let source: (any MTLBuffer)?
             switch allocation.sourceBacking {
@@ -2679,20 +2770,15 @@ public final class PaintTileStore: @unchecked Sendable {
                     )
                 }
             case .knownClear, .residentOnly:
-                source = device.makeBuffer(
-                    length: imageBytes,
-                    options: .storageModeShared
-                )
-                source?.contents().initializeMemory(
-                    as: UInt8.self,
-                    repeating: 0,
-                    count: imageBytes
-                )
+                source = persistentZeroSource
+                    ?? newlyAllocatedPersistentZeroSource
             }
             guard let source else {
                 throw PaintTileStoreError.stagingBufferAllocationFailed
             }
-            sourceBuffers.append(source)
+            if case .rgba16Float = allocation.sourceBacking {
+                transientSourceBuffers.append(source)
+            }
             blit.copy(
                 from: source,
                 sourceOffset: 0,
@@ -2724,8 +2810,20 @@ public final class PaintTileStore: @unchecked Sendable {
                 count: imageBytes
             ))
         }
-        _ = sourceBuffers
-        return captured
+        _ = transientSourceBuffers
+        return TransferResult(
+            captured: captured,
+            newlyAllocatedPersistentZeroSource:
+                newlyAllocatedPersistentZeroSource
+        )
+    }
+
+    private func installPersistentZeroSource(from result: TransferResult) {
+        guard persistentZeroSource == nil,
+              let source = result.newlyAllocatedPersistentZeroSource
+        else { return }
+        persistentZeroSource = source
+        persistentZeroAllocationCount = 1
     }
 
     private func advancedStateRevision() throws -> UInt64 {

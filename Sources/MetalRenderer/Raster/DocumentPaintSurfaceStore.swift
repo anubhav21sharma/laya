@@ -282,9 +282,11 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         layerIDs: [UUID],
         generation: UInt64 = 0
     ) throws {
-        let (transferByteCapacity, overflow) = byteBudget
+        let (transferHeadroom, multiplicationOverflow) = byteBudget
             .multipliedReportingOverflow(by: 3)
-        guard !overflow else {
+        let (transferByteCapacity, additionOverflow) = transferHeadroom
+            .addingReportingOverflow(PaintTileDescriptor.residentByteCount)
+        guard !multiplicationOverflow, !additionOverflow else {
             throw DocumentPaintSurfaceStoreError.transferByteCapacityOverflow
         }
         try self.init(

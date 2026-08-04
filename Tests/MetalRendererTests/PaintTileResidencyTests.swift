@@ -209,7 +209,8 @@ struct PaintTileResidencyTests {
             capacityBytes: bytes * 5 - 1,
             residentBytes: bytes,
             allocationBytes: bytes,
-            stagingBytes: bytes * 3
+            persistentZeroBytes: bytes,
+            stagingBytes: bytes * 2
         )) {
             _ = try store.reserve(
                 surfaceID: surfaceID,
@@ -257,7 +258,9 @@ struct PaintTileResidencyTests {
         #expect(store.snapshot().lastTransferAccounting == PaintTileTransferAccounting(
             residentTextureBytesBefore: bytes,
             allocatedTextureBytes: bytes,
-            uploadStagingBytes: bytes,
+            persistentZeroAllocationBytes: 0,
+            persistentZeroAllocationCount: 0,
+            uploadStagingBytes: 0,
             readbackStagingBytes: bytes,
             capturedPayloadBytes: bytes,
             peakTrackedBytes: bytes * 5,
@@ -265,6 +268,87 @@ struct PaintTileResidencyTests {
         ))
         #expect(store.snapshot().residentByteCount == bytes)
         try store.release(replacement, surfaceID: surfaceID, currentGeneration: 1)
+    }
+
+    @Test
+    func zeroSourceCapacityAndTextureAllocationFailuresAreAtomicAndRetryable() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let surfaceID = UUID()
+        let layerID = UUID()
+        let size = PixelSize(width: 512, height: 256)
+        let capacityStore = PaintTileStore(
+            device: device,
+            byteBudget: bytes * 2,
+            transferByteCapacity: bytes * 2
+        )
+        let beforeCapacity = capacityStore.snapshot()
+        #expect(throws: PaintTileStoreError.transferCapacityExceeded(
+            requiredBytes: bytes * 3,
+            capacityBytes: bytes * 2,
+            residentBytes: 0,
+            allocationBytes: bytes * 2,
+            persistentZeroBytes: bytes,
+            stagingBytes: 0
+        )) {
+            _ = try capacityStore.reserve(
+                surfaceID: surfaceID,
+                layerID: layerID,
+                generation: 1,
+                pixelSize: size,
+                coordinates: [.init(x: 0, y: 0), .init(x: 1, y: 0)],
+                pinReasons: [.active]
+            )
+        }
+        #expect(capacityStore.snapshot() == beforeCapacity)
+        let capacityRetry = try capacityStore.reserve(
+            surfaceID: surfaceID,
+            layerID: layerID,
+            generation: 1,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0)],
+            pinReasons: [.active]
+        )
+        #expect(capacityStore.snapshot().persistentZeroAllocationCount == 1)
+        try capacityStore.release(
+            capacityRetry,
+            surfaceID: surfaceID,
+            currentGeneration: 1
+        )
+
+        let allocationStore = PaintTileStore(
+            device: device,
+            byteBudget: bytes,
+            transferByteCapacity: bytes * 2
+        )
+        let beforeAllocation = allocationStore.snapshot()
+        #expect(throws: PaintTileStoreError.injectedAllocationFailure(
+            reserveIndex: 0
+        )) {
+            _ = try allocationStore.reserve(
+                surfaceID: surfaceID,
+                layerID: layerID,
+                generation: 1,
+                pixelSize: size,
+                coordinates: [.init(x: 0, y: 0)],
+                pinReasons: [.active],
+                failureInjection: .init(failingAtReserveIndex: 0)
+            )
+        }
+        #expect(allocationStore.snapshot() == beforeAllocation)
+        let allocationRetry = try allocationStore.reserve(
+            surfaceID: surfaceID,
+            layerID: layerID,
+            generation: 1,
+            pixelSize: size,
+            coordinates: [.init(x: 0, y: 0)],
+            pinReasons: [.active]
+        )
+        #expect(allocationStore.snapshot().persistentZeroAllocationCount == 1)
+        try allocationStore.release(
+            allocationRetry,
+            surfaceID: surfaceID,
+            currentGeneration: 1
+        )
     }
 
     @Test
