@@ -81,6 +81,9 @@ No Stage D production behavior exists at the baseline.
   modes.
 - Existing schema-v1/v2/v3 project files decode without data loss. New saves
   use schema v4. Unknown required formats fail closed.
+- In schema v4, a tiled surface's `pixelSize` is physical paint-storage
+  geometry, not viewport/document size: plain and periodic use the compiled
+  canonical raster size, radial uses `RadialSectorLayout.atlasPixelSize`.
 - Checked-in raster updates require independent semantic/reference evidence;
   current-code output alone is not authority.
 - Physical iPad/Pencil/Wacom/120 Hz evidence remains pending and cannot be
@@ -297,9 +300,20 @@ wiring changes:
 - Produces a v4 tiled surface manifest whose nonempty records contain stable
   tile ID, integer coordinate, clipped logical bounds, `rgba16Float`, little
   endian byte order, byte count, SHA-256 semantic hash, and raster revision.
+  `PatternPaintTileSurface.rasterRevision` is required even when its tile list
+  is empty; `PatternProjectPaintTileSurface` carries the same value and every
+  nonempty record must repeat that exact revision.
+- Defines persisted tile UUIDs as archive identities, distinct from process-
+  local `PaintTileID`. Task 7 must install a checked bijection during native
+  import and return the same UUIDs during save/history restore; no UUID-to-
+  `UInt64` truncation or regeneration is allowed.
 - `PatternPaintTileCodec` validates finite half-float linear-premultiplied
   channels, `0 <= rgb <= alpha <= 1`, exact byte counts, unique IDs and
-  coordinates, bounds, hashes, total decoded bytes, and maximum eight layers.
+  coordinates, bounds, hashes, uniform surface revision, total decoded bytes,
+  and maximum eight layers. It accepts physical dimensions through
+  `RadialSectorLayout.maximumAtlasDimension == 16_384`, while project metadata
+  separately requires the surface size to equal the compiled document's exact
+  plain/periodic/radial storage geometry.
 
 - [ ] Write LayerStack RED tests for all operations, maximum count, duplicate
   IDs, invalid opacity/name/order, active deletion fallback, and locked active
@@ -312,7 +326,15 @@ wiring changes:
   completion, undo, redo, reorder, deleted-target atomic failure, and history
   cursor preservation when renderer restore fails.
 - [ ] Write v4 wire RED tests for deterministic round trip and each malformed
-  tile field. Include archive-wide decoded-byte limits and path-collision tests.
+  tile field. Include empty-surface revision, mixed tile revisions, physical-
+  size/compiled-geometry mismatch, archive-wide decoded-byte limits, and path-
+  collision tests.
+- [ ] Before Task 6 starts, correct the existing 4,096-only manifest bound and
+  run save/decode/save fixtures at the maximum accepted plain/periodic size and
+  a compiled radial layout whose atlas dimension exceeds 4,096 and is at most
+  16,384. Require identical physical size, surface revision, tile UUIDs,
+  payload bytes, and semantic hashes; malformed oversized or noncompiled
+  dimensions fail before payload materialization.
 - [ ] Add v1 single-raster, v2/v3 layer, and v3 radial-page migration fixtures.
   Preserve every declared layer up to the eight-layer bound; never flatten or
   drop a valid old layer. Reject larger legacy stacks with a typed error.
@@ -395,17 +417,22 @@ wiring changes:
   harness may select the tiled backend in this task. Task 6 remains the single
   production switch and deletes the legacy backend.
 - `StrokeTileSurfaceResources` owns sparse RGBA16F authoritative and prediction
-  `TiledRasterSurface`s from Task 2, one shared bounded store, an immutable
-  per-stroke layer/generation identity, and preallocated partition/upload
-  workspace. It receives a separately prepared RGBA16F deposition pipeline;
-  the compiled brush's current BGRA8 pipeline must never be bound to a tile.
+  `TiledRasterSurface`s from Task 2, an immutable per-stroke layer/generation
+  namespace, and preallocated partition/upload workspace. Its production
+  initializer must borrow an injected document-owned `PaintTileStore` and
+  namespace allocator; it cannot create or budget a store. A standalone-store
+  convenience initializer is internal test-only. It receives a separately
+  prepared RGBA16F deposition pipeline; the compiled brush's current BGRA8
+  pipeline must never be bound to a tile.
 - Extend `PaintTileStore`/`TiledRasterSurface` with a checked, already-sorted
   reserve/return path whose warmed bookkeeping does not allocate. The existing
   convenience API may continue to canonicalize arbitrary caller arrays.
-- `StrokePreparedSurfaceLease` carries immutable, row-major sorted bindings for
-  every currently visible authoritative and prediction tile, not only the
-  current dirty delta. It also carries generation/token/layer, per-binding clear
-  state, and actual/predicted counts. Main may read those textures until exact
+- The encoder stores row-major bindings in fixed-capacity, append-only immutable
+  chunks that are reused across frames. `StrokePreparedSurfaceLease` carries
+  generation/token/layer, actual/predicted counts, the dirty/invalidation delta,
+  and references to newly appended or replaced chunks; it never recopies the
+  stroke's entire visible binding history. Task 6 may request viewport/export-
+  batch leases from those chunks. Main may read referenced textures until exact
   acknowledgement; the scheduler may neither mutate nor evict them meanwhile.
 - Projected support is clipped, partitioned, and deduplicated before encoding.
   A separately checked tile-record-reference budget accounts for one projected
@@ -421,6 +448,11 @@ wiring changes:
   prior-to-clear tile-coordinate lists. The planned footprint publishes only
   after GPU success; shorter, longer, overlapping, and empty replacements clear
   only the preceding prediction footprint and failure preserves the old one.
+- Stroke namespaces and borrowed-store entries retire only after the final GPU
+  completion plus exact ACK, cancel, or failure disposition has returned every
+  published lease. Late ACK, cancel while Main owns a lease, and failure after
+  chunk publication defer retirement; immediate next-stroke reuse gets a new
+  namespace and cannot alias the retiring generation.
 - Task 5 proves sparse geometry, lifecycle, and storage. Encoded-sRGB-to-linear
   conversion and application consumption of tiled leases remain Task 6 work.
 - Correct Task 0's source-structure contract to inventory the legacy production
@@ -436,8 +468,9 @@ wiring changes:
   owns zero tiles, one dab allocates only intersecting tiles, no full-canvas
   texture exists in the tiled backend, and an RGBA16F pipeline binding is used.
 - [ ] Add authoritative append and multi-frame tests proving each actual ordinal
-  deposits once per required tile, previously visible tiles remain readable in
-  the whole-visible lease, and exact ACK returns every pin.
+  deposits once per required tile, prior immutable chunks remain reusable,
+  per-frame binding-copy work is bounded by the changed chunks rather than total
+  stroke tiles, and exact ACK returns every frame pin.
 - [ ] Add shorter, longer, overlapping, multi-page, and empty prediction
   replacement tests. Prediction enabled/disabled must produce identical
   authoritative candidate tile bytes, and replacement may clear only its prior
@@ -445,7 +478,12 @@ wiring changes:
 - [ ] Inject failure before tile allocation, partition/reference publication,
   command encoding, completion, and lease publication. Cover late completion,
   stale/wrong generation-token-layer ACK, cancel with Main ownership, deferred
-  retirement, and immediate next-stroke reuse; no partial footprint may publish.
+  namespace/store retirement, and immediate next-stroke reuse; no partial
+  footprint may publish and no borrowed-store entry may outlive final retirement.
+- [ ] At minimum and maximum radial ray counts, preflight projected-image count,
+  tile-record references, page slots, binding chunks, upload bytes, and checked
+  arithmetic before reserve. Maximum symmetry must either fit the declared
+  capacities or fail typed without any store/GPU mutation.
 - [ ] Install the tiled backend only through a scheduler test seam and exercise
   begin, authoritative append, prediction, estimated replacement, finish,
   cancel, failure, radial pages, and immediate reuse. Run the unchanged Stage C
@@ -470,6 +508,7 @@ wiring changes:
 - Delete: `Sources/MetalRenderer/PersistentLiveTile.swift`
 - Delete: `Sources/MetalRenderer/Brush/ReplayLiveTile.swift`
 - Modify: `Sources/MetalRenderer/CanonicalRaster.swift`
+- Modify: `Sources/PatternEngine/RadialSectorLayout.swift`
 - Modify: `Sources/CShaderTypes/include/ShaderTypes.h`
 - Modify: `Sources/MetalRenderer/ShaderABI.swift`
 - Modify: `Sources/MetalRenderer/GridPipelineLibrary.swift`
@@ -498,6 +537,8 @@ wiring changes:
 - Modify: `Tests/MetalRendererTests/CommittedDocumentSnapshotTests.swift`
 - Modify: `Tests/MetalRendererTests/RendererResizeTests.swift`
 - Modify: `Tests/MetalRendererTests/StageDBaselineContractTests.swift`
+- Modify: `Tests/PatternEngineTests/RadialSectorLayoutTests.swift`
+- Modify: `Tests/PatternEngineTests/SymmetryDescriptorCompilerTests.swift`
 - Modify: `App/Tests/PatternProjectBridgeTests.swift`
 
 **Interfaces:**
@@ -510,6 +551,11 @@ wiring changes:
   eight. Canonical, authoritative, prediction, provisional, scratch, and later
   every layer draw from this one budget; no production convenience initializer
   may create a second store.
+- Task 5 production stroke resources receive this exact shared store and a fresh
+  document namespace from the registry. Canonical, transient, and history-
+  install identities cannot collide because surface role and generation are
+  part of the namespace; final ACK/cancel/failure retirement is the only path
+  that releases transient namespace ownership.
 - Document geometry distinguishes visible `documentPixelSize` from physical
   storage size. Plain storage uses the finite canvas, periodic storage uses the
   canonical repeat cell, and radial storage uses the checked compiled sector
@@ -527,9 +573,11 @@ wiring changes:
   output-region batches and includes the one-tile input halo needed by every
   output region, so all four bilinear neighbors are bound in the same pass and
   each output pixel is written exactly once. It must not issue one fullscreen
-  pass per tile. Plans are cached by document generation, surface revision,
-  viewport/export geometry, and transient lease token—not rebuilt for each
-  input event.
+  pass per tile. Plans are cached by document generation, canonical/transient
+  content revision, viewport/export batch geometry, and binding-chunk revision.
+  Lease tokens express lifetime only and never invalidate content. Dirty tile
+  and chunk deltas update page-table ranges incrementally; unchanged chunks and
+  page-table ranges remain byte-identical and are not rebuilt per input event.
 - Every bilinear sample resolves all four integer neighbors independently.
   Missing pages/tiles are transparent; edge tiles honor clipped bounds;
   periodic coordinates wrap before lookup; radial logical coordinates resolve
@@ -557,6 +605,12 @@ wiring changes:
   candidate tile whose valid logical texels are all transparent is removed from
   the surface and backing store before publication. Empty clear is a no-op and
   erase-to-empty releases residency after the last lease completes.
+- Radial capacity uses RGBA16F's exact 8 bytes per physical pixel, checked as
+  resident-page count × 256 × 256 × 8 plus separately checked page-table and
+  binding bytes. `maximumAtlasDimension` remains 16,384, but the resident-byte
+  budget may reject a geometrically valid atlas. Compilation and Task 5
+  preflight minimum and maximum ray counts—including the maximum projected
+  image count—before allocating or publishing tile/reference workspace.
 - The old full-surface canonical allocations plus live/replay/revision types,
   legacy scheduler selector, and production-capable synchronous harness route
   are deleted in the same commit. BGRA8 remains only at the exact Task 0
@@ -567,10 +621,15 @@ wiring changes:
   release/prune during destination
   upload, and rerun `TiledRasterRevisionStoreTests`. Task 6 may not compensate
   for a weaker revision-store contract with caller timing assumptions.
+- [ ] Satisfy the Task 3 wire dependency before production edits: land physical-
+  geometry validation, 16,384-bounded radial manifests, manifest-level surface
+  revisions, and maximum-layout deterministic round trips. Task 6 must not add
+  a second interpretation of v4 `pixelSize`.
 - [ ] Write pure RED tests for the shared registry and physical geometry:
   arbitrary stable layer IDs, one common byte budget, no hidden independent
   stores, plain/periodic/radial storage dimensions, maximum radial layout,
-  candidate swap, stale generation, and overflow before allocation.
+  candidate swap, stale generation, 8-byte radial resident accounting, minimum/
+  maximum-ray workspace preflight, and overflow before allocation.
 - [ ] Write CPU sparse-sampler RED tests for missing/clear tiles, clipped edges,
   four-neighbor bilinear interpolation, all four tile-corner combinations,
   negative and maximum periodic wrap, radial page/atlas resolution, immutable
@@ -602,8 +661,10 @@ wiring changes:
 - [ ] Stream stable tiled revisions directly into display/export/interchange
   destinations without assembling a full RGBA16F source. Prove erase-to-empty
   pruning, bounded page-table/argument-buffer bytes, shared-budget pressure,
-  bounded pins, and no per-event plan rebuild in the accelerated 10-minute trace.
-- [ ] Run `swift test --filter 'DocumentColorPipelineTests|DocumentPaintSurfaceStoreTests|SparseTileSamplingPlanTests|SparseTileSamplingPipelineTests|TiledRasterSurfaceTests|TiledRasterRevisionStoreTests|StrokeTileSurfaceEncoderTests|DepositionRendererTests|CommittedDocumentSnapshotTests|RendererResizeTests|StageCAcceptance'`,
+  viewport/batch-bounded pins, incremental page-table/chunk invalidation, and no
+  total-stroke-sized per-event copy or plan rebuild in the accelerated 10-minute
+  trace.
+- [ ] Run `swift test --filter 'PatternPaintTileCodecTests|StageDProjectBaselineTests|RadialSectorLayoutTests|SymmetryDescriptorCompilerTests|DocumentColorPipelineTests|DocumentPaintSurfaceStoreTests|SparseTileSamplingPlanTests|SparseTileSamplingPipelineTests|TiledRasterSurfaceTests|TiledRasterRevisionStoreTests|StrokeTileSurfaceEncoderTests|DepositionRendererTests|CommittedDocumentSnapshotTests|RendererResizeTests|StageCAcceptance'`,
   `scripts/run-brush-input-allocation-probe.sh all`, and Debug/Release macOS
   builds. No current-output golden may be regenerated; every approved fixture
   change cites an independent vector and semantic reason.
@@ -616,6 +677,7 @@ wiring changes:
 - Create: `Sources/MetalRenderer/Compositing/LayerCompositor.swift`
 - Create: `Sources/MetalRenderer/Compositing/LayerBlendPipeline.swift`
 - Create: `Sources/MetalRenderer/Raster/LayerSurfaceTransaction.swift`
+- Create: `Sources/MetalRenderer/Raster/PersistedPaintTileIdentityMap.swift`
 - Modify: `Sources/MetalRenderer/Compositing/SparseTileSamplingPlan.swift`
 - Modify: `Sources/MetalRenderer/Raster/DocumentPaintSurfaceStore.swift`
 - Modify: `Sources/MetalRenderer/GridRenderer.swift`
@@ -626,12 +688,16 @@ wiring changes:
 - Modify: `Sources/MetalRenderer/PeriodicBakedRepeatExporter.swift`
 - Modify: `App/PatternSpike/EditorSessionController.swift`
 - Modify: `App/PatternSpike/Persistence/PatternProjectBridge.swift`
+- Modify: `Sources/SafeArchive/SafeArchive.swift`
+- Modify: `Sources/SafeArchive/SafeArchiveCodec.swift`
+- Modify: `Sources/SafeArchive/SafeArchiveIO.swift`
 - Modify: `Sources/PatternFile/PatternProjectArchive.swift`
 - Modify: `Sources/PatternFile/PatternProjectPackageCodec.swift`
 - Modify: `Sources/PatternFile/PatternPaintTileCodec.swift`
 - Modify: `Sources/PatternFile/PatternRasterExportCodec.swift`
 - Create: `Tests/MetalRendererTests/LayerCompositorTests.swift`
 - Create: `Tests/MetalRendererTests/LayerSurfaceTransactionTests.swift`
+- Create: `Tests/MetalRendererTests/PersistedPaintTileIdentityMapTests.swift`
 - Modify: `App/Tests/EditorSessionControllerTests.swift`
 - Modify: `App/Tests/PatternProjectBridgeTests.swift`
 - Modify: `Tests/PatternFileTests/PatternProjectArchiveTests.swift`
@@ -639,6 +705,8 @@ wiring changes:
 - Modify: `Tests/PatternFileTests/PatternPaintTileCodecTests.swift`
 - Modify: `Tests/PatternFileTests/PatternRasterExportCodecTests.swift`
 - Modify: `Tests/EditorCoreTests/LayerStackTests.swift`
+- Modify: `Tests/SafeArchiveTests/SafeArchiveCodecTests.swift`
+- Modify: `Tests/SafeArchiveTests/SafeArchiveIOTests.swift`
 
 **Interfaces:**
 
@@ -664,16 +732,37 @@ wiring changes:
   pointer-down. The stroke remains bound to that layer through completion;
   paint/erase/clear and all layer mutations reject locked, missing, stale, or
   active-drawing targets with typed errors.
+- `PersistedPaintTileIdentityMap`, owned by `DocumentPaintSurfaceStore`, is the
+  checked bijection between persisted tile UUIDs and process-local
+  `PaintTileIdentity` values. New tiles receive one UUID
+  when first published; eviction/page-in preserves it; native import binds the
+  manifest UUID to the newly reserved runtime identity; history delete/restore
+  snapshots and reinstalls the mapping transactionally. Duplicate UUID,
+  coordinate disagreement, stale mapping, or regenerated identity fails before
+  registry swap.
 - Native v4 save snapshots one stable document generation and streams sorted
   nonempty RGBA16F tile entries directly to `PatternProjectArchive`; it never
-  flattens to PNG or assembles a full canvas. Save/load/save preserves layer IDs,
-  tile IDs, coordinates, clipped bounds, surface raster revisions, byte order,
-  payload bytes, and semantic hashes. Runtime history-store namespaces are
-  freshly allocated and are not serialized.
+  flattens to PNG or assembles a full canvas. The surface manifest always emits
+  physical storage `pixelSize` and manifest-level raster revision, including an
+  empty surface; every tile record repeats that revision. Save/load/save
+  preserves layer IDs, persisted tile UUIDs, coordinates, clipped bounds,
+  surface revision, byte order, payload bytes, and semantic hashes. Runtime
+  `PaintTileID` and history-store namespaces are freshly allocated and are not
+  serialized.
+- SafeArchive gains bounded `SafeArchiveEntryProvider` and
+  `SafeArchiveEntryConsumer` chunk APIs. Project save provides manifest and tile
+  entries lazily while holding one document snapshot lease from manifest freeze
+  through archive fsync/atomic replacement; project load preflights the central
+  directory and consumes one bounded entry/chunk at a time into validation and
+  candidate upload. Neither direction constructs `[String: Data]` for all tile
+  payloads, and every early error closes the provider/consumer and snapshot
+  lease exactly once.
 - Native v4 load validates the complete manifest, paths, counts, checked
-  per-entry/aggregate sizes, radial storage geometry, hashes, and layer limits
+  per-entry/aggregate sizes, exact compiled physical storage geometry, manifest/
+  tile revision uniformity, persisted-ID bijection, hashes, and layer limits
   before allocating a candidate shared store. It then bounded-reads/uploads one
-  tile at a time and swaps only after every tile succeeds. V1/v2/v3 encoded-
+  tile at a time, sets the candidate surface's persisted revision even when it
+  is empty, and swaps only after every tile succeeds. V1/v2/v3 encoded-
   premultiplied BGRA imports use Task 6's explicit conversion once and install
   a valid one-to-eight-layer registry without dropping declared layers.
 - PNG/interchange remains flattened encoded-premultiplied BGRA8. Transparent
@@ -697,7 +786,13 @@ wiring changes:
   for duplicate IDs/coordinates/paths, reordered manifest entries, byte/hash/
   bounds/revision mismatch, excessive layers/entries/bytes, radial map mismatch,
   truncated payload, upload failure, and stale snapshot. Assert save/load/save
-  semantic and byte equality with stable tile/revision identities.
+  semantic and byte equality with stable persisted tile UUIDs and surface
+  revision, including empty surfaces and a maximum accepted radial atlas.
+- [ ] Add SafeArchive provider/consumer RED tests for bounded chunk size,
+  declared-size mismatch, checksum failure, duplicate/unsafe path, aggregate
+  overflow, provider/consumer throw at every chunk, atomic destination replace,
+  snapshot mutation while saving, and exact lease closure. Peak payload memory
+  must be bounded by one tile plus fixed archive buffers, not archive size.
 - [ ] Add v1/v2/v3 fixtures covering translucent pixels, multiple declared
   layers, periodic cells, and radial pages. Require visual import parity within
   one encoded channel, no layer loss, and transactional failure for invalid or
@@ -710,7 +805,7 @@ wiring changes:
   traces. Persistent plus page-in plus in-flight composition bytes must remain
   within the checked shared/transient budgets; leases, queues, page tables, and
   binding batches return to their warm baseline after completion or failure.
-- [ ] Run `swift test --filter 'LayerStackTests|LayerCompositorTests|LayerSurfaceTransactionTests|EditorSessionControllerTests|PatternPaintTileCodecTests|PatternProjectArchiveTests|PatternProjectPackageCodecTests|PatternRasterExportCodecTests|PatternProjectBridgeTests'`.
+- [ ] Run `swift test --filter 'LayerStackTests|LayerCompositorTests|LayerSurfaceTransactionTests|PersistedPaintTileIdentityMapTests|EditorSessionControllerTests|SafeArchiveCodecTests|SafeArchiveIOTests|PatternPaintTileCodecTests|PatternProjectArchiveTests|PatternProjectPackageCodecTests|PatternRasterExportCodecTests|PatternProjectBridgeTests'`.
 - [ ] Commit as `feat(layers): compose bounded linear tiles`.
 
 ### Task 8: Stage D Acceptance Checkpoint
@@ -721,6 +816,9 @@ wiring changes:
 - Create: `Sources/StageDAcceptanceProbe/main.swift`
 - Modify: `Package.swift`
 - Create: `scripts/run-stage-d-acceptance.sh`
+- Create: `App/PatternSpike/Harness/StageDAppRouteEvidence.swift`
+- Create: `App/UITests/StageDAppRouteUITests.swift`
+- Modify: `App/UITests/PatternSpikeMacUITests.swift`
 - Modify: `App/Tests/ContentViewLifecycleTests.swift`
 - Modify: `App/Tests/EditorSessionControllerTests.swift`
 - Modify: `App/Tests/PatternProjectBridgeTests.swift`
@@ -739,13 +837,15 @@ wiring changes:
 | Layers | one/eight layers, sparse/full, all blend modes, order, visibility, opacity, lock, active fallback, add/delete/undo/redo/resize | CPU/GPU blend parity, exact target layer/revision identity, transactional rollback, shared budget |
 | Persistence/export | v1/v2/v3 imports, v4 empty/periodic/radial/eight-layer, save/load/save, finite/repeat/baked/PNG | bounded streaming reads, stable IDs/revisions/hashes/bytes, independent flattened reference, one transfer conversion |
 | Sustained runtime | cold/warm, 10-second wall trace, 36,000-frame accelerated 10-minute trace, allocation/residency pressure, injected failure/reuse | JSONL plus summary: input provenance, replay, queues, prepare/submit/GPU/present p95/p99, allocations, page tables/bindings/leases, resident/high-water bytes |
-| App/UI routes | color selection, draw/erase/clear, size/brush/layer changes, mode/resize, undo/redo, save/open/export | controller/UI command reaches the production sparse route, disabled/rejected states are correct, no shortcut/focus regression, state and pixels agree |
+| App/UI routes | color selection, draw/erase/clear, size/brush/layer changes, mode/resize, undo/redo, save/open/export, tilde HUD, digit/letter/command shortcuts while canvas vs numeric fields own focus | Xcode-hosted `PatternSpikeMacUITests` `.xcresult` plus app-written route manifest prove real control/key delivery, focus ownership, production sparse route, disabled/rejected states, and matching state/pixels |
 
-- [ ] Implement `StageDAcceptanceProbe` as the sole matrix runner. Every row has
-  a stable scenario ID, deterministic seed/input trace, expected semantic hash
-  or independent numeric oracle, and a typed result. The shell script rejects
-  missing/duplicate rows, skipped software evidence, nonfinite metrics, or a
-  report generated by any nonproduction backend.
+- [ ] Implement `StageDAcceptanceProbe` as the manifest aggregator for package
+  harness results, the Xcode-hosted macOS UI `.xcresult`, and the app-written
+  production-route evidence manifest. Every row has a stable scenario ID,
+  deterministic seed/input trace, expected semantic hash or independent numeric
+  oracle, producer kind, and typed result. The shell script rejects missing/
+  duplicate rows, an absent/failed required Xcode test identifier, skipped
+  software evidence, nonfinite metrics, or any nonproduction backend.
 - [ ] Add mutation/negative controls that independently invert transfer
   direction, straight/premultiplied handling, alpha, bilinear neighbor/tile
   origin, periodic/radial lookup, LRU/pinning, install atomicity, empty pruning,
@@ -758,6 +858,14 @@ wiring changes:
   undo/redo, save/open/export, text-field focus/keyboard shortcuts, failed
   operation recovery, and immediate next action. Assert visible state,
   canonical bytes, history cursor, layer stack, generation, and pending tokens.
+- [ ] Run actual `XCUIApplication` controls in `StageDAppRouteUITests`: click
+  draw/erase/clear, brush/size/layer/mode/resize, undo/redo, save/open/export;
+  send tilde, digits, letters, Command-Z, and Command-Shift-Z first to canvas and
+  then to focused numeric fields. Assert accessibility value/selection/enabled
+  state, field text, unchanged tiling while a field owns digits, shortcut action
+  after canvas refocus, HUD presence, and app-written canonical/layer/history/
+  sparse-route evidence after each command. SwiftUI hosting/controller tests
+  alone cannot satisfy this row.
 - [ ] Require zero production legacy synchronous-render calls, zero append-only
   actual replay, zero post-warm input/partition/lease application allocations,
   no dropped actual input, no GPU wait on input/main, all queues and lease/token
@@ -776,6 +884,18 @@ wiring changes:
   telemetry suite, then run `scripts/run-stage-d-acceptance.sh` twice from a
   clean build directory. Both runs must produce identical semantic hashes and
   no unexplained metric or resident-resource growth.
+- [ ] Run the Xcode-hosted app-route gate:
+
+  ```bash
+  xcodebuild test -project App/PatternSpike.xcodeproj \
+    -scheme PatternSpikeMac -destination 'platform=macOS' \
+    -resultBundlePath .build/StageDAppRoutes.xcresult \
+    CODE_SIGNING_ALLOWED=NO
+  ```
+
+  Convert its test summary plus the app route manifest into the aggregator
+  input and require every named UI scenario above to pass. Never treat a
+  successful app build as UI route evidence.
 - [ ] Build `PatternSpikeMac` Debug and Release for `platform=macOS`, and build
   `PatternSpikePad` Debug and Release for `generic/platform=iOS Simulator`, all
   with `CODE_SIGNING_ALLOWED=NO`. Launch the macOS harness route and require a
