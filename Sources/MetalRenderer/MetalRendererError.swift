@@ -50,6 +50,7 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
         actualWidth: Int,
         actualHeight: Int
     )
+    case rasterRevisionLayerMismatch(expected: UUID, actual: UUID)
     case missingRasterRevision
     case invalidRasterRevisionOperationToken
     case rasterRevisionOperationDidNotComplete
@@ -144,6 +145,8 @@ public enum MetalRendererError: Error, Equatable, LocalizedError, Sendable {
             \(expectedWidth)x\(expectedHeight), got \
             \(actualWidth)x\(actualHeight).
             """
+        case let .rasterRevisionLayerMismatch(expected, actual):
+            "Raster-revision layer mismatch: expected \(expected), got \(actual)."
         case .missingRasterRevision:
             "The requested raster revision is no longer resident."
         case .invalidRasterRevisionOperationToken:

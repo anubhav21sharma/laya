@@ -929,6 +929,68 @@ func clearAndResizeCommandsUseTheExplicitCompatibilityLayer() throws {
 
 @Test
 @MainActor
+func mismatchedTiledReceiptFailsWithoutRecordingCrossLayerHistory() throws {
+    guard let renderer = try makeControllerRenderer() else { return }
+    var requestedToken: RendererOperationToken?
+    var released: [Set<StoredRasterRevisionID>] = []
+    let controller = EditorSessionController(
+        renderer: renderer,
+        releaseRasterRevisions: { released.append($0) },
+        requestClear: { token, _ in requestedToken = token }
+    )
+    var errors: [MetalRendererError] = []
+    controller.onError = { errors.append($0) }
+    controller.clear()
+    let token = try #require(requestedToken)
+    let expectedLayerID = LayerStack.compatibilityLayerID
+    let actualLayerID = controllerLayerID(404)
+    let size = PixelSize(width: 256, height: 256)
+    let regions = PixelRegionSet(
+        [PixelRect(minX: 0, minY: 0, maxX: 256, maxY: 256)!],
+        clippedTo: size
+    )
+    let storage = RasterRevisionStorage.tiledRGBA16Float(
+        layerID: actualLayerID,
+        generation: 1,
+        tileCoordinates: [.init(x: 0, y: 0)]
+    )
+    let before = RasterRevisionReference(
+        id: StoredRasterRevisionID(rawValue: 80_001),
+        pixelSize: size,
+        documentPixelSize: size,
+        regions: regions,
+        retainedBytes: 0,
+        storage: storage
+    )
+    let after = RasterRevisionReference(
+        id: StoredRasterRevisionID(rawValue: 80_002),
+        pixelSize: size,
+        documentPixelSize: size,
+        regions: regions,
+        retainedBytes: PaintTileDescriptor.residentByteCount,
+        storage: storage
+    )
+
+    renderer.onOperationCompleted?(.rasterSuccess(RasterMutationReceipt(
+        token: token,
+        before: before,
+        after: after
+    )))
+
+    #expect(errors == [.rasterRevisionLayerMismatch(
+        expected: expectedLayerID,
+        actual: actualLayerID
+    )])
+    #expect(released == [[before.id, after.id]])
+    #expect(!controller.historyAvailabilityForTesting.canUndo)
+    #expect(!controller.historyAvailabilityForTesting.canRedo)
+    #expect(controller.lastRecordedRasterCommandForTesting == nil)
+    #expect(controller.transactionStateForTesting == .idle)
+    #expect(!controller.model.isBusy)
+}
+
+@Test
+@MainActor
 func operationSuccessMovesUndoRedoOnlyAfterRendererCompletion() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     var releaseCalls: [Set<StoredRasterRevisionID>] = []

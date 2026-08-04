@@ -15,15 +15,29 @@ public struct RasterMutationReceipt: Equatable, Sendable {
     public let token: RendererOperationToken
     public let before: RasterRevisionReference
     public let after: RasterRevisionReference
+    public let layerID: UUID?
+    public let generation: UInt64?
+    public let tileCoordinates: [RasterRevisionTileCoordinate]
 
     public init(
         token: RendererOperationToken,
         before: RasterRevisionReference,
         after: RasterRevisionReference
     ) {
+        precondition(
+            before.layerID == after.layerID,
+            "A raster mutation pair cannot cross layer storage."
+        )
         self.token = token
         self.before = before
         self.after = after
+        layerID = before.layerID
+        generation = before.generation == after.generation
+            ? before.generation
+            : nil
+        tileCoordinates = Array(Set(
+            before.tileCoordinates + after.tileCoordinates
+        )).sorted()
     }
 }
 

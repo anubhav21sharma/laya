@@ -6,6 +6,102 @@ import Testing
 @Suite(.serialized)
 struct RasterRevisionStoreTests {
     @Test
+    func legacyStoreRemainsFullSurfaceCompatibilityStorage() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = RasterRevisionStore(device: device)
+        let size = PixelSize(width: 64, height: 64)
+        let pair = try store.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regionSet(size: size),
+            afterPixelSize: size,
+            afterRegions: regionSet(size: size)
+        )
+
+        #expect(pair.before.storage == .fullSurfaceBGRA8)
+        #expect(pair.after.storage == .fullSurfaceBGRA8)
+        store.discard(pair)
+    }
+
+    @Test
+    func tiledReceiptExposesItsImmutableLayerBinding() {
+        let size = PixelSize(width: 256, height: 256)
+        let layerID = UUID()
+        let coordinate = RasterRevisionTileCoordinate(x: 0, y: 0)
+        let regions = PixelRegionSet(
+            [PixelRect(minX: 0, minY: 0, maxX: 256, maxY: 256)!],
+            clippedTo: size
+        )
+        let storage = RasterRevisionStorage.tiledRGBA16Float(
+            layerID: layerID,
+            generation: 42,
+            tileCoordinates: [coordinate]
+        )
+        let before = RasterRevisionReference(
+            id: StoredRasterRevisionID(rawValue: 1),
+            pixelSize: size,
+            documentPixelSize: size,
+            regions: regions,
+            retainedBytes: 0,
+            storage: storage
+        )
+        let after = RasterRevisionReference(
+            id: StoredRasterRevisionID(rawValue: 2),
+            pixelSize: size,
+            documentPixelSize: size,
+            regions: regions,
+            retainedBytes: PaintTileDescriptor.residentByteCount,
+            storage: storage
+        )
+
+        let receipt = RasterMutationReceipt(
+            token: RendererOperationToken(rawValue: 9),
+            before: before,
+            after: after
+        )
+
+        #expect(receipt.layerID == layerID)
+        #expect(receipt.generation == 42)
+        #expect(receipt.tileCoordinates == [coordinate])
+    }
+
+    @Test
+    func legacyAndTiledStoresShareOneCollisionFreeRevisionNamespace() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 256, height: 256)
+        let regions = PixelRegionSet(
+            [PixelRect(minX: 0, minY: 0, maxX: 1, maxY: 1)!],
+            clippedTo: size
+        )
+        let legacy = RasterRevisionStore(device: device)
+        let legacyPair = try legacy.allocatePair(
+            beforePixelSize: size,
+            beforeRegions: regions,
+            afterPixelSize: size,
+            afterRegions: regions
+        )
+        let tiled = TiledRasterRevisionStore(
+            device: device,
+            maximumRetainedBytes: PaintTileDescriptor.residentByteCount
+        )
+        let tiledPair = try tiled.allocatePair(
+            layerID: UUID(),
+            generation: 0,
+            pixelSize: size,
+            dirtyRegions: regions,
+            beforePresentCoordinates: [],
+            afterPresentCoordinates: []
+        )
+
+        #expect(legacyPair.revisionIDs.isDisjoint(with: tiledPair.revisionIDs))
+        try tiled.release(legacyPair.revisionIDs)
+        #expect(tiled.containsRevision(tiledPair.before.id))
+        #expect(tiled.containsRevision(tiledPair.after.id))
+
+        legacy.discard(legacyPair)
+        try tiled.discard(tiledPair)
+    }
+
+    @Test
     func unknownAndStaleReferencesFailWithoutEncoding() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let store = RasterRevisionStore(device: device)

@@ -1680,6 +1680,13 @@ final class EditorSessionController {
             } else if let pendingTileResize,
                       pendingTileResize.token == completedToken
             {
+                if rejectMismatchedTiledReceipt(
+                    receipt,
+                    expectedLayerID: pendingTileResize.layerID,
+                    completedToken: completedToken
+                ) {
+                    return
+                }
                 precondition(
                     receipt.before.documentPixelSize
                         == pendingTileResize.before
@@ -1711,6 +1718,13 @@ final class EditorSessionController {
                 preconditionFailure(
                     "Renderer completed a raster mutation the controller did not accept."
                 )
+            }
+            if rejectMismatchedTiledReceipt(
+                receipt,
+                expectedLayerID: layerID,
+                completedToken: completedToken
+            ) {
+                return
             }
             let command = RasterHistoryCommand(
                 layerID: layerID,
@@ -1781,6 +1795,35 @@ final class EditorSessionController {
         }
         refreshDerivedModelState()
         resumeDeferredPointerIfIdle()
+    }
+
+    private func rejectMismatchedTiledReceipt(
+        _ receipt: RasterMutationReceipt,
+        expectedLayerID: UUID,
+        completedToken: EditorTransactionToken
+    ) -> Bool {
+        guard let actualLayerID = receipt.layerID,
+              actualLayerID != expectedLayerID
+        else { return false }
+
+        let error = MetalRendererError.rasterRevisionLayerMismatch(
+            expected: expectedLayerID,
+            actual: actualLayerID
+        )
+        report(error)
+        releaseRasterRevisions([receipt.before.id, receipt.after.id])
+        activeStrokeLayerID = nil
+        if pendingRasterMutation?.token == completedToken {
+            pendingRasterMutation = nil
+        }
+        if pendingTileResize?.token == completedToken {
+            pendingTileResize = nil
+        }
+        apply(.operationCompleted(completedToken, succeeded: false))
+        finishAwaitedClear(token: completedToken, result: .failure(error))
+        refreshDerivedModelState()
+        resumeDeferredPointerIfIdle()
+        return true
     }
 
     private func handleLayerRasterStorageCompletion(

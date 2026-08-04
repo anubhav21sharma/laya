@@ -47,6 +47,8 @@ struct RasterRevisionHarnessSnapshot: Equatable {
     let retainedBytes: Data
 }
 
+/// Full-surface BGRA8 compatibility storage. New sparse paint routes use
+/// `TiledRasterRevisionStore`; this helper remains until the atomic switch.
 public final class RasterRevisionStore: @unchecked Sendable {
     private enum Lifetime {
         case provisional
@@ -692,7 +694,7 @@ public final class RasterRevisionStore: @unchecked Sendable {
     }
 }
 
-private final class RasterRevisionStoreIdentitySource: @unchecked Sendable {
+final class RasterRevisionStoreIdentitySource: @unchecked Sendable {
     static let shared = RasterRevisionStoreIdentitySource()
 
     private let lock = NSLock()
