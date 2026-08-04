@@ -6,6 +6,8 @@
 using namespace metal;
 typedef uint PatternUInt32;
 typedef int PatternInt32;
+typedef uint2 PatternUInt2;
+typedef int2 PatternInt2;
 typedef float2 PatternFloat2;
 typedef float4 PatternFloat4;
 typedef uint4 PatternUInt4;
@@ -16,6 +18,8 @@ typedef uint4 PatternUInt4;
 #include <simd/simd.h>
 typedef uint32_t PatternUInt32;
 typedef int32_t PatternInt32;
+typedef vector_uint2 PatternUInt2;
+typedef vector_int2 PatternInt2;
 typedef vector_float2 PatternFloat2;
 typedef vector_float4 PatternFloat4;
 typedef vector_uint4 PatternUInt4;
@@ -194,6 +198,110 @@ typedef struct PatternCompositeUniforms {
     PatternFloat4 parameters;
 } PatternCompositeUniforms;
 
+typedef struct PatternSparseSamplingUniforms {
+    PatternUInt2 outputSize;
+    PatternFloat2 sourceOrigin;
+    PatternFloat2 sourceStep;
+    PatternUInt32 descriptorCount;
+    PatternUInt32 layerCount;
+    PatternUInt32 bindingCount;
+    PatternUInt32 addressingFlags;
+    PatternUInt2 period;
+    PatternUInt32 compositeMode;
+    PatternUInt32 liveVisible;
+    PatternUInt2 reserved;
+} PatternSparseSamplingUniforms;
+
+typedef struct PatternSparsePageTableDescriptor {
+    PatternUInt32 entryOffset;
+    PatternUInt32 entryCount;
+    PatternInt2 tableOrigin;
+    PatternUInt2 tableSize;
+    PatternUInt32 layerIndex;
+    PatternUInt32 role;
+} PatternSparsePageTableDescriptor;
+
+typedef struct PatternSparseTilePageEntry {
+    PatternInt2 logicalOrigin;
+    PatternInt2 physicalOrigin;
+    PatternInt32 globalBindingSlot;
+    PatternUInt32 packedLocalMinimum;
+    PatternUInt32 packedLocalMaximum;
+    PatternUInt32 flags;
+} PatternSparseTilePageEntry;
+
+#ifndef __METAL_VERSION__
+static inline size_t PatternSparseSamplingUniformsOffsetOutputSize(void) {
+    return offsetof(PatternSparseSamplingUniforms, outputSize);
+}
+static inline size_t PatternSparseSamplingUniformsOffsetSourceOrigin(void) {
+    return offsetof(PatternSparseSamplingUniforms, sourceOrigin);
+}
+static inline size_t PatternSparseSamplingUniformsOffsetSourceStep(void) {
+    return offsetof(PatternSparseSamplingUniforms, sourceStep);
+}
+static inline size_t PatternSparseSamplingUniformsOffsetDescriptorCount(void) {
+    return offsetof(PatternSparseSamplingUniforms, descriptorCount);
+}
+static inline size_t PatternSparseSamplingUniformsOffsetLayerCount(void) {
+    return offsetof(PatternSparseSamplingUniforms, layerCount);
+}
+static inline size_t PatternSparseSamplingUniformsOffsetBindingCount(void) {
+    return offsetof(PatternSparseSamplingUniforms, bindingCount);
+}
+static inline size_t PatternSparseSamplingUniformsOffsetAddressingFlags(void) {
+    return offsetof(PatternSparseSamplingUniforms, addressingFlags);
+}
+static inline size_t PatternSparseSamplingUniformsOffsetPeriod(void) {
+    return offsetof(PatternSparseSamplingUniforms, period);
+}
+static inline size_t PatternSparseSamplingUniformsOffsetCompositeMode(void) {
+    return offsetof(PatternSparseSamplingUniforms, compositeMode);
+}
+static inline size_t PatternSparseSamplingUniformsOffsetLiveVisible(void) {
+    return offsetof(PatternSparseSamplingUniforms, liveVisible);
+}
+static inline size_t PatternSparseSamplingUniformsOffsetReserved(void) {
+    return offsetof(PatternSparseSamplingUniforms, reserved);
+}
+static inline size_t PatternSparsePageTableDescriptorOffsetEntryOffset(void) {
+    return offsetof(PatternSparsePageTableDescriptor, entryOffset);
+}
+static inline size_t PatternSparsePageTableDescriptorOffsetEntryCount(void) {
+    return offsetof(PatternSparsePageTableDescriptor, entryCount);
+}
+static inline size_t PatternSparsePageTableDescriptorOffsetTableOrigin(void) {
+    return offsetof(PatternSparsePageTableDescriptor, tableOrigin);
+}
+static inline size_t PatternSparsePageTableDescriptorOffsetTableSize(void) {
+    return offsetof(PatternSparsePageTableDescriptor, tableSize);
+}
+static inline size_t PatternSparsePageTableDescriptorOffsetLayerIndex(void) {
+    return offsetof(PatternSparsePageTableDescriptor, layerIndex);
+}
+static inline size_t PatternSparsePageTableDescriptorOffsetRole(void) {
+    return offsetof(PatternSparsePageTableDescriptor, role);
+}
+static inline size_t PatternSparseTilePageEntryOffsetLogicalOrigin(void) {
+    return offsetof(PatternSparseTilePageEntry, logicalOrigin);
+}
+static inline size_t PatternSparseTilePageEntryOffsetPhysicalOrigin(void) {
+    return offsetof(PatternSparseTilePageEntry, physicalOrigin);
+}
+static inline size_t PatternSparseTilePageEntryOffsetGlobalBindingSlot(void) {
+    return offsetof(PatternSparseTilePageEntry, globalBindingSlot);
+}
+static inline size_t PatternSparseTilePageEntryOffsetPackedLocalMinimum(void) {
+    return offsetof(PatternSparseTilePageEntry, packedLocalMinimum);
+}
+static inline size_t PatternSparseTilePageEntryOffsetPackedLocalMaximum(void) {
+    return offsetof(PatternSparseTilePageEntry, packedLocalMaximum);
+}
+static inline size_t PatternSparseTilePageEntryOffsetFlags(void) {
+    return offsetof(PatternSparseTilePageEntry, flags);
+}
+#endif
+
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexFrameUniforms = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexGridFrameUniforms = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexDabInstances = 2;
@@ -202,6 +310,12 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexRadialFrameUniforms = 4;
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternBufferIndexRadialResizeDestinationUniforms = 5;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexRadialResizePage = 6;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexSparseSamplingUniforms = 7;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternBufferIndexSparsePageTableDescriptors = 8;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexSparsePageEntries = 9;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexSparseBindingRemap = 10;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexSparseTextureArguments = 11;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexCanonical = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexLive = 1;
@@ -209,6 +323,25 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushShape = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushGrain = 3;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexReplayLive = 4;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexRadialPageTable = 5;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexSparseFallbackBase = 6;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseMaximumFallbackTextures = 16;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseMaximumTier2Textures = 512;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseSamplingABIVersion = 1;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseRoleCanonical = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseRoleAuthoritative = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseRolePrediction = 2;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseAddressingPeriodic = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseAddressingRadial = 2;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparsePageEntryKnownClear = 1;
+
+#ifdef __METAL_VERSION__
+struct PatternSparseTextureArguments {
+    array<texture2d<float>, 512> textures [[id(0)]];
+};
+#endif
 
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternTextureIndexDepositionPrimaryShape = 0;

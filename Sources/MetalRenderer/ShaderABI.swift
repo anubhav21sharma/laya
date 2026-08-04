@@ -102,6 +102,7 @@ public enum ShaderABI {
             && MemoryLayout<PatternCompositeUniforms>.offset(
                 of: \.parameters
             ) == 0
+            && sparseSamplingIsValid
     }
 
     private static var depositionStampInstanceIsValid: Bool {
@@ -175,10 +176,153 @@ public enum ShaderABI {
             && PatternDepositionABIVersion == UInt32(DepositionABI.version)
     }
 
+    private static var sparseSamplingIsValid: Bool {
+        MemoryLayout<PatternSparseSamplingUniforms>.size == 64
+            && MemoryLayout<PatternSparseSamplingUniforms>.stride == 64
+            && MemoryLayout<PatternSparseSamplingUniforms>.alignment == 8
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.outputSize
+            ) == 0
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.sourceOrigin
+            ) == 8
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.sourceStep
+            ) == 16
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.descriptorCount
+            ) == 24
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.layerCount
+            ) == 28
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.bindingCount
+            ) == 32
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.addressingFlags
+            ) == 36
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.period
+            ) == 40
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.compositeMode
+            ) == 48
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.liveVisible
+            ) == 52
+            && MemoryLayout<PatternSparseSamplingUniforms>.offset(
+                of: \.reserved
+            ) == 56
+            && MemoryLayout<PatternSparsePageTableDescriptor>.size == 32
+            && MemoryLayout<PatternSparsePageTableDescriptor>.stride == 32
+            && MemoryLayout<PatternSparsePageTableDescriptor>.alignment == 8
+            && MemoryLayout<PatternSparsePageTableDescriptor>.offset(
+                of: \.entryOffset
+            ) == 0
+            && MemoryLayout<PatternSparsePageTableDescriptor>.offset(
+                of: \.entryCount
+            ) == 4
+            && MemoryLayout<PatternSparsePageTableDescriptor>.offset(
+                of: \.tableOrigin
+            ) == 8
+            && MemoryLayout<PatternSparsePageTableDescriptor>.offset(
+                of: \.tableSize
+            ) == 16
+            && MemoryLayout<PatternSparsePageTableDescriptor>.offset(
+                of: \.layerIndex
+            ) == 24
+            && MemoryLayout<PatternSparsePageTableDescriptor>.offset(
+                of: \.role
+            ) == 28
+            && MemoryLayout<PatternSparseTilePageEntry>.size == 32
+            && MemoryLayout<PatternSparseTilePageEntry>.stride == 32
+            && MemoryLayout<PatternSparseTilePageEntry>.alignment == 8
+            && MemoryLayout<PatternSparseTilePageEntry>.offset(
+                of: \.logicalOrigin
+            ) == 0
+            && MemoryLayout<PatternSparseTilePageEntry>.offset(
+                of: \.physicalOrigin
+            ) == 8
+            && MemoryLayout<PatternSparseTilePageEntry>.offset(
+                of: \.globalBindingSlot
+            ) == 16
+            && MemoryLayout<PatternSparseTilePageEntry>.offset(
+                of: \.packedLocalMinimum
+            ) == 20
+            && MemoryLayout<PatternSparseTilePageEntry>.offset(
+                of: \.packedLocalMaximum
+            ) == 24
+            && MemoryLayout<PatternSparseTilePageEntry>.offset(
+                of: \.flags
+            ) == 28
+            && PatternSparseSamplingUniformsOffsetOutputSize() == 0
+            && PatternSparseSamplingUniformsOffsetSourceOrigin() == 8
+            && PatternSparseSamplingUniformsOffsetSourceStep() == 16
+            && PatternSparseSamplingUniformsOffsetDescriptorCount() == 24
+            && PatternSparseSamplingUniformsOffsetLayerCount() == 28
+            && PatternSparseSamplingUniformsOffsetBindingCount() == 32
+            && PatternSparseSamplingUniformsOffsetAddressingFlags() == 36
+            && PatternSparseSamplingUniformsOffsetPeriod() == 40
+            && PatternSparseSamplingUniformsOffsetCompositeMode() == 48
+            && PatternSparseSamplingUniformsOffsetLiveVisible() == 52
+            && PatternSparseSamplingUniformsOffsetReserved() == 56
+            && PatternSparsePageTableDescriptorOffsetEntryOffset() == 0
+            && PatternSparsePageTableDescriptorOffsetEntryCount() == 4
+            && PatternSparsePageTableDescriptorOffsetTableOrigin() == 8
+            && PatternSparsePageTableDescriptorOffsetTableSize() == 16
+            && PatternSparsePageTableDescriptorOffsetLayerIndex() == 24
+            && PatternSparsePageTableDescriptorOffsetRole() == 28
+            && PatternSparseTilePageEntryOffsetLogicalOrigin() == 0
+            && PatternSparseTilePageEntryOffsetPhysicalOrigin() == 8
+            && PatternSparseTilePageEntryOffsetGlobalBindingSlot() == 16
+            && PatternSparseTilePageEntryOffsetPackedLocalMinimum() == 20
+            && PatternSparseTilePageEntryOffsetPackedLocalMaximum() == 24
+            && PatternSparseTilePageEntryOffsetFlags() == 28
+            && PatternSparseSamplingABIVersion == UInt32(
+                SparseSamplingABI.version
+            )
+    }
+
     public static func preconditionValid(
         file: StaticString = #fileID,
         line: UInt = #line
     ) {
         precondition(isValid, "CPU/MSL shader layout mismatch", file: file, line: line)
+    }
+}
+
+public enum SparseSamplingABIError: Error, Equatable, Sendable {
+    case localBoundOutOfRange(Int)
+    case invertedLocalBounds
+}
+
+public enum SparseSamplingABI {
+    public static let version: UInt16 = 1
+    public static let maximumFallbackTextures = 16
+    public static let maximumTier2Textures = 512
+
+    public static func packLocalBound(
+        _ bound: SIMD2<Int>
+    ) throws -> UInt32 {
+        for component in [bound.x, bound.y] where !(0...256).contains(component) {
+            throw SparseSamplingABIError.localBoundOutOfRange(component)
+        }
+        return UInt32(bound.x) | (UInt32(bound.y) << 16)
+    }
+
+    public static func unpackLocalBound(_ packed: UInt32) -> SIMD2<Int> {
+        SIMD2(Int(packed & 0xffff), Int((packed >> 16) & 0xffff))
+    }
+
+    public static func packLocalBounds(
+        minimum: SIMD2<Int>,
+        maximum: SIMD2<Int>
+    ) throws -> (minimum: UInt32, maximum: UInt32) {
+        let packedMinimum = try packLocalBound(minimum)
+        let packedMaximum = try packLocalBound(maximum)
+        guard minimum.x <= maximum.x, minimum.y <= maximum.y else {
+            throw SparseSamplingABIError.invertedLocalBounds
+        }
+        return (packedMinimum, packedMaximum)
     }
 }

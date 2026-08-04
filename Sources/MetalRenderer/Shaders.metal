@@ -1957,3 +1957,312 @@ fragment float4 patternCommitFragment(
         material.parameters.z
     );
 }
+
+// Stage D P4 production-inert sparse sampling probe. Nothing in the active
+// renderer creates these functions' pipeline states.
+vertex PatternFullscreenOut patternSparseSamplingVertex(
+    uint vertexID [[vertex_id]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]]
+) {
+    const float2 clip[3] = {
+        float2(-1.0, -1.0),
+        float2(3.0, -1.0),
+        float2(-1.0, 3.0)
+    };
+    PatternFullscreenOut output;
+    output.position = float4(clip[vertexID], 0.0, 1.0);
+    output.screenPixel = float2(
+        (clip[vertexID].x + 1.0) * 0.5 * float(sparse.outputSize.x),
+        (1.0 - clip[vertexID].y) * 0.5 * float(sparse.outputSize.y)
+    );
+    return output;
+}
+
+struct PatternSparseResolvedAddress {
+    int globalSlot;
+    uint2 localTexel;
+    bool valid;
+};
+
+static int patternSparseFloorDivide(int value, int divisor) {
+    const int quotient = value / divisor;
+    const int remainder = value % divisor;
+    return remainder < 0 ? quotient - 1 : quotient;
+}
+
+static int patternSparsePositiveRemainder(int value, int modulus) {
+    const int remainder = value % modulus;
+    return remainder < 0 ? remainder + modulus : remainder;
+}
+
+static int2 patternSparseUnpackBound(uint packed) {
+    return int2(int(packed & 0xffffu), int((packed >> 16) & 0xffffu));
+}
+
+static bool patternSparseDescriptorIndex(
+    uint role,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    thread uint& result
+) {
+    for (uint index = 0; index < sparse.descriptorCount; ++index) {
+        const PatternSparsePageTableDescriptor descriptor = descriptors[index];
+        if (descriptor.layerIndex == 0 && descriptor.role == role) {
+            result = index;
+            return true;
+        }
+    }
+    return false;
+}
+
+static PatternSparseResolvedAddress patternSparseResolveAddress(
+    int2 logicalPixel,
+    uint role,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries
+) {
+    int2 addressed = logicalPixel;
+    if ((sparse.addressingFlags & PatternSparseAddressingPeriodic) != 0) {
+        addressed = int2(
+            patternSparsePositiveRemainder(addressed.x, int(sparse.period.x)),
+            patternSparsePositiveRemainder(addressed.y, int(sparse.period.y))
+        );
+    }
+    uint descriptorIndex;
+    if (!patternSparseDescriptorIndex(
+        role, sparse, descriptors, descriptorIndex
+    )) {
+        return {-1, uint2(0), false};
+    }
+    const PatternSparsePageTableDescriptor descriptor =
+        descriptors[descriptorIndex];
+    const int2 page = int2(
+        patternSparseFloorDivide(addressed.x, 256),
+        patternSparseFloorDivide(addressed.y, 256)
+    );
+    const int2 relative = page - descriptor.tableOrigin;
+    if (relative.x < 0 || relative.y < 0
+        || relative.x >= int(descriptor.tableSize.x)
+        || relative.y >= int(descriptor.tableSize.y)) {
+        return {-1, uint2(0), false};
+    }
+    const uint localEntry = uint(relative.y) * descriptor.tableSize.x
+        + uint(relative.x);
+    if (localEntry >= descriptor.entryCount) {
+        return {-1, uint2(0), false};
+    }
+    const PatternSparseTilePageEntry entry =
+        entries[descriptor.entryOffset + localEntry];
+    if (entry.globalBindingSlot < 0
+        || (entry.flags & PatternSparsePageEntryKnownClear) != 0) {
+        return {-1, uint2(0), false};
+    }
+    const int2 local = addressed - entry.logicalOrigin;
+    const int2 localMinimum = patternSparseUnpackBound(
+        entry.packedLocalMinimum
+    );
+    const int2 localMaximum = patternSparseUnpackBound(
+        entry.packedLocalMaximum
+    );
+    if (local.x < localMinimum.x || local.y < localMinimum.y
+        || local.x >= localMaximum.x || local.y >= localMaximum.y) {
+        return {-1, uint2(0), false};
+    }
+    return {entry.globalBindingSlot, uint2(local), true};
+}
+
+static float4 patternSparseComposeNeighbor(
+    float4 canonical,
+    float4 authoritative,
+    float4 prediction,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternCompositeUniforms& material
+) {
+    if (sparse.liveVisible == 0) {
+        return canonical;
+    }
+    return patternCompositeLive(
+        authoritative,
+        prediction,
+        canonical,
+        sparse.compositeMode,
+        material.parameters.x,
+        material.parameters.y,
+        material.parameters.z
+    );
+}
+
+static float4 patternSparseBilinear(
+    float4 value00,
+    float4 value10,
+    float4 value01,
+    float4 value11,
+    float2 fraction
+) {
+    return mix(
+        mix(value00, value10, fraction.x),
+        mix(value01, value11, fraction.x),
+        fraction.y
+    );
+}
+
+static float4 patternSparseTier2Read(
+    PatternSparseResolvedAddress address,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparseTextureArguments& arguments
+) {
+    if (!address.valid || address.globalSlot >= int(sparse.bindingCount)) {
+        return float4(0.0);
+    }
+    return arguments.textures[uint(address.globalSlot)].read(
+        address.localTexel
+    );
+}
+
+static float4 patternSparseFallbackRead(
+    PatternSparseResolvedAddress address,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant int* remap,
+    array<texture2d<float>, 16> textures
+) {
+    if (!address.valid || address.globalSlot >= int(sparse.bindingCount)) {
+        return float4(0.0);
+    }
+    const int localSlot = remap[address.globalSlot];
+    if (localSlot < 0 || localSlot >= 16) {
+        return float4(0.0);
+    }
+    return textures[uint(localSlot)].read(address.localTexel);
+}
+
+static float4 patternSparseTier2Neighbor(
+    int2 logicalPixel,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant PatternSparseTextureArguments& arguments
+) {
+    return patternSparseComposeNeighbor(
+        patternSparseTier2Read(patternSparseResolveAddress(
+            logicalPixel, PatternSparseRoleCanonical, sparse,
+            descriptors, entries
+        ), sparse, arguments),
+        patternSparseTier2Read(patternSparseResolveAddress(
+            logicalPixel, PatternSparseRoleAuthoritative, sparse,
+            descriptors, entries
+        ), sparse, arguments),
+        patternSparseTier2Read(patternSparseResolveAddress(
+            logicalPixel, PatternSparseRolePrediction, sparse,
+            descriptors, entries
+        ), sparse, arguments),
+        sparse,
+        material
+    );
+}
+
+static float4 patternSparseFallbackNeighbor(
+    int2 logicalPixel,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant int* remap,
+    array<texture2d<float>, 16> textures
+) {
+    return patternSparseComposeNeighbor(
+        patternSparseFallbackRead(patternSparseResolveAddress(
+            logicalPixel, PatternSparseRoleCanonical, sparse,
+            descriptors, entries
+        ), sparse, remap, textures),
+        patternSparseFallbackRead(patternSparseResolveAddress(
+            logicalPixel, PatternSparseRoleAuthoritative, sparse,
+            descriptors, entries
+        ), sparse, remap, textures),
+        patternSparseFallbackRead(patternSparseResolveAddress(
+            logicalPixel, PatternSparseRolePrediction, sparse,
+            descriptors, entries
+        ), sparse, remap, textures),
+        sparse,
+        material
+    );
+}
+
+fragment float4 patternSparseSamplingTier2Fragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant PatternSparseTextureArguments& arguments
+        [[buffer(PatternBufferIndexSparseTextureArguments)]]
+) {
+    const float2 point = sparse.sourceOrigin + input.screenPixel
+        * sparse.sourceStep;
+    const float2 samplePosition = point - 0.5;
+    const int2 lower = int2(floor(samplePosition));
+    const float2 fraction = fract(samplePosition);
+    return patternSparseBilinear(
+        patternSparseTier2Neighbor(
+            lower, sparse, material, descriptors, entries, arguments
+        ),
+        patternSparseTier2Neighbor(
+            lower + int2(1, 0), sparse, material,
+            descriptors, entries, arguments
+        ),
+        patternSparseTier2Neighbor(
+            lower + int2(0, 1), sparse, material,
+            descriptors, entries, arguments
+        ),
+        patternSparseTier2Neighbor(
+            lower + int2(1, 1), sparse, material,
+            descriptors, entries, arguments
+        ),
+        fraction
+    );
+}
+
+fragment float4 patternSparseSamplingFallbackFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant int* remap [[buffer(PatternBufferIndexSparseBindingRemap)]],
+    array<texture2d<float>, 16> textures
+        [[texture(PatternTextureIndexSparseFallbackBase)]]
+) {
+    const float2 point = sparse.sourceOrigin + input.screenPixel
+        * sparse.sourceStep;
+    const float2 samplePosition = point - 0.5;
+    const int2 lower = int2(floor(samplePosition));
+    const float2 fraction = fract(samplePosition);
+    return patternSparseBilinear(
+        patternSparseFallbackNeighbor(
+            lower, sparse, material, descriptors, entries, remap, textures
+        ),
+        patternSparseFallbackNeighbor(
+            lower + int2(1, 0), sparse, material,
+            descriptors, entries, remap, textures
+        ),
+        patternSparseFallbackNeighbor(
+            lower + int2(0, 1), sparse, material,
+            descriptors, entries, remap, textures
+        ),
+        patternSparseFallbackNeighbor(
+            lower + int2(1, 1), sparse, material,
+            descriptors, entries, remap, textures
+        ),
+        fraction
+    );
+}

@@ -35,6 +35,7 @@ enum SparseTileSamplingPlanError: Error, Equatable, Sendable {
     case staleSlotOwner
     case missingPageTable(layerID: UUID, role: SparseTileSampleRole)
     case nonFiniteSamplePoint
+    case invalidOutputToSourceTransform
     case contentKeyCollision
     case consumerIdentityOverflow
     case leaseRetirementRequested
@@ -54,6 +55,38 @@ enum SparseTileAddressing: Equatable, Sendable {
     case radial(layout: RadialSectorLayout)
 }
 
+/// Immutable axis-aligned mapping from target-local pixel centers into sparse
+/// source pixel-center space. `sourceOffset` is relative to the P3 output
+/// region's minimum; this keeps `.identity` correct for signed/nonzero regions.
+struct SparseTileOutputToSourceTransform: Equatable, Hashable, Sendable {
+    let sourceOffset: SIMD2<Float>
+    let sourceStep: SIMD2<Float>
+
+    static let identity = SparseTileOutputToSourceTransform(
+        sourceOffset: .zero,
+        sourceStep: SIMD2(repeating: 1)
+    )
+
+    fileprivate func shaderSourceOrigin(
+        outputRegion: SparseTileOutputRegion
+    ) throws -> SIMD2<Float> {
+        let root = SIMD2(Float(outputRegion.minX), Float(outputRegion.minY))
+        guard root.x.isFinite, root.y.isFinite,
+              Double(root.x) == Double(outputRegion.minX),
+              Double(root.y) == Double(outputRegion.minY),
+              sourceOffset.x.isFinite, sourceOffset.y.isFinite,
+              sourceStep.x.isFinite, sourceStep.y.isFinite
+        else {
+            throw SparseTileSamplingPlanError.invalidOutputToSourceTransform
+        }
+        let origin = root + sourceOffset
+        guard origin.x.isFinite, origin.y.isFinite else {
+            throw SparseTileSamplingPlanError.invalidOutputToSourceTransform
+        }
+        return origin
+    }
+}
+
 struct SparseTileRoleContentKey: Hashable, Sendable {
     let role: SparseTileSampleRole
     let contentRevision: UInt64
@@ -70,6 +103,21 @@ struct SparseTileSamplingPlanKey: Hashable, Sendable {
     let orderedLayers: [SparseTileLayerContentKey]
     let addressingRevision: UInt64
     let outputGeometryRevision: UInt64
+    let outputToSourceTransform: SparseTileOutputToSourceTransform
+
+    init(
+        documentGeneration: UInt64,
+        orderedLayers: [SparseTileLayerContentKey],
+        addressingRevision: UInt64,
+        outputGeometryRevision: UInt64,
+        outputToSourceTransform: SparseTileOutputToSourceTransform = .identity
+    ) {
+        self.documentGeneration = documentGeneration
+        self.orderedLayers = orderedLayers
+        self.addressingRevision = addressingRevision
+        self.outputGeometryRevision = outputGeometryRevision
+        self.outputToSourceTransform = outputToSourceTransform
+    }
 }
 
 enum SparseTileSourceDisposition: Equatable, Sendable {
@@ -331,6 +379,8 @@ final class SparseTileSamplingPlanContent: @unchecked Sendable {
     let bindingChunks: [SparseTileBindingChunk]
     let batches: [SparseTileBindingBatch]
     let telemetry: SparseTilePlanTelemetry
+    let outputToSourceTransform: SparseTileOutputToSourceTransform
+    let shaderSourceOrigin: SIMD2<Float>
     fileprivate let sourceFingerprints: [SparseTileSourceFingerprint]
     fileprivate let outputRegion: SparseTileOutputRegion
     private let recordsBySlot: [Int: SparseTileBindingRecord]
@@ -343,6 +393,8 @@ final class SparseTileSamplingPlanContent: @unchecked Sendable {
         bindingChunks: [SparseTileBindingChunk],
         batches: [SparseTileBindingBatch],
         telemetry: SparseTilePlanTelemetry,
+        outputToSourceTransform: SparseTileOutputToSourceTransform,
+        shaderSourceOrigin: SIMD2<Float>,
         sourceFingerprints: [SparseTileSourceFingerprint],
         outputRegion: SparseTileOutputRegion
     ) {
@@ -353,6 +405,8 @@ final class SparseTileSamplingPlanContent: @unchecked Sendable {
         self.bindingChunks = bindingChunks
         self.batches = batches
         self.telemetry = telemetry
+        self.outputToSourceTransform = outputToSourceTransform
+        self.shaderSourceOrigin = shaderSourceOrigin
         self.sourceFingerprints = sourceFingerprints
         self.outputRegion = outputRegion
         recordsBySlot = Dictionary(
@@ -1389,6 +1443,8 @@ enum SparseTileSamplingPlanBuilder {
         }) else {
             throw SparseTileSamplingPlanError.inconsistentAddressing
         }
+        let shaderSourceOrigin = try key.outputToSourceTransform
+            .shaderSourceOrigin(outputRegion: outputRegion)
         let maximumGlobalSlots = min(limits.maximumBindingSlots, 512)
         let bindingCount = try sources.reduce(into: 0) { count, source in
             count = try checkedSum(count, source.references.count)
@@ -1456,10 +1512,17 @@ enum SparseTileSamplingPlanBuilder {
         // Validate the complete deterministic subdivision before allocating
         // records, chunks, or page entries. This includes terminal child
         // regions, not only an output that starts at one pixel.
-        try preflightOutputHalo(outputRegion, addressing: sources[0].addressing)
+        try preflightOutputHalo(
+            outputRegion,
+            transform: key.outputToSourceTransform,
+            shaderSourceOrigin: shaderSourceOrigin,
+            addressing: sources[0].addressing
+        )
         try preflightBatches(
             sources: sources,
             outputRegion: outputRegion,
+            transform: key.outputToSourceTransform,
+            shaderSourceOrigin: shaderSourceOrigin,
             limits: limits
         )
         allocationObserver?(.bindingRecords, bindingCount)
@@ -1589,6 +1652,8 @@ enum SparseTileSamplingPlanBuilder {
             pageTables: pageTables,
             addressing: sources[0].addressing,
             outputRegion: outputRegion,
+            transform: key.outputToSourceTransform,
+            shaderSourceOrigin: shaderSourceOrigin,
             limits: limits
         )
         let rebuiltPageEntries = pageTables.reduce(into: 0) { result, table in
@@ -1611,6 +1676,8 @@ enum SparseTileSamplingPlanBuilder {
                 rebuiltPageEntryCount: rebuiltPageEntries,
                 rebuiltBindingCount: rebuiltBindingCount
             ),
+            outputToSourceTransform: key.outputToSourceTransform,
+            shaderSourceOrigin: shaderSourceOrigin,
             sourceFingerprints: sources.fingerprints,
             outputRegion: outputRegion
         )
@@ -1765,17 +1832,25 @@ enum SparseTileSamplingPlanBuilder {
 
     private static func preflightOutputHalo(
         _ outputRegion: SparseTileOutputRegion,
+        transform: SparseTileOutputToSourceTransform,
+        shaderSourceOrigin: SIMD2<Float>,
         addressing: SparseTileAddressing
     ) throws {
+        let halo = try mappedSourceHalo(
+            for: outputRegion,
+            within: outputRegion,
+            transform: transform,
+            shaderSourceOrigin: shaderSourceOrigin
+        )
         _ = try addressedIntervals(
-            minimum: outputRegion.minX,
-            maximumInclusive: outputRegion.maxX,
+            minimum: halo.minX,
+            maximumInclusive: halo.maxX,
             axisLimit: addressing.axisWidth,
             wraps: addressing.wraps
         )
         _ = try addressedIntervals(
-            minimum: outputRegion.minY,
-            maximumInclusive: outputRegion.maxY,
+            minimum: halo.minY,
+            maximumInclusive: halo.maxY,
             axisLimit: addressing.axisHeight,
             wraps: addressing.wraps
         )
@@ -1783,18 +1858,27 @@ enum SparseTileSamplingPlanBuilder {
 
     private static func requiredSourceBindingCount(
         for region: SparseTileOutputRegion,
+        within outputRegion: SparseTileOutputRegion,
+        transform: SparseTileOutputToSourceTransform,
+        shaderSourceOrigin: SIMD2<Float>,
         sources: [SparseTileSourceSnapshot]
     ) throws -> Int {
         let addressing = sources[0].addressing
+        let halo = try mappedSourceHalo(
+            for: region,
+            within: outputRegion,
+            transform: transform,
+            shaderSourceOrigin: shaderSourceOrigin
+        )
         let xIntervals = try addressedIntervals(
-            minimum: region.minX,
-            maximumInclusive: region.maxX,
+            minimum: halo.minX,
+            maximumInclusive: halo.maxX,
             axisLimit: addressing.axisWidth,
             wraps: addressing.wraps
         )
         let yIntervals = try addressedIntervals(
-            minimum: region.minY,
-            maximumInclusive: region.maxY,
+            minimum: halo.minY,
+            maximumInclusive: halo.maxY,
             axisLimit: addressing.axisHeight,
             wraps: addressing.wraps
         )
@@ -1849,6 +1933,8 @@ enum SparseTileSamplingPlanBuilder {
     private static func preflightBatches(
         sources: [SparseTileSourceSnapshot],
         outputRegion: SparseTileOutputRegion,
+        transform: SparseTileOutputToSourceTransform,
+        shaderSourceOrigin: SIMD2<Float>,
         limits: SparseTilePlanLimits
     ) throws {
         var batchCount = 0
@@ -1867,6 +1953,9 @@ enum SparseTileSamplingPlanBuilder {
             }
             let required = try requiredSourceBindingCount(
                 for: region,
+                within: outputRegion,
+                transform: transform,
+                shaderSourceOrigin: shaderSourceOrigin,
                 sources: sources
             )
             if required <= limits.maximumTexturesPerBatch {
@@ -1934,12 +2023,17 @@ enum SparseTileSamplingPlanBuilder {
         pageTables: [SparseTilePageTable],
         addressing: SparseTileAddressing,
         outputRegion: SparseTileOutputRegion,
+        transform: SparseTileOutputToSourceTransform,
+        shaderSourceOrigin: SIMD2<Float>,
         limits: SparseTilePlanLimits
     ) throws -> [SparseTileBindingBatch] {
         var batches: [SparseTileBindingBatch] = []
         func split(_ region: SparseTileOutputRegion) throws {
             let slots = try requiredSlots(
                 for: region,
+                within: outputRegion,
+                transform: transform,
+                shaderSourceOrigin: shaderSourceOrigin,
                 pageTables: pageTables,
                 addressing: addressing
             )
@@ -1997,18 +2091,27 @@ enum SparseTileSamplingPlanBuilder {
 
     private static func requiredSlots(
         for region: SparseTileOutputRegion,
+        within outputRegion: SparseTileOutputRegion,
+        transform: SparseTileOutputToSourceTransform,
+        shaderSourceOrigin: SIMD2<Float>,
         pageTables: [SparseTilePageTable],
         addressing: SparseTileAddressing
     ) throws -> [Int] {
+        let halo = try mappedSourceHalo(
+            for: region,
+            within: outputRegion,
+            transform: transform,
+            shaderSourceOrigin: shaderSourceOrigin
+        )
         let xIntervals = try addressedIntervals(
-            minimum: region.minX,
-            maximumInclusive: region.maxX,
+            minimum: halo.minX,
+            maximumInclusive: halo.maxX,
             axisLimit: addressing.axisWidth,
             wraps: addressing.wraps
         )
         let yIntervals = try addressedIntervals(
-            minimum: region.minY,
-            maximumInclusive: region.maxY,
+            minimum: halo.minY,
+            maximumInclusive: halo.maxY,
             axisLimit: addressing.axisHeight,
             wraps: addressing.wraps
         )
@@ -2038,6 +2141,72 @@ enum SparseTileSamplingPlanBuilder {
             }
         }
         return slots.sorted()
+    }
+
+    private struct SparseTileMappedSourceHalo {
+        let minX: Int
+        let minY: Int
+        let maxX: Int
+        let maxY: Int
+    }
+
+    private static func mappedSourceHalo(
+        for region: SparseTileOutputRegion,
+        within outputRegion: SparseTileOutputRegion,
+        transform: SparseTileOutputToSourceTransform,
+        shaderSourceOrigin: SIMD2<Float>
+    ) throws -> SparseTileMappedSourceHalo {
+        let localMinX = try region.minX.subtractingChecked(outputRegion.minX)
+        let localMinY = try region.minY.subtractingChecked(outputRegion.minY)
+        let localMaxX = try region.maxX.subtractingChecked(outputRegion.minX)
+        let localMaxY = try region.maxY.subtractingChecked(outputRegion.minY)
+        guard localMinX >= 0, localMinY >= 0,
+              localMaxX <= outputRegion.width,
+              localMaxY <= outputRegion.height
+        else { throw SparseTileSamplingPlanError.invalidOutputRegion }
+
+        func axis(
+            localMinimum: Int,
+            localMaximum: Int,
+            origin: Float,
+            step: Float
+        ) throws -> (minimum: Int, maximum: Int) {
+            guard localMaximum > localMinimum else {
+                throw SparseTileSamplingPlanError.invalidOutputRegion
+            }
+            let firstCenter = Float(localMinimum) + 0.5
+            let lastCenter = Float(localMaximum - 1) + 0.5
+            guard firstCenter.isFinite, lastCenter.isFinite else {
+                throw SparseTileSamplingPlanError.invalidOutputToSourceTransform
+            }
+            let first = origin + firstCenter * step - 0.5
+            let last = origin + lastCenter * step - 0.5
+            guard first.isFinite, last.isFinite else {
+                throw SparseTileSamplingPlanError.invalidOutputToSourceTransform
+            }
+            let minimum = try checkedFloorToInt(Double(min(first, last)))
+            let upperLower = try checkedFloorToInt(Double(max(first, last)))
+            return (minimum, try checkedSum(upperLower, 1))
+        }
+
+        let x = try axis(
+            localMinimum: localMinX,
+            localMaximum: localMaxX,
+            origin: shaderSourceOrigin.x,
+            step: transform.sourceStep.x
+        )
+        let y = try axis(
+            localMinimum: localMinY,
+            localMaximum: localMaxY,
+            origin: shaderSourceOrigin.y,
+            step: transform.sourceStep.y
+        )
+        return SparseTileMappedSourceHalo(
+            minX: x.minimum,
+            minY: y.minimum,
+            maxX: x.maximum,
+            maxY: y.maximum
+        )
     }
 
     private static func addressedIntervals(

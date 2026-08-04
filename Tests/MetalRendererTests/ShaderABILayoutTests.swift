@@ -275,4 +275,145 @@ func gridWireIndicesAppendWithoutRenumberingSliceZero() {
     #expect(PatternTextureIndexBrushShape == 2)
     #expect(PatternTextureIndexBrushGrain == 3)
     #expect(PatternTextureIndexReplayLive == 4)
+    #expect(PatternTextureIndexRadialPageTable == 5)
+}
+
+@Test
+func sparseSamplingWireValuesAppendWithoutRenumberingExistingSlots() {
+    #expect(PatternBufferIndexFrameUniforms == 0)
+    #expect(PatternBufferIndexGridFrameUniforms == 1)
+    #expect(PatternBufferIndexDabInstances == 2)
+    #expect(PatternBufferIndexBrushMaterial == 3)
+    #expect(PatternBufferIndexRadialFrameUniforms == 4)
+    #expect(PatternBufferIndexRadialResizeDestinationUniforms == 5)
+    #expect(PatternBufferIndexRadialResizePage == 6)
+    #expect(PatternBufferIndexSparseSamplingUniforms == 7)
+    #expect(PatternBufferIndexSparsePageTableDescriptors == 8)
+    #expect(PatternBufferIndexSparsePageEntries == 9)
+    #expect(PatternBufferIndexSparseBindingRemap == 10)
+    #expect(PatternBufferIndexSparseTextureArguments == 11)
+
+    #expect(PatternTextureIndexCanonical == 0)
+    #expect(PatternTextureIndexLive == 1)
+    #expect(PatternTextureIndexBrushShape == 2)
+    #expect(PatternTextureIndexBrushGrain == 3)
+    #expect(PatternTextureIndexReplayLive == 4)
+    #expect(PatternTextureIndexRadialPageTable == 5)
+    #expect(PatternTextureIndexSparseFallbackBase == 6)
+    #expect(PatternSparseMaximumFallbackTextures == 16)
+    #expect(PatternSparseMaximumTier2Textures == 512)
+    #expect(PatternSparseSamplingABIVersion == 1)
+
+    #expect(PatternSparseRoleCanonical == 0)
+    #expect(PatternSparseRoleAuthoritative == 1)
+    #expect(PatternSparseRolePrediction == 2)
+    #expect(PatternSparseAddressingPeriodic == 1)
+    #expect(PatternSparseAddressingRadial == 2)
+    #expect(PatternSparsePageEntryKnownClear == 1)
+}
+
+@Test
+func sparseSamplingUniformLayoutMatchesMetalContract() {
+    #expect(MemoryLayout<PatternSparseSamplingUniforms>.size == 64)
+    #expect(MemoryLayout<PatternSparseSamplingUniforms>.stride == 64)
+    #expect(MemoryLayout<PatternSparseSamplingUniforms>.alignment == 8)
+    let swiftOffsets = [
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.outputSize),
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.sourceOrigin),
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.sourceStep),
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.descriptorCount),
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.layerCount),
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.bindingCount),
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.addressingFlags),
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.period),
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.compositeMode),
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.liveVisible),
+        MemoryLayout<PatternSparseSamplingUniforms>.offset(of: \.reserved),
+    ]
+    let expected: [Int?] = [0, 8, 16, 24, 28, 32, 36, 40, 48, 52, 56]
+    #expect(swiftOffsets == expected)
+    let cOffsets = [
+        PatternSparseSamplingUniformsOffsetOutputSize(),
+        PatternSparseSamplingUniformsOffsetSourceOrigin(),
+        PatternSparseSamplingUniformsOffsetSourceStep(),
+        PatternSparseSamplingUniformsOffsetDescriptorCount(),
+        PatternSparseSamplingUniformsOffsetLayerCount(),
+        PatternSparseSamplingUniformsOffsetBindingCount(),
+        PatternSparseSamplingUniformsOffsetAddressingFlags(),
+        PatternSparseSamplingUniformsOffsetPeriod(),
+        PatternSparseSamplingUniformsOffsetCompositeMode(),
+        PatternSparseSamplingUniformsOffsetLiveVisible(),
+        PatternSparseSamplingUniformsOffsetReserved(),
+    ]
+    #expect(cOffsets == expected.map { numericCast($0!) })
+}
+
+@Test
+func sparsePageTableLayoutsMatchMetalContract() {
+    #expect(MemoryLayout<PatternSparsePageTableDescriptor>.size == 32)
+    #expect(MemoryLayout<PatternSparsePageTableDescriptor>.stride == 32)
+    #expect(MemoryLayout<PatternSparsePageTableDescriptor>.alignment == 8)
+    let descriptorSwiftOffsets = [
+        MemoryLayout<PatternSparsePageTableDescriptor>.offset(of: \.entryOffset),
+        MemoryLayout<PatternSparsePageTableDescriptor>.offset(of: \.entryCount),
+        MemoryLayout<PatternSparsePageTableDescriptor>.offset(of: \.tableOrigin),
+        MemoryLayout<PatternSparsePageTableDescriptor>.offset(of: \.tableSize),
+        MemoryLayout<PatternSparsePageTableDescriptor>.offset(of: \.layerIndex),
+        MemoryLayout<PatternSparsePageTableDescriptor>.offset(of: \.role),
+    ]
+    let descriptorExpected: [Int?] = [0, 4, 8, 16, 24, 28]
+    #expect(descriptorSwiftOffsets == descriptorExpected)
+    #expect([
+        PatternSparsePageTableDescriptorOffsetEntryOffset(),
+        PatternSparsePageTableDescriptorOffsetEntryCount(),
+        PatternSparsePageTableDescriptorOffsetTableOrigin(),
+        PatternSparsePageTableDescriptorOffsetTableSize(),
+        PatternSparsePageTableDescriptorOffsetLayerIndex(),
+        PatternSparsePageTableDescriptorOffsetRole(),
+    ] == descriptorExpected.map { numericCast($0!) })
+
+    #expect(MemoryLayout<PatternSparseTilePageEntry>.size == 32)
+    #expect(MemoryLayout<PatternSparseTilePageEntry>.stride == 32)
+    #expect(MemoryLayout<PatternSparseTilePageEntry>.alignment == 8)
+    let entrySwiftOffsets = [
+        MemoryLayout<PatternSparseTilePageEntry>.offset(of: \.logicalOrigin),
+        MemoryLayout<PatternSparseTilePageEntry>.offset(of: \.physicalOrigin),
+        MemoryLayout<PatternSparseTilePageEntry>.offset(of: \.globalBindingSlot),
+        MemoryLayout<PatternSparseTilePageEntry>.offset(of: \.packedLocalMinimum),
+        MemoryLayout<PatternSparseTilePageEntry>.offset(of: \.packedLocalMaximum),
+        MemoryLayout<PatternSparseTilePageEntry>.offset(of: \.flags),
+    ]
+    let entryExpected: [Int?] = [0, 8, 16, 20, 24, 28]
+    #expect(entrySwiftOffsets == entryExpected)
+    #expect([
+        PatternSparseTilePageEntryOffsetLogicalOrigin(),
+        PatternSparseTilePageEntryOffsetPhysicalOrigin(),
+        PatternSparseTilePageEntryOffsetGlobalBindingSlot(),
+        PatternSparseTilePageEntryOffsetPackedLocalMinimum(),
+        PatternSparseTilePageEntryOffsetPackedLocalMaximum(),
+        PatternSparseTilePageEntryOffsetFlags(),
+    ] == entryExpected.map { numericCast($0!) })
+    #expect(ShaderABI.isValid)
+}
+
+@Test
+func sparsePackedBoundsAdmitOnlyCheckedZeroThroughTileSide() throws {
+    let packed = try SparseSamplingABI.packLocalBounds(
+        minimum: SIMD2(0, 17),
+        maximum: SIMD2(256, 255)
+    )
+    #expect(SparseSamplingABI.unpackLocalBound(packed.minimum) == SIMD2(0, 17))
+    #expect(SparseSamplingABI.unpackLocalBound(packed.maximum) == SIMD2(256, 255))
+    #expect(throws: SparseSamplingABIError.localBoundOutOfRange(-1)) {
+        _ = try SparseSamplingABI.packLocalBound(SIMD2(-1, 0))
+    }
+    #expect(throws: SparseSamplingABIError.localBoundOutOfRange(257)) {
+        _ = try SparseSamplingABI.packLocalBound(SIMD2(0, 257))
+    }
+    #expect(throws: SparseSamplingABIError.invertedLocalBounds) {
+        _ = try SparseSamplingABI.packLocalBounds(
+            minimum: SIMD2(8, 9),
+            maximum: SIMD2(7, 10)
+        )
+    }
 }

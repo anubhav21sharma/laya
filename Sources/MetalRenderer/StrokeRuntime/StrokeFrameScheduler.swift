@@ -11,6 +11,11 @@ package enum StrokePreparationAllocationProbeStage: UInt8, Sendable {
     case surfaceMetalSubmission
     case surfaceTilePartition
     case surfaceTileLease
+    case sparseSamplingAcquire
+    case sparseSamplingPreflight
+    case sparseSamplingMetalSubmission
+    case sparseSamplingCompletion
+    case sparseSamplingCompletionWait
     case strokeLifecycleCPU
 }
 

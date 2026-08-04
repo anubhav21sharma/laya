@@ -51,6 +51,11 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
     private var surfaceMetalSubmission: [UInt64] = []
     private var surfaceTilePartition: [UInt64] = []
     private var surfaceTileLease: [UInt64] = []
+    private var sparseSamplingAcquire: [UInt64] = []
+    private var sparseSamplingPreflight: [UInt64] = []
+    private var sparseSamplingMetalSubmission: [UInt64] = []
+    private var sparseSamplingCompletion: [UInt64] = []
+    private var sparseSamplingCompletionWait: [UInt64] = []
     private var strokeLifecycleCPU: [UInt64] = []
 
     init() {
@@ -62,6 +67,11 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         surfaceMetalSubmission.reserveCapacity(512)
         surfaceTilePartition.reserveCapacity(512)
         surfaceTileLease.reserveCapacity(512)
+        sparseSamplingAcquire.reserveCapacity(1_024)
+        sparseSamplingPreflight.reserveCapacity(1_024)
+        sparseSamplingMetalSubmission.reserveCapacity(1_024)
+        sparseSamplingCompletion.reserveCapacity(1_024)
+        sparseSamplingCompletionWait.reserveCapacity(1_024)
         strokeLifecycleCPU.reserveCapacity(64)
     }
 
@@ -87,6 +97,16 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
             surfaceTilePartition.append(count)
         case .surfaceTileLease:
             surfaceTileLease.append(count)
+        case .sparseSamplingAcquire:
+            sparseSamplingAcquire.append(count)
+        case .sparseSamplingPreflight:
+            sparseSamplingPreflight.append(count)
+        case .sparseSamplingMetalSubmission:
+            sparseSamplingMetalSubmission.append(count)
+        case .sparseSamplingCompletion:
+            sparseSamplingCompletion.append(count)
+        case .sparseSamplingCompletionWait:
+            sparseSamplingCompletionWait.append(count)
         case .strokeLifecycleCPU:
             strokeLifecycleCPU.append(count)
         }
@@ -106,6 +126,11 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         case .surfaceMetalSubmission: surfaceMetalSubmission
         case .surfaceTilePartition: surfaceTilePartition
         case .surfaceTileLease: surfaceTileLease
+        case .sparseSamplingAcquire: sparseSamplingAcquire
+        case .sparseSamplingPreflight: sparseSamplingPreflight
+        case .sparseSamplingMetalSubmission: sparseSamplingMetalSubmission
+        case .sparseSamplingCompletion: sparseSamplingCompletion
+        case .sparseSamplingCompletionWait: sparseSamplingCompletionWait
         case .strokeLifecycleCPU: strokeLifecycleCPU
         }
         let result = Snapshot(
@@ -139,6 +164,11 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         case .surfaceMetalSubmission: surfaceMetalSubmission
         case .surfaceTilePartition: surfaceTilePartition
         case .surfaceTileLease: surfaceTileLease
+        case .sparseSamplingAcquire: sparseSamplingAcquire
+        case .sparseSamplingPreflight: sparseSamplingPreflight
+        case .sparseSamplingMetalSubmission: sparseSamplingMetalSubmission
+        case .sparseSamplingCompletion: sparseSamplingCompletion
+        case .sparseSamplingCompletionWait: sparseSamplingCompletionWait
         case .strokeLifecycleCPU: strokeLifecycleCPU
         }
     }
@@ -153,6 +183,11 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         surfaceMetalSubmission.removeAll(keepingCapacity: true)
         surfaceTilePartition.removeAll(keepingCapacity: true)
         surfaceTileLease.removeAll(keepingCapacity: true)
+        sparseSamplingAcquire.removeAll(keepingCapacity: true)
+        sparseSamplingPreflight.removeAll(keepingCapacity: true)
+        sparseSamplingMetalSubmission.removeAll(keepingCapacity: true)
+        sparseSamplingCompletion.removeAll(keepingCapacity: true)
+        sparseSamplingCompletionWait.removeAll(keepingCapacity: true)
         strokeLifecycleCPU.removeAll(keepingCapacity: true)
         lock.unlock()
     }
@@ -211,7 +246,7 @@ private final class TenMinuteTraceAllocationMeasurements:
         lock.lock()
         defer { lock.unlock() }
         switch stage {
-        case .surfaceMetalSubmission:
+        case .surfaceMetalSubmission, .sparseSamplingMetalSubmission:
             // Driver allocator timing is diagnostic, not application work.
             return
         case .strokeLifecycleCPU:
@@ -229,7 +264,9 @@ private final class TenMinuteTraceAllocationMeasurements:
             }
         case .authoritativeCPU, .predictionCPU, .estimatedCPU,
              .batchPackaging, .surfaceRecordPacking,
-             .surfaceTilePartition, .surfaceTileLease:
+             .surfaceTilePartition, .surfaceTileLease,
+             .sparseSamplingAcquire, .sparseSamplingPreflight,
+             .sparseSamplingCompletion, .sparseSamplingCompletionWait:
             switch window {
             case .first:
                 firstHotEventCount += 1
@@ -283,6 +320,7 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
     case sensorProgramAllocations(total: UInt64)
     case offMainEstimatedAllocations(total: UInt64, maximum: UInt64)
     case offMainAllocationRegression(String)
+    case sparseSamplingAllocationRegression(String)
     case productionAllocations(
         total: UInt64,
         firstIndex: Int,
@@ -337,6 +375,8 @@ private enum ProbeHarnessError: Error, CustomStringConvertible {
                 + "maximum single correction=\(maximum)"
         case let .offMainAllocationRegression(detail):
             "off-main allocation regression: \(detail)"
+        case let .sparseSamplingAllocationRegression(detail):
+            "sparse sampling allocation regression: \(detail)"
         case let .productionAllocations(
             total,
             firstIndex,
@@ -404,6 +444,11 @@ private struct BrushInputAllocationProbeHarness {
                     probe: probe,
                     root: root
                 )
+            case "--stage-d-sampling":
+                try await runStageDSamplingProbe(
+                    probe: probe,
+                    root: root
+                )
             case "--production":
                 try await runProduction(probe: probe, root: root)
             case "--ten-minute-trace":
@@ -467,6 +512,144 @@ private struct BrushInputAllocationProbeHarness {
                 + "\(lease.eventCount)/0 metal_driver="
                 + "\(metal.eventCount)/\(metal.allocationCount)"
         )
+    }
+
+    @MainActor
+    private static func runStageDSamplingProbe(
+        probe: AllocatorProbe,
+        root: URL
+    ) async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw ProbeHarnessError.metalUnavailable
+        }
+        let measurements = ActorAllocationMeasurements()
+        let results = try await SparseTileSamplingAllocationProbeHarness.run(
+            device: device,
+            library: rendererLibrary(device: device, root: root),
+            probe: StrokePreparationAllocationProbe(
+                identity: 0xD6,
+                arm: { probe.arm() },
+                disarm: { probe.disarm() },
+                record: { stage, count in
+                    measurements.record(stage, count: count)
+                }
+            )
+        )
+        let acquire = measurements.snapshot(for: .sparseSamplingAcquire)
+        let preflight = measurements.snapshot(for: .sparseSamplingPreflight)
+        let submission = measurements.snapshot(
+            for: .sparseSamplingMetalSubmission
+        )
+        let completion = measurements.snapshot(
+            for: .sparseSamplingCompletion
+        )
+        let completionWait = measurements.snapshot(
+            for: .sparseSamplingCompletionWait
+        )
+        let expectedEvents = results.reduce(0) {
+            $0 + $1.measuredIterationCount
+        }
+        let exactEvents = acquire.eventCount == expectedEvents
+            && preflight.eventCount == expectedEvents
+            && submission.eventCount == expectedEvents
+            && completion.eventCount == expectedEvents
+            && completionWait.eventCount == expectedEvents
+        let boundedApplicationAllocations =
+            SparseTileSamplingAllocationCap.acquire.accepts(
+                maximumObserved: acquire.maximumSingleEventCount,
+                firstHalf: acquire.firstHalfAllocationCount,
+                lastHalf: acquire.lastHalfAllocationCount
+            )
+            && SparseTileSamplingAllocationCap.preflight.accepts(
+                maximumObserved: preflight.maximumSingleEventCount,
+                firstHalf: preflight.firstHalfAllocationCount,
+                lastHalf: preflight.lastHalfAllocationCount
+            )
+            && SparseTileSamplingAllocationCap.submission.accepts(
+                maximumObserved: submission.maximumSingleEventCount,
+                firstHalf: submission.firstHalfAllocationCount,
+                lastHalf: submission.lastHalfAllocationCount
+            )
+            && SparseTileSamplingAllocationCap.completion.accepts(
+                maximumObserved: completion.maximumSingleEventCount,
+                firstHalf: completion.firstHalfAllocationCount,
+                lastHalf: completion.lastHalfAllocationCount
+            )
+            && SparseTileSamplingAllocationCap.completionWait.accepts(
+                maximumObserved: completionWait.maximumSingleEventCount,
+                firstHalf: completionWait.firstHalfAllocationCount,
+                lastHalf: completionWait.lastHalfAllocationCount
+            )
+        let resourcesAreStable = results.allSatisfy {
+            $0.sourceTileCount == 17
+                && ($0.backend == "directFallback" ? $0.drawCount > 1 : true)
+                && $0.warmedPlanMetalBufferAllocationCount > 0
+                && $0.warmedPlanMetalBufferAllocationCount
+                    == $0.finalPlanMetalBufferAllocationCount
+                && $0.warmedPlanMetalBufferAllocationBytes
+                    == $0.finalPlanMetalBufferAllocationBytes
+                && $0.warmedCachedPlanMetalBufferBytes
+                    == $0.finalCachedPlanMetalBufferBytes
+                && $0.warmedUploadMetalBufferAllocationCount > 0
+                && $0.warmedUploadMetalBufferAllocationCount
+                    == $0.finalUploadMetalBufferAllocationCount
+                && $0.warmedUploadMetalBufferBytes
+                    == $0.finalUploadMetalBufferBytes
+                && $0.uploadCapacity == 3
+                && $0.uploadHighWaterSlotCount == 3
+                && $0.finalActiveUploadSlotCount == 0
+                && $0.terminalCommandCount
+                    == UInt64($0.measuredIterationCount)
+                && $0.commandFailureCount == 0
+                && $0.planCompletionFailureCount == 0
+                && $0.pendingCompletionCount == 0
+                && $0.finalSourceActiveLeaseCount == 0
+        }
+        guard !results.isEmpty,
+              exactEvents,
+              boundedApplicationAllocations,
+              resourcesAreStable
+        else {
+            throw ProbeHarnessError.sparseSamplingAllocationRegression(
+                "backends=\(results.map(\.backend)) expected=\(expectedEvents) "
+                    + "checks=\(exactEvents)/"
+                    + "\(boundedApplicationAllocations)/\(resourcesAreStable) "
+                    + summary("acquire", acquire)
+                    + summary("preflight", preflight)
+                    + summary("submission", submission)
+                    + summary("completion", completion)
+                    + summary("wait", completionWait)
+                    + "resources=\(results)"
+            )
+        }
+        print(
+            "ALLOCATOR PROBE STAGE D SAMPLING PASS backends="
+                + "\(results.map(\.backend).joined(separator: ",")) "
+                + "events=\(expectedEvents) app_acquire="
+                + "\(acquire.allocationCount)/max"
+                + "\(acquire.maximumSingleEventCount) app_preflight="
+                + "\(preflight.allocationCount)/max"
+                + "\(preflight.maximumSingleEventCount) app_completion="
+                + "\(completion.allocationCount)/max"
+                + "\(completion.maximumSingleEventCount) app_wait="
+                + "\(completionWait.allocationCount)/max"
+                + "\(completionWait.maximumSingleEventCount) metal_submission="
+                + "\(submission.allocationCount)/max"
+                + "\(submission.maximumSingleEventCount)"
+                + " plan_bytes=\(results.map(\.finalCachedPlanMetalBufferBytes))"
+                + " upload_bytes=\(results.map(\.finalUploadMetalBufferBytes))"
+                + " draws=\(results.map(\.drawCount))"
+        )
+    }
+
+    private static func summary(
+        _ name: String,
+        _ snapshot: ActorAllocationMeasurements.Snapshot
+    ) -> String {
+        "\(name)=\(snapshot.eventCount)/max"
+            + "\(snapshot.maximumSingleEventCount)/halves"
+            + "\(snapshot.firstHalfAllocationCount)-"
+            + "\(snapshot.lastHalfAllocationCount) "
     }
 
     private static func runSelfTest(probe: AllocatorProbe) throws {

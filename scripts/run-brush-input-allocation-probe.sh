@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 case "${1:-}" in
-  all|tip-support-spacing|sensor-program|input-derivation|stage-c|stage-c-emission|stage-d-tiles)
+  all|tip-support-spacing|sensor-program|input-derivation|stage-c|stage-c-emission|stage-d-tiles|stage-d-sampling)
     scope=$1
     scratch="$repo_root/.build/brush-input-allocation-probe"
     configuration="${2:-release}"
@@ -59,6 +59,7 @@ case "$scope" in
     run_probe --tip-support-spacing
     run_probe --sensor-program
     run_probe --stage-d-tiles
+    run_probe --stage-d-sampling
     run_probe --production
     ;;
   tip-support-spacing)
@@ -86,6 +87,10 @@ case "$scope" in
   stage-d-tiles)
     run_probe --self-test
     run_probe --stage-d-tiles
+    ;;
+  stage-d-sampling)
+    run_probe --self-test
+    run_probe --stage-d-sampling
     ;;
   *)
     printf 'unsupported allocator probe scope: %s\n' "$scope" >&2
