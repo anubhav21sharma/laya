@@ -249,7 +249,7 @@ struct TiledRasterRevisionStoreTests {
     }
 
     @Test
-    func finalizedAfterTileSetIsAvailableOnlyWhenTheWholePairIsReady() throws {
+    func installLeaseConsumesOnceAfterCompleteGenerationScopedGPUCopy() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let size = PixelSize(width: 300, height: 256)
         let layerID = tiledRevisionLayerID(30)
@@ -268,7 +268,7 @@ struct TiledRasterRevisionStoreTests {
             afterPresentCoordinates: [edge]
         )
         #expect(throws: TiledRasterRevisionStoreError.pairNotReady) {
-            _ = try store.finalizedTileSet(for: pair.after)
+            _ = try store.beginInstall(for: pair.after)
         }
 
         let source = try tiledRevisionTexture(device: device)
@@ -299,33 +299,231 @@ struct TiledRasterRevisionStoreTests {
         try tiledRevisionRequireCompleted(command)
         try store.finalize(before, as: .succeeded)
         #expect(throws: TiledRasterRevisionStoreError.pairNotReady) {
-            _ = try store.finalizedTileSet(for: pair.after)
+            _ = try store.beginInstall(for: pair.after)
         }
         try store.finalize(after, as: .succeeded)
 
-        let tileSet = try store.finalizedTileSet(for: pair.after)
-        #expect(tileSet.reference == pair.after)
-        #expect(tileSet.layerID == layerID)
-        #expect(tileSet.generation == 77)
-        #expect(tileSet.tiles.map(\.descriptor.coordinate) == [first, edge])
-        guard case .knownClear = tileSet.tiles[0].payload else {
-            Issue.record("Removed tile must remain explicitly clear")
-            return
+        let lease = try store.beginInstall(for: pair.after)
+        #expect(lease.reference == pair.after)
+        #expect(lease.layerID == layerID)
+        #expect(lease.generation == 77)
+        #expect(lease.tiles.map(\.descriptor.coordinate) == [first, edge])
+        #expect(lease.tiles.map(\.disposition) == [.remove, .replace])
+        #expect(lease.surfaceRevisionAdvance == 1)
+        #expect(throws: TiledRasterRevisionStoreError.pairNotReady) {
+            try store.publish(pair)
         }
-        guard case let .rgba16Float(
-            buffer,
-            offset,
-            bytesPerRow,
-            bytesPerImage
-        ) = tileSet.tiles[1].payload else {
-            Issue.record("Present edge tile must expose retained GPU bytes")
-            return
+
+        let replacement = try tiledRevisionTexture(device: device)
+        let install = try #require(queue.makeCommandBuffer())
+        let installToken = try store.encodeInstall(
+            lease,
+            layerID: layerID,
+            generation: 77,
+            targets: [.init(coordinate: edge, texture: replacement)],
+            on: install
+        )
+        install.commit()
+        install.waitUntilCompleted()
+        try tiledRevisionRequireCompleted(install)
+        try store.finalize(installToken, as: .succeeded)
+        #expect(throws: TiledRasterRevisionStoreError.layerMismatch(
+            expected: layerID,
+            actual: tiledRevisionLayerID(31)
+        )) {
+            try store.consumeInstall(
+                lease,
+                layerID: tiledRevisionLayerID(31),
+                generation: 77
+            )
         }
-        #expect(buffer.storageMode == .private)
-        #expect(offset == 0)
-        #expect(bytesPerRow >= 44 * 8)
-        #expect(bytesPerImage == bytesPerRow * 256)
-        #expect(tileSet.surfaceRevisionAdvance == 1)
+        #expect(throws: TiledRasterRevisionStoreError.generationMismatch(
+            expected: 77,
+            actual: 78
+        )) {
+            try store.consumeInstall(
+                lease,
+                layerID: layerID,
+                generation: 78
+            )
+        }
+        try store.consumeInstall(
+            lease,
+            layerID: layerID,
+            generation: 77
+        )
+        #expect(throws: TiledRasterRevisionStoreError.invalidInstallLease) {
+            try store.consumeInstall(
+                lease,
+                layerID: layerID,
+                generation: 77
+            )
+        }
+        try store.publish(pair)
+        let installed = tiledRevisionDownload(replacement)
+        #expect(tiledRevisionClippedBytes(
+            installed,
+            width: 44,
+            height: 256
+        ) == tiledRevisionClippedBytes(
+            tiledRevisionDownload(source),
+            width: 44,
+            height: 256
+        ))
+    }
+
+    @Test
+    func releaseDefersUntilLiveInstallLeaseIsConsumed() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layerID = tiledRevisionLayerID(32)
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let fixture = try tiledRevisionCapturedPair(
+            device: device,
+            layerID: layerID,
+            generation: 8,
+            pixelSize: PixelSize(width: 256, height: 256),
+            beforePresentCoordinates: [],
+            afterPresentCoordinates: [coordinate]
+        )
+        try fixture.store.publish(fixture.pair)
+        let lease = try fixture.store.beginInstall(for: fixture.pair.after)
+        try fixture.store.release([fixture.pair.after.id])
+        #expect(fixture.store.containsRevision(fixture.pair.after.id))
+        #expect(fixture.store.residentBytes == fixture.pair.after.retainedBytes)
+
+        let queue = try #require(device.makeCommandQueue())
+        let command = try #require(queue.makeCommandBuffer())
+        let target = try tiledRevisionTexture(device: device)
+        let operation = try fixture.store.encodeInstall(
+            lease,
+            layerID: layerID,
+            generation: 8,
+            targets: [.init(coordinate: coordinate, texture: target)],
+            on: command
+        )
+        command.commit()
+        command.waitUntilCompleted()
+        try tiledRevisionRequireCompleted(command)
+        try fixture.store.finalize(operation, as: .succeeded)
+        try fixture.store.consumeInstall(
+            lease,
+            layerID: layerID,
+            generation: 8
+        )
+
+        #expect(!fixture.store.containsRevision(fixture.pair.after.id))
+        #expect(fixture.store.residentBytes == fixture.pair.before.retainedBytes)
+    }
+
+    @Test
+    func discardInvalidatesLiveInstallLeaseAndReleasesAllAccounting() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layerID = tiledRevisionLayerID(33)
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let fixture = try tiledRevisionCapturedPair(
+            device: device,
+            layerID: layerID,
+            generation: 9,
+            pixelSize: PixelSize(width: 256, height: 256),
+            beforePresentCoordinates: [coordinate],
+            afterPresentCoordinates: [coordinate]
+        )
+        let lease = try fixture.store.beginInstall(for: fixture.pair.after)
+        let queue = try #require(device.makeCommandQueue())
+        let command = try #require(queue.makeCommandBuffer())
+        let target = try tiledRevisionTexture(device: device)
+        let operation = try fixture.store.encodeInstall(
+            lease,
+            layerID: layerID,
+            generation: 9,
+            targets: [.init(coordinate: coordinate, texture: target)],
+            on: command
+        )
+
+        try fixture.store.discard(fixture.pair)
+        command.commit()
+        command.waitUntilCompleted()
+        try tiledRevisionRequireCompleted(command)
+
+        #expect(fixture.store.residentBytes == 0)
+        #expect(fixture.store.snapshot().inFlightInstallLeaseCount == 0)
+        #expect(fixture.store.snapshot().inFlightOperationCount == 0)
+        #expect(throws: TiledRasterRevisionStoreError.invalidOperationToken) {
+            try fixture.store.finalize(operation, as: .succeeded)
+        }
+        #expect(throws: TiledRasterRevisionStoreError.invalidInstallLease) {
+            try fixture.store.consumeInstall(
+                lease,
+                layerID: layerID,
+                generation: 9
+            )
+        }
+        #expect(throws: TiledRasterRevisionStoreError.invalidInstallLease) {
+            _ = try fixture.store.encodeInstall(
+                lease,
+                layerID: layerID,
+                generation: 9,
+                targets: [
+                    .init(
+                        coordinate: coordinate,
+                        texture: try tiledRevisionTexture(device: device)
+                    ),
+                ],
+                on: try #require(device.makeCommandQueue()?.makeCommandBuffer())
+            )
+        }
+    }
+
+    @Test
+    func failedInstallEncodingInvalidatesLeaseAndLeavesStoreReusable() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layerID = tiledRevisionLayerID(34)
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let fixture = try tiledRevisionCapturedPair(
+            device: device,
+            layerID: layerID,
+            generation: 10,
+            pixelSize: PixelSize(width: 256, height: 256),
+            beforePresentCoordinates: [coordinate],
+            afterPresentCoordinates: [coordinate]
+        )
+        let baseline = fixture.store.snapshot()
+        let lease = try fixture.store.beginInstall(for: fixture.pair.after)
+        let target = try tiledRevisionTexture(device: device)
+        let command = try #require(
+            device.makeCommandQueue()?.makeCommandBuffer()
+        )
+
+        #expect(throws: TiledRasterRevisionStoreError.injectedFailure(
+            .commandEncoding
+        )) {
+            _ = try fixture.store.encodeInstall(
+                lease,
+                layerID: layerID,
+                generation: 10,
+                targets: [.init(coordinate: coordinate, texture: target)],
+                on: command,
+                failureInjection: .init(failingAt: .commandEncoding)
+            )
+        }
+
+        let snapshot = fixture.store.snapshot()
+        #expect(snapshot.inFlightInstallLeaseCount == 0)
+        #expect(snapshot.inFlightOperationCount == 0)
+        #expect(snapshot == baseline)
+        #expect(throws: TiledRasterRevisionStoreError.invalidInstallLease) {
+            try fixture.store.consumeInstall(
+                lease,
+                layerID: layerID,
+                generation: 10
+            )
+        }
+
+        let replacement = try fixture.store.beginInstall(
+            for: fixture.pair.after
+        )
+        #expect(replacement != lease)
+        try fixture.store.discard(fixture.pair)
     }
 
     @Test
@@ -648,6 +846,75 @@ struct TiledRasterRevisionStoreTests {
         }
         #expect(store.residentBytes == 0)
     }
+}
+
+private func tiledRevisionCapturedPair(
+    device: any MTLDevice,
+    layerID: UUID,
+    generation: UInt64,
+    pixelSize: PixelSize,
+    beforePresentCoordinates: [PaintTileCoordinate],
+    afterPresentCoordinates: [PaintTileCoordinate]
+) throws -> (
+    store: TiledRasterRevisionStore,
+    pair: PendingRasterRevisionPair
+) {
+    let coordinates = Array(Set(
+        beforePresentCoordinates + afterPresentCoordinates
+    )).sorted()
+    precondition(!coordinates.isEmpty)
+    let store = TiledRasterRevisionStore(
+        device: device,
+        maximumRetainedBytes:
+            PaintTileDescriptor.residentByteCount * coordinates.count * 2
+    )
+    let pair = try store.allocatePair(
+        layerID: layerID,
+        generation: generation,
+        pixelSize: pixelSize,
+        dirtyRegions: tiledRevisionRegions(
+            for: coordinates,
+            size: pixelSize
+        ),
+        beforePresentCoordinates: beforePresentCoordinates,
+        afterPresentCoordinates: afterPresentCoordinates
+    )
+    let texture = try tiledRevisionTexture(device: device)
+    tiledRevisionUpload(tiledRevisionBytes(seed: 53), to: texture)
+    let beforePresent = Set(beforePresentCoordinates)
+    let afterPresent = Set(afterPresentCoordinates)
+    let beforeSources: [TiledRasterRevisionTileSource] = coordinates.map {
+        beforePresent.contains($0)
+            ? .texture(coordinate: $0, texture: texture)
+            : .knownClear(coordinate: $0)
+    }
+    let afterSources: [TiledRasterRevisionTileSource] = coordinates.map {
+        afterPresent.contains($0)
+            ? .texture(coordinate: $0, texture: texture)
+            : .knownClear(coordinate: $0)
+    }
+    let queue = try #require(device.makeCommandQueue())
+    let command = try #require(queue.makeCommandBuffer())
+    let before = try store.encodeCapture(
+        pair.before,
+        layerID: layerID,
+        generation: generation,
+        sources: beforeSources,
+        on: command
+    )
+    let after = try store.encodeCapture(
+        pair.after,
+        layerID: layerID,
+        generation: generation,
+        sources: afterSources,
+        on: command
+    )
+    command.commit()
+    command.waitUntilCompleted()
+    try tiledRevisionRequireCompleted(command)
+    try store.finalize(before, as: .succeeded)
+    try store.finalize(after, as: .succeeded)
+    return (store, pair)
 }
 
 private func tiledRevisionLayerID(_ value: Int) -> UUID {

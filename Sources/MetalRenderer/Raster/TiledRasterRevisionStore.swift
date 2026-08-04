@@ -44,6 +44,7 @@ public enum TiledRasterRevisionStoreError:
     case pairNotReady
     case pairAlreadyPublished
     case releaseAlreadyRequested
+    case invalidInstallLease
     case injectedFailure(TiledRasterRevisionFailurePoint)
 }
 
@@ -80,30 +81,44 @@ public struct TiledRasterRevisionTileTarget: @unchecked Sendable {
     }
 }
 
-public enum TiledRasterRevisionRetainedPayload: @unchecked Sendable {
-    case knownClear
-    case rgba16Float(
-        buffer: any MTLBuffer,
-        offset: Int,
-        bytesPerRow: Int,
-        bytesPerImage: Int
-    )
+public enum TiledRasterRevisionInstallDisposition:
+    Equatable, Sendable
+{
+    case remove
+    case replace
 }
 
-public struct TiledRasterRevisionRetainedTile: @unchecked Sendable {
+public struct TiledRasterRevisionInstallTile: Equatable, Sendable {
     public let descriptor: PaintTileDescriptor
-    public let payload: TiledRasterRevisionRetainedPayload
+    public let disposition: TiledRasterRevisionInstallDisposition
 }
 
-/// Immutable, sorted input for the later canonical tile install. Consumers
-/// prepare every replacement resource first, then swap the complete set once.
-public struct TiledRasterRevisionTileSet: @unchecked Sendable {
+/// Opaque store-owned lease for preparing one canonical tile-set replacement.
+/// It deliberately exposes no retained Metal buffers.
+public struct TiledRasterRevisionInstallLease: Equatable, Sendable {
+    fileprivate let storeIdentity: UInt64
+    fileprivate let leaseID: UInt64
     public let reference: RasterRevisionReference
     public let layerID: UUID
     public let generation: UInt64
-    public let tiles: [TiledRasterRevisionRetainedTile]
-    /// One user operation installs the set with one surface revision change.
+    public let tiles: [TiledRasterRevisionInstallTile]
     public let surfaceRevisionAdvance: UInt64 = 1
+
+    fileprivate init(
+        storeIdentity: UInt64,
+        leaseID: UInt64,
+        reference: RasterRevisionReference,
+        layerID: UUID,
+        generation: UInt64,
+        tiles: [TiledRasterRevisionInstallTile]
+    ) {
+        self.storeIdentity = storeIdentity
+        self.leaseID = leaseID
+        self.reference = reference
+        self.layerID = layerID
+        self.generation = generation
+        self.tiles = tiles
+    }
 }
 
 public struct TiledRasterRevisionOperationToken:
@@ -126,6 +141,7 @@ public struct TiledRasterRevisionStoreSnapshot:
     public let provisionalRevisionCount: Int
     public let publishedRevisionCount: Int
     public let inFlightOperationCount: Int
+    public let inFlightInstallLeaseCount: Int
 
     public static func empty(
         maximumRetainedBytes: Int
@@ -135,7 +151,8 @@ public struct TiledRasterRevisionStoreSnapshot:
             residentBytes: 0,
             provisionalRevisionCount: 0,
             publishedRevisionCount: 0,
-            inFlightOperationCount: 0
+            inFlightOperationCount: 0,
+            inFlightInstallLeaseCount: 0
         )
     }
 }
@@ -166,6 +183,13 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
     private enum OperationKind {
         case capture
         case restore
+        case install
+    }
+
+    private enum InstallState {
+        case prepared
+        case encoding
+        case readyToConsume
     }
 
     private struct Slice {
@@ -204,8 +228,17 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         let revisionID: StoredRasterRevisionID
         let pairID: StoredRasterRevisionID
         let kind: OperationKind
+        let installLeaseID: UInt64?
         let commandBuffer: any MTLCommandBuffer
         let transientBuffers: [any MTLBuffer]
+    }
+
+    private struct InstallRecord {
+        let revisionID: StoredRasterRevisionID
+        let pairID: StoredRasterRevisionID
+        let layerID: UUID
+        let generation: UInt64
+        var state: InstallState
     }
 
     private let device: any MTLDevice
@@ -216,8 +249,10 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
     private var entries: [StoredRasterRevisionID: Entry] = [:]
     private var pairs: [StoredRasterRevisionID: PairRecord] = [:]
     private var operations: [TiledRasterRevisionOperationToken: Operation] = [:]
+    private var installRecords: [UInt64: InstallRecord] = [:]
     private var nextRevisionID: UInt64 = 1
     private var nextOperationID: UInt64 = 1
+    private var nextInstallLeaseID: UInt64 = 1
     private var residentByteCount = 0
 
     public init(
@@ -242,7 +277,8 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 publishedRevisionCount: entries.values.reduce(into: 0) {
                     if $1.lifetime == .published { $0 += 1 }
                 },
-                inFlightOperationCount: operations.count
+                inFlightOperationCount: operations.count,
+                inFlightInstallLeaseCount: installRecords.count
             )
         }
     }
@@ -667,8 +703,10 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
             guard !record.isPublished else {
                 throw TiledRasterRevisionStoreError.pairAlreadyPublished
             }
-            guard operations.values.allSatisfy({ $0.pairID != pair.before.id })
-            else {
+            let pairOperations = operations.values.filter {
+                $0.pairID == pair.before.id
+            }
+            guard pairOperations.allSatisfy({ $0.kind == .install }) else {
                 throw TiledRasterRevisionStoreError.pairNotReady
             }
             removePair(pair.before.id)
@@ -700,13 +738,14 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         }
     }
 
-    public func finalizedTileSet(
+    public func beginInstall(
         for reference: RasterRevisionReference
-    ) throws -> TiledRasterRevisionTileSet {
+    ) throws -> TiledRasterRevisionInstallLease {
         try withLock {
             guard reference.id.belongs(to: storeIdentity),
-                  let entry = entries[reference.id],
+                  var entry = entries[reference.id],
                   entry.reference == reference,
+                  !entry.releaseRequested,
                   let pair = pairs[entry.pairID],
                   let before = entries[pair.before.id],
                   let after = entries[pair.after.id],
@@ -721,32 +760,133 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
             else {
                 throw TiledRasterRevisionStoreError.pairNotReady
             }
-            let tiles = entry.slices.map { slice in
-                let payload: TiledRasterRevisionRetainedPayload
-                if slice.isPresent {
-                    guard let buffer = entry.buffer else {
-                        preconditionFailure("Present slice must retain bytes")
-                    }
-                    payload = .rgba16Float(
-                        buffer: buffer,
-                        offset: slice.bufferOffset,
-                        bytesPerRow: slice.bytesPerRow,
-                        bytesPerImage: slice.bytesPerImage
-                    )
-                } else {
-                    payload = .knownClear
-                }
-                return TiledRasterRevisionRetainedTile(
-                    descriptor: slice.descriptor,
-                    payload: payload
-                )
+            guard !installRecords.values.contains(where: {
+                $0.pairID == entry.pairID
+            }) else {
+                throw TiledRasterRevisionStoreError.pairNotReady
             }
-            return TiledRasterRevisionTileSet(
+            guard nextInstallLeaseID < UInt64.max else {
+                throw TiledRasterRevisionStoreError.byteCountOverflow
+            }
+            let leaseID = nextInstallLeaseID
+            nextInstallLeaseID += 1
+            installRecords[leaseID] = InstallRecord(
+                revisionID: reference.id,
+                pairID: entry.pairID,
+                layerID: layerID,
+                generation: generation,
+                state: .prepared
+            )
+            entry.inFlightCount += 1
+            entries[reference.id] = entry
+            return TiledRasterRevisionInstallLease(
+                storeIdentity: storeIdentity,
+                leaseID: leaseID,
                 reference: reference,
                 layerID: layerID,
                 generation: generation,
-                tiles: tiles
+                tiles: entry.slices.map {
+                    TiledRasterRevisionInstallTile(
+                        descriptor: $0.descriptor,
+                        disposition: $0.isPresent ? .replace : .remove
+                    )
+                }
             )
+        }
+    }
+
+    public func encodeInstall(
+        _ lease: TiledRasterRevisionInstallLease,
+        layerID: UUID,
+        generation: UInt64,
+        targets: [TiledRasterRevisionTileTarget],
+        on commandBuffer: any MTLCommandBuffer,
+        failureInjection: TiledRasterRevisionFailureInjection? = nil
+    ) throws -> TiledRasterRevisionOperationToken {
+        let entry = try withLock {
+            let record = try validatedInstallRecord(
+                lease,
+                layerID: layerID,
+                generation: generation
+            )
+            guard record.state == .prepared,
+                  let entry = entries[record.revisionID]
+            else {
+                throw TiledRasterRevisionStoreError.invalidInstallLease
+            }
+            try validateInstall(targets: targets, for: entry)
+            return entry
+        }
+        let orderedTargets = targets.sorted { $0.coordinate < $1.coordinate }
+        let token = try reserveOperation(
+            revisionID: lease.reference.id,
+            kind: .install,
+            installLeaseID: lease.leaseID,
+            commandBuffer: commandBuffer,
+            transientBuffers: []
+        )
+        do {
+            if failureInjection?.shouldFail(at: .commandEncoding) == true {
+                throw TiledRasterRevisionStoreError.injectedFailure(
+                    .commandEncoding
+                )
+            }
+            guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
+                throw TiledRasterRevisionStoreError.blitEncoderUnavailable
+            }
+            encoder.label = "Install Tiled Raster Revision"
+            let presentSlices = entry.slices.filter(\.isPresent)
+            for (slice, target) in zip(presentSlices, orderedTargets) {
+                guard let buffer = entry.buffer else {
+                    preconditionFailure("Present slice must retain bytes")
+                }
+                encoder.copy(
+                    from: buffer,
+                    sourceOffset: slice.bufferOffset,
+                    sourceBytesPerRow: slice.bytesPerRow,
+                    sourceBytesPerImage: slice.bytesPerImage,
+                    sourceSize: MTLSize(
+                        width: slice.descriptor.logicalBounds.width,
+                        height: slice.descriptor.logicalBounds.height,
+                        depth: 1
+                    ),
+                    to: target.texture,
+                    destinationSlice: 0,
+                    destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                )
+            }
+            encoder.endEncoding()
+            return token
+        } catch {
+            cancelOperation(token)
+            throw error
+        }
+    }
+
+    public func consumeInstall(
+        _ lease: TiledRasterRevisionInstallLease,
+        layerID: UUID,
+        generation: UInt64
+    ) throws {
+        try withLock {
+            let record = try validatedInstallRecord(
+                lease,
+                layerID: layerID,
+                generation: generation
+            )
+            guard record.state == .readyToConsume,
+                  var entry = entries[record.revisionID],
+                  entry.inFlightCount > 0
+            else {
+                throw TiledRasterRevisionStoreError.invalidInstallLease
+            }
+            installRecords.removeValue(forKey: lease.leaseID)
+            entry.inFlightCount -= 1
+            entries[record.revisionID] = entry
+            if entry.inFlightCount == 0, entry.releaseRequested {
+                removeRevision(record.revisionID)
+            }
         }
     }
 
@@ -1020,6 +1160,60 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         }
     }
 
+    private func validateInstall(
+        targets: [TiledRasterRevisionTileTarget],
+        for entry: Entry
+    ) throws {
+        var unique = Set<PaintTileCoordinate>()
+        for target in targets {
+            guard unique.insert(target.coordinate).inserted else {
+                throw TiledRasterRevisionStoreError.duplicateCoordinate(
+                    target.coordinate
+                )
+            }
+            try validate(texture: target.texture)
+        }
+        let expected = Set(
+            entry.slices.lazy
+                .filter(\.isPresent)
+                .map(\.descriptor.coordinate)
+        )
+        guard unique == expected, targets.count == expected.count else {
+            throw TiledRasterRevisionStoreError.coordinateSetMismatch
+        }
+    }
+
+    private func validatedInstallRecord(
+        _ lease: TiledRasterRevisionInstallLease,
+        layerID: UUID,
+        generation: UInt64
+    ) throws -> InstallRecord {
+        guard lease.storeIdentity == storeIdentity,
+              let record = installRecords[lease.leaseID],
+              record.revisionID == lease.reference.id,
+              record.layerID == lease.layerID,
+              record.generation == lease.generation,
+              let entry = entries[record.revisionID],
+              entry.reference == lease.reference,
+              entry.pairID == record.pairID
+        else {
+            throw TiledRasterRevisionStoreError.invalidInstallLease
+        }
+        guard record.layerID == layerID else {
+            throw TiledRasterRevisionStoreError.layerMismatch(
+                expected: record.layerID,
+                actual: layerID
+            )
+        }
+        guard record.generation == generation else {
+            throw TiledRasterRevisionStoreError.generationMismatch(
+                expected: record.generation,
+                actual: generation
+            )
+        }
+        return record
+    }
+
     private func validate(texture: any MTLTexture) throws {
         guard texture.pixelFormat == PaintTileDescriptor.pixelFormat else {
             throw TiledRasterRevisionStoreError.invalidTextureFormat
@@ -1034,6 +1228,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
     private func reserveOperation(
         revisionID: StoredRasterRevisionID,
         kind: OperationKind,
+        installLeaseID: UInt64? = nil,
         commandBuffer: any MTLCommandBuffer,
         transientBuffers: [any MTLBuffer]
     ) throws -> TiledRasterRevisionOperationToken {
@@ -1049,6 +1244,19 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                     throw TiledRasterRevisionStoreError.pairNotReady
                 }
                 entry.capturePending = true
+            } else if kind == .install {
+                guard let installLeaseID,
+                      var record = installRecords[installLeaseID],
+                      record.revisionID == revisionID,
+                      record.pairID == entry.pairID,
+                      record.state == .prepared
+                else {
+                    throw TiledRasterRevisionStoreError.invalidInstallLease
+                }
+                record.state = .encoding
+                installRecords[installLeaseID] = record
+            } else {
+                precondition(installLeaseID == nil)
             }
             entry.inFlightCount += 1
             entries[revisionID] = entry
@@ -1061,6 +1269,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 revisionID: revisionID,
                 pairID: entry.pairID,
                 kind: kind,
+                installLeaseID: installLeaseID,
                 commandBuffer: commandBuffer,
                 transientBuffers: transientBuffers
             )
@@ -1091,6 +1300,22 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         }
         precondition(entry.inFlightCount > 0)
         entry.inFlightCount -= 1
+        if operation.kind == .install {
+            guard let leaseID = operation.installLeaseID,
+                  var record = installRecords[leaseID]
+            else {
+                preconditionFailure("Install operation must own a live lease")
+            }
+            if succeeded {
+                precondition(record.state == .encoding)
+                record.state = .readyToConsume
+                installRecords[leaseID] = record
+            } else {
+                installRecords.removeValue(forKey: leaseID)
+                precondition(entry.inFlightCount > 0)
+                entry.inFlightCount -= 1
+            }
+        }
         entries[operation.revisionID] = entry
         if entry.inFlightCount == 0, entry.releaseRequested {
             removeRevision(operation.revisionID)
@@ -1119,6 +1344,18 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
     }
 
     private func removePair(_ pairID: StoredRasterRevisionID) {
+        let operationTokens = operations.compactMap { token, operation in
+            operation.pairID == pairID ? token : nil
+        }
+        for token in operationTokens {
+            operations.removeValue(forKey: token)
+        }
+        let leaseIDs = installRecords.compactMap { leaseID, record in
+            record.pairID == pairID ? leaseID : nil
+        }
+        for leaseID in leaseIDs {
+            installRecords.removeValue(forKey: leaseID)
+        }
         guard let pair = pairs.removeValue(forKey: pairID) else { return }
         removeRevision(pair.before.id)
         removeRevision(pair.after.id)
