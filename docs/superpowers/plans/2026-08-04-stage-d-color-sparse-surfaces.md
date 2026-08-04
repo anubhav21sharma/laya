@@ -140,13 +140,15 @@ wiring changes:
   `Tests/Baselines/stage-b-known-issues.txt`.
 - Produces: frozen encoded-BGRA8 import fixtures, existing project v1/v2/v3
   archive hashes, representative dry-scene semantic/canonical hashes, and an
-  executable inventory of every full-canvas paint allocation that Task 5 must
+  executable inventory of every full-canvas paint allocation that Task 6 must
   remove.
 
-- [ ] Add a source-structure test that identifies all baseline paint-bearing
-  `.bgra8Unorm` allocations in `CanonicalRaster`, `PersistentLiveTile`,
-  `ReplayLiveTile`, and `StrokeMetalSurfaceResources`; the test must fail only
-  after those allocations are replaced and will be inverted at Task 5.
+- [ ] Add a source/runtime structure gate that inventories every baseline
+  full-canvas paint allocation and encoded-BGRA deposition route, regardless
+  of the concrete type or pixel format. Keep an exact BGRA8 allowlist for
+  drawable, export/interchange, capture, and diagnostics. Task 5 proves its
+  opt-in tiled seam without changing this production inventory; Task 6 removes
+  the legacy routes and inverts the gate.
 - [ ] Add fixtures for empty, translucent, low-flow repeated buildup, erase,
   periodic seam, and radial pages. Record encoded input bytes and independent
   expected linear reference values; do not bless current blended pixels as
@@ -340,6 +342,14 @@ wiring changes:
 - Capture and restore operations are two-phase and generation-scoped. Publish
   occurs only after all tile blits complete. Release during in-flight work is
   deferred, and failure/cancel discards the entire provisional pair.
+- Produces an opaque `TiledRasterRevisionInstallLease` from
+  `beginInstall(for:)`. `encodeInstall(_:layerID:generation:targets:on:)`
+  returns the existing operation token, `finalize(_:as:)` makes a successful
+  lease consumable only after GPU completion, and
+  `consumeInstall(_:layerID:generation:)` releases its retained-payload pin
+  after the atomic destination swap. Failed finalization invalidates the lease.
+  History release, pruning, memory pressure, a second install, and forged or
+  wrong-layer leases cannot invalidate retained buffers during installation.
 - Keeps the old full-surface store as a private production compatibility helper
   while Task 5 proves the tiled route behind an explicit test seam. Task 6 is
   the only production switch and then deletes the helper.
@@ -350,6 +360,10 @@ wiring changes:
 - [ ] Add failure injection before each buffer allocation, each tile capture,
   command encoding, and completion. Assert no published partial pair and exact
   reusable store state.
+- [ ] Add install-lease RED tests for release/prune while install is in flight,
+  wrong token/layer/generation, duplicate finish, failed destination upload,
+  and immediate retry. Retained bytes remain pinned through GPU completion and
+  return to the exact pre-install accounting on every outcome.
 - [ ] Prove one stroke spanning many dirty rectangles but the same tile captures
   that tile once, and that retained bytes equal aligned RGBA16F tile slices.
 - [ ] Add reorder regression using the layer-bound history command from Task 3.
@@ -449,9 +463,15 @@ wiring changes:
 
 **Files:**
 
+- Create: `Sources/MetalRenderer/Raster/DocumentPaintSurfaceStore.swift`
+- Create: `Sources/MetalRenderer/Compositing/SparseTileSamplingPlan.swift`
+- Create: `Sources/MetalRenderer/Compositing/SparseTileSamplingPipeline.swift`
+- Delete: `Sources/MetalRenderer/Raster/RasterRevisionStore.swift`
+- Delete: `Sources/MetalRenderer/PersistentLiveTile.swift`
+- Delete: `Sources/MetalRenderer/Brush/ReplayLiveTile.swift`
 - Modify: `Sources/MetalRenderer/CanonicalRaster.swift`
-- Modify: `Sources/MetalRenderer/PersistentLiveTile.swift`
-- Modify: `Sources/MetalRenderer/Brush/ReplayLiveTile.swift`
+- Modify: `Sources/CShaderTypes/include/ShaderTypes.h`
+- Modify: `Sources/MetalRenderer/ShaderABI.swift`
 - Modify: `Sources/MetalRenderer/GridPipelineLibrary.swift`
 - Modify: `Sources/MetalRenderer/Deposition/DepositionPipelineLibrary.swift`
 - Modify: `Sources/MetalRenderer/Deposition/DepositionEncoder.swift`
@@ -459,6 +479,8 @@ wiring changes:
 - Modify: `Sources/MetalRenderer/GridRenderer.swift`
 - Modify: `Sources/MetalRenderer/GridRenderer+Harness.swift`
 - Modify: `Sources/MetalRenderer/Shaders.metal`
+- Modify: `Sources/MetalRenderer/Color/DocumentColorPipeline.swift`
+- Modify: `Sources/MetalRenderer/Capture/PNGWriter.swift`
 - Modify: `Sources/MetalRenderer/CommittedDocumentSnapshot.swift`
 - Modify: `Sources/MetalRenderer/FlattenedSceneExporter.swift`
 - Modify: `Sources/MetalRenderer/FiniteCanvasExporter.swift`
@@ -467,42 +489,124 @@ wiring changes:
 - Modify: `App/PatternSpike/Canvas/MetalCanvas.swift`
 - Modify: `App/PatternSpike/Panels/EditorTopBar.swift`
 - Modify: `App/PatternSpike/Persistence/PatternProjectBridge.swift`
+- Modify: `Sources/BrushInputAllocationProbeHarness/main.swift`
+- Create: `Tests/MetalRendererTests/DocumentPaintSurfaceStoreTests.swift`
+- Create: `Tests/MetalRendererTests/SparseTileSamplingPlanTests.swift`
+- Create: `Tests/MetalRendererTests/SparseTileSamplingPipelineTests.swift`
 - Modify: `Tests/MetalRendererTests/DepositionRendererTests.swift`
+- Modify: `Tests/MetalRendererTests/DocumentColorPipelineTests.swift`
+- Modify: `Tests/MetalRendererTests/CommittedDocumentSnapshotTests.swift`
+- Modify: `Tests/MetalRendererTests/RendererResizeTests.swift`
 - Modify: `Tests/MetalRendererTests/StageDBaselineContractTests.swift`
 - Modify: `App/Tests/PatternProjectBridgeTests.swift`
 
 **Interfaces:**
 
-- `CanonicalRaster`, authoritative live, prediction, and scratch become
-  `TiledRasterSurface` owners. No production paint-bearing `.bgra8Unorm`
-  full-canvas texture remains.
-- All deposition/erase/commit math targets `.rgba16Float`; encoded `InkColor`
-  enters through Task 1's conversion API exactly once when instances are packed in
-  this atomic switch. Display and PNG/interchange export perform the sole
-  linear-to-encoded conversion.
-- GridRenderer installs Task 5 leases, commits only dirty tiles through Task 4, and
-  preserves the twelve lifecycle transitions. The legacy full-canvas paint
-  path and test switch are deleted in this commit.
+- `DocumentPaintSurfaceStore` is the document-owned residency owner. It holds
+  exactly one `PaintTileStore`, a checked layer-ID-to-`TiledRasterSurface`
+  registry, document geometry, and surface generation. It accepts any valid
+  layer ID and contains no compatibility-layer special cases; Task 6 initially
+  registers exactly one layer and Task 7 exercises the same API with up to
+  eight. Canonical, authoritative, prediction, provisional, scratch, and later
+  every layer draw from this one budget; no production convenience initializer
+  may create a second store.
+- Document geometry distinguishes visible `documentPixelSize` from physical
+  storage size. Plain storage uses the finite canvas, periodic storage uses the
+  canonical repeat cell, and radial storage uses the checked compiled sector
+  atlas dimensions/page map rather than the viewport size. Resize/mode import
+  validates both dimensions and total possible tile/page-table bytes before it
+  allocates a candidate registry.
+- `SparseTileSamplingPlan` is an immutable generation/revision-scoped value with
+  sorted CPU page-table entries, bounded texture binding batches, tile-origin
+  and clipped-bounds uniforms, and visible leases. The builder runs page-in,
+  residency reservation, page-table construction, and argument-buffer filling
+  off main. Main only binds a completed plan and returns it after the final GPU
+  completion that sampled it.
+- The primary display/export sampler uses Tier-2 argument buffers where the
+  device supports them. Its bounded fallback partitions bindings into ordered
+  output-region batches and includes the one-tile input halo needed by every
+  output region, so all four bilinear neighbors are bound in the same pass and
+  each output pixel is written exactly once. It must not issue one fullscreen
+  pass per tile. Plans are cached by document generation, surface revision,
+  viewport/export geometry, and transient lease token—not rebuilt for each
+  input event.
+- Every bilinear sample resolves all four integer neighbors independently.
+  Missing pages/tiles are transparent; edge tiles honor clipped bounds;
+  periodic coordinates wrap before lookup; radial logical coordinates resolve
+  through the immutable sector page table to physical atlas tiles. CPU and GPU
+  samplers use identical floor/neighbor semantics across tile, periodic, and
+  radial seams.
+- `DocumentColorPipeline` adds explicit encoded-premultiplied BGRA8 interchange
+  APIs. Import unpremultiplies RGB in encoded space, decodes straight sRGB, then
+  premultiplies in linear space. Transparent PNG export unpremultiplies linear
+  RGB, encodes straight sRGB, premultiplies in encoded space, then packs BGRA8.
+  Alpha zero has deterministic zero RGB. Automatic sRGB attachment conversion
+  is allowed only for an opaque drawable, never as transparent PNG authority.
+- The Task 1 stamp packer is the sole paint-ingress conversion. Deposition,
+  buildup, erase, preview, canonical commit, clear, resize, restore, and native
+  tile bytes stay linear-premultiplied `.rgba16Float`; display/interchange is
+  encoded once at the boundary.
+- GridRenderer consumes Task 5 immutable authoritative/prediction leases and
+  commits their exact sorted coordinates through Task 4. A Task 4 install lease
+  pins revision payload buffers until every candidate destination upload
+  completes; only then does one atomic registry swap, one canonical surface
+  revision advance, and `consumeInstall` publish. Failed finalization discards
+  the entire candidate and preserves pixels, history, generation, and visible
+  plans.
+- After successful deposition, erase, clear, restore, resize, or import, every
+  candidate tile whose valid logical texels are all transparent is removed from
+  the surface and backing store before publication. Empty clear is a no-op and
+  erase-to-empty releases residency after the last lease completes.
+- The old full-surface canonical allocations plus live/replay/revision types,
+  legacy scheduler selector, and production-capable synchronous harness route
+  are deleted in the same commit. BGRA8 remains only at the exact Task 0
+  allowlisted boundaries.
 
-- [ ] Invert Task 0's structure test: fail on any production full-canvas paint
-  allocation or encoded-BGRA8 deposition target. Permit BGRA8 only in drawable,
-  capture/export/interchange, and diagnostics boundaries.
-- [ ] Add CPU old-path versus tiled geometric differentials for opaque legacy
-  scenes before deletion; compare coverage/support, not encoded-space low-flow
-  color that Task 1 intentionally corrects.
-- [ ] Add independent linear reference tests for translucent buildup, erase,
-  transparent edges, preview/commit, display, and PNG. Require GPU error at
-  most `2e-3` in linear half-float and encoded export error at most one channel
-  value.
-- [ ] Exercise begin/append/predict/estimate/finish/cancel/failure/next stroke,
-  resize, clear, undo/redo, brush switch, plain/periodic/radial, and maximum
-  symmetry through production entry points.
-- [ ] Require one-dab 4096 allocation proportional to touched tiles, exact
-  transaction rollback on each injected failure, bounded residency, and no
-  growing per-event work in the accelerated 10-minute trace.
-- [ ] Regenerate no golden from current output. Any changed approved fixture
-  must cite its independent color vector and semantic reason in the task report.
-- [ ] Run `swift test --filter 'DocumentColorPipelineTests|TiledRasterSurfaceTests|TiledRasterRevisionStoreTests|StrokeTileSurfaceEncoderTests|DepositionRendererTests|StageCAcceptance'`, the allocation probe, and Debug/Release macOS builds.
+- [ ] Satisfy the Task 4 dependency before production edits: add RED
+  install-lease tests and make retained revision payloads impossible to
+  release/prune during destination
+  upload, and rerun `TiledRasterRevisionStoreTests`. Task 6 may not compensate
+  for a weaker revision-store contract with caller timing assumptions.
+- [ ] Write pure RED tests for the shared registry and physical geometry:
+  arbitrary stable layer IDs, one common byte budget, no hidden independent
+  stores, plain/periodic/radial storage dimensions, maximum radial layout,
+  candidate swap, stale generation, and overflow before allocation.
+- [ ] Write CPU sparse-sampler RED tests for missing/clear tiles, clipped edges,
+  four-neighbor bilinear interpolation, all four tile-corner combinations,
+  negative and maximum periodic wrap, radial page/atlas resolution, immutable
+  plan identity, deterministic batching, Tier-2/fallback equivalence, and
+  cache invalidation only on a dependency change.
+- [ ] Add offscreen Metal differentials for the same sampling cases. Assert
+  absolute linear-channel error at most `2e-3`, transparent missing entries,
+  no seam discontinuity above that tolerance, and identical Tier-2/fallback
+  output. Add a source/performance gate rejecting per-tile fullscreen passes.
+- [ ] Add encoded-premultiplied import/export vectors for alpha 0, 0.5, and 1,
+  non-gray translucent edges, low channel values, row padding, and round trip.
+  Require at most one encoded channel of PNG error and tests that fail for
+  straight-alpha packing, encoded-space blend, double encode, or encoding alpha.
+- [ ] Add opaque old-path versus tiled geometry/support differentials before
+  deleting the oracle. Then activate RGBA16F pipeline validation, the typed
+  stamp packer, shared document store, sparse sampling plans, Task 5 leases,
+  Task 4 install leases, and transactional clear/restore/resize/import as one
+  production change.
+- [ ] Exercise the generic one-layer route through all twelve lifecycle rows in
+  plain, every periodic family, radial rotation/mirror/mandala, maximum symmetry,
+  resize crop/empty-fill, clear, undo/redo, and brush switch. Inject failure at
+  reserve, page-in, plan build, command creation/encoding/completion, install,
+  prune, candidate swap, resize, and import; every failure must allow an
+  immediate successful next stroke.
+- [ ] Invert Task 0: ban the legacy types/symbols, any full-canvas paint-bearing
+  allocation in any format, and encoded-BGRA deposition. Assert the exact BGRA8
+  allowlist plus runtime one-dab 4096 touched-tile count/resident bytes. Update
+  Task 0/report wording from Task 5 to Task 6.
+- [ ] Stream stable tiled revisions directly into display/export/interchange
+  destinations without assembling a full RGBA16F source. Prove erase-to-empty
+  pruning, bounded page-table/argument-buffer bytes, shared-budget pressure,
+  bounded pins, and no per-event plan rebuild in the accelerated 10-minute trace.
+- [ ] Run `swift test --filter 'DocumentColorPipelineTests|DocumentPaintSurfaceStoreTests|SparseTileSamplingPlanTests|SparseTileSamplingPipelineTests|TiledRasterSurfaceTests|TiledRasterRevisionStoreTests|StrokeTileSurfaceEncoderTests|DepositionRendererTests|CommittedDocumentSnapshotTests|RendererResizeTests|StageCAcceptance'`,
+  `scripts/run-brush-input-allocation-probe.sh all`, and Debug/Release macOS
+  builds. No current-output golden may be regenerated; every approved fixture
+  change cites an independent vector and semantic reason.
 - [ ] Commit as `refactor(raster): activate linear sparse paint`.
 
 ### Task 7: Add The Linear Tile-Based Layer Compositor
@@ -511,43 +615,102 @@ wiring changes:
 
 - Create: `Sources/MetalRenderer/Compositing/LayerCompositor.swift`
 - Create: `Sources/MetalRenderer/Compositing/LayerBlendPipeline.swift`
+- Create: `Sources/MetalRenderer/Raster/LayerSurfaceTransaction.swift`
+- Modify: `Sources/MetalRenderer/Compositing/SparseTileSamplingPlan.swift`
+- Modify: `Sources/MetalRenderer/Raster/DocumentPaintSurfaceStore.swift`
 - Modify: `Sources/MetalRenderer/GridRenderer.swift`
+- Modify: `Sources/MetalRenderer/CommittedDocumentSnapshot.swift`
+- Modify: `Sources/MetalRenderer/FlattenedSceneExporter.swift`
+- Modify: `Sources/MetalRenderer/FiniteCanvasExporter.swift`
+- Modify: `Sources/MetalRenderer/PeriodicRepeatExporter.swift`
+- Modify: `Sources/MetalRenderer/PeriodicBakedRepeatExporter.swift`
 - Modify: `App/PatternSpike/EditorSessionController.swift`
 - Modify: `App/PatternSpike/Persistence/PatternProjectBridge.swift`
+- Modify: `Sources/PatternFile/PatternProjectArchive.swift`
+- Modify: `Sources/PatternFile/PatternProjectPackageCodec.swift`
+- Modify: `Sources/PatternFile/PatternPaintTileCodec.swift`
 - Modify: `Sources/PatternFile/PatternRasterExportCodec.swift`
 - Create: `Tests/MetalRendererTests/LayerCompositorTests.swift`
+- Create: `Tests/MetalRendererTests/LayerSurfaceTransactionTests.swift`
 - Modify: `App/Tests/EditorSessionControllerTests.swift`
+- Modify: `App/Tests/PatternProjectBridgeTests.swift`
+- Modify: `Tests/PatternFileTests/PatternProjectArchiveTests.swift`
+- Modify: `Tests/PatternFileTests/PatternProjectPackageCodecTests.swift`
+- Modify: `Tests/PatternFileTests/PatternPaintTileCodecTests.swift`
 - Modify: `Tests/PatternFileTests/PatternRasterExportCodecTests.swift`
 - Modify: `Tests/EditorCoreTests/LayerStackTests.swift`
 
 **Interfaces:**
 
-- `LayerCompositor` consumes an immutable ordered visible-layer snapshot and
-  dirty tile coordinate; it streams at most eight source tiles directly to the
-  drawable/export target using linear premultiplied normal/multiply/screen.
-  A `.visible` pin lasts for the in-flight tile composition batch, not the
-  lifetime of the whole viewport, so an eight-layer viewport cannot pin the
-  entire canvas above budget.
-- GridRenderer captures the active layer ID at pointer-down. Paint/erase/clear
-  reject a locked layer. Visibility/opacity/order changes invalidate only the
-  affected display tiles and never rewrite layer pixels.
-- Project capture/save/load uses schema v4 native tiles; v1/v2/v3 imports
-  convert encoded BGRA8 once and produce a single transactionally installed
-  v4 layer stack.
+- Task 7 extends—not replaces—Task 6's generic registry and immutable sampling
+  plan. `PreparedLayerCompositePlan` contains an immutable bottom-to-top visible
+  layer snapshot and one sparse sampling plan per contributing layer. It pins
+  only the bounded batch being encoded and releases all plans after GPU
+  completion; it never creates a whole-viewport or full-layer composite cache.
+- `LayerCompositor` applies opacity and linear-premultiplied normal, multiply,
+  or screen in deterministic stack order. Display and every exporter call this
+  same composition kernel/reference contract. Hidden/empty layers contribute
+  transparent; visibility/order/opacity changes invalidate bindings/output,
+  never rewrite layer tile bytes.
+- `LayerSurfaceTransaction` prepares raster and metadata candidates together.
+  Add creates an empty registered surface with zero textures; delete retains a
+  stable tile revision before removing the surface; undo restores exact layer
+  descriptor, order, tile IDs, payload revisions, and active fallback; redo
+  removes them again. Resize/mode switch prepares all layer surfaces, radial
+  page maps, and metadata before one registry/stack/history swap. Any storage,
+  upload, metadata, or completion failure leaves both old raster and old stack
+  installed with the history cursor unchanged.
+- GridRenderer captures the active unlocked layer and registry generation at
+  pointer-down. The stroke remains bound to that layer through completion;
+  paint/erase/clear and all layer mutations reject locked, missing, stale, or
+  active-drawing targets with typed errors.
+- Native v4 save snapshots one stable document generation and streams sorted
+  nonempty RGBA16F tile entries directly to `PatternProjectArchive`; it never
+  flattens to PNG or assembles a full canvas. Save/load/save preserves layer IDs,
+  tile IDs, coordinates, clipped bounds, surface raster revisions, byte order,
+  payload bytes, and semantic hashes. Runtime history-store namespaces are
+  freshly allocated and are not serialized.
+- Native v4 load validates the complete manifest, paths, counts, checked
+  per-entry/aggregate sizes, radial storage geometry, hashes, and layer limits
+  before allocating a candidate shared store. It then bounded-reads/uploads one
+  tile at a time and swaps only after every tile succeeds. V1/v2/v3 encoded-
+  premultiplied BGRA imports use Task 6's explicit conversion once and install
+  a valid one-to-eight-layer registry without dropping declared layers.
+- PNG/interchange remains flattened encoded-premultiplied BGRA8. Transparent
+  export first composites layers in linear premultiplied space and then uses
+  Task 6's boundary packer exactly once; native project tiles never pass through
+  PNG or a transfer conversion.
 
-- [ ] Write independent CPU equations and GPU differential RED tests for all
-  three blend modes, opacity 0/0.5/1, transparent edges, hidden layers, reordered
-  layers, empty tiles, and eight-layer order. Require `2e-3` linear error.
-- [ ] Add pure/app lifecycle tests for add/delete/reorder/visibility/opacity/
-  lock/active changes and rejection during active drawing.
-- [ ] Prove undo/redo restores the pointer-down layer after reorder/active
-  changes and one stroke still creates exactly one command.
-- [ ] Run a fully populated 2048 × 2048 eight-layer streaming composition and
-  assert persistent plus in-flight paint bytes never exceed the configured
-  budget; no whole-viewport composite cache is allowed.
-- [ ] Add deterministic v4 save/load/save archive equality and v1/v2/v3 visual
-  import parity within one encoded channel value.
-- [ ] Run `swift test --filter 'LayerStackTests|LayerCompositorTests|EditorSessionControllerTests|PatternRasterExportCodecTests|PatternProjectBridgeTests'`.
+- [ ] Write CPU/GPU RED differentials for normal/multiply/screen, opacity
+  0/0.5/1, hidden and empty layers, translucent colored edges, reordered
+  layers, one through eight layers, and missing sparse inputs. Require `2e-3`
+  linear error, deterministic order, and identical Tier-2/fallback results.
+- [ ] Write transaction RED tests for add/delete/undo/redo/reorder/visibility/
+  opacity/lock/active, deletion of active and nonactive layers, exact revision
+  restoration, resize crop/empty-fill across all layers, radial layout changes,
+  failure at every prepare/upload/swap seam, and rejection while drawing.
+- [ ] Route production paint to the pointer-down layer and prove brush/layer
+  switching, clear, and undo/redo never retarget a command after reorder or
+  active-layer change. One completed stroke still publishes exactly one
+  history command; cancel/failure publishes none.
+- [ ] Implement streamed v4 capture/save/load and RED malformed-archive tests
+  for duplicate IDs/coordinates/paths, reordered manifest entries, byte/hash/
+  bounds/revision mismatch, excessive layers/entries/bytes, radial map mismatch,
+  truncated payload, upload failure, and stale snapshot. Assert save/load/save
+  semantic and byte equality with stable tile/revision identities.
+- [ ] Add v1/v2/v3 fixtures covering translucent pixels, multiple declared
+  layers, periodic cells, and radial pages. Require visual import parity within
+  one encoded channel, no layer loss, and transactional failure for invalid or
+  over-limit input.
+- [ ] Route display, finite, periodic repeat/baked repeat, flattened PNG, and
+  native project capture through the correct shared snapshot. Compare each
+  flattened export against an independent CPU layer/color reference and prove
+  native bytes remain lossless linear RGBA16F.
+- [ ] Run fully populated and sparse 2048 × 2048 eight-layer display/export
+  traces. Persistent plus page-in plus in-flight composition bytes must remain
+  within the checked shared/transient budgets; leases, queues, page tables, and
+  binding batches return to their warm baseline after completion or failure.
+- [ ] Run `swift test --filter 'LayerStackTests|LayerCompositorTests|LayerSurfaceTransactionTests|EditorSessionControllerTests|PatternPaintTileCodecTests|PatternProjectArchiveTests|PatternProjectPackageCodecTests|PatternRasterExportCodecTests|PatternProjectBridgeTests'`.
 - [ ] Commit as `feat(layers): compose bounded linear tiles`.
 
 ### Task 8: Stage D Acceptance Checkpoint
@@ -558,41 +721,78 @@ wiring changes:
 - Create: `Sources/StageDAcceptanceProbe/main.swift`
 - Modify: `Package.swift`
 - Create: `scripts/run-stage-d-acceptance.sh`
+- Modify: `App/Tests/ContentViewLifecycleTests.swift`
+- Modify: `App/Tests/EditorSessionControllerTests.swift`
+- Modify: `App/Tests/PatternProjectBridgeTests.swift`
+- Modify: `Tests/MetalRendererTests/StageDBaselineContractTests.swift`
 - Create: `docs/superpowers/reports/2026-08-04-stage-d-acceptance.md`
 - Modify: `.superpowers/sdd/2026-08-01-brush-engine-corrective-program/progress.md`
 
-**Acceptance matrix:**
+**Exact acceptance harness matrix:**
 
-- encoded/linear transfer vectors and CPU/GPU blend differentials;
-- empty, one-tile, seam, four-corner, large, clear, erase, and rollback surfaces;
-- begin, append, prediction, estimate, finish, cancel, every injected failure,
-  rapid next stroke, resize, clear, undo/redo, brush/layer switch;
-- plain, every periodic family, radial rotation/reflection, and maximum symmetry;
-- schema-v1/v2/v3 imports and deterministic schema-v4 save/load;
-- one through eight layers, all blend modes, order/visibility/opacity/lock;
-- cold/warm, cache churn, memory pressure, 10-second, and accelerated 10-minute
-  traces with allocation/residency/queue/frame telemetry.
+| Harness group | Required production scenarios | Required evidence |
+| --- | --- | --- |
+| Color | alpha 0/0.5/1, translucent colored edge, 1/8/64 buildup, erase, normal/multiply/screen, opaque display, transparent PNG | independent CPU vectors, GPU differential `<= 2e-3`, encoded export error `<= 1/255`, negative controls |
+| Sparse sampling | empty, one tile, two-tile seam, four-corner bilinear, clipped edge, 4096 one dab, erase-to-empty, cache churn, pressure | exact coordinates/bytes, CPU/GPU page-table parity, Tier-2/fallback parity, zero full-paint allocations |
+| Stroke lifecycle | initialize/import, begin, append actual/coalesced, prediction, estimate replacement, prepare/submit/display, finish, cancel, every injected failure, rapid next stroke, clear, undo/redo, brush/layer switch | canonical hashes, one-shot ordinals, command count, token/lease return, cursor/generation, renderer reuse |
+| Modes | plain; periodic grid, half-drop, brick, mirror-X, mirror-Y, mirror-XY, rotational, square-rotation, square-kaleidoscope, hexagons, rotation-3, rotation-6, kaleidoscope-60, kaleidoscope-30; radial rotation/mirror/mandala at minimum and maximum rays; resize crop/empty-fill | seam probes, logical-to-physical maps, stable hashes with prediction on/off, bounded radial storage |
+| Layers | one/eight layers, sparse/full, all blend modes, order, visibility, opacity, lock, active fallback, add/delete/undo/redo/resize | CPU/GPU blend parity, exact target layer/revision identity, transactional rollback, shared budget |
+| Persistence/export | v1/v2/v3 imports, v4 empty/periodic/radial/eight-layer, save/load/save, finite/repeat/baked/PNG | bounded streaming reads, stable IDs/revisions/hashes/bytes, independent flattened reference, one transfer conversion |
+| Sustained runtime | cold/warm, 10-second wall trace, 36,000-frame accelerated 10-minute trace, allocation/residency pressure, injected failure/reuse | JSONL plus summary: input provenance, replay, queues, prepare/submit/GPU/present p95/p99, allocations, page tables/bindings/leases, resident/high-water bytes |
+| App/UI routes | color selection, draw/erase/clear, size/brush/layer changes, mode/resize, undo/redo, save/open/export | controller/UI command reaches the production sparse route, disabled/rejected states are correct, no shortcut/focus regression, state and pixels agree |
 
-- [ ] Add negative controls that independently break transfer direction,
-  premultiplication, alpha handling, tile coordinate/halo, LRU/pinning, rollback,
-  layer order, blend mode, display encode, export encode, and old full-canvas
-  route detection. Prove every control fails its intended gate.
-- [ ] Require Stage C semantic and scheduler suites unchanged, zero actual
-  replay, zero warmed input-path application allocations, bounded queues,
-  bounded tile bytes, flat first/last-decile CPU work, stable allocations, and
-  failure reuse.
-- [ ] Run the focused Stage D suite, all adjacent history/project/export suites,
-  `scripts/run-stage-d-acceptance.sh`, Debug/Release macOS builds, and Debug
-  iPadOS simulator build. Record physical checks as pending.
-- [ ] Run the broad suite. It must contain no new issue outside the exact frozen
-  27 Stage B records; if Stage D legitimately resolves a frozen record, require
-  an independent reference and treat removal as an explicit acceptance change,
-  never silently regenerate the baseline.
-- [ ] Run a fresh independent review over the complete Stage D range. Resolve
-  every Critical/Important finding and rerun affected gates.
-- [ ] Record environment, exact commands, counts, hashes, CPU/GPU/frame/memory
-  metrics, unresolved hardware evidence, and the Stage E boundary in the
-  acceptance report.
+- [ ] Implement `StageDAcceptanceProbe` as the sole matrix runner. Every row has
+  a stable scenario ID, deterministic seed/input trace, expected semantic hash
+  or independent numeric oracle, and a typed result. The shell script rejects
+  missing/duplicate rows, skipped software evidence, nonfinite metrics, or a
+  report generated by any nonproduction backend.
+- [ ] Add mutation/negative controls that independently invert transfer
+  direction, straight/premultiplied handling, alpha, bilinear neighbor/tile
+  origin, periodic/radial lookup, LRU/pinning, install atomicity, empty pruning,
+  layer order/blend, display/export encode, archive identity, and banned legacy
+  route detection. Require each control to fail exactly its named gate while
+  the unmodified fixture passes.
+- [ ] Strengthen lifecycle/app coverage so every one of the twelve inventory
+  rows runs through production GridRenderer plus EditorSessionController. Cover
+  app commands for color, draw, erase, clear, brush/size/layer/mode/resize,
+  undo/redo, save/open/export, text-field focus/keyboard shortcuts, failed
+  operation recovery, and immediate next action. Assert visible state,
+  canonical bytes, history cursor, layer stack, generation, and pending tokens.
+- [ ] Require zero production legacy synchronous-render calls, zero append-only
+  actual replay, zero post-warm input/partition/lease application allocations,
+  no dropped actual input, no GPU wait on input/main, all queues and lease/token
+  counts at zero after quiescence, resident plus transient bytes within their
+  configured budgets, and no per-event page-table rebuild or full-canvas source.
+- [ ] The 10-second and accelerated 10-minute gates use existing Stage B
+  thresholds: event-to-submit miss fraction `<= 1%`, early/late 400-frame
+  `BenchmarkLongStrokeMetrics` limits, bounded queue high-water, stable warmed
+  capacities/allocation counts, and last-decile work no greater than
+  `max(firstDecile * 4, firstDecile + 100 ms)` for the accelerated scheduler
+  trace. Record CPU preparation, event-to-submit, GPU, presentation p95/p99,
+  missed-frame fraction, page-in/cache counts, and resident/in-flight high-water;
+  do not claim physical 120 Hz performance from this evidence.
+- [ ] Run the focused color/surface/history/layer/persistence/export suite and
+  every adjacent Stage B/C lifecycle, scheduler, semantic, allocation, and
+  telemetry suite, then run `scripts/run-stage-d-acceptance.sh` twice from a
+  clean build directory. Both runs must produce identical semantic hashes and
+  no unexplained metric or resident-resource growth.
+- [ ] Build `PatternSpikeMac` Debug and Release for `platform=macOS`, and build
+  `PatternSpikePad` Debug and Release for `generic/platform=iOS Simulator`, all
+  with `CODE_SIGNING_ALLOWED=NO`. Launch the macOS harness route and require a
+  completed production JSONL segment; simulator build is compile evidence only.
+- [ ] Run the broad suite. It must contain only the exact frozen 27 Stage B issue
+  records and no new issue. A resolved frozen record requires independent
+  evidence plus an explicit reviewed baseline removal; never regenerate the
+  allowlist or golden from current output.
+- [ ] Run a fresh independent review over `ca5dff5..HEAD` against this plan and
+  the parent corrective program. Resolve every Critical/Important finding,
+  rerun the complete affected matrix plus broad/build gates, and require the
+  final reviewer to report no unresolved Critical/Important issue.
+- [ ] Record commit range, OS/Xcode/Swift/GPU, exact commands and test counts,
+  every scenario/result/hash, CPU/GPU/frame/queue/allocation/residency metrics,
+  negative-control proof, broad baseline diff, review disposition, and physical
+  iPad/Pencil/Wacom/120 Hz/thermal/memory evidence as pending in the acceptance
+  report. The report alone may set Stage D to `accepted` and open Stage E.
 - [ ] Commit as `test(raster): accept stage D surfaces`.
 
 ## Completion Boundary
