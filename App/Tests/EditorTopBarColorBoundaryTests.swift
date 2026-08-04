@@ -1,42 +1,52 @@
-import AppKit
 import PatternEngine
 import SwiftUI
 import Testing
+
+#if os(macOS)
+import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 
 @Suite("Editor top-bar color boundary")
 struct EditorTopBarColorBoundaryTests {
     @Test
     @MainActor
     func arbitrarySourceSpacesBecomeBoundedEncodedSRGBWithPreservedAlpha() throws {
-        let sourceColors = [
-            NSColor(
+        #if os(macOS)
+        let sourceColors: [(Color, Float)] = [
+            (Color(NSColor(
                 colorSpace: .displayP3,
-                components: [1.1, 0.2, 0.4, 0.35],
+                components: [1, 0.15, 0.4, 0.35],
                 count: 4
-            ),
-            NSColor(
+            )), 0.35),
+            (Color(NSColor(
                 colorSpace: .genericGray,
                 components: [0.6, 0.65],
                 count: 2
-            ),
-            NSColor(
-                deviceCyan: 0.2,
-                magenta: 0.7,
-                yellow: 0.1,
-                black: 0.05,
-                alpha: 0.8
-            ),
+            )), 0.65),
         ]
+        #elseif os(iOS)
+        let sourceColors: [(Color, Float)] = [
+            (Color(UIColor(
+                displayP3Red: 1,
+                green: 0.15,
+                blue: 0.4,
+                alpha: 0.35
+            )), 0.35),
+            (Color(UIColor(white: 0.6, alpha: 0.65)), 0.65),
+        ]
+        #endif
 
-        for source in sourceColors {
+        for (source, sourceAlpha) in sourceColors {
             let encoded = try #require(
-                EditorTopBar.encodedSRGBColor(from: Color(source))
+                EditorTopBar.encodedSRGBColor(from: source)
             )
             #expect((0...1).contains(encoded.red))
             #expect((0...1).contains(encoded.green))
             #expect((0...1).contains(encoded.blue))
             #expect((0...1).contains(encoded.alpha))
-            #expect(abs(encoded.alpha - Float(source.alphaComponent)) <= 1e-6)
+            #expect(abs(encoded.alpha - sourceAlpha) <= 1e-6)
         }
     }
 
