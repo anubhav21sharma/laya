@@ -1341,6 +1341,664 @@ struct DocumentPaintSurfaceTransactionTests {
     }
 
     @Test
+    func encodedImportRejectsMalformedBoundariesBeforeCandidateAllocation() throws {
+        guard let fixture = try TransactionFixture.make(width: 2, height: 1)
+        else { return }
+        let baseline = fixture.registry.snapshot()
+        let revisions = fixture.revisions.snapshot()
+
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .unsupportedMutationKind(.encodedImport)) {
+            _ = try fixture.coordinator.prepareMutation(
+                fixture.request(
+                    kind: .encodedImport,
+                    dirty: [.init(x: 0, y: 0)],
+                    requiresHistoryPair: false
+                )
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .invalidEncodedImport(.invalidDimensions(width: 0, height: 1))) {
+            _ = try fixture.coordinator.prepareEncodedImport(
+                DocumentPaintSurfaceEncodedImportRequest(
+                    layerID: fixture.layerID,
+                    candidateGeometry: fixture.geometry,
+                    width: 0,
+                    height: 1,
+                    bytesPerRow: 0,
+                    encodedPremultipliedBGRA8: Data()
+                ),
+                failureInjection: .init(failingAt: .candidateReserve(0))
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .invalidEncodedImport(.invalidRowStride(minimum: 8, actual: 7))) {
+            _ = try fixture.coordinator.prepareEncodedImport(
+                DocumentPaintSurfaceEncodedImportRequest(
+                    layerID: fixture.layerID,
+                    candidateGeometry: fixture.geometry,
+                    width: 2,
+                    height: 1,
+                    bytesPerRow: 7,
+                    encodedPremultipliedBGRA8: Data(repeating: 0, count: 7)
+                ),
+                failureInjection: .init(failingAt: .candidateReserve(0))
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .invalidEncodedImport(
+                .invalidEncodedByteCount(expected: 8, actual: 7)
+            )) {
+            _ = try fixture.coordinator.prepareEncodedImport(
+                DocumentPaintSurfaceEncodedImportRequest(
+                    layerID: fixture.layerID,
+                    candidateGeometry: fixture.geometry,
+                    width: 2,
+                    height: 1,
+                    bytesPerRow: 8,
+                    encodedPremultipliedBGRA8: Data(repeating: 0, count: 7)
+                ),
+                failureInjection: .init(failingAt: .candidateReserve(0))
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .invalidEncodedImport(.byteCountOverflow)) {
+            _ = try fixture.coordinator.prepareEncodedImport(
+                DocumentPaintSurfaceEncodedImportRequest(
+                    layerID: fixture.layerID,
+                    candidateGeometry: fixture.geometry,
+                    width: Int.max,
+                    height: 2,
+                    bytesPerRow: Int.max,
+                    encodedPremultipliedBGRA8: Data()
+                ),
+                failureInjection: .init(failingAt: .candidateReserve(0))
+            )
+        }
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .encodedImportGeometryMismatch(
+                expected: fixture.geometry.storagePixelSize,
+                actual: PixelSize(width: 1, height: 1)
+            )) {
+            _ = try fixture.coordinator.prepareEncodedImport(
+                DocumentPaintSurfaceEncodedImportRequest(
+                    layerID: fixture.layerID,
+                    candidateGeometry: fixture.geometry,
+                    width: 1,
+                    height: 1,
+                    bytesPerRow: 4,
+                    encodedPremultipliedBGRA8: Data(repeating: 0, count: 4)
+                ),
+                failureInjection: .init(failingAt: .candidateReserve(0))
+            )
+        }
+        let radialLayout = try RadialSectorLayout(
+            maximumRadius: 1,
+            sectorAngleRadians: .pi
+        )
+        let radialGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 2, height: 2),
+            storagePixelSize: radialLayout.atlasPixelSize,
+            radialLayout: radialLayout
+        )
+        let radialByteCount = radialLayout.atlasPixelSize.width
+            * radialLayout.atlasPixelSize.height * 4
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .encodedImportRadialUnsupported) {
+            _ = try fixture.coordinator.prepareEncodedImport(
+                DocumentPaintSurfaceEncodedImportRequest(
+                    layerID: fixture.layerID,
+                    candidateGeometry: radialGeometry,
+                    width: radialLayout.atlasPixelSize.width,
+                    height: radialLayout.atlasPixelSize.height,
+                    bytesPerRow: radialLayout.atlasPixelSize.width * 4,
+                    encodedPremultipliedBGRA8:
+                        Data(repeating: 0, count: radialByteCount)
+                ),
+                failureInjection: .init(failingAt: .candidateReserve(0))
+            )
+        }
+
+        #expect(fixture.registry.snapshot() == baseline)
+        #expect(fixture.revisions.snapshot() == revisions)
+        #expect(fixture.coordinator.snapshot().state == .idle)
+    }
+
+    @Test
+    func transparentEncodedImportAllocatesNothingButStillReplacesWhenRequired() throws {
+        let transparentGarbage = Data([
+            255, 91, 37, 0,
+            12, 240, 200, 0,
+        ])
+        guard let empty = try TransactionFixture.make(width: 2, height: 1)
+        else { return }
+        let emptyBaseline = empty.registry.snapshot()
+        let noOp = try empty.coordinator.prepareEncodedImport(
+            DocumentPaintSurfaceEncodedImportRequest(
+                layerID: empty.layerID,
+                candidateGeometry: empty.geometry,
+                width: 2,
+                height: 1,
+                bytesPerRow: 8,
+                encodedPremultipliedBGRA8: transparentGarbage
+            )
+        )
+        guard case let .noOp(receipt) = noOp else {
+            Issue.record("Expected an allocation-free transparent import no-op")
+            return
+        }
+        #expect(receipt.kind == .encodedImport)
+        #expect(empty.registry.snapshot() == emptyBaseline)
+        #expect(empty.backend.encodeCallCount == 0)
+
+        guard let replacement = try TransactionFixture.make(width: 2, height: 1)
+        else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        try transactionSeedActive(replacement, coordinates: [coordinate])
+        let replacementBaseline = replacement.registry.snapshot()
+        let revisions = replacement.revisions.snapshot()
+        let prepared = try transactionPrepared(
+            replacement.coordinator.prepareEncodedImport(
+                DocumentPaintSurfaceEncodedImportRequest(
+                    layerID: replacement.layerID,
+                    candidateGeometry: replacement.geometry,
+                    width: 2,
+                    height: 1,
+                    bytesPerRow: 8,
+                    encodedPremultipliedBGRA8: transparentGarbage
+                )
+            )
+        )
+        #expect(replacement.registry.snapshot() == replacementBaseline)
+        let encoded = try replacement.coordinator.encodeMutation(prepared)
+        let payload = try #require(replacement.backend.encodedImportPayload)
+        #expect(payload.destinations.isEmpty)
+        #expect(payload.tileRegions.isEmpty)
+        #expect(replacement.registry.snapshot().activeTileLeaseCount == 0)
+        let reduced = try replacement.coordinator.completeMutation(
+            encoded,
+            as: .succeeded
+        )
+        let terminal = try replacement.coordinator.prepareTerminalCommit(reduced)
+        let result = try replacement.coordinator.publish(terminal)
+        #expect(result.historyPair == nil)
+        #expect(replacement.registry.snapshot().generation
+            == replacementBaseline.generation + 1)
+        #expect(replacement.registry.snapshot().layers[0].references.isEmpty)
+        #expect(replacement.registry.snapshot().residentTileBytes == 0)
+        #expect(replacement.revisions.snapshot() == revisions)
+
+        guard let geometryChange = try TransactionFixture.make(width: 2, height: 1)
+        else { return }
+        let target = try transactionGeometry(width: 1, height: 1)
+        let changed = try transactionPrepared(
+            geometryChange.coordinator.prepareEncodedImport(
+                DocumentPaintSurfaceEncodedImportRequest(
+                    layerID: geometryChange.layerID,
+                    candidateGeometry: target,
+                    width: 1,
+                    height: 1,
+                    bytesPerRow: 4,
+                    encodedPremultipliedBGRA8: Data([255, 99, 17, 0])
+                )
+            )
+        )
+        let changedEncoded = try geometryChange.coordinator.encodeMutation(changed)
+        let changedReduced = try geometryChange.coordinator.completeMutation(
+            changedEncoded,
+            as: .succeeded
+        )
+        let changedTerminal = try geometryChange.coordinator
+            .prepareTerminalCommit(changedReduced)
+        _ = try geometryChange.coordinator.publish(changedTerminal)
+        #expect(geometryChange.registry.snapshot().geometry == target)
+        #expect(geometryChange.registry.snapshot().layers[0].references.isEmpty)
+        #expect(geometryChange.registry.snapshot().residentTileBytes == 0)
+    }
+
+    @Test
+    func encodedImport257x259UsesExactPaddedTilewiseColorBoundary() throws {
+        let width = 257
+        let height = 259
+        let bytesPerRow = width * 4 + 8
+        var bytes = Data(repeating: 0, count: bytesPerRow * height)
+        for y in 0..<height {
+            for offset in (width * 4)..<bytesPerRow {
+                bytes[y * bytesPerRow + offset] = 255
+            }
+        }
+        func setPixel(
+            x: Int,
+            y: Int,
+            blue: UInt8,
+            green: UInt8,
+            red: UInt8,
+            alpha: UInt8
+        ) {
+            let offset = y * bytesPerRow + x * 4
+            bytes[offset] = blue
+            bytes[offset + 1] = green
+            bytes[offset + 2] = red
+            bytes[offset + 3] = alpha
+        }
+        setPixel(x: 0, y: 0, blue: 255, green: 91, red: 37, alpha: 0)
+        setPixel(x: 1, y: 0, blue: 32, green: 16, red: 64, alpha: 128)
+        setPixel(x: 255, y: 0, blue: 3, green: 2, red: 1, alpha: 255)
+        setPixel(x: 256, y: 0, blue: 200, green: 1, red: 255, alpha: 128)
+        setPixel(x: 0, y: 256, blue: 17, green: 61, red: 93, alpha: 128)
+        setPixel(x: 256, y: 258, blue: 7, green: 11, red: 19, alpha: 255)
+
+        guard let fixture = try TransactionFixture.make(
+            width: width,
+            height: height
+        ) else { return }
+        let old = PaintTileCoordinate(x: 0, y: 0)
+        let coordinates = [
+            PaintTileCoordinate(x: 0, y: 0),
+            PaintTileCoordinate(x: 1, y: 0),
+            PaintTileCoordinate(x: 0, y: 1),
+            PaintTileCoordinate(x: 1, y: 1),
+        ]
+        try transactionSeedActive(fixture, coordinates: [old])
+        let baseline = fixture.registry.snapshot()
+        let revisionBaseline = fixture.revisions.snapshot()
+        let prepared = try transactionPrepared(
+            fixture.coordinator.prepareEncodedImport(
+                DocumentPaintSurfaceEncodedImportRequest(
+                    layerID: fixture.layerID,
+                    candidateGeometry: fixture.geometry,
+                    width: width,
+                    height: height,
+                    bytesPerRow: bytesPerRow,
+                    encodedPremultipliedBGRA8: bytes
+                )
+            )
+        )
+        let preparedSnapshot = fixture.registry.snapshot()
+        #expect(preparedSnapshot.generation == baseline.generation)
+        #expect(preparedSnapshot.geometry == baseline.geometry)
+        #expect(preparedSnapshot.layers == baseline.layers)
+        #expect(preparedSnapshot.residentTileBytes
+            == baseline.residentTileBytes
+                + coordinates.count * PaintTileDescriptor.residentByteCount)
+        let encoded = try fixture.coordinator.encodeMutation(prepared)
+        let payload = try #require(fixture.backend.encodedImportPayload)
+        #expect(payload.width == width)
+        #expect(payload.height == height)
+        #expect(payload.bytesPerRow == bytesPerRow)
+        #expect(payload.encodedPremultipliedBGRA8 == bytes)
+        #expect(payload.conversion
+            == .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float)
+        #expect(payload.clearsDestinationsBeforeConversion)
+        #expect(payload.destinations.map(\.coordinate) == coordinates)
+        #expect(payload.tileRegions == [
+            .init(
+                coordinate: coordinates[0],
+                sourceOrigin: SIMD2(0, 0),
+                sourceByteOffset: 0,
+                destinationOrigin: .zero,
+                extent: PixelSize(width: 256, height: 256)
+            ),
+            .init(
+                coordinate: coordinates[1],
+                sourceOrigin: SIMD2(256, 0),
+                sourceByteOffset: 256 * 4,
+                destinationOrigin: .zero,
+                extent: PixelSize(width: 1, height: 256)
+            ),
+            .init(
+                coordinate: coordinates[2],
+                sourceOrigin: SIMD2(0, 256),
+                sourceByteOffset: 256 * bytesPerRow,
+                destinationOrigin: .zero,
+                extent: PixelSize(width: 256, height: 3)
+            ),
+            .init(
+                coordinate: coordinates[3],
+                sourceOrigin: SIMD2(256, 256),
+                sourceByteOffset: 256 * bytesPerRow + 256 * 4,
+                destinationOrigin: .zero,
+                extent: PixelSize(width: 1, height: 3)
+            ),
+        ])
+        let encodedSnapshot = fixture.registry.snapshot()
+        #expect(encodedSnapshot.generation == baseline.generation)
+        #expect(encodedSnapshot.layers == baseline.layers)
+        #expect(encodedSnapshot.activeTileLeaseCount == 1)
+
+        let transparent = transactionImportPayloadColor(payload, x: 0, y: 0)
+        #expect(transparent == .zero)
+        let translucent = transactionImportPayloadColor(payload, x: 1, y: 0)
+        let translucentOracle = DocumentColorPipeline
+            .importEncodedPremultipliedBGRA8(.init(
+                blue: 32,
+                green: 16,
+                red: 64,
+                alpha: 128
+            )).simd
+        #expect(translucent == translucentOracle)
+        #expect(translucent != transactionWrongStraightAlphaImport(
+            blue: 32,
+            green: 16,
+            red: 64,
+            alpha: 128
+        ))
+        #expect(translucent != transactionWrongEncodedPremultipliedImport(
+            blue: 32,
+            green: 16,
+            red: 64,
+            alpha: 128
+        ))
+        #expect(translucent != transactionWrongDoubleDecodedImport(translucent))
+        #expect(transactionImportPayloadColor(payload, x: 255, y: 0)
+            == DocumentColorPipeline.importEncodedPremultipliedBGRA8(.init(
+                blue: 3,
+                green: 2,
+                red: 1,
+                alpha: 255
+            )).simd)
+        let tolerant = transactionImportPayloadColor(payload, x: 256, y: 0)
+        #expect(abs(tolerant.x - tolerant.w) < 1e-7)
+        #expect(abs(tolerant.z - tolerant.w) < 1e-7)
+
+        let reduced = try fixture.coordinator.completeMutation(
+            encoded,
+            as: .succeeded
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError.historyNotRequired) {
+            _ = try fixture.coordinator.encodeHistoryCapture(reduced)
+        }
+        let terminal = try fixture.coordinator.prepareTerminalCommit(reduced)
+        let result = try fixture.coordinator.publish(terminal)
+        #expect(result.historyPair == nil)
+        #expect(result.dirtyCoordinates == coordinates)
+        #expect(fixture.registry.snapshot().generation == baseline.generation + 1)
+        #expect(fixture.registry.snapshot().layers[0].references.map(\.coordinate)
+            == coordinates)
+        #expect(fixture.revisions.snapshot() == revisionBaseline)
+        #expect(fixture.registry.snapshot().activeTileLeaseCount == 0)
+    }
+
+    @Test
+    func encodedImportReductionPrunesAConvertedAlphaZeroTile() throws {
+        guard let fixture = try TransactionFixture.make(width: 1, height: 1)
+        else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        fixture.backend.alphaByCoordinate[coordinate] = 0
+        let request = transactionEncodedImportRequest(
+            fixture,
+            bytes: Data([19, 37, 91, 255])
+        )
+        let prepared = try transactionPrepared(
+            fixture.coordinator.prepareEncodedImport(request)
+        )
+        let encoded = try fixture.coordinator.encodeMutation(prepared)
+        #expect(fixture.backend.encodedImportPayload?.destinations.count == 1)
+        let reduced = try fixture.coordinator.completeMutation(
+            encoded,
+            as: .succeeded
+        )
+        #expect(fixture.coordinator.snapshot().candidateCoordinates.isEmpty)
+        #expect(fixture.registry.snapshot().residentTileBytes == 0)
+        let terminal = try fixture.coordinator.prepareTerminalCommit(reduced)
+        let result = try fixture.coordinator.publish(terminal)
+        #expect(result.historyPair == nil)
+        #expect(result.dirtyCoordinates == [coordinate])
+        #expect(fixture.registry.snapshot().layers[0].references.isEmpty)
+        #expect(fixture.registry.snapshot().residentTileBytes == 0)
+    }
+
+    @Test
+    func encodedImportFailuresRestoreExactBaselineAndAllowImmediateReuse() throws {
+        guard let reserve = try TransactionFixture.make(width: 1, height: 1)
+        else { return }
+        let reserveRequest = transactionEncodedImportRequest(
+            reserve,
+            bytes: Data([19, 37, 91, 255])
+        )
+        let reserveRegistry = reserve.registry.snapshot()
+        let reserveRevisions = reserve.revisions.snapshot()
+        #expect(throws: PaintTileStoreError
+            .injectedAllocationFailure(reserveIndex: 0)) {
+            _ = try reserve.coordinator.prepareEncodedImport(
+                reserveRequest,
+                failureInjection: .init(failingAt: .candidateReserve(0))
+            )
+        }
+        try transactionRequireEncodedImportQuiescentAndReusable(
+            reserve,
+            request: reserveRequest,
+            registryBaseline: reserveRegistry,
+            revisionBaseline: reserveRevisions
+        )
+
+        guard let encode = try TransactionFixture.make(width: 1, height: 1)
+        else { return }
+        let encodeRequest = transactionEncodedImportRequest(
+            encode,
+            bytes: Data([19, 37, 91, 255])
+        )
+        let encodeRegistry = encode.registry.snapshot()
+        let encodeRevisions = encode.revisions.snapshot()
+        let encodePrepared = try transactionPrepared(
+            encode.coordinator.prepareEncodedImport(encodeRequest)
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .backendEncodingFailed) {
+            _ = try encode.coordinator.encodeMutation(
+                encodePrepared,
+                failureInjection: .init(failingAt: .mutationEncode)
+            )
+        }
+        #expect(encode.coordinator.snapshot().phase == .prepared)
+        try encode.coordinator.discard(encodePrepared)
+        try transactionRequireEncodedImportQuiescentAndReusable(
+            encode,
+            request: encodeRequest,
+            registryBaseline: encodeRegistry,
+            revisionBaseline: encodeRevisions
+        )
+
+        for (point, expected) in [
+            (
+                DocumentPaintSurfaceTransactionFailurePoint.mutationCompletion,
+                DocumentPaintSurfaceTransactionError.backendCompletionFailed
+            ),
+            (.reductionValidation, .reductionValidationFailed),
+            (.destinationLeaseReturn, .destinationLeaseReturnFailed),
+            (.candidatePrune, .candidatePruneFailed),
+        ] {
+            guard let fixture = try TransactionFixture.make(width: 1, height: 1)
+            else { return }
+            let request = transactionEncodedImportRequest(
+                fixture,
+                bytes: Data([19, 37, 91, 255])
+            )
+            let registry = fixture.registry.snapshot()
+            let revisions = fixture.revisions.snapshot()
+            let prepared = try transactionPrepared(
+                fixture.coordinator.prepareEncodedImport(request)
+            )
+            let encoded = try fixture.coordinator.encodeMutation(prepared)
+            #expect(throws: expected) {
+                _ = try fixture.coordinator.completeMutation(
+                    encoded,
+                    as: .succeeded,
+                    failureInjection: .init(failingAt: point)
+                )
+            }
+            if fixture.coordinator.snapshot().state == .discardPending {
+                try fixture.coordinator.retryDiscard()
+            }
+            try transactionRequireEncodedImportQuiescentAndReusable(
+                fixture,
+                request: request,
+                registryBaseline: registry,
+                revisionBaseline: revisions
+            )
+        }
+
+        for (point, expected) in [
+            (
+                DocumentPaintSurfaceTransactionFailurePoint.terminalPreflight,
+                DocumentPaintSurfaceTransactionError.terminalPreflightFailed
+            ),
+            (.registryPrepare, .registryPreparationFailed),
+        ] {
+            guard let fixture = try TransactionFixture.make(width: 1, height: 1)
+            else { return }
+            let request = transactionEncodedImportRequest(
+                fixture,
+                bytes: Data([19, 37, 91, 255])
+            )
+            let registry = fixture.registry.snapshot()
+            let revisions = fixture.revisions.snapshot()
+            let prepared = try transactionPrepared(
+                fixture.coordinator.prepareEncodedImport(request)
+            )
+            let encoded = try fixture.coordinator.encodeMutation(prepared)
+            let reduced = try fixture.coordinator.completeMutation(
+                encoded,
+                as: .succeeded
+            )
+            #expect(throws: expected) {
+                _ = try fixture.coordinator.prepareTerminalCommit(
+                    reduced,
+                    failureInjection: .init(failingAt: point)
+                )
+            }
+            try fixture.coordinator.discard(reduced)
+            try transactionRequireEncodedImportQuiescentAndReusable(
+                fixture,
+                request: request,
+                registryBaseline: registry,
+                revisionBaseline: revisions
+            )
+        }
+
+        guard let publish = try TransactionFixture.make(width: 1, height: 1)
+        else { return }
+        let publishRequest = transactionEncodedImportRequest(
+            publish,
+            bytes: Data([19, 37, 91, 255])
+        )
+        let publishRegistry = publish.registry.snapshot()
+        let publishRevisions = publish.revisions.snapshot()
+        let publishPrepared = try transactionPrepared(
+            publish.coordinator.prepareEncodedImport(publishRequest)
+        )
+        let publishEncoded = try publish.coordinator.encodeMutation(
+            publishPrepared
+        )
+        let publishReduced = try publish.coordinator.completeMutation(
+            publishEncoded,
+            as: .succeeded
+        )
+        let terminal = try publish.coordinator.prepareTerminalCommit(
+            publishReduced
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .revisionPublishFailed) {
+            _ = try publish.coordinator.publish(
+                terminal,
+                failureInjection: .init(failingAt: .revisionPublish)
+            )
+        }
+        try publish.coordinator.discard(terminal)
+        try transactionRequireEncodedImportQuiescentAndReusable(
+            publish,
+            request: publishRequest,
+            registryBaseline: publishRegistry,
+            revisionBaseline: publishRevisions
+        )
+    }
+
+    @Test
+    func encodedImportRejectsWinnerAfterReplacementAuthorityDerivation() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue()
+        else { return }
+        let layerID = UUID()
+        let geometry = try transactionGeometry(width: 512, height: 256)
+        let tileBytes = PaintTileDescriptor.residentByteCount
+        let registry = try DocumentPaintSurfaceStore(
+            device: device,
+            byteBudget: tileBytes * 8,
+            transferByteCapacity: tileBytes * 16,
+            geometry: geometry,
+            layerIDs: [layerID]
+        )
+        let revisions = TiledRasterRevisionStore(
+            device: device,
+            maximumRetainedBytes: tileBytes * 8
+        )
+        let winningCoordinate = PaintTileCoordinate(x: 1, y: 0)
+        let winningCoordinator = DocumentPaintSurfaceTransaction(
+            registry: registry,
+            revisionStore: revisions,
+            commandQueue: queue,
+            mutationBackend: TransactionTestMutationBackend()
+        )
+        let winningRequest = DocumentPaintSurfaceMutationRequest(
+            kind: .stroke,
+            layerID: layerID,
+            baseGeometry: geometry,
+            candidateGeometry: geometry,
+            dirtyCoordinates: [winningCoordinate],
+            explicitlyRemovedCoordinates: [],
+            requiresHistoryPair: false
+        )
+        let importBackend = TransactionTestMutationBackend()
+        let importCoordinator = DocumentPaintSurfaceTransaction(
+            registry: registry,
+            revisionStore: revisions,
+            commandQueue: queue,
+            mutationBackend: importBackend,
+            afterEncodedImportReplacementAuthorityForTesting: {
+                let prepared = try transactionPrepared(
+                    winningCoordinator.prepareMutation(winningRequest)
+                )
+                let encoded = try winningCoordinator.encodeMutation(prepared)
+                let reduced = try winningCoordinator.completeMutation(
+                    encoded,
+                    as: .succeeded
+                )
+                let terminal = try winningCoordinator
+                    .prepareTerminalCommit(reduced)
+                _ = try winningCoordinator.publish(terminal)
+            }
+        )
+        var bytes = Data(count: 512 * 256 * 4)
+        bytes[3] = 255
+        let request = DocumentPaintSurfaceEncodedImportRequest(
+            layerID: layerID,
+            candidateGeometry: geometry,
+            width: 512,
+            height: 256,
+            bytesPerRow: 512 * 4,
+            encodedPremultipliedBGRA8: bytes
+        )
+        let revisionBaseline = revisions.snapshot()
+
+        #expect(throws: DocumentPaintSurfaceStoreError.staleGeneration(
+            expected: 1,
+            actual: 0
+        )) {
+            _ = try importCoordinator.prepareEncodedImport(request)
+        }
+
+        #expect(importCoordinator.snapshot().state == .idle)
+        #expect(importBackend.encodeCallCount == 0)
+        #expect(registry.snapshot().generation == 1)
+        #expect(registry.snapshot().layers[0].references.map(\.coordinate) == [
+            winningCoordinate,
+        ])
+        #expect(registry.snapshot().activeTileLeaseCount == 0)
+        #expect(registry.snapshot().preparedCandidateCount == 0)
+        #expect(revisions.snapshot() == revisionBaseline)
+    }
+
+    @Test
     func capturedBaseEpochCannotMixWithAConcurrentCoordinatorCommit() throws {
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue()
@@ -2086,6 +2744,8 @@ private final class TransactionTestMutationBackend:
     var onDiscardAndWaitUntilTerminal: (() -> Void)?
     private(set) var destinations: [DocumentPaintSurfaceMutationDestination] = []
     private(set) var resizePayload: DocumentPaintSurfaceResizeBackendPayload?
+    private(set) var encodedImportPayload:
+        DocumentPaintSurfaceEncodedImportBackendPayload?
 
     func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws {
         switch operation {
@@ -2093,6 +2753,9 @@ private final class TransactionTestMutationBackend:
             _ = destinations
         case let .resize(payload):
             resizePayload = payload
+            destinations = payload.destinations
+        case let .encodedImport(payload):
+            encodedImportPayload = payload
             destinations = payload.destinations
         case let .restore(payload):
             _ = payload.reference
@@ -2109,6 +2772,9 @@ private final class TransactionTestMutationBackend:
             self.destinations = destinations
         case let .resize(payload):
             resizePayload = payload
+            destinations = payload.destinations
+        case let .encodedImport(payload):
+            encodedImportPayload = payload
             destinations = payload.destinations
         case let .restore(payload):
             destinations = payload.destinations
@@ -2245,6 +2911,108 @@ private func transactionRadialPhysicalCoordinate(
         x: page.atlasSlot % layout.atlasColumns,
         y: page.atlasSlot / layout.atlasColumns
     )
+}
+
+private func transactionImportPayloadColor(
+    _ payload: DocumentPaintSurfaceEncodedImportBackendPayload,
+    x: Int,
+    y: Int
+) -> SIMD4<Float> {
+    let offset = y * payload.bytesPerRow + x * 4
+    let pixel = EncodedPremultipliedBGRA8(
+        blue: payload.encodedPremultipliedBGRA8[offset],
+        green: payload.encodedPremultipliedBGRA8[offset + 1],
+        red: payload.encodedPremultipliedBGRA8[offset + 2],
+        alpha: payload.encodedPremultipliedBGRA8[offset + 3]
+    )
+    switch payload.conversion {
+    case .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float:
+        return DocumentColorPipeline
+            .importEncodedPremultipliedBGRA8(pixel).simd
+    }
+}
+
+private func transactionWrongStraightAlphaImport(
+    blue: UInt8,
+    green: UInt8,
+    red: UInt8,
+    alpha: UInt8
+) -> SIMD4<Float> {
+    EncodedSRGBColor(
+        red: Float(red) / 255,
+        green: Float(green) / 255,
+        blue: Float(blue) / 255,
+        alpha: Float(alpha) / 255
+    )!.linearPremultiplied().simd
+}
+
+private func transactionWrongEncodedPremultipliedImport(
+    blue: UInt8,
+    green: UInt8,
+    red: UInt8,
+    alpha: UInt8
+) -> SIMD4<Float> {
+    SIMD4(
+        Float(red) / 255,
+        Float(green) / 255,
+        Float(blue) / 255,
+        Float(alpha) / 255
+    )
+}
+
+private func transactionWrongDoubleDecodedImport(
+    _ correct: SIMD4<Float>
+) -> SIMD4<Float> {
+    guard correct.w > 0 else { return .zero }
+    return EncodedSRGBColor(
+        red: min(1, correct.x / correct.w),
+        green: min(1, correct.y / correct.w),
+        blue: min(1, correct.z / correct.w),
+        alpha: correct.w
+    )!.linearPremultiplied().simd
+}
+
+private func transactionEncodedImportRequest(
+    _ fixture: TransactionFixture,
+    bytes: Data
+) -> DocumentPaintSurfaceEncodedImportRequest {
+    let size = fixture.geometry.storagePixelSize
+    return DocumentPaintSurfaceEncodedImportRequest(
+        layerID: fixture.layerID,
+        candidateGeometry: fixture.geometry,
+        width: size.width,
+        height: size.height,
+        bytesPerRow: size.width * 4,
+        encodedPremultipliedBGRA8: bytes
+    )
+}
+
+private func transactionRequireEncodedImportQuiescentAndReusable(
+    _ fixture: TransactionFixture,
+    request: DocumentPaintSurfaceEncodedImportRequest,
+    registryBaseline: DocumentPaintSurfaceStoreSnapshot,
+    revisionBaseline: TiledRasterRevisionStoreSnapshot
+) throws {
+    #expect(fixture.coordinator.snapshot().state == .idle)
+    #expect(fixture.registry.snapshot() == registryBaseline)
+    #expect(fixture.revisions.snapshot() == revisionBaseline)
+
+    let prepared = try transactionPrepared(
+        fixture.coordinator.prepareEncodedImport(request)
+    )
+    let encoded = try fixture.coordinator.encodeMutation(prepared)
+    let reduced = try fixture.coordinator.completeMutation(
+        encoded,
+        as: .succeeded
+    )
+    let terminal = try fixture.coordinator.prepareTerminalCommit(reduced)
+    let result = try fixture.coordinator.publish(terminal)
+    #expect(result.historyPair == nil)
+    #expect(fixture.coordinator.snapshot().state == .idle)
+    #expect(fixture.registry.snapshot().generation
+        == registryBaseline.generation + 1)
+    #expect(fixture.registry.snapshot().activeTileLeaseCount == 0)
+    #expect(fixture.revisions.snapshot() == revisionBaseline)
 }
 
 private func transactionPrepared(

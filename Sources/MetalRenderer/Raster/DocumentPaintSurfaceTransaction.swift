@@ -71,6 +71,9 @@ public enum DocumentPaintSurfaceTransactionError:
     case overlappingDirtyAndRemovedCoordinate(PaintTileCoordinate)
     case incompleteGeometryReplacement(PaintTileCoordinate)
     case invalidResizeMapping
+    case invalidEncodedImport(DocumentColorInterchangeError)
+    case encodedImportGeometryMismatch(expected: PixelSize, actual: PixelSize)
+    case encodedImportRadialUnsupported
     case emptyMutation
     case backendEncodingFailed
     case backendCompletionFailed
@@ -172,6 +175,34 @@ public struct DocumentPaintSurfaceMutationRequest:
         self.dirtyCoordinates = dirtyCoordinates
         self.explicitlyRemovedCoordinates = explicitlyRemovedCoordinates
         self.requiresHistoryPair = requiresHistoryPair
+    }
+}
+
+/// Complete, immutable encoded-interchange source for opening a document.
+/// Import is always a full candidate replacement without an undo-history pair;
+/// the caller resets editor history only after publication succeeds.
+public struct DocumentPaintSurfaceEncodedImportRequest: Equatable, Sendable {
+    public let layerID: UUID
+    public let candidateGeometry: DocumentPaintGeometry
+    public let width: Int
+    public let height: Int
+    public let bytesPerRow: Int
+    public let encodedPremultipliedBGRA8: Data
+
+    public init(
+        layerID: UUID,
+        candidateGeometry: DocumentPaintGeometry,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int,
+        encodedPremultipliedBGRA8: Data
+    ) {
+        self.layerID = layerID
+        self.candidateGeometry = candidateGeometry
+        self.width = width
+        self.height = height
+        self.bytesPerRow = bytesPerRow
+        self.encodedPremultipliedBGRA8 = Data(encodedPremultipliedBGRA8)
     }
 }
 
@@ -369,6 +400,34 @@ struct DocumentPaintSurfaceResizeBackendPayload: @unchecked Sendable {
     let mappings: [DocumentPaintSurfaceResizeCopyMapping]
 }
 
+enum DocumentPaintSurfaceEncodedImportConversion: Equatable, Sendable {
+    /// For each texel: alpha-zero discards encoded RGB; otherwise divide the
+    /// encoded RGB bytes by encoded alpha, clamp tolerant C8>A8 input to straight
+    /// [0, 1], decode straight sRGB to linear, then premultiply linear RGB by
+    /// alpha and store RGBA16F.
+    case encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float
+}
+
+struct DocumentPaintSurfaceEncodedImportTileRegion: Equatable, Sendable {
+    let coordinate: PaintTileCoordinate
+    let sourceOrigin: SIMD2<Int>
+    let sourceByteOffset: Int
+    let destinationOrigin: SIMD2<Int>
+    let extent: PixelSize
+}
+
+struct DocumentPaintSurfaceEncodedImportBackendPayload: @unchecked Sendable {
+    let candidateGeometry: DocumentPaintGeometry
+    let width: Int
+    let height: Int
+    let bytesPerRow: Int
+    let encodedPremultipliedBGRA8: Data
+    let conversion: DocumentPaintSurfaceEncodedImportConversion
+    let clearsDestinationsBeforeConversion: Bool
+    let destinations: [DocumentPaintSurfaceMutationDestination]
+    let tileRegions: [DocumentPaintSurfaceEncodedImportTileRegion]
+}
+
 /// Complete restore payload presented to the inert backend preflight. It is
 /// deliberately typed and contains no candidate, install lease, or registry
 /// commit token.
@@ -383,6 +442,7 @@ enum DocumentPaintSurfaceBackendOperation: @unchecked Sendable {
         destinations: [DocumentPaintSurfaceMutationDestination]
     )
     case resize(DocumentPaintSurfaceResizeBackendPayload)
+    case encodedImport(DocumentPaintSurfaceEncodedImportBackendPayload)
     case restore(DocumentPaintSurfaceRestoreBackendPayload)
 }
 
@@ -446,6 +506,12 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         let mappings: [DocumentPaintSurfaceResizeCopyMapping]
     }
 
+    private struct EncodedImportPlan: Sendable {
+        let request: DocumentPaintSurfaceEncodedImportRequest
+        let dirtyCoordinates: [PaintTileCoordinate]
+        let tileRegions: [DocumentPaintSurfaceEncodedImportTileRegion]
+    }
+
     private final class LiveTransaction {
         let sequence: UInt64
         let request: DocumentPaintSurfaceMutationRequest
@@ -453,6 +519,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         let baseBinding: DocumentPaintLayerBinding
         let candidate: DocumentPaintSurfaceCandidate
         let resizePlan: ResizePlan?
+        let encodedImportPlan: EncodedImportPlan?
         var phase: DocumentPaintSurfaceTransactionPhase
 
         var candidateBinding: DocumentPaintLayerBinding?
@@ -476,6 +543,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             baseBinding: DocumentPaintLayerBinding,
             candidate: DocumentPaintSurfaceCandidate,
             resizePlan: ResizePlan?,
+            encodedImportPlan: EncodedImportPlan?,
             phase: DocumentPaintSurfaceTransactionPhase
         ) {
             self.sequence = sequence
@@ -484,6 +552,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             self.baseBinding = baseBinding
             self.candidate = candidate
             self.resizePlan = resizePlan
+            self.encodedImportPlan = encodedImportPlan
             self.phase = phase
         }
     }
@@ -529,6 +598,8 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
     private let commandQueue: any MTLCommandQueue
     private let mutationBackend: any DocumentPaintSurfaceMutationBackend
     private let afterBaseSnapshotForTesting: (@Sendable () throws -> Void)?
+    private let afterEncodedImportReplacementAuthorityForTesting:
+        (@Sendable () throws -> Void)?
     private var nextSequence: UInt64 = 1
     private var lastCompletedSequence: UInt64 = 0
     private var live: LiveTransaction?
@@ -539,13 +610,17 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         revisionStore: TiledRasterRevisionStore,
         commandQueue: any MTLCommandQueue,
         mutationBackend: any DocumentPaintSurfaceMutationBackend,
-        afterBaseSnapshotForTesting: (@Sendable () throws -> Void)? = nil
+        afterBaseSnapshotForTesting: (@Sendable () throws -> Void)? = nil,
+        afterEncodedImportReplacementAuthorityForTesting:
+            (@Sendable () throws -> Void)? = nil
     ) {
         self.registry = registry
         self.revisionStore = revisionStore
         self.commandQueue = commandQueue
         self.mutationBackend = mutationBackend
         self.afterBaseSnapshotForTesting = afterBaseSnapshotForTesting
+        self.afterEncodedImportReplacementAuthorityForTesting =
+            afterEncodedImportReplacementAuthorityForTesting
     }
 
     public func snapshot() -> DocumentPaintSurfaceTransactionSnapshot {
@@ -598,23 +673,99 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         _ request: DocumentPaintSurfaceMutationRequest,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
     ) throws -> DocumentPaintMutationPreparation {
+        guard request.kind != .encodedImport else {
+            throw DocumentPaintSurfaceTransactionError
+                .unsupportedMutationKind(.encodedImport)
+        }
+        return try prepareMutation(
+            request,
+            failureInjection: failureInjection,
+            encodedImportPlan: nil
+        )
+    }
+
+    public func prepareEncodedImport(
+        _ request: DocumentPaintSurfaceEncodedImportRequest,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
+    ) throws -> DocumentPaintMutationPreparation {
+        let importPlan = try Self.makeEncodedImportPlan(request)
+        return try prepareMutation(
+            nil,
+            failureInjection: failureInjection,
+            encodedImportPlan: importPlan
+        )
+    }
+
+    private func prepareMutation(
+        _ suppliedRequest: DocumentPaintSurfaceMutationRequest?,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection?,
+        encodedImportPlan: EncodedImportPlan?
+    ) throws -> DocumentPaintMutationPreparation {
         try withLock {
             guard live == nil, liveRestore == nil else {
                 throw DocumentPaintSurfaceTransactionError
                     .transactionAlreadyLive
             }
-            guard request.kind != .restore else {
+            let targetLayerID: UUID
+            if let suppliedRequest {
+                guard suppliedRequest.kind != .restore else {
+                    throw DocumentPaintSurfaceTransactionError
+                        .unsupportedMutationKind(suppliedRequest.kind)
+                }
+                guard encodedImportPlan == nil else {
+                    throw DocumentPaintSurfaceTransactionError
+                        .unsupportedMutationKind(suppliedRequest.kind)
+                }
+                targetLayerID = suppliedRequest.layerID
+            } else if let encodedImportPlan {
+                targetLayerID = encodedImportPlan.request.layerID
+            } else {
                 throw DocumentPaintSurfaceTransactionError
-                    .unsupportedMutationKind(request.kind)
+                    .unsupportedMutationKind(.encodedImport)
             }
             let base: DocumentPaintSurfaceMutationBaseSnapshot
             do {
-                base = try registry.captureMutationBase(for: request.layerID)
+                base = try registry.captureMutationBase(
+                    for: targetLayerID
+                )
             } catch DocumentPaintSurfaceStoreError.unknownLayerID {
                 throw DocumentPaintSurfaceTransactionError
-                    .unknownLayerID(request.layerID)
+                    .unknownLayerID(targetLayerID)
             }
             try afterBaseSnapshotForTesting?()
+            let request: DocumentPaintSurfaceMutationRequest
+            if let suppliedRequest {
+                request = suppliedRequest
+            } else if let encodedImportPlan {
+                let dirty = Set(encodedImportPlan.dirtyCoordinates)
+                let removals = base.binding.canonical.references
+                    .map(\.coordinate)
+                    .filter { !dirty.contains($0) }
+                request = DocumentPaintSurfaceMutationRequest(
+                    kind: .encodedImport,
+                    layerID: encodedImportPlan.request.layerID,
+                    baseGeometry: base.geometry,
+                    candidateGeometry:
+                        encodedImportPlan.request.candidateGeometry,
+                    dirtyCoordinates: encodedImportPlan.dirtyCoordinates,
+                    explicitlyRemovedCoordinates: removals,
+                    requiresHistoryPair: false
+                )
+            } else {
+                preconditionFailure("Mutation preparation source was lost")
+            }
+            if request.kind == .encodedImport {
+                try afterEncodedImportReplacementAuthorityForTesting?()
+                guard let encodedImportPlan,
+                      encodedImportPlan.request.layerID == request.layerID,
+                      encodedImportPlan.request.candidateGeometry
+                        == request.candidateGeometry,
+                      !request.requiresHistoryPair
+                else {
+                    throw DocumentPaintSurfaceTransactionError
+                        .unsupportedMutationKind(request.kind)
+                }
+            }
             let activeGeometry = base.geometry
             guard request.baseGeometry == activeGeometry else {
                 throw DocumentPaintSurfaceTransactionError
@@ -703,9 +854,21 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     throw DocumentPaintSurfaceTransactionError
                         .missingBaseCoordinate(missing)
                 }
+            } else if request.kind == .encodedImport,
+                      request.candidateGeometry == request.baseGeometry,
+                      baseCoordinates.isEmpty,
+                      request.dirtyCoordinates.isEmpty,
+                      request.explicitlyRemovedCoordinates.isEmpty {
+                return .noOp(DocumentPaintSurfaceNoOp(
+                    kind: .encodedImport,
+                    layerID: request.layerID,
+                    generation: base.generation
+                ))
             } else if request.dirtyCoordinates.isEmpty,
                       request.explicitlyRemovedCoordinates.isEmpty,
                       !(request.kind == .resize
+                          && request.candidateGeometry != request.baseGeometry),
+                      !(request.kind == .encodedImport
                           && request.candidateGeometry != request.baseGeometry) {
                 throw DocumentPaintSurfaceTransactionError.emptyMutation
             }
@@ -746,6 +909,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 baseBinding: baseBinding,
                 candidate: candidate,
                 resizePlan: resizePlan,
+                encodedImportPlan: encodedImportPlan,
                 phase: .prepared
             )
             return .prepared(DocumentPaintPreparedMutation(
@@ -1163,22 +1327,26 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         try withLock {
             let current = try validated(handle)
             let binding: DocumentPaintLayerBinding
-            let lease: PaintTileLease
+            let lease: PaintTileLease?
             do {
                 binding = try current.candidate.binding(
                     for: current.request.layerID
                 )
-                lease = try binding.canonical.leaseExistingTiles(
-                    at: current.request.dirtyCoordinates,
-                    pinReasons: [.dirty, .inFlight]
-                )
+                if current.request.dirtyCoordinates.isEmpty {
+                    lease = nil
+                } else {
+                    lease = try binding.canonical.leaseExistingTiles(
+                        at: current.request.dirtyCoordinates,
+                        pinReasons: [.dirty, .inFlight]
+                    )
+                }
             } catch {
                 throw DocumentPaintSurfaceTransactionError
                     .backendEncodingFailed
             }
             current.candidateBinding = binding
             current.destinationLease = lease
-            let destinations = lease.bindings.map {
+            let destinations = (lease?.bindings ?? []).map {
                 DocumentPaintSurfaceMutationDestination(
                     coordinate: $0.descriptor.coordinate,
                     logicalBounds: $0.descriptor.logicalBounds,
@@ -1186,7 +1354,43 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 )
             }
             let operation: DocumentPaintSurfaceBackendOperation
-            if let resizePlan = current.resizePlan {
+            if let importPlan = current.encodedImportPlan {
+                do {
+                    try Self.validateEncodedImportBindings(
+                        destinations: destinations,
+                        plan: importPlan
+                    )
+                    operation = .encodedImport(
+                        DocumentPaintSurfaceEncodedImportBackendPayload(
+                            candidateGeometry:
+                                importPlan.request.candidateGeometry,
+                            width: importPlan.request.width,
+                            height: importPlan.request.height,
+                            bytesPerRow: importPlan.request.bytesPerRow,
+                            encodedPremultipliedBGRA8: importPlan.request
+                                .encodedPremultipliedBGRA8,
+                            conversion:
+                                .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float,
+                            clearsDestinationsBeforeConversion: true,
+                            destinations: destinations,
+                            tileRegions: importPlan.tileRegions
+                        )
+                    )
+                } catch {
+                    do {
+                        if let lease {
+                            try binding.canonical.returnLease(lease)
+                        }
+                        current.destinationLease = nil
+                        current.candidateBinding = nil
+                    } catch {
+                        current.phase = .discardPending
+                        throw DocumentPaintSurfaceTransactionError.cleanupFailed
+                    }
+                    throw DocumentPaintSurfaceTransactionError
+                        .backendEncodingFailed
+                }
+            } else if let resizePlan = current.resizePlan {
                 do {
                     if !resizePlan.sourceCoordinates.isEmpty {
                         current.resizeSourceLease = try current.baseBinding
@@ -1227,7 +1431,9 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                             )
                             current.resizeSourceLease = nil
                         }
-                        try binding.canonical.returnLease(lease)
+                        if let lease {
+                            try binding.canonical.returnLease(lease)
+                        }
                         current.destinationLease = nil
                         current.candidateBinding = nil
                     } catch {
@@ -1258,7 +1464,9 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                         )
                         current.resizeSourceLease = nil
                     }
-                    try binding.canonical.returnLease(lease)
+                    if let lease {
+                        try binding.canonical.returnLease(lease)
+                    }
                     current.destinationLease = nil
                     current.candidateBinding = nil
                 } catch {
@@ -1283,11 +1491,11 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         try withLock {
             let current = try validated(handle)
             guard let encoding = current.backendEncoding,
-                  let binding = current.candidateBinding,
-                  let lease = current.destinationLease
+                  let binding = current.candidateBinding
             else {
                 preconditionFailure("Encoded mutation lost owned resources")
             }
+            let lease = current.destinationLease
             let evidence: [DocumentPaintSurfaceMutationEvidence]
             do {
                 if failureInjection?.shouldFail(at: .mutationCompletion) == true {
@@ -1318,20 +1526,24 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 )
             }
 
-            if failureInjection?.shouldFail(at: .destinationLeaseReturn) == true {
-                current.phase = .discardPending
-                throw DocumentPaintSurfaceTransactionError
-                    .destinationLeaseReturnFailed
+            if let lease {
+                if failureInjection?.shouldFail(
+                    at: .destinationLeaseReturn
+                ) == true {
+                    current.phase = .discardPending
+                    throw DocumentPaintSurfaceTransactionError
+                        .destinationLeaseReturnFailed
+                }
+                do {
+                    try binding.canonical.returnLease(lease)
+                    current.destinationLease = nil
+                } catch {
+                    current.phase = .discardPending
+                    throw DocumentPaintSurfaceTransactionError
+                        .destinationLeaseReturnFailed
+                }
             }
-            do {
-                try binding.canonical.returnLease(lease)
-                current.destinationLease = nil
-                current.candidateBinding = nil
-            } catch {
-                current.phase = .discardPending
-                throw DocumentPaintSurfaceTransactionError
-                    .destinationLeaseReturnFailed
-            }
+            current.candidateBinding = nil
             if let sourceLease = current.resizeSourceLease {
                 if failureInjection?.shouldFail(at: .sourceLeaseReturn) == true {
                     current.phase = .discardPending
@@ -1631,6 +1843,11 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                   let result = current.commitResult
             else {
                 preconditionFailure("Terminal commit lost prepared ownership")
+            }
+            if current.revisionPair == nil,
+               failureInjection?.shouldFail(at: .revisionPublish) == true {
+                throw DocumentPaintSurfaceTransactionError
+                    .revisionPublishFailed
             }
             if let pair = current.revisionPair {
                 let revisionFailure: TiledRasterRevisionFailureInjection?
@@ -2007,6 +2224,148 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         live = nil
     }
 
+    private static func makeEncodedImportPlan(
+        _ request: DocumentPaintSurfaceEncodedImportRequest
+    ) throws -> EncodedImportPlan {
+        guard request.width > 0, request.height > 0 else {
+            throw DocumentPaintSurfaceTransactionError.invalidEncodedImport(
+                .invalidDimensions(
+                    width: request.width,
+                    height: request.height
+                )
+            )
+        }
+        let (minimumBytesPerRow, rowOverflow) = request.width
+            .multipliedReportingOverflow(by: 4)
+        guard !rowOverflow else {
+            throw DocumentPaintSurfaceTransactionError
+                .invalidEncodedImport(.byteCountOverflow)
+        }
+        guard request.bytesPerRow >= minimumBytesPerRow else {
+            throw DocumentPaintSurfaceTransactionError.invalidEncodedImport(
+                .invalidRowStride(
+                    minimum: minimumBytesPerRow,
+                    actual: request.bytesPerRow
+                )
+            )
+        }
+        let (expectedByteCount, byteCountOverflow) = request.bytesPerRow
+            .multipliedReportingOverflow(by: request.height)
+        guard !byteCountOverflow else {
+            throw DocumentPaintSurfaceTransactionError
+                .invalidEncodedImport(.byteCountOverflow)
+        }
+        guard request.encodedPremultipliedBGRA8.count == expectedByteCount else {
+            throw DocumentPaintSurfaceTransactionError.invalidEncodedImport(
+                .invalidEncodedByteCount(
+                    expected: expectedByteCount,
+                    actual: request.encodedPremultipliedBGRA8.count
+                )
+            )
+        }
+        guard request.candidateGeometry.radialLayout == nil else {
+            throw DocumentPaintSurfaceTransactionError
+                .encodedImportRadialUnsupported
+        }
+        let actualSize = PixelSize(
+            width: request.width,
+            height: request.height
+        )
+        guard request.candidateGeometry.storagePixelSize == actualSize else {
+            throw DocumentPaintSurfaceTransactionError
+                .encodedImportGeometryMismatch(
+                    expected: request.candidateGeometry.storagePixelSize,
+                    actual: actualSize
+                )
+        }
+
+        let maximumTileX = (request.width - 1) / PaintTileDescriptor.side
+        let maximumTileY = (request.height - 1) / PaintTileDescriptor.side
+        var coordinates: [PaintTileCoordinate] = []
+        var regions: [DocumentPaintSurfaceEncodedImportTileRegion] = []
+        let tileCount = (maximumTileX + 1) * (maximumTileY + 1)
+        coordinates.reserveCapacity(tileCount)
+        regions.reserveCapacity(tileCount)
+        for y in 0...maximumTileY {
+            for x in 0...maximumTileX {
+                let coordinate = PaintTileCoordinate(x: x, y: y)
+                let descriptor: PaintTileDescriptor
+                do {
+                    descriptor = try PaintTileDescriptor(
+                        coordinate: coordinate,
+                        logicalPixelSize:
+                            request.candidateGeometry.storagePixelSize
+                    )
+                } catch {
+                    throw DocumentPaintSurfaceTransactionError
+                        .encodedImportGeometryMismatch(
+                            expected:
+                                request.candidateGeometry.storagePixelSize,
+                            actual: actualSize
+                        )
+                }
+                let (rowOffset, rowOffsetOverflow) = descriptor.logicalBounds
+                    .minY.multipliedReportingOverflow(by: request.bytesPerRow)
+                let (columnOffset, columnOffsetOverflow) = descriptor
+                    .logicalBounds.minX.multipliedReportingOverflow(by: 4)
+                let (sourceByteOffset, offsetOverflow) = rowOffset
+                    .addingReportingOverflow(columnOffset)
+                guard !rowOffsetOverflow, !columnOffsetOverflow,
+                      !offsetOverflow
+                else {
+                    throw DocumentPaintSurfaceTransactionError
+                        .invalidEncodedImport(.byteCountOverflow)
+                }
+                guard encodedImportTileContainsNonzeroAlpha(
+                    request.encodedPremultipliedBGRA8,
+                    bytesPerRow: request.bytesPerRow,
+                    logicalBounds: descriptor.logicalBounds
+                ) else {
+                    continue
+                }
+                coordinates.append(coordinate)
+                regions.append(DocumentPaintSurfaceEncodedImportTileRegion(
+                    coordinate: coordinate,
+                    sourceOrigin: SIMD2(
+                        descriptor.logicalBounds.minX,
+                        descriptor.logicalBounds.minY
+                    ),
+                    sourceByteOffset: sourceByteOffset,
+                    destinationOrigin: .zero,
+                    extent: PixelSize(
+                        width: descriptor.logicalBounds.width,
+                        height: descriptor.logicalBounds.height
+                    )
+                ))
+            }
+        }
+        return EncodedImportPlan(
+            request: request,
+            dirtyCoordinates: coordinates,
+            tileRegions: regions
+        )
+    }
+
+    private static func encodedImportTileContainsNonzeroAlpha(
+        _ data: Data,
+        bytesPerRow: Int,
+        logicalBounds: PixelRect
+    ) -> Bool {
+        data.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            for y in logicalBounds.minY..<logicalBounds.maxY {
+                var alphaOffset = y * bytesPerRow
+                    + logicalBounds.minX * 4
+                    + 3
+                for _ in logicalBounds.minX..<logicalBounds.maxX {
+                    if bytes[alphaOffset] != 0 { return true }
+                    alphaOffset += 4
+                }
+            }
+            return false
+        }
+    }
+
     private static func makeResizePlan(
         baseCoordinates: [PaintTileCoordinate],
         sourceGeometry: DocumentPaintGeometry,
@@ -2192,6 +2551,34 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                   destination.texture.height == PaintTileDescriptor.side
             else {
                 throw DocumentPaintSurfaceTransactionError.invalidResizeMapping
+            }
+        }
+    }
+
+    private static func validateEncodedImportBindings(
+        destinations: [DocumentPaintSurfaceMutationDestination],
+        plan: EncodedImportPlan
+    ) throws {
+        guard destinations.map(\.coordinate) == plan.dirtyCoordinates,
+              plan.tileRegions.map(\.coordinate) == plan.dirtyCoordinates
+        else {
+            throw DocumentPaintSurfaceTransactionError.backendEncodingFailed
+        }
+        for (destination, region) in zip(
+            destinations,
+            plan.tileRegions
+        ) {
+            guard destination.texture.pixelFormat
+                    == PaintTileDescriptor.pixelFormat,
+                  destination.texture.width == PaintTileDescriptor.side,
+                  destination.texture.height == PaintTileDescriptor.side,
+                  region.destinationOrigin == .zero,
+                  destination.logicalBounds.width == region.extent.width,
+                  destination.logicalBounds.height == region.extent.height,
+                  destination.logicalBounds.minX == region.sourceOrigin.x,
+                  destination.logicalBounds.minY == region.sourceOrigin.y
+            else {
+                throw DocumentPaintSurfaceTransactionError.backendEncodingFailed
             }
         }
     }
