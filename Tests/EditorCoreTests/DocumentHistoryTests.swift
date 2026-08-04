@@ -1,4 +1,4 @@
-import EditorCore
+@testable import EditorCore
 import Foundation
 import PatternEngine
 import Testing
@@ -6,6 +6,21 @@ import Testing
 private let historyLayerID = UUID(
     uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 )!
+
+@Test
+func diagnosticSnapshotIncludesBaseSemanticsAndNavigationSequence() throws {
+    let history = DocumentHistory(initialDocumentIsEmpty: false)
+    let initial = history.diagnosticSnapshotForTesting()
+    #expect(!initial.baseDocumentIsEmpty)
+    #expect(initial.nextNavigationToken == 0)
+
+    _ = history.appendSuccessful(makeRasterCommand(bytes: 64))
+    let navigation = try #require(try history.beginUndo())
+    let pending = history.diagnosticSnapshotForTesting()
+    #expect(pending.nextNavigationToken == 1)
+    #expect(pending.pendingNavigation?.token == navigation.token)
+    #expect(!pending.baseDocumentIsEmpty)
+}
 
 @Test
 func navigationMovesCursorOnlyAfterSuccess() throws {

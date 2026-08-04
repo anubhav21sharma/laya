@@ -216,6 +216,17 @@ public enum DocumentHistoryError: Error, Equatable, Sendable {
     case commandExceedsMaximumBytes(retainedBytes: Int, maximumBytes: Int)
 }
 
+/// Internal, payload-complete history state used by transaction rollback
+/// tests. This deliberately exposes no public diagnostics API.
+struct DocumentHistoryDiagnosticSnapshot: Equatable, Sendable {
+    let commands: [DocumentHistoryCommand]
+    let cursor: Int
+    let retainedRasterBytes: Int
+    let pendingNavigation: HistoryNavigation?
+    let baseDocumentIsEmpty: Bool
+    let nextNavigationToken: UInt64
+}
+
 public final class DocumentHistory {
     public let maximumCommands: Int
     public let maximumBytes: Int
@@ -251,6 +262,17 @@ public final class DocumentHistory {
 
     public var currentDocumentIsEmpty: Bool {
         documentIsEmpty(at: cursor)
+    }
+
+    func diagnosticSnapshotForTesting() -> DocumentHistoryDiagnosticSnapshot {
+        .init(
+            commands: commands,
+            cursor: cursor,
+            retainedRasterBytes: retainedRasterBytes,
+            pendingNavigation: pendingNavigation,
+            baseDocumentIsEmpty: baseDocumentIsEmpty,
+            nextNavigationToken: nextNavigationToken
+        )
     }
 
     public func beginUndo() throws -> HistoryNavigation? {

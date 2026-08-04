@@ -1,5 +1,5 @@
 import Foundation
-import EditorCore
+@testable import EditorCore
 import Metal
 @testable import MetalRenderer
 import PatternEngine
@@ -7,6 +7,42 @@ import Testing
 
 @Suite("Document paint surface transaction", .serialized)
 struct DocumentPaintSurfaceTransactionTests {
+    @Test
+    func quiescenceOracleCapturesEveryObservableOwnershipDimension() throws {
+        guard let fixture = try TransactionFixture.make() else { return }
+        let history = DocumentHistory()
+        let oracle = try TransactionQuiescenceOracle.capture(
+            fixture,
+            history: history
+        )
+
+        try oracle.expectRestored(fixture, history: history)
+        #expect(oracle.transactionOwnership.candidateIdentity == nil)
+        #expect(oracle.transactionOwnership.reduction == nil)
+        #expect(!oracle.transactionOwnership.hasResizePlan)
+        #expect(history.diagnosticSnapshotForTesting().commands.isEmpty)
+        #expect(oracle.activeLayerPayloads.count == 1)
+    }
+
+    @Test
+    func quiescenceOracleDetectsCanonicalByteChangesWithStableMetadata() throws {
+        guard let fixture = try TransactionFixture.make(width: 256, height: 256)
+        else { return }
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        try transactionSeedActive(fixture, coordinates: [coordinate])
+        let oracle = try TransactionQuiescenceOracle.capture(fixture)
+        let metadata = fixture.registry.snapshot()
+
+        try transactionOverwriteActiveCanonicalBytes(
+            fixture,
+            coordinate: coordinate,
+            byte: 0x3c
+        )
+
+        #expect(fixture.registry.snapshot() == metadata)
+        #expect(try !oracle.matchesActiveLayerPayloads(fixture))
+    }
+
     @Test
     func emptyClearIsExplicitNoOpWithoutAllocatingOrOpeningTransaction() throws {
         guard let fixture = try TransactionFixture.make() else { return }
@@ -620,6 +656,384 @@ struct DocumentPaintSurfaceTransactionTests {
         try cleanupFixture.coordinator.retryDiscard()
         #expect(cleanupFixture.coordinator.snapshot().state == .idle)
         #expect(cleanupFixture.registry.snapshot().activeTileLeaseCount == 0)
+    }
+
+    @Test
+    func quiescenceOracleCoversMissingMutationAndHistoryRows() throws {
+        let first = PaintTileCoordinate(x: 0, y: 0)
+        let second = PaintTileCoordinate(x: 1, y: 0)
+
+        guard let reserve = try TransactionFixture.make(width: 512, height: 256)
+        else { return }
+        let reserveOracle = try TransactionQuiescenceOracle.capture(reserve)
+        #expect(throws: PaintTileStoreError
+            .injectedAllocationFailure(reserveIndex: 1)) {
+            _ = try reserve.coordinator.prepareMutation(
+                reserve.request(
+                    dirty: [first, second],
+                    requiresHistoryPair: false
+                ),
+                failureInjection: .init(failingAt: .candidateReserve(1))
+            )
+        }
+        try reserveOracle.expectRestored(reserve)
+        _ = try transactionCommitNoHistory(
+            reserve,
+            request: reserve.request(
+                dirty: [first],
+                requiresHistoryPair: false
+            )
+        )
+
+        for outcome in [
+            RasterRevisionOperationOutcome.failed,
+            .cancelled,
+        ] {
+            guard let fixture = try TransactionFixture.make() else { return }
+            let oracle = try TransactionQuiescenceOracle.capture(fixture)
+            let prepared = try transactionPrepared(
+                fixture.coordinator.prepareMutation(
+                    fixture.request(
+                        dirty: [first],
+                        requiresHistoryPair: false
+                    )
+                )
+            )
+            let encoded = try fixture.coordinator.encodeMutation(prepared)
+            #expect(throws: DocumentPaintSurfaceTransactionError
+                .mutationCommandFailed) {
+                _ = try fixture.coordinator.completeMutation(
+                    encoded,
+                    as: outcome
+                )
+            }
+            try oracle.expectRestored(fixture)
+            _ = try transactionCommitNoHistory(
+                fixture,
+                request: fixture.request(
+                    dirty: [first],
+                    requiresHistoryPair: false
+                )
+            )
+        }
+
+        for point in [
+            DocumentPaintSurfaceTransactionFailurePoint.historyAllocation(1),
+            .historyEncoding,
+        ] {
+            guard let fixture = try TransactionFixture.make() else { return }
+            try transactionSeedActive(fixture, coordinates: [first])
+            let oracle = try TransactionQuiescenceOracle.capture(fixture)
+            let request = fixture.request(dirty: [first])
+            let reduced = try transactionReduced(fixture, coordinates: [first])
+            let expected: DocumentPaintSurfaceTransactionError =
+                point == .historyEncoding
+                    ? .historyCaptureFailed
+                    : .historyAllocationFailed
+            #expect(throws: expected) {
+                _ = try fixture.coordinator.encodeHistoryCapture(
+                    reduced,
+                    failureInjection: .init(failingAt: point)
+                )
+            }
+            try oracle.expectRestored(fixture)
+            let result = try transactionCommitWithHistory(
+                fixture,
+                request: request
+            )
+            try fixture.revisions.release(
+                try #require(result.historyPair).revisionIDs
+            )
+        }
+
+        for outcome in [
+            RasterRevisionOperationOutcome.failed,
+            .cancelled,
+        ] {
+            guard let fixture = try TransactionFixture.make() else { return }
+            try transactionSeedActive(fixture, coordinates: [first])
+            let oracle = try TransactionQuiescenceOracle.capture(fixture)
+            let request = fixture.request(dirty: [first])
+            let reduced = try transactionReduced(fixture, coordinates: [first])
+            let encodedHistory = try fixture.coordinator
+                .encodeHistoryCapture(reduced)
+            #expect(throws: DocumentPaintSurfaceTransactionError
+                .historyFinalizationFailed) {
+                _ = try fixture.coordinator.completeHistoryCapture(
+                    encodedHistory,
+                    as: outcome
+                )
+            }
+            try oracle.expectRestored(fixture)
+            let result = try transactionCommitWithHistory(
+                fixture,
+                request: request
+            )
+            try fixture.revisions.release(
+                try #require(result.historyPair).revisionIDs
+            )
+        }
+    }
+
+    @Test
+    func quiescenceOracleCoversMutationCleanupAtEveryOwnedPhase() throws {
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+
+        guard let encodedFixture = try TransactionFixture.make() else { return }
+        let encodedOracle = try TransactionQuiescenceOracle.capture(encodedFixture)
+        let encodedRequest = encodedFixture.request(
+            dirty: [coordinate],
+            requiresHistoryPair: false
+        )
+        let prepared = try transactionPrepared(
+            encodedFixture.coordinator.prepareMutation(encodedRequest)
+        )
+        let encoded = try encodedFixture.coordinator.encodeMutation(prepared)
+        #expect(throws: DocumentPaintSurfaceTransactionError.cleanupFailed) {
+            try encodedFixture.coordinator.discard(
+                encoded,
+                failureInjection: .init(failingAt: .cleanup)
+            )
+        }
+        #expect(encodedFixture.coordinator.snapshot().state == .discardPending)
+        #expect(encodedFixture.backend.liveResourceCount == 1)
+        try encodedFixture.coordinator.retryDiscard()
+        try encodedOracle.expectRestored(encodedFixture)
+        _ = try transactionCommitNoHistory(
+            encodedFixture,
+            request: encodedRequest
+        )
+
+        for terminalPhase in [false, true] {
+            guard let fixture = try TransactionFixture.make() else { return }
+            let oracle = try TransactionQuiescenceOracle.capture(fixture)
+            let request = fixture.request(dirty: [coordinate])
+            let reduced = try transactionReduced(fixture, coordinates: [coordinate])
+            let encodedHistory = try fixture.coordinator
+                .encodeHistoryCapture(reduced)
+            if terminalPhase {
+                let completed = try fixture.coordinator.completeHistoryCapture(
+                    encodedHistory,
+                    as: .succeeded
+                )
+                let terminal = try fixture.coordinator
+                    .prepareTerminalCommit(completed)
+                #expect(throws: DocumentPaintSurfaceTransactionError
+                    .cleanupFailed) {
+                    try fixture.coordinator.discard(
+                        terminal,
+                        failureInjection: .init(failingAt: .cleanup)
+                    )
+                }
+            } else {
+                #expect(throws: DocumentPaintSurfaceTransactionError
+                    .cleanupFailed) {
+                    try fixture.coordinator.discard(
+                        encodedHistory,
+                        failureInjection: .init(failingAt: .cleanup)
+                    )
+                }
+            }
+            #expect(fixture.coordinator.snapshot().state == .discardPending)
+            try fixture.coordinator.retryDiscard()
+            try oracle.expectRestored(fixture)
+            let result = try transactionCommitWithHistory(
+                fixture,
+                request: request
+            )
+            try fixture.revisions.release(
+                try #require(result.historyPair).revisionIDs
+            )
+        }
+    }
+
+    @Test
+    func quiescenceOracleCoversLateResizePublishRollback() throws {
+        guard let fixture = try TransactionFixture.make(width: 257, height: 256)
+        else { return }
+        let kept = PaintTileCoordinate(x: 0, y: 0)
+        let cropped = PaintTileCoordinate(x: 1, y: 0)
+        try transactionSeedActive(fixture, coordinates: [kept, cropped])
+        let target = try transactionGeometry(width: 255, height: 256)
+        let request = fixture.request(
+            kind: .resize,
+            dirty: [kept],
+            removing: [cropped],
+            candidateGeometry: target
+        )
+        let oracle = try TransactionQuiescenceOracle.capture(fixture)
+        let prepared = try transactionPrepared(
+            fixture.coordinator.prepareMutation(request)
+        )
+        let encoded = try fixture.coordinator.encodeMutation(prepared)
+        let reduced = try fixture.coordinator.completeMutation(
+            encoded,
+            as: .succeeded
+        )
+        let encodedHistory = try fixture.coordinator
+            .encodeHistoryCapture(reduced)
+        let completed = try fixture.coordinator.completeHistoryCapture(
+            encodedHistory,
+            as: .succeeded
+        )
+        let terminal = try fixture.coordinator.prepareTerminalCommit(completed)
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .revisionPublishFailed) {
+            _ = try fixture.coordinator.publish(
+                terminal,
+                failureInjection: .init(failingAt: .revisionPublish)
+            )
+        }
+        #expect(fixture.coordinator.snapshot().phase == .terminalPrepared)
+        try fixture.coordinator.discard(terminal)
+        try oracle.expectRestored(fixture)
+
+        let result = try transactionCommitWithHistory(
+            fixture,
+            request: request
+        )
+        try fixture.revisions.release(
+            try #require(result.historyPair).revisionIDs
+        )
+    }
+
+    @Test
+    func quiescenceOracleCoversImportOutcomesAndCleanup() throws {
+        for outcome in [
+            RasterRevisionOperationOutcome.failed,
+            .cancelled,
+        ] {
+            guard let fixture = try TransactionFixture.make(width: 1, height: 1)
+            else { return }
+            let request = transactionEncodedImportRequest(
+                fixture,
+                bytes: Data([19, 37, 91, 255])
+            )
+            let oracle = try TransactionQuiescenceOracle.capture(fixture)
+            let prepared = try transactionPrepared(
+                fixture.coordinator.prepareEncodedImport(request)
+            )
+            let encoded = try fixture.coordinator.encodeMutation(prepared)
+            #expect(throws: DocumentPaintSurfaceTransactionError
+                .mutationCommandFailed) {
+                _ = try fixture.coordinator.completeMutation(
+                    encoded,
+                    as: outcome
+                )
+            }
+            try oracle.expectRestored(fixture)
+            _ = try transactionCommitEncodedImport(
+                fixture,
+                request: request
+            )
+        }
+
+        guard let cleanup = try TransactionFixture.make(width: 1, height: 1)
+        else { return }
+        let request = transactionEncodedImportRequest(
+            cleanup,
+            bytes: Data([19, 37, 91, 255])
+        )
+        let oracle = try TransactionQuiescenceOracle.capture(cleanup)
+        let prepared = try transactionPrepared(
+            cleanup.coordinator.prepareEncodedImport(request)
+        )
+        let encoded = try cleanup.coordinator.encodeMutation(prepared)
+        #expect(throws: DocumentPaintSurfaceTransactionError.cleanupFailed) {
+            try cleanup.coordinator.discard(
+                encoded,
+                failureInjection: .init(failingAt: .cleanup)
+            )
+        }
+        #expect(cleanup.coordinator.snapshot().state == .discardPending)
+        try cleanup.coordinator.retryDiscard()
+        try oracle.expectRestored(cleanup)
+        _ = try transactionCommitEncodedImport(cleanup, request: request)
+    }
+
+    @Test
+    func quiescenceOracleCoversRestoreOutcomesAndCleanup() throws {
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        for outcome in [
+            RasterRevisionOperationOutcome.failed,
+            .cancelled,
+        ] {
+            guard let fixture = try TransactionFixture.make(width: 256, height: 256)
+            else { return }
+            let pair = try transactionCapturedPair(
+                fixture,
+                coordinate: coordinate,
+                publish: true
+            )
+            let request = fixture.restoreRequest(
+                reference: pair.after,
+                expected: [
+                    .init(coordinate: coordinate, disposition: .replace),
+                ]
+            )
+            let oracle = try TransactionQuiescenceOracle.capture(fixture)
+            let prepared = try fixture.coordinator.prepareRestore(request)
+            let encoded = try fixture.coordinator.encodeRestore(prepared)
+            #expect(throws: DocumentPaintSurfaceTransactionError
+                .restoreCommandFailed) {
+                _ = try fixture.coordinator.completeRestore(
+                    encoded,
+                    as: outcome
+                )
+            }
+            #expect(fixture.coordinator.snapshot().state == .discardPending)
+            try fixture.coordinator.retryDiscard()
+            try oracle.expectRestored(fixture)
+            _ = try transactionCommitRestore(fixture, request: request)
+            try fixture.revisions.release(pair.revisionIDs)
+        }
+
+        for terminalPhase in [false, true] {
+            guard let fixture = try TransactionFixture.make(width: 256, height: 256)
+            else { return }
+            let pair = try transactionCapturedPair(
+                fixture,
+                coordinate: coordinate,
+                publish: true
+            )
+            let request = fixture.restoreRequest(
+                reference: pair.after,
+                expected: [
+                    .init(coordinate: coordinate, disposition: .replace),
+                ]
+            )
+            let oracle = try TransactionQuiescenceOracle.capture(fixture)
+            let prepared = try fixture.coordinator.prepareRestore(request)
+            let encoded = try fixture.coordinator.encodeRestore(prepared)
+            if terminalPhase {
+                let completed = try fixture.coordinator.completeRestore(
+                    encoded,
+                    as: .succeeded
+                )
+                let terminal = try fixture.coordinator
+                    .prepareTerminalRestore(completed)
+                #expect(throws: DocumentPaintSurfaceTransactionError
+                    .cleanupFailed) {
+                    try fixture.coordinator.discard(
+                        terminal,
+                        failureInjection: .init(failingAt: .cleanup)
+                    )
+                }
+            } else {
+                #expect(throws: DocumentPaintSurfaceTransactionError
+                    .cleanupFailed) {
+                    try fixture.coordinator.discard(
+                        encoded,
+                        failureInjection: .init(failingAt: .cleanup)
+                    )
+                }
+            }
+            #expect(fixture.coordinator.snapshot().state == .discardPending)
+            try fixture.coordinator.retryDiscard()
+            try oracle.expectRestored(fixture)
+            _ = try transactionCommitRestore(fixture, request: request)
+            try fixture.revisions.release(pair.revisionIDs)
+        }
     }
 
     @Test
@@ -2485,6 +2899,10 @@ struct DocumentPaintSurfaceTransactionTests {
         )
         let terminal = try fixture.coordinator.prepareTerminalRestore(completed)
         let before = fixture.registry.snapshot()
+        let retryableOracle = try TransactionQuiescenceOracle.capture(
+            fixture,
+            history: history
+        )
 
         #expect(throws: DocumentPaintSurfaceTransactionError
             .restoreConsumeFailed) {
@@ -2495,13 +2913,20 @@ struct DocumentPaintSurfaceTransactionTests {
         }
         #expect(fixture.registry.snapshot() == before)
         #expect(fixture.coordinator.snapshot().phase == .restoreTerminalPrepared)
+        try retryableOracle.expectRestored(fixture, history: history)
         #expect(history.canUndo)
         #expect(!history.canRedo)
 
         _ = try fixture.coordinator.publishRestore(terminal)
+        #expect(Optional(history.diagnosticSnapshotForTesting())
+            == retryableOracle.history)
         try history.finishNavigation(token: undo.token, succeeded: true)
+        #expect(history.commandCount == 1)
+        #expect(history.retainedRasterBytes
+            == pair.before.retainedBytes + pair.after.retainedBytes)
         #expect(!history.canUndo)
         #expect(history.canRedo)
+        #expect(history.currentDocumentIsEmpty)
         #expect(fixture.coordinator.snapshot().state == .idle)
     }
 
@@ -2738,6 +3163,8 @@ private final class TransactionTestMutationBackend:
 {
     private(set) var encodeCallCount = 0
     private(set) var discardCallCount = 0
+    private(set) var activeEncodingIDs: Set<UUID> = []
+    var liveResourceCount: Int { activeEncodingIDs.count }
     var alphaByCoordinate: [PaintTileCoordinate: Float] = [:]
     var evidenceOverride: [DocumentPaintSurfaceMutationEvidence]?
     var discardShouldFail = false
@@ -2779,7 +3206,9 @@ private final class TransactionTestMutationBackend:
         case let .restore(payload):
             destinations = payload.destinations
         }
-        return DocumentPaintSurfaceMutationBackendEncoding()
+        let encoding = DocumentPaintSurfaceMutationBackendEncoding()
+        activeEncodingIDs.insert(encoding.rawValue)
+        return encoding
     }
 
     func complete(
@@ -2788,14 +3217,15 @@ private final class TransactionTestMutationBackend:
     ) throws -> [DocumentPaintSurfaceMutationEvidence] {
         _ = encoding
         _ = outcome
-        if let evidenceOverride { return evidenceOverride }
-        return destinations.map {
+        let evidence = evidenceOverride ?? destinations.map {
             DocumentPaintSurfaceMutationEvidence(
                 coordinate: $0.coordinate,
                 logicalBounds: $0.logicalBounds,
                 maximumAlpha: alphaByCoordinate[$0.coordinate] ?? 1
             )
         }
+        activeEncodingIDs.remove(encoding.rawValue)
+        return evidence
     }
 
     func discardAndWaitUntilTerminal(
@@ -2805,6 +3235,7 @@ private final class TransactionTestMutationBackend:
         discardCallCount += 1
         onDiscardAndWaitUntilTerminal?()
         if discardShouldFail { throw TransactionTestError.backendFailure }
+        activeEncodingIDs.remove(encoding.rawValue)
     }
 }
 
@@ -3061,6 +3492,93 @@ private func transactionCommitWithHistory(
     return try fixture.coordinator.publish(terminal)
 }
 
+@discardableResult
+private func transactionCommitNoHistory(
+    _ fixture: TransactionFixture,
+    request: DocumentPaintSurfaceMutationRequest
+) throws -> DocumentPaintSurfaceCommitResult {
+    let prepared = try transactionPrepared(
+        fixture.coordinator.prepareMutation(request)
+    )
+    let encoded = try fixture.coordinator.encodeMutation(prepared)
+    let reduced = try fixture.coordinator.completeMutation(
+        encoded,
+        as: .succeeded
+    )
+    let terminal = try fixture.coordinator.prepareTerminalCommit(reduced)
+    let result = try fixture.coordinator.publish(terminal)
+    #expect(fixture.coordinator.snapshot().state == .idle)
+    #expect(fixture.coordinator.ownershipSnapshotForTesting() == .empty)
+    #expect(fixture.backend.activeEncodingIDs.isEmpty)
+    return result
+}
+
+@discardableResult
+private func transactionCommitWithHistory(
+    _ fixture: TransactionFixture,
+    request: DocumentPaintSurfaceMutationRequest
+) throws -> DocumentPaintSurfaceCommitResult {
+    let prepared = try transactionPrepared(
+        fixture.coordinator.prepareMutation(request)
+    )
+    let encoded = try fixture.coordinator.encodeMutation(prepared)
+    let reduced = try fixture.coordinator.completeMutation(
+        encoded,
+        as: .succeeded
+    )
+    let history = try fixture.coordinator.encodeHistoryCapture(reduced)
+    let completed = try fixture.coordinator.completeHistoryCapture(
+        history,
+        as: .succeeded
+    )
+    let terminal = try fixture.coordinator.prepareTerminalCommit(completed)
+    let result = try fixture.coordinator.publish(terminal)
+    #expect(fixture.coordinator.snapshot().state == .idle)
+    #expect(fixture.coordinator.ownershipSnapshotForTesting() == .empty)
+    #expect(fixture.backend.activeEncodingIDs.isEmpty)
+    return result
+}
+
+@discardableResult
+private func transactionCommitEncodedImport(
+    _ fixture: TransactionFixture,
+    request: DocumentPaintSurfaceEncodedImportRequest
+) throws -> DocumentPaintSurfaceCommitResult {
+    let prepared = try transactionPrepared(
+        fixture.coordinator.prepareEncodedImport(request)
+    )
+    let encoded = try fixture.coordinator.encodeMutation(prepared)
+    let reduced = try fixture.coordinator.completeMutation(
+        encoded,
+        as: .succeeded
+    )
+    let terminal = try fixture.coordinator.prepareTerminalCommit(reduced)
+    let result = try fixture.coordinator.publish(terminal)
+    #expect(fixture.coordinator.snapshot().state == .idle)
+    #expect(fixture.coordinator.ownershipSnapshotForTesting() == .empty)
+    #expect(fixture.backend.activeEncodingIDs.isEmpty)
+    return result
+}
+
+@discardableResult
+private func transactionCommitRestore(
+    _ fixture: TransactionFixture,
+    request: DocumentPaintSurfaceRestoreRequest
+) throws -> DocumentPaintSurfaceRestoreResult {
+    let prepared = try fixture.coordinator.prepareRestore(request)
+    let encoded = try fixture.coordinator.encodeRestore(prepared)
+    let completed = try fixture.coordinator.completeRestore(
+        encoded,
+        as: .succeeded
+    )
+    let terminal = try fixture.coordinator.prepareTerminalRestore(completed)
+    let result = try fixture.coordinator.publishRestore(terminal)
+    #expect(fixture.coordinator.snapshot().state == .idle)
+    #expect(fixture.coordinator.ownershipSnapshotForTesting() == .empty)
+    #expect(fixture.backend.activeEncodingIDs.isEmpty)
+    return result
+}
+
 private func transactionCapturedPair(
     _ fixture: TransactionFixture,
     coordinate: PaintTileCoordinate,
@@ -3158,6 +3676,58 @@ private func transactionSeedActive(
     )
 }
 
+private func transactionOverwriteActiveCanonicalBytes(
+    _ fixture: TransactionFixture,
+    coordinate: PaintTileCoordinate,
+    byte: UInt8
+) throws {
+    let binding = try fixture.registry.binding(for: fixture.layerID)
+    let lease = try binding.canonical.leaseExistingTiles(
+        at: [coordinate],
+        pinReasons: [.inFlight]
+    )
+    defer { try? binding.canonical.returnLease(lease) }
+    let texture = try #require(lease.bindings.first?.texture)
+    let bytesPerRow = texture.width * MemoryLayout<UInt16>.size * 4
+    let bytesPerImage = bytesPerRow * texture.height
+    let staging = try #require(fixture.device.makeBuffer(
+        length: bytesPerImage,
+        options: .storageModeShared
+    ))
+    staging.contents().initializeMemory(
+        as: UInt8.self,
+        repeating: byte,
+        count: bytesPerImage
+    )
+    let queue = try #require(fixture.device.makeCommandQueue())
+    let command = try #require(queue.makeCommandBuffer())
+    let blit = try #require(command.makeBlitCommandEncoder())
+    blit.copy(
+        from: staging,
+        sourceOffset: 0,
+        sourceBytesPerRow: bytesPerRow,
+        sourceBytesPerImage: bytesPerImage,
+        sourceSize: MTLSize(
+            width: texture.width,
+            height: texture.height,
+            depth: 1
+        ),
+        to: texture,
+        destinationSlice: 0,
+        destinationLevel: 0,
+        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+    )
+    blit.endEncoding()
+    command.commit()
+    command.waitUntilCompleted()
+    try fixture.registry.sharedTileStore.markModified(
+        lease,
+        surfaceID: lease.surfaceID,
+        currentGeneration: lease.generation,
+        coordinates: [coordinate]
+    )
+}
+
 private func transactionRequireQuiescentAndReusable(
     _ fixture: TransactionFixture,
     coordinate: PaintTileCoordinate
@@ -3179,6 +3749,194 @@ private func transactionRequireQuiescentAndReusable(
     )
     try fixture.coordinator.discard(retry)
     #expect(fixture.coordinator.snapshot().state == .idle)
+}
+
+private struct TransactionTileStoreQuiescenceSnapshot: Equatable {
+    let residentByteCount: Int
+    let backingByteCount: Int
+    let activeLeaseCount: Int
+    let provisionalReservationCount: Int
+    let provisionalByteCount: Int
+    let preparedRetirementCount: Int
+    let pendingRetirementCount: Int
+    let entries: [TransactionTileEntryQuiescenceSnapshot]
+    let leastRecentlyUsedOrder: [PaintTileIdentity]
+
+    init(_ snapshot: PaintTileStoreSnapshot) {
+        residentByteCount = snapshot.residentByteCount
+        backingByteCount = snapshot.backingByteCount
+        activeLeaseCount = snapshot.activeLeaseCount
+        provisionalReservationCount = snapshot.provisionalReservationCount
+        provisionalByteCount = snapshot.provisionalByteCount
+        preparedRetirementCount = snapshot.preparedRetirementCount
+        pendingRetirementCount = snapshot.pendingRetirementCount
+        entries = snapshot.entries.map(TransactionTileEntryQuiescenceSnapshot.init)
+        leastRecentlyUsedOrder = snapshot.leastRecentlyUsedOrder
+    }
+}
+
+private struct TransactionTileEntryQuiescenceSnapshot: Equatable {
+    let surfaceID: UUID
+    let generation: UInt64
+    let identity: PaintTileIdentity
+    let descriptor: PaintTileDescriptor
+    let isResident: Bool
+    let backing: PaintTileBackingSnapshot
+    let pinCounts: [PaintTilePinReason: Int]
+
+    init(_ snapshot: PaintTileStoreEntrySnapshot) {
+        surfaceID = snapshot.surfaceID
+        generation = snapshot.generation
+        identity = snapshot.identity
+        descriptor = snapshot.descriptor
+        isResident = snapshot.isResident
+        backing = snapshot.backing
+        pinCounts = snapshot.pinCounts
+    }
+}
+
+private struct TransactionQuiescenceOracle {
+    let registry: DocumentPaintSurfaceStoreSnapshot
+    let activeLayerPayloads: [TransactionActiveLayerPayloadSnapshot]
+    let tileStore: TransactionTileStoreQuiescenceSnapshot
+    let revisions: TiledRasterRevisionStoreSnapshot
+    let revisionPayloads: [TiledRasterRevisionHarnessSnapshot]
+    let transaction: DocumentPaintSurfaceTransactionSnapshot
+    let transactionOwnership:
+        DocumentPaintSurfaceTransactionOwnershipSnapshot
+    let backendActiveEncodingIDs: Set<UUID>
+    let history: DocumentHistoryDiagnosticSnapshot?
+
+    static func capture(
+        _ fixture: TransactionFixture,
+        history: DocumentHistory? = nil
+    ) throws -> Self {
+        Self(
+            registry: fixture.registry.snapshot(),
+            activeLayerPayloads: try captureActiveLayerPayloads(fixture),
+            tileStore: .init(fixture.registry.sharedTileStore.snapshot()),
+            revisions: fixture.revisions.snapshot(),
+            revisionPayloads: try fixture.revisions.snapshotsForHarness(),
+            transaction: fixture.coordinator.snapshot(),
+            transactionOwnership:
+                fixture.coordinator.ownershipSnapshotForTesting(),
+            backendActiveEncodingIDs: fixture.backend.activeEncodingIDs,
+            history: history?.diagnosticSnapshotForTesting()
+        )
+    }
+
+    func matchesActiveLayerPayloads(
+        _ fixture: TransactionFixture
+    ) throws -> Bool {
+        let actual = try Self.captureActiveLayerPayloads(fixture)
+        return actual == activeLayerPayloads
+    }
+
+    func expectRestored(
+        _ fixture: TransactionFixture,
+        history actualHistory: DocumentHistory? = nil
+    ) throws {
+        let actualRegistry = fixture.registry.snapshot()
+        #expect(actualRegistry == registry)
+        #expect(try matchesActiveLayerPayloads(fixture))
+        #expect(TransactionTileStoreQuiescenceSnapshot(
+            fixture.registry.sharedTileStore.snapshot()
+        ) == tileStore)
+        #expect(actualRegistry.activeTileLeaseCount
+            == registry.activeTileLeaseCount)
+        #expect(actualRegistry.preparedCandidateCount
+            == registry.preparedCandidateCount)
+        #expect(fixture.revisions.snapshot() == revisions)
+        #expect(try fixture.revisions.snapshotsForHarness()
+            == revisionPayloads)
+        #expect(fixture.coordinator.snapshot() == transaction)
+        #expect(fixture.coordinator.ownershipSnapshotForTesting()
+            == transactionOwnership)
+        #expect(fixture.backend.activeEncodingIDs
+            == backendActiveEncodingIDs)
+        if let history {
+            #expect(actualHistory?.diagnosticSnapshotForTesting() == history)
+        } else {
+            #expect(actualHistory == nil)
+        }
+    }
+
+    private static func captureActiveLayerPayloads(
+        _ fixture: TransactionFixture
+    ) throws -> [TransactionActiveLayerPayloadSnapshot] {
+        try fixture.registry.layerIDs.map { layerID in
+            let binding = try fixture.registry.binding(for: layerID)
+            let references = binding.canonical.references
+            let activeIdentities = Set(references.map(\.identity))
+            let namespaces = Set(references.map {
+                TransactionActivePhysicalNamespace(
+                    surfaceID: $0.physicalSurfaceID,
+                    generation: $0.physicalGeneration
+                )
+            }).sorted()
+            var payloadByIdentity: [
+                PaintTileIdentity: TransactionActiveTilePayloadSnapshot
+            ] = [:]
+            for namespace in namespaces {
+                let payload = try fixture.registry.sharedTileStore.payloadSnapshot(
+                    surfaceID: namespace.surfaceID,
+                    layerID: layerID,
+                    generation: namespace.generation
+                )
+                for entry in payload.entries
+                where activeIdentities.contains(entry.identity) {
+                    payloadByIdentity[entry.identity] = .init(
+                        physicalSurfaceID: namespace.surfaceID,
+                        physicalGeneration: namespace.generation,
+                        entry: entry
+                    )
+                }
+            }
+            let tiles = try references.map { reference in
+                let tile = try #require(payloadByIdentity[reference.identity])
+                #expect(tile.entry.descriptor == reference.descriptor)
+                #expect(tile.physicalSurfaceID == reference.physicalSurfaceID)
+                #expect(tile.physicalGeneration == reference.physicalGeneration)
+                return tile
+            }
+            return TransactionActiveLayerPayloadSnapshot(
+                logicalSurfaceID: binding.canonical.surfaceID,
+                layerID: layerID,
+                generation: binding.generation,
+                tiles: tiles
+            )
+        }
+    }
+}
+
+private struct TransactionActiveLayerPayloadSnapshot: Equatable {
+    let logicalSurfaceID: UUID
+    let layerID: UUID
+    let generation: UInt64
+    let tiles: [TransactionActiveTilePayloadSnapshot]
+}
+
+private struct TransactionActivePhysicalNamespace:
+    Hashable, Comparable
+{
+    let surfaceID: UUID
+    let generation: UInt64
+
+    static func < (
+        lhs: TransactionActivePhysicalNamespace,
+        rhs: TransactionActivePhysicalNamespace
+    ) -> Bool {
+        if lhs.surfaceID.uuidString != rhs.surfaceID.uuidString {
+            return lhs.surfaceID.uuidString < rhs.surfaceID.uuidString
+        }
+        return lhs.generation < rhs.generation
+    }
+}
+
+private struct TransactionActiveTilePayloadSnapshot: Equatable {
+    let physicalSurfaceID: UUID
+    let physicalGeneration: UInt64
+    let entry: PaintTilePayloadEntry
 }
 
 private enum TransactionTestError: Error {

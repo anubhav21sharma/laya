@@ -262,6 +262,73 @@ public struct DocumentPaintSurfaceTransactionSnapshot:
     public let candidateCoordinates: [PaintTileCoordinate]
 }
 
+/// Internal ownership-only observability for failure/quiescence gates. Tests
+/// can prove every owned category returns to its exact retryable baseline
+/// without exposing these identities through the public API.
+struct DocumentPaintSurfaceTransactionOwnershipSnapshot:
+    Equatable, Sendable
+{
+    let candidateIdentity: ObjectIdentifier?
+    let preparedCommitIdentity: ObjectIdentifier?
+    let commandBufferIdentity: ObjectIdentifier?
+    let destinationLeaseID: PaintTileLeaseID?
+    let resizeSourceLeaseID: PaintTileLeaseID?
+    let baseSourceLeaseID: PaintTileLeaseID?
+    let candidateSourceLeaseID: PaintTileLeaseID?
+    let backendEncodingID: UUID?
+    let revisionPair: PendingRasterRevisionPair?
+    let beforeCapture: TiledRasterRevisionOperationToken?
+    let afterCapture: TiledRasterRevisionOperationToken?
+    let installOperation: TiledRasterRevisionOperationToken?
+    let installLease: TiledRasterRevisionInstallLease?
+    let reduction: DocumentPaintTransparencyReduction?
+    let commitResult: DocumentPaintSurfaceCommitResult?
+    let restoreResult: DocumentPaintSurfaceRestoreResult?
+    let hasResizePlan: Bool
+    let hasEncodedImportPlan: Bool
+    let candidateCount: Int
+    let candidateBindingCount: Int
+    let destinationLeaseCount: Int
+    let sourceLeaseCount: Int
+    let backendEncodingCount: Int
+    let revisionPairCount: Int
+    let commandBufferCount: Int
+    let revisionOperationCount: Int
+    let installLeaseCount: Int
+    let preparedCommitCount: Int
+
+    static let empty = Self(
+        candidateIdentity: nil,
+        preparedCommitIdentity: nil,
+        commandBufferIdentity: nil,
+        destinationLeaseID: nil,
+        resizeSourceLeaseID: nil,
+        baseSourceLeaseID: nil,
+        candidateSourceLeaseID: nil,
+        backendEncodingID: nil,
+        revisionPair: nil,
+        beforeCapture: nil,
+        afterCapture: nil,
+        installOperation: nil,
+        installLease: nil,
+        reduction: nil,
+        commitResult: nil,
+        restoreResult: nil,
+        hasResizePlan: false,
+        hasEncodedImportPlan: false,
+        candidateCount: 0,
+        candidateBindingCount: 0,
+        destinationLeaseCount: 0,
+        sourceLeaseCount: 0,
+        backendEncodingCount: 0,
+        revisionPairCount: 0,
+        commandBufferCount: 0,
+        revisionOperationCount: 0,
+        installLeaseCount: 0,
+        preparedCommitCount: 0
+    )
+}
+
 public struct DocumentPaintSurfaceCommitResult: Equatable, Sendable {
     public let layerID: UUID
     public let beforeGeneration: UInt64
@@ -666,6 +733,100 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 sequence: live.sequence,
                 candidateCoordinates: coordinates
             )
+        }
+    }
+
+    func ownershipSnapshotForTesting()
+        -> DocumentPaintSurfaceTransactionOwnershipSnapshot
+    {
+        withLock {
+            if let live {
+                return .init(
+                    candidateIdentity: ObjectIdentifier(live.candidate),
+                    preparedCommitIdentity: live.preparedCommit.map(
+                        ObjectIdentifier.init
+                    ),
+                    commandBufferIdentity: live.historyCommandBuffer.map {
+                        ObjectIdentifier($0)
+                    },
+                    destinationLeaseID: live.destinationLease?.id,
+                    resizeSourceLeaseID: live.resizeSourceLease?.id,
+                    baseSourceLeaseID: live.baseSourceLease?.id,
+                    candidateSourceLeaseID: live.candidateSourceLease?.id,
+                    backendEncodingID: live.backendEncoding?.rawValue,
+                    revisionPair: live.revisionPair,
+                    beforeCapture: live.beforeCapture,
+                    afterCapture: live.afterCapture,
+                    installOperation: nil,
+                    installLease: nil,
+                    reduction: live.reduction,
+                    commitResult: live.commitResult,
+                    restoreResult: nil,
+                    hasResizePlan: live.resizePlan != nil,
+                    hasEncodedImportPlan: live.encodedImportPlan != nil,
+                    candidateCount: 1,
+                    candidateBindingCount: live.candidateBinding == nil ? 0 : 1,
+                    destinationLeaseCount: live.destinationLease == nil ? 0 : 1,
+                    sourceLeaseCount: [
+                        live.resizeSourceLease,
+                        live.baseSourceLease,
+                        live.candidateSourceLease,
+                    ].compactMap { $0 }.count,
+                    backendEncodingCount: live.backendEncoding == nil ? 0 : 1,
+                    revisionPairCount: live.revisionPair == nil ? 0 : 1,
+                    commandBufferCount:
+                        live.historyCommandBuffer == nil ? 0 : 1,
+                    revisionOperationCount: [
+                        live.beforeCapture,
+                        live.afterCapture,
+                    ].compactMap { $0 }.count,
+                    installLeaseCount: 0,
+                    preparedCommitCount: live.preparedCommit == nil ? 0 : 1
+                )
+            }
+            if let liveRestore {
+                return .init(
+                    candidateIdentity: ObjectIdentifier(liveRestore.candidate),
+                    preparedCommitIdentity: liveRestore.preparedCommit.map(
+                        ObjectIdentifier.init
+                    ),
+                    commandBufferIdentity: liveRestore.commandBuffer.map {
+                        ObjectIdentifier($0)
+                    },
+                    destinationLeaseID: liveRestore.destinationLease?.id,
+                    resizeSourceLeaseID: nil,
+                    baseSourceLeaseID: nil,
+                    candidateSourceLeaseID: nil,
+                    backendEncodingID: nil,
+                    revisionPair: nil,
+                    beforeCapture: nil,
+                    afterCapture: nil,
+                    installOperation: liveRestore.installOperation,
+                    installLease: liveRestore.installLease,
+                    reduction: nil,
+                    commitResult: nil,
+                    restoreResult: liveRestore.result,
+                    hasResizePlan: false,
+                    hasEncodedImportPlan: false,
+                    candidateCount: 1,
+                    candidateBindingCount:
+                        liveRestore.candidateBinding == nil ? 0 : 1,
+                    destinationLeaseCount:
+                        liveRestore.destinationLease == nil ? 0 : 1,
+                    sourceLeaseCount: 0,
+                    backendEncodingCount: 0,
+                    revisionPairCount: 0,
+                    commandBufferCount:
+                        liveRestore.commandBuffer == nil ? 0 : 1,
+                    revisionOperationCount:
+                        liveRestore.installOperation == nil ? 0 : 1,
+                    installLeaseCount:
+                        liveRestore.installLease == nil ? 0 : 1,
+                    preparedCommitCount:
+                        liveRestore.preparedCommit == nil ? 0 : 1
+                )
+            }
+            return .empty
         }
     }
 
