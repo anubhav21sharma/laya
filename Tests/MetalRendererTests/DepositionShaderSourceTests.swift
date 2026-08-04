@@ -97,6 +97,31 @@ struct DepositionShaderSourceTests {
     }
 
     @Test
+    func documentColorHelpersAreNotWiredIntoActiveBGRA8Deposition() throws {
+        let source = try depositionShaderSource()
+        let vertex = try functionSource(
+            named: "patternProjectedDepositionVertex",
+            in: source
+        )
+        let fragment = try functionSource(
+            named: "patternDepositionFragment",
+            in: source
+        )
+
+        for activeFunction in [vertex, fragment] {
+            #expect(!activeFunction.contains(
+                "patternEncodedSRGBToLinearPremultiplied"
+            ))
+            #expect(!activeFunction.contains(
+                "patternLinearPremultipliedToEncodedSRGB"
+            ))
+        }
+        #expect(vertex.contains(
+            "output.premultipliedColor = instance.premultipliedColor"
+        ))
+    }
+
+    @Test
     func wetConcentrationHasNoProductionShaderWireOrPipelineBranch() throws {
         let root = repositoryRoot()
         let sources = [

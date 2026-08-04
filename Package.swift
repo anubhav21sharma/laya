@@ -225,6 +225,7 @@ let package = Package(
                 "Tests/ContentViewLifecycleTests.swift",
                 "Tests/BrushLabSessionTests.swift",
                 "Tests/DebugPerformanceMonitorTests.swift",
+                "Tests/EditorTopBarColorBoundaryTests.swift",
                 "Tests/EditorSessionControllerTests.swift",
                 "Tests/PatternProjectBridgeTests.swift",
                 "Tests/SliceThreeHarnessHistoryTests.swift",

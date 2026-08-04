@@ -34,6 +34,148 @@ fragment float4 patternBlankFragment(PatternVertexOut input [[stage_in]]) {
     return float4(242.0 / 255.0, 244.0 / 255.0, 241.0 / 255.0, 1.0);
 }
 
+static float patternSRGBChannelToLinear(float encoded) {
+    return encoded <= 0.04045
+        ? encoded / 12.92
+        : pow((encoded + 0.055) / 1.055, 2.4);
+}
+
+static float patternLinearChannelToSRGB(float linear) {
+    return linear <= 0.0031308
+        ? linear * 12.92
+        : 1.055 * pow(linear, 1.0 / 2.4) - 0.055;
+}
+
+static float4 patternEncodedSRGBToLinearPremultiplied(float4 encoded) {
+    const float3 linear = float3(
+        patternSRGBChannelToLinear(encoded.r),
+        patternSRGBChannelToLinear(encoded.g),
+        patternSRGBChannelToLinear(encoded.b)
+    );
+    return float4(linear * encoded.a, encoded.a);
+}
+
+static float4 patternLinearPremultipliedToEncodedSRGB(float4 linear) {
+    if (linear.a <= 0.0) {
+        return float4(0.0);
+    }
+    const float3 straight = clamp(linear.rgb / linear.a, 0.0, 1.0);
+    return float4(
+        patternLinearChannelToSRGB(straight.r),
+        patternLinearChannelToSRGB(straight.g),
+        patternLinearChannelToSRGB(straight.b),
+        linear.a
+    );
+}
+
+static float4 patternLinearSourceOver(float4 source, float4 destination) {
+    return source + destination * (1.0 - source.a);
+}
+
+static float4 patternLinearDestinationOut(
+    float4 destination,
+    float eraseAlpha
+) {
+    return destination * (1.0 - clamp(eraseAlpha, 0.0, 1.0));
+}
+
+static float patternLinearBlendChannel(
+    float source,
+    float destination,
+    uint mode
+) {
+    switch (mode) {
+    case 1:
+        return source * destination;
+    case 2:
+        return source + destination - source * destination;
+    default:
+        return source;
+    }
+}
+
+static float4 patternLinearBlend(
+    float4 source,
+    float4 destination,
+    uint mode
+) {
+    if (mode == 0) {
+        return patternLinearSourceOver(source, destination);
+    }
+    const float3 sourceStraight = source.a > 0.0
+        ? source.rgb / source.a
+        : float3(0.0);
+    const float3 destinationStraight = destination.a > 0.0
+        ? destination.rgb / destination.a
+        : float3(0.0);
+    const float3 blended = float3(
+        patternLinearBlendChannel(
+            sourceStraight.r,
+            destinationStraight.r,
+            mode
+        ),
+        patternLinearBlendChannel(
+            sourceStraight.g,
+            destinationStraight.g,
+            mode
+        ),
+        patternLinearBlendChannel(
+            sourceStraight.b,
+            destinationStraight.b,
+            mode
+        )
+    );
+    const float3 output =
+        sourceStraight * source.a * (1.0 - destination.a)
+        + destinationStraight * destination.a * (1.0 - source.a)
+        + blended * source.a * destination.a;
+    const float outputAlpha = source.a + destination.a * (1.0 - source.a);
+    return float4(output, outputAlpha);
+}
+
+struct PatternDocumentColorProbeInput {
+    float4 source;
+    float4 destination;
+    uint4 controls;
+};
+
+kernel void patternDocumentColorDifferential(
+    const device PatternDocumentColorProbeInput* inputs [[buffer(0)]],
+    device half4* output [[buffer(1)]],
+    uint index [[thread_position_in_grid]]
+) {
+    const PatternDocumentColorProbeInput input = inputs[index];
+    float4 result;
+    switch (input.controls.x) {
+    case 0:
+        result = patternEncodedSRGBToLinearPremultiplied(input.source);
+        break;
+    case 1:
+        result = patternLinearSourceOver(input.source, input.destination);
+        break;
+    case 2:
+        result = input.destination;
+        for (uint stamp = 0; stamp < input.controls.y; ++stamp) {
+            result = patternLinearSourceOver(input.source, result);
+        }
+        break;
+    case 3:
+        result = patternLinearDestinationOut(
+            input.destination,
+            input.source.a
+        );
+        break;
+    default:
+        result = patternLinearBlend(
+            input.source,
+            input.destination,
+            input.controls.x - 4
+        );
+        break;
+    }
+    output[index] = half4(result);
+}
+
 kernel void patternDepositionABIRoundTrip(
     const device PatternDepositionStampInstance* instances [[buffer(0)]],
     device PatternUInt4* output [[buffer(1)]],

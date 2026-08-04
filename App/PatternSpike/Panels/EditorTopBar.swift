@@ -177,24 +177,24 @@ struct EditorTopBar: View {
                 )
             },
             set: { color in
-                guard let inkColor = Self.sRGBInkColor(from: color) else {
+                guard let encoded = Self.encodedSRGBColor(from: color) else {
                     return
                 }
-                controller.handleInkColor(inkColor)
+                controller.handleInkColor(encoded.inkColor)
             }
         )
     }
 
-    private static func sRGBInkColor(from color: Color) -> InkColor? {
+    static func encodedSRGBColor(from color: Color) -> EncodedSRGBColor? {
         #if os(macOS)
         guard let converted = NSColor(color).usingColorSpace(.sRGB) else {
             return nil
         }
-        return InkColor(
-            red: Float(converted.redComponent),
-            green: Float(converted.greenComponent),
-            blue: Float(converted.blueComponent),
-            alpha: Float(converted.alphaComponent)
+        return boundedEncodedSRGBColor(
+            red: converted.redComponent,
+            green: converted.greenComponent,
+            blue: converted.blueComponent,
+            alpha: converted.alphaComponent
         )
         #else
         guard
@@ -209,13 +209,29 @@ struct EditorTopBar: View {
         else {
             return nil
         }
-        return InkColor(
-            red: Float(components[0]),
-            green: Float(components[1]),
-            blue: Float(components[2]),
-            alpha: Float(components[3])
+        return boundedEncodedSRGBColor(
+            red: components[0],
+            green: components[1],
+            blue: components[2],
+            alpha: converted.alpha
         )
         #endif
+    }
+
+    private static func boundedEncodedSRGBColor(
+        red: CGFloat,
+        green: CGFloat,
+        blue: CGFloat,
+        alpha: CGFloat
+    ) -> EncodedSRGBColor? {
+        let components = [red, green, blue, alpha]
+        guard components.allSatisfy(\.isFinite) else { return nil }
+        return EncodedSRGBColor(
+            red: Float(min(1, max(0, red))),
+            green: Float(min(1, max(0, green))),
+            blue: Float(min(1, max(0, blue))),
+            alpha: Float(min(1, max(0, alpha)))
+        )
     }
 }
 
