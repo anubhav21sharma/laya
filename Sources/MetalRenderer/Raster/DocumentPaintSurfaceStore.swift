@@ -112,10 +112,27 @@ public struct DocumentPaintSurfaceStoreSnapshot: Equatable, Sendable {
     public let preparedCandidateCount: Int
 }
 
-private struct DocumentPaintLayerState: Sendable {
+fileprivate struct DocumentPaintLayerState: Sendable {
     let logicalSurfaceID: UUID
     let revision: RasterRevision
     let references: [PaintTileReference]
+}
+
+fileprivate struct DocumentPaintSurfaceCandidateBase: Sendable {
+    let registryIdentity: UUID
+    let generation: UInt64
+    let geometry: DocumentPaintGeometry
+    let layers: [UUID: DocumentPaintLayerState]
+}
+
+/// A transaction-only view captured under the registry lock. The binding and
+/// candidate base are deliberately inseparable so a concurrent publication
+/// cannot mix generations while a mutation is being prepared.
+struct DocumentPaintSurfaceMutationBaseSnapshot: Sendable {
+    let generation: UInt64
+    let geometry: DocumentPaintGeometry
+    let binding: DocumentPaintLayerBinding
+    fileprivate let candidateBase: DocumentPaintSurfaceCandidateBase
 }
 
 public final class DocumentPaintSurfaceCandidate: @unchecked Sendable {
@@ -335,22 +352,38 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             guard let state = activeLayers[layerID] else {
                 throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
             }
-            let view = try TiledRasterCoordinateReferenceView(
-                storeIdentity: sharedTileStore.identity,
-                surfaceID: state.logicalSurfaceID,
-                layerID: layerID,
-                pixelSize: currentGeometry.storagePixelSize,
-                generation: currentGeneration,
-                revision: state.revision,
-                references: state.references
+            return try makeBinding(
+                for: layerID,
+                state: state,
+                geometry: currentGeometry,
+                generation: currentGeneration
             )
-            return DocumentPaintLayerBinding(
-                layerID: layerID,
+        }
+    }
+
+    func captureMutationBase(
+        for layerID: UUID
+    ) throws -> DocumentPaintSurfaceMutationBaseSnapshot {
+        try withLock {
+            guard let state = activeLayers[layerID] else {
+                throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+            }
+            let candidateBase = DocumentPaintSurfaceCandidateBase(
+                registryIdentity: identity,
                 generation: currentGeneration,
-                canonical: try TiledRasterSurface(
-                    store: sharedTileStore,
-                    referenceView: view
-                )
+                geometry: currentGeometry,
+                layers: activeLayers
+            )
+            return DocumentPaintSurfaceMutationBaseSnapshot(
+                generation: candidateBase.generation,
+                geometry: candidateBase.geometry,
+                binding: try makeBinding(
+                    for: layerID,
+                    state: state,
+                    geometry: candidateBase.geometry,
+                    generation: candidateBase.generation
+                ),
+                candidateBase: candidateBase
             )
         }
     }
@@ -361,23 +394,59 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         removingCoordinatesByLayer: [UUID: [PaintTileCoordinate]] = [:],
         failureInjection: PaintTileAllocationFailureInjection? = nil
     ) throws -> DocumentPaintSurfaceCandidate {
-        let base: (
-            generation: UInt64,
-            geometry: DocumentPaintGeometry,
-            layers: [UUID: DocumentPaintLayerState]
-        ) = try withLock {
-            for layerID in dirtyCoordinatesByLayer.keys
-            where activeLayers[layerID] == nil {
-                throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
-            }
-            for layerID in removingCoordinatesByLayer.keys
-            where activeLayers[layerID] == nil {
-                throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
-            }
-            guard currentGeneration < UInt64.max else {
-                throw DocumentPaintSurfaceStoreError.generationOverflow
-            }
-            return (currentGeneration, currentGeometry, activeLayers)
+        let base = withLock {
+            DocumentPaintSurfaceCandidateBase(
+                registryIdentity: identity,
+                generation: currentGeneration,
+                geometry: currentGeometry,
+                layers: activeLayers
+            )
+        }
+        return try makeCandidate(
+            from: base,
+            geometry: geometry,
+            dirtyCoordinatesByLayer: dirtyCoordinatesByLayer,
+            removingCoordinatesByLayer: removingCoordinatesByLayer,
+            failureInjection: failureInjection
+        )
+    }
+
+    func makeCandidate(
+        from snapshot: DocumentPaintSurfaceMutationBaseSnapshot,
+        geometry: DocumentPaintGeometry? = nil,
+        dirtyCoordinatesByLayer: [UUID: [PaintTileCoordinate]] = [:],
+        removingCoordinatesByLayer: [UUID: [PaintTileCoordinate]] = [:],
+        failureInjection: PaintTileAllocationFailureInjection? = nil
+    ) throws -> DocumentPaintSurfaceCandidate {
+        guard snapshot.candidateBase.registryIdentity == identity else {
+            throw DocumentPaintSurfaceStoreError.foreignCandidate
+        }
+        return try makeCandidate(
+            from: snapshot.candidateBase,
+            geometry: geometry,
+            dirtyCoordinatesByLayer: dirtyCoordinatesByLayer,
+            removingCoordinatesByLayer: removingCoordinatesByLayer,
+            failureInjection: failureInjection
+        )
+    }
+
+    private func makeCandidate(
+        from base: DocumentPaintSurfaceCandidateBase,
+        geometry: DocumentPaintGeometry?,
+        dirtyCoordinatesByLayer: [UUID: [PaintTileCoordinate]],
+        removingCoordinatesByLayer: [UUID: [PaintTileCoordinate]],
+        failureInjection: PaintTileAllocationFailureInjection?
+    ) throws -> DocumentPaintSurfaceCandidate {
+        for layerID in dirtyCoordinatesByLayer.keys
+        where base.layers[layerID] == nil {
+            throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+        }
+        for layerID in removingCoordinatesByLayer.keys
+        where base.layers[layerID] == nil {
+            throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+        }
+        guard base.generation < UInt64.max else {
+            throw DocumentPaintSurfaceStoreError.generationOverflow
         }
         let candidateGeneration = base.generation + 1
         let candidateGeometry = geometry ?? base.geometry
@@ -485,6 +554,31 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             layerStates: candidateLayers,
             ownedReferences: owned.sorted(),
             ownedNamespaces: ownedNamespaces
+        )
+    }
+
+    private func makeBinding(
+        for layerID: UUID,
+        state: DocumentPaintLayerState,
+        geometry: DocumentPaintGeometry,
+        generation: UInt64
+    ) throws -> DocumentPaintLayerBinding {
+        let view = try TiledRasterCoordinateReferenceView(
+            storeIdentity: sharedTileStore.identity,
+            surfaceID: state.logicalSurfaceID,
+            layerID: layerID,
+            pixelSize: geometry.storagePixelSize,
+            generation: generation,
+            revision: state.revision,
+            references: state.references
+        )
+        return DocumentPaintLayerBinding(
+            layerID: layerID,
+            generation: generation,
+            canonical: try TiledRasterSurface(
+                store: sharedTileStore,
+                referenceView: view
+            )
         )
     }
 
