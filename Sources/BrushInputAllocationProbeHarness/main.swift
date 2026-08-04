@@ -2754,6 +2754,8 @@ private struct BrushInputAllocationProbeHarness {
         try renderer.cancelStroke(token: warmToken)
         try await drainToQuiescence(renderer: renderer)
 
+        // Multiple identical measured strokes ensure warm-up did not merely
+        // move an allocation into the first post-warm lifecycle.
         let measuredLifecycleCount = 8
         var mainLifecycleSeries: [UInt64] = []
         var actorLifecycleSeries: [UInt64] = []

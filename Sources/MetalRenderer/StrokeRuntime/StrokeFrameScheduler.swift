@@ -3007,8 +3007,8 @@ actor StrokeFrameScheduler {
         defer { disarmAuthoritativeAllocationProbe(drain: drain) }
         // Take unique ownership before mutating the buffer. Keeping the actor
         // property's copy alive would force Array COW on every continuation
-        // resume. Every path reinstalls the drain before its only suspension
-        // point; terminal publish has no active transaction left to expose.
+        // resume. Every page-yield path reinstalls the drain before packaging;
+        // terminal publish has no active transaction left to expose.
         authoritativeCandidateDrain = nil
         defer {
             // A synchronous failure can escape before a continuation is
@@ -3019,6 +3019,34 @@ actor StrokeFrameScheduler {
                 drain.arenaTransaction.rollback()
             }
         }
+        let isFinishing = try resumeAuthoritativeCandidateDrainCPU(
+            drain: drain,
+            coordinator: coordinator,
+            viewport: viewport,
+            strategy: strategy,
+            preparationCPUStartedAt: preparationCPUStartedAt
+        )
+        // No async function may be entered while the authoritative probe is
+        // armed. Swift can otherwise allocate a TaskAllocator slab for the
+        // callee's async frame and misattribute runtime bookkeeping to the
+        // allocation-free Stage C CPU segment.
+        disarmAuthoritativeAllocationProbe(drain: drain)
+        return try await makeCandidateDrainBatch(
+            drain: drain,
+            coordinator: coordinator,
+            generatorRanOnMainThread: generatorRanOnMainThread,
+            isFinishing: isFinishing,
+            preparationCPUStartedAt: preparationCPUStartedAt
+        )
+    }
+
+    private func resumeAuthoritativeCandidateDrainCPU(
+        drain: StrokeAuthoritativeCandidateDrain,
+        coordinator: StrokeRenderCoordinator,
+        viewport: ViewportTransform,
+        strategy: TilingStrategy,
+        preparationCPUStartedAt: UInt64
+    ) throws -> Bool {
         recordCandidatePhase(drain.phase)
         authoritativeCandidateResumeCount &+= 1
         generatedLogicalDabScratch.removeAll(keepingCapacity: true)
@@ -3092,13 +3120,7 @@ actor StrokeFrameScheduler {
                 try installStagedCandidateProjectionPage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return try await makeCandidateDrainBatch(
-                    drain: drain,
-                    coordinator: coordinator,
-                    generatorRanOnMainThread: generatorRanOnMainThread,
-                    isFinishing: false,
-                    preparationCPUStartedAt: preparationCPUStartedAt
-                )
+                return false
             }
         }
 
@@ -3114,20 +3136,13 @@ actor StrokeFrameScheduler {
                 try installCheckpointedAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return try await makeCandidateDrainBatch(
-                    drain: drain,
-                    coordinator: coordinator,
-                    generatorRanOnMainThread: generatorRanOnMainThread,
-                    isFinishing: false,
-                    preparationCPUStartedAt: preparationCPUStartedAt
-                )
+                return false
             }
         }
         if drain.phase == .settledTransfer {
-            return try await continueAfterCandidateEmission(
+            return try continueAfterCandidateEmissionCPU(
                 drain,
                 coordinator: coordinator,
-                generatorRanOnMainThread: generatorRanOnMainThread,
                 preparationCPUStartedAt: preparationCPUStartedAt
             )
         }
@@ -3180,13 +3195,7 @@ actor StrokeFrameScheduler {
                 try installPartialAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return try await makeCandidateDrainBatch(
-                    drain: drain,
-                    coordinator: coordinator,
-                    generatorRanOnMainThread: generatorRanOnMainThread,
-                    isFinishing: false,
-                    preparationCPUStartedAt: preparationCPUStartedAt
-                )
+                return false
             }
             let page: BrushStrokeGenerator.EmissionPage?
             var yieldedAcceptedPrefix = false
@@ -3242,13 +3251,7 @@ actor StrokeFrameScheduler {
                 try installPartialAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return try await makeCandidateDrainBatch(
-                    drain: drain,
-                    coordinator: coordinator,
-                    generatorRanOnMainThread: generatorRanOnMainThread,
-                    isFinishing: false,
-                    preparationCPUStartedAt: preparationCPUStartedAt
-                )
+                return false
             }
             guard let page else {
                 throw StrokeFrameSchedulerError.invalidLifecycle
@@ -3260,13 +3263,7 @@ actor StrokeFrameScheduler {
                 try installPartialAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return try await makeCandidateDrainBatch(
-                    drain: drain,
-                    coordinator: coordinator,
-                    generatorRanOnMainThread: generatorRanOnMainThread,
-                    isFinishing: false,
-                    preparationCPUStartedAt: preparationCPUStartedAt
-                )
+                return false
             }
 
             guard let completedGenerator = cursor.completedGenerator,
@@ -3288,13 +3285,7 @@ actor StrokeFrameScheduler {
                 try installPartialAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return try await makeCandidateDrainBatch(
-                    drain: drain,
-                    coordinator: coordinator,
-                    generatorRanOnMainThread: generatorRanOnMainThread,
-                    isFinishing: false,
-                    preparationCPUStartedAt: preparationCPUStartedAt
-                )
+                return false
             }
 
             let preparationDeadlineReached =
@@ -3308,13 +3299,7 @@ actor StrokeFrameScheduler {
                 try installCheckpointedAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return try await makeCandidateDrainBatch(
-                    drain: drain,
-                    coordinator: coordinator,
-                    generatorRanOnMainThread: generatorRanOnMainThread,
-                    isFinishing: false,
-                    preparationCPUStartedAt: preparationCPUStartedAt
-                )
+                return false
             }
         }
 
@@ -3325,28 +3310,20 @@ actor StrokeFrameScheduler {
             try installCheckpointedAuthoritativeCandidatePage(drain)
             drain.hasPublishedCandidatePage = true
             authoritativeCandidateDrain = drain
-            return try await makeCandidateDrainBatch(
-                drain: drain,
-                coordinator: coordinator,
-                generatorRanOnMainThread: generatorRanOnMainThread,
-                isFinishing: false,
-                preparationCPUStartedAt: preparationCPUStartedAt
-            )
+            return false
         }
-        return try await continueAfterCandidateEmission(
+        return try continueAfterCandidateEmissionCPU(
             drain,
             coordinator: coordinator,
-            generatorRanOnMainThread: generatorRanOnMainThread,
             preparationCPUStartedAt: preparationCPUStartedAt
         )
     }
 
-    private func continueAfterCandidateEmission(
+    private func continueAfterCandidateEmissionCPU(
         _ drain: StrokeAuthoritativeCandidateDrain,
         coordinator: StrokeRenderCoordinator,
-        generatorRanOnMainThread: Bool,
         preparationCPUStartedAt: UInt64
-    ) async throws -> StrokePreparedDepositionBatch {
+    ) throws -> Bool {
         if !settledChunkScratch.isEmpty,
            drain.preparedSettledTransfer == nil
         {
@@ -3407,13 +3384,7 @@ actor StrokeFrameScheduler {
                 try installCheckpointedAuthoritativeCandidatePage(drain)
                 drain.hasPublishedCandidatePage = true
                 authoritativeCandidateDrain = drain
-                return try await makeCandidateDrainBatch(
-                    drain: drain,
-                    coordinator: coordinator,
-                    generatorRanOnMainThread: generatorRanOnMainThread,
-                    isFinishing: false,
-                    preparationCPUStartedAt: preparationCPUStartedAt
-                )
+                return false
             }
         }
         setCandidatePhase(.arenaRetention, on: drain)
@@ -3466,20 +3437,13 @@ actor StrokeFrameScheduler {
             try installCheckpointedAuthoritativeCandidatePage(drain)
             drain.hasPublishedCandidatePage = true
             authoritativeCandidateDrain = drain
-            return try await makeCandidateDrainBatch(
-                drain: drain,
-                coordinator: coordinator,
-                generatorRanOnMainThread: generatorRanOnMainThread,
-                isFinishing: false,
-                preparationCPUStartedAt: preparationCPUStartedAt
-            )
+            return false
         }
-        return try await finalizeAuthoritativeCandidateDrain(
+        try finalizeAuthoritativeCandidateDrainCPU(
             drain,
-            coordinator: coordinator,
-            generatorRanOnMainThread: generatorRanOnMainThread,
-            preparationCPUStartedAt: preparationCPUStartedAt
+            coordinator: coordinator
         )
+        return drain.isFinishing
     }
 
     private func resumeCandidateActualStorage(
@@ -3765,12 +3729,10 @@ actor StrokeFrameScheduler {
         try installPartialAuthoritativeCandidatePage(drain)
     }
 
-    private func finalizeAuthoritativeCandidateDrain(
+    private func finalizeAuthoritativeCandidateDrainCPU(
         _ drain: StrokeAuthoritativeCandidateDrain,
-        coordinator: StrokeRenderCoordinator,
-        generatorRanOnMainThread: Bool,
-        preparationCPUStartedAt: UInt64
-    ) async throws -> StrokePreparedDepositionBatch {
+        coordinator: StrokeRenderCoordinator
+    ) throws {
         guard let preparedArenaCommit = drain.preparedArenaCommit else {
             throw StrokeFrameSchedulerError.invalidLifecycle
         }
@@ -3872,13 +3834,6 @@ actor StrokeFrameScheduler {
         {
             privateSurfaceEncoder?.beginPredictionReplacement()
         }
-        return try await makeCandidateDrainBatch(
-            drain: drain,
-            coordinator: coordinator,
-            generatorRanOnMainThread: generatorRanOnMainThread,
-            isFinishing: drain.isFinishing,
-            preparationCPUStartedAt: preparationCPUStartedAt
-        )
     }
 
     private func appendProjectedChunks<Chunks: Collection>(
