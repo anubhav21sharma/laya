@@ -43,6 +43,85 @@ public enum PaintTileStoreError: Error, Equatable, Sendable {
         allocationBytes: Int,
         stagingBytes: Int
     )
+    case foreignStoreReference
+    case unsortedReference
+    case duplicateReference
+    case staleTileReference
+    case retirementAlreadyPrepared
+    case retirementIdentityOverflow
+}
+
+/// Opaque ownership identity for one physical tile store. References and
+/// leases carry this value so no caller can accidentally mix stores that use
+/// otherwise-identical surface/layer/generation coordinates.
+public struct PaintTileStoreIdentity: Hashable, Comparable, Sendable {
+    fileprivate let rawValue: UUID
+
+    init() { rawValue = UUID() }
+
+    public static func < (
+        lhs: PaintTileStoreIdentity,
+        rhs: PaintTileStoreIdentity
+    ) -> Bool {
+        lhs.rawValue.uuidString < rhs.rawValue.uuidString
+    }
+}
+
+/// Immutable metadata-only pointer to one exact physical tile entry.
+public struct PaintTileReference: Hashable, Comparable, Sendable {
+    public let storeIdentity: PaintTileStoreIdentity
+    public let physicalSurfaceID: UUID
+    public let layerID: UUID
+    public let physicalGeneration: UInt64
+    public let identity: PaintTileIdentity
+    public let descriptor: PaintTileDescriptor
+
+    public var coordinate: PaintTileCoordinate { descriptor.coordinate }
+
+    public static func < (
+        lhs: PaintTileReference,
+        rhs: PaintTileReference
+    ) -> Bool {
+        if lhs.coordinate != rhs.coordinate {
+            return lhs.coordinate < rhs.coordinate
+        }
+        if lhs.layerID != rhs.layerID {
+            return lhs.layerID.uuidString < rhs.layerID.uuidString
+        }
+        if lhs.physicalSurfaceID != rhs.physicalSurfaceID {
+            return lhs.physicalSurfaceID.uuidString
+                < rhs.physicalSurfaceID.uuidString
+        }
+        if lhs.physicalGeneration != rhs.physicalGeneration {
+            return lhs.physicalGeneration < rhs.physicalGeneration
+        }
+        if lhs.identity != rhs.identity { return lhs.identity < rhs.identity }
+        return lhs.storeIdentity < rhs.storeIdentity
+    }
+
+    func replacing(
+        identity: PaintTileIdentity
+    ) -> PaintTileReference {
+        PaintTileReference(
+            storeIdentity: storeIdentity,
+            physicalSurfaceID: physicalSurfaceID,
+            layerID: layerID,
+            physicalGeneration: physicalGeneration,
+            identity: identity,
+            descriptor: descriptor
+        )
+    }
+}
+
+/// Opaque single-use retirement transaction prepared under the store lock.
+public final class PaintTilePreparedRetirement: @unchecked Sendable {
+    fileprivate let storeIdentity: PaintTileStoreIdentity
+    fileprivate let token: UInt64
+
+    fileprivate init(storeIdentity: PaintTileStoreIdentity, token: UInt64) {
+        self.storeIdentity = storeIdentity
+        self.token = token
+    }
 }
 
 public struct PaintTileLeaseID: RawRepresentable, Hashable, Sendable {
@@ -218,6 +297,7 @@ public struct PaintTileLease: @unchecked Sendable {
     public let surfaceID: UUID
     public let layerID: UUID
     public let generation: UInt64
+    public let storeIdentity: PaintTileStoreIdentity
     private let ownedPinReasons: [PaintTilePinReason]
     private let ownedBindings: [PaintTileBinding]
     fileprivate let strokeWorkspace: PaintTileStrokeLeaseWorkspace?
@@ -232,6 +312,7 @@ public struct PaintTileLease: @unchecked Sendable {
         surfaceID: UUID,
         layerID: UUID,
         generation: UInt64,
+        storeIdentity: PaintTileStoreIdentity,
         pinReasons: [PaintTilePinReason],
         bindings: [PaintTileBinding]
     ) {
@@ -239,6 +320,7 @@ public struct PaintTileLease: @unchecked Sendable {
         self.surfaceID = surfaceID
         self.layerID = layerID
         self.generation = generation
+        self.storeIdentity = storeIdentity
         ownedPinReasons = pinReasons
         ownedBindings = bindings
         strokeWorkspace = nil
@@ -249,6 +331,7 @@ public struct PaintTileLease: @unchecked Sendable {
         surfaceID: UUID,
         layerID: UUID,
         generation: UInt64,
+        storeIdentity: PaintTileStoreIdentity,
         pinReasons: [PaintTilePinReason],
         strokeWorkspace: PaintTileStrokeLeaseWorkspace
     ) {
@@ -256,6 +339,7 @@ public struct PaintTileLease: @unchecked Sendable {
         self.surfaceID = surfaceID
         self.layerID = layerID
         self.generation = generation
+        self.storeIdentity = storeIdentity
         ownedPinReasons = pinReasons
         ownedBindings = []
         self.strokeWorkspace = strokeWorkspace
@@ -288,6 +372,7 @@ public struct PaintTileLease: @unchecked Sendable {
             surfaceID: surfaceID,
             layerID: layerID,
             generation: generation,
+            storeIdentity: storeIdentity,
             pinReasons: pinReasons,
             bindings: committedBindings
         )
@@ -544,7 +629,26 @@ public final class PaintTileStore: @unchecked Sendable {
         let surfaceID: UUID
         let generation: UInt64
         let identityStorage: LeaseIdentityStorage
+        /// Present only for immutable leases spanning physical namespaces.
+        /// Single-namespace hot leases derive keys without allocating.
+        let mixedNamespaceKeys: [Key]?
         let pinReasons: [PaintTilePinReason]
+
+        func referencesPhysicalNamespace(
+            surfaceID: UUID,
+            generation: UInt64
+        ) -> Bool {
+            if let mixedNamespaceKeys {
+                return mixedNamespaceKeys.contains {
+                    $0.surfaceID == surfaceID && $0.generation == generation
+                }
+            }
+            return self.surfaceID == surfaceID && self.generation == generation
+        }
+    }
+
+    private enum PreparedRetirementState {
+        case prepared([Key])
     }
 
     private struct Allocation {
@@ -557,6 +661,7 @@ public final class PaintTileStore: @unchecked Sendable {
     }
 
     private let device: any MTLDevice
+    public let identity = PaintTileStoreIdentity()
     public let transferByteCapacity: Int
     private let lock = NSLock()
     private var residency: PaintTileResidency
@@ -573,6 +678,10 @@ public final class PaintTileStore: @unchecked Sendable {
         )
     private var provisionalByteCount = 0
     private var nextProvisionalReservationID: UInt64 = 0
+    private var nextRetirementID: UInt64 = 0
+    private var preparedRetirements: [UInt64: PreparedRetirementState] = [:]
+    private var preparedRetirementKeys: Set<Key> = []
+    private var pendingRetirementKeys: Set<Key> = []
     private let provisionalTextureDescriptor: MTLTextureDescriptor
 
     public convenience init(device: any MTLDevice, byteBudget: Int) {
@@ -634,22 +743,347 @@ public final class PaintTileStore: @unchecked Sendable {
         }
     }
 
+    /// Returns metadata-only references to the exact physical entries in one
+    /// namespace. The returned order is stable row-major coordinate order.
+    public func references(
+        surfaceID: UUID,
+        layerID: UUID,
+        generation: UInt64
+    ) throws -> [PaintTileReference] {
+        withLock {
+            records.compactMap { key, record -> PaintTileReference? in
+                guard key.surfaceID == surfaceID,
+                      key.layerID == layerID,
+                      key.generation == generation
+                else { return nil }
+                return reference(key: key, record: record)
+            }
+            .sorted()
+        }
+    }
+
+    /// Resolves metadata for an exact, sorted reference set under one store
+    /// lock. A physical coordinate that was retired and later reused never
+    /// aliases the stale reference because tile identity is revalidated.
+    public func snapshot(
+        exactReferences references: [PaintTileReference]
+    ) throws -> [PaintTileStoreEntrySnapshot] {
+        try withLock {
+            var result: [PaintTileStoreEntrySnapshot] = []
+            result.reserveCapacity(references.count)
+            for index in references.indices {
+                let value = references[index]
+                guard value.storeIdentity == identity else {
+                    throw PaintTileStoreError.foreignStoreReference
+                }
+                if index > references.startIndex {
+                    if references[index - 1] == value {
+                        throw PaintTileStoreError.duplicateReference
+                    }
+                    guard references[index - 1] < value else {
+                        throw PaintTileStoreError.unsortedReference
+                    }
+                }
+                let key = Key(
+                    surfaceID: value.physicalSurfaceID,
+                    layerID: value.layerID,
+                    generation: value.physicalGeneration,
+                    coordinate: value.coordinate
+                )
+                guard let record = records[key],
+                      reference(key: key, record: record) == value
+                else { throw PaintTileStoreError.staleTileReference }
+                result.append(entrySnapshot(key: key, record: record))
+            }
+            return result
+        }
+    }
+
+    /// Atomically pins exact entries that may belong to different physical
+    /// surface namespaces. No entry is created and every reference is
+    /// validated before residency or lease bookkeeping changes.
+    public func reserveReferences(
+        _ references: [PaintTileReference],
+        leaseSurfaceID: UUID,
+        leaseLayerID: UUID,
+        leaseGeneration: UInt64,
+        pinReasons: [PaintTilePinReason]
+    ) throws -> PaintTileLease {
+        guard !pinReasons.isEmpty else {
+            throw PaintTileStoreError.emptyPinReasons
+        }
+        for index in pinReasons.indices.dropFirst() {
+            guard pinReasons[index - 1] < pinReasons[index] else {
+                throw PaintTileStoreError.unsortedPinReason(
+                    previous: pinReasons[index - 1],
+                    current: pinReasons[index]
+                )
+            }
+        }
+        for index in references.indices {
+            guard references[index].storeIdentity == identity else {
+                throw PaintTileStoreError.foreignStoreReference
+            }
+            if index > references.startIndex {
+                let previous = references[index - 1]
+                let current = references[index]
+                if previous == current {
+                    throw PaintTileStoreError.duplicateReference
+                }
+                guard previous < current else {
+                    throw PaintTileStoreError.unsortedReference
+                }
+            }
+        }
+
+        return try withLock {
+            let requested: [(Key, Record)] = try references.map { reference in
+                let key = Key(
+                    surfaceID: reference.physicalSurfaceID,
+                    layerID: reference.layerID,
+                    generation: reference.physicalGeneration,
+                    coordinate: reference.coordinate
+                )
+                guard !pendingRetirementKeys.contains(key),
+                      !preparedRetirementKeys.contains(key),
+                      let record = records[key],
+                      self.reference(key: key, record: record) == reference
+                else {
+                    throw PaintTileStoreError.staleTileReference
+                }
+                return (key, record)
+            }
+            var stagedResidency = residency
+            let identities = requested.map { $0.1.identity }
+            try preflightCapacity(
+                requestedIdentities: identities,
+                residency: stagedResidency
+            )
+
+            var evicted: [PaintTileIdentity] = []
+            for identity in identities
+            where stagedResidency.entries[identity] != nil {
+                evicted.append(contentsOf: try stagedResidency.admit(
+                    identity,
+                    byteCount: PaintTileDescriptor.residentByteCount,
+                    pinReasons: pinReasons
+                ))
+            }
+            for identity in identities
+            where stagedResidency.entries[identity] == nil {
+                evicted.append(contentsOf: try stagedResidency.admit(
+                    identity,
+                    byteCount: PaintTileDescriptor.residentByteCount,
+                    pinReasons: pinReasons
+                ))
+            }
+            var uniqueEvictions: [PaintTileIdentity] = []
+            for value in evicted where !uniqueEvictions.contains(value) {
+                uniqueEvictions.append(value)
+            }
+            evicted = uniqueEvictions
+
+            let allocationCount = requested.reduce(into: 0) {
+                if $1.1.texture == nil { $0 += 1 }
+            }
+            let accounting = try transferAccounting(
+                captureIdentities: evicted,
+                allocationCount: allocationCount
+            )
+            var allocations: [Allocation] = []
+            allocations.reserveCapacity(allocationCount)
+            for (key, record) in requested where record.texture == nil {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: PaintTileDescriptor.pixelFormat,
+                    width: PaintTileDescriptor.side,
+                    height: PaintTileDescriptor.side,
+                    mipmapped: false
+                )
+                descriptor.storageMode = .private
+                descriptor.usage = [.renderTarget, .shaderRead, .shaderWrite]
+                guard let texture = device.makeTexture(descriptor: descriptor) else {
+                    throw PaintTileStoreError.textureAllocationFailed(
+                        reserveIndex: allocations.count
+                    )
+                }
+                texture.label = "Paint Tile \(record.identity.tileID.rawValue)"
+                allocations.append(Allocation(
+                    key: key,
+                    identity: record.identity,
+                    descriptor: record.descriptor,
+                    texture: texture,
+                    sourceBacking: record.backing ?? .knownClear,
+                    isNew: false
+                ))
+            }
+            let captured = try transfer(
+                evicted: evicted,
+                allocations: allocations
+            )
+            let (leaseRawID, leaseOverflow) = nextLeaseID
+                .addingReportingOverflow(1)
+            guard !leaseOverflow else {
+                throw PaintTileStoreError.leaseIdentityOverflow
+            }
+            let nextRevision = try advancedStateRevision()
+            let stagedRecords = Self.cloneRecords(records)
+            for evictedIdentity in evicted {
+                guard let key = stagedRecords.first(where: {
+                    $0.value.identity == evictedIdentity
+                })?.key else { continue }
+                stagedRecords[key]?.storage.texture = nil
+                if let payload = captured[evictedIdentity] {
+                    stagedRecords[key]?.storage.backing = payload
+                }
+            }
+            for allocation in allocations {
+                stagedRecords[allocation.key]?.storage.texture = allocation.texture
+                switch allocation.sourceBacking {
+                case .knownClear:
+                    stagedRecords[allocation.key]?.storage.backing = .knownClear
+                case .residentOnly, .rgba16Float:
+                    stagedRecords[allocation.key]?.storage.backing = nil
+                }
+            }
+            let bindings = requested.compactMap { key, record in
+                stagedRecords[key]?.texture.map {
+                    PaintTileBinding(
+                        identity: record.identity,
+                        descriptor: record.descriptor,
+                        texture: $0
+                    )
+                }
+            }
+            guard bindings.count == requested.count else {
+                throw PaintTileStoreError.leaseBindingMismatch
+            }
+            let leaseID = PaintTileLeaseID(rawValue: leaseRawID)
+            var stagedLeases = leases
+            stagedLeases[leaseID] = LeaseRecord(
+                surfaceID: leaseSurfaceID,
+                generation: leaseGeneration,
+                identityStorage: .owned(identities),
+                mixedNamespaceKeys: requested.map(\.0),
+                pinReasons: pinReasons
+            )
+            records = stagedRecords
+            residency = stagedResidency
+            leases = stagedLeases
+            nextLeaseID = leaseRawID
+            stateRevision = nextRevision
+            lastTransferAccounting = accounting
+            return PaintTileLease(
+                id: leaseID,
+                surfaceID: leaseSurfaceID,
+                layerID: leaseLayerID,
+                generation: leaseGeneration,
+                storeIdentity: identity,
+                pinReasons: pinReasons,
+                bindings: bindings
+            )
+        }
+    }
+
+    /// Validates and reserves an exact set of entries for a later nonthrowing
+    /// retirement request. Preparation prevents new leases from racing the
+    /// candidate's final registry swap.
+    public func prepareRetirement(
+        _ references: [PaintTileReference]
+    ) throws -> PaintTilePreparedRetirement {
+        try withLock {
+            var keys: [Key] = []
+            keys.reserveCapacity(references.count)
+            for index in references.indices {
+                let value = references[index]
+                guard value.storeIdentity == identity else {
+                    throw PaintTileStoreError.foreignStoreReference
+                }
+                if index > references.startIndex {
+                    if references[index - 1] == value {
+                        throw PaintTileStoreError.duplicateReference
+                    }
+                    guard references[index - 1] < value else {
+                        throw PaintTileStoreError.unsortedReference
+                    }
+                }
+                let key = Key(
+                    surfaceID: value.physicalSurfaceID,
+                    layerID: value.layerID,
+                    generation: value.physicalGeneration,
+                    coordinate: value.coordinate
+                )
+                guard !preparedRetirementKeys.contains(key),
+                      !pendingRetirementKeys.contains(key)
+                else { throw PaintTileStoreError.retirementAlreadyPrepared }
+                guard let record = records[key],
+                      reference(key: key, record: record) == value
+                else { throw PaintTileStoreError.staleTileReference }
+                keys.append(key)
+            }
+            let (token, overflow) = nextRetirementID.addingReportingOverflow(1)
+            guard !overflow else {
+                throw PaintTileStoreError.retirementIdentityOverflow
+            }
+            let nextRevision = try advancedStateRevision()
+            nextRetirementID = token
+            preparedRetirements[token] = .prepared(keys)
+            preparedRetirementKeys.formUnion(keys)
+            stateRevision = nextRevision
+            return PaintTilePreparedRetirement(
+                storeIdentity: identity,
+                token: token
+            )
+        }
+    }
+
+    /// Commits a prepared retirement without any remaining fallible work.
+    /// Unpinned entries disappear immediately; pinned entries are deleted by
+    /// the final balanced lease return.
+    public func requestRetirement(_ plan: PaintTilePreparedRetirement) {
+        guard plan.storeIdentity == identity else { return }
+        withLock {
+            guard case let .prepared(keys)? = preparedRetirements[plan.token]
+            else { return }
+            for key in keys {
+                preparedRetirementKeys.remove(key)
+                if let record = records[key], residency.isPinned(record.identity) {
+                    pendingRetirementKeys.insert(key)
+                } else {
+                    removeRecord(for: key)
+                }
+            }
+            preparedRetirements.removeValue(forKey: plan.token)
+        }
+    }
+
+    public func cancelRetirement(_ plan: PaintTilePreparedRetirement) {
+        guard plan.storeIdentity == identity else { return }
+        withLock {
+            guard case let .prepared(keys)? = preparedRetirements[plan.token]
+            else { return }
+            for key in keys { preparedRetirementKeys.remove(key) }
+            preparedRetirements.removeValue(forKey: plan.token)
+        }
+    }
+
+    public func isRetirementPending(_ reference: PaintTileReference) -> Bool {
+        guard reference.storeIdentity == identity else { return false }
+        return withLock {
+            pendingRetirementKeys.contains(Key(
+                surfaceID: reference.physicalSurfaceID,
+                layerID: reference.layerID,
+                generation: reference.physicalGeneration,
+                coordinate: reference.coordinate
+            ))
+        }
+    }
+
     /// Cheap metadata snapshot. A `.residentOnly` entry deliberately omits
     /// private texture bytes; use `payloadSnapshot` for a restorable snapshot.
     public func snapshot() -> PaintTileStoreSnapshot {
         withLock {
             let entrySnapshots = records.map { key, record in
-                let entry = residency.entries[record.identity]
-                return PaintTileStoreEntrySnapshot(
-                    surfaceID: key.surfaceID,
-                    generation: key.generation,
-                    identity: record.identity,
-                    descriptor: record.descriptor,
-                    isResident: record.texture != nil,
-                    backing: record.backing ?? .residentOnly,
-                    lastUseEpoch: entry?.lastUseEpoch,
-                    pinCounts: entry?.pinCounts.dictionary ?? [:]
-                )
+                entrySnapshot(key: key, record: record)
             }
             .sorted { $0.identity < $1.identity }
             return PaintTileStoreSnapshot(
@@ -669,6 +1103,23 @@ public final class PaintTileStore: @unchecked Sendable {
                 lastTransferAccounting: lastTransferAccounting
             )
         }
+    }
+
+    private func entrySnapshot(
+        key: Key,
+        record: Record
+    ) -> PaintTileStoreEntrySnapshot {
+        let entry = residency.entries[record.identity]
+        return PaintTileStoreEntrySnapshot(
+            surfaceID: key.surfaceID,
+            generation: key.generation,
+            identity: record.identity,
+            descriptor: record.descriptor,
+            isResident: record.texture != nil,
+            backing: record.backing ?? .residentOnly,
+            lastUseEpoch: entry?.lastUseEpoch,
+            pinCounts: entry?.pinCounts.dictionary ?? [:]
+        )
     }
 
     /// Payload-complete immutable snapshot. Unlike `snapshot()`, this API
@@ -816,6 +1267,12 @@ public final class PaintTileStore: @unchecked Sendable {
                     generation: generation,
                     coordinate: $0
                 )
+            }
+            guard !keys.contains(where: {
+                preparedRetirementKeys.contains($0)
+                    || pendingRetirementKeys.contains($0)
+            }) else {
+                throw PaintTileStoreError.staleTileReference
             }
             var stagedResidency = residency
             var stagedNextTileID = nextTileID
@@ -982,6 +1439,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 surfaceID: surfaceID,
                 generation: generation,
                 identityStorage: .owned(requested.map(\.1)),
+                mixedNamespaceKeys: nil,
                 pinReasons: pinReasons
             )
 
@@ -997,6 +1455,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 surfaceID: surfaceID,
                 layerID: layerID,
                 generation: generation,
+                storeIdentity: identity,
                 pinReasons: pinReasons,
                 bindings: bindings
             )
@@ -1092,6 +1551,10 @@ public final class PaintTileStore: @unchecked Sendable {
                 generation: generation,
                 coordinate: coordinate
             )
+            if preparedRetirementKeys.contains(key)
+                || pendingRetirementKeys.contains(key) {
+                throw PaintTileStoreError.staleTileReference
+            }
             guard let record = records[key], let texture = record.texture else {
                 return nil
             }
@@ -1117,6 +1580,7 @@ public final class PaintTileStore: @unchecked Sendable {
             surfaceID: surfaceID,
             generation: generation,
             identityStorage: .owned(identities),
+            mixedNamespaceKeys: nil,
             pinReasons: pinReasons
         )
         nextLeaseID = leaseRawID
@@ -1126,6 +1590,7 @@ public final class PaintTileStore: @unchecked Sendable {
             surfaceID: surfaceID,
             layerID: layerID,
             generation: generation,
+            storeIdentity: identity,
             pinReasons: pinReasons,
             bindings: bindings
         )
@@ -1148,6 +1613,11 @@ public final class PaintTileStore: @unchecked Sendable {
                 generation: generation,
                 coordinate: coordinate
             )
+            if preparedRetirementKeys.contains(key)
+                || pendingRetirementKeys.contains(key) {
+                workspace.abandonReservation()
+                throw PaintTileStoreError.staleTileReference
+            }
             guard let record = records[key], let texture = record.texture else {
                 workspace.abandonReservation()
                 return nil
@@ -1182,6 +1652,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 surfaceID: surfaceID,
                 generation: generation,
                 identityStorage: .strokeWorkspace(workspace),
+                mixedNamespaceKeys: nil,
                 pinReasons: pinReasons
             )
             workspace.isOutstanding = true
@@ -1192,6 +1663,7 @@ public final class PaintTileStore: @unchecked Sendable {
                 surfaceID: surfaceID,
                 layerID: layerID,
                 generation: generation,
+                storeIdentity: identity,
                 pinReasons: pinReasons,
                 strokeWorkspace: workspace
             )
@@ -1752,17 +2224,26 @@ public final class PaintTileStore: @unchecked Sendable {
                 try residency.unpin(identity, reason: reason)
             }
         }
+        var identityIndex = 0
         leaseRecord.identityStorage.forEach { identity in
-            let key = Key(
-                surfaceID: leaseRecord.surfaceID,
-                layerID: identity.layerID,
-                generation: leaseRecord.generation,
-                coordinate: identity.coordinate
-            )
-            if !residency.isPinned(identity),
-               records[key]?.backing == .knownClear {
-                records.removeValue(forKey: key)
-                residency.remove(identity)
+            let key: Key
+            if let mixedNamespaceKeys = leaseRecord.mixedNamespaceKeys {
+                key = mixedNamespaceKeys[identityIndex]
+            } else {
+                key = Key(
+                    surfaceID: leaseRecord.surfaceID,
+                    layerID: identity.layerID,
+                    generation: leaseRecord.generation,
+                    coordinate: identity.coordinate
+                )
+            }
+            identityIndex += 1
+            guard !residency.isPinned(identity) else { return }
+            if pendingRetirementKeys.remove(key) != nil {
+                removeRecord(for: key)
+            } else if !preparedRetirementKeys.contains(key),
+                      records[key]?.backing == .knownClear {
+                removeRecord(for: key)
             }
         }
     }
@@ -1824,11 +2305,13 @@ public final class PaintTileStore: @unchecked Sendable {
     public func retire(surfaceID: UUID, generation: UInt64) throws {
         try withLock {
             var matchingLeases = 0
-            for lease in leases.values
-            where lease.surfaceID == surfaceID
-                && lease.generation == generation
-            {
-                matchingLeases += 1
+            for lease in leases.values {
+                if lease.referencesPhysicalNamespace(
+                    surfaceID: surfaceID,
+                    generation: generation
+                ) {
+                    matchingLeases += 1
+                }
             }
             guard matchingLeases == 0 else {
                 throw PaintTileStoreError.outstandingLeases(
@@ -1848,16 +2331,18 @@ public final class PaintTileStore: @unchecked Sendable {
                     count: provisionalCount
                 )
             }
+            guard !preparedRetirementKeys.contains(where: {
+                $0.surfaceID == surfaceID && $0.generation == generation
+            }) else {
+                throw PaintTileStoreError.retirementAlreadyPrepared
+            }
             guard var matchingKey = records.first(where: {
                 $0.key.surfaceID == surfaceID
                     && $0.key.generation == generation
             })?.key else { return }
             let nextRevision = try advancedStateRevision()
             while true {
-                if let identity = records[matchingKey]?.identity {
-                    residency.remove(identity)
-                }
-                records.removeValue(forKey: matchingKey)
+                removeRecord(for: matchingKey)
                 guard let nextKey = records.first(where: {
                     $0.key.surfaceID == surfaceID
                         && $0.key.generation == generation
@@ -1882,10 +2367,16 @@ public final class PaintTileStore: @unchecked Sendable {
             var predictionLeaseCount = 0
             var authoritativeProvisionalCount = 0
             var predictionProvisionalCount = 0
-            for lease in leases.values where lease.generation == generation {
-                if lease.surfaceID == authoritativeSurfaceID {
+            for lease in leases.values {
+                if lease.referencesPhysicalNamespace(
+                    surfaceID: authoritativeSurfaceID,
+                    generation: generation
+                ) {
                     authoritativeLeaseCount += 1
-                } else if lease.surfaceID == predictionSurfaceID {
+                } else if lease.referencesPhysicalNamespace(
+                    surfaceID: predictionSurfaceID,
+                    generation: generation
+                ) {
                     predictionLeaseCount += 1
                 }
             }
@@ -1925,6 +2416,13 @@ public final class PaintTileStore: @unchecked Sendable {
                     count: predictionProvisionalCount
                 )
             }
+            guard !preparedRetirementKeys.contains(where: {
+                $0.generation == generation
+                    && ($0.surfaceID == authoritativeSurfaceID
+                        || $0.surfaceID == predictionSurfaceID)
+            }) else {
+                throw PaintTileStoreError.retirementAlreadyPrepared
+            }
             let hasMatchingRecord = records.keys.contains {
                 $0.generation == generation
                     && ($0.surfaceID == authoritativeSurfaceID
@@ -1937,10 +2435,7 @@ public final class PaintTileStore: @unchecked Sendable {
                     && ($0.key.surfaceID == authoritativeSurfaceID
                         || $0.key.surfaceID == predictionSurfaceID)
             })?.key {
-                if let identity = records[key]?.identity {
-                    residency.remove(identity)
-                }
-                records.removeValue(forKey: key)
+                removeRecord(for: key)
             }
             stateRevision = nextRevision
         }
@@ -1973,6 +2468,9 @@ public final class PaintTileStore: @unchecked Sendable {
         surfaceID: UUID,
         currentGeneration: UInt64
     ) throws -> LeaseRecord {
+        guard lease.storeIdentity == identity else {
+            throw PaintTileStoreError.foreignStoreReference
+        }
         guard lease.surfaceID == surfaceID else {
             throw PaintTileStoreError.wrongSurface(
                 expected: surfaceID,
@@ -1996,6 +2494,25 @@ public final class PaintTileStore: @unchecked Sendable {
             throw PaintTileStoreError.leaseBindingMismatch
         }
         return record
+    }
+
+    private func reference(key: Key, record: Record) -> PaintTileReference {
+        PaintTileReference(
+            storeIdentity: identity,
+            physicalSurfaceID: key.surfaceID,
+            layerID: key.layerID,
+            physicalGeneration: key.generation,
+            identity: record.identity,
+            descriptor: record.descriptor
+        )
+    }
+
+    private func removeRecord(for key: Key) {
+        if let record = records.removeValue(forKey: key) {
+            residency.remove(record.identity)
+        }
+        pendingRetirementKeys.remove(key)
+        preparedRetirementKeys.remove(key)
     }
 
     private func preflightCapacity(

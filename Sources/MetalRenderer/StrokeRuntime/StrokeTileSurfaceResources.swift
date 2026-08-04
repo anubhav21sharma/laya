@@ -43,6 +43,7 @@ enum StrokeTileSurfaceError: Error, Equatable, Sendable {
     case wrongGeneration(expected: UInt64, actual: UInt64)
     case wrongLayer(expected: UUID, actual: UUID)
     case duplicateSurfaceNamespace(UUID)
+    case unauthenticatedSurfaceNamespace
     case injectedFailure(StrokeTileFailureInjectionSeam)
 }
 
@@ -325,34 +326,215 @@ struct StrokeTileSurfaceResourceSnapshot: Equatable, Sendable {
     let fullCanvasTextureCount: Int
 }
 
-struct StrokeTileSurfaceNamespaceLease: Sendable {
-    let authoritativeSurfaceID: UUID
-    let predictionSurfaceID: UUID
+final class StrokeTileSurfaceNamespaceOwnership: @unchecked Sendable {
+    private enum State { case issued, claimed, finished }
+
     let retirementToken: UInt64
-    private let retirementHandler: @Sendable (UInt64) -> Void
+    private let lock = NSLock()
+    private var state: State = .issued
+    private let finishHandler: @Sendable (UInt64) -> Void
 
     init(
-        authoritativeSurfaceID: UUID,
-        predictionSurfaceID: UUID,
         retirementToken: UInt64,
-        onRetired: @escaping @Sendable (UInt64) -> Void
+        onFinished: @escaping @Sendable (UInt64) -> Void
     ) {
-        self.authoritativeSurfaceID = authoritativeSurfaceID
-        self.predictionSurfaceID = predictionSurfaceID
         self.retirementToken = retirementToken
-        retirementHandler = onRetired
+        finishHandler = onFinished
     }
 
-    fileprivate func reportRetired() { retirementHandler(retirementToken) }
+    var isOutstanding: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return state != .finished
+    }
 
-    static func testing(generation: UInt64) -> Self {
-        Self(
-            authoritativeSurfaceID: UUID(),
-            predictionSurfaceID: UUID(),
-            retirementToken: generation,
-            onRetired: { _ in }
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard state == .issued else { return false }
+        state = .claimed
+        return true
+    }
+
+    func cancelIfUnclaimed() {
+        finish(allowIssued: true, allowClaimed: false)
+    }
+
+    func abortClaimedInitialization() {
+        finish(allowIssued: false, allowClaimed: true)
+    }
+
+    func retire() {
+        finish(allowIssued: true, allowClaimed: true)
+    }
+
+    private func finish(allowIssued: Bool, allowClaimed: Bool) {
+        lock.lock()
+        let shouldFinish: Bool
+        switch state {
+        case .issued:
+            shouldFinish = allowIssued
+        case .claimed:
+            shouldFinish = allowClaimed
+        case .finished:
+            shouldFinish = false
+        }
+        if shouldFinish { state = .finished }
+        lock.unlock()
+        if shouldFinish { finishHandler(retirementToken) }
+    }
+
+    deinit { retire() }
+}
+
+struct StrokeTileSurfaceNamespaceLease: Sendable {
+    let authoritative: DocumentPaintSurfaceNamespace
+    let prediction: DocumentPaintSurfaceNamespace
+    let retirementToken: UInt64
+    fileprivate let isStandaloneTestOnly: Bool
+    let ownership: StrokeTileSurfaceNamespaceOwnership
+    private let authenticationHandler:
+        @Sendable (StrokeTileSurfaceNamespaceLease) -> Bool
+
+    private init(
+        authoritative: DocumentPaintSurfaceNamespace,
+        prediction: DocumentPaintSurfaceNamespace,
+        retirementToken: UInt64,
+        isStandaloneTestOnly: Bool,
+        ownership: StrokeTileSurfaceNamespaceOwnership,
+        authenticate: @escaping @Sendable
+            (StrokeTileSurfaceNamespaceLease) -> Bool
+    ) {
+        self.authoritative = authoritative
+        self.prediction = prediction
+        self.retirementToken = retirementToken
+        self.isStandaloneTestOnly = isStandaloneTestOnly
+        self.ownership = ownership
+        authenticationHandler = authenticate
+    }
+
+    var authoritativeSurfaceID: UUID { authoritative.surfaceID }
+    var predictionSurfaceID: UUID { prediction.surfaceID }
+    var storeIdentity: PaintTileStoreIdentity { authoritative.storeIdentity }
+    var layerID: UUID { authoritative.layerID }
+    var generation: UInt64 { authoritative.generation }
+
+    static func registryIssued(
+        authoritative: DocumentPaintSurfaceNamespace,
+        prediction: DocumentPaintSurfaceNamespace,
+        retirementToken: UInt64,
+        authenticate: @escaping @Sendable
+            (StrokeTileSurfaceNamespaceLease) -> Bool,
+        onRetired: @escaping @Sendable (UInt64) -> Void
+    ) -> Self {
+        let ownership = StrokeTileSurfaceNamespaceOwnership(
+            retirementToken: retirementToken,
+            onFinished: onRetired
+        )
+        return Self(
+            authoritative: authoritative,
+            prediction: prediction,
+            retirementToken: retirementToken,
+            isStandaloneTestOnly: false,
+            ownership: ownership,
+            authenticate: authenticate
         )
     }
+
+    func isAuthenticated(
+        storeIdentity: PaintTileStoreIdentity,
+        layerID: UUID,
+        generation: UInt64
+    ) -> Bool {
+        authoritative.storeIdentity == prediction.storeIdentity
+            && authoritative.layerID == prediction.layerID
+            && authoritative.generation == prediction.generation
+            && authoritative.role == .authoritative
+            && prediction.role == .prediction
+            && authoritative.storeIdentity == storeIdentity
+            && authoritative.layerID == layerID
+            && authoritative.generation == generation
+            && ownership.isOutstanding
+            && authenticationHandler(self)
+    }
+
+    func claimForResources() -> Bool { ownership.claim() }
+    func abortClaimedInitialization() {
+        ownership.abortClaimedInitialization()
+    }
+    func reportRetired() { ownership.retire() }
+    func cancel() { ownership.cancelIfUnclaimed() }
+
+    #if DEBUG
+    static func testing(generation: UInt64) -> Self {
+        let storeIdentity = PaintTileStoreIdentity()
+        let layerID = UUID()
+        let token = generation
+        let ownership = StrokeTileSurfaceNamespaceOwnership(
+            retirementToken: token,
+            onFinished: { _ in }
+        )
+        return Self(
+            authoritative: DocumentPaintSurfaceNamespace(
+                storeIdentity: storeIdentity,
+                surfaceID: UUID(),
+                layerID: layerID,
+                generation: generation,
+                role: .authoritative,
+                token: token
+            ),
+            prediction: DocumentPaintSurfaceNamespace(
+                storeIdentity: storeIdentity,
+                surfaceID: UUID(),
+                layerID: layerID,
+                generation: generation,
+                role: .prediction,
+                token: token
+            ),
+            retirementToken: token,
+            isStandaloneTestOnly: true,
+            ownership: ownership,
+            authenticate: { $0.generation == generation }
+        )
+    }
+
+    static func testing(
+        storeIdentity: PaintTileStoreIdentity,
+        layerID: UUID,
+        generation: UInt64,
+        authoritativeSurfaceID: UUID = UUID(),
+        predictionSurfaceID: UUID = UUID(),
+        retirementToken: UInt64 = 0,
+        onRetired: @escaping @Sendable (UInt64) -> Void = { _ in }
+    ) -> Self {
+        let ownership = StrokeTileSurfaceNamespaceOwnership(
+            retirementToken: retirementToken,
+            onFinished: onRetired
+        )
+        return Self(
+            authoritative: DocumentPaintSurfaceNamespace(
+                storeIdentity: storeIdentity,
+                surfaceID: authoritativeSurfaceID,
+                layerID: layerID,
+                generation: generation,
+                role: .authoritative,
+                token: retirementToken
+            ),
+            prediction: DocumentPaintSurfaceNamespace(
+                storeIdentity: storeIdentity,
+                surfaceID: predictionSurfaceID,
+                layerID: layerID,
+                generation: generation,
+                role: .prediction,
+                token: retirementToken
+            ),
+            retirementToken: retirementToken,
+            isStandaloneTestOnly: true,
+            ownership: ownership,
+            authenticate: { _ in true }
+        )
+    }
+    #endif
 }
 
 /// Sparse, borrowed-store resources for the opt-in Task 5 renderer seam.
@@ -403,6 +585,34 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
         pipeline: DepositionPipelineBinding,
         namespaceLease: StrokeTileSurfaceNamespaceLease
     ) throws {
+        #if DEBUG
+        let isStandaloneTestNamespace = namespaceLease.isStandaloneTestOnly
+            && namespaceLease
+            .isAuthenticated(
+                storeIdentity: namespaceLease.storeIdentity,
+                layerID: namespaceLease.layerID,
+                generation: generation
+            )
+            && namespaceLease.generation == generation
+        #else
+        let isStandaloneTestNamespace = false
+        #endif
+        guard namespaceLease.isAuthenticated(
+            storeIdentity: store.identity,
+            layerID: layerID,
+            generation: generation
+        ) || isStandaloneTestNamespace else {
+            throw StrokeTileSurfaceError.unauthenticatedSurfaceNamespace
+        }
+        guard namespaceLease.claimForResources() else {
+            throw StrokeTileSurfaceError.unauthenticatedSurfaceNamespace
+        }
+        var namespaceInitializationSucceeded = false
+        defer {
+            if !namespaceInitializationSucceeded {
+                namespaceLease.abortClaimedInitialization()
+            }
+        }
         guard maximumRecordCount > 0, maximumTileReferenceCount > 0 else {
             throw StrokeTileSurfaceError.invalidCapacity
         }
@@ -463,6 +673,7 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
         depositionPassDescriptor = pass
         commandQueue.label = "Off-main Sparse Stroke Preparation"
         uploadBuffer.label = "Off-main Sparse Stroke Instances"
+        namespaceInitializationSucceeded = true
     }
 
     #if DEBUG
@@ -498,6 +709,8 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
         namespaceRetirementLock.unlock()
         if shouldReport { namespaceLease.reportRetired() }
     }
+
+    deinit { reportNamespaceRetiredExactlyOnce() }
 }
 
 struct StrokeTileEncodingConfiguration: @unchecked Sendable {
@@ -1803,13 +2016,20 @@ package enum StrokeTileAllocationProbeHarness {
         let layerID = UUID(
             uuidString: "1a110ca7-10a5-4d50-a110-ca710a54d501"
         )!
-        let store = PaintTileStore(
+        let registry = try DocumentPaintSurfaceStore(
             device: device,
-            byteBudget: PaintTileDescriptor.residentByteCount * 16
+            byteBudget: PaintTileDescriptor.residentByteCount * 16,
+            geometry: DocumentPaintGeometry(
+                documentPixelSize: PixelSize(width: 512, height: 512),
+                storagePixelSize: PixelSize(width: 512, height: 512),
+                radialLayout: nil
+            ),
+            layerIDs: [layerID],
+            generation: 1
         )
         let first = try makeResources(
             device: device,
-            store: store,
+            registry: registry,
             layerID: layerID,
             generation: 1,
             pipeline: pipeline
@@ -1845,9 +2065,12 @@ package enum StrokeTileAllocationProbeHarness {
         )
         try encoder.cancel(frameDisposition: .unpublished)
 
+        let generationTwo = try registry.makeCandidate()
+        registry.commitPrepared(try registry.prepareCommit(generationTwo))
+
         let measured = try makeResources(
             device: device,
-            store: store,
+            registry: registry,
             layerID: layerID,
             generation: 2,
             pipeline: pipeline
@@ -1872,9 +2095,12 @@ package enum StrokeTileAllocationProbeHarness {
         // and candidate shape; measured calls exercise only the warmed path.
         try encoder.configure(configuration(measured), generation: 2)
 
+        let generationThree = try registry.makeCandidate()
+        registry.commitPrepared(try registry.prepareCommit(generationThree))
+
         let second = try makeResources(
             device: device,
-            store: store,
+            registry: registry,
             layerID: layerID,
             generation: 3,
             pipeline: pipeline
@@ -1942,21 +2168,25 @@ package enum StrokeTileAllocationProbeHarness {
     @MainActor
     private static func makeResources(
         device: any MTLDevice,
-        store: PaintTileStore,
+        registry: DocumentPaintSurfaceStore,
         layerID: UUID,
         generation: UInt64,
         pipeline: DepositionPipelineBinding
     ) throws -> StrokeTileSurfaceResources {
-        try StrokeTileSurfaceResources(
+        let namespace = try registry.issueStrokeNamespace(
+            layerID: layerID,
+            generation: generation
+        )
+        return try StrokeTileSurfaceResources(
             device: device,
-            store: store,
+            store: registry.sharedTileStore,
             layerID: layerID,
             pixelSize: PixelSize(width: 512, height: 512),
             generation: generation,
             maximumRecordCount: 32,
             maximumTileReferenceCount: 128,
             pipeline: pipeline,
-            namespaceLease: .testing(generation: generation)
+            namespaceLease: namespace
         )
     }
 

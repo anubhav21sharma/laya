@@ -25,7 +25,7 @@ public struct PaintTileCoordinate: Hashable, Comparable, Sendable {
     }
 }
 
-public struct PaintTileDescriptor: Equatable, Sendable {
+public struct PaintTileDescriptor: Hashable, Sendable {
     public static let side = 256
     public static let pixelFormat: MTLPixelFormat = .rgba16Float
     public static let residentByteCount = 256 * 256 * 4 * 2

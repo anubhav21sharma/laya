@@ -6,6 +6,67 @@ public enum TiledRasterSurfaceError: Error, Equatable, Sendable {
     case revisionOverflow
     case generationOverflow
     case leaseLayerMismatch(expected: UUID, actual: UUID)
+    case immutableReferenceView
+    case foreignReferenceStore
+    case duplicateReferenceCoordinate(PaintTileCoordinate)
+    case unsortedReferenceCoordinate
+    case missingReferenceCoordinate(PaintTileCoordinate)
+}
+
+/// Immutable logical surface generation whose coordinates may point into
+/// several physical namespaces in one PaintTileStore.
+public struct TiledRasterCoordinateReferenceView: Equatable, Sendable {
+    public let storeIdentity: PaintTileStoreIdentity
+    public let surfaceID: UUID
+    public let layerID: UUID
+    public let pixelSize: PixelSize
+    public let generation: UInt64
+    public let revision: RasterRevision
+    public let references: [PaintTileReference]
+
+    public init(
+        storeIdentity: PaintTileStoreIdentity,
+        surfaceID: UUID,
+        layerID: UUID,
+        pixelSize: PixelSize,
+        generation: UInt64,
+        revision: RasterRevision,
+        references: [PaintTileReference]
+    ) throws {
+        var previous: PaintTileCoordinate?
+        for reference in references {
+            guard reference.storeIdentity == storeIdentity else {
+                throw TiledRasterSurfaceError.foreignReferenceStore
+            }
+            guard reference.layerID == layerID else {
+                throw TiledRasterSurfaceError.leaseLayerMismatch(
+                    expected: layerID,
+                    actual: reference.layerID
+                )
+            }
+            _ = try PaintTileDescriptor(
+                coordinate: reference.coordinate,
+                logicalPixelSize: pixelSize
+            )
+            if let previous {
+                if previous == reference.coordinate {
+                    throw TiledRasterSurfaceError
+                        .duplicateReferenceCoordinate(reference.coordinate)
+                }
+                guard previous < reference.coordinate else {
+                    throw TiledRasterSurfaceError.unsortedReferenceCoordinate
+                }
+            }
+            previous = reference.coordinate
+        }
+        self.storeIdentity = storeIdentity
+        self.surfaceID = surfaceID
+        self.layerID = layerID
+        self.pixelSize = pixelSize
+        self.generation = generation
+        self.revision = revision
+        self.references = references
+    }
 }
 
 public struct TiledRasterBackingSnapshot: Equatable, Sendable {
@@ -34,6 +95,7 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
 
     private let lock = NSLock()
     private let store: PaintTileStore
+    private let referenceView: TiledRasterCoordinateReferenceView?
     private var currentGeneration: UInt64
     private var currentRevision: RasterRevision
     private var dirtyCoordinates: Set<PaintTileCoordinate> = []
@@ -71,6 +133,23 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         currentGeneration = generation
         currentRevision = initialRevision
         self.store = store
+        referenceView = nil
+    }
+
+    public init(
+        store: PaintTileStore,
+        referenceView: TiledRasterCoordinateReferenceView
+    ) throws {
+        guard referenceView.storeIdentity == store.identity else {
+            throw TiledRasterSurfaceError.foreignReferenceStore
+        }
+        surfaceID = referenceView.surfaceID
+        layerID = referenceView.layerID
+        pixelSize = referenceView.pixelSize
+        currentGeneration = referenceView.generation
+        currentRevision = referenceView.revision
+        self.store = store
+        self.referenceView = referenceView
     }
 
     public convenience init(
@@ -134,12 +213,69 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         withLock { dirtyCoordinates.sorted() }
     }
 
+    public var references: [PaintTileReference] {
+        withLock {
+            if let referenceView { return referenceView.references }
+            return (try? store.references(
+                surfaceID: surfaceID,
+                layerID: layerID,
+                generation: currentGeneration
+            )) ?? []
+        }
+    }
+
+    /// Pins exact existing entries without allocating new coordinates. Both
+    /// mutable namespace surfaces and immutable coordinate views expose this
+    /// same sampler-facing lease contract.
+    public func leaseExistingTiles(
+        at coordinates: [PaintTileCoordinate],
+        pinReasons: [PaintTilePinReason]
+    ) throws -> PaintTileLease {
+        try withLock {
+            let available: [PaintTileReference]
+            if let referenceView {
+                available = referenceView.references
+            } else {
+                available = try store.references(
+                    surfaceID: surfaceID,
+                    layerID: layerID,
+                    generation: currentGeneration
+                )
+            }
+            let byCoordinate = Dictionary(
+                uniqueKeysWithValues: available.map { ($0.coordinate, $0) }
+            )
+            let sorted = coordinates.sorted()
+            for index in sorted.indices.dropFirst()
+            where sorted[index] == sorted[index - 1] {
+                throw PaintTileStoreError.duplicateCoordinate(sorted[index])
+            }
+            let selected = try sorted.map { coordinate in
+                guard let reference = byCoordinate[coordinate] else {
+                    throw TiledRasterSurfaceError
+                        .missingReferenceCoordinate(coordinate)
+                }
+                return reference
+            }
+            return try store.reserveReferences(
+                selected,
+                leaseSurfaceID: surfaceID,
+                leaseLayerID: layerID,
+                leaseGeneration: currentGeneration,
+                pinReasons: Array(Set(pinReasons)).sorted()
+            )
+        }
+    }
+
     public func reserveTiles(
         intersecting supportBounds: PixelRect,
         antialiasHalo: Int = 1,
         pinReasons: [PaintTilePinReason],
         failureInjection: PaintTileAllocationFailureInjection? = nil
     ) throws -> PaintTileLease {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
         let coordinates = try PaintTileDescriptor.coordinates(
             intersecting: supportBounds,
             in: pixelSize,
@@ -157,7 +293,10 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         pinReasons: [PaintTilePinReason],
         failureInjection: PaintTileAllocationFailureInjection? = nil
     ) throws -> PaintTileLease {
-        try withLock {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
+        return try withLock {
             try store.reserve(
                 surfaceID: surfaceID,
                 layerID: layerID,
@@ -175,7 +314,10 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         pinReasons: [PaintTilePinReason],
         failureInjection: PaintTileAllocationFailureInjection? = nil
     ) throws -> PaintTileLease {
-        try withLock {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
+        return try withLock {
             try store.reserveSortedUnique(
                 surfaceID: surfaceID,
                 layerID: layerID,
@@ -194,7 +336,10 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         workspace: PaintTileStrokeLeaseWorkspace,
         failureInjection: PaintTileAllocationFailureInjection? = nil
     ) throws -> PaintTileLease {
-        try withLock {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
+        return try withLock {
             try store.reserveSortedUniqueForStroke(
                 surfaceID: surfaceID,
                 layerID: layerID,
@@ -219,13 +364,16 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         _ lease: PaintTileLease,
         coordinates: [PaintTileCoordinate]
     ) throws {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
         guard lease.layerID == layerID else {
             throw TiledRasterSurfaceError.leaseLayerMismatch(
                 expected: layerID,
                 actual: lease.layerID
             )
         }
-        try withLock {
+        return try withLock {
             guard currentRevision.rawValue < UInt64.max else {
                 throw TiledRasterSurfaceError.revisionOverflow
             }
@@ -247,6 +395,9 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         coordinates: [PaintTileCoordinate],
         workspace: PaintTileProvisionalWorkspace
     ) throws -> PaintTileProvisionalReservation {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
         guard lease.layerID == layerID else {
             throw TiledRasterSurfaceError.leaseLayerMismatch(
                 expected: layerID,
@@ -270,7 +421,10 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         modifiedCoordinates: [PaintTileCoordinate],
         knownClearCoordinates: [PaintTileCoordinate]
     ) throws -> PaintTileLease {
-        try withLock {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
+        return try withLock {
             guard currentRevision.rawValue < UInt64.max else {
                 throw TiledRasterSurfaceError.revisionOverflow
             }
@@ -307,6 +461,9 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
         _ lease: PaintTileLease,
         coordinates: [PaintTileCoordinate]
     ) throws {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
         guard lease.layerID == layerID else {
             throw TiledRasterSurfaceError.leaseLayerMismatch(
                 expected: layerID,
@@ -358,6 +515,9 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
     }
 
     public func advanceGeneration() throws {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
         try withLock {
             guard currentGeneration < UInt64.max else {
                 throw TiledRasterSurfaceError.generationOverflow
@@ -380,12 +540,7 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
 
     public func backingSnapshot() -> TiledRasterBackingSnapshot {
         withLock {
-            let storeSnapshot = store.snapshot()
-            let entries = storeSnapshot.entries.filter {
-                $0.surfaceID == surfaceID
-                    && $0.generation == currentGeneration
-                    && $0.identity.layerID == layerID
-            }
+            let entries = currentEntries()
             return TiledRasterBackingSnapshot(
                 surfaceID: surfaceID,
                 layerID: layerID,
@@ -411,7 +566,10 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
     }
 
     public func payloadSnapshot() throws -> PaintTilePayloadSnapshot {
-        try withLock {
+        guard referenceView == nil else {
+            throw TiledRasterSurfaceError.immutableReferenceView
+        }
+        return try withLock {
             try store.payloadSnapshot(
                 surfaceID: surfaceID,
                 layerID: layerID,
@@ -427,7 +585,12 @@ public final class TiledRasterSurface: RasterSurface, @unchecked Sendable {
     }
 
     private func currentEntries() -> [PaintTileStoreEntrySnapshot] {
-        store.snapshot().entries.filter {
+        if let referenceView {
+            return (try? store.snapshot(
+                exactReferences: referenceView.references
+            )) ?? []
+        }
+        return store.snapshot().entries.filter {
             $0.surfaceID == surfaceID
                 && $0.generation == currentGeneration
                 && $0.identity.layerID == layerID

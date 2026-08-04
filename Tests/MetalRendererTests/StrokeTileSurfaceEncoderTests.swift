@@ -353,6 +353,164 @@ struct StrokeTileSurfaceEncoderTests {
 
     @Test
     @MainActor
+    func documentRegistryNamespaceAuthenticatesSharedStoreLayerAndGeneration()
+        async throws
+    {
+        guard let context = try await makeContext(pixelFormat: .rgba16Float)
+        else { return }
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 512, height: 512),
+            storagePixelSize: PixelSize(width: 512, height: 512),
+            radialLayout: nil
+        )
+        let registry = try DocumentPaintSurfaceStore(
+            device: context.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 4,
+            geometry: geometry,
+            layerIDs: [context.layerID],
+            generation: 7
+        )
+        let namespace = try registry.issueStrokeNamespace(
+            layerID: context.layerID,
+            generation: 7
+        )
+        let resources = try StrokeTileSurfaceResources(
+            device: context.device,
+            store: registry.sharedTileStore,
+            layerID: context.layerID,
+            pixelSize: geometry.storagePixelSize,
+            generation: 7,
+            maximumRecordCount: 32,
+            maximumTileReferenceCount: 128,
+            pipeline: context.pipeline,
+            namespaceLease: namespace
+        )
+        #expect(resources.store === registry.sharedTileStore)
+        #expect(resources.authoritative.surfaceID
+            == namespace.authoritative.surfaceID)
+        #expect(resources.prediction.surfaceID
+            == namespace.prediction.surfaceID)
+
+        let foreign = PaintTileStore(
+            device: context.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 4
+        )
+        #expect(throws: StrokeTileSurfaceError.unauthenticatedSurfaceNamespace) {
+            _ = try StrokeTileSurfaceResources(
+                device: context.device,
+                store: foreign,
+                layerID: context.layerID,
+                pixelSize: geometry.storagePixelSize,
+                generation: 7,
+                maximumRecordCount: 32,
+                maximumTileReferenceCount: 128,
+                pipeline: context.pipeline,
+                namespaceLease: namespace
+            )
+        }
+    }
+
+    @Test
+    @MainActor
+    func documentNamespaceOwnershipCleansUpFailureDeinitCancelAndAbandonment()
+        async throws
+    {
+        guard let context = try await makeContext(pixelFormat: .rgba16Float),
+              let invalid = try await makeContext(pixelFormat: .bgra8Unorm)
+        else { return }
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 512, height: 512),
+            storagePixelSize: PixelSize(width: 512, height: 512),
+            radialLayout: nil
+        )
+        let registry = try DocumentPaintSurfaceStore(
+            device: context.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 4,
+            geometry: geometry,
+            layerIDs: [context.layerID],
+            generation: 7
+        )
+
+        var resources: StrokeTileSurfaceResources? = try .init(
+            device: context.device,
+            store: registry.sharedTileStore,
+            layerID: context.layerID,
+            pixelSize: geometry.storagePixelSize,
+            generation: 7,
+            maximumRecordCount: 32,
+            maximumTileReferenceCount: 128,
+            pipeline: context.pipeline,
+            namespaceLease: registry.issueStrokeNamespace(
+                layerID: context.layerID,
+                generation: 7
+            )
+        )
+        #expect(resources != nil)
+        #expect(registry.snapshot().issuedNamespaceCount == 1)
+        resources = nil
+        #expect(registry.snapshot().issuedNamespaceCount == 0)
+
+        let failing = try registry.issueStrokeNamespace(
+            layerID: context.layerID,
+            generation: 7
+        )
+        #expect(throws: StrokeTileSurfaceError.invalidPipelinePixelFormat(
+            expected: MTLPixelFormat.rgba16Float.rawValue,
+            actual: MTLPixelFormat.bgra8Unorm.rawValue
+        )) {
+            _ = try StrokeTileSurfaceResources(
+                device: context.device,
+                store: registry.sharedTileStore,
+                layerID: context.layerID,
+                pixelSize: geometry.storagePixelSize,
+                generation: 7,
+                maximumRecordCount: 32,
+                maximumTileReferenceCount: 128,
+                pipeline: invalid.pipeline,
+                namespaceLease: failing
+            )
+        }
+        #expect(registry.snapshot().issuedNamespaceCount == 0)
+
+        let invalidCapacity = try registry.issueStrokeNamespace(
+            layerID: context.layerID,
+            generation: 7
+        )
+        #expect(throws: StrokeTileSurfaceError.invalidCapacity) {
+            _ = try StrokeTileSurfaceResources(
+                device: context.device,
+                store: registry.sharedTileStore,
+                layerID: context.layerID,
+                pixelSize: geometry.storagePixelSize,
+                generation: 7,
+                maximumRecordCount: 0,
+                maximumTileReferenceCount: 128,
+                pipeline: context.pipeline,
+                namespaceLease: invalidCapacity
+            )
+        }
+        #expect(registry.snapshot().issuedNamespaceCount == 0)
+
+        let cancelled = try registry.issueStrokeNamespace(
+            layerID: context.layerID,
+            generation: 7
+        )
+        #expect(registry.snapshot().issuedNamespaceCount == 1)
+        cancelled.cancel()
+        cancelled.cancel()
+        #expect(registry.snapshot().issuedNamespaceCount == 0)
+
+        var abandoned: StrokeTileSurfaceNamespaceLease? = try registry
+            .issueStrokeNamespace(layerID: context.layerID, generation: 7)
+        #expect(abandoned != nil)
+        #expect(registry.snapshot().issuedNamespaceCount == 1)
+        abandoned = nil
+        registry.sweepAbandonedNamespaces()
+        #expect(registry.snapshot().issuedNamespaceCount == 0)
+    }
+
+    @Test
+    @MainActor
     func encoderPublishesSparseImmutableDeltaAndReturnsExactPins() async throws {
         guard let context = try await makeContext(pixelFormat: .rgba16Float)
         else { return }
@@ -1574,19 +1732,23 @@ struct StrokeTileSurfaceEncoderTests {
         let recorder = StrokeNamespaceRetirementRecorder()
         let authoritativeID = UUID()
         let predictionID = UUID()
+        let store = PaintTileStore(
+            device: context.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 4
+        )
         let resources = try StrokeTileSurfaceResources(
             device: context.device,
-            store: PaintTileStore(
-                device: context.device,
-                byteBudget: PaintTileDescriptor.residentByteCount * 4
-            ),
+            store: store,
             layerID: context.layerID,
             pixelSize: PixelSize(width: 512, height: 512),
             generation: 7,
             maximumRecordCount: 32,
             maximumTileReferenceCount: 128,
             pipeline: context.pipeline,
-            namespaceLease: StrokeTileSurfaceNamespaceLease(
+            namespaceLease: StrokeTileSurfaceNamespaceLease.testing(
+                storeIdentity: store.identity,
+                layerID: context.layerID,
+                generation: 7,
                 authoritativeSurfaceID: authoritativeID,
                 predictionSurfaceID: predictionID,
                 retirementToken: 0xD5,
@@ -1638,22 +1800,26 @@ struct StrokeTileSurfaceEncoderTests {
         guard let context = try await makeContext(pixelFormat: .rgba16Float)
         else { return }
         let duplicate = UUID()
+        let store = PaintTileStore(
+            device: context.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 4
+        )
         #expect(throws: StrokeTileSurfaceError.duplicateSurfaceNamespace(
             duplicate
         )) {
             _ = try StrokeTileSurfaceResources(
                 device: context.device,
-                store: PaintTileStore(
-                    device: context.device,
-                    byteBudget: PaintTileDescriptor.residentByteCount * 4
-                ),
+                store: store,
                 layerID: context.layerID,
                 pixelSize: PixelSize(width: 512, height: 512),
                 generation: 7,
                 maximumRecordCount: 32,
                 maximumTileReferenceCount: 128,
                 pipeline: context.pipeline,
-                namespaceLease: StrokeTileSurfaceNamespaceLease(
+                namespaceLease: StrokeTileSurfaceNamespaceLease.testing(
+                    storeIdentity: store.identity,
+                    layerID: context.layerID,
+                    generation: 7,
                     authoritativeSurfaceID: duplicate,
                     predictionSurfaceID: duplicate,
                     retirementToken: 1,
