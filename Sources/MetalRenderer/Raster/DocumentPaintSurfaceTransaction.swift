@@ -71,6 +71,7 @@ public enum DocumentPaintSurfaceTransactionError:
     case overlappingDirtyAndRemovedCoordinate(PaintTileCoordinate)
     case incompleteGeometryReplacement(PaintTileCoordinate)
     case invalidResizeMapping
+    case invalidTargetRadialConfiguration
     case invalidEncodedImport(DocumentColorInterchangeError)
     case encodedImportGeometryMismatch(expected: PixelSize, actual: PixelSize)
     case encodedImportRadialUnsupported
@@ -165,6 +166,7 @@ public struct DocumentPaintSurfaceMutationRequest:
     public let layerID: UUID
     public let baseGeometry: DocumentPaintGeometry
     public let candidateGeometry: DocumentPaintGeometry
+    public let targetRadialConfiguration: RadialSymmetryConfiguration?
     public let dirtyCoordinates: [PaintTileCoordinate]
     public let explicitlyRemovedCoordinates: [PaintTileCoordinate]
     public let requiresHistoryPair: Bool
@@ -174,6 +176,7 @@ public struct DocumentPaintSurfaceMutationRequest:
         layerID: UUID,
         baseGeometry: DocumentPaintGeometry,
         candidateGeometry: DocumentPaintGeometry,
+        targetRadialConfiguration: RadialSymmetryConfiguration? = nil,
         dirtyCoordinates: [PaintTileCoordinate],
         explicitlyRemovedCoordinates: [PaintTileCoordinate],
         requiresHistoryPair: Bool
@@ -182,6 +185,7 @@ public struct DocumentPaintSurfaceMutationRequest:
         self.layerID = layerID
         self.baseGeometry = baseGeometry
         self.candidateGeometry = candidateGeometry
+        self.targetRadialConfiguration = targetRadialConfiguration
         self.dirtyCoordinates = dirtyCoordinates
         self.explicitlyRemovedCoordinates = explicitlyRemovedCoordinates
         self.requiresHistoryPair = requiresHistoryPair
@@ -527,10 +531,29 @@ struct DocumentPaintSurfaceResizeCopyMapping: Equatable, Sendable {
 struct DocumentPaintSurfaceResizeBackendPayload: @unchecked Sendable {
     let sourceGeometry: DocumentPaintGeometry
     let candidateGeometry: DocumentPaintGeometry
+    let targetRadialConfiguration: RadialSymmetryConfiguration?
     let clearsDestinationsBeforeCopy: Bool
     let sources: [DocumentPaintSurfaceMutationSource]
     let destinations: [DocumentPaintSurfaceMutationDestination]
     let mappings: [DocumentPaintSurfaceResizeCopyMapping]
+
+    init(
+        sourceGeometry: DocumentPaintGeometry,
+        candidateGeometry: DocumentPaintGeometry,
+        targetRadialConfiguration: RadialSymmetryConfiguration? = nil,
+        clearsDestinationsBeforeCopy: Bool,
+        sources: [DocumentPaintSurfaceMutationSource],
+        destinations: [DocumentPaintSurfaceMutationDestination],
+        mappings: [DocumentPaintSurfaceResizeCopyMapping]
+    ) {
+        self.sourceGeometry = sourceGeometry
+        self.candidateGeometry = candidateGeometry
+        self.targetRadialConfiguration = targetRadialConfiguration
+        self.clearsDestinationsBeforeCopy = clearsDestinationsBeforeCopy
+        self.sources = sources
+        self.destinations = destinations
+        self.mappings = mappings
+    }
 }
 
 enum DocumentPaintSurfaceEncodedImportConversion: Equatable, Sendable {
@@ -581,8 +604,20 @@ struct DocumentPaintSurfaceMutationBackendEncoding:
     Hashable, Sendable
 {
     let rawValue: UUID
+    let ownerIdentity: UUID?
+    let sequence: UInt64
 
-    init() { rawValue = UUID() }
+    init() {
+        rawValue = UUID()
+        ownerIdentity = nil
+        sequence = 0
+    }
+
+    init(ownerIdentity: UUID, sequence: UInt64) {
+        rawValue = UUID()
+        self.ownerIdentity = ownerIdentity
+        self.sequence = sequence
+    }
 }
 
 struct DocumentPaintSurfaceMutationEvidence: Equatable, Sendable {
@@ -1019,6 +1054,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                         actual: request.baseGeometry
                     )
             }
+            try Self.validateTargetRadialConfiguration(request)
             try Self.validateSortedUnique(request.dirtyCoordinates)
             try Self.validateSortedUnique(
                 request.explicitlyRemovedCoordinates
@@ -1694,6 +1730,8 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                             sourceGeometry: current.request.baseGeometry,
                             candidateGeometry:
                                 current.request.candidateGeometry,
+                            targetRadialConfiguration:
+                                current.request.targetRadialConfiguration,
                             clearsDestinationsBeforeCopy: true,
                             sources: sources,
                             destinations: destinations,
@@ -2837,6 +2875,15 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         sourceGeometry: DocumentPaintGeometry,
         candidateGeometry: DocumentPaintGeometry
     ) throws -> ResizePlan {
+        if baseCoordinates.isEmpty {
+            return ResizePlan(
+                sourceCoordinates: [],
+                beforeCoordinates: [],
+                afterCoordinates: [],
+                removedCoordinates: [],
+                mappings: []
+            )
+        }
         if let sourceLayout = sourceGeometry.radialLayout,
            let candidateLayout = candidateGeometry.radialLayout {
             return try makeRadialResizePlan(
@@ -2914,6 +2961,44 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             },
             mappings: mappings
         )
+    }
+
+    private static func validateTargetRadialConfiguration(
+        _ request: DocumentPaintSurfaceMutationRequest
+    ) throws {
+        guard request.kind == .resize else {
+            guard request.targetRadialConfiguration == nil else {
+                throw DocumentPaintSurfaceTransactionError
+                    .invalidTargetRadialConfiguration
+            }
+            return
+        }
+        switch (
+            request.candidateGeometry.radialLayout,
+            request.targetRadialConfiguration
+        ) {
+        case (nil, nil):
+            return
+        case let (layout?, configuration?):
+            do {
+                let compiled = try SymmetryDescriptorCompiler.compile(
+                    finiteConfiguration: .radial(configuration),
+                    canvasSize: request.candidateGeometry.documentPixelSize
+                )
+                guard compiled.domain.finite?.radial.layout == layout else {
+                    throw DocumentPaintSurfaceTransactionError
+                        .invalidTargetRadialConfiguration
+                }
+            } catch let error as DocumentPaintSurfaceTransactionError {
+                throw error
+            } catch {
+                throw DocumentPaintSurfaceTransactionError
+                    .invalidTargetRadialConfiguration
+            }
+        default:
+            throw DocumentPaintSurfaceTransactionError
+                .invalidTargetRadialConfiguration
+        }
     }
 
     private static func makeRadialResizePlan(

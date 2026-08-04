@@ -36,6 +36,7 @@ struct DocumentPaintSurfaceTransactionTests {
         let ownerImplementationPaths: Set<String> = [
             "Compositing/SparseTileSamplingPipeline.swift",
             "Compositing/SparseTileSamplingPlan.swift",
+            "Raster/DocumentPaintSurfaceMetalBackend.swift",
             "Raster/DocumentPaintSurfaceStore.swift",
             "Raster/DocumentPaintSurfaceTransaction.swift",
             "StrokeRuntime/StrokePrivateSurfaceEncoder.swift",
@@ -1713,13 +1714,29 @@ struct DocumentPaintSurfaceTransactionTests {
 
     @Test
     func radialResizeMapsLogicalPageAcrossPermutedSlotsAndMasksTargetOrbit() throws {
-        let sourceLayout = try RadialSectorLayout(
-            maximumRadius: 1_024,
-            sectorAngleRadians: .pi
+        let sourceConfiguration = RadialSymmetryConfiguration(
+            kind: .mirror,
+            rayCount: 1,
+            center: WorldPoint(x: 1_024, y: 1_024)
         )
-        let targetLayout = try RadialSectorLayout(
-            maximumRadius: 700,
-            sectorAngleRadians: .pi / 3
+        let targetConfiguration = RadialSymmetryConfiguration(
+            kind: .mandala,
+            rayCount: 3,
+            center: WorldPoint(x: 700, y: 700)
+        )
+        let sourceCompiled = try SymmetryDescriptorCompiler.compile(
+            finiteConfiguration: .radial(sourceConfiguration),
+            canvasSize: PixelSize(width: 2_048, height: 2_048)
+        )
+        let targetCompiled = try SymmetryDescriptorCompiler.compile(
+            finiteConfiguration: .radial(targetConfiguration),
+            canvasSize: PixelSize(width: 1_400, height: 1_400)
+        )
+        let sourceLayout = try #require(
+            sourceCompiled.domain.finite?.radial.layout
+        )
+        let targetLayout = try #require(
+            targetCompiled.domain.finite?.radial.layout
         )
         let sourceGeometry = try DocumentPaintGeometry(
             documentPixelSize: PixelSize(width: 2_048, height: 2_048),
@@ -1772,7 +1789,8 @@ struct DocumentPaintSurfaceTransactionTests {
                     kind: .resize,
                     dirty: [targetPhysical],
                     removing: [sourceCommonPhysical],
-                    candidateGeometry: targetGeometry
+                    candidateGeometry: targetGeometry,
+                    targetRadialConfiguration: targetConfiguration
                 )
             )
         )
@@ -3550,6 +3568,7 @@ private struct TransactionFixture {
         removing: [PaintTileCoordinate] = [],
         baseGeometry: DocumentPaintGeometry? = nil,
         candidateGeometry: DocumentPaintGeometry? = nil,
+        targetRadialConfiguration: RadialSymmetryConfiguration? = nil,
         requiresHistoryPair: Bool = true
     ) -> DocumentPaintSurfaceMutationRequest {
         DocumentPaintSurfaceMutationRequest(
@@ -3557,6 +3576,7 @@ private struct TransactionFixture {
             layerID: layerID,
             baseGeometry: baseGeometry ?? geometry,
             candidateGeometry: candidateGeometry ?? geometry,
+            targetRadialConfiguration: targetRadialConfiguration,
             dirtyCoordinates: dirty,
             explicitlyRemovedCoordinates: removing,
             requiresHistoryPair: requiresHistoryPair
