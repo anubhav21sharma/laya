@@ -43,7 +43,7 @@ No Stage D production behavior exists at the baseline.
 - Preserve unrelated user files, including `.vscode/` and
   `brushes/procreate/1_FREE_Charcoal_Set.key`. Stage only task-owned files.
 - Write the failing test or measurable assertion before every behavior change.
-- Run focused tests after each red/green step and the broad suite at D8.
+- Run focused tests after each red/green step and the broad suite at Task 8.
 - `PatternEngine` remains platform- and renderer-independent.
 - `EditorCore` owns layer ordering and history commands; it never imports Metal.
 - `PatternFile` owns wire formats and defensive validation; it never imports
@@ -125,7 +125,7 @@ wiring changes:
 
 ---
 
-### Task D0: Freeze Stage D Contracts And Counterexamples
+### Task 0: Freeze Stage D Contracts And Counterexamples
 
 **Files:**
 
@@ -140,13 +140,13 @@ wiring changes:
   `Tests/Baselines/stage-b-known-issues.txt`.
 - Produces: frozen encoded-BGRA8 import fixtures, existing project v1/v2/v3
   archive hashes, representative dry-scene semantic/canonical hashes, and an
-  executable inventory of every full-canvas paint allocation that D5 must
+  executable inventory of every full-canvas paint allocation that Task 5 must
   remove.
 
 - [ ] Add a source-structure test that identifies all baseline paint-bearing
   `.bgra8Unorm` allocations in `CanonicalRaster`, `PersistentLiveTile`,
   `ReplayLiveTile`, and `StrokeMetalSurfaceResources`; the test must fail only
-  after those allocations are replaced and will be inverted at D5.
+  after those allocations are replaced and will be inverted at Task 5.
 - [ ] Add fixtures for empty, translucent, low-flow repeated buildup, erase,
   periodic seam, and radial pages. Record encoded input bytes and independent
   expected linear reference values; do not bless current blended pixels as
@@ -160,7 +160,7 @@ wiring changes:
 - [ ] Run `swift test --filter 'StageDBaselineContractTests|StageDProjectBaselineTests|StageCAcceptance'`.
 - [ ] Commit as `test(raster): freeze stage D contracts`.
 
-### Task D1: Add Typed Linear-Light Color Semantics
+### Task 1: Add Typed Linear-Light Color Semantics
 
 **Files:**
 
@@ -203,18 +203,18 @@ wiring changes:
   app test proving arbitrary source color spaces become bounded encoded sRGB,
   alpha is preserved, and the UI boundary performs no gamma decode or
   premultiplication. Add the new test file to the explicit Package source list.
-- [ ] Add a tested packing conversion API that D6 can call, but leave the
+- [ ] Add a tested packing conversion API that Task 6 can call, but leave the
   active `DepositionStampInstance` path byte-identical in this task. Converting
   instance color before the paint/display surface switch would create an
   invalid mixed encoded/linear production state. A route-contract test pins
-  UI encoded input -> exactly one D1 conversion -> linear-premultiplied shader
-  payload; D6 activates that route atomically.
+  UI encoded input -> exactly one Task 1 conversion -> linear-premultiplied
+  shader payload; Task 6 activates that route atomically.
 - [ ] Add negative tests that fail on double premultiplication, gamma-encoded
   alpha, encoded-space source-over, and double display encode.
 - [ ] Run `swift test --filter 'DocumentColorTests|DocumentColorPipelineTests|DepositionStampInstanceTests|DepositionShaderSourceTests'`.
 - [ ] Commit as `feat(color): define linear paint contract`.
 
-### Task D2: Build The Sparse Tile And Residency Core
+### Task 2: Build The Sparse Tile And Residency Core
 
 **Files:**
 
@@ -259,7 +259,7 @@ wiring changes:
 - [ ] Run `swift test --filter 'PaintTileDescriptorTests|PaintTileResidencyTests|TiledRasterSurfaceTests'`.
 - [ ] Commit as `feat(raster): add bounded sparse tile store`.
 
-### Task D3: Add Layer Ownership And Project Schema V4
+### Task 3: Add Layer Ownership And Project Schema V4
 
 **Files:**
 
@@ -319,7 +319,7 @@ wiring changes:
 - [ ] Run `swift test --filter 'LayerStackTests|DocumentHistoryTests|PatternProjectMetadataCodecTests|PatternPaintTileCodecTests|PatternProjectArchiveTests'`.
 - [ ] Commit as `feat(document): add layered tile schema`.
 
-### Task D4: Make Raster Revisions Tile-Transactional
+### Task 4: Make Raster Revisions Tile-Transactional
 
 **Files:**
 
@@ -341,7 +341,7 @@ wiring changes:
   occurs only after all tile blits complete. Release during in-flight work is
   deferred, and failure/cancel discards the entire provisional pair.
 - Keeps the old full-surface store only as a private compatibility helper until
-  D5 switches every production route; D5 then deletes it.
+  Task 5 switches every production route; Task 6 then deletes it.
 
 - [ ] Write RED tests for 1/2/4-tile capture/restore, empty-before, erase-to-
   empty, stale token, wrong layer/generation/format/coordinate, duplicate
@@ -351,11 +351,11 @@ wiring changes:
   reusable store state.
 - [ ] Prove one stroke spanning many dirty rectangles but the same tile captures
   that tile once, and that retained bytes equal aligned RGBA16F tile slices.
-- [ ] Add reorder regression using the layer-bound history command from D3.
+- [ ] Add reorder regression using the layer-bound history command from Task 3.
 - [ ] Run `swift test --filter 'TiledRasterRevisionStoreTests|RasterRevisionStoreTests|DocumentHistoryTests'`.
 - [ ] Commit as `refactor(history): snapshot sparse paint tiles`.
 
-### Task D5: Prepare Off-Main Tiled Stroke Surfaces
+### Task 5: Prepare Off-Main Tiled Stroke Surfaces
 
 **Files:**
 
@@ -371,13 +371,13 @@ wiring changes:
 **Interfaces:**
 
 - Replaces the two full-canvas textures in `StrokeMetalSurfaceResources` with
-  sparse authoritative and prediction tile sets from D2.
+  sparse authoritative and prediction tile sets from Task 2.
 - `StrokePreparedSurfaceLease` carries immutable sorted dirty-tile bindings,
   generation/token/layer, clear flags, and actual/predicted counts. The main
   actor can read leased textures; the scheduler cannot mutate them until return.
 - Projected record bounds are partitioned by tile before encoding. Per-tile
   scissor/coordinate uniforms preserve canonical positions and symmetry.
-- This task prepares the new path behind a test-only installation seam; D6 is
+- This task prepares the new path behind a test-only installation seam; Task 6 is
   the single production switch.
 
 - [ ] Write RED tests for authoritative append, shorter/longer prediction
@@ -394,7 +394,7 @@ wiring changes:
   `scripts/run-brush-input-allocation-probe.sh all`.
 - [ ] Commit as `refactor(render): prepare sparse stroke surfaces`.
 
-### Task D6: Atomically Switch Production Paint To Linear Sparse Tiles
+### Task 6: Atomically Switch Production Paint To Linear Sparse Tiles
 
 **Files:**
 
@@ -426,19 +426,19 @@ wiring changes:
   `TiledRasterSurface` owners. No production paint-bearing `.bgra8Unorm`
   full-canvas texture remains.
 - All deposition/erase/commit math targets `.rgba16Float`; encoded `InkColor`
-  enters through D1's conversion API exactly once when instances are packed in
+  enters through Task 1's conversion API exactly once when instances are packed in
   this atomic switch. Display and PNG/interchange export perform the sole
   linear-to-encoded conversion.
-- GridRenderer installs D5 leases, commits only dirty tiles through D4, and
+- GridRenderer installs Task 5 leases, commits only dirty tiles through Task 4, and
   preserves the twelve lifecycle transitions. The legacy full-canvas paint
   path and test switch are deleted in this commit.
 
-- [ ] Invert D0's structure test: fail on any production full-canvas paint
+- [ ] Invert Task 0's structure test: fail on any production full-canvas paint
   allocation or encoded-BGRA8 deposition target. Permit BGRA8 only in drawable,
   capture/export/interchange, and diagnostics boundaries.
 - [ ] Add CPU old-path versus tiled geometric differentials for opaque legacy
   scenes before deletion; compare coverage/support, not encoded-space low-flow
-  color that D1 intentionally corrects.
+  color that Task 1 intentionally corrects.
 - [ ] Add independent linear reference tests for translucent buildup, erase,
   transparent edges, preview/commit, display, and PNG. Require GPU error at
   most `2e-3` in linear half-float and encoded export error at most one channel
@@ -454,7 +454,7 @@ wiring changes:
 - [ ] Run `swift test --filter 'DocumentColorPipelineTests|TiledRasterSurfaceTests|TiledRasterRevisionStoreTests|StrokeTileSurfaceEncoderTests|DepositionRendererTests|StageCAcceptance'`, the allocation probe, and Debug/Release macOS builds.
 - [ ] Commit as `refactor(raster): activate linear sparse paint`.
 
-### Task D7: Add The Linear Tile-Based Layer Compositor
+### Task 7: Add The Linear Tile-Based Layer Compositor
 
 **Files:**
 
@@ -499,7 +499,7 @@ wiring changes:
 - [ ] Run `swift test --filter 'LayerStackTests|LayerCompositorTests|EditorSessionControllerTests|PatternRasterExportCodecTests|PatternProjectBridgeTests'`.
 - [ ] Commit as `feat(layers): compose bounded linear tiles`.
 
-### Task D8: Stage D Acceptance Checkpoint
+### Task 8: Stage D Acceptance Checkpoint
 
 **Files:**
 
@@ -546,7 +546,7 @@ wiring changes:
 
 ## Completion Boundary
 
-Stage D is complete only when D8 is green and independently reviewed. At that
+Stage D is complete only when Task 8 is green and independently reviewed. At that
 point low-flow buildup and blend equations match independent linear-light
 references, every production paint surface is sparse RGBA16F, history and
 schema-v4 persistence are tile-transactional, eight-layer composition respects
