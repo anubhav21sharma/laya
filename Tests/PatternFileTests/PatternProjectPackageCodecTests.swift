@@ -6,6 +6,54 @@ import Testing
 @Suite("Pattern project package codec")
 struct PatternProjectPackageCodecTests {
     @Test
+    func pngOnlyPackageRouteRejectsNativeTileSurfacesOnEncodeAndOpen()
+        throws
+    {
+        let metadata = try paintTilePackageFixture()
+        let layerID = try #require(metadata.layers.first?.id)
+        let expected = PatternProjectFileError.unsupportedSurfaceRoute(
+            layerID
+        )
+
+        #expect(throws: expected) {
+            try PatternProjectPackageCodec.encode(
+                metadata: metadata,
+                rastersByPath: [:]
+            )
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("native.patternproj")
+        #expect(throws: expected) {
+            try PatternProjectPackageCodec.save(
+                metadata: metadata,
+                rastersByPath: [:],
+                to: destination
+            )
+        }
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+
+        let files = try PatternProjectMetadataCodec.encode(metadata)
+        var entries: [String: Data] = [
+            PatternProjectFormat.manifestPath: files.manifest,
+            PatternProjectFormat.symmetryPath: files.symmetry,
+        ]
+        for (path, data) in files.layersByPath { entries[path] = data }
+        for (path, data) in files.surfacesByPath { entries[path] = data }
+        let archive = try PatternProjectArchiveCodec.encode(entries: entries)
+
+        #expect(throws: expected) {
+            try PatternProjectPackageCodec.open(archive)
+        }
+    }
+
+    @Test
     func periodicPackageRoundTripsMetadataPixelsAndAdvisoryFiles()
         throws
     {
@@ -208,6 +256,41 @@ struct PatternProjectPackageCodecTests {
             try PatternProjectPackageCodec.open(invalidPalette)
         }
     }
+}
+
+private func paintTilePackageFixture() throws -> PatternProjectMetadata {
+    let (base, _) = try packageFixture(radial: false)
+    let layer = try #require(base.layers.first)
+    let tiledLayer = PatternProjectLayer(
+        id: layer.id,
+        kind: layer.kind,
+        name: layer.name,
+        order: layer.order,
+        opacity: layer.opacity,
+        blendMode: layer.blendMode,
+        isVisible: layer.isVisible,
+        isLocked: layer.isLocked,
+        origin: layer.origin,
+        surface: .paintTiles(PatternProjectPaintTileSurface(
+            manifestFile: "surfaces/layer.tiles.json",
+            pixelSize: base.canvasSize,
+            tiles: []
+        ))
+    )
+    return PatternProjectMetadata(
+        documentID: base.documentID,
+        title: base.title,
+        appVersion: base.appVersion,
+        createdAt: base.createdAt,
+        modifiedAt: base.modifiedAt,
+        canvasSize: base.canvasSize,
+        viewport: base.viewport,
+        documentConfiguration: base.documentConfiguration,
+        documentDomainLocked: base.documentDomainLocked,
+        radialGeometryLocked: base.radialGeometryLocked,
+        activeLayerID: base.activeLayerID,
+        layers: [tiledLayer]
+    )
 }
 
 private func packageFixture(

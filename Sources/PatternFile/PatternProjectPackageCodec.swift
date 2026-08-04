@@ -32,6 +32,7 @@ public enum PatternProjectFileError:
     case unexpectedRaster(String)
     case duplicateArchivePath(String)
     case unexpectedArchiveEntry(String)
+    case unsupportedSurfaceRoute(UUID)
     case rasterBudgetExceeded(actual: UInt64, maximum: UInt64)
     case raster(path: String, error: PatternRasterImageError)
     case invalidThumbnail
@@ -51,6 +52,8 @@ public enum PatternProjectFileError:
             "Project resources collide at \(path)."
         case let .unexpectedArchiveEntry(path):
             "Project archive entry \(path) is not declared."
+        case let .unsupportedSurfaceRoute(layerID):
+            "Layer \(layerID) uses native tiles unavailable on this package route."
         case let .rasterBudgetExceeded(actual, maximum):
             "Decoded raster cost \(actual) bytes exceeds \(maximum)."
         case let .raster(path, error):
@@ -138,6 +141,7 @@ private extension PatternProjectPackageCodec {
         thumbnail: PatternRasterImage?,
         projectPaletteJSON: Data?
     ) throws -> [String: Data] {
+        try requirePNGPackageRoute(metadata)
         let metadataFiles: PatternProjectMetadataFiles
         do {
             metadataFiles = try PatternProjectMetadataCodec.encode(metadata)
@@ -248,6 +252,7 @@ private extension PatternProjectPackageCodec {
         } catch let error as PatternProjectArchiveError {
             throw PatternProjectFileError.archive(error)
         }
+        try requirePNGPackageRoute(validated.metadata)
         let expected = expectedRasters(in: validated.metadata)
         try validateRasterBudget(expected)
         var allowed = Set([
@@ -349,6 +354,24 @@ private extension PatternProjectPackageCodec {
             }
         }
         return expected
+    }
+
+    static func requirePNGPackageRoute(
+        _ metadata: PatternProjectMetadata
+    ) throws {
+        let layers = metadata.layers.sorted {
+            if $0.order == $1.order {
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            return $0.order < $1.order
+        }
+        for layer in layers {
+            if case .paintTiles = layer.surface {
+                throw PatternProjectFileError.unsupportedSurfaceRoute(
+                    layer.id
+                )
+            }
+        }
     }
 
     static func validateRasterBudget(
