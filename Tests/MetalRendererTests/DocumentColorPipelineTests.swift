@@ -7,6 +7,203 @@ import Testing
 @Suite("Linear document color pipeline")
 struct DocumentColorPipelineTests {
     @Test
+    func encodedPremultipliedBGRAImportUsesStraightEncodedChroma() {
+        let imported = DocumentColorPipeline.importEncodedPremultipliedBGRA8(
+            EncodedPremultipliedBGRA8(
+                blue: 32,
+                green: 16,
+                red: 64,
+                alpha: 128
+            )
+        )
+
+        expectChannels(
+            imported.simd,
+            SIMD4(
+                0.10744026,
+                0.007203074,
+                0.025537802,
+                0.5019608
+            ),
+            tolerance: 3e-7
+        )
+    }
+
+    @Test
+    func encodedPremultipliedBGRAExportEncodesStraightLinearChroma() throws {
+        let color = try premultiplied(
+            0.10744026,
+            0.007203074,
+            0.025537802,
+            0.5019608
+        )
+
+        #expect(
+            DocumentColorPipeline.exportEncodedPremultipliedBGRA8(color)
+                == EncodedPremultipliedBGRA8(
+                    blue: 32,
+                    green: 16,
+                    red: 64,
+                    alpha: 128
+                )
+        )
+    }
+
+    @Test
+    func encodedPremultipliedBGRAImportZerosChromaWhenAlphaIsZero() {
+        let imported = DocumentColorPipeline.importEncodedPremultipliedBGRA8(
+            EncodedPremultipliedBGRA8(
+                blue: 255,
+                green: 64,
+                red: 1,
+                alpha: 0
+            )
+        )
+
+        #expect(imported.simd == .zero)
+        #expect(
+            DocumentColorPipeline.exportEncodedPremultipliedBGRA8(imported)
+                == EncodedPremultipliedBGRA8(
+                    blue: 0,
+                    green: 0,
+                    red: 0,
+                    alpha: 0
+                )
+        )
+    }
+
+    @Test
+    func encodedPremultipliedBGRAFourByteLayoutIsStable() {
+        #expect(MemoryLayout<EncodedPremultipliedBGRA8>.size == 4)
+        #expect(MemoryLayout<EncodedPremultipliedBGRA8>.stride == 4)
+    }
+
+    @Test
+    func rowImportAndExportUseExactBGRAOrder() throws {
+        let encoded: [UInt8] = [
+            0, 0, 255, 255,
+            255, 0, 0, 255,
+        ]
+
+        let imported = try DocumentColorPipeline
+            .importEncodedPremultipliedBGRA8Row(encoded, pixelCount: 2)
+
+        #expect(imported.map(\.simd) == [
+            SIMD4<Float>(1, 0, 0, 1),
+            SIMD4<Float>(0, 0, 1, 1),
+        ])
+        #expect(
+            try DocumentColorPipeline.exportEncodedPremultipliedBGRA8Row(
+                imported,
+                pixelCount: 2
+            ) == encoded
+        )
+    }
+
+    @Test
+    func bufferConversionHonorsRowStrideAndInitializesPadding() throws {
+        let encoded: [UInt8] = [
+            0, 0, 255, 255, 91, 92, 93, 94,
+            0, 255, 0, 255, 81, 82, 83, 84,
+        ]
+
+        let imported = try DocumentColorPipeline
+            .importEncodedPremultipliedBGRA8Buffer(
+                encoded,
+                width: 1,
+                height: 2,
+                bytesPerRow: 8
+            )
+
+        #expect(imported.map(\.simd) == [
+            SIMD4<Float>(1, 0, 0, 1),
+            SIMD4<Float>(0, 1, 0, 1),
+        ])
+        #expect(
+            try DocumentColorPipeline.exportEncodedPremultipliedBGRA8Buffer(
+                imported,
+                width: 1,
+                height: 2,
+                bytesPerRow: 8
+            ) == [
+                0, 0, 255, 255, 0, 0, 0, 0,
+                0, 255, 0, 255, 0, 0, 0, 0,
+            ]
+        )
+    }
+
+    @Test
+    func rowAndBufferConversionRejectMalformedGeometryBeforeConversion() {
+        #expect(
+            throws: DocumentColorInterchangeError.invalidDimensions(
+                width: 0,
+                height: 1
+            )
+        ) {
+            _ = try DocumentColorPipeline
+                .importEncodedPremultipliedBGRA8Buffer(
+                    [],
+                    width: 0,
+                    height: 1,
+                    bytesPerRow: 0
+                )
+        }
+        #expect(
+            throws: DocumentColorInterchangeError.invalidRowStride(
+                minimum: 8,
+                actual: 7
+            )
+        ) {
+            _ = try DocumentColorPipeline
+                .importEncodedPremultipliedBGRA8Buffer(
+                    Array(repeating: 0, count: 7),
+                    width: 2,
+                    height: 1,
+                    bytesPerRow: 7
+                )
+        }
+        #expect(
+            throws: DocumentColorInterchangeError.invalidEncodedByteCount(
+                expected: 8,
+                actual: 7
+            )
+        ) {
+            _ = try DocumentColorPipeline
+                .importEncodedPremultipliedBGRA8Row(
+                    Array(repeating: 0, count: 7),
+                    pixelCount: 2
+                )
+        }
+        #expect(
+            throws: DocumentColorInterchangeError.invalidLinearPixelCount(
+                expected: 2,
+                actual: 1
+            )
+        ) {
+            let black = LinearPremultipliedColor(
+                red: 0,
+                green: 0,
+                blue: 0,
+                alpha: 1
+            )!
+            _ = try DocumentColorPipeline
+                .exportEncodedPremultipliedBGRA8Row(
+                    [black],
+                    pixelCount: 2
+                )
+        }
+        #expect(throws: DocumentColorInterchangeError.byteCountOverflow) {
+            _ = try DocumentColorPipeline
+                .importEncodedPremultipliedBGRA8Buffer(
+                    [],
+                    width: Int.max,
+                    height: 2,
+                    bytesPerRow: Int.max
+                )
+        }
+    }
+
+    @Test
     func declaresLinearWorkingAndEncodedDisplayFormats() {
         #expect(DocumentColorPipeline.workingPixelFormat == .rgba16Float)
         #expect(DocumentColorPipeline.displayPixelFormat == .bgra8Unorm_srgb)

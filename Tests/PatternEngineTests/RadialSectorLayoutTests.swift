@@ -6,6 +6,65 @@ import Testing
 @Suite("Radial sector layout")
 struct RadialSectorLayoutTests {
     @Test
+    func sparseAccountingUsesResidentPagesRatherThanAtlasPadding() throws {
+        let layout = try RadialSectorLayout(
+            maximumRadius: 1_024,
+            sectorAngleRadians: .pi
+        )
+
+        #expect(
+            try layout.residentByteCount(bytesPerPixel: 8)
+                == layout.residentPages.count * 256 * 256 * 8
+        )
+        #expect(
+            try layout.pageTableByteCount(bytesPerEntry: 4)
+                == layout.pageTable.count * 4
+        )
+        #expect(
+            try layout.bindingSlotCount(projectedImageCount: 3)
+                == layout.residentPages.count * 3
+        )
+        #expect(
+            try layout.uploadWorkspaceByteCount(
+                recordCount: 17,
+                bytesPerRecord: 32
+            ) == 544
+        )
+        #expect(
+            try layout.residentByteCount(bytesPerPixel: 4)
+                <= layout.residentBytesPerSurface
+        )
+    }
+
+    @Test
+    func sparseAccountingRejectsInvalidScalarsAndOverflow() throws {
+        let layout = try RadialSectorLayout(
+            maximumRadius: 512,
+            sectorAngleRadians: .pi
+        )
+
+        #expect(
+            throws: RadialSectorAccountingError.nonpositiveElementSize(0)
+        ) {
+            _ = try layout.residentByteCount(bytesPerPixel: 0)
+        }
+        #expect(
+            throws: RadialSectorAccountingError.negativeElementCount(-1)
+        ) {
+            _ = try layout.bindingSlotCount(projectedImageCount: -1)
+        }
+        #expect(throws: RadialSectorAccountingError.byteCountOverflow) {
+            _ = try layout.pageTableByteCount(bytesPerEntry: Int.max)
+        }
+        #expect(throws: RadialSectorAccountingError.byteCountOverflow) {
+            _ = try layout.uploadWorkspaceByteCount(
+                recordCount: Int.max,
+                bytesPerRecord: 2
+            )
+        }
+    }
+
+    @Test
     func pageAtlasAllocatesOnlySectorIntersectingPages() throws {
         let layout = try RadialSectorLayout(
             maximumRadius: 1_024,

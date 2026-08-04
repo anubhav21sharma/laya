@@ -28,6 +28,12 @@ public struct RadialResidentPage: Equatable, Sendable {
     }
 }
 
+public enum RadialSectorAccountingError: Error, Equatable, Sendable {
+    case nonpositiveElementSize(Int)
+    case negativeElementCount(Int)
+    case byteCountOverflow
+}
+
 public struct RadialSectorLayout: Equatable, Sendable {
     public static let pageSide = 256
     public static let maximumAtlasDimension = 16_384
@@ -171,6 +177,55 @@ public struct RadialSectorLayout: Equatable, Sendable {
         )
     }
 
+    /// Exact sparse resident storage, excluding unused slots in the rectangular
+    /// atlas retained by the legacy production path.
+    public func residentByteCount(bytesPerPixel: Int) throws -> Int {
+        let pixelsPerPage = try Self.checkedProduct(
+            Self.pageSide,
+            Self.pageSide
+        )
+        let residentPixels = try Self.checkedProduct(
+            residentPages.count,
+            pixelsPerPage
+        )
+        return try Self.checkedByteCount(
+            elementCount: residentPixels,
+            elementSize: bytesPerPixel
+        )
+    }
+
+    public func pageTableByteCount(bytesPerEntry: Int) throws -> Int {
+        try Self.checkedByteCount(
+            elementCount: pageTable.count,
+            elementSize: bytesPerEntry
+        )
+    }
+
+    public func bindingSlotCount(projectedImageCount: Int) throws -> Int {
+        guard projectedImageCount >= 0 else {
+            throw RadialSectorAccountingError.negativeElementCount(
+                projectedImageCount
+            )
+        }
+        return try Self.checkedProduct(
+            residentPages.count,
+            projectedImageCount
+        )
+    }
+
+    public func uploadWorkspaceByteCount(
+        recordCount: Int,
+        bytesPerRecord: Int
+    ) throws -> Int {
+        guard recordCount >= 0 else {
+            throw RadialSectorAccountingError.negativeElementCount(recordCount)
+        }
+        return try Self.checkedByteCount(
+            elementCount: recordCount,
+            elementSize: bytesPerRecord
+        )
+    }
+
     public func residentPage(containing point: SIMD2<Float>)
         -> RadialResidentPage?
     {
@@ -279,6 +334,31 @@ public struct RadialSectorLayout: Equatable, Sendable {
             }
         }
         return false
+    }
+
+    private static func checkedByteCount(
+        elementCount: Int,
+        elementSize: Int
+    ) throws -> Int {
+        guard elementSize > 0 else {
+            throw RadialSectorAccountingError.nonpositiveElementSize(
+                elementSize
+            )
+        }
+        guard elementCount >= 0 else {
+            throw RadialSectorAccountingError.negativeElementCount(
+                elementCount
+            )
+        }
+        return try checkedProduct(elementCount, elementSize)
+    }
+
+    private static func checkedProduct(_ lhs: Int, _ rhs: Int) throws -> Int {
+        let (result, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard !overflow else {
+            throw RadialSectorAccountingError.byteCountOverflow
+        }
+        return result
     }
 }
 
