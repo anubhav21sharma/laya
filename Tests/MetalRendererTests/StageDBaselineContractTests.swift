@@ -1,5 +1,8 @@
 import CryptoKit
 import Foundation
+import Metal
+@testable import MetalRenderer
+import PatternEngine
 import Testing
 
 @Suite("Stage D baseline renderer contracts", .serialized)
@@ -11,22 +14,22 @@ struct StageDBaselineContractTests {
                 StageDPaintAllocation(
                     file: "Sources/MetalRenderer/CanonicalRaster.swift",
                     type: "CanonicalRaster",
-                    physicalTextureCount: 2
+                    bindings: ["front", "scratch"]
                 ),
                 StageDPaintAllocation(
                     file: "Sources/MetalRenderer/PersistentLiveTile.swift",
                     type: "PersistentLiveTile",
-                    physicalTextureCount: 1
+                    bindings: ["texture"]
                 ),
                 StageDPaintAllocation(
                     file: "Sources/MetalRenderer/Brush/ReplayLiveTile.swift",
                     type: "ReplayLiveTile",
-                    physicalTextureCount: 1
+                    bindings: ["texture"]
                 ),
                 StageDPaintAllocation(
                     file: "Sources/MetalRenderer/StrokeRuntime/StrokePrivateSurfaceEncoder.swift",
                     type: "StrokeMetalSurfaceResources",
-                    physicalTextureCount: 2
+                    bindings: ["authoritativeTexture", "predictionTexture"]
                 ),
             ]
         )
@@ -51,19 +54,21 @@ struct StageDBaselineContractTests {
     }
 
     @Test
-    func drySceneSemanticAndCanonicalHashesAreFrozen() {
+    @MainActor
+    func drySceneSemanticAndCanonicalHashesAreFrozen() async throws {
         for scene in stageDDryScenes {
-            #expect(stageDSHA256(Data(scene.semanticDescription.utf8)) == scene.semanticSHA256)
-            #expect(stageDSHA256(Data(scene.canonicalBGRA8)) == scene.canonicalBGRA8SHA256)
+            let actual = try await stageDDrySceneSnapshot(scene.kind)
+            #expect(actual.semanticSHA256 == scene.semanticSHA256)
+            #expect(actual.canonicalBGRA8SHA256 == scene.canonicalBGRA8SHA256)
         }
     }
 
     @Test
-    func stageCLifecycleInventoryHasOneNamedOwner() {
+    @MainActor
+    func stageCLifecycleInventoryHasOneNamedOwner() async throws {
         #expect(stageDLifecycleTransitions.count == 12)
         for transition in stageDLifecycleTransitions {
-            #expect(!transition.stageCAcceptanceAssertion.isEmpty)
-            #expect(!transition.stageDInsertionPoint.isEmpty)
+            try await transition.exercise()
         }
     }
 }
@@ -71,7 +76,7 @@ struct StageDBaselineContractTests {
 private struct StageDPaintAllocation: Equatable {
     let file: String
     let type: String
-    let physicalTextureCount: Int
+    let bindings: [String]
 }
 
 private func stageDBaselinePaintAllocations() throws -> [StageDPaintAllocation] {
@@ -80,20 +85,28 @@ private func stageDBaselinePaintAllocations() throws -> [StageDPaintAllocation] 
         .deletingLastPathComponent()
         .deletingLastPathComponent()
     return try [
-        ("Sources/MetalRenderer/CanonicalRaster.swift", "CanonicalRaster", 2),
-        ("Sources/MetalRenderer/PersistentLiveTile.swift", "PersistentLiveTile", 1),
-        ("Sources/MetalRenderer/Brush/ReplayLiveTile.swift", "ReplayLiveTile", 1),
-        ("Sources/MetalRenderer/StrokeRuntime/StrokePrivateSurfaceEncoder.swift", "StrokeMetalSurfaceResources", 2),
-    ].map { file, type, physicalTextureCount in
+        ("Sources/MetalRenderer/CanonicalRaster.swift", "CanonicalRaster", ["front", "scratch"]),
+        ("Sources/MetalRenderer/PersistentLiveTile.swift", "PersistentLiveTile", ["texture"]),
+        ("Sources/MetalRenderer/Brush/ReplayLiveTile.swift", "ReplayLiveTile", ["texture"]),
+        ("Sources/MetalRenderer/StrokeRuntime/StrokePrivateSurfaceEncoder.swift", "StrokeMetalSurfaceResources", ["authoritativeTexture", "predictionTexture"]),
+    ].map { file, type, bindings in
         let source = try String(
             contentsOf: repositoryRoot.appendingPathComponent(file),
             encoding: .utf8
         )
-        #expect(source.contains("pixelFormat: .bgra8Unorm"))
+        let descriptor = try #require(
+            source.range(of: "let descriptor = MTLTextureDescriptor")
+        )
+        let allocation = source[descriptor.lowerBound...]
+        #expect(allocation.contains("pixelFormat: .bgra8Unorm"))
+        let actualBindings = allocation.matches(
+            of: /let\s+([A-Za-z]+)\s*=\s*device\.makeTexture\([\s\S]{0,80}?descriptor:\s*descriptor/
+        ).map { String($0.1) }
+        #expect(actualBindings == bindings, Comment(rawValue: type))
         return StageDPaintAllocation(
             file: file,
             type: type,
-            physicalTextureCount: physicalTextureCount
+            bindings: actualBindings
         )
     }
 }
@@ -140,8 +153,7 @@ private let stageDImportFixtures: [StageDEncodedImportFixture] = [
 
 private struct StageDDryScene: Sendable {
     let name: String
-    let semanticDescription: String
-    let canonicalBGRA8: [UInt8]
+    let kind: StageDDrySceneKind
     let semanticSHA256: String
     let canonicalBGRA8SHA256: String
 }
@@ -149,26 +161,91 @@ private struct StageDDryScene: Sendable {
 private let stageDDryScenes: [StageDDryScene] = [
     StageDDryScene(
         name: "empty",
-        semanticDescription: "stage-d-dry/empty/transparent",
-        canonicalBGRA8: [0, 0, 0, 0],
-        semanticSHA256: "28830e8bf009bc6b7283fbf0ce65632f22c5802a4f9231b609ea19911687393e",
-        canonicalBGRA8SHA256: "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+        kind: .empty,
+        semanticSHA256: "084d319ba809dda6fe4d8908ddb68223abe2bbebf42c623e6fb2afb38bb24c8a",
+        canonicalBGRA8SHA256: "4fe7b59af6de3b665b67788cc2f99892ab827efae3a467342b3bb4e3bc8e5bfe"
     ),
     StageDDryScene(
         name: "periodic-seam",
-        semanticDescription: "stage-d-dry/periodic-seam/encoded-bgra8",
-        canonicalBGRA8: [255, 0, 255, 255],
-        semanticSHA256: "d22a73bfb4001fcd402b6fdd8c79126619b0eb88ee1528d2cfcf47d8fe4d7cb2",
-        canonicalBGRA8SHA256: "f7f9e13d8ace3958b3fee2a2cbfa1d16dc90523b4ea4fd124c8e3aba6a872401"
+        kind: .periodicSeam,
+        semanticSHA256: "db1f959a9d367913219060804edb5d889218a8f1a6d6d657942c811d7a361771",
+        canonicalBGRA8SHA256: "a979a116f0c38c99b2e3f0eeef20071d72019ceb360c5ee25c79a17bbc38421c"
     ),
     StageDDryScene(
         name: "radial-pages",
-        semanticDescription: "stage-d-dry/radial-pages/encoded-bgra8",
-        canonicalBGRA8: [12, 180, 240, 224],
-        semanticSHA256: "dc87cf3b941b10246261c236364e1db11c1a6cdb6923d7efcbd9052982eb83db",
-        canonicalBGRA8SHA256: "12cffdd06cc41ab40c4ef7dfef98c8b7d12b2c7359ae241f2f9599d98f73af42"
+        kind: .radialPages,
+        semanticSHA256: "089f851f0e3a3a822a5efbff093be5f446c00f72860206c40799157b202742a9",
+        canonicalBGRA8SHA256: "74ddefcc329ec4fde57d9c93c5241e34419afa49d1eebf1832ea095e7d142550"
     ),
 ]
+
+private enum StageDDrySceneKind: Sendable {
+    case empty
+    case periodicSeam
+    case radialPages
+}
+
+private struct StageDDrySceneSnapshot: Sendable {
+    let semanticSHA256: String
+    let canonicalBGRA8SHA256: String
+}
+
+@MainActor
+private func stageDDrySceneSnapshot(
+    _ kind: StageDDrySceneKind
+) async throws -> StageDDrySceneSnapshot {
+    let finite: FiniteSymmetryConfiguration?
+    switch kind {
+    case .empty, .periodicSeam:
+        finite = nil
+    case .radialPages:
+        finite = .radial(RadialSymmetryConfiguration(
+            kind: .mandala,
+            rayCount: 8,
+            center: WorldPoint(x: 32, y: 32)
+        ))
+    }
+    guard let setup = try makeDepositionRendererSetup(
+        tiling: .grid,
+        finite: finite
+    ) else {
+        throw StageDDrySceneError.metalUnavailable
+    }
+    let program = try stageCMetalTestProgram(
+        id: "test.stage-d.dry.\(kind)",
+        replayMode: .appendOnly
+    )
+    let brush = try await setup.compileBrush(definition: program.definition)
+    try setup.renderer.activateDrawBrush(brush)
+    if kind != .empty {
+        let token = RendererOperationToken(rawValue: 130_000)
+        try setup.renderer.beginStroke(
+            token: token,
+            sample: depositionSample(.began, x: 4, y: 32),
+            style: depositionStyle(brush, compositeMode: .draw, diameter: 8)
+        )
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionSample(.moved, x: 60, y: 32)
+        )
+        try setup.renderer.requestStrokeCommit(
+            token: token,
+            sample: depositionSample(.ended, x: 4, y: 32),
+            maximumRetainedBytes: 4_000_000
+        )
+        try await prepareOffMainCommit(setup.renderer)
+        _ = try setup.renderer.finishCommitForHarness()
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+    }
+    return StageDDrySceneSnapshot(
+        semanticSHA256: brush.renderIdentity.semanticHash,
+        canonicalBGRA8SHA256: stageDSHA256(Data(depositionTextureBytes(
+            try setup.renderer.copyCanonicalForHarness()
+        )))
+    )
+}
+
+private enum StageDDrySceneError: Error { case metalUnavailable }
 
 private func stageDDecodeEncodedBGRA8(_ encoded: [UInt8]) -> [Double] {
     encoded.enumerated().map { index, byte in
@@ -186,21 +263,123 @@ private func stageDSHA256(_ data: Data) -> String {
 
 private struct StageDLifecycleTransition: Sendable {
     let name: String
-    let stageCAcceptanceAssertion: String
-    let stageDInsertionPoint: String
+    let exercise: @MainActor @Sendable () async throws -> Void
 }
 
 private let stageDLifecycleTransitions: [StageDLifecycleTransition] = [
-    .init(name: "initialize-import", stageCAcceptanceAssertion: "replacement installation", stageDInsertionPoint: "empty sparse import"),
-    .init(name: "begin", stageCAcceptanceAssertion: "beginStroke", stageDInsertionPoint: "pointer-down layer capture"),
-    .init(name: "append-actual-coalesced", stageCAcceptanceAssertion: "authoritative batch partition", stageDInsertionPoint: "touched tile reservation"),
-    .init(name: "replace-prediction", stageCAcceptanceAssertion: "prediction isolation", stageDInsertionPoint: "prediction tile lease"),
-    .init(name: "prepare-submit-display", stageCAcceptanceAssertion: "off-main workspace availability", stageDInsertionPoint: "linear display encode"),
-    .init(name: "finish-commit", stageCAcceptanceAssertion: "finishCommitForHarness", stageDInsertionPoint: "layer-bound history"),
-    .init(name: "cancel-failure", stageCAcceptanceAssertion: "injected off-main failure", stageDInsertionPoint: "transactional tile discard"),
-    .init(name: "clear", stageCAcceptanceAssertion: "requestClearForHarness", stageDInsertionPoint: "active layer tile clear"),
-    .init(name: "undo-redo", stageCAcceptanceAssertion: "requestRasterRestoreForHarness", stageDInsertionPoint: "original layer target"),
-    .init(name: "layer-mutation", stageCAcceptanceAssertion: "active stroke ownership", stageDInsertionPoint: "drawing transaction rejection"),
-    .init(name: "resize-mode-switch-import", stageCAcceptanceAssertion: "requestResizeForHarness", stageDInsertionPoint: "replacement tiled document"),
-    .init(name: "export-save", stageCAcceptanceAssertion: "canonical snapshot", stageDInsertionPoint: "single linear-to-encoded boundary"),
+    .init(name: "initialize-import", exercise: { try await stageDLifecycleProbe(.initializeImport) }),
+    .init(name: "begin", exercise: { try await stageDLifecycleProbe(.begin) }),
+    .init(name: "append-actual-coalesced", exercise: { try await stageDLifecycleProbe(.appendActual) }),
+    .init(name: "replace-prediction", exercise: { try await stageDLifecycleProbe(.replacePrediction) }),
+    .init(name: "prepare-submit-display", exercise: { try await stageDLifecycleProbe(.prepareSubmitDisplay) }),
+    .init(name: "finish-commit", exercise: { try await stageDLifecycleProbe(.finishCommit) }),
+    .init(name: "cancel-failure", exercise: { try await stageDLifecycleProbe(.cancelFailure) }),
+    .init(name: "clear", exercise: { try await stageDLifecycleProbe(.clear) }),
+    .init(name: "undo-redo", exercise: { try await stageDLifecycleProbe(.undoRedo) }),
+    .init(name: "layer-mutation", exercise: { try await stageDLifecycleProbe(.layerMutation) }),
+    .init(name: "resize-mode-switch-import", exercise: { try await stageDLifecycleProbe(.resizeModeSwitchImport) }),
+    .init(name: "export-save", exercise: { try await stageDLifecycleProbe(.exportSave) }),
 ]
+
+private enum StageDLifecycleKind: Sendable {
+    case initializeImport, begin, appendActual, replacePrediction
+    case prepareSubmitDisplay, finishCommit, cancelFailure, clear, undoRedo
+    case layerMutation, resizeModeSwitchImport, exportSave
+}
+
+@MainActor
+private func stageDLifecycleProbe(_ kind: StageDLifecycleKind) async throws {
+    guard let setup = try makeDepositionRendererSetup(tiling: .grid, finite: .plain) else {
+        throw StageDDrySceneError.metalUnavailable
+    }
+    let program = try stageCMetalTestProgram(
+        id: "test.stage-d.lifecycle.\(kind)", replayMode: .appendOnly
+    )
+    let brush = try await setup.compileBrush(definition: program.definition)
+    try setup.renderer.activateDrawBrush(brush)
+    let initial = depositionTextureBytes(try setup.renderer.copyCanonicalForHarness())
+    #expect(!initial.contains { $0 != 0 })
+    guard kind != .initializeImport else { return }
+
+    let token = RendererOperationToken(rawValue: 140_000)
+    try setup.renderer.beginStroke(
+        token: token,
+        sample: depositionSample(.began, x: 8, y: 8),
+        style: depositionStyle(brush, compositeMode: .draw, diameter: 8)
+    )
+    #expect(setup.renderer.hasActiveStroke)
+    guard kind != .begin else { return }
+
+    try setup.renderer.appendStroke(
+        token: token,
+        sample: depositionSample(.moved, x: 40, y: 24)
+    )
+    guard kind != .appendActual else { return }
+
+    if kind == .replacePrediction {
+        try setup.renderer.appendStroke(
+            token: token,
+            sample: depositionPredictedSample(x: 48)
+        )
+        try await drainOffMainPreparedFrames(setup.renderer, minimumFrameCount: 0)
+        #expect(setup.renderer.hasActiveStroke)
+        return
+    }
+
+    try setup.renderer.requestStrokeCommit(
+        token: token,
+        sample: depositionSample(.ended, x: 56, y: 32),
+        maximumRetainedBytes: 4_000_000
+    )
+    try await prepareOffMainCommit(setup.renderer)
+    if kind == .prepareSubmitDisplay {
+        #expect(
+            depositionTextureBytes(
+                try setup.renderer.copyCanonicalForHarness()
+            ) == initial
+        )
+        return
+    }
+    _ = try setup.renderer.finishCommitForHarness()
+    try await awaitOffMainWorkspaceAvailable(setup.renderer)
+    let committed = depositionTextureBytes(try setup.renderer.copyCanonicalForHarness())
+    #expect(committed.contains { $0 != 0 })
+    guard kind != .finishCommit else { return }
+
+    switch kind {
+    case .cancelFailure:
+        let cancel = RendererOperationToken(rawValue: 140_001)
+        try setup.renderer.beginStroke(token: cancel, sample: depositionSample(.began), style: depositionStyle(brush, compositeMode: .draw, diameter: 8))
+        try setup.renderer.cancelStroke(token: cancel)
+        try await awaitOffMainWorkspaceAvailable(setup.renderer)
+        #expect(depositionTextureBytes(try setup.renderer.copyCanonicalForHarness()) == committed)
+    case .clear, .layerMutation:
+        try setup.renderer.requestClearForHarness(token: RendererOperationToken(rawValue: 140_002), maximumRetainedBytes: 4_000_000, forceFailure: false)
+        try setup.renderer.finishRasterOperationForHarness()
+        #expect(!depositionTextureBytes(try setup.renderer.copyCanonicalForHarness()).contains { $0 != 0 })
+    case .undoRedo:
+        var receipt: RasterMutationReceipt?
+        setup.renderer.onOperationCompleted = { completion in
+            if case let .rasterSuccess(value) = completion { receipt = value }
+        }
+        defer { setup.renderer.onOperationCompleted = nil }
+        try setup.renderer.requestClearForHarness(token: RendererOperationToken(rawValue: 140_002), maximumRetainedBytes: 4_000_000, forceFailure: false)
+        try setup.renderer.finishRasterOperationForHarness()
+        let clear = try #require(receipt)
+        try setup.renderer.requestRasterRestoreForHarness(token: RendererOperationToken(rawValue: 140_003), revision: clear.before, forceFailure: false)
+        try setup.renderer.finishRasterOperationForHarness()
+        #expect(depositionTextureBytes(try setup.renderer.copyCanonicalForHarness()) == committed)
+        try setup.renderer.requestRasterRestoreForHarness(token: RendererOperationToken(rawValue: 140_004), revision: clear.after, forceFailure: false)
+        try setup.renderer.finishRasterOperationForHarness()
+        #expect(!depositionTextureBytes(try setup.renderer.copyCanonicalForHarness()).contains { $0 != 0 })
+        setup.renderer.releaseRasterRevisions([clear.before.id, clear.after.id])
+    case .resizeModeSwitchImport:
+        try setup.renderer.requestResizeForHarness(token: RendererOperationToken(rawValue: 140_003), to: PixelSize(width: 80, height: 72), maximumRetainedBytes: 4_000_000, forceResourceAllocationFailure: false)
+        try setup.renderer.finishRasterOperationForHarness()
+        #expect(setup.renderer.pixelSize == PixelSize(width: 80, height: 72))
+    case .exportSave:
+        #expect(try setup.renderer.copyCanonicalForHarness().width == 64)
+    default:
+        break
+    }
+}
