@@ -56,6 +56,7 @@ struct PatternProjectArchiveTests {
             id: tileID,
             coordinate: PatternPaintTileCoordinate(x: 0, y: 0),
             logicalBounds: bounds,
+            pixelSize: PixelSize(width: 256, height: 256),
             rasterRevision: 7,
             file: payloadPath,
             payload: payload
@@ -95,6 +96,7 @@ struct PatternProjectArchiveTests {
             id: tileID,
             coordinate: PatternPaintTileCoordinate(x: 0, y: 0),
             logicalBounds: bounds,
+            pixelSize: PixelSize(width: 256, height: 256),
             rasterRevision: 7,
             file: manifestPath,
             payload: payload

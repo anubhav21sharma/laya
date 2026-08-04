@@ -99,6 +99,7 @@ public struct PatternPaintTileSurface: Equatable, Sendable {
 
 public enum PatternPaintTileError: Error, Equatable, Sendable {
     case invalidManifest
+    case manifestByteLimitExceeded(actual: Int, maximum: Int)
     case layerCountOutOfRange(Int)
     case duplicateLayerID(UUID)
     case duplicateTileID(UUID)
@@ -132,11 +133,32 @@ public enum PatternPaintTileCodec {
         id: UUID,
         coordinate: PatternPaintTileCoordinate,
         logicalBounds: PatternPaintTileBounds,
+        pixelSize: PixelSize,
         rasterRevision: UInt64,
         file: String,
         payload: Data,
         validatingComponents: Bool = true
     ) throws -> PatternPaintTileRecord {
+        guard checkedPixelSize(
+            width: pixelSize.width,
+            height: pixelSize.height
+        ) == pixelSize else {
+            throw PatternPaintTileError.invalidPixelSize
+        }
+        try validatePath(file)
+        guard expectedBounds(
+            coordinate: coordinate,
+            pixelSize: pixelSize
+        ) == logicalBounds else {
+            throw PatternPaintTileError.invalidLogicalBounds(id)
+        }
+        guard payload.count == bytesPerTile else {
+            throw PatternPaintTileError.payloadByteCountMismatch(
+                tileID: id,
+                expected: bytesPerTile,
+                actual: payload.count
+            )
+        }
         let provisional = PatternPaintTileRecord(
             id: id,
             coordinate: coordinate,
@@ -148,13 +170,13 @@ public enum PatternPaintTileCodec {
             rasterRevision: rasterRevision,
             file: file
         )
-        guard payload.count == bytesPerTile else {
-            throw PatternPaintTileError.payloadByteCountMismatch(
-                tileID: id,
-                expected: bytesPerTile,
-                actual: payload.count
-            )
-        }
+        try validateMetadata([
+            PatternPaintTileSurface(
+                layerID: layerID,
+                pixelSize: pixelSize,
+                tiles: [provisional]
+            ),
+        ])
         if validatingComponents {
             try validateComponents(payload, tileID: id)
         }
@@ -178,6 +200,17 @@ public enum PatternPaintTileCodec {
     public static func encodeManifest(
         _ surface: PatternPaintTileSurface
     ) throws -> Data {
+        try encodeManifest(
+            surface,
+            maximumByteCount: maximumManifestBytes
+        )
+    }
+
+    static func encodeManifest(
+        _ surface: PatternPaintTileSurface,
+        maximumByteCount: Int
+    ) throws -> Data {
+        try validateMetadata([surface])
         let wire = SurfaceWire(surface)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [
@@ -185,11 +218,19 @@ public enum PatternPaintTileCodec {
             .sortedKeys,
             .withoutEscapingSlashes,
         ]
+        let encoded: Data
         do {
-            return try encoder.encode(wire)
+            encoded = try encoder.encode(wire)
         } catch {
             throw PatternPaintTileError.invalidManifest
         }
+        guard encoded.count <= maximumByteCount else {
+            throw PatternPaintTileError.manifestByteLimitExceeded(
+                actual: encoded.count,
+                maximum: maximumByteCount
+            )
+        }
+        return encoded
     }
 
     public static func decodeManifest(

@@ -1,10 +1,99 @@
 import Foundation
 import PatternEngine
-import PatternFile
+@testable import PatternFile
 import Testing
 
 @Suite("Pattern paint tile codec")
 struct PatternPaintTileCodecTests {
+    @Test
+    func recordCreationRejectsUnsafePathAndNonclippedBoundsBeforeHashing()
+        throws
+    {
+        let layerID = UUID(
+            uuidString: "11111111-2222-3333-4444-555555555555"
+        )!
+        let tileID = UUID(
+            uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )!
+        let pixelSize = PixelSize(width: 300, height: 256)
+        let payload = halfPayload([0.25, 0.125, 0, 0.5])
+
+        #expect(throws: PatternPaintTileError.unsafePath("../tile")) {
+            try PatternPaintTileCodec.makeRecord(
+                layerID: layerID,
+                id: tileID,
+                coordinate: PatternPaintTileCoordinate(x: 0, y: 0),
+                logicalBounds: PatternPaintTileBounds(
+                    minX: 0,
+                    minY: 0,
+                    width: 256,
+                    height: 256
+                ),
+                pixelSize: pixelSize,
+                rasterRevision: 1,
+                file: "../tile",
+                payload: payload
+            )
+        }
+        #expect(throws: PatternPaintTileError.invalidLogicalBounds(tileID)) {
+            try PatternPaintTileCodec.makeRecord(
+                layerID: layerID,
+                id: tileID,
+                coordinate: PatternPaintTileCoordinate(x: 1, y: 0),
+                logicalBounds: PatternPaintTileBounds(
+                    minX: 256,
+                    minY: 0,
+                    width: 45,
+                    height: 256
+                ),
+                pixelSize: pixelSize,
+                rasterRevision: 1,
+                file: "tiles/edge.rgba16f",
+                payload: payload
+            )
+        }
+    }
+
+    @Test
+    func manifestEncodingRejectsMetadataItsDecoderWouldRejectAndSizeLimit()
+        throws
+    {
+        let fixture = try tileFixture()
+        let unsafe = PatternPaintTileRecord(
+            id: fixture.record.id,
+            coordinate: fixture.record.coordinate,
+            logicalBounds: fixture.record.logicalBounds,
+            pixelFormat: fixture.record.pixelFormat,
+            byteOrder: fixture.record.byteOrder,
+            byteCount: fixture.record.byteCount,
+            semanticSHA256: fixture.record.semanticSHA256,
+            rasterRevision: fixture.record.rasterRevision,
+            file: "../unsafe"
+        )
+        #expect(throws: PatternPaintTileError.unsafePath("../unsafe")) {
+            try PatternPaintTileCodec.encodeManifest(
+                PatternPaintTileSurface(
+                    layerID: fixture.surface.layerID,
+                    pixelSize: fixture.surface.pixelSize,
+                    tiles: [unsafe]
+                )
+            )
+        }
+
+        let encoded = try PatternPaintTileCodec.encodeManifest(
+            fixture.surface
+        )
+        #expect(throws: PatternPaintTileError.manifestByteLimitExceeded(
+            actual: encoded.count,
+            maximum: encoded.count - 1
+        )) {
+            try PatternPaintTileCodec.encodeManifest(
+                fixture.surface,
+                maximumByteCount: encoded.count - 1
+            )
+        }
+    }
+
     @Test
     func nativeRGBA16FPayloadRoundTripsDeterministically() throws {
         let fixture = try tileFixture()
@@ -99,6 +188,7 @@ struct PatternPaintTileCodecTests {
                 id: fixture.record.id,
                 coordinate: fixture.record.coordinate,
                 logicalBounds: fixture.record.logicalBounds,
+                pixelSize: fixture.surface.pixelSize,
                 rasterRevision: fixture.record.rasterRevision,
                 file: fixture.record.file,
                 payload: payload,
@@ -129,6 +219,7 @@ struct PatternPaintTileCodecTests {
             id: secondID,
             coordinate: fixture.record.coordinate,
             logicalBounds: fixture.record.logicalBounds,
+            pixelSize: fixture.surface.pixelSize,
             rasterRevision: 2,
             file: "tiles/second.rgba16f",
             payload: fixture.payload
@@ -218,6 +309,7 @@ struct PatternPaintTileCodecTests {
                 width: 44,
                 height: 256
             ),
+            pixelSize: fixture.surface.pixelSize,
             rasterRevision: 2,
             file: fixture.record.file,
             payload: fixture.payload
@@ -287,6 +379,7 @@ private func tileFixture() throws -> (
             width: 256,
             height: 256
         ),
+        pixelSize: PixelSize(width: 300, height: 256),
         rasterRevision: 1,
         file: "tiles/primary.rgba16f",
         payload: payload
