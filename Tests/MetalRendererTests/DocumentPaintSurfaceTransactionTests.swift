@@ -650,7 +650,7 @@ struct DocumentPaintSurfaceTransactionTests {
         let grown = try transactionGeometry(width: 768, height: 512)
 
         #expect(throws: DocumentPaintSurfaceTransactionError
-            .incompleteGeometryReplacement(first)) {
+            .invalidResizeMapping) {
             _ = try fixture.coordinator.prepareMutation(
                 fixture.request(
                     kind: .resize,
@@ -699,17 +699,17 @@ struct DocumentPaintSurfaceTransactionTests {
     }
 
     @Test
-    func geometryChangeBuildsDistinctBeforeAndAfterEndpoints() throws {
+    func geometryChangeBuildsDistinctEndpointsWithoutInventingExpansionTiles() throws {
         guard let fixture = try TransactionFixture.make(width: 256, height: 256)
         else { return }
         let shared = PaintTileCoordinate(x: 0, y: 0)
-        let grownOnly = PaintTileCoordinate(x: 2, y: 2)
+        try transactionSeedActive(fixture, coordinates: [shared])
         let grown = try transactionGeometry(width: 513, height: 513)
         let prepared = try transactionPrepared(
             fixture.coordinator.prepareMutation(
                 fixture.request(
                     kind: .resize,
-                    dirty: [shared, grownOnly],
+                    dirty: [shared],
                     candidateGeometry: grown
                 )
             )
@@ -735,9 +735,609 @@ struct DocumentPaintSurfaceTransactionTests {
         ])
         #expect(pair.after.tileCoordinates == [
             RasterRevisionTileCoordinate(x: 0, y: 0),
-            RasterRevisionTileCoordinate(x: 2, y: 2),
         ])
         try fixture.revisions.release(pair.revisionIDs)
+    }
+
+    @Test
+    func blankResizePublishesZeroByteHistoryAndUndoRedoBothGeometries() throws {
+        guard let fixture = try TransactionFixture.make(width: 255, height: 256)
+        else { return }
+        let target = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 514, height: 512),
+            storagePixelSize: PixelSize(width: 257, height: 256),
+            radialLayout: nil
+        )
+        let prepared = try transactionPrepared(
+            fixture.coordinator.prepareMutation(
+                fixture.request(
+                    kind: .resize,
+                    dirty: [],
+                    removing: [],
+                    candidateGeometry: target
+                )
+            )
+        )
+        let encoded = try fixture.coordinator.encodeMutation(prepared)
+        let reduced = try fixture.coordinator.completeMutation(
+            encoded,
+            as: .succeeded
+        )
+        let history = try fixture.coordinator.encodeHistoryCapture(reduced)
+        let completed = try fixture.coordinator.completeHistoryCapture(
+            history,
+            as: .succeeded
+        )
+        let terminal = try fixture.coordinator.prepareTerminalCommit(completed)
+        let committed = try fixture.coordinator.publish(terminal)
+        let pair = try #require(committed.historyPair)
+
+        #expect(committed.dirtyCoordinates.isEmpty)
+        #expect(pair.before.pixelSize == fixture.geometry.storagePixelSize)
+        #expect(pair.before.documentPixelSize
+            == fixture.geometry.documentPixelSize)
+        #expect(pair.after.pixelSize == target.storagePixelSize)
+        #expect(pair.after.documentPixelSize == target.documentPixelSize)
+        #expect(pair.before.tileCoordinates.isEmpty)
+        #expect(pair.after.tileCoordinates.isEmpty)
+        #expect(pair.retainedBytes == 0)
+        #expect(fixture.registry.snapshot().geometry == target)
+
+        let undoPrepared = try fixture.coordinator.prepareRestore(
+            fixture.restoreRequest(
+                reference: pair.before,
+                expected: [],
+                targetGeometry: fixture.geometry
+            )
+        )
+        let undoEncoded = try fixture.coordinator.encodeRestore(undoPrepared)
+        let undoCompleted = try fixture.coordinator.completeRestore(
+            undoEncoded,
+            as: .succeeded
+        )
+        let undoTerminal = try fixture.coordinator.prepareTerminalRestore(
+            undoCompleted
+        )
+        _ = try fixture.coordinator.publishRestore(undoTerminal)
+        #expect(fixture.registry.snapshot().geometry == fixture.geometry)
+
+        let redoPrepared = try fixture.coordinator.prepareRestore(
+            fixture.restoreRequest(
+                reference: pair.after,
+                expected: [],
+                targetGeometry: target
+            )
+        )
+        let redoEncoded = try fixture.coordinator.encodeRestore(redoPrepared)
+        let redoCompleted = try fixture.coordinator.completeRestore(
+            redoEncoded,
+            as: .succeeded
+        )
+        let redoTerminal = try fixture.coordinator.prepareTerminalRestore(
+            redoCompleted
+        )
+        _ = try fixture.coordinator.publishRestore(redoTerminal)
+        #expect(fixture.registry.snapshot().geometry == target)
+        #expect(fixture.registry.snapshot().layers[0].references.isEmpty)
+        #expect(fixture.registry.snapshot().activeTileLeaseCount == 0)
+        #expect(fixture.revisions.snapshot().inFlightInstallLeaseCount == 0)
+        #expect(fixture.coordinator.snapshot().state == .idle)
+
+        try fixture.revisions.release(pair.revisionIDs)
+    }
+
+    @Test
+    func plainResizeCrops257To255WithOneExactTopLeftCopyAndNoScaling() throws {
+        guard let fixture = try TransactionFixture.make(width: 257, height: 256)
+        else { return }
+        let kept = PaintTileCoordinate(x: 0, y: 0)
+        let cropped = PaintTileCoordinate(x: 1, y: 0)
+        try transactionSeedActive(
+            fixture,
+            coordinates: [kept, cropped]
+        )
+        let target = try transactionGeometry(width: 255, height: 256)
+        let prepared = try transactionPrepared(
+            fixture.coordinator.prepareMutation(
+                fixture.request(
+                    kind: .resize,
+                    dirty: [kept],
+                    removing: [cropped],
+                    candidateGeometry: target
+                )
+            )
+        )
+
+        let encoded = try fixture.coordinator.encodeMutation(prepared)
+        let payload = try #require(fixture.backend.resizePayload)
+        #expect(payload.sourceGeometry == fixture.geometry)
+        #expect(payload.candidateGeometry == target)
+        #expect(payload.sources.map(\.coordinate) == [kept])
+        #expect(payload.destinations.map(\.coordinate) == [kept])
+        #expect(payload.mappings == [
+            DocumentPaintSurfaceResizeCopyMapping(
+                sourceCoordinate: kept,
+                destinationCoordinate: kept,
+                sourceOrigin: .zero,
+                destinationOrigin: .zero,
+                extent: PixelSize(width: 255, height: 256),
+                logicalPage: nil,
+                masksToTargetOrbit: false
+            ),
+        ])
+        #expect(fixture.registry.snapshot().activeTileLeaseCount == 2)
+
+        let reduced = try fixture.coordinator.completeMutation(
+            encoded,
+            as: .succeeded
+        )
+        #expect(fixture.registry.snapshot().activeTileLeaseCount == 0)
+        let history = try fixture.coordinator.encodeHistoryCapture(reduced)
+        let completed = try fixture.coordinator.completeHistoryCapture(
+            history,
+            as: .succeeded
+        )
+        let terminal = try fixture.coordinator.prepareTerminalCommit(completed)
+        let result = try fixture.coordinator.publish(terminal)
+        let pair = try #require(result.historyPair)
+
+        #expect(pair.before.pixelSize == fixture.geometry.storagePixelSize)
+        #expect(pair.after.pixelSize == target.storagePixelSize)
+        #expect(pair.before.tileCoordinates == [
+            RasterRevisionTileCoordinate(x: 0, y: 0),
+            RasterRevisionTileCoordinate(x: 1, y: 0),
+        ])
+        #expect(pair.after.tileCoordinates == [
+            RasterRevisionTileCoordinate(x: 0, y: 0),
+        ])
+        #expect(fixture.registry.snapshot().geometry == target)
+        #expect(fixture.registry.snapshot().layers[0].references.map(\.coordinate)
+            == [kept])
+        try fixture.revisions.release(pair.revisionIDs)
+    }
+
+    @Test
+    func plainResize255256257ClearsThenCopiesOnlyPresentIntersections() throws {
+        let zero = PaintTileCoordinate(x: 0, y: 0)
+        let one = PaintTileCoordinate(x: 1, y: 0)
+        let cases: [(
+            sourceWidth: Int,
+            targetWidth: Int,
+            sourceCoordinates: [PaintTileCoordinate],
+            dirty: [PaintTileCoordinate],
+            removed: [PaintTileCoordinate],
+            extentWidth: Int
+        )] = [
+            (255, 256, [zero], [zero], [], 255),
+            (256, 257, [zero], [zero], [], 256),
+            (257, 256, [zero, one], [zero], [one], 256),
+            (256, 255, [zero], [zero], [], 255),
+        ]
+
+        for item in cases {
+            guard let fixture = try TransactionFixture.make(
+                width: item.sourceWidth,
+                height: 256
+            ) else { return }
+            try transactionSeedActive(
+                fixture,
+                coordinates: item.sourceCoordinates
+            )
+            let target = try transactionGeometry(
+                width: item.targetWidth,
+                height: 256
+            )
+            let prepared = try transactionPrepared(
+                fixture.coordinator.prepareMutation(
+                    fixture.request(
+                        kind: .resize,
+                        dirty: item.dirty,
+                        removing: item.removed,
+                        candidateGeometry: target
+                    )
+                )
+            )
+            let encoded = try fixture.coordinator.encodeMutation(prepared)
+            let payload = try #require(fixture.backend.resizePayload)
+
+            #expect(payload.clearsDestinationsBeforeCopy)
+            #expect(payload.sources.map(\.coordinate) == item.dirty)
+            #expect(payload.destinations.map(\.coordinate) == item.dirty)
+            #expect(payload.mappings.count == item.dirty.count)
+            #expect(payload.mappings.map(\.extent) == item.dirty.map { _ in
+                PixelSize(width: item.extentWidth, height: 256)
+            })
+            #expect(fixture.coordinator.snapshot().candidateCoordinates
+                == item.dirty)
+
+            let reduced = try fixture.coordinator.completeMutation(
+                encoded,
+                as: .succeeded
+            )
+            #expect(fixture.registry.snapshot().activeTileLeaseCount == 0)
+            try fixture.coordinator.discard(reduced)
+        }
+
+        guard let holeFixture = try TransactionFixture.make(
+            width: 512,
+            height: 256
+        ) else { return }
+        try transactionSeedActive(holeFixture, coordinates: [one])
+        let expanded = try transactionGeometry(width: 513, height: 256)
+        let holePrepared = try transactionPrepared(
+            holeFixture.coordinator.prepareMutation(
+                holeFixture.request(
+                    kind: .resize,
+                    dirty: [one],
+                    candidateGeometry: expanded
+                )
+            )
+        )
+        let holeEncoded = try holeFixture.coordinator.encodeMutation(holePrepared)
+        let holePayload = try #require(holeFixture.backend.resizePayload)
+        #expect(holePayload.sources.map(\.coordinate) == [one])
+        #expect(holePayload.destinations.map(\.coordinate) == [one])
+        #expect(holeFixture.coordinator.snapshot().candidateCoordinates == [one])
+        try holeFixture.coordinator.discard(holeEncoded)
+    }
+
+    @Test
+    func prunedResizeEdgeStaysClearAfterRedoWithoutResurrectingAStoredTile() throws {
+        guard let fixture = try TransactionFixture.make(width: 257, height: 256)
+        else { return }
+        let edge = PaintTileCoordinate(x: 1, y: 0)
+        try transactionSeedActive(fixture, coordinates: [edge])
+        fixture.backend.alphaByCoordinate = [edge: 0]
+        let target = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 1_028, height: 512),
+            storagePixelSize: fixture.geometry.storagePixelSize,
+            radialLayout: nil
+        )
+        let prepared = try transactionPrepared(
+            fixture.coordinator.prepareMutation(
+                fixture.request(
+                    kind: .resize,
+                    dirty: [edge],
+                    candidateGeometry: target
+                )
+            )
+        )
+        let encoded = try fixture.coordinator.encodeMutation(prepared)
+        let reduced = try fixture.coordinator.completeMutation(
+            encoded,
+            as: .succeeded
+        )
+        #expect(fixture.coordinator.snapshot().candidateCoordinates.isEmpty)
+        let history = try fixture.coordinator.encodeHistoryCapture(reduced)
+        let completed = try fixture.coordinator.completeHistoryCapture(
+            history,
+            as: .succeeded
+        )
+        let terminal = try fixture.coordinator.prepareTerminalCommit(completed)
+        let result = try fixture.coordinator.publish(terminal)
+        let pair = try #require(result.historyPair)
+        #expect(pair.before.retainedBytes > 0)
+        #expect(pair.after.retainedBytes == 0)
+        #expect(fixture.registry.snapshot().layers[0].references.isEmpty)
+
+        let undoPrepared = try fixture.coordinator.prepareRestore(
+            fixture.restoreRequest(
+                reference: pair.before,
+                expected: [.init(coordinate: edge, disposition: .replace)],
+                targetGeometry: fixture.geometry
+            )
+        )
+        let undoEncoded = try fixture.coordinator.encodeRestore(undoPrepared)
+        let undoCompleted = try fixture.coordinator.completeRestore(
+            undoEncoded,
+            as: .succeeded
+        )
+        _ = try fixture.coordinator.publishRestore(
+            fixture.coordinator.prepareTerminalRestore(undoCompleted)
+        )
+        #expect(fixture.registry.snapshot().layers[0].references.map(\.coordinate)
+            == [edge])
+
+        let redoPrepared = try fixture.coordinator.prepareRestore(
+            fixture.restoreRequest(
+                reference: pair.after,
+                expected: [.init(coordinate: edge, disposition: .remove)],
+                targetGeometry: target
+            )
+        )
+        let redoEncoded = try fixture.coordinator.encodeRestore(redoPrepared)
+        let redoCompleted = try fixture.coordinator.completeRestore(
+            redoEncoded,
+            as: .succeeded
+        )
+        _ = try fixture.coordinator.publishRestore(
+            fixture.coordinator.prepareTerminalRestore(redoCompleted)
+        )
+        #expect(fixture.registry.snapshot().layers[0].references.isEmpty)
+        try fixture.revisions.release(pair.revisionIDs)
+    }
+
+    @Test
+    func radialResizeMapsLogicalPageAcrossPermutedSlotsAndMasksTargetOrbit() throws {
+        let sourceLayout = try RadialSectorLayout(
+            maximumRadius: 1_024,
+            sectorAngleRadians: .pi
+        )
+        let targetLayout = try RadialSectorLayout(
+            maximumRadius: 700,
+            sectorAngleRadians: .pi / 3
+        )
+        let sourceGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 2_048, height: 2_048),
+            storagePixelSize: sourceLayout.atlasPixelSize,
+            radialLayout: sourceLayout
+        )
+        let targetGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 1_400, height: 1_400),
+            storagePixelSize: targetLayout.atlasPixelSize,
+            radialLayout: targetLayout
+        )
+        let logicalPage = RadialPageCoordinate(x: 0, y: 0)
+        let sourceCommon = try #require(
+            sourceLayout.residentPage(at: logicalPage)
+        )
+        let targetCommon = try #require(
+            targetLayout.residentPage(at: logicalPage)
+        )
+        let sourceSlotZero = try #require(
+            sourceLayout.residentPages.first { $0.atlasSlot == 0 }
+        )
+        #expect(sourceCommon.atlasSlot != targetCommon.atlasSlot)
+        #expect(sourceSlotZero.coordinate != logicalPage)
+
+        let sourceCommonPhysical = transactionRadialPhysicalCoordinate(
+            sourceCommon,
+            layout: sourceLayout
+        )
+        let croppedSlotZeroPhysical = transactionRadialPhysicalCoordinate(
+            sourceSlotZero,
+            layout: sourceLayout
+        )
+        let targetPhysical = transactionRadialPhysicalCoordinate(
+            targetCommon,
+            layout: targetLayout
+        )
+        #expect(croppedSlotZeroPhysical == targetPhysical)
+        #expect(sourceCommonPhysical != targetPhysical)
+
+        guard let fixture = try TransactionFixture.make(
+            geometry: sourceGeometry
+        ) else { return }
+        try transactionSeedActive(
+            fixture,
+            coordinates: [croppedSlotZeroPhysical, sourceCommonPhysical].sorted()
+        )
+        let prepared = try transactionPrepared(
+            fixture.coordinator.prepareMutation(
+                fixture.request(
+                    kind: .resize,
+                    dirty: [targetPhysical],
+                    removing: [sourceCommonPhysical],
+                    candidateGeometry: targetGeometry
+                )
+            )
+        )
+        let encoded = try fixture.coordinator.encodeMutation(prepared)
+        let payload = try #require(fixture.backend.resizePayload)
+
+        #expect(payload.sources.map(\.coordinate) == [sourceCommonPhysical])
+        #expect(payload.destinations.map(\.coordinate) == [targetPhysical])
+        #expect(payload.mappings == [
+            DocumentPaintSurfaceResizeCopyMapping(
+                sourceCoordinate: sourceCommonPhysical,
+                destinationCoordinate: targetPhysical,
+                sourceOrigin: .zero,
+                destinationOrigin: .zero,
+                extent: PixelSize(width: 256, height: 256),
+                logicalPage: logicalPage,
+                masksToTargetOrbit: true
+            ),
+        ])
+        #expect(payload.mappings.count == 1)
+        #expect(fixture.registry.snapshot().activeTileLeaseCount == 2)
+
+        let reduced = try fixture.coordinator.completeMutation(
+            encoded,
+            as: .succeeded
+        )
+        let history = try fixture.coordinator.encodeHistoryCapture(reduced)
+        let completed = try fixture.coordinator.completeHistoryCapture(
+            history,
+            as: .succeeded
+        )
+        let terminal = try fixture.coordinator.prepareTerminalCommit(completed)
+        let result = try fixture.coordinator.publish(terminal)
+        let pair = try #require(result.historyPair)
+
+        #expect(pair.before.pixelSize == sourceLayout.atlasPixelSize)
+        #expect(pair.before.documentPixelSize
+            == sourceGeometry.documentPixelSize)
+        #expect(pair.after.pixelSize == targetLayout.atlasPixelSize)
+        #expect(pair.after.documentPixelSize
+            == targetGeometry.documentPixelSize)
+        #expect(pair.before.tileCoordinates.count == 2)
+        #expect(pair.after.tileCoordinates == [
+            RasterRevisionTileCoordinate(
+                x: targetPhysical.x,
+                y: targetPhysical.y
+            ),
+        ])
+        #expect(pair.retainedBytes == PaintTileDescriptor.residentByteCount * 3)
+        #expect(fixture.registry.snapshot().geometry == targetGeometry)
+        #expect(fixture.registry.snapshot().layers[0].references.map(\.coordinate)
+            == [targetPhysical])
+
+        let beforePhysical = [
+            croppedSlotZeroPhysical,
+            sourceCommonPhysical,
+        ].sorted()
+        let undoPrepared = try fixture.coordinator.prepareRestore(
+            fixture.restoreRequest(
+                reference: pair.before,
+                expected: beforePhysical.map {
+                    .init(coordinate: $0, disposition: .replace)
+                },
+                targetGeometry: sourceGeometry
+            )
+        )
+        let undoEncoded = try fixture.coordinator.encodeRestore(undoPrepared)
+        let undoCompleted = try fixture.coordinator.completeRestore(
+            undoEncoded,
+            as: .succeeded
+        )
+        _ = try fixture.coordinator.publishRestore(
+            fixture.coordinator.prepareTerminalRestore(undoCompleted)
+        )
+        #expect(fixture.registry.snapshot().geometry == sourceGeometry)
+        #expect(fixture.registry.snapshot().layers[0].references.map(\.coordinate)
+            == beforePhysical)
+
+        let redoPrepared = try fixture.coordinator.prepareRestore(
+            fixture.restoreRequest(
+                reference: pair.after,
+                expected: [
+                    .init(coordinate: targetPhysical, disposition: .replace),
+                ],
+                targetGeometry: targetGeometry
+            )
+        )
+        let redoEncoded = try fixture.coordinator.encodeRestore(redoPrepared)
+        let redoCompleted = try fixture.coordinator.completeRestore(
+            redoEncoded,
+            as: .succeeded
+        )
+        _ = try fixture.coordinator.publishRestore(
+            fixture.coordinator.prepareTerminalRestore(redoCompleted)
+        )
+        #expect(fixture.registry.snapshot().geometry == targetGeometry)
+        #expect(fixture.registry.snapshot().layers[0].references.map(\.coordinate)
+            == [targetPhysical])
+        #expect(fixture.registry.snapshot().activeTileLeaseCount == 0)
+        #expect(fixture.revisions.snapshot().inFlightInstallLeaseCount == 0)
+        try fixture.revisions.release(pair.revisionIDs)
+    }
+
+    @Test
+    func resizeRejectsInventedExpansionTilesAndIncompleteCropAuthority() throws {
+        let zero = PaintTileCoordinate(x: 0, y: 0)
+        let one = PaintTileCoordinate(x: 1, y: 0)
+
+        guard let grow = try TransactionFixture.make(width: 256, height: 256)
+        else { return }
+        try transactionSeedActive(grow, coordinates: [zero])
+        let grown = try transactionGeometry(width: 257, height: 256)
+        let growBaseline = grow.registry.snapshot()
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .invalidResizeMapping) {
+            _ = try grow.coordinator.prepareMutation(
+                grow.request(
+                    kind: .resize,
+                    dirty: [zero, one],
+                    candidateGeometry: grown
+                )
+            )
+        }
+        #expect(grow.registry.snapshot() == growBaseline)
+
+        guard let crop = try TransactionFixture.make(width: 257, height: 256)
+        else { return }
+        try transactionSeedActive(crop, coordinates: [zero, one])
+        let cropped = try transactionGeometry(width: 256, height: 256)
+        let cropBaseline = crop.registry.snapshot()
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .invalidResizeMapping) {
+            _ = try crop.coordinator.prepareMutation(
+                crop.request(
+                    kind: .resize,
+                    dirty: [zero],
+                    removing: [],
+                    candidateGeometry: cropped
+                )
+            )
+        }
+        #expect(crop.registry.snapshot() == cropBaseline)
+    }
+
+    @Test
+    func resizeFailureReturnsSourceAndDestinationLeasesAndAllowsImmediateRetry() throws {
+        let kept = PaintTileCoordinate(x: 0, y: 0)
+        let cropped = PaintTileCoordinate(x: 1, y: 0)
+        for point in [
+            DocumentPaintSurfaceTransactionFailurePoint.mutationCompletion,
+            .destinationLeaseReturn,
+            .sourceLeaseReturn,
+        ] {
+            guard let fixture = try TransactionFixture.make(
+                width: 257,
+                height: 256
+            ) else { return }
+            try transactionSeedActive(
+                fixture,
+                coordinates: [kept, cropped]
+            )
+            let target = try transactionGeometry(width: 255, height: 256)
+            let baseline = fixture.registry.snapshot()
+            let revisions = fixture.revisions.snapshot()
+            let prepared = try transactionPrepared(
+                fixture.coordinator.prepareMutation(
+                    fixture.request(
+                        kind: .resize,
+                        dirty: [kept],
+                        removing: [cropped],
+                        candidateGeometry: target
+                    )
+                )
+            )
+            let encoded = try fixture.coordinator.encodeMutation(prepared)
+            let expected: DocumentPaintSurfaceTransactionError
+            switch point {
+            case .mutationCompletion:
+                expected = .backendCompletionFailed
+            case .destinationLeaseReturn:
+                expected = .destinationLeaseReturnFailed
+            default:
+                expected = .sourceLeaseReturnFailed
+            }
+            #expect(throws: expected) {
+                _ = try fixture.coordinator.completeMutation(
+                    encoded,
+                    as: .succeeded,
+                    failureInjection: .init(failingAt: point)
+                )
+            }
+            if point == .mutationCompletion {
+                #expect(fixture.coordinator.snapshot().state == .idle)
+            } else {
+                #expect(fixture.coordinator.snapshot().state == .discardPending)
+                try fixture.coordinator.retryDiscard()
+            }
+            #expect(fixture.registry.snapshot() == baseline)
+            #expect(fixture.revisions.snapshot() == revisions)
+            #expect(fixture.registry.snapshot().activeTileLeaseCount == 0)
+
+            let retry = try transactionPrepared(
+                fixture.coordinator.prepareMutation(
+                    fixture.request(
+                        kind: .resize,
+                        dirty: [kept],
+                        removing: [cropped],
+                        candidateGeometry: target
+                    )
+                )
+            )
+            let retryEncoded = try fixture.coordinator.encodeMutation(retry)
+            let retryReduced = try fixture.coordinator.completeMutation(
+                retryEncoded,
+                as: .succeeded
+            )
+            try fixture.coordinator.discard(retryReduced)
+            #expect(fixture.registry.snapshot() == baseline)
+        }
     }
 
     @Test
@@ -1485,11 +2085,15 @@ private final class TransactionTestMutationBackend:
     var discardShouldFail = false
     var onDiscardAndWaitUntilTerminal: (() -> Void)?
     private(set) var destinations: [DocumentPaintSurfaceMutationDestination] = []
+    private(set) var resizePayload: DocumentPaintSurfaceResizeBackendPayload?
 
     func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws {
         switch operation {
         case let .mutation(_, destinations):
             _ = destinations
+        case let .resize(payload):
+            resizePayload = payload
+            destinations = payload.destinations
         case let .restore(payload):
             _ = payload.reference
             destinations = payload.destinations
@@ -1497,10 +2101,18 @@ private final class TransactionTestMutationBackend:
     }
 
     func encode(
-        destinations: [DocumentPaintSurfaceMutationDestination]
+        _ operation: DocumentPaintSurfaceBackendOperation
     ) throws -> DocumentPaintSurfaceMutationBackendEncoding {
         encodeCallCount += 1
-        self.destinations = destinations
+        switch operation {
+        case let .mutation(_, destinations):
+            self.destinations = destinations
+        case let .resize(payload):
+            resizePayload = payload
+            destinations = payload.destinations
+        case let .restore(payload):
+            destinations = payload.destinations
+        }
         return DocumentPaintSurfaceMutationBackendEncoding()
     }
 
@@ -1542,13 +2154,15 @@ private struct TransactionFixture {
     static func make(
         width: Int = 512,
         height: Int = 512,
-        layerID requestedLayerID: UUID? = nil
+        layerID requestedLayerID: UUID? = nil,
+        geometry requestedGeometry: DocumentPaintGeometry? = nil
     ) throws -> Self? {
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue()
         else { return nil }
         let layerID = requestedLayerID ?? UUID()
-        let geometry = try transactionGeometry(width: width, height: height)
+        let geometry = try requestedGeometry
+            ?? transactionGeometry(width: width, height: height)
         let tileBytes = PaintTileDescriptor.residentByteCount
         let registry = try DocumentPaintSurfaceStore(
             device: device,
@@ -1620,6 +2234,16 @@ private func transactionGeometry(
         documentPixelSize: PixelSize(width: width, height: height),
         storagePixelSize: PixelSize(width: width, height: height),
         radialLayout: nil
+    )
+}
+
+private func transactionRadialPhysicalCoordinate(
+    _ page: RadialResidentPage,
+    layout: RadialSectorLayout
+) -> PaintTileCoordinate {
+    PaintTileCoordinate(
+        x: page.atlasSlot % layout.atlasColumns,
+        y: page.atlasSlot / layout.atlasColumns
     )
 }
 

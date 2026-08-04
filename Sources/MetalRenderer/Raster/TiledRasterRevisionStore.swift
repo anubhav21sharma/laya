@@ -420,7 +420,11 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         after: TiledRasterRevisionEndpoint,
         failureInjection: TiledRasterRevisionFailureInjection? = nil
     ) throws -> PendingRasterRevisionPair {
-        guard !before.coordinates.isEmpty || !after.coordinates.isEmpty else {
+        let geometryChanged = before.pixelSize != after.pixelSize
+            || before.documentPixelSize != after.documentPixelSize
+        guard !before.coordinates.isEmpty || !after.coordinates.isEmpty
+                || geometryChanged
+        else {
             throw TiledRasterRevisionStoreError.emptyCoordinateSet
         }
         let beforeLayout = try makeLayout(

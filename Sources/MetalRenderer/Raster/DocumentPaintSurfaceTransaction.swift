@@ -70,6 +70,7 @@ public enum DocumentPaintSurfaceTransactionError:
     case missingBaseCoordinate(PaintTileCoordinate)
     case overlappingDirtyAndRemovedCoordinate(PaintTileCoordinate)
     case incompleteGeometryReplacement(PaintTileCoordinate)
+    case invalidResizeMapping
     case emptyMutation
     case backendEncodingFailed
     case backendCompletionFailed
@@ -343,6 +344,31 @@ struct DocumentPaintSurfaceMutationDestination: @unchecked Sendable {
     let texture: any MTLTexture
 }
 
+struct DocumentPaintSurfaceMutationSource: @unchecked Sendable {
+    let coordinate: PaintTileCoordinate
+    let logicalBounds: PixelRect
+    let texture: any MTLTexture
+}
+
+struct DocumentPaintSurfaceResizeCopyMapping: Equatable, Sendable {
+    let sourceCoordinate: PaintTileCoordinate
+    let destinationCoordinate: PaintTileCoordinate
+    let sourceOrigin: SIMD2<Int>
+    let destinationOrigin: SIMD2<Int>
+    let extent: PixelSize
+    let logicalPage: RadialPageCoordinate?
+    let masksToTargetOrbit: Bool
+}
+
+struct DocumentPaintSurfaceResizeBackendPayload: @unchecked Sendable {
+    let sourceGeometry: DocumentPaintGeometry
+    let candidateGeometry: DocumentPaintGeometry
+    let clearsDestinationsBeforeCopy: Bool
+    let sources: [DocumentPaintSurfaceMutationSource]
+    let destinations: [DocumentPaintSurfaceMutationDestination]
+    let mappings: [DocumentPaintSurfaceResizeCopyMapping]
+}
+
 /// Complete restore payload presented to the inert backend preflight. It is
 /// deliberately typed and contains no candidate, install lease, or registry
 /// commit token.
@@ -356,6 +382,7 @@ enum DocumentPaintSurfaceBackendOperation: @unchecked Sendable {
         kind: DocumentPaintSurfaceTransactionKind,
         destinations: [DocumentPaintSurfaceMutationDestination]
     )
+    case resize(DocumentPaintSurfaceResizeBackendPayload)
     case restore(DocumentPaintSurfaceRestoreBackendPayload)
 }
 
@@ -391,9 +418,8 @@ protocol DocumentPaintSurfaceMutationBackend:
 {
     func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws
 
-    func encode(
-        destinations: [DocumentPaintSurfaceMutationDestination]
-    ) throws -> DocumentPaintSurfaceMutationBackendEncoding
+    func encode(_ operation: DocumentPaintSurfaceBackendOperation) throws
+        -> DocumentPaintSurfaceMutationBackendEncoding
 
     func complete(
         _ encoding: DocumentPaintSurfaceMutationBackendEncoding,
@@ -412,16 +438,26 @@ protocol DocumentPaintSurfaceMutationBackend:
 /// Production-inert owner for one complete sparse document mutation. It is
 /// intentionally independent from GridRenderer until the atomic Task 6 switch.
 public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
+    private struct ResizePlan: Sendable {
+        let sourceCoordinates: [PaintTileCoordinate]
+        let beforeCoordinates: [PaintTileCoordinate]
+        let afterCoordinates: [PaintTileCoordinate]
+        let removedCoordinates: [PaintTileCoordinate]
+        let mappings: [DocumentPaintSurfaceResizeCopyMapping]
+    }
+
     private final class LiveTransaction {
         let sequence: UInt64
         let request: DocumentPaintSurfaceMutationRequest
         let baseGeneration: UInt64
         let baseBinding: DocumentPaintLayerBinding
         let candidate: DocumentPaintSurfaceCandidate
+        let resizePlan: ResizePlan?
         var phase: DocumentPaintSurfaceTransactionPhase
 
         var candidateBinding: DocumentPaintLayerBinding?
         var destinationLease: PaintTileLease?
+        var resizeSourceLease: PaintTileLease?
         var backendEncoding: DocumentPaintSurfaceMutationBackendEncoding?
         var reduction: DocumentPaintTransparencyReduction?
         var revisionPair: PendingRasterRevisionPair?
@@ -439,6 +475,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             baseGeneration: UInt64,
             baseBinding: DocumentPaintLayerBinding,
             candidate: DocumentPaintSurfaceCandidate,
+            resizePlan: ResizePlan?,
             phase: DocumentPaintSurfaceTransactionPhase
         ) {
             self.sequence = sequence
@@ -446,6 +483,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             self.baseGeneration = baseGeneration
             self.baseBinding = baseBinding
             self.candidate = candidate
+            self.resizePlan = resizePlan
             self.phase = phase
         }
     }
@@ -620,6 +658,27 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 throw DocumentPaintSurfaceTransactionError
                     .missingBaseCoordinate(coordinate)
             }
+            let resizePlan: ResizePlan?
+            if request.kind == .resize {
+                guard request.candidateGeometry != request.baseGeometry else {
+                    throw DocumentPaintSurfaceTransactionError
+                        .invalidResizeMapping
+                }
+                resizePlan = try Self.makeResizePlan(
+                    baseCoordinates: baseCoordinates,
+                    sourceGeometry: request.baseGeometry,
+                    candidateGeometry: request.candidateGeometry
+                )
+                guard request.dirtyCoordinates == resizePlan?.afterCoordinates,
+                      request.explicitlyRemovedCoordinates
+                        == resizePlan?.removedCoordinates
+                else {
+                    throw DocumentPaintSurfaceTransactionError
+                        .invalidResizeMapping
+                }
+            } else {
+                resizePlan = nil
+            }
             if request.kind == .clear {
                 guard request.dirtyCoordinates.isEmpty else {
                     throw DocumentPaintSurfaceTransactionError
@@ -645,7 +704,9 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                         .missingBaseCoordinate(missing)
                 }
             } else if request.dirtyCoordinates.isEmpty,
-                      request.explicitlyRemovedCoordinates.isEmpty {
+                      request.explicitlyRemovedCoordinates.isEmpty,
+                      !(request.kind == .resize
+                          && request.candidateGeometry != request.baseGeometry) {
                 throw DocumentPaintSurfaceTransactionError.emptyMutation
             }
 
@@ -684,6 +745,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 baseGeneration: baseBinding.generation,
                 baseBinding: baseBinding,
                 candidate: candidate,
+                resizePlan: resizePlan,
                 phase: .prepared
             )
             return .prepared(DocumentPaintPreparedMutation(
@@ -1123,20 +1185,79 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     texture: $0.texture
                 )
             }
+            let operation: DocumentPaintSurfaceBackendOperation
+            if let resizePlan = current.resizePlan {
+                do {
+                    if !resizePlan.sourceCoordinates.isEmpty {
+                        current.resizeSourceLease = try current.baseBinding
+                            .canonical.leaseExistingTiles(
+                                at: resizePlan.sourceCoordinates,
+                                pinReasons: [.inFlight]
+                            )
+                    }
+                    let sources = (current.resizeSourceLease?.bindings ?? [])
+                        .map {
+                            DocumentPaintSurfaceMutationSource(
+                                coordinate: $0.descriptor.coordinate,
+                                logicalBounds: $0.descriptor.logicalBounds,
+                                texture: $0.texture
+                            )
+                        }
+                    try Self.validateResizeBindings(
+                        sources: sources,
+                        destinations: destinations,
+                        plan: resizePlan
+                    )
+                    operation = .resize(
+                        DocumentPaintSurfaceResizeBackendPayload(
+                            sourceGeometry: current.request.baseGeometry,
+                            candidateGeometry:
+                                current.request.candidateGeometry,
+                            clearsDestinationsBeforeCopy: true,
+                            sources: sources,
+                            destinations: destinations,
+                            mappings: resizePlan.mappings
+                        )
+                    )
+                } catch {
+                    do {
+                        if let sourceLease = current.resizeSourceLease {
+                            try current.baseBinding.canonical.returnLease(
+                                sourceLease
+                            )
+                            current.resizeSourceLease = nil
+                        }
+                        try binding.canonical.returnLease(lease)
+                        current.destinationLease = nil
+                        current.candidateBinding = nil
+                    } catch {
+                        current.phase = .discardPending
+                        throw DocumentPaintSurfaceTransactionError.cleanupFailed
+                    }
+                    throw DocumentPaintSurfaceTransactionError
+                        .backendEncodingFailed
+                }
+            } else {
+                operation = .mutation(
+                    kind: current.request.kind,
+                    destinations: destinations
+                )
+            }
             do {
                 if failureInjection?.shouldFail(at: .mutationEncode) == true {
                     throw DocumentPaintSurfaceTransactionError
                         .backendEncodingFailed
                 }
-                try mutationBackend.preflight(.mutation(
-                    kind: current.request.kind,
-                    destinations: destinations
-                ))
-                current.backendEncoding = try mutationBackend.encode(
-                    destinations: destinations
-                )
+                try mutationBackend.preflight(operation)
+                current.backendEncoding = try mutationBackend.encode(operation)
             } catch {
                 do {
+                    if let sourceLease = current.resizeSourceLease {
+                        try current.baseBinding.canonical.returnLease(
+                            sourceLease
+                        )
+                        current.resizeSourceLease = nil
+                    }
                     try binding.canonical.returnLease(lease)
                     current.destinationLease = nil
                     current.candidateBinding = nil
@@ -1211,6 +1332,21 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 throw DocumentPaintSurfaceTransactionError
                     .destinationLeaseReturnFailed
             }
+            if let sourceLease = current.resizeSourceLease {
+                if failureInjection?.shouldFail(at: .sourceLeaseReturn) == true {
+                    current.phase = .discardPending
+                    throw DocumentPaintSurfaceTransactionError
+                        .sourceLeaseReturnFailed
+                }
+                do {
+                    try current.baseBinding.canonical.returnLease(sourceLease)
+                    current.resizeSourceLease = nil
+                } catch {
+                    current.phase = .discardPending
+                    throw DocumentPaintSurfaceTransactionError
+                        .sourceLeaseReturnFailed
+                }
+            }
             guard let reduction = current.reduction else {
                 preconditionFailure("Validated reduction was not retained")
             }
@@ -1261,7 +1397,8 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             current.candidateBinding = candidateBinding
 
             let endpointCoordinates = Self.historyEndpointCoordinates(
-                for: current.request
+                for: current.request,
+                resizePlan: current.resizePlan
             )
             let basePresent = Set(
                 current.baseBinding.canonical.references.map(\.coordinate)
@@ -1795,6 +1932,16 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     .destinationLeaseReturnFailed
             }
         }
+        if let sourceLease = current.resizeSourceLease {
+            do {
+                try current.baseBinding.canonical.returnLease(sourceLease)
+                current.resizeSourceLease = nil
+            } catch {
+                current.phase = .discardPending
+                throw DocumentPaintSurfaceTransactionError
+                    .sourceLeaseReturnFailed
+            }
+        }
         if current.beforeCapture != nil || current.afterCapture != nil {
             current.historyCommandBuffer?.waitUntilCompleted()
             do {
@@ -1860,6 +2007,195 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         live = nil
     }
 
+    private static func makeResizePlan(
+        baseCoordinates: [PaintTileCoordinate],
+        sourceGeometry: DocumentPaintGeometry,
+        candidateGeometry: DocumentPaintGeometry
+    ) throws -> ResizePlan {
+        if let sourceLayout = sourceGeometry.radialLayout,
+           let candidateLayout = candidateGeometry.radialLayout {
+            return try makeRadialResizePlan(
+                baseCoordinates: baseCoordinates,
+                sourceLayout: sourceLayout,
+                candidateLayout: candidateLayout
+            )
+        }
+        guard sourceGeometry.radialLayout == nil,
+              candidateGeometry.radialLayout == nil
+        else {
+            throw DocumentPaintSurfaceTransactionError.invalidResizeMapping
+        }
+        var mappings: [DocumentPaintSurfaceResizeCopyMapping] = []
+        mappings.reserveCapacity(baseCoordinates.count)
+        for coordinate in baseCoordinates {
+            let source: PaintTileDescriptor
+            let destination: PaintTileDescriptor
+            do {
+                source = try PaintTileDescriptor(
+                    coordinate: coordinate,
+                    logicalPixelSize: sourceGeometry.storagePixelSize
+                )
+                destination = try PaintTileDescriptor(
+                    coordinate: coordinate,
+                    logicalPixelSize: candidateGeometry.storagePixelSize
+                )
+            } catch PaintTileError.coordinateOutsideSurface {
+                continue
+            } catch {
+                throw DocumentPaintSurfaceTransactionError.invalidResizeMapping
+            }
+            let minX = max(
+                source.logicalBounds.minX,
+                destination.logicalBounds.minX
+            )
+            let minY = max(
+                source.logicalBounds.minY,
+                destination.logicalBounds.minY
+            )
+            let maxX = min(
+                source.logicalBounds.maxX,
+                destination.logicalBounds.maxX
+            )
+            let maxY = min(
+                source.logicalBounds.maxY,
+                destination.logicalBounds.maxY
+            )
+            guard maxX > minX, maxY > minY else { continue }
+            mappings.append(DocumentPaintSurfaceResizeCopyMapping(
+                sourceCoordinate: coordinate,
+                destinationCoordinate: coordinate,
+                sourceOrigin: SIMD2(
+                    minX - source.logicalBounds.minX,
+                    minY - source.logicalBounds.minY
+                ),
+                destinationOrigin: SIMD2(
+                    minX - destination.logicalBounds.minX,
+                    minY - destination.logicalBounds.minY
+                ),
+                extent: PixelSize(width: maxX - minX, height: maxY - minY),
+                logicalPage: nil,
+                masksToTargetOrbit: false
+            ))
+        }
+        let sourceCoordinates = mappings.map(\.sourceCoordinate).sorted()
+        let afterCoordinates = mappings.map(\.destinationCoordinate).sorted()
+        let afterSet = Set(afterCoordinates)
+        return ResizePlan(
+            sourceCoordinates: sourceCoordinates,
+            beforeCoordinates: baseCoordinates,
+            afterCoordinates: afterCoordinates,
+            removedCoordinates: baseCoordinates.filter {
+                !afterSet.contains($0)
+            },
+            mappings: mappings
+        )
+    }
+
+    private static func makeRadialResizePlan(
+        baseCoordinates: [PaintTileCoordinate],
+        sourceLayout: RadialSectorLayout,
+        candidateLayout: RadialSectorLayout
+    ) throws -> ResizePlan {
+        let sourcePages = Dictionary(
+            uniqueKeysWithValues: sourceLayout.residentPages.map { page in
+                (
+                    radialPhysicalCoordinate(page, layout: sourceLayout),
+                    page
+                )
+            }
+        )
+        var mappings: [DocumentPaintSurfaceResizeCopyMapping] = []
+        mappings.reserveCapacity(baseCoordinates.count)
+        for sourceCoordinate in baseCoordinates {
+            guard let sourcePage = sourcePages[sourceCoordinate] else {
+                throw DocumentPaintSurfaceTransactionError
+                    .invalidResizeMapping
+            }
+            guard let candidatePage = candidateLayout.residentPage(
+                at: sourcePage.coordinate
+            ) else { continue }
+            mappings.append(DocumentPaintSurfaceResizeCopyMapping(
+                sourceCoordinate: sourceCoordinate,
+                destinationCoordinate: radialPhysicalCoordinate(
+                    candidatePage,
+                    layout: candidateLayout
+                ),
+                sourceOrigin: .zero,
+                destinationOrigin: .zero,
+                extent: PixelSize(
+                    width: RadialSectorLayout.pageSide,
+                    height: RadialSectorLayout.pageSide
+                ),
+                logicalPage: sourcePage.coordinate,
+                masksToTargetOrbit: true
+            ))
+        }
+        mappings.sort {
+            if $0.destinationCoordinate == $1.destinationCoordinate {
+                return $0.sourceCoordinate < $1.sourceCoordinate
+            }
+            return $0.destinationCoordinate < $1.destinationCoordinate
+        }
+        let sourceCoordinates = mappings.map(\.sourceCoordinate).sorted()
+        let afterCoordinates = mappings.map(\.destinationCoordinate).sorted()
+        guard Set(afterCoordinates).count == afterCoordinates.count else {
+            throw DocumentPaintSurfaceTransactionError.invalidResizeMapping
+        }
+        let afterSet = Set(afterCoordinates)
+        return ResizePlan(
+            sourceCoordinates: sourceCoordinates,
+            beforeCoordinates: baseCoordinates,
+            afterCoordinates: afterCoordinates,
+            removedCoordinates: baseCoordinates.filter {
+                !afterSet.contains($0)
+            },
+            mappings: mappings
+        )
+    }
+
+    private static func radialPhysicalCoordinate(
+        _ page: RadialResidentPage,
+        layout: RadialSectorLayout
+    ) -> PaintTileCoordinate {
+        PaintTileCoordinate(
+            x: page.atlasSlot % layout.atlasColumns,
+            y: page.atlasSlot / layout.atlasColumns
+        )
+    }
+
+    private static func validateResizeBindings(
+        sources: [DocumentPaintSurfaceMutationSource],
+        destinations: [DocumentPaintSurfaceMutationDestination],
+        plan: ResizePlan
+    ) throws {
+        guard sources.map(\.coordinate) == plan.sourceCoordinates,
+              destinations.map(\.coordinate) == plan.afterCoordinates,
+              plan.mappings.map(\.sourceCoordinate).sorted()
+                == plan.sourceCoordinates,
+              plan.mappings.map(\.destinationCoordinate).sorted()
+                == plan.afterCoordinates
+        else {
+            throw DocumentPaintSurfaceTransactionError.invalidResizeMapping
+        }
+        for source in sources {
+            guard source.texture.pixelFormat == PaintTileDescriptor.pixelFormat,
+                  source.texture.width == PaintTileDescriptor.side,
+                  source.texture.height == PaintTileDescriptor.side
+            else {
+                throw DocumentPaintSurfaceTransactionError.invalidResizeMapping
+            }
+        }
+        for destination in destinations {
+            guard destination.texture.pixelFormat
+                    == PaintTileDescriptor.pixelFormat,
+                  destination.texture.width == PaintTileDescriptor.side,
+                  destination.texture.height == PaintTileDescriptor.side
+            else {
+                throw DocumentPaintSurfaceTransactionError.invalidResizeMapping
+            }
+        }
+    }
+
     private static func validateReduction(
         _ evidence: [DocumentPaintSurfaceMutationEvidence],
         dirtyCoordinates: [PaintTileCoordinate],
@@ -1915,8 +2251,15 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
     }
 
     private static func historyEndpointCoordinates(
-        for request: DocumentPaintSurfaceMutationRequest
+        for request: DocumentPaintSurfaceMutationRequest,
+        resizePlan: ResizePlan?
     ) -> (before: [PaintTileCoordinate], after: [PaintTileCoordinate]) {
+        if let resizePlan {
+            return (
+                resizePlan.beforeCoordinates,
+                resizePlan.afterCoordinates
+            )
+        }
         let changed = Set(
             request.dirtyCoordinates
                 + request.explicitlyRemovedCoordinates

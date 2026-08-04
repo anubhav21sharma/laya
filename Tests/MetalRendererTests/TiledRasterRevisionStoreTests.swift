@@ -1247,6 +1247,54 @@ struct TiledRasterRevisionStoreTests {
     }
 
     @Test
+    func emptyEndpointsAllocateOnlyForARealPhysicalOrVisibleGeometryChange() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layerID = tiledRevisionLayerID(46)
+        let before = try TiledRasterRevisionEndpoint(
+            generation: 3,
+            pixelSize: PixelSize(width: 255, height: 256),
+            documentPixelSize: PixelSize(width: 510, height: 512),
+            coordinates: [],
+            presentCoordinates: []
+        )
+        let after = try TiledRasterRevisionEndpoint(
+            generation: 4,
+            pixelSize: PixelSize(width: 257, height: 256),
+            documentPixelSize: PixelSize(width: 514, height: 512),
+            coordinates: [],
+            presentCoordinates: []
+        )
+        let store = TiledRasterRevisionStore(
+            device: device,
+            maximumRetainedBytes: 1
+        )
+
+        let pair = try store.allocatePair(
+            layerID: layerID,
+            before: before,
+            after: after
+        )
+
+        #expect(pair.before.pixelSize == before.pixelSize)
+        #expect(pair.after.pixelSize == after.pixelSize)
+        #expect(pair.before.documentPixelSize == before.documentPixelSize)
+        #expect(pair.after.documentPixelSize == after.documentPixelSize)
+        #expect(pair.before.tileCoordinates.isEmpty)
+        #expect(pair.after.tileCoordinates.isEmpty)
+        #expect(pair.retainedBytes == 0)
+        #expect(store.residentBytes == 0)
+        try store.discard(pair)
+
+        #expect(throws: TiledRasterRevisionStoreError.emptyCoordinateSet) {
+            _ = try store.allocatePair(
+                layerID: layerID,
+                before: before,
+                after: before
+            )
+        }
+    }
+
+    @Test
     func publishedOnlyInstallRejectsProvisionalAndOwnsPublishedLifetime() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let layerID = tiledRevisionLayerID(42)
