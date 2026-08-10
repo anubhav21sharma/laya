@@ -8,7 +8,6 @@ public enum DepositionEvidenceValidationError:
     case sceneSetMismatch
     case duplicateScene(String)
     case scenesNotSorted
-    case wrongSceneSchema(name: String, actual: Int)
     case invalidExpectationPair(String)
 
     public var errorDescription: String? {
@@ -23,8 +22,6 @@ public enum DepositionEvidenceValidationError:
             "Deposition scene '\(name)' is duplicated."
         case .scenesNotSorted:
             "Deposition scenes must be sorted by scene name."
-        case let .wrongSceneSchema(name, actual):
-            "Deposition scene '\(name)' uses schema \(actual), expected 6."
         case let .invalidExpectationPair(name):
             "Deposition scene pair '\(name)' must differ in exactly one authoritative expectation."
         }
@@ -175,12 +172,6 @@ public enum DepositionEvidenceValidator {
         }
         guard names == sceneNames else {
             throw DepositionEvidenceValidationError.sceneSetMismatch
-        }
-        for scene in scenes where scene.schemaVersion != 6 {
-            throw DepositionEvidenceValidationError.wrongSceneSchema(
-                name: scene.name,
-                actual: scene.schemaVersion
-            )
         }
         for positiveName in positiveSceneNames {
             guard

@@ -1268,11 +1268,6 @@ struct StrokeFrameSchedulerTests {
                 <= maximumWorkPerReturn,
             "Retained replay counting, reprojection, and settled transfer must be included in the per-return work budget"
         )
-        #expect(
-            replacementSnapshot.synchronousCompatibilityReplayInvocationCount
-                == 0
-        )
-
         // Leave another cursor continuation outstanding, cancel between
         // pages, and prove no retained-work transaction poisons rapid reuse.
         let cancellationFirst = try await scheduler.appendPreparedStroke(
@@ -1765,12 +1760,12 @@ struct StrokeFrameSchedulerTests {
         #expect(queue.snapshot.authoritativeCapacity == 12)
         #expect(
             queue.snapshot.predictionCapacity
-                == PredictionOverlay.maximumNormalizedSampleCount
+                == PredictionAdmissionLimits.maximumNormalizedSampleCount
         )
         #expect(queue.snapshot.authoritativeStorageCapacity >= 12)
         #expect(
             queue.snapshot.predictionStorageCapacity
-                >= PredictionOverlay.maximumNormalizedSampleCount
+                >= PredictionAdmissionLimits.maximumNormalizedSampleCount
         )
     }
 
@@ -3699,7 +3694,7 @@ struct StrokeFrameSchedulerTests {
                         }
                         deferredAcknowledgement = (generation, token)
                     }
-                case let .commitBarrierReached(resultGeneration):
+                case let .commitBarrierReached(resultGeneration, _):
                     #expect(resultGeneration == generation)
                     commitBarrierReached = true
                     logicalDabCountAtCommitBarrier = dabs.count
@@ -4248,10 +4243,17 @@ extension StrokeFrameSchedulerTests {
         ].enumerated() {
             let generation = UInt64(0xC1_12_F0 + offset * 2)
             let injector = OneShotStageCFailureInjector(seam: seam)
-            let surfaces = try StrokeMetalSurfaceResources(
+            let store = PaintTileStore(
                 device: setup.device,
+                byteBudget: PaintTileDescriptor.residentByteCount * 32
+            )
+            let surfaces = try stageCCurrentSurfaceResources(
+                device: setup.device,
+                store: store,
+                layerID: UUID(),
+                generation: generation,
                 pixelSize: PixelSize(width: 512, height: 512),
-                maximumRecordCount: 4_096
+                pipeline: setup.tilePipeline
             )
             let descriptor = StrokeMetalResourceDescriptor(
                 surfaces: surfaces,
@@ -4302,17 +4304,40 @@ extension StrokeFrameSchedulerTests {
             }
             #expect(actualGeneration == generation)
             #expect(failure == .injectedStageC(seam))
+            let retryGeneration = generation + 1
+            let retrySurfaces = try stageCCurrentSurfaceResources(
+                device: setup.device,
+                store: store,
+                layerID: UUID(),
+                generation: retryGeneration,
+                pixelSize: PixelSize(width: 512, height: 512),
+                pipeline: setup.tilePipeline
+            )
+            let retryConfiguration = try preparationConfiguration(
+                program: stageCMetalTestProgram(
+                    id: "test.scheduler.stage-c-surface-retry-\(seam.rawValue)"
+                ),
+                metalResourceDescriptor: StrokeMetalResourceDescriptor(
+                    surfaces: retrySurfaces,
+                    brush: setup.brush,
+                    frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+                    forceCommandFailure: false
+                )
+            )
             try await assertInjectedFailureCleanupAndReuse(
                 scheduler,
                 failedGeneration: generation,
-                configuration: configuration
+                configuration: configuration,
+                retryConfiguration: retryConfiguration
             )
+            #expect(store.snapshot().activeLeaseCount == 0)
+            #expect(store.snapshot().entries.isEmpty)
         }
     }
 
     @Test
     @MainActor
-    func tiledTestBackendRunsThroughSchedulerWithoutChangingLegacySelection()
+    func capabilityBackedSurfaceRunsThroughSchedulerAndReleasesPins()
         async throws
     {
         guard let setup = try await stageCSurfaceTestSetup() else { return }
@@ -4321,44 +4346,22 @@ extension StrokeFrameSchedulerTests {
             device: setup.device,
             byteBudget: PaintTileDescriptor.residentByteCount * 32
         )
-        let tiled = try StrokeTileSurfaceResources(
+        let surfaces = try stageCCurrentSurfaceResources(
             device: setup.device,
             store: store,
             layerID: UUID(
                 uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
             )!,
-            pixelSize: PixelSize(width: 512, height: 512),
             generation: generation,
-            maximumRecordCount: 4_096,
-            maximumTileReferenceCount: 16_384,
-            pipeline: setup.tilePipeline,
-            namespaceLease: .testing(generation: generation)
+            pixelSize: PixelSize(width: 512, height: 512),
+            pipeline: setup.tilePipeline
         )
         let descriptor = StrokeMetalResourceDescriptor(
-            tiledTestSurfaces: tiled,
+            surfaces: surfaces,
             brush: setup.brush,
             frameUniforms: stageCSurfaceFrameUniforms(side: 512),
             forceCommandFailure: false
         )
-        guard case .tiledTest = descriptor.backend else {
-            Issue.record("Expected explicit tiled test backend")
-            return
-        }
-        let legacy = try StrokeMetalSurfaceResources(
-            device: setup.device,
-            pixelSize: PixelSize(width: 512, height: 512),
-            maximumRecordCount: 4_096
-        )
-        let legacyDescriptor = StrokeMetalResourceDescriptor(
-            surfaces: legacy,
-            brush: setup.brush,
-            frameUniforms: stageCSurfaceFrameUniforms(side: 512),
-            forceCommandFailure: false
-        )
-        guard case .legacy = legacyDescriptor.backend else {
-            Issue.record("Existing construction must remain legacy")
-            return
-        }
 
         let scheduler = StrokeFrameScheduler(
             budget: try frameBudget(
@@ -4389,7 +4392,7 @@ extension StrokeFrameSchedulerTests {
         guard case let .prepared(first)? = began,
               let firstLease = first.surfaceLease
         else {
-            Issue.record("Expected tiled begin lease")
+            Issue.record("Expected capability-backed begin lease")
             return
         }
         #expect(!firstLease.tiledBindings.isEmpty)
@@ -4406,7 +4409,7 @@ extension StrokeFrameSchedulerTests {
                 generation: generation
             )
         } else if case let .failed(_, failure)? = afterAck {
-            Issue.record("Tiled ACK failed: \(failure)")
+            Issue.record("Capability-backed ACK failed: \(failure)")
         }
         #expect(store.snapshot().activeLeaseCount == 0)
 
@@ -4421,7 +4424,7 @@ extension StrokeFrameSchedulerTests {
         guard case let .prepared(second)? = appended,
               let secondLease = second.surfaceLease
         else {
-            Issue.record("Expected tiled append lease")
+            Issue.record("Expected capability-backed append lease")
             return
         }
         #expect(secondLease.tiledBindings.count >= firstLease.tiledBindings.count)
@@ -4441,7 +4444,7 @@ extension StrokeFrameSchedulerTests {
 
     @Test
     @MainActor
-    func tiledSchedulerRunsPredictionEstimateFinishAndImmediateReuse()
+    func capabilityBackedSchedulerRunsPredictionEstimateFinishAndReuse()
         async throws
     {
         guard let setup = try await stageCSurfaceTestSetup() else { return }
@@ -4450,22 +4453,20 @@ extension StrokeFrameSchedulerTests {
             device: setup.device,
             byteBudget: PaintTileDescriptor.residentByteCount * 32
         )
-        let firstNamespace = StrokeTileSurfaceNamespaceLease.testing(
-            generation: generation
-        )
-        let firstResources = try StrokeTileSurfaceResources(
+        let firstResources = try stageCCurrentSurfaceResources(
             device: setup.device,
             store: store,
             layerID: UUID(),
-            pixelSize: PixelSize(width: 512, height: 512),
             generation: generation,
-            maximumRecordCount: 4_096,
-            maximumTileReferenceCount: 16_384,
-            pipeline: setup.tilePipeline,
-            namespaceLease: firstNamespace
+            pixelSize: PixelSize(width: 512, height: 512),
+            pipeline: setup.tilePipeline
         )
+        let firstAuthoritativeSurfaceID =
+            firstResources.capability.testingAuthoritativeSurfaceID
+        let firstPredictionSurfaceID =
+            firstResources.capability.testingPredictionSurfaceID
         let firstDescriptor = StrokeMetalResourceDescriptor(
-            tiledTestSurfaces: firstResources,
+            surfaces: firstResources,
             brush: setup.brush,
             frameUniforms: stageCSurfaceFrameUniforms(side: 512),
             forceCommandFailure: false
@@ -4539,7 +4540,7 @@ extension StrokeFrameSchedulerTests {
             )
         ))
         guard case let .prepared(estimated)? = estimate else {
-            Issue.record("Expected tiled estimated replacement")
+            Issue.record("Expected capability-backed estimated replacement")
             return
         }
         #expect(estimated.surfaceLease?.layer == .authoritative)
@@ -4581,23 +4582,21 @@ extension StrokeFrameSchedulerTests {
         #expect(store.snapshot().entries.isEmpty)
 
         let reusedGeneration = generation + 1
-        let reusedNamespace = StrokeTileSurfaceNamespaceLease.testing(
-            generation: reusedGeneration
-        )
-        #expect(reusedNamespace.authoritativeSurfaceID
-            != firstNamespace.authoritativeSurfaceID)
-        #expect(reusedNamespace.predictionSurfaceID
-            != firstNamespace.predictionSurfaceID)
-        let reusedResources = try StrokeTileSurfaceResources(
+        let reusedResources = try stageCCurrentSurfaceResources(
             device: setup.device,
             store: store,
             layerID: UUID(),
-            pixelSize: PixelSize(width: 512, height: 512),
             generation: reusedGeneration,
-            maximumRecordCount: 4_096,
-            maximumTileReferenceCount: 16_384,
-            pipeline: setup.tilePipeline,
-            namespaceLease: reusedNamespace
+            pixelSize: PixelSize(width: 512, height: 512),
+            pipeline: setup.tilePipeline
+        )
+        #expect(
+            reusedResources.capability.testingAuthoritativeSurfaceID
+                != firstAuthoritativeSurfaceID
+        )
+        #expect(
+            reusedResources.capability.testingPredictionSurfaceID
+                != firstPredictionSurfaceID
         )
         let reusedConfiguration = try preparationConfiguration(
             program: stageCMetalTestProgram(
@@ -4605,7 +4604,7 @@ extension StrokeFrameSchedulerTests {
                 replayMode: .appendOnly
             ),
             metalResourceDescriptor: StrokeMetalResourceDescriptor(
-                tiledTestSurfaces: reusedResources,
+                surfaces: reusedResources,
                 brush: setup.brush,
                 frameUniforms: stageCSurfaceFrameUniforms(side: 512),
                 forceCommandFailure: false
@@ -4632,7 +4631,117 @@ extension StrokeFrameSchedulerTests {
 
     @Test
     @MainActor
-    func tiledSchedulerCommandFailureRetiresAndReusesImmediately()
+    func capabilityBackedCommitPublishesSourceOnlyAfterFinalACK()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD5_11
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 32
+        )
+        let layerID = UUID()
+        let resources = try StrokeTileSurfaceResources(
+            device: setup.device,
+            commandQueue: setup.device.makeCommandQueue()!,
+            capability: try .testing(
+                store: store,
+                layerID: layerID,
+                pixelSize: PixelSize(width: 512, height: 512),
+                generation: generation
+            ),
+            maximumRecordCount: 4_096,
+            maximumTileReferenceCount: 16_384,
+            pipeline: setup.tilePipeline
+        )
+        let scheduler = StrokeFrameScheduler(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120,
+            preparationClock: { 0 }
+        )
+        let configuration = try preparationConfiguration(
+            program: stageCMetalTestProgram(
+                id: "test.scheduler.task6-atomic-source-barrier",
+                replayMode: .appendOnly
+            ),
+            metalResourceDescriptor: StrokeMetalResourceDescriptor(
+                surfaces: resources,
+                brush: setup.brush,
+                frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+                forceCommandFailure: false
+            )
+        )
+        let began = try await scheduler.beginPreparedStroke(
+            generation: generation,
+            configuration: configuration,
+            actualSamples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 0
+            )]
+        )
+        try await acknowledgeAll(
+            began,
+            scheduler: scheduler,
+            generation: generation
+        )
+        let finished = try await scheduler.finishPreparedStroke(
+            generation: generation,
+            actualSamples: [stageCPreparationSample(
+                phase: .ended,
+                x: 96,
+                timestamp: 1
+            )]
+        )
+        _ = try await drainPreparedBatchRecords(
+            finished,
+            scheduler: scheduler,
+            generation: generation
+        )
+
+        let commit = await scheduler.process(.commit(generation: generation))
+        guard case let .prepared(commitPage)? = commit,
+              let commitToken = commitPage.frameToken
+        else {
+            Issue.record("Commit must first publish one ACK-scoped page")
+            return
+        }
+        #expect(!resources.capability.isTerminal)
+        #expect(resources.snapshot.activeLeaseCount == 0)
+
+        let barrier = await scheduler.acknowledgePreparedFrame(
+            generation: generation,
+            frameToken: commitToken
+        )
+        guard case let .commitBarrierReached(
+            barrierGeneration,
+            commitMutation
+        )? = barrier,
+        case let .source(source) = commitMutation
+        else {
+            Issue.record("Final ACK must atomically publish the opaque source")
+            return
+        }
+        #expect(barrierGeneration == generation)
+        #expect(!source.coordinates.isEmpty)
+        #expect(resources.snapshot.activeLeaseCount == 1)
+        #expect(!resources.capability.isTerminal)
+
+        try source.cancelUnclaimed()
+        #expect(resources.snapshot.activeLeaseCount == 0)
+        #expect(resources.capability.isTerminal)
+        await scheduler.cancel(generation: generation)
+        #expect(store.snapshot().entries.isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func capabilityBackedCommandFailureRetiresAndReusesImmediately()
         async throws
     {
         guard let setup = try await stageCSurfaceTestSetup() else { return }
@@ -4642,16 +4751,13 @@ extension StrokeFrameSchedulerTests {
             byteBudget: PaintTileDescriptor.residentByteCount * 16
         )
         func resources(_ value: UInt64) throws -> StrokeTileSurfaceResources {
-            try StrokeTileSurfaceResources(
+            try stageCCurrentSurfaceResources(
                 device: setup.device,
                 store: store,
                 layerID: UUID(),
-                pixelSize: PixelSize(width: 512, height: 512),
                 generation: value,
-                maximumRecordCount: 4_096,
-                maximumTileReferenceCount: 16_384,
-                pipeline: setup.tilePipeline,
-                namespaceLease: .testing(generation: value)
+                pixelSize: PixelSize(width: 512, height: 512),
+                pipeline: setup.tilePipeline
             )
         }
         let failingResources = try resources(generation)
@@ -4673,7 +4779,7 @@ extension StrokeFrameSchedulerTests {
                     replayMode: .appendOnly
                 ),
                 metalResourceDescriptor: StrokeMetalResourceDescriptor(
-                    tiledTestSurfaces: failingResources,
+                    surfaces: failingResources,
                     brush: setup.brush,
                     frameUniforms: stageCSurfaceFrameUniforms(side: 512),
                     forceCommandFailure: true
@@ -4704,7 +4810,7 @@ extension StrokeFrameSchedulerTests {
                     replayMode: .appendOnly
                 ),
                 metalResourceDescriptor: StrokeMetalResourceDescriptor(
-                    tiledTestSurfaces: goodResources,
+                    surfaces: goodResources,
                     brush: setup.brush,
                     frameUniforms: stageCSurfaceFrameUniforms(side: 512),
                     forceCommandFailure: false
@@ -4727,7 +4833,7 @@ extension StrokeFrameSchedulerTests {
 
     @Test
     @MainActor
-    func tiledSchedulerMapsRadialProjectedPagesIntoCompactAtlas()
+    func capabilityBackedSchedulerMapsRadialPagesIntoCompactAtlas()
         async throws
     {
         guard let setup = try await stageCSurfaceTestSetup() else { return }
@@ -4747,16 +4853,13 @@ extension StrokeFrameSchedulerTests {
             device: setup.device,
             byteBudget: PaintTileDescriptor.residentByteCount * 64
         )
-        let tiled = try StrokeTileSurfaceResources(
+        let surfaces = try stageCCurrentSurfaceResources(
             device: setup.device,
             store: store,
             layerID: UUID(),
-            pixelSize: layout.atlasPixelSize,
             generation: generation,
-            maximumRecordCount: 4_096,
-            maximumTileReferenceCount: 16_384,
-            pipeline: setup.tilePipeline,
-            namespaceLease: .testing(generation: generation)
+            pixelSize: layout.atlasPixelSize,
+            pipeline: setup.tilePipeline
         )
         let scheduler = StrokeFrameScheduler(
             budget: try frameBudget(
@@ -4777,7 +4880,7 @@ extension StrokeFrameSchedulerTests {
                 ),
                 strategy: strategy,
                 metalResourceDescriptor: StrokeMetalResourceDescriptor(
-                    tiledTestSurfaces: tiled,
+                    surfaces: surfaces,
                     brush: setup.brush,
                     frameUniforms: stageCSurfaceFrameUniforms(side: 512),
                     radialLayout: layout,
@@ -4815,7 +4918,8 @@ extension StrokeFrameSchedulerTests {
     private func assertInjectedFailureCleanupAndReuse(
         _ scheduler: StrokeFrameScheduler,
         failedGeneration: UInt64,
-        configuration: StrokePreparationConfiguration
+        configuration: StrokePreparationConfiguration,
+        retryConfiguration: StrokePreparationConfiguration? = nil
     ) async throws {
         let failed = await scheduler.snapshot
         #expect(failed.activeGeneration == nil)
@@ -4850,7 +4954,7 @@ extension StrokeFrameSchedulerTests {
         let retry = await scheduler.process(
             .begin(
                 generation: retryGeneration,
-                configuration: configuration,
+                configuration: retryConfiguration ?? configuration,
                 samples: [
                     stageCPreparationSample(
                         phase: .began,
@@ -4900,6 +5004,106 @@ extension StrokeFrameSchedulerTests {
         }
         Issue.record("Injected Stage C failure did not terminate within bound")
         return current
+    }
+
+    @Test
+    @MainActor
+    func bridgePublishesDisplayFrameAndCompletionConfirmedAffineACK()
+        async throws
+    {
+        guard let setup = try await stageCSurfaceTestSetup() else { return }
+        let generation: UInt64 = 0xD6_20
+        let store = PaintTileStore(
+            device: setup.device,
+            byteBudget: PaintTileDescriptor.residentByteCount * 32
+        )
+        let surfaces = try stageCCurrentSurfaceResources(
+            device: setup.device,
+            store: store,
+            layerID: UUID(),
+            generation: generation,
+            pixelSize: PixelSize(width: 512, height: 512),
+            pipeline: setup.tilePipeline
+        )
+        let descriptor = StrokeMetalResourceDescriptor(
+            surfaces: surfaces,
+            brush: setup.brush,
+            frameUniforms: stageCSurfaceFrameUniforms(side: 512),
+            forceCommandFailure: false
+        )
+        let bridge = StrokePreparationBridge(
+            budget: try frameBudget(
+                authoritativePerFrame: 4_096,
+                predictedPerFrame: 4_096,
+                authoritativeCapacity: 12_288,
+                predictedCapacity: 4_096
+            ),
+            targetFramesPerSecond: 120
+        )
+        try bridge.submit(.begin(
+            generation: generation,
+            configuration: try preparationConfiguration(
+                program: stageCMetalTestProgram(
+                    id: "test.scheduler.stage-d-display-frame"
+                ),
+                metalResourceDescriptor: descriptor
+            ),
+            samples: [stageCPreparationSample(
+                phase: .began,
+                x: 64,
+                timestamp: 0
+            )]
+        ))
+
+        let progress = StrokePreparationAsyncProgressRegistration(
+            mailbox: bridge.mailbox
+        )
+        defer { progress.remove() }
+        var scratch: [StrokePreparationResult] = []
+        var prepared: StrokePreparedDepositionBatch?
+        for _ in 0..<1_000 {
+            let revision = progress.currentRevision
+            bridge.drainResults(into: &scratch)
+            if case let .prepared(batch)? = scratch.first {
+                prepared = batch
+                break
+            }
+            scratch.removeAll(keepingCapacity: true)
+            if progress.currentRevision != revision { continue }
+            _ = try await progress.waitForProgress(
+                after: revision,
+                timeoutNanoseconds: Self.asyncProgressTimeoutNanoseconds
+            )
+        }
+        let batch = try #require(prepared)
+        let frame = try #require(batch.displayFrame)
+        #expect(frame.generation == generation)
+        #expect(frame.layer == batch.surfaceLease?.layer)
+        #expect(bridge.mailbox.snapshot.awaitingPreparedFrameSubmission)
+
+        try await frame.acknowledgement.fulfill()
+        await #expect(
+            throws: StrokePreparationAcknowledgementError
+                .acknowledgementAlreadyFulfilled
+        ) {
+            try await frame.acknowledgement.fulfill()
+        }
+        for _ in 0..<16 {
+            scratch.removeAll(keepingCapacity: true)
+            bridge.drainResults(into: &scratch)
+            for result in scratch {
+                if case let .prepared(next) = result,
+                   let nextFrame = next.displayFrame
+                {
+                    try await nextFrame.acknowledgement.fulfill()
+                }
+            }
+            if bridge.mailbox.snapshot.isQuiescent { break }
+            await Task.yield()
+        }
+        #expect(bridge.mailbox.snapshot.isQuiescent)
+        #expect(store.snapshot().activeLeaseCount == 0)
+        try bridge.submit(.cancel(generation: generation, reason: nil))
     }
 
     @MainActor
@@ -4959,9 +5163,31 @@ extension StrokeFrameSchedulerTests {
         return (
             device,
             compiled.renderState,
-            try await pipelines.prepareRGBA16Float(
-                matching: compiled.depositionPipeline.key
-            )
+            compiled.depositionPipeline
+        )
+    }
+
+    @MainActor
+    private func stageCCurrentSurfaceResources(
+        device: any MTLDevice,
+        store: PaintTileStore,
+        layerID: UUID,
+        generation: UInt64,
+        pixelSize: PixelSize,
+        pipeline: DepositionPipelineBinding
+    ) throws -> StrokeTileSurfaceResources {
+        try StrokeTileSurfaceResources(
+            device: device,
+            commandQueue: device.makeCommandQueue()!,
+            capability: try .testing(
+                store: store,
+                layerID: layerID,
+                pixelSize: pixelSize,
+                generation: generation
+            ),
+            maximumRecordCount: 4_096,
+            maximumTileReferenceCount: 16_384,
+            pipeline: pipeline
         )
     }
 

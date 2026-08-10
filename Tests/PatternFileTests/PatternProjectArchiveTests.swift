@@ -6,6 +6,74 @@ import Testing
 @Suite("Pattern project archive")
 struct PatternProjectArchiveTests {
     @Test
+    func nativeArchiveRejectsLayerCountBeforeReadingSurfaceManifests() throws {
+        let archive = try PatternProjectArchiveCodec.open(
+            PatternProjectArchiveCodec.encode(entries: [
+                "placeholder": Data(),
+            ])
+        )
+        let paths = (0..<9).map { "surfaces/\($0).tiles.json" }
+
+        #expect(throws: PatternPaintTileError.layerCountOutOfRange(9)) {
+            try PatternPaintTileCodec.decodeArchive(
+                archive,
+                surfaceManifestPaths: paths
+            )
+        }
+    }
+
+    @Test
+    func nativeArchiveRejectsAggregateTileCountBeforeReadingPayloads() throws {
+        let layerID = UUID()
+        let manifestPath = "surfaces/layer.tiles.json"
+        let records = (0..<2).map { ordinal in
+            PatternPaintTileRecord(
+                id: UUID(uuidString: String(
+                    format: "00000000-0000-4000-8000-%012x",
+                    ordinal + 1
+                ))!,
+                coordinate: PatternPaintTileCoordinate(x: ordinal, y: 0),
+                logicalBounds: PatternPaintTileBounds(
+                    minX: ordinal * 256,
+                    minY: 0,
+                    width: 256,
+                    height: 256
+                ),
+                pixelFormat: .rgba16Float,
+                byteOrder: .littleEndian,
+                byteCount: PatternPaintTileCodec.bytesPerTile,
+                semanticSHA256: String(repeating: "0", count: 64),
+                rasterRevision: 4,
+                file: "tiles/missing-\(ordinal).rgba16f"
+            )
+        }
+        let manifest = try PatternPaintTileCodec.encodeManifest(
+            PatternPaintTileSurface(
+                layerID: layerID,
+                pixelSize: PixelSize(width: 512, height: 256),
+                rasterRevision: 4,
+                tiles: records
+            )
+        )
+        let archive = try PatternProjectArchiveCodec.open(
+            PatternProjectArchiveCodec.encode(entries: [
+                manifestPath: manifest,
+            ])
+        )
+
+        #expect(throws: PatternPaintTileError.tileCountOutOfRange(
+            actual: 2,
+            maximum: 1
+        )) {
+            try PatternPaintTileCodec.decodeArchive(
+                archive,
+                surfaceManifestPaths: [manifestPath],
+                maximumDecodedBytes: PatternPaintTileCodec.bytesPerTile
+            )
+        }
+    }
+
+    @Test
     func projectArchiveExposesBoundedReadsFromDeclaredEntrySizes() throws {
         let path = "surfaces/oversized.tiles.json"
         let byteCount = PatternPaintTileCodec.maximumManifestBytes + 1
@@ -65,6 +133,7 @@ struct PatternProjectArchiveTests {
             PatternPaintTileSurface(
                 layerID: layerID,
                 pixelSize: PixelSize(width: 256, height: 256),
+                rasterRevision: 7,
                 tiles: [record]
             )
         )
@@ -80,9 +149,9 @@ struct PatternProjectArchiveTests {
             surfaceManifestPaths: [manifestPath]
         )
         #expect(decoded[0].tiles == [record])
-        #expect(throws: PatternPaintTileError.decodedByteLimitExceeded(
-            actual: 524_288,
-            maximum: 524_287
+        #expect(throws: PatternPaintTileError.tileCountOutOfRange(
+            actual: 1,
+            maximum: 0
         )) {
             try PatternPaintTileCodec.decodeArchive(
                 archive,
@@ -105,6 +174,7 @@ struct PatternProjectArchiveTests {
             PatternPaintTileSurface(
                 layerID: layerID,
                 pixelSize: PixelSize(width: 256, height: 256),
+                rasterRevision: 7,
                 tiles: [collision]
             )
         )
@@ -124,7 +194,7 @@ struct PatternProjectArchiveTests {
     @Test
     func storedZIPRoundTripsDeterministically() throws {
         let entries: [String: Data] = [
-            "manifest.json": Data("{\"schemaVersion\":2}".utf8),
+            "manifest.json": Data("{\"schemaVersion\":4}".utf8),
             "layers/layer.json": Data("layer".utf8),
             "rasters/layer.png": Data((0..<251).map(UInt8.init)),
         ]
@@ -157,7 +227,7 @@ struct PatternProjectArchiveTests {
         let archiveURL = directory.appendingPathComponent("interop.zip")
         try PatternProjectArchiveIO.save(
             entries: [
-                "manifest.json": Data("{\"schemaVersion\":2}".utf8),
+                "manifest.json": Data("{\"schemaVersion\":4}".utf8),
                 "rasters/layer.png": Data((0..<251).map(UInt8.init)),
             ],
             to: archiveURL

@@ -231,7 +231,7 @@ private final class BrushFoundationProbePipelinePreparer:
             name: "foundationProbeFragment"
         )
         descriptor.colorAttachments[0].pixelFormat =
-            GridPipelineLibrary.colorPixelFormat
+            DocumentColorPipeline.workingPixelFormat
         state = try device.makeRenderPipelineState(descriptor: descriptor)
     }
 

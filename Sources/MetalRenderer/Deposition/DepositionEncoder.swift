@@ -386,9 +386,8 @@ struct DepositionEncoder {
                 key.brush.backend
             )
         }
-        guard let pixelFormat = MTLPixelFormat(
-            rawValue: key.colorPixelFormatRawValue
-        ), pixelFormat != .invalid
+        guard key.colorPixelFormatRawValue
+                == DocumentColorPipeline.workingPixelFormat.rawValue
         else {
             throw DepositionEncodingError.invalidPipelinePixelFormat(
                 key.colorPixelFormatRawValue

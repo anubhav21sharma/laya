@@ -31,93 +31,56 @@ enum HarnessLaunch {
                 configuration: configuration,
                 gitCommit: gitCommit
             )
-            switch try HarnessSchemaRouting.runnerKind(
-                for: scene.schemaVersion
-            ) {
-            case .deposition:
-                Task { @MainActor in
-                    do {
-                        let baseResult = try await DepositionHarnessRunner(
-                            device: device,
-                            productionAnchorDefinitions: [
-                                "deposition-airbrush":
-                                    AnchorBrushCatalog.airbrush.definition,
-                                "deposition-dry":
-                                    AnchorBrushCatalog.dryMedia.definition,
-                                "deposition-erase":
-                                    AnchorBrushCatalog.eraser.definition,
-                                "deposition-glaze":
-                                    AnchorBrushCatalog.glaze.definition,
-                                "deposition-ink":
-                                    AnchorBrushCatalog.ink.definition,
-                                "deposition-marker":
-                                    AnchorBrushCatalog.marker.definition,
-                                "professional-chisel-marker":
-                                    ProfessionalBrushCatalog.chiselMarker
-                                        .definition,
-                                "professional-graphite-pencil":
-                                    ProfessionalBrushCatalog.graphitePencil
-                                        .definition,
-                                "professional-natural-charcoal":
-                                    ProfessionalBrushCatalog.naturalCharcoal
-                                        .definition,
-                                "professional-technical-ink":
-                                    ProfessionalBrushCatalog.technicalInk
-                                        .definition,
-                            ]
-                        ).run(
-                            scene: scene,
-                            outputDirectory: outputDirectory,
-                            build: build
-                        )
-                        let result = try attachRuntimeTrace(
-                            runtimeTraceProfile,
-                            device: device,
-                            to: baseResult
-                        )
-                        try validateRuntimeTrace(
-                            runtimeTraceProfile,
-                            result: result
-                        )
-                        pass(scene: scene, result: result)
-                    } catch {
-                        fail(error)
-                    }
+            Task { @MainActor in
+                do {
+                    let baseResult = try await DepositionHarnessRunner(
+                        device: device,
+                        productionAnchorDefinitions: [
+                            "deposition-airbrush":
+                                AnchorBrushCatalog.airbrush.definition,
+                            "deposition-dry":
+                                AnchorBrushCatalog.dryMedia.definition,
+                            "deposition-erase":
+                                AnchorBrushCatalog.eraser.definition,
+                            "deposition-glaze":
+                                AnchorBrushCatalog.glaze.definition,
+                            "deposition-ink":
+                                AnchorBrushCatalog.ink.definition,
+                            "deposition-marker":
+                                AnchorBrushCatalog.marker.definition,
+                            "professional-chisel-marker":
+                                ProfessionalBrushCatalog.chiselMarker
+                                    .definition,
+                            "professional-graphite-pencil":
+                                ProfessionalBrushCatalog.graphitePencil
+                                    .definition,
+                            "professional-natural-charcoal":
+                                ProfessionalBrushCatalog.naturalCharcoal
+                                    .definition,
+                            "professional-technical-ink":
+                                ProfessionalBrushCatalog.technicalInk
+                                    .definition,
+                        ]
+                    ).run(
+                        scene: scene,
+                        outputDirectory: outputDirectory,
+                        build: build
+                    )
+                    let result = try attachRuntimeTrace(
+                        runtimeTraceProfile,
+                        device: device,
+                        to: baseResult
+                    )
+                    try validateRuntimeTrace(
+                        runtimeTraceProfile,
+                        result: result
+                    )
+                    pass(scene: scene, result: result)
+                } catch {
+                    fail(error)
                 }
-                return
-            case .sliceThree:
-                let baseResult = try SliceThreeHarnessRunner(device: device).run(
-                    scene: scene,
-                    outputDirectory: outputDirectory,
-                    build: build
-                )
-                let result = try attachRuntimeTrace(
-                    runtimeTraceProfile,
-                    device: device,
-                    to: baseResult
-                )
-                try validateRuntimeTrace(
-                    runtimeTraceProfile,
-                    result: result
-                )
-                pass(scene: scene, result: result)
-            case .foundation:
-                let baseResult = try HarnessRunner(device: device).run(
-                    scene: scene,
-                    outputDirectory: outputDirectory,
-                    build: build
-                )
-                let result = try attachRuntimeTrace(
-                    runtimeTraceProfile,
-                    device: device,
-                    to: baseResult
-                )
-                try validateRuntimeTrace(
-                    runtimeTraceProfile,
-                    result: result
-                )
-                pass(scene: scene, result: result)
             }
+            return
         } catch {
             fail(error)
         }

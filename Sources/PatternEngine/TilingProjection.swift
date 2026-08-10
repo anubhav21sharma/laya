@@ -135,23 +135,33 @@ public final class TilingProjectionScratch: @unchecked Sendable {
 }
 
 public enum TilingProjection {
+    public static func depositionSupportLocalBounds(
+        radius: Float
+    ) -> AxisAlignedRect {
+        precondition(radius.isFinite && radius > 0)
+        let expansion = 1 + 1 / radius
+        return AxisAlignedRect(
+            minimum: SIMD2(repeating: -expansion),
+            maximum: SIMD2(repeating: expansion)
+        )
+    }
+
     public static func dirtyPixelRect(
         for fragment: CellFragment,
         radius: Float
     ) -> PixelRect {
-        precondition(radius.isFinite && radius > 0)
-        let expansion = 1 + 1 / radius
+        let localBounds = depositionSupportLocalBounds(radius: radius)
         let corner0 = fragment.canonicalFromBrush.applying(
-            to: SIMD2(-expansion, -expansion)
+            to: localBounds.minimum
         )
         let corner1 = fragment.canonicalFromBrush.applying(
-            to: SIMD2(expansion, -expansion)
+            to: SIMD2(localBounds.maximum.x, localBounds.minimum.y)
         )
         let corner2 = fragment.canonicalFromBrush.applying(
-            to: SIMD2(-expansion, expansion)
+            to: SIMD2(localBounds.minimum.x, localBounds.maximum.y)
         )
         let corner3 = fragment.canonicalFromBrush.applying(
-            to: SIMD2(expansion, expansion)
+            to: localBounds.maximum
         )
         return PixelRect(
             minX: Int(floor(min(

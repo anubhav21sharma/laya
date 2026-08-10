@@ -404,36 +404,32 @@ struct ContentView: View {
     ) {
         guard !fileOperationBusy else { return }
         fileErrorMessage = nil
-        do {
-            let captured = try PatternProjectBridge.capture(
-                renderer: controller.renderer,
-                identity: projectIdentity,
-                appVersion: Bundle.main.object(
-                    forInfoDictionaryKey: "CFBundleShortVersionString"
-                ) as? String ?? "0.1.0"
-            )
-            fileOperationBusy = true
-            Task {
-                do {
-                    let data = try await Task.detached(
-                        priority: .utility
-                    ) {
-                        try PatternProjectPackageCodec.encode(
-                            metadata: captured.metadata,
-                            rastersByPath: captured.rastersByPath
-                        )
-                    }.value
-                    exportDocument = PatternProjectFileDocument(
-                        archiveData: data
+        fileOperationBusy = true
+        Task {
+            do {
+                let captured = try await PatternProjectBridge.capture(
+                    renderer: controller.renderer,
+                    identity: projectIdentity,
+                    appVersion: Bundle.main.object(
+                        forInfoDictionaryKey: "CFBundleShortVersionString"
+                    ) as? String ?? "0.1.0"
+                )
+                let data = try await Task.detached(
+                    priority: .utility
+                ) {
+                    try PatternProjectPackageCodec.encode(
+                        metadata: captured.metadata,
+                        rastersByPath: captured.rastersByPath
                     )
-                    exportPresented = true
-                } catch {
-                    fileErrorMessage = error.localizedDescription
-                }
-                fileOperationBusy = false
+                }.value
+                exportDocument = PatternProjectFileDocument(
+                    archiveData: data
+                )
+                exportPresented = true
+            } catch {
+                fileErrorMessage = error.localizedDescription
             }
-        } catch {
-            fileErrorMessage = error.localizedDescription
+            fileOperationBusy = false
         }
     }
 
@@ -469,7 +465,7 @@ struct ContentView: View {
                     let identity = try PatternProjectBridge.identity(
                         from: decoded
                     )
-                    let renderer = try PatternProjectBridge.makeRenderer(
+                    let renderer = try await PatternProjectBridge.makeRenderer(
                         from: decoded,
                         device: current.renderer.device,
                         drawableSize:

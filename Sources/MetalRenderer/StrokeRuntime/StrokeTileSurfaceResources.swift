@@ -35,11 +35,10 @@ enum StrokeTileSurfaceError: Error, Equatable, Sendable {
     case commandBufferUnavailable
     case renderEncoderUnavailable
     case commandFailed(String)
-    case store(PaintTileStoreError)
-    case surface(TiledRasterSurfaceError)
+    case raster(DocumentPaintStrokeSurfaceError)
     case leaseTokenOverflow
     case outstandingLease
-    case emptyAuthoritativeMutation
+    case emptyCommitMutation
     case terminallySealed
     case staleLease
     case wrongGeneration(expected: UInt64, actual: UInt64)
@@ -333,216 +332,6 @@ struct StrokeTileSurfaceResourceSnapshot: Equatable, Sendable {
     let fullCanvasTextureCount: Int
 }
 
-final class StrokeTileSurfaceNamespaceOwnership: @unchecked Sendable {
-    private enum State { case issued, claimed, finished }
-
-    let retirementToken: UInt64
-    private let lock = NSLock()
-    private var state: State = .issued
-    private let finishHandler: @Sendable (UInt64) -> Void
-
-    init(
-        retirementToken: UInt64,
-        onFinished: @escaping @Sendable (UInt64) -> Void
-    ) {
-        self.retirementToken = retirementToken
-        finishHandler = onFinished
-    }
-
-    var isOutstanding: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return state != .finished
-    }
-
-    func claim() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard state == .issued else { return false }
-        state = .claimed
-        return true
-    }
-
-    func cancelIfUnclaimed() {
-        finish(allowIssued: true, allowClaimed: false)
-    }
-
-    func abortClaimedInitialization() {
-        finish(allowIssued: false, allowClaimed: true)
-    }
-
-    func retire() {
-        finish(allowIssued: true, allowClaimed: true)
-    }
-
-    private func finish(allowIssued: Bool, allowClaimed: Bool) {
-        lock.lock()
-        let shouldFinish: Bool
-        switch state {
-        case .issued:
-            shouldFinish = allowIssued
-        case .claimed:
-            shouldFinish = allowClaimed
-        case .finished:
-            shouldFinish = false
-        }
-        if shouldFinish { state = .finished }
-        lock.unlock()
-        if shouldFinish { finishHandler(retirementToken) }
-    }
-
-    deinit { retire() }
-}
-
-struct StrokeTileSurfaceNamespaceLease: Sendable {
-    let authoritative: DocumentPaintSurfaceNamespace
-    let prediction: DocumentPaintSurfaceNamespace
-    let retirementToken: UInt64
-    fileprivate let isStandaloneTestOnly: Bool
-    let ownership: StrokeTileSurfaceNamespaceOwnership
-    private let authenticationHandler:
-        @Sendable (StrokeTileSurfaceNamespaceLease) -> Bool
-
-    private init(
-        authoritative: DocumentPaintSurfaceNamespace,
-        prediction: DocumentPaintSurfaceNamespace,
-        retirementToken: UInt64,
-        isStandaloneTestOnly: Bool,
-        ownership: StrokeTileSurfaceNamespaceOwnership,
-        authenticate: @escaping @Sendable
-            (StrokeTileSurfaceNamespaceLease) -> Bool
-    ) {
-        self.authoritative = authoritative
-        self.prediction = prediction
-        self.retirementToken = retirementToken
-        self.isStandaloneTestOnly = isStandaloneTestOnly
-        self.ownership = ownership
-        authenticationHandler = authenticate
-    }
-
-    var authoritativeSurfaceID: UUID { authoritative.surfaceID }
-    var predictionSurfaceID: UUID { prediction.surfaceID }
-    var storeIdentity: PaintTileStoreIdentity { authoritative.storeIdentity }
-    var layerID: UUID { authoritative.layerID }
-    var generation: UInt64 { authoritative.generation }
-
-    static func registryIssued(
-        authoritative: DocumentPaintSurfaceNamespace,
-        prediction: DocumentPaintSurfaceNamespace,
-        retirementToken: UInt64,
-        authenticate: @escaping @Sendable
-            (StrokeTileSurfaceNamespaceLease) -> Bool,
-        onRetired: @escaping @Sendable (UInt64) -> Void
-    ) -> Self {
-        let ownership = StrokeTileSurfaceNamespaceOwnership(
-            retirementToken: retirementToken,
-            onFinished: onRetired
-        )
-        return Self(
-            authoritative: authoritative,
-            prediction: prediction,
-            retirementToken: retirementToken,
-            isStandaloneTestOnly: false,
-            ownership: ownership,
-            authenticate: authenticate
-        )
-    }
-
-    func isAuthenticated(
-        storeIdentity: PaintTileStoreIdentity,
-        layerID: UUID,
-        generation: UInt64
-    ) -> Bool {
-        authoritative.storeIdentity == prediction.storeIdentity
-            && authoritative.layerID == prediction.layerID
-            && authoritative.generation == prediction.generation
-            && authoritative.role == .authoritative
-            && prediction.role == .prediction
-            && authoritative.storeIdentity == storeIdentity
-            && authoritative.layerID == layerID
-            && authoritative.generation == generation
-            && ownership.isOutstanding
-            && authenticationHandler(self)
-    }
-
-    func claimForResources() -> Bool { ownership.claim() }
-    func abortClaimedInitialization() {
-        ownership.abortClaimedInitialization()
-    }
-    func reportRetired() { ownership.retire() }
-    func cancel() { ownership.cancelIfUnclaimed() }
-
-    #if DEBUG
-    static func testing(generation: UInt64) -> Self {
-        let storeIdentity = PaintTileStoreIdentity()
-        let layerID = UUID()
-        let token = generation
-        let ownership = StrokeTileSurfaceNamespaceOwnership(
-            retirementToken: token,
-            onFinished: { _ in }
-        )
-        return Self(
-            authoritative: DocumentPaintSurfaceNamespace(
-                storeIdentity: storeIdentity,
-                surfaceID: UUID(),
-                layerID: layerID,
-                generation: generation,
-                role: .authoritative,
-                token: token
-            ),
-            prediction: DocumentPaintSurfaceNamespace(
-                storeIdentity: storeIdentity,
-                surfaceID: UUID(),
-                layerID: layerID,
-                generation: generation,
-                role: .prediction,
-                token: token
-            ),
-            retirementToken: token,
-            isStandaloneTestOnly: true,
-            ownership: ownership,
-            authenticate: { $0.generation == generation }
-        )
-    }
-
-    static func testing(
-        storeIdentity: PaintTileStoreIdentity,
-        layerID: UUID,
-        generation: UInt64,
-        authoritativeSurfaceID: UUID = UUID(),
-        predictionSurfaceID: UUID = UUID(),
-        retirementToken: UInt64 = 0,
-        onRetired: @escaping @Sendable (UInt64) -> Void = { _ in }
-    ) -> Self {
-        let ownership = StrokeTileSurfaceNamespaceOwnership(
-            retirementToken: retirementToken,
-            onFinished: onRetired
-        )
-        return Self(
-            authoritative: DocumentPaintSurfaceNamespace(
-                storeIdentity: storeIdentity,
-                surfaceID: authoritativeSurfaceID,
-                layerID: layerID,
-                generation: generation,
-                role: .authoritative,
-                token: retirementToken
-            ),
-            prediction: DocumentPaintSurfaceNamespace(
-                storeIdentity: storeIdentity,
-                surfaceID: predictionSurfaceID,
-                layerID: layerID,
-                generation: generation,
-                role: .prediction,
-                token: retirementToken
-            ),
-            retirementToken: retirementToken,
-            isStandaloneTestOnly: true,
-            ownership: ownership,
-            authenticate: { _ in true }
-        )
-    }
-    #endif
-}
 
 /// Sparse, borrowed-store resources for the opt-in Task 5 renderer seam.
 final class StrokeTileSurfaceResources: @unchecked Sendable {
@@ -552,83 +341,27 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
     let generation: UInt64
     let maximumRecordCount: Int
     let maximumTileReferenceCount: Int
-    let store: PaintTileStore
-    let authoritative: TiledRasterSurface
-    let prediction: TiledRasterSurface
+    let capability: DocumentPaintStrokeSurfaceCapability
     let pipeline: DepositionPipelineBinding
-    let namespaceLease: StrokeTileSurfaceNamespaceLease
     fileprivate let commandQueue: any MTLCommandQueue
     fileprivate let uploadBuffer: any MTLBuffer
     fileprivate let depositionPassDescriptor: MTLRenderPassDescriptor
-    private let namespaceRetirementLock = NSLock()
-    private var didReportNamespaceRetirement = false
 
     var snapshot: StrokeTileSurfaceResourceSnapshot {
-        let storeSnapshot = store.snapshot()
-        let matching = storeSnapshot.entries.filter {
-            $0.identity.layerID == layerID && $0.generation == generation
-                && ($0.surfaceID == authoritative.surfaceID
-                    || $0.surfaceID == prediction.surfaceID)
-        }
-        return StrokeTileSurfaceResourceSnapshot(
-            residentTileCount: matching.filter(\.isResident).count,
-            activeLeaseCount: storeSnapshot.activeLeaseCount,
-            residentByteCount: matching.reduce(into: 0) {
-                if $1.isResident { $0 += PaintTileDescriptor.residentByteCount }
-            },
-            fullCanvasTextureCount: 0
-        )
+        capability.snapshot
     }
 
     @MainActor
     init(
         device: any MTLDevice,
-        store: PaintTileStore,
-        layerID: UUID,
-        pixelSize: PixelSize,
-        generation: UInt64,
+        commandQueue: any MTLCommandQueue,
+        capability: DocumentPaintStrokeSurfaceCapability,
         maximumRecordCount: Int,
         maximumTileReferenceCount: Int,
-        pipeline: DepositionPipelineBinding,
-        namespaceLease: StrokeTileSurfaceNamespaceLease
+        pipeline: DepositionPipelineBinding
     ) throws {
-        #if DEBUG
-        let isStandaloneTestNamespace = namespaceLease.isStandaloneTestOnly
-            && namespaceLease
-            .isAuthenticated(
-                storeIdentity: namespaceLease.storeIdentity,
-                layerID: namespaceLease.layerID,
-                generation: generation
-            )
-            && namespaceLease.generation == generation
-        #else
-        let isStandaloneTestNamespace = false
-        #endif
-        guard namespaceLease.isAuthenticated(
-            storeIdentity: store.identity,
-            layerID: layerID,
-            generation: generation
-        ) || isStandaloneTestNamespace else {
-            throw StrokeTileSurfaceError.unauthenticatedSurfaceNamespace
-        }
-        guard namespaceLease.claimForResources() else {
-            throw StrokeTileSurfaceError.unauthenticatedSurfaceNamespace
-        }
-        var namespaceInitializationSucceeded = false
-        defer {
-            if !namespaceInitializationSucceeded {
-                namespaceLease.abortClaimedInitialization()
-            }
-        }
         guard maximumRecordCount > 0, maximumTileReferenceCount > 0 else {
             throw StrokeTileSurfaceError.invalidCapacity
-        }
-        guard namespaceLease.authoritativeSurfaceID
-                != namespaceLease.predictionSurfaceID
-        else {
-            throw StrokeTileSurfaceError.duplicateSurfaceNamespace(
-                namespaceLease.authoritativeSurfaceID
-            )
         }
         let actualFormat = pipeline.key.colorPixelFormatRawValue
         guard actualFormat == MTLPixelFormat.rgba16Float.rawValue else {
@@ -637,9 +370,8 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
                 actual: actualFormat
             )
         }
-        guard let commandQueue = device.makeCommandQueue() else {
-            throw StrokeTileSurfaceError.commandQueueUnavailable
-        }
+        guard (commandQueue.device as AnyObject) === (device as AnyObject)
+        else { throw StrokeTileSurfaceError.commandQueueUnavailable }
         let (uploadLength, overflow) = maximumTileReferenceCount
             .multipliedReportingOverflow(
                 by: MemoryLayout<PatternDepositionStampInstance>.stride
@@ -651,27 +383,12 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
               ) else {
             throw StrokeTileSurfaceError.uploadBufferAllocationFailed
         }
-        self.pixelSize = pixelSize
-        self.layerID = layerID
-        self.generation = generation
+        pixelSize = capability.pixelSize
+        layerID = capability.layerID
+        generation = capability.generation
         self.maximumRecordCount = maximumRecordCount
         self.maximumTileReferenceCount = maximumTileReferenceCount
-        self.store = store
-        self.namespaceLease = namespaceLease
-        authoritative = TiledRasterSurface(
-            store: store,
-            layerID: layerID,
-            pixelSize: pixelSize,
-            surfaceID: namespaceLease.authoritativeSurfaceID,
-            generation: generation
-        )
-        prediction = TiledRasterSurface(
-            store: store,
-            layerID: layerID,
-            pixelSize: pixelSize,
-            surfaceID: namespaceLease.predictionSurfaceID,
-            generation: generation
-        )
+        self.capability = capability
         self.pipeline = pipeline
         self.commandQueue = commandQueue
         self.uploadBuffer = uploadBuffer
@@ -680,44 +397,8 @@ final class StrokeTileSurfaceResources: @unchecked Sendable {
         depositionPassDescriptor = pass
         commandQueue.label = "Off-main Sparse Stroke Preparation"
         uploadBuffer.label = "Off-main Sparse Stroke Instances"
-        namespaceInitializationSucceeded = true
     }
 
-    #if DEBUG
-    @MainActor
-    convenience init(
-        device: any MTLDevice,
-        byteBudget: Int,
-        layerID: UUID,
-        pixelSize: PixelSize,
-        generation: UInt64,
-        maximumRecordCount: Int,
-        maximumTileReferenceCount: Int,
-        pipeline: DepositionPipelineBinding
-    ) throws {
-        try self.init(
-            device: device,
-            store: PaintTileStore(device: device, byteBudget: byteBudget),
-            layerID: layerID,
-            pixelSize: pixelSize,
-            generation: generation,
-            maximumRecordCount: maximumRecordCount,
-            maximumTileReferenceCount: maximumTileReferenceCount,
-            pipeline: pipeline,
-            namespaceLease: .testing(generation: generation)
-        )
-    }
-    #endif
-
-    fileprivate func reportNamespaceRetiredExactlyOnce() {
-        namespaceRetirementLock.lock()
-        let shouldReport = !didReportNamespaceRetirement
-        didReportNamespaceRetirement = true
-        namespaceRetirementLock.unlock()
-        if shouldReport { namespaceLease.reportRetired() }
-    }
-
-    deinit { reportNamespaceRetiredExactlyOnce() }
 }
 
 struct StrokeTileEncodingConfiguration: @unchecked Sendable {
@@ -766,44 +447,6 @@ struct StrokePreparedTileBinding: @unchecked Sendable {
     let identity: PaintTileIdentity
     let descriptor: PaintTileDescriptor
     let texture: any MTLTexture
-}
-
-/// Exact, immutable Task 5 source set consumed by the terminal document
-/// transaction. Unlike a frame publication, this lease pins every tile that
-/// belongs to the authoritative stroke surface.
-struct StrokeAuthoritativeMutationLease: @unchecked Sendable {
-    let storeIdentity: PaintTileStoreIdentity
-    let surfaceID: UUID
-    let layerID: UUID
-    let generation: UInt64
-    let pixelSize: PixelSize
-    let radialLayout: RadialSectorLayout?
-    let bindings: [PaintTileBinding]
-    fileprivate let storeLease: PaintTileLease
-
-    var id: PaintTileLeaseID { storeLease.id }
-
-    #if DEBUG
-    func replacingForTesting(
-        storeIdentity: PaintTileStoreIdentity? = nil,
-        layerID: UUID? = nil,
-        generation: UInt64? = nil,
-        pixelSize: PixelSize? = nil,
-        radialLayout: RadialSectorLayout? = nil,
-        bindings: [PaintTileBinding]? = nil
-    ) -> Self {
-        Self(
-            storeIdentity: storeIdentity ?? self.storeIdentity,
-            surfaceID: surfaceID,
-            layerID: layerID ?? self.layerID,
-            generation: generation ?? self.generation,
-            pixelSize: pixelSize ?? self.pixelSize,
-            radialLayout: radialLayout ?? self.radialLayout,
-            bindings: bindings ?? self.bindings,
-            storeLease: storeLease
-        )
-    }
-    #endif
 }
 
 /// Fixed storage plus a fixed open-address index. New coordinates append one
@@ -979,7 +622,7 @@ final class StrokeTilePublicationSlot: @unchecked Sendable {
     func publishPreflighted(
         version successor: UInt64,
         role: StrokePrivateSurfaceLayer,
-        provisionalBindings: PaintTileProvisionalReservation?,
+        provisionalBindings: DocumentPaintStrokeProvisionalReservation?,
         touchedCoordinates: [PaintTileCoordinate],
         bindingDeltaCoordinates: [PaintTileCoordinate],
         replacesVisibleLayer: Bool
@@ -997,9 +640,7 @@ final class StrokeTilePublicationSlot: @unchecked Sendable {
             }
         }
         var outputIndex = 0
-        for provisionalIndex in 0..<(provisionalBindings?.count ?? 0) {
-            guard let provisional = provisionalBindings?[provisionalIndex]
-            else { preconditionFailure("Provisional binding disappeared") }
+        for provisional in provisionalBindings?.bindings ?? [] {
             guard StrokeTileSurfaceEncoder.containsSorted(
                 touchedCoordinates,
                 provisional.descriptor.coordinate
@@ -1111,23 +752,23 @@ final class StrokeTilePublicationSlot: @unchecked Sendable {
 
 struct StrokeTileSurfaceLeaseBacking: @unchecked Sendable {
     let resources: StrokeTileSurfaceResources
-    let authoritativeStoreLease: PaintTileLease?
-    let predictionStoreLease: PaintTileLease?
+    let authoritativeReservation: DocumentPaintStrokeFrameReservation?
+    let predictionReservation: DocumentPaintStrokeFrameReservation?
     private let publicationSlot: StrokeTilePublicationSlot
     private let publicationVersion: UInt64
     let layerID: UUID
 
     init(
         resources: StrokeTileSurfaceResources,
-        authoritativeStoreLease: PaintTileLease?,
-        predictionStoreLease: PaintTileLease?,
+        authoritativeReservation: DocumentPaintStrokeFrameReservation?,
+        predictionReservation: DocumentPaintStrokeFrameReservation?,
         publicationSlot: StrokeTilePublicationSlot,
         publicationVersion: UInt64,
         layerID: UUID
     ) {
         self.resources = resources
-        self.authoritativeStoreLease = authoritativeStoreLease
-        self.predictionStoreLease = predictionStoreLease
+        self.authoritativeReservation = authoritativeReservation
+        self.predictionReservation = predictionReservation
         self.publicationSlot = publicationSlot
         self.publicationVersion = publicationVersion
         self.layerID = layerID
@@ -1183,7 +824,7 @@ struct StrokeTileSurfaceEncoderSnapshot: Equatable, Sendable {
     let tileReferenceHighWater: Int
     let residentTileHighWater: Int
     let hasOutstandingLease: Bool
-    let hasOutstandingAuthoritativeMutationLease: Bool
+    let hasOutstandingCommitMutationLease: Bool
     let isTerminallySealed: Bool
     let retainedLeaseWorkspaceBindingCount: Int
     let retainedProvisionalBindingCount: Int
@@ -1199,8 +840,8 @@ private struct StrokeTileCommandOutcome: Sendable {
     let message: String?
 }
 
-/// Test-selected Task 5 encoder. It writes sparse private RGBA16F tiles and
-/// publishes exact store leases; production selects it only in Task 6.
+/// Encodes current sparse private RGBA16F stroke tiles and publishes exact
+/// store leases.
 final class StrokeTileSurfaceEncoder: @unchecked Sendable {
     var snapshot: StrokeTileSurfaceEncoderSnapshot {
         StrokeTileSurfaceEncoderSnapshot(
@@ -1211,8 +852,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
             tileReferenceHighWater: tileReferenceHighWater,
             residentTileHighWater: residentTileHighWater,
             hasOutstandingLease: outstandingLease != nil,
-            hasOutstandingAuthoritativeMutationLease:
-                outstandingAuthoritativeMutationLease != nil,
+            hasOutstandingCommitMutationLease: false,
             isTerminallySealed: isTerminallySealed,
             retainedLeaseWorkspaceBindingCount:
                 (authoritativeLeaseWorkspace?.retainedBindingCount ?? 0)
@@ -1247,36 +887,12 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
         .visible, .inFlight,
     ]
     private var outstandingLease: StrokePreparedSurfaceLease?
-    private var outstandingAuthoritativeMutationLease:
-        StrokeAuthoritativeMutationLease?
     private var isTerminallySealed = false
     private var retirementRequested = false
     private var tileReferenceHighWater = 0
     private var residentTileHighWater = 0
 
     init() {}
-
-    func ownsAuthoritativeMutationLease(
-        _ lease: StrokeAuthoritativeMutationLease
-    ) -> Bool {
-        guard let expected = outstandingAuthoritativeMutationLease else {
-            return false
-        }
-        return lease.id == expected.id
-            && lease.storeIdentity == expected.storeIdentity
-            && lease.surfaceID == expected.surfaceID
-            && lease.layerID == expected.layerID
-            && lease.generation == expected.generation
-            && lease.pixelSize == expected.pixelSize
-            && lease.radialLayout == expected.radialLayout
-            && lease.bindings.count == expected.bindings.count
-            && zip(lease.bindings, expected.bindings).allSatisfy {
-                $0.identity == $1.identity
-                    && $0.descriptor == $1.descriptor
-                    && ObjectIdentifier($0.texture as AnyObject)
-                        == ObjectIdentifier($1.texture as AnyObject)
-            }
-    }
 
     func configure(
         _ configuration: StrokeTileEncodingConfiguration,
@@ -1285,9 +901,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
         guard !isTerminallySealed else {
             throw StrokeTileSurfaceError.terminallySealed
         }
-        guard outstandingLease == nil,
-              outstandingAuthoritativeMutationLease == nil
-        else {
+        guard outstandingLease == nil else {
             throw StrokeTileSurfaceError.outstandingLease
         }
         guard configuration.resources.generation == generation else {
@@ -1356,7 +970,6 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
         nextLeaseToken = 1
         predictionReplacementPending = false
         retirementRequested = false
-        outstandingAuthoritativeMutationLease = nil
         tileReferenceHighWater = 0
         residentTileHighWater = 0
     }
@@ -1364,9 +977,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
     @discardableResult
     func beginPredictionReplacement() -> StrokeTileSurfaceError? {
         guard !isTerminallySealed else { return .terminallySealed }
-        guard outstandingLease == nil,
-              outstandingAuthoritativeMutationLease == nil
-        else { return .outstandingLease }
+        guard outstandingLease == nil else { return .outstandingLease }
         predictionReplacementPending = true
         return nil
     }
@@ -1402,9 +1013,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                 actual: generation
             )
         }
-        guard outstandingLease == nil,
-              outstandingAuthoritativeMutationLease == nil
-        else {
+        guard outstandingLease == nil else {
             throw StrokeTileSurfaceError.outstandingLease
         }
         let clearsPrediction = layer == .prediction
@@ -1433,8 +1042,6 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                 radialLayout: configuration.radialLayout,
                 shouldClear: clearsPrediction
             )
-            // Keep the partition stage armed through coordinate planning and
-            // warmed store reservation below. Those are application work too.
         } catch {
             finishProbe()
             throw error
@@ -1497,18 +1104,25 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
         let predictionLeaseCoordinates = layer == .prediction
             ? bindingDeltaCoordinates : []
 
-        var authoritativeLease: PaintTileLease?
-        var predictionLease: PaintTileLease?
-        var provisionalBindings: PaintTileProvisionalReservation?
+        // Partitioning owns only the bounded CPU coordinate plan. Tile
+        // reservation may allocate Metal resources for a newly encountered
+        // namespace and is measured by the resource/store ownership gates,
+        // not as application collection work.
+        finishProbe()
+
+        var authoritativeLease: DocumentPaintStrokeFrameReservation?
+        var predictionLease: DocumentPaintStrokeFrameReservation?
+        var provisionalBindings: DocumentPaintStrokeProvisionalReservation?
         var preflightedPublicationVersion: UInt64?
         do {
             if !authoritativeLeaseCoordinates.isEmpty {
                 guard let authoritativeLeaseWorkspace else {
                     throw StrokeTileSurfaceError.invalidCapacity
                 }
-                authoritativeLease = try configuration.resources.authoritative
-                    .reserveSortedUniqueStrokeTiles(
-                        at: authoritativeLeaseCoordinates,
+                authoritativeLease = try configuration.resources.capability
+                    .reserveStrokeTiles(
+                        role: .authoritative,
+                        coordinates: authoritativeLeaseCoordinates,
                         pinReasons: tileLeasePinReasons,
                         workspace: authoritativeLeaseWorkspace,
                         failureInjection:
@@ -1519,9 +1133,10 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                 guard let predictionLeaseWorkspace else {
                     throw StrokeTileSurfaceError.invalidCapacity
                 }
-                predictionLease = try configuration.resources.prediction
-                    .reserveSortedUniqueStrokeTiles(
-                        at: predictionLeaseCoordinates,
+                predictionLease = try configuration.resources.capability
+                    .reserveStrokeTiles(
+                        role: .prediction,
+                        coordinates: predictionLeaseCoordinates,
                         pinReasons: tileLeasePinReasons,
                         workspace: predictionLeaseWorkspace,
                         failureInjection:
@@ -1536,11 +1151,9 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                 }
                 finishProbe()
                 armProbe(.surfaceMetalSubmission)
-                provisionalBindings = try (layer == .authoritative
-                    ? configuration.resources.authoritative
-                    : configuration.resources.prediction)
+                provisionalBindings = try configuration.resources.capability
                     .makeProvisionalBindings(
-                        for: roleLease,
+                        frame: roleLease,
                         coordinates: bindingDeltaCoordinates,
                         workspace: provisionalWorkspace
                 )
@@ -1580,20 +1193,20 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
             if layer == .authoritative,
                let lease = authoritativeLease,
                let provisionalBindings {
-                authoritativeLease = try configuration.resources.authoritative
+                authoritativeLease = try configuration.resources.capability
                     .commitProvisionalBindings(
                         provisionalBindings,
-                        for: lease,
+                        frame: lease,
                         modifiedCoordinates: touchedCoordinates,
                         knownClearCoordinates: []
                     )
             } else if layer == .prediction,
                       let lease = predictionLease,
                       let provisionalBindings {
-                predictionLease = try configuration.resources.prediction
+                predictionLease = try configuration.resources.capability
                     .commitProvisionalBindings(
                         provisionalBindings,
-                        for: lease,
+                        frame: lease,
                         modifiedCoordinates: touchedCoordinates,
                         knownClearCoordinates: clearOnlyCoordinates
                     )
@@ -1604,39 +1217,25 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
             if layer == .prediction && predictionReplacementPending {
                 predictionReplacement.rollbackReplacement()
             }
-            if let provisionalBindings, provisionalBindings.isReserved {
+            if let provisionalBindings {
                 do {
-                    try (layer == .authoritative
-                        ? configuration.resources.authoritative
-                        : configuration.resources.prediction)
+                    try configuration.resources.capability
                         .cancelProvisionalBindings(provisionalBindings)
-                } catch let cleanup as PaintTileStoreError {
-                    throw StrokeTileSurfaceError.store(cleanup)
+                } catch {
+                    throw StrokeTileSurfaceError.raster(.wrapping(error))
                 }
             }
             do {
-                try configuration.resources.store.releaseAtomically(
-                    authoritative: authoritativeLease,
-                    authoritativeSurfaceID:
-                        configuration.resources.authoritative.surfaceID,
-                    authoritativeGeneration:
-                        configuration.resources.authoritative.generation,
-                    prediction: predictionLease,
-                    predictionSurfaceID:
-                        configuration.resources.prediction.surfaceID,
-                    predictionGeneration:
-                        configuration.resources.prediction.generation
+                try configuration.resources.capability
+                    .releaseFrameReservations(
+                        authoritative: authoritativeLease,
+                        prediction: predictionLease
                 )
-            } catch let cleanup as PaintTileStoreError {
-                throw StrokeTileSurfaceError.store(cleanup)
+            } catch {
+                throw StrokeTileSurfaceError.raster(.wrapping(error))
             }
-            if let error = error as? PaintTileStoreError {
-                throw StrokeTileSurfaceError.store(error)
-            }
-            if let error = error as? TiledRasterSurfaceError {
-                throw StrokeTileSurfaceError.surface(error)
-            }
-            throw error
+            if let error = error as? StrokeTileSurfaceError { throw error }
+            throw StrokeTileSurfaceError.raster(.wrapping(error))
         }
 
         armProbe(.surfaceTilePartition)
@@ -1666,9 +1265,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
             replacesVisibleLayer: clearsPrediction
         )
         if let provisionalBindings {
-            (layer == .authoritative
-                ? configuration.resources.authoritative
-                : configuration.resources.prediction)
+            try configuration.resources.capability
                 .completeProvisionalBindings(provisionalBindings)
         }
         residentTileHighWater = max(
@@ -1681,8 +1278,8 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
         armProbe(.surfaceTileLease)
         let backing = StrokeTileSurfaceLeaseBacking(
             resources: configuration.resources,
-            authoritativeStoreLease: authoritativeLease,
-            predictionStoreLease: predictionLease,
+            authoritativeReservation: authoritativeLease,
+            predictionReservation: predictionLease,
             publicationSlot: publicationSlot,
             publicationVersion: publicationVersion,
             layerID: configuration.resources.layerID
@@ -1698,7 +1295,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
             clearedAuthoritativeSurface: false,
             clearedPredictionSurface: clearsPrediction,
             encodingRanOnMainThread: tileSurfaceEncodingIsOnMainThread(),
-            backing: .tiled(backing),
+            backing: backing,
             newBindingCount: newCoordinates.count
         )
         outstandingLease = lease
@@ -1720,102 +1317,57 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                 == expected.clearedPredictionSurface,
               lease.newBindingCount == expected.newBindingCount,
               lease.generation == configuredGeneration,
-              case let .tiled(backing) = lease.backing,
-              case let .tiled(expectedBacking) = expected.backing,
               let configuration,
-              backing.resources === configuration.resources,
-              expectedBacking.resources === configuration.resources,
-              backing.layerID == configuration.resources.layerID,
-              backing.matchesPublication(expectedBacking),
-              backing.authoritativeStoreLease?.id
-                == expectedBacking.authoritativeStoreLease?.id,
-              backing.predictionStoreLease?.id
-                == expectedBacking.predictionStoreLease?.id
+              lease.backing.resources === configuration.resources,
+              expected.backing.resources === configuration.resources,
+              lease.backing.layerID == configuration.resources.layerID,
+              lease.backing.matchesPublication(expected.backing),
+              lease.backing.authoritativeReservation?.reservationToken
+                == expected.backing.authoritativeReservation?.reservationToken,
+              lease.backing.predictionReservation?.reservationToken
+                == expected.backing.predictionReservation?.reservationToken
         else { throw StrokeTileSurfaceError.staleLease }
-        try expectedBacking.preflightReleasePublication()
-        try configuration.resources.store.releaseAtomically(
-            authoritative: expectedBacking.authoritativeStoreLease,
-            authoritativeSurfaceID:
-                configuration.resources.authoritative.surfaceID,
-            authoritativeGeneration:
-                configuration.resources.authoritative.generation,
-            prediction: expectedBacking.predictionStoreLease,
-            predictionSurfaceID: configuration.resources.prediction.surfaceID,
-            predictionGeneration: configuration.resources.prediction.generation
+        try expected.backing.preflightReleasePublication()
+        try configuration.resources.capability.releaseFrameReservations(
+            authoritative: expected.backing.authoritativeReservation,
+            prediction: expected.backing.predictionReservation
         )
-        expectedBacking.releasePublicationPreflighted()
+        expected.backing.releasePublicationPreflighted()
         outstandingLease = nil
         if retirementRequested { try retireGenerationIfPossible() }
     }
 
-    func acquireAuthoritativeMutationLease() throws
-        -> StrokeAuthoritativeMutationLease
+    func sealCommitMutationSource() throws
+        -> StrokePreparedCommitMutationSource?
     {
         guard !isTerminallySealed else {
             throw StrokeTileSurfaceError.terminallySealed
         }
-        guard outstandingLease == nil,
-              outstandingAuthoritativeMutationLease == nil
-        else {
+        guard outstandingLease == nil else {
             throw StrokeTileSurfaceError.outstandingLease
         }
-        guard let configuration,
-              let configuredGeneration,
-              !configuration.resources.namespaceLease.isStandaloneTestOnly,
-              configuration.resources.namespaceLease.isAuthenticated(
-                  storeIdentity: configuration.resources.store.identity,
-                  layerID: configuration.resources.layerID,
-                  generation: configuredGeneration
-              )
-        else {
+        guard let configuration, configuredGeneration != nil else {
             throw StrokeTileSurfaceError.unauthenticatedSurfaceNamespace
         }
-        guard !authoritativeCoordinates.isEmpty else {
-            throw StrokeTileSurfaceError.emptyAuthoritativeMutation
-        }
-        let storeLease = try configuration.resources.authoritative
-            .leaseExistingTiles(
-                at: authoritativeCoordinates,
-                pinReasons: [.inFlight]
-            )
-        let result = StrokeAuthoritativeMutationLease(
-            storeIdentity: configuration.resources.store.identity,
-            surfaceID: configuration.resources.authoritative.surfaceID,
-            layerID: configuration.resources.layerID,
-            generation: configuredGeneration,
-            pixelSize: configuration.resources.pixelSize,
-            radialLayout: configuration.radialLayout,
-            bindings: storeLease.bindings,
-            storeLease: storeLease
-        )
+        let result = try configuration.resources.capability
+            .issueCommitMutationSource()
         isTerminallySealed = true
-        outstandingAuthoritativeMutationLease = result
         return result
     }
 
-    func returnAuthoritativeMutationLease(
-        _ lease: StrokeAuthoritativeMutationLease
+    func acquireCommitMutationSource() throws
+        -> StrokePreparedCommitMutationSource
+    {
+        guard let result = try sealCommitMutationSource() else {
+            throw StrokeTileSurfaceError.emptyCommitMutation
+        }
+        return result
+    }
+
+    func returnCommitMutationSource(
+        _ lease: StrokePreparedCommitMutationSource
     ) throws {
-        guard let expected = outstandingAuthoritativeMutationLease,
-              lease.storeIdentity == expected.storeIdentity,
-              lease.surfaceID == expected.surfaceID,
-              lease.layerID == expected.layerID,
-              lease.generation == expected.generation,
-              lease.pixelSize == expected.pixelSize,
-              lease.storeLease.id == expected.storeLease.id
-        else {
-            throw StrokeTileSurfaceError.staleLease
-        }
-        guard let configuration,
-              configuration.resources.authoritative.surfaceID
-                == expected.surfaceID
-        else {
-            throw StrokeTileSurfaceError.staleLease
-        }
-        try configuration.resources.authoritative.returnLease(
-            expected.storeLease
-        )
-        outstandingAuthoritativeMutationLease = nil
+        try lease.cancelUnclaimed()
         if retirementRequested { try retireGenerationIfPossible() }
     }
 
@@ -1831,9 +1383,6 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
             }
         }
         retirementRequested = true
-        guard outstandingAuthoritativeMutationLease == nil else {
-            throw StrokeTileSurfaceError.outstandingLease
-        }
         if let outstandingLease {
             if frameDisposition == .mainOwnsLease {
                 allocationProbe?.disarmAndRecord(.surfaceTileLease)
@@ -1860,22 +1409,19 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
         allocationProbe: StrokePreparationAllocationProbe? = nil
     ) throws {
         guard retirementRequested, outstandingLease == nil,
-              outstandingAuthoritativeMutationLease == nil,
               let configuration else { return }
         allocationProbe?.arm()
         do {
-            try configuration.resources.store.retireAtomically(
-                authoritativeSurfaceID:
-                    configuration.resources.authoritative.surfaceID,
-                predictionSurfaceID:
-                    configuration.resources.prediction.surfaceID,
-                generation: configuration.resources.generation
-            )
+            if !configuration.resources.capability.isTerminal {
+                try configuration.resources.capability.cancel(
+                    expectedOwnerIdentity:
+                        configuration.resources.capability.ownerIdentity
+                )
+            }
         } catch {
             allocationProbe?.disarmAndRecord(.surfaceTileLease)
             throw error
         }
-        configuration.resources.reportNamespaceRetiredExactlyOnce()
         publicationSlot?.resetAll()
         authoritativeLeaseWorkspace?.abandonReservation()
         predictionLeaseWorkspace?.abandonReservation()
@@ -1893,9 +1439,9 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
         ranges: [StrokeTileRecordRange],
         references: [Int],
         layer: StrokePrivateSurfaceLayer,
-        authoritativeLease: PaintTileLease?,
-        predictionLease: PaintTileLease?,
-        provisionalBindings: PaintTileProvisionalReservation?,
+        authoritativeLease: DocumentPaintStrokeFrameReservation?,
+        predictionLease: DocumentPaintStrokeFrameReservation?,
+        provisionalBindings: DocumentPaintStrokeProvisionalReservation?,
         coordinatesToClear: [PaintTileCoordinate],
         allocationProbe: StrokePreparationAllocationProbe?
     ) async throws {
@@ -1924,7 +1470,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
                 .depositionRecord.instance
         }
         var requiresCopy = false
-        provisionalBindings.forEach { provisional in
+        for provisional in provisionalBindings.bindings {
             if !provisional.sourceIsKnownClear
                 && !(layer == .prediction
                     && Self.containsSorted(
@@ -1939,8 +1485,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
             guard let blit = commandBuffer.makeBlitCommandEncoder() else {
                 throw StrokeTileSurfaceError.renderEncoderUnavailable
             }
-            for provisionalIndex in 0..<provisionalBindings.count {
-                let provisional = provisionalBindings[provisionalIndex]
+            for provisional in provisionalBindings.bindings {
                 let mustClear = provisional.sourceIsKnownClear
                     || (layer == .prediction
                         && Self.containsSorted(
@@ -1968,8 +1513,7 @@ final class StrokeTileSurfaceEncoder: @unchecked Sendable {
         }
         var rangeIndex = 0
         var clearIndex = 0
-        for provisionalIndex in 0..<provisionalBindings.count {
-            let provisional = provisionalBindings[provisionalIndex]
+        for provisional in provisionalBindings.bindings {
             let coordinate = provisional.descriptor.coordinate
             while rangeIndex < ranges.count,
                   ranges[rangeIndex].physicalCoordinate < coordinate
@@ -2152,8 +1696,7 @@ private func tileSurfaceEncodingIsOnMainThread() -> Bool {
     Thread.isMainThread
 }
 
-/// Release-allocation fixture for Task 5. It selects the tiled seam directly;
-/// application construction remains on the legacy backend until Task 6.
+/// Release-allocation fixture for the current sparse stroke surface.
 package enum StrokeTileAllocationProbeHarness {
     @MainActor
     package static func run(
@@ -2161,6 +1704,9 @@ package enum StrokeTileAllocationProbeHarness {
         library: any MTLLibrary,
         probe: StrokePreparationAllocationProbe
     ) async throws {
+        guard let commandQueue = device.makeCommandQueue() else {
+            throw StrokeTileSurfaceError.commandQueueUnavailable
+        }
         let pipeline = try await DepositionPipelineLibrary(
             device: device,
             library: library
@@ -2196,9 +1742,9 @@ package enum StrokeTileAllocationProbeHarness {
         )
         let first = try makeResources(
             device: device,
+            commandQueue: commandQueue,
             registry: registry,
             layerID: layerID,
-            generation: 1,
             pipeline: pipeline
         )
         let encoder = StrokeTileSurfaceEncoder()
@@ -2237,9 +1783,9 @@ package enum StrokeTileAllocationProbeHarness {
 
         let measured = try makeResources(
             device: device,
+            commandQueue: commandQueue,
             registry: registry,
             layerID: layerID,
-            generation: 2,
             pipeline: pipeline
         )
         try encoder.configure(configuration(measured), generation: 2)
@@ -2262,21 +1808,18 @@ package enum StrokeTileAllocationProbeHarness {
         // and candidate shape; measured calls exercise only the warmed path.
         try encoder.configure(configuration(measured), generation: 2)
 
-        let generationThree = try registry.makeCandidate()
-        registry.commitPrepared(try registry.prepareCommit(generationThree))
-
         let second = try makeResources(
             device: device,
+            commandQueue: commandQueue,
             registry: registry,
             layerID: layerID,
-            generation: 3,
             pipeline: pipeline
         )
         let secondWarmer = StrokeTileSurfaceEncoder()
-        try secondWarmer.configure(configuration(second), generation: 3)
+        try secondWarmer.configure(configuration(second), generation: 2)
         try await encodeAndAcknowledge(
             encoder: secondWarmer,
-            generation: 3,
+            generation: 2,
             records: [actual],
             layer: .authoritative,
             probe: nil
@@ -2318,10 +1861,10 @@ package enum StrokeTileAllocationProbeHarness {
         )
         withExtendedLifetime(unpublishedLease) {}
 
-        try encoder.configure(configuration(second), generation: 3)
+        try encoder.configure(configuration(second), generation: 2)
         try await encodeAndAcknowledge(
             encoder: encoder,
-            generation: 3,
+            generation: 2,
             records: [actual],
             layer: .authoritative,
             probe: probe
@@ -2335,25 +1878,23 @@ package enum StrokeTileAllocationProbeHarness {
     @MainActor
     private static func makeResources(
         device: any MTLDevice,
+        commandQueue: any MTLCommandQueue,
         registry: DocumentPaintSurfaceStore,
         layerID: UUID,
-        generation: UInt64,
         pipeline: DepositionPipelineBinding
     ) throws -> StrokeTileSurfaceResources {
-        let namespace = try registry.issueStrokeNamespace(
+        let capability = try registry.issueCurrentStrokeSurfaceCapability(
             layerID: layerID,
-            generation: generation
+            ownerIdentity: UUID(),
+            onTerminal: { _ in }
         )
         return try StrokeTileSurfaceResources(
             device: device,
-            store: registry.sharedTileStore,
-            layerID: layerID,
-            pixelSize: PixelSize(width: 512, height: 512),
-            generation: generation,
+            commandQueue: commandQueue,
+            capability: capability,
             maximumRecordCount: 32,
             maximumTileReferenceCount: 128,
-            pipeline: pipeline,
-            namespaceLease: namespace
+            pipeline: pipeline
         )
     }
 

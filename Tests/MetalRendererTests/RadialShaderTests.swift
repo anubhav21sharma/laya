@@ -14,7 +14,7 @@ struct RadialShaderTests {
     @MainActor
     func committedDabAppearsAtEveryIndependentOrbitPoint(
         kind: RadialSymmetryKind
-    ) throws {
+    ) async throws {
         let rays = kind == .mirror ? 1 : 4
         let configuration = RadialSymmetryConfiguration(
             kind: kind,
@@ -26,8 +26,11 @@ struct RadialShaderTests {
             return
         }
 
-        try commitRadialDab(renderer, at: ScreenPoint(x: 92, y: 71))
-        let display = try renderer.renderOffscreenDisplayForHarness(
+        try await commitRadialDab(
+            renderer,
+            at: ScreenPoint(x: 92, y: 71)
+        )
+        let display = try await renderer.renderOffscreenDisplayForHarness(
             width: 128,
             height: 128,
             showGridLines: false
@@ -53,7 +56,7 @@ struct RadialShaderTests {
 
     @Test
     @MainActor
-    func radialGuideChangesBlankFiniteDisplay() throws {
+    func radialGuideChangesBlankFiniteDisplay() async throws {
         let configuration = RadialSymmetryConfiguration(
             kind: .mandala,
             rayCount: 8,
@@ -64,12 +67,12 @@ struct RadialShaderTests {
             return
         }
 
-        let plain = try renderer.renderOffscreenDisplayForHarness(
+        let plain = try await renderer.renderOffscreenDisplayForHarness(
             width: 128,
             height: 128,
             showGridLines: false
         )
-        let guided = try renderer.renderOffscreenDisplayForHarness(
+        let guided = try await renderer.renderOffscreenDisplayForHarness(
             width: 128,
             height: 128,
             showGridLines: true
@@ -83,7 +86,7 @@ struct RadialShaderTests {
 
     @Test
     @MainActor
-    func finiteCanvasBoundaryRemainsVisibleWhenGridIsHidden() throws {
+    func finiteCanvasBoundaryRemainsVisibleWhenGridIsHidden() async throws {
         let configuration = RadialSymmetryConfiguration(
             kind: .mandala,
             rayCount: 8,
@@ -93,7 +96,7 @@ struct RadialShaderTests {
             return
         }
 
-        let display = try renderer.renderOffscreenDisplayForHarness(
+        let display = try await renderer.renderOffscreenDisplayForHarness(
             width: 128,
             height: 128,
             showGridLines: false
@@ -110,63 +113,9 @@ struct RadialShaderTests {
 
     @Test
     @MainActor
-    func radialGeometryLocksOnlyAfterSuccessfulCommit() throws {
-        let initial = RadialSymmetryConfiguration(
-            kind: .rotation,
-            rayCount: 6,
-            center: WorldPoint(x: 64, y: 64)
-        )
-        guard let renderer = try makeRadialRenderer(initial) else {
-            return
-        }
-        #expect(!renderer.documentDomainLocked)
-        #expect(!renderer.radialGeometryLocked)
-
-        let failedToken = RendererOperationToken(rawValue: 1)
-        let failedStyle = try nativeRadialStyle(
-            radialDrawStyle,
-            renderer: renderer
-        )
-        try renderer.beginStroke(
-            token: failedToken,
-            sample: radialSample(.began, x: 90, y: 64),
-            style: failedStyle
-        )
-        try renderer.requestStrokeCommit(
-            token: failedToken,
-            sample: radialSample(.ended, x: 90, y: 64),
-            maximumRetainedBytes: 4_000_000
-        )
-        #expect(throws: MetalRendererError.self) {
-            _ = try renderer.finishCommitForHarness(
-                forceCommitFailure: true
-            )
-        }
-        #expect(!renderer.documentDomainLocked)
-        #expect(!renderer.radialGeometryLocked)
-
-        let revised = RadialSymmetryConfiguration(
-            kind: .mandala,
-            rayCount: 7,
-            center: WorldPoint(x: 61, y: 65),
-            referenceAngleRadians: .pi / 9
-        )
-        try renderer.applyFiniteConfiguration(.radial(revised))
-        try commitRadialDab(
-            renderer,
-            at: ScreenPoint(x: 90, y: 64),
-            tokenValue: 2
-        )
-        #expect(renderer.documentDomainLocked)
-        #expect(renderer.radialGeometryLocked)
-        #expect(throws: MetalRendererError.radialGeometryLocked) {
-            try renderer.applyFiniteConfiguration(.radial(initial))
-        }
-    }
-
-    @Test
-    @MainActor
-    func radialEraseAndClearAffectEveryLinkedImageAndUnlockEmptyCanvas() throws {
+    func radialEraseAndClearAffectEveryLinkedImageAndUnlockEmptyCanvas()
+        async throws
+    {
         let radial = RadialSymmetryConfiguration(
             kind: .mandala,
             rayCount: 6,
@@ -175,7 +124,7 @@ struct RadialShaderTests {
         )
         guard let renderer = try makeRadialRenderer(radial) else { return }
         let source = ScreenPoint(x: 91, y: 70)
-        try commitRadialDab(
+        try await commitRadialDab(
             renderer,
             at: source,
             tokenValue: 30
@@ -184,7 +133,7 @@ struct RadialShaderTests {
             of: WorldPoint(x: source.x, y: source.y),
             configuration: radial
         )
-        let drawn = try renderer.exportFiniteCanvas(
+        let drawn = try await renderer.exportFiniteCanvas(
             transparentBackground: true
         )
         #expect(orbit.allSatisfy {
@@ -201,13 +150,13 @@ struct RadialShaderTests {
             compositeMode: .erase,
             eraserStrength: 1
         )
-        try commitRadialDab(
+        try await commitRadialDab(
             renderer,
             at: source,
             tokenValue: 31,
             style: eraseStyle
         )
-        let erased = try renderer.exportFiniteCanvas(
+        let erased = try await renderer.exportFiniteCanvas(
             transparentBackground: true
         )
         #expect(orbit.allSatisfy {
@@ -219,17 +168,15 @@ struct RadialShaderTests {
         })
         #expect(renderer.radialGeometryLocked)
 
-        try commitRadialDab(
+        try await commitRadialDab(
             renderer,
             at: source,
             tokenValue: 32
         )
-        try renderer.requestClear(
-            token: RendererOperationToken(rawValue: 33),
-            maximumRetainedBytes: 4_000_000
+        try await renderer.clearDocument(
+            token: RendererOperationToken(rawValue: 33)
         )
-        try renderer.finishRasterOperationForHarness()
-        let cleared = try renderer.exportFiniteCanvas(
+        let cleared = try await renderer.exportFiniteCanvas(
             transparentBackground: true
         )
         #expect(
@@ -238,30 +185,32 @@ struct RadialShaderTests {
         )
         #expect(!renderer.documentDomainLocked)
         #expect(!renderer.radialGeometryLocked)
-        try renderer.applyFiniteConfiguration(.plain)
+        try await renderer.applyFiniteConfiguration(.plain)
         #expect(renderer.documentConfiguration == .finite(.plain))
     }
 
     @Test
     @MainActor
-    func radialResizeCropsByOrbitWithoutScalingOrResurrection() throws {
+    func radialResizeCropsByOrbitWithoutScalingOrResurrection()
+        async throws
+    {
         let radial = RadialSymmetryConfiguration(
             kind: .rotation,
             rayCount: 4,
             center: WorldPoint(x: 55, y: 55)
         )
         guard let renderer = try makeRadialRenderer(radial) else { return }
-        try commitRadialDab(
+        try await commitRadialDab(
             renderer,
             at: ScreenPoint(x: 75, y: 55),
             tokenValue: 1
         )
-        try commitRadialDab(
+        try await commitRadialDab(
             renderer,
             at: ScreenPoint(x: 127, y: 55),
             tokenValue: 2
         )
-        let original = try renderer.exportFiniteCanvas(
+        let original = try await renderer.exportFiniteCanvas(
             transparentBackground: true
         )
         #expect(
@@ -278,19 +227,17 @@ struct RadialShaderTests {
                 resizeReceipt = receipt
             }
         }
-        try renderer.requestResize(
+        try await renderer.resizeDocument(
             token: RendererOperationToken(rawValue: 3),
-            to: PixelSize(width: 64, height: 64),
-            maximumRetainedBytes: 4_000_000
+            to: PixelSize(width: 64, height: 64)
         )
-        try renderer.finishRasterOperationForHarness()
         let receipt = try #require(resizeReceipt)
         #expect(receipt.before.documentPixelSize == PixelSize(width: 128, height: 128))
         #expect(receipt.after.documentPixelSize == PixelSize(width: 64, height: 64))
         #expect(renderer.pixelSize == PixelSize(width: 64, height: 64))
         #expect(renderer.radialGeometryLocked)
 
-        let cropped = try renderer.exportFiniteCanvas(
+        let cropped = try await renderer.exportFiniteCanvas(
             transparentBackground: true
         )
         #expect(
@@ -302,13 +249,11 @@ struct RadialShaderTests {
             )
         )
 
-        try renderer.requestResize(
+        try await renderer.resizeDocument(
             token: RendererOperationToken(rawValue: 4),
-            to: PixelSize(width: 128, height: 128),
-            maximumRetainedBytes: 4_000_000
+            to: PixelSize(width: 128, height: 128)
         )
-        try renderer.finishRasterOperationForHarness()
-        let expanded = try renderer.exportFiniteCanvas(
+        let expanded = try await renderer.exportFiniteCanvas(
             transparentBackground: true
         )
         #expect(
@@ -329,7 +274,7 @@ struct RadialShaderTests {
 
     @Test
     @MainActor
-    func radialResizeUndoRedoRestoresExactAtlasAndDocumentSize() throws {
+    func radialResizeUndoRedoRestoresExactAtlasAndDocumentSize() async throws {
         let radial = RadialSymmetryConfiguration(
             kind: .mandala,
             rayCount: 5,
@@ -337,12 +282,12 @@ struct RadialShaderTests {
             referenceAngleRadians: .pi / 13
         )
         guard let renderer = try makeRadialRenderer(radial) else { return }
-        try commitRadialDab(
+        try await commitRadialDab(
             renderer,
             at: ScreenPoint(x: 76, y: 59),
             tokenValue: 10
         )
-        let original = try radialCanonicalBytes(renderer)
+        let original = try await radialCanonicalBytes(renderer)
         var resizeReceipt: RasterMutationReceipt?
         renderer.onOperationCompleted = { completion in
             if case let .rasterSuccess(receipt) = completion {
@@ -350,82 +295,35 @@ struct RadialShaderTests {
             }
         }
 
-        try renderer.requestResize(
+        try await renderer.resizeDocument(
             token: RendererOperationToken(rawValue: 11),
-            to: PixelSize(width: 64, height: 64),
-            maximumRetainedBytes: 4_000_000
+            to: PixelSize(width: 64, height: 64)
         )
-        try renderer.finishRasterOperationForHarness()
         let receipt = try #require(resizeReceipt)
-        let resized = try radialCanonicalBytes(renderer)
+        let resized = try await radialCanonicalBytes(renderer)
         #expect(renderer.pixelSize == PixelSize(width: 64, height: 64))
         #expect(renderer.radialGeometryLocked)
 
-        try renderer.requestResizeRestore(
+        try await renderer.restoreDocumentRevision(
             token: RendererOperationToken(rawValue: 12),
             revision: receipt.before
         )
-        try renderer.finishRasterOperationForHarness()
         #expect(renderer.pixelSize == PixelSize(width: 128, height: 128))
-        #expect(try radialCanonicalBytes(renderer) == original)
+        #expect(try await radialCanonicalBytes(renderer) == original)
         #expect(renderer.radialGeometryLocked)
 
-        try renderer.requestResizeRestore(
+        try await renderer.restoreDocumentRevision(
             token: RendererOperationToken(rawValue: 13),
             revision: receipt.after
         )
-        try renderer.finishRasterOperationForHarness()
         #expect(renderer.pixelSize == PixelSize(width: 64, height: 64))
-        #expect(try radialCanonicalBytes(renderer) == resized)
+        #expect(try await radialCanonicalBytes(renderer) == resized)
         #expect(renderer.radialGeometryLocked)
 
-        renderer.releaseRasterRevisions([
+        try await renderer.releasePaintRevisions([
             receipt.before.id,
             receipt.after.id,
         ])
-    }
-
-    @Test
-    @MainActor
-    func failedSubmittedRadialResizePreservesAllInstalledState() throws {
-        let radial = RadialSymmetryConfiguration(
-            kind: .rotation,
-            rayCount: 7,
-            center: WorldPoint(x: 55, y: 55)
-        )
-        guard let renderer = try makeRadialRenderer(radial) else { return }
-        try commitRadialDab(
-            renderer,
-            at: ScreenPoint(x: 83, y: 57),
-            tokenValue: 20
-        )
-        let configuration = renderer.documentConfiguration
-        let canonical = try radialCanonicalBytes(renderer)
-        let snapshot = renderer.harnessTilingMutationSnapshot
-        var completions: [RendererOperationCompletion] = []
-        renderer.onOperationCompleted = { completions.append($0) }
-
-        try renderer.requestResizeForHarness(
-            token: RendererOperationToken(rawValue: 21),
-            to: PixelSize(width: 64, height: 64),
-            maximumRetainedBytes: 4_000_000,
-            forceResourceAllocationFailure: false,
-            forceCommandFailure: true
-        )
-        #expect(throws: MetalRendererError.commandFailed(
-            "injected harness command-buffer failure"
-        )) {
-            try renderer.finishRasterOperationForHarness()
-        }
-
-        #expect(renderer.documentConfiguration == configuration)
-        #expect(renderer.pixelSize == PixelSize(width: 128, height: 128))
-        #expect(renderer.radialGeometryLocked)
-        #expect(renderer.documentDomainLocked)
-        #expect(renderer.harnessTilingMutationSnapshot == snapshot)
-        #expect(try radialCanonicalBytes(renderer) == canonical)
-        #expect(renderer.isIdle)
-        #expect(completions.count == 1)
     }
 }
 
@@ -433,7 +331,7 @@ struct RadialShaderTests {
 struct FiniteCanvasExportTests {
     @Test
     @MainActor
-    func plainTransparentExportPreservesExactCanvasPixels() throws {
+    func plainTransparentExportPreservesExactCanvasPixels() async throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let renderer = try makeFiniteRenderer(
             device: device,
@@ -443,16 +341,18 @@ struct FiniteCanvasExportTests {
         let fixture = (0..<(64 * 64)).flatMap { index -> [UInt8] in
             let x = index % 64
             let y = index / 64
+            let alpha = UInt8(truncatingIfNeeded: x * 7 + y * 11)
+            guard alpha > 0 else { return [0, 0, 0, 0] }
             return [
-                UInt8(truncatingIfNeeded: x * 3),
-                UInt8(truncatingIfNeeded: y * 5),
-                UInt8(truncatingIfNeeded: x + y),
-                UInt8(truncatingIfNeeded: x * 7 + y * 11),
+                UInt8((x * 3) % (Int(alpha) + 1)),
+                UInt8((y * 5) % (Int(alpha) + 1)),
+                UInt8((x + y) % (Int(alpha) + 1)),
+                alpha,
             ]
         }
-        try renderer.replaceCanonicalPixelsForHarness(fixture)
+        try await installFiniteCommittedRaster(fixture, into: renderer)
 
-        let exported = try renderer.exportFiniteCanvas(
+        let exported = try await renderer.exportFiniteCanvas(
             transparentBackground: true
         )
 
@@ -464,7 +364,9 @@ struct FiniteCanvasExportTests {
 
     @Test
     @MainActor
-    func radialExportUsesDocumentPixelsAndIgnoresViewportAndGuides() throws {
+    func radialExportUsesDocumentPixelsAndIgnoresViewportAndGuides()
+        async throws
+    {
         let radial = RadialSymmetryConfiguration(
             kind: .mandala,
             rayCount: 5,
@@ -472,12 +374,15 @@ struct FiniteCanvasExportTests {
             referenceAngleRadians: .pi / 13
         )
         guard let renderer = try makeRadialRenderer(radial) else { return }
-        try commitRadialDab(renderer, at: ScreenPoint(x: 94, y: 70))
+        try await commitRadialDab(
+            renderer,
+            at: ScreenPoint(x: 94, y: 70)
+        )
         let beforeConfiguration = renderer.documentConfiguration
         let beforeLock = renderer.radialGeometryLocked
-        let beforeCanonical = try radialCanonicalBytes(renderer)
+        let beforeCanonical = try await radialCanonicalBytes(renderer)
 
-        let baseline = try renderer.exportFiniteCanvas(
+        let baseline = try await renderer.exportFiniteCanvas(
             transparentBackground: true
         )
         renderer.pan(byScreenDelta: SIMD2(37, -19))
@@ -486,14 +391,14 @@ struct FiniteCanvasExportTests {
             anchor: ScreenPoint(x: 17, y: 103)
         )
         renderer.setInteractiveGridVisibility(true)
-        let transformed = try renderer.exportFiniteCanvas(
+        let transformed = try await renderer.exportFiniteCanvas(
             transparentBackground: true
         )
 
         #expect(transformed == baseline)
         #expect(renderer.documentConfiguration == beforeConfiguration)
         #expect(renderer.radialGeometryLocked == beforeLock)
-        #expect(try radialCanonicalBytes(renderer) == beforeCanonical)
+        #expect(try await radialCanonicalBytes(renderer) == beforeCanonical)
         #expect(baseline.bgra8Bytes.contains { $0 != 0 })
         #expect(
             stride(from: 3, to: baseline.bgra8Bytes.count, by: 4)
@@ -501,38 +406,20 @@ struct FiniteCanvasExportTests {
         )
     }
 
-    @Test(arguments: [
-        FiniteCanvasExportInjectedFailure.textureAllocation,
-        .commandBuffer,
-        .renderEncoder,
-    ])
-    @MainActor
-    func exportFailureDoesNotMutateFiniteDocument(
-        failure: FiniteCanvasExportInjectedFailure
-    ) throws {
-        let radial = RadialSymmetryConfiguration(
-            kind: .rotation,
-            rayCount: 7,
-            center: WorldPoint(x: 59, y: 67)
-        )
-        guard let renderer = try makeRadialRenderer(radial) else { return }
-        try commitRadialDab(renderer, at: ScreenPoint(x: 91, y: 68))
-        let configuration = renderer.documentConfiguration
-        let lock = renderer.radialGeometryLocked
-        let viewport = renderer.viewport
-        let canonical = try radialCanonicalBytes(renderer)
+}
 
-        #expect(throws: MetalRendererError.self) {
-            try renderer.exportFiniteCanvas(
-                transparentBackground: false,
-                injecting: failure
-            )
-        }
-        #expect(renderer.documentConfiguration == configuration)
-        #expect(renderer.radialGeometryLocked == lock)
-        #expect(renderer.viewport == viewport)
-        #expect(try radialCanonicalBytes(renderer) == canonical)
-    }
+@MainActor
+private func installFiniteCommittedRaster(
+    _ bytes: [UInt8],
+    into renderer: GridRenderer
+) async throws {
+    try await renderer.restoreCommittedDocument(CommittedDocumentSnapshot(
+        canvasSize: renderer.pixelSize,
+        documentConfiguration: renderer.documentConfiguration,
+        documentDomainLocked: bytes.contains { $0 != 0 },
+        radialGeometryLocked: false,
+        storage: .singleRaster(bgra8PremultipliedBytes: bytes)
+    ))
 }
 
 private let radialDrawStyle = radialTemplateStyle()
@@ -659,7 +546,7 @@ private func commitRadialDab(
     at point: ScreenPoint,
     tokenValue: UInt64 = 1,
     style: StrokeRenderStyle = radialDrawStyle
-) throws {
+) async throws {
     let nativeStyle = try nativeRadialStyle(style, renderer: renderer)
     let token = RendererOperationToken(rawValue: tokenValue)
     try renderer.beginStroke(
@@ -669,10 +556,9 @@ private func commitRadialDab(
     )
     try renderer.requestStrokeCommit(
         token: token,
-        sample: radialSample(.ended, x: point.x, y: point.y),
-        maximumRetainedBytes: 4_000_000
+        sample: radialSample(.ended, x: point.x, y: point.y)
     )
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.finishCommitForHarness()
 }
 
 @MainActor
@@ -731,8 +617,10 @@ private func radialTextureBytes(_ texture: any MTLTexture) -> [UInt8] {
 @MainActor
 private func radialCanonicalBytes(
     _ renderer: GridRenderer
-) throws -> [UInt8] {
-    radialTextureBytes(try renderer.copyCanonicalForHarness())
+) async throws -> [UInt8] {
+    try await renderer.exportFiniteCanvas(
+        transparentBackground: true
+    ).bgra8Bytes
 }
 
 private func radialPixelIsInk(

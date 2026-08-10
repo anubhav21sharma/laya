@@ -72,14 +72,11 @@ public enum DocumentPaintSurfaceTransactionError:
     case incompleteGeometryReplacement(PaintTileCoordinate)
     case invalidResizeMapping
     case invalidTargetRadialConfiguration
-    case invalidEncodedImport(DocumentColorInterchangeError)
-    case encodedImportGeometryMismatch(expected: PixelSize, actual: PixelSize)
-    case encodedImportRadialUnsupported
     case emptyMutation
     case missingStrokeAuthoritativeLease
     case invalidStrokeCompositeParameters
+    case strokeSourceContextMismatch
     case strokeSourceStoreMismatch
-    case strokeSourceOwnerMismatch
     case strokeSourceLayerMismatch(expected: UUID, actual: UUID)
     case strokeSourceGenerationMismatch(expected: UInt64, actual: UInt64)
     case strokeSourceGeometryMismatch(expected: PixelSize, actual: PixelSize)
@@ -108,9 +105,7 @@ public enum DocumentPaintSurfaceTransactionError:
     case registryPreparationFailed
     case revisionPublishFailed
     case restoreReferenceUnavailable
-    case restoreLayerMismatch(expected: UUID, actual: UUID)
     case restoreGeometryMismatch
-    case restoreDispositionMismatch
     case restorePreparationFailed
     case restoreEncodingFailed
     case restoreCompletionFailed
@@ -192,67 +187,16 @@ public struct DocumentPaintSurfaceMutationRequest:
     }
 }
 
-/// Complete, immutable encoded-interchange source for opening a document.
-/// Import is always a full candidate replacement without an undo-history pair;
-/// the caller resets editor history only after publication succeeds.
-public struct DocumentPaintSurfaceEncodedImportRequest: Equatable, Sendable {
-    public let layerID: UUID
-    public let candidateGeometry: DocumentPaintGeometry
-    public let width: Int
-    public let height: Int
-    public let bytesPerRow: Int
-    public let encodedPremultipliedBGRA8: Data
+struct DocumentPaintSurfaceRestoreRequest: Equatable, Sendable {
+    let reference: RasterRevisionReference
+    let targetGeometry: DocumentPaintGeometry
 
-    public init(
-        layerID: UUID,
-        candidateGeometry: DocumentPaintGeometry,
-        width: Int,
-        height: Int,
-        bytesPerRow: Int,
-        encodedPremultipliedBGRA8: Data
-    ) {
-        self.layerID = layerID
-        self.candidateGeometry = candidateGeometry
-        self.width = width
-        self.height = height
-        self.bytesPerRow = bytesPerRow
-        self.encodedPremultipliedBGRA8 = Data(encodedPremultipliedBGRA8)
-    }
-}
-
-public struct DocumentPaintSurfaceRestoreTileExpectation:
-    Equatable, Sendable
-{
-    public let coordinate: PaintTileCoordinate
-    public let disposition: TiledRasterRevisionInstallDisposition
-
-    public init(
-        coordinate: PaintTileCoordinate,
-        disposition: TiledRasterRevisionInstallDisposition
-    ) {
-        self.coordinate = coordinate
-        self.disposition = disposition
-    }
-}
-
-public struct DocumentPaintSurfaceRestoreRequest: Equatable, Sendable {
-    public let reference: RasterRevisionReference
-    public let targetGeometry: DocumentPaintGeometry
-    public let layerID: UUID
-    public let expectedInstallDispositions:
-        [DocumentPaintSurfaceRestoreTileExpectation]
-
-    public init(
+    init(
         reference: RasterRevisionReference,
-        targetGeometry: DocumentPaintGeometry,
-        layerID: UUID,
-        expectedInstallDispositions:
-            [DocumentPaintSurfaceRestoreTileExpectation]
+        targetGeometry: DocumentPaintGeometry
     ) {
         self.reference = reference
         self.targetGeometry = targetGeometry
-        self.layerID = layerID
-        self.expectedInstallDispositions = expectedInstallDispositions
     }
 }
 
@@ -288,7 +232,7 @@ struct DocumentPaintSurfaceTransactionOwnershipSnapshot:
     let destinationLeaseID: PaintTileLeaseID?
     let resizeSourceLeaseID: PaintTileLeaseID?
     let strokeBaseSourceLeaseID: PaintTileLeaseID?
-    let strokeAuthoritativeSourceLeaseID: PaintTileLeaseID?
+    let strokeCommitSourceLeaseID: UUID?
     let baseSourceLeaseID: PaintTileLeaseID?
     let candidateSourceLeaseID: PaintTileLeaseID?
     let backendEncodingID: UUID?
@@ -301,7 +245,7 @@ struct DocumentPaintSurfaceTransactionOwnershipSnapshot:
     let commitResult: DocumentPaintSurfaceCommitResult?
     let restoreResult: DocumentPaintSurfaceRestoreResult?
     let hasResizePlan: Bool
-    let hasEncodedImportPlan: Bool
+    let hasEncodedImportRequest: Bool
     let candidateCount: Int
     let candidateBindingCount: Int
     let destinationLeaseCount: Int
@@ -320,7 +264,7 @@ struct DocumentPaintSurfaceTransactionOwnershipSnapshot:
         destinationLeaseID: nil,
         resizeSourceLeaseID: nil,
         strokeBaseSourceLeaseID: nil,
-        strokeAuthoritativeSourceLeaseID: nil,
+        strokeCommitSourceLeaseID: nil,
         baseSourceLeaseID: nil,
         candidateSourceLeaseID: nil,
         backendEncodingID: nil,
@@ -333,7 +277,7 @@ struct DocumentPaintSurfaceTransactionOwnershipSnapshot:
         commitResult: nil,
         restoreResult: nil,
         hasResizePlan: false,
-        hasEncodedImportPlan: false,
+        hasEncodedImportRequest: false,
         candidateCount: 0,
         candidateBindingCount: 0,
         destinationLeaseCount: 0,
@@ -515,6 +459,7 @@ struct DocumentPaintSurfaceStrokeBackendPayload: @unchecked Sendable {
     let compositeParameters: DocumentPaintStrokeCompositeParameters
     let baseSources: [DocumentPaintSurfaceReadSource]
     let authoritativeSources: [DocumentPaintSurfaceReadSource]
+    let predictionSources: [DocumentPaintSurfaceReadSource]
     let destinations: [DocumentPaintSurfaceMutationDestination]
 }
 
@@ -556,48 +501,11 @@ struct DocumentPaintSurfaceResizeBackendPayload: @unchecked Sendable {
     }
 }
 
-enum DocumentPaintSurfaceEncodedImportConversion: Equatable, Sendable {
-    /// For each texel: alpha-zero discards encoded RGB; otherwise divide the
-    /// encoded RGB bytes by encoded alpha, clamp tolerant C8>A8 input to straight
-    /// [0, 1], decode straight sRGB to linear, then premultiply linear RGB by
-    /// alpha and store RGBA16F.
-    case encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float
-}
-
-struct DocumentPaintSurfaceEncodedImportTileRegion: Equatable, Sendable {
-    let coordinate: PaintTileCoordinate
-    let sourceOrigin: SIMD2<Int>
-    let sourceByteOffset: Int
-    let destinationOrigin: SIMD2<Int>
-    let extent: PixelSize
-}
-
-struct DocumentPaintSurfaceEncodedImportBackendPayload: @unchecked Sendable {
-    let candidateGeometry: DocumentPaintGeometry
-    let width: Int
-    let height: Int
-    let bytesPerRow: Int
-    let encodedPremultipliedBGRA8: Data
-    let conversion: DocumentPaintSurfaceEncodedImportConversion
-    let clearsDestinationsBeforeConversion: Bool
-    let destinations: [DocumentPaintSurfaceMutationDestination]
-    let tileRegions: [DocumentPaintSurfaceEncodedImportTileRegion]
-}
-
-/// Complete restore payload presented to the inert backend preflight. It is
-/// deliberately typed and contains no candidate, install lease, or registry
-/// commit token.
-struct DocumentPaintSurfaceRestoreBackendPayload: @unchecked Sendable {
-    let reference: RasterRevisionReference
-    let destinations: [DocumentPaintSurfaceMutationDestination]
-}
-
 enum DocumentPaintSurfaceBackendOperation: @unchecked Sendable {
     case stroke(DocumentPaintSurfaceStrokeBackendPayload)
     case clear
     case resize(DocumentPaintSurfaceResizeBackendPayload)
     case encodedImport(DocumentPaintSurfaceEncodedImportBackendPayload)
-    case restore(DocumentPaintSurfaceRestoreBackendPayload)
 }
 
 struct DocumentPaintSurfaceMutationBackendEncoding:
@@ -642,8 +550,6 @@ struct DocumentPaintSurfaceMutationEvidence: Equatable, Sendable {
 protocol DocumentPaintSurfaceMutationBackend:
     AnyObject, Sendable
 {
-    func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws
-
     func encode(_ operation: DocumentPaintSurfaceBackendOperation) throws
         -> DocumentPaintSurfaceMutationBackendEncoding
 
@@ -662,9 +568,9 @@ protocol DocumentPaintSurfaceMutationBackend:
 }
 
 /// Production-inert owner for one complete sparse document mutation. It is
-/// intentionally independent from GridRenderer until the atomic Task 6 switch.
+/// owned by the document-paint render context.
 public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
-    private struct ResizePlan: Sendable {
+    struct ResizePlan: Sendable {
         let sourceCoordinates: [PaintTileCoordinate]
         let beforeCoordinates: [PaintTileCoordinate]
         let afterCoordinates: [PaintTileCoordinate]
@@ -672,29 +578,70 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         let mappings: [DocumentPaintSurfaceResizeCopyMapping]
     }
 
-    private struct EncodedImportPlan: Sendable {
+    /// The only transaction-local metadata added after the encoded boundary.
+    /// Coordinates and candidate geometry remain authoritative on the trusted
+    /// request; the current base is captured atomically by the store.
+    private struct TrustedImportState: Sendable {
         let request: DocumentPaintSurfaceEncodedImportRequest
-        let dirtyCoordinates: [PaintTileCoordinate]
-        let tileRegions: [DocumentPaintSurfaceEncodedImportTileRegion]
+        let baseGeometry: DocumentPaintGeometry
+        let removedCoordinates: [PaintTileCoordinate]
     }
 
     private final class LiveTransaction {
         let sequence: UInt64
-        let request: DocumentPaintSurfaceMutationRequest
+        let request: DocumentPaintSurfaceMutationRequest?
+        let trustedImport: TrustedImportState?
         let baseGeneration: UInt64
         let baseBinding: DocumentPaintLayerBinding
         let candidate: DocumentPaintSurfaceCandidate
         let resizePlan: ResizePlan?
-        let encodedImportPlan: EncodedImportPlan?
         var phase: DocumentPaintSurfaceTransactionPhase
+
+        var kind: DocumentPaintSurfaceTransactionKind {
+            request?.kind ?? .encodedImport
+        }
+
+        var layerID: UUID {
+            request?.layerID ?? trustedImport!.request.layerID
+        }
+
+        var baseGeometry: DocumentPaintGeometry {
+            request?.baseGeometry ?? trustedImport!.baseGeometry
+        }
+
+        var candidateGeometry: DocumentPaintGeometry {
+            request?.candidateGeometry
+                ?? trustedImport!.request.candidateGeometry
+        }
+
+        var targetRadialConfiguration: RadialSymmetryConfiguration? {
+            request?.targetRadialConfiguration
+        }
+
+        var dirtyCoordinates: [PaintTileCoordinate] {
+            request?.dirtyCoordinates
+                ?? trustedImport!.request.importDirtyCoordinates
+        }
+
+        var removedCoordinates: [PaintTileCoordinate] {
+            request?.explicitlyRemovedCoordinates
+                ?? trustedImport!.removedCoordinates
+        }
+
+        var requiresHistoryPair: Bool {
+            request?.requiresHistoryPair ?? false
+        }
+
+        var encodedImportRequest: DocumentPaintSurfaceEncodedImportRequest? {
+            trustedImport?.request
+        }
 
         var candidateBinding: DocumentPaintLayerBinding?
         var destinationLease: PaintTileLease?
         var resizeSourceLease: PaintTileLease?
         var strokeBaseSourceLease: PaintTileLease?
-        var strokeAuthoritativeSourceOwner: StrokeTileSurfaceEncoder?
-        var strokeAuthoritativeSourceLease:
-            StrokeAuthoritativeMutationLease?
+        var strokeCommitSourceLease:
+            StrokePreparedCommitMutationSource?
         var backendEncoding: DocumentPaintSurfaceMutationBackendEncoding?
         var reduction: DocumentPaintTransparencyReduction?
         var revisionPair: PendingRasterRevisionPair?
@@ -708,21 +655,22 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
 
         init(
             sequence: UInt64,
-            request: DocumentPaintSurfaceMutationRequest,
+            request: DocumentPaintSurfaceMutationRequest?,
+            trustedImport: TrustedImportState?,
             baseGeneration: UInt64,
             baseBinding: DocumentPaintLayerBinding,
             candidate: DocumentPaintSurfaceCandidate,
             resizePlan: ResizePlan?,
-            encodedImportPlan: EncodedImportPlan?,
             phase: DocumentPaintSurfaceTransactionPhase
         ) {
+            precondition((request == nil) != (trustedImport == nil))
             self.sequence = sequence
             self.request = request
+            self.trustedImport = trustedImport
             self.baseGeneration = baseGeneration
             self.baseBinding = baseBinding
             self.candidate = candidate
             self.resizePlan = resizePlan
-            self.encodedImportPlan = encodedImportPlan
             self.phase = phase
         }
     }
@@ -730,6 +678,8 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
     private final class LiveRestore {
         let sequence: UInt64
         let request: DocumentPaintSurfaceRestoreRequest
+        let layerID: UUID
+        let restoredCoordinates: [PaintTileCoordinate]
         let baseGeneration: UInt64
         let baseBinding: DocumentPaintLayerBinding
         let candidate: DocumentPaintSurfaceCandidate
@@ -746,6 +696,8 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         init(
             sequence: UInt64,
             request: DocumentPaintSurfaceRestoreRequest,
+            layerID: UUID,
+            restoredCoordinates: [PaintTileCoordinate],
             baseGeneration: UInt64,
             baseBinding: DocumentPaintLayerBinding,
             candidate: DocumentPaintSurfaceCandidate,
@@ -753,6 +705,8 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         ) {
             self.sequence = sequence
             self.request = request
+            self.layerID = layerID
+            self.restoredCoordinates = restoredCoordinates
             self.baseGeneration = baseGeneration
             self.baseBinding = baseBinding
             self.candidate = candidate
@@ -767,10 +721,9 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
     private let revisionStore: TiledRasterRevisionStore
     private let commandQueue: any MTLCommandQueue
     private let mutationBackend: any DocumentPaintSurfaceMutationBackend
+    private let expectedStrokeSourceContextIdentity: UUID?
     private let allowKnownClearAuthoritativeStrokeSourcesForTesting: Bool
     private let afterBaseSnapshotForTesting: (@Sendable () throws -> Void)?
-    private let afterEncodedImportReplacementAuthorityForTesting:
-        (@Sendable () throws -> Void)?
     private var nextSequence: UInt64 = 1
     private var lastCompletedSequence: UInt64 = 0
     private var live: LiveTransaction?
@@ -781,15 +734,16 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         revisionStore: TiledRasterRevisionStore,
         commandQueue: any MTLCommandQueue,
         mutationBackend: any DocumentPaintSurfaceMutationBackend,
+        expectedStrokeSourceContextIdentity: UUID? = nil,
         allowKnownClearAuthoritativeStrokeSourcesForTesting: Bool = false,
-        afterBaseSnapshotForTesting: (@Sendable () throws -> Void)? = nil,
-        afterEncodedImportReplacementAuthorityForTesting:
-            (@Sendable () throws -> Void)? = nil
+        afterBaseSnapshotForTesting: (@Sendable () throws -> Void)? = nil
     ) {
         self.registry = registry
         self.revisionStore = revisionStore
         self.commandQueue = commandQueue
         self.mutationBackend = mutationBackend
+        self.expectedStrokeSourceContextIdentity =
+            expectedStrokeSourceContextIdentity
         #if DEBUG
         self.allowKnownClearAuthoritativeStrokeSourcesForTesting =
             allowKnownClearAuthoritativeStrokeSourcesForTesting
@@ -797,8 +751,6 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         self.allowKnownClearAuthoritativeStrokeSourcesForTesting = false
         #endif
         self.afterBaseSnapshotForTesting = afterBaseSnapshotForTesting
-        self.afterEncodedImportReplacementAuthorityForTesting =
-            afterEncodedImportReplacementAuthorityForTesting
     }
 
     public func snapshot() -> DocumentPaintSurfaceTransactionSnapshot {
@@ -815,7 +767,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 let coordinates: [PaintTileCoordinate]
                 do {
                     coordinates = try liveRestore.candidate
-                        .binding(for: liveRestore.request.layerID)
+                        .binding(for: liveRestore.layerID)
                         .canonical.references.map(\.coordinate)
                 } catch {
                     coordinates = []
@@ -833,7 +785,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             let coordinates: [PaintTileCoordinate]
             do {
                 coordinates = try live.candidate
-                    .binding(for: live.request.layerID)
+                    .binding(for: live.layerID)
                     .canonical.references.map(\.coordinate)
             } catch {
                 coordinates = []
@@ -864,8 +816,8 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     resizeSourceLeaseID: live.resizeSourceLease?.id,
                     strokeBaseSourceLeaseID:
                         live.strokeBaseSourceLease?.id,
-                    strokeAuthoritativeSourceLeaseID:
-                        live.strokeAuthoritativeSourceLease?.id,
+                    strokeCommitSourceLeaseID:
+                        live.strokeCommitSourceLease?.sourceToken,
                     baseSourceLeaseID: live.baseSourceLease?.id,
                     candidateSourceLeaseID: live.candidateSourceLease?.id,
                     backendEncodingID: live.backendEncoding?.rawValue,
@@ -878,7 +830,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     commitResult: live.commitResult,
                     restoreResult: nil,
                     hasResizePlan: live.resizePlan != nil,
-                    hasEncodedImportPlan: live.encodedImportPlan != nil,
+                    hasEncodedImportRequest: live.trustedImport != nil,
                     candidateCount: 1,
                     candidateBindingCount: live.candidateBinding == nil ? 0 : 1,
                     destinationLeaseCount: live.destinationLease == nil ? 0 : 1,
@@ -888,7 +840,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                         live.baseSourceLease,
                         live.candidateSourceLease,
                     ].compactMap { $0 }.count
-                        + (live.strokeAuthoritativeSourceLease == nil ? 0 : 1),
+                        + (live.strokeCommitSourceLease == nil ? 0 : 1),
                     backendEncodingCount: live.backendEncoding == nil ? 0 : 1,
                     revisionPairCount: live.revisionPair == nil ? 0 : 1,
                     commandBufferCount:
@@ -913,7 +865,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     destinationLeaseID: liveRestore.destinationLease?.id,
                     resizeSourceLeaseID: nil,
                     strokeBaseSourceLeaseID: nil,
-                    strokeAuthoritativeSourceLeaseID: nil,
+                    strokeCommitSourceLeaseID: nil,
                     baseSourceLeaseID: nil,
                     candidateSourceLeaseID: nil,
                     backendEncodingID: nil,
@@ -926,7 +878,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     commitResult: nil,
                     restoreResult: liveRestore.result,
                     hasResizePlan: false,
-                    hasEncodedImportPlan: false,
+                    hasEncodedImportRequest: false,
                     candidateCount: 1,
                     candidateBindingCount:
                         liveRestore.candidateBinding == nil ? 0 : 1,
@@ -953,99 +905,107 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         _ request: DocumentPaintSurfaceMutationRequest,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
     ) throws -> DocumentPaintMutationPreparation {
-        guard request.kind != .encodedImport else {
+        guard request.kind != .encodedImport,
+              request.kind != .restore else {
             throw DocumentPaintSurfaceTransactionError
                 .unsupportedMutationKind(.encodedImport)
         }
-        return try prepareMutation(
+        return try prepareGeneralMutation(
             request,
-            failureInjection: failureInjection,
-            encodedImportPlan: nil
+            failureInjection: failureInjection
         )
     }
 
-    public func prepareEncodedImport(
+    func prepareEncodedImport(
         _ request: DocumentPaintSurfaceEncodedImportRequest,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
-    ) throws -> DocumentPaintMutationPreparation {
-        let importPlan = try Self.makeEncodedImportPlan(request)
-        return try prepareMutation(
-            nil,
-            failureInjection: failureInjection,
-            encodedImportPlan: importPlan
-        )
-    }
-
-    private func prepareMutation(
-        _ suppliedRequest: DocumentPaintSurfaceMutationRequest?,
-        failureInjection: DocumentPaintSurfaceTransactionFailureInjection?,
-        encodedImportPlan: EncodedImportPlan?
     ) throws -> DocumentPaintMutationPreparation {
         try withLock {
             guard live == nil, liveRestore == nil else {
                 throw DocumentPaintSurfaceTransactionError
                     .transactionAlreadyLive
             }
-            let targetLayerID: UUID
-            if let suppliedRequest {
-                guard suppliedRequest.kind != .restore else {
-                    throw DocumentPaintSurfaceTransactionError
-                        .unsupportedMutationKind(suppliedRequest.kind)
-                }
-                guard encodedImportPlan == nil else {
-                    throw DocumentPaintSurfaceTransactionError
-                        .unsupportedMutationKind(suppliedRequest.kind)
-                }
-                targetLayerID = suppliedRequest.layerID
-            } else if let encodedImportPlan {
-                targetLayerID = encodedImportPlan.request.layerID
-            } else {
+            let base: DocumentPaintSurfaceMutationBaseSnapshot
+            do {
+                base = try registry.captureMutationBase(for: request.layerID)
+            } catch DocumentPaintSurfaceStoreError.unknownLayerID {
                 throw DocumentPaintSurfaceTransactionError
-                    .unsupportedMutationKind(.encodedImport)
+                    .unknownLayerID(request.layerID)
+            }
+            try afterBaseSnapshotForTesting?()
+            let baseCoordinates = base.binding.canonical.references
+                .map(\.coordinate)
+            let importedCoordinates = Set(request.importDirtyCoordinates)
+            let removedCoordinates = baseCoordinates.filter {
+                !importedCoordinates.contains($0)
+            }
+            if request.candidateGeometry == base.geometry,
+               baseCoordinates.isEmpty,
+               request.importDirtyCoordinates.isEmpty {
+                return .noOp(DocumentPaintSurfaceNoOp(
+                    kind: .encodedImport,
+                    layerID: request.layerID,
+                    generation: base.generation
+                ))
+            }
+            guard nextSequence < UInt64.max else {
+                throw DocumentPaintSurfaceTransactionError.sequenceOverflow
+            }
+            let sequence = nextSequence
+            let candidate = try registry.makeCandidate(
+                from: base,
+                geometry: request.candidateGeometry,
+                dirtyCoordinatesByLayer: [
+                    request.layerID: request.importDirtyCoordinates,
+                ],
+                removingCoordinatesByLayer: [
+                    request.layerID: removedCoordinates,
+                ],
+                failureInjection: Self.candidateAllocationFailure(
+                    failureInjection
+                )
+            )
+            nextSequence += 1
+            live = LiveTransaction(
+                sequence: sequence,
+                request: nil,
+                trustedImport: TrustedImportState(
+                    request: request,
+                    baseGeometry: base.geometry,
+                    removedCoordinates: removedCoordinates
+                ),
+                baseGeneration: base.binding.generation,
+                baseBinding: base.binding,
+                candidate: candidate,
+                resizePlan: nil,
+                phase: .prepared
+            )
+            return .prepared(DocumentPaintPreparedMutation(
+                coordinatorIdentity: identity,
+                sequence: sequence
+            ))
+        }
+    }
+
+    private func prepareGeneralMutation(
+        _ request: DocumentPaintSurfaceMutationRequest,
+        failureInjection: DocumentPaintSurfaceTransactionFailureInjection?
+    ) throws -> DocumentPaintMutationPreparation {
+        try withLock {
+            guard live == nil, liveRestore == nil else {
+                throw DocumentPaintSurfaceTransactionError
+                    .transactionAlreadyLive
             }
             let base: DocumentPaintSurfaceMutationBaseSnapshot
             do {
                 base = try registry.captureMutationBase(
-                    for: targetLayerID
+                    for: request.layerID
                 )
             } catch DocumentPaintSurfaceStoreError.unknownLayerID {
                 throw DocumentPaintSurfaceTransactionError
-                    .unknownLayerID(targetLayerID)
+                    .unknownLayerID(request.layerID)
             }
             try afterBaseSnapshotForTesting?()
-            let request: DocumentPaintSurfaceMutationRequest
-            if let suppliedRequest {
-                request = suppliedRequest
-            } else if let encodedImportPlan {
-                let dirty = Set(encodedImportPlan.dirtyCoordinates)
-                let removals = base.binding.canonical.references
-                    .map(\.coordinate)
-                    .filter { !dirty.contains($0) }
-                request = DocumentPaintSurfaceMutationRequest(
-                    kind: .encodedImport,
-                    layerID: encodedImportPlan.request.layerID,
-                    baseGeometry: base.geometry,
-                    candidateGeometry:
-                        encodedImportPlan.request.candidateGeometry,
-                    dirtyCoordinates: encodedImportPlan.dirtyCoordinates,
-                    explicitlyRemovedCoordinates: removals,
-                    requiresHistoryPair: false
-                )
-            } else {
-                preconditionFailure("Mutation preparation source was lost")
-            }
-            if request.kind == .encodedImport {
-                try afterEncodedImportReplacementAuthorityForTesting?()
-                guard let encodedImportPlan,
-                      encodedImportPlan.request.layerID == request.layerID,
-                      encodedImportPlan.request.candidateGeometry
-                        == request.candidateGeometry,
-                      !request.requiresHistoryPair
-                else {
-                    throw DocumentPaintSurfaceTransactionError
-                        .unsupportedMutationKind(request.kind)
-                }
-            }
             let activeGeometry = base.geometry
             guard request.baseGeometry == activeGeometry else {
                 throw DocumentPaintSurfaceTransactionError
@@ -1135,21 +1095,9 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     throw DocumentPaintSurfaceTransactionError
                         .missingBaseCoordinate(missing)
                 }
-            } else if request.kind == .encodedImport,
-                      request.candidateGeometry == request.baseGeometry,
-                      baseCoordinates.isEmpty,
-                      request.dirtyCoordinates.isEmpty,
-                      request.explicitlyRemovedCoordinates.isEmpty {
-                return .noOp(DocumentPaintSurfaceNoOp(
-                    kind: .encodedImport,
-                    layerID: request.layerID,
-                    generation: base.generation
-                ))
             } else if request.dirtyCoordinates.isEmpty,
                       request.explicitlyRemovedCoordinates.isEmpty,
                       !(request.kind == .resize
-                          && request.candidateGeometry != request.baseGeometry),
-                      !(request.kind == .encodedImport
                           && request.candidateGeometry != request.baseGeometry) {
                 throw DocumentPaintSurfaceTransactionError.emptyMutation
             }
@@ -1186,11 +1134,11 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             live = LiveTransaction(
                 sequence: sequence,
                 request: request,
+                trustedImport: nil,
                 baseGeneration: baseBinding.generation,
                 baseBinding: baseBinding,
                 candidate: candidate,
                 resizePlan: resizePlan,
-                encodedImportPlan: encodedImportPlan,
                 phase: .prepared
             )
             return .prepared(DocumentPaintPreparedMutation(
@@ -1200,42 +1148,13 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         }
     }
 
-    public func prepareRestore(
+    func prepareRestore(
         _ request: DocumentPaintSurfaceRestoreRequest,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
     ) throws -> DocumentPaintPreparedRestore {
         try withLock {
             guard live == nil, liveRestore == nil else {
                 throw DocumentPaintSurfaceTransactionError.transactionAlreadyLive
-            }
-            guard let referenceLayer = request.reference.layerID else {
-                throw DocumentPaintSurfaceTransactionError
-                    .restoreReferenceUnavailable
-            }
-            guard referenceLayer == request.layerID else {
-                throw DocumentPaintSurfaceTransactionError.restoreLayerMismatch(
-                    expected: referenceLayer,
-                    actual: request.layerID
-                )
-            }
-            guard request.reference.pixelSize
-                    == request.targetGeometry.storagePixelSize,
-                  request.reference.documentPixelSize
-                    == request.targetGeometry.documentPixelSize
-            else {
-                throw DocumentPaintSurfaceTransactionError
-                    .restoreGeometryMismatch
-            }
-            try Self.validateRestoreExpectations(
-                request.expectedInstallDispositions
-            )
-
-            let base: DocumentPaintSurfaceMutationBaseSnapshot
-            do {
-                base = try registry.captureMutationBase(for: request.layerID)
-            } catch DocumentPaintSurfaceStoreError.unknownLayerID {
-                throw DocumentPaintSurfaceTransactionError
-                    .unknownLayerID(request.layerID)
             }
             let installLease: TiledRasterRevisionInstallLease
             do {
@@ -1246,38 +1165,36 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 throw DocumentPaintSurfaceTransactionError
                     .restoreReferenceUnavailable
             }
-            let actual = installLease.tiles.map {
-                DocumentPaintSurfaceRestoreTileExpectation(
-                    coordinate: $0.descriptor.coordinate,
-                    disposition: $0.disposition
-                )
-            }
-            guard actual == request.expectedInstallDispositions else {
+            guard installLease.reference.pixelSize
+                    == request.targetGeometry.storagePixelSize,
+                  installLease.reference.documentPixelSize
+                    == request.targetGeometry.documentPixelSize
+            else {
                 try abandonRestoreInstall(installLease)
                 throw DocumentPaintSurfaceTransactionError
-                    .restoreDispositionMismatch
+                    .restoreGeometryMismatch
+            }
+            let layerID = installLease.layerID
+            let base: DocumentPaintSurfaceMutationBaseSnapshot
+            do {
+                base = try registry.captureMutationBase(for: layerID)
+            } catch DocumentPaintSurfaceStoreError.unknownLayerID {
+                try abandonRestoreInstall(installLease)
+                throw DocumentPaintSurfaceTransactionError
+                    .unknownLayerID(layerID)
             }
 
-            let replacements = actual.compactMap {
-                $0.disposition == .replace ? $0.coordinate : nil
-            }
-            for coordinate in replacements {
-                do {
-                    _ = try PaintTileDescriptor(
-                        coordinate: coordinate,
-                        logicalPixelSize:
-                            request.targetGeometry.storagePixelSize
-                    )
-                } catch {
-                    try abandonRestoreInstall(installLease)
-                    throw DocumentPaintSurfaceTransactionError
-                        .restoreGeometryMismatch
-                }
+            let replacements = installLease.tiles.compactMap {
+                $0.disposition == .replace
+                    ? $0.descriptor.coordinate
+                    : nil
             }
             let baseCoordinates = base.binding.canonical.references
                 .map(\.coordinate)
-            let historicalRemovals = actual.compactMap {
-                $0.disposition == .remove ? $0.coordinate : nil
+            let historicalRemovals = installLease.tiles.compactMap {
+                $0.disposition == .remove
+                    ? $0.descriptor.coordinate
+                    : nil
             }
             let removals: [PaintTileCoordinate]
             if request.targetGeometry != base.geometry {
@@ -1303,14 +1220,14 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 candidate = try registry.makeCandidate(
                     from: base,
                     geometry: request.targetGeometry,
-                    dirtyCoordinatesByLayer: [request.layerID: replacements],
-                    removingCoordinatesByLayer: [request.layerID: removals],
+                    dirtyCoordinatesByLayer: [layerID: replacements],
+                    removingCoordinatesByLayer: [layerID: removals],
                     failureInjection: Self.candidateAllocationFailure(
                         failureInjection
                     )
                 )
                 candidateForCleanup = candidate
-                binding = try candidate.binding(for: request.layerID)
+                binding = try candidate.binding(for: layerID)
                 destinationLease = try binding.canonical.leaseExistingTiles(
                     at: replacements,
                     pinReasons: [.dirty, .inFlight]
@@ -1332,6 +1249,10 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             let current = LiveRestore(
                 sequence: sequence,
                 request: request,
+                layerID: layerID,
+                restoredCoordinates: installLease.tiles.map {
+                    $0.descriptor.coordinate
+                },
                 baseGeneration: base.generation,
                 baseBinding: base.binding,
                 candidate: candidate,
@@ -1364,19 +1285,6 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     logicalBounds: $0.descriptor.logicalBounds,
                     texture: $0.texture
                 )
-            }
-            let payload = DocumentPaintSurfaceRestoreBackendPayload(
-                reference: current.request.reference,
-                destinations: destinations
-            )
-            do {
-                try mutationBackend.preflight(.restore(payload))
-                try Self.validateRestoreDestinations(
-                    destinations,
-                    expected: current.request.expectedInstallDispositions
-                )
-            } catch {
-                throw DocumentPaintSurfaceTransactionError.restoreEncodingFailed
             }
             guard let commandBuffer = commandQueue.makeCommandBuffer() else {
                 current.phase = .discardPending
@@ -1547,12 +1455,11 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     .registryPreparationFailed
             }
             current.result = DocumentPaintSurfaceRestoreResult(
-                layerID: current.request.layerID,
+                layerID: current.layerID,
                 beforeGeneration: current.baseGeneration,
                 afterGeneration: current.candidate.generation,
                 reference: current.request.reference,
-                restoredCoordinates: current.request
-                    .expectedInstallDispositions.map(\.coordinate)
+                restoredCoordinates: current.restoredCoordinates
             )
             current.preparedCommit = prepared
             current.phase = .restoreTerminalPrepared
@@ -1607,7 +1514,6 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
     ) throws -> DocumentPaintEncodedMutation {
         try encodeMutation(
             handle,
-            strokeSourceOwner: nil,
             strokeSourceLease: nil,
             strokeCompositeParameters: nil,
             failureInjection: failureInjection
@@ -1616,15 +1522,13 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
 
     func encodeStrokeMutation(
         _ handle: DocumentPaintPreparedMutation,
-        sourceOwner: StrokeTileSurfaceEncoder,
-        sourceLease: StrokeAuthoritativeMutationLease,
+        source: StrokePreparedCommitMutationSource,
         compositeParameters: DocumentPaintStrokeCompositeParameters,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection? = nil
     ) throws -> DocumentPaintEncodedMutation {
         try encodeMutation(
             handle,
-            strokeSourceOwner: sourceOwner,
-            strokeSourceLease: sourceLease,
+            strokeSourceLease: source,
             strokeCompositeParameters: compositeParameters,
             failureInjection: failureInjection
         )
@@ -1632,8 +1536,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
 
     private func encodeMutation(
         _ handle: DocumentPaintPreparedMutation,
-        strokeSourceOwner: StrokeTileSurfaceEncoder?,
-        strokeSourceLease: StrokeAuthoritativeMutationLease?,
+        strokeSourceLease: StrokePreparedCommitMutationSource?,
         strokeCompositeParameters: DocumentPaintStrokeCompositeParameters?,
         failureInjection: DocumentPaintSurfaceTransactionFailureInjection?
     ) throws -> DocumentPaintEncodedMutation {
@@ -1643,13 +1546,13 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             let lease: PaintTileLease?
             do {
                 binding = try current.candidate.binding(
-                    for: current.request.layerID
+                    for: current.layerID
                 )
-                if current.request.dirtyCoordinates.isEmpty {
+                if current.dirtyCoordinates.isEmpty {
                     lease = nil
                 } else {
                     lease = try binding.canonical.leaseExistingTiles(
-                        at: current.request.dirtyCoordinates,
+                        at: current.dirtyCoordinates,
                         pinReasons: [.dirty, .inFlight]
                     )
                 }
@@ -1667,42 +1570,12 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 )
             }
             let operation: DocumentPaintSurfaceBackendOperation
-            if let importPlan = current.encodedImportPlan {
-                do {
-                    try Self.validateEncodedImportBindings(
-                        destinations: destinations,
-                        plan: importPlan
+            if let importRequest = current.encodedImportRequest {
+                operation = .encodedImport(
+                    importRequest.makeBackendPayload(
+                        destinations: destinations
                     )
-                    operation = .encodedImport(
-                        DocumentPaintSurfaceEncodedImportBackendPayload(
-                            candidateGeometry:
-                                importPlan.request.candidateGeometry,
-                            width: importPlan.request.width,
-                            height: importPlan.request.height,
-                            bytesPerRow: importPlan.request.bytesPerRow,
-                            encodedPremultipliedBGRA8: importPlan.request
-                                .encodedPremultipliedBGRA8,
-                            conversion:
-                                .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float,
-                            clearsDestinationsBeforeConversion: true,
-                            destinations: destinations,
-                            tileRegions: importPlan.tileRegions
-                        )
-                    )
-                } catch {
-                    do {
-                        if let lease {
-                            try binding.canonical.returnLease(lease)
-                        }
-                        current.destinationLease = nil
-                        current.candidateBinding = nil
-                    } catch {
-                        current.phase = .discardPending
-                        throw DocumentPaintSurfaceTransactionError.cleanupFailed
-                    }
-                    throw DocumentPaintSurfaceTransactionError
-                        .backendEncodingFailed
-                }
+                )
             } else if let resizePlan = current.resizePlan {
                 do {
                     if !resizePlan.sourceCoordinates.isEmpty {
@@ -1727,11 +1600,11 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     )
                     operation = .resize(
                         DocumentPaintSurfaceResizeBackendPayload(
-                            sourceGeometry: current.request.baseGeometry,
+                            sourceGeometry: current.baseGeometry,
                             candidateGeometry:
-                                current.request.candidateGeometry,
+                                current.candidateGeometry,
                             targetRadialConfiguration:
-                                current.request.targetRadialConfiguration,
+                                current.targetRadialConfiguration,
                             clearsDestinationsBeforeCopy: true,
                             sources: sources,
                             destinations: destinations,
@@ -1758,54 +1631,96 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     throw DocumentPaintSurfaceTransactionError
                         .backendEncodingFailed
                 }
-            } else if current.request.kind == .clear {
+            } else if current.kind == .clear {
                 operation = .clear
-            } else if current.request.kind == .stroke {
+            } else if current.kind == .stroke {
                 do {
                     let authoritativeSources:
                         [DocumentPaintSurfaceReadSource]
+                    let predictionSources:
+                        [DocumentPaintSurfaceReadSource]
                     let compositeParameters:
                         DocumentPaintStrokeCompositeParameters
-                    if let strokeSourceOwner,
-                       let strokeSourceLease,
+                    if let strokeSourceLease,
                        let suppliedParameters = strokeCompositeParameters {
-                        try Self.validateStrokeAuthoritativeSource(
+                        guard let request = current.request else {
+                            preconditionFailure("Stroke lost request authority")
+                        }
+                        try Self.validateStrokeCommitSource(
                             strokeSourceLease,
-                            owner: strokeSourceOwner,
                             registry: registry,
-                            request: current.request,
-                            generation: current.baseGeneration
+                            request: request,
+                            generation: current.baseGeneration,
+                            expectedContextIdentity:
+                                expectedStrokeSourceContextIdentity
                         )
                         guard suppliedParameters.isValid else {
                             throw DocumentPaintSurfaceTransactionError
                                 .invalidStrokeCompositeParameters
                         }
-                        current.strokeAuthoritativeSourceOwner =
-                            strokeSourceOwner
-                        current.strokeAuthoritativeSourceLease =
+                        let claimedSources = try strokeSourceLease.claim(
+                            transactionID: identity
+                        )
+                        current.strokeCommitSourceLease =
                             strokeSourceLease
-                        authoritativeSources = strokeSourceLease.bindings.map {
-                            .texture(DocumentPaintSurfaceMutationSource(
-                                coordinate: $0.descriptor.coordinate,
-                                logicalBounds: $0.descriptor.logicalBounds,
-                                texture: $0.texture
-                            ))
+                        authoritativeSources = try claimedSources.map {
+                            source in
+                            if let binding = source.authoritative {
+                                return .texture(
+                                    DocumentPaintSurfaceMutationSource(
+                                        coordinate: source.coordinate,
+                                        logicalBounds:
+                                            binding.descriptor.logicalBounds,
+                                        texture: binding.texture
+                                    )
+                                )
+                            }
+                            let descriptor = try PaintTileDescriptor(
+                                coordinate: source.coordinate,
+                                logicalPixelSize: current
+                                    .candidateGeometry.storagePixelSize
+                            )
+                            return .knownClear(
+                                coordinate: source.coordinate,
+                                logicalBounds: descriptor.logicalBounds
+                            )
+                        }
+                        predictionSources = try claimedSources.map {
+                            source in
+                            if let binding = source.prediction {
+                                return .texture(
+                                    DocumentPaintSurfaceMutationSource(
+                                        coordinate: source.coordinate,
+                                        logicalBounds:
+                                            binding.descriptor.logicalBounds,
+                                        texture: binding.texture
+                                    )
+                                )
+                            }
+                            let descriptor = try PaintTileDescriptor(
+                                coordinate: source.coordinate,
+                                logicalPixelSize: current
+                                    .candidateGeometry.storagePixelSize
+                            )
+                            return .knownClear(
+                                coordinate: source.coordinate,
+                                logicalBounds: descriptor.logicalBounds
+                            )
                         }
                         compositeParameters = suppliedParameters
                     } else {
                         guard allowKnownClearAuthoritativeStrokeSourcesForTesting,
-                              strokeSourceOwner == nil,
                               strokeSourceLease == nil,
                               strokeCompositeParameters == nil
                         else {
                             throw DocumentPaintSurfaceTransactionError
                                 .missingStrokeAuthoritativeLease
                         }
-                        authoritativeSources = try current.request
+                        authoritativeSources = try current
                             .dirtyCoordinates.map { coordinate in
                                 let descriptor = try PaintTileDescriptor(
                                     coordinate: coordinate,
-                                    logicalPixelSize: current.request
+                                    logicalPixelSize: current
                                         .candidateGeometry.storagePixelSize
                                 )
                                 return .knownClear(
@@ -1813,6 +1728,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                                     logicalBounds: descriptor.logicalBounds
                                 )
                             }
+                        predictionSources = authoritativeSources
                         compositeParameters = .opaqueDraw
                     }
 
@@ -1820,7 +1736,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                         current.baseBinding.canonical.references
                             .map(\.coordinate)
                     )
-                    let presentBaseCoordinates = current.request
+                    let presentBaseCoordinates = current
                         .dirtyCoordinates.filter {
                             baseReferenceCoordinates.contains($0)
                         }
@@ -1837,7 +1753,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                                 ($0.descriptor.coordinate, $0)
                             }
                     )
-                    let baseSources = try current.request.dirtyCoordinates.map {
+                    let baseSources = try current.dirtyCoordinates.map {
                         coordinate -> DocumentPaintSurfaceReadSource in
                         if let binding = presentBaseSources[coordinate] {
                             return .texture(
@@ -1851,7 +1767,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                         }
                         let descriptor = try PaintTileDescriptor(
                             coordinate: coordinate,
-                            logicalPixelSize: current.request
+                            logicalPixelSize: current
                                 .baseGeometry.storagePixelSize
                         )
                         return .knownClear(
@@ -1860,18 +1776,16 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                         )
                     }
                     let payload = DocumentPaintSurfaceStrokeBackendPayload(
-                        geometry: current.request.candidateGeometry,
+                        geometry: current.candidateGeometry,
                         compositeParameters: compositeParameters,
                         baseSources: baseSources,
                         authoritativeSources: authoritativeSources,
+                        predictionSources: predictionSources,
                         destinations: destinations
                     )
                     try Self.validateStrokePayload(
                         payload,
-                        expectedCoordinates: current.request.dirtyCoordinates,
-                        allowsKnownClearAuthoritativeSources:
-                            strokeSourceLease == nil
-                                && allowKnownClearAuthoritativeStrokeSourcesForTesting
+                        expectedCoordinates: current.dirtyCoordinates
                     )
                     operation = .stroke(payload)
                 } catch {
@@ -1895,14 +1809,13 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 }
             } else {
                 throw DocumentPaintSurfaceTransactionError
-                    .unsupportedMutationKind(current.request.kind)
+                    .unsupportedMutationKind(current.kind)
             }
             do {
                 if failureInjection?.shouldFail(at: .mutationEncode) == true {
                     throw DocumentPaintSurfaceTransactionError
                         .backendEncodingFailed
                 }
-                try mutationBackend.preflight(operation)
                 current.backendEncoding = try mutationBackend.encode(operation)
             } catch {
                 do {
@@ -1963,8 +1876,8 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 }
                 current.reduction = try Self.validateReduction(
                     evidence,
-                    dirtyCoordinates: current.request.dirtyCoordinates,
-                    pixelSize: current.request.candidateGeometry.storagePixelSize
+                    dirtyCoordinates: current.dirtyCoordinates,
+                    pixelSize: current.candidateGeometry.storagePixelSize
                 )
             } catch let transactionError as DocumentPaintSurfaceTransactionError {
                 try failAndCleanup(current, preserving: transactionError)
@@ -1994,14 +1907,17 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             }
             current.candidateBinding = nil
             if current.strokeBaseSourceLease != nil
-                || current.strokeAuthoritativeSourceLease != nil {
+                || current.strokeCommitSourceLease != nil {
                 if failureInjection?.shouldFail(at: .sourceLeaseReturn) == true {
                     current.phase = .discardPending
                     throw DocumentPaintSurfaceTransactionError
                         .sourceLeaseReturnFailed
                 }
                 do {
-                    try releaseStrokeSources(current)
+                    try releaseStrokeSources(
+                        current,
+                        authoritativeCompletion: .consumed
+                    )
                 } catch {
                     current.phase = .discardPending
                     throw DocumentPaintSurfaceTransactionError
@@ -2034,7 +1950,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 try registry.pruneFullyTransparentCoordinates(
                     reduction.fullyTransparentCoordinates,
                     from: current.candidate,
-                    layerID: current.request.layerID
+                    layerID: current.layerID
                 )
             } catch {
                 try failAndCleanup(
@@ -2056,13 +1972,13 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
     ) throws -> DocumentPaintEncodedHistory {
         try withLock {
             let current = try validated(handle)
-            guard current.request.requiresHistoryPair else {
+            guard current.requiresHistoryPair else {
                 throw DocumentPaintSurfaceTransactionError.historyNotRequired
             }
             let candidateBinding: DocumentPaintLayerBinding
             do {
                 candidateBinding = try current.candidate.binding(
-                    for: current.request.layerID
+                    for: current.layerID
                 )
             } catch {
                 try failAndCleanup(
@@ -2072,8 +1988,11 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             }
             current.candidateBinding = candidateBinding
 
+            guard let request = current.request else {
+                preconditionFailure("History mutation lost request authority")
+            }
             let endpointCoordinates = Self.historyEndpointCoordinates(
-                for: current.request,
+                for: request,
                 resizePlan: current.resizePlan
             )
             let basePresent = Set(
@@ -2093,18 +2012,20 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             do {
                 before = try TiledRasterRevisionEndpoint(
                     generation: current.baseGeneration,
-                    pixelSize: current.request.baseGeometry.storagePixelSize,
+                    pixelSize: current.baseGeometry.storagePixelSize,
                     documentPixelSize:
-                        current.request.baseGeometry.documentPixelSize,
+                        current.baseGeometry.documentPixelSize,
+                    radialLayout: current.baseGeometry.radialLayout,
                     coordinates: endpointCoordinates.before,
                     presentCoordinates: beforePresent
                 )
                 after = try TiledRasterRevisionEndpoint(
                     generation: current.candidate.generation,
                     pixelSize:
-                        current.request.candidateGeometry.storagePixelSize,
+                        current.candidateGeometry.storagePixelSize,
                     documentPixelSize:
-                        current.request.candidateGeometry.documentPixelSize,
+                        current.candidateGeometry.documentPixelSize,
+                    radialLayout: current.candidateGeometry.radialLayout,
                     coordinates: endpointCoordinates.after,
                     presentCoordinates: afterPresent
                 )
@@ -2112,7 +2033,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     failureInjection
                 )
                 current.revisionPair = try revisionStore.allocatePair(
-                    layerID: current.request.layerID,
+                    layerID: current.layerID,
                     before: before,
                     after: after,
                     failureInjection: allocationFailure
@@ -2158,7 +2079,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 )
                 current.beforeCapture = try revisionStore.encodeCapture(
                     pair.before,
-                    layerID: current.request.layerID,
+                    layerID: current.layerID,
                     generation: current.baseGeneration,
                     sources: beforeSources,
                     on: commandBuffer,
@@ -2169,7 +2090,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 )
                 current.afterCapture = try revisionStore.encodeCapture(
                     pair.after,
-                    layerID: current.request.layerID,
+                    layerID: current.layerID,
                     generation: current.candidate.generation,
                     sources: afterSources,
                     on: commandBuffer,
@@ -2443,7 +2364,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
     ) throws -> DocumentPaintTerminalCommit {
         try withLock {
             let current = try validated(handle)
-            guard current.request.requiresHistoryPair == requiresHistoryPair,
+            guard current.requiresHistoryPair == requiresHistoryPair,
                   (requiresHistoryPair
                     ? current.revisionPair != nil
                     : current.revisionPair == nil)
@@ -2455,12 +2376,12 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                     .terminalPreflightFailed
             }
             let result = DocumentPaintSurfaceCommitResult(
-                layerID: current.request.layerID,
+                layerID: current.layerID,
                 beforeGeneration: current.baseGeneration,
                 afterGeneration: current.candidate.generation,
                 dirtyCoordinates: Set(
-                    current.request.dirtyCoordinates
-                        + current.request.explicitlyRemovedCoordinates
+                    current.dirtyCoordinates
+                        + current.removedCoordinates
                 ).sorted(),
                 historyPair: current.revisionPair
             )
@@ -2593,24 +2514,20 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
     }
 
     private func releaseStrokeSources(
-        _ current: LiveTransaction
+        _ current: LiveTransaction,
+        authoritativeCompletion:
+            StrokePreparedCommitMutationCompletion = .aborted
     ) throws {
         if let baseLease = current.strokeBaseSourceLease {
             try current.baseBinding.canonical.returnLease(baseLease)
             current.strokeBaseSourceLease = nil
         }
-        switch (
-            current.strokeAuthoritativeSourceOwner,
-            current.strokeAuthoritativeSourceLease
-        ) {
-        case let (owner?, lease?):
-            try owner.returnAuthoritativeMutationLease(lease)
-            current.strokeAuthoritativeSourceOwner = nil
-            current.strokeAuthoritativeSourceLease = nil
-        case (nil, nil):
-            break
-        default:
-            throw DocumentPaintSurfaceTransactionError.cleanupFailed
+        if let lease = current.strokeCommitSourceLease {
+            try lease.complete(
+                transactionID: identity,
+                as: authoritativeCompletion
+            )
+            current.strokeCommitSourceLease = nil
         }
     }
 
@@ -2644,7 +2561,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             }
         }
         if current.strokeBaseSourceLease != nil
-            || current.strokeAuthoritativeSourceLease != nil {
+            || current.strokeCommitSourceLease != nil {
             do {
                 try releaseStrokeSources(current)
             } catch {
@@ -2728,149 +2645,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         live = nil
     }
 
-    private static func makeEncodedImportPlan(
-        _ request: DocumentPaintSurfaceEncodedImportRequest
-    ) throws -> EncodedImportPlan {
-        guard request.width > 0, request.height > 0 else {
-            throw DocumentPaintSurfaceTransactionError.invalidEncodedImport(
-                .invalidDimensions(
-                    width: request.width,
-                    height: request.height
-                )
-            )
-        }
-        let (minimumBytesPerRow, rowOverflow) = request.width
-            .multipliedReportingOverflow(by: 4)
-        guard !rowOverflow else {
-            throw DocumentPaintSurfaceTransactionError
-                .invalidEncodedImport(.byteCountOverflow)
-        }
-        guard request.bytesPerRow >= minimumBytesPerRow else {
-            throw DocumentPaintSurfaceTransactionError.invalidEncodedImport(
-                .invalidRowStride(
-                    minimum: minimumBytesPerRow,
-                    actual: request.bytesPerRow
-                )
-            )
-        }
-        let (expectedByteCount, byteCountOverflow) = request.bytesPerRow
-            .multipliedReportingOverflow(by: request.height)
-        guard !byteCountOverflow else {
-            throw DocumentPaintSurfaceTransactionError
-                .invalidEncodedImport(.byteCountOverflow)
-        }
-        guard request.encodedPremultipliedBGRA8.count == expectedByteCount else {
-            throw DocumentPaintSurfaceTransactionError.invalidEncodedImport(
-                .invalidEncodedByteCount(
-                    expected: expectedByteCount,
-                    actual: request.encodedPremultipliedBGRA8.count
-                )
-            )
-        }
-        guard request.candidateGeometry.radialLayout == nil else {
-            throw DocumentPaintSurfaceTransactionError
-                .encodedImportRadialUnsupported
-        }
-        let actualSize = PixelSize(
-            width: request.width,
-            height: request.height
-        )
-        guard request.candidateGeometry.storagePixelSize == actualSize else {
-            throw DocumentPaintSurfaceTransactionError
-                .encodedImportGeometryMismatch(
-                    expected: request.candidateGeometry.storagePixelSize,
-                    actual: actualSize
-                )
-        }
-
-        let maximumTileX = (request.width - 1) / PaintTileDescriptor.side
-        let maximumTileY = (request.height - 1) / PaintTileDescriptor.side
-        var coordinates: [PaintTileCoordinate] = []
-        var regions: [DocumentPaintSurfaceEncodedImportTileRegion] = []
-        let tileCount = (maximumTileX + 1) * (maximumTileY + 1)
-        coordinates.reserveCapacity(tileCount)
-        regions.reserveCapacity(tileCount)
-        for y in 0...maximumTileY {
-            for x in 0...maximumTileX {
-                let coordinate = PaintTileCoordinate(x: x, y: y)
-                let descriptor: PaintTileDescriptor
-                do {
-                    descriptor = try PaintTileDescriptor(
-                        coordinate: coordinate,
-                        logicalPixelSize:
-                            request.candidateGeometry.storagePixelSize
-                    )
-                } catch {
-                    throw DocumentPaintSurfaceTransactionError
-                        .encodedImportGeometryMismatch(
-                            expected:
-                                request.candidateGeometry.storagePixelSize,
-                            actual: actualSize
-                        )
-                }
-                let (rowOffset, rowOffsetOverflow) = descriptor.logicalBounds
-                    .minY.multipliedReportingOverflow(by: request.bytesPerRow)
-                let (columnOffset, columnOffsetOverflow) = descriptor
-                    .logicalBounds.minX.multipliedReportingOverflow(by: 4)
-                let (sourceByteOffset, offsetOverflow) = rowOffset
-                    .addingReportingOverflow(columnOffset)
-                guard !rowOffsetOverflow, !columnOffsetOverflow,
-                      !offsetOverflow
-                else {
-                    throw DocumentPaintSurfaceTransactionError
-                        .invalidEncodedImport(.byteCountOverflow)
-                }
-                guard encodedImportTileContainsNonzeroAlpha(
-                    request.encodedPremultipliedBGRA8,
-                    bytesPerRow: request.bytesPerRow,
-                    logicalBounds: descriptor.logicalBounds
-                ) else {
-                    continue
-                }
-                coordinates.append(coordinate)
-                regions.append(DocumentPaintSurfaceEncodedImportTileRegion(
-                    coordinate: coordinate,
-                    sourceOrigin: SIMD2(
-                        descriptor.logicalBounds.minX,
-                        descriptor.logicalBounds.minY
-                    ),
-                    sourceByteOffset: sourceByteOffset,
-                    destinationOrigin: .zero,
-                    extent: PixelSize(
-                        width: descriptor.logicalBounds.width,
-                        height: descriptor.logicalBounds.height
-                    )
-                ))
-            }
-        }
-        return EncodedImportPlan(
-            request: request,
-            dirtyCoordinates: coordinates,
-            tileRegions: regions
-        )
-    }
-
-    private static func encodedImportTileContainsNonzeroAlpha(
-        _ data: Data,
-        bytesPerRow: Int,
-        logicalBounds: PixelRect
-    ) -> Bool {
-        data.withUnsafeBytes { rawBuffer in
-            let bytes = rawBuffer.bindMemory(to: UInt8.self)
-            for y in logicalBounds.minY..<logicalBounds.maxY {
-                var alphaOffset = y * bytesPerRow
-                    + logicalBounds.minX * 4
-                    + 3
-                for _ in logicalBounds.minX..<logicalBounds.maxX {
-                    if bytes[alphaOffset] != 0 { return true }
-                    alphaOffset += 4
-                }
-            }
-            return false
-        }
-    }
-
-    private static func makeResizePlan(
+    static func makeResizePlan(
         baseCoordinates: [PaintTileCoordinate],
         sourceGeometry: DocumentPaintGeometry,
         candidateGeometry: DocumentPaintGeometry
@@ -3106,13 +2881,19 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         }
     }
 
-    private static func validateStrokeAuthoritativeSource(
-        _ lease: StrokeAuthoritativeMutationLease,
-        owner: StrokeTileSurfaceEncoder,
+    private static func validateStrokeCommitSource(
+        _ lease: StrokePreparedCommitMutationSource,
         registry: DocumentPaintSurfaceStore,
         request: DocumentPaintSurfaceMutationRequest,
-        generation: UInt64
+        generation: UInt64,
+        expectedContextIdentity: UUID?
     ) throws {
+        if let expectedContextIdentity {
+            guard lease.contextIdentity == expectedContextIdentity else {
+                throw DocumentPaintSurfaceTransactionError
+                    .strokeSourceContextMismatch
+            }
+        }
         guard lease.storeIdentity == registry.tileStoreIdentity else {
             throw DocumentPaintSurfaceTransactionError
                 .strokeSourceStoreMismatch
@@ -3145,26 +2926,22 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             throw DocumentPaintSurfaceTransactionError
                 .strokeSourceRadialLayoutMismatch
         }
-        guard lease.bindings.map(\.descriptor.coordinate)
-                == request.dirtyCoordinates
+        guard lease.coordinates == request.dirtyCoordinates
         else {
             throw DocumentPaintSurfaceTransactionError
                 .strokeSourceCoordinateMismatch
-        }
-        guard owner.ownsAuthoritativeMutationLease(lease) else {
-            throw DocumentPaintSurfaceTransactionError
-                .strokeSourceOwnerMismatch
         }
     }
 
     static func validateStrokePayload(
         _ payload: DocumentPaintSurfaceStrokeBackendPayload,
-        expectedCoordinates: [PaintTileCoordinate],
-        allowsKnownClearAuthoritativeSources: Bool
+        expectedCoordinates: [PaintTileCoordinate]
     ) throws {
         guard payload.compositeParameters.isValid,
               payload.baseSources.map(\.coordinate) == expectedCoordinates,
               payload.authoritativeSources.map(\.coordinate)
+                == expectedCoordinates,
+              payload.predictionSources.map(\.coordinate)
                 == expectedCoordinates,
               payload.destinations.map(\.coordinate) == expectedCoordinates
         else {
@@ -3180,6 +2957,9 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                 $0.coordinate == coordinate
             })?.logicalBounds == expected.logicalBounds,
                 payload.authoritativeSources.first(where: {
+                    $0.coordinate == coordinate
+                })?.logicalBounds == expected.logicalBounds,
+                payload.predictionSources.first(where: {
                     $0.coordinate == coordinate
                 })?.logicalBounds == expected.logicalBounds,
                 payload.destinations.first(where: {
@@ -3214,10 +2994,25 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         for source in payload.authoritativeSources {
             switch source {
             case .knownClear:
-                guard allowsKnownClearAuthoritativeSources else {
+                break
+            case let .texture(textureSource):
+                guard textureSource.texture.pixelFormat
+                        == PaintTileDescriptor.pixelFormat,
+                      textureSource.texture.width == PaintTileDescriptor.side,
+                      textureSource.texture.height == PaintTileDescriptor.side
+                else {
                     throw DocumentPaintSurfaceTransactionError
-                        .missingStrokeAuthoritativeLease
+                        .strokeSourceGeometryMismatch(
+                            expected: payload.geometry.storagePixelSize,
+                            actual: payload.geometry.storagePixelSize
+                        )
                 }
+            }
+        }
+        for source in payload.predictionSources {
+            switch source {
+            case .knownClear:
+                break
             case let .texture(textureSource):
                 guard textureSource.texture.pixelFormat
                         == PaintTileDescriptor.pixelFormat,
@@ -3233,7 +3028,9 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             }
         }
         var readTextureIdentities: Set<ObjectIdentifier> = []
-        for source in payload.baseSources + payload.authoritativeSources {
+        for source in payload.baseSources + payload.authoritativeSources
+            + payload.predictionSources
+        {
             guard case let .texture(textureSource) = source else { continue }
             let identity = ObjectIdentifier(textureSource.texture as AnyObject)
             guard readTextureIdentities.insert(identity).inserted else {
@@ -3260,34 +3057,6 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
                         expected: payload.geometry.storagePixelSize,
                         actual: payload.geometry.storagePixelSize
                     )
-            }
-        }
-    }
-
-    private static func validateEncodedImportBindings(
-        destinations: [DocumentPaintSurfaceMutationDestination],
-        plan: EncodedImportPlan
-    ) throws {
-        guard destinations.map(\.coordinate) == plan.dirtyCoordinates,
-              plan.tileRegions.map(\.coordinate) == plan.dirtyCoordinates
-        else {
-            throw DocumentPaintSurfaceTransactionError.backendEncodingFailed
-        }
-        for (destination, region) in zip(
-            destinations,
-            plan.tileRegions
-        ) {
-            guard destination.texture.pixelFormat
-                    == PaintTileDescriptor.pixelFormat,
-                  destination.texture.width == PaintTileDescriptor.side,
-                  destination.texture.height == PaintTileDescriptor.side,
-                  region.destinationOrigin == .zero,
-                  destination.logicalBounds.width == region.extent.width,
-                  destination.logicalBounds.height == region.extent.height,
-                  destination.logicalBounds.minX == region.sourceOrigin.x,
-                  destination.logicalBounds.minY == region.sourceOrigin.y
-            else {
-                throw DocumentPaintSurfaceTransactionError.backendEncodingFailed
             }
         }
     }
@@ -3529,46 +3298,6 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
             throw error
         } catch {
             throw DocumentPaintSurfaceTransactionError.cleanupFailed
-        }
-    }
-
-    private static func validateRestoreExpectations(
-        _ expectations: [DocumentPaintSurfaceRestoreTileExpectation]
-    ) throws {
-        for index in expectations.indices.dropFirst() {
-            let previous = expectations[index - 1].coordinate
-            let current = expectations[index].coordinate
-            if previous == current {
-                throw DocumentPaintSurfaceTransactionError
-                    .duplicateCoordinate(current)
-            }
-            guard previous < current else {
-                throw DocumentPaintSurfaceTransactionError
-                    .unsortedCoordinate(previous: previous, current: current)
-            }
-        }
-    }
-
-    private static func validateRestoreDestinations(
-        _ destinations: [DocumentPaintSurfaceMutationDestination],
-        expected: [DocumentPaintSurfaceRestoreTileExpectation]
-    ) throws {
-        let replacementCoordinates = expected.compactMap {
-            $0.disposition == .replace ? $0.coordinate : nil
-        }
-        guard destinations.map(\.coordinate) == replacementCoordinates else {
-            throw DocumentPaintSurfaceTransactionError
-                .restoreDispositionMismatch
-        }
-        for destination in destinations {
-            guard destination.texture.pixelFormat
-                    == PaintTileDescriptor.pixelFormat,
-                  destination.texture.width == PaintTileDescriptor.side,
-                  destination.texture.height == PaintTileDescriptor.side
-            else {
-                throw DocumentPaintSurfaceTransactionError
-                    .restoreEncodingFailed
-            }
         }
     }
 

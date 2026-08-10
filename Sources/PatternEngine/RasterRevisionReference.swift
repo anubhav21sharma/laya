@@ -98,6 +98,8 @@ public struct RasterRevisionReference: Equatable, Sendable {
     /// User-visible finite canvas dimensions. This differs from `pixelSize`
     /// only when a sparse radial sector atlas backs the document.
     public let documentPixelSize: PixelSize
+    /// Exact sparse storage geometry for radial documents.
+    public let radialLayout: RadialSectorLayout?
     public let regions: PixelRegionSet
     public let retainedBytes: Int
     public let storage: RasterRevisionStorage
@@ -118,6 +120,7 @@ public struct RasterRevisionReference: Equatable, Sendable {
             id: id,
             pixelSize: pixelSize,
             documentPixelSize: pixelSize,
+            radialLayout: nil,
             regions: regions,
             retainedBytes: retainedBytes,
             storage: .fullSurfaceBGRA8
@@ -128,6 +131,7 @@ public struct RasterRevisionReference: Equatable, Sendable {
         id: StoredRasterRevisionID,
         pixelSize: PixelSize,
         documentPixelSize: PixelSize,
+        radialLayout: RadialSectorLayout? = nil,
         regions: PixelRegionSet,
         retainedBytes: Int,
         storage: RasterRevisionStorage = .fullSurfaceBGRA8
@@ -139,6 +143,7 @@ public struct RasterRevisionReference: Equatable, Sendable {
         self.id = id
         self.pixelSize = pixelSize
         self.documentPixelSize = documentPixelSize
+        self.radialLayout = radialLayout
         self.regions = regions
         self.retainedBytes = retainedBytes
         self.storage = storage
@@ -155,6 +160,7 @@ public struct RasterRevisionReference: Equatable, Sendable {
             id: id,
             pixelSize: pixelSize,
             documentPixelSize: documentPixelSize ?? pixelSize,
+            radialLayout: nil,
             regions: regions,
             retainedBytes: retainedBytes,
             storage: .fullSurfaceBGRA8

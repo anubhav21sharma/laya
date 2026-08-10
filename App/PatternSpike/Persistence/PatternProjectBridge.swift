@@ -54,8 +54,8 @@ enum PatternProjectBridge {
         identity: PatternProjectIdentity,
         appVersion: String,
         modifiedAt: Date = Date()
-    ) throws -> CapturedPatternProject {
-        let snapshot = try renderer.captureCommittedDocument()
+    ) async throws -> CapturedPatternProject {
+        let snapshot = try await renderer.captureCommittedDocument()
         let layerPathStem =
             "rasters/\(identity.layerID.uuidString.lowercased())"
         let surface: PatternProjectLayerSurface
@@ -199,25 +199,7 @@ enum PatternProjectBridge {
             // consume it until that switch is installed.
             throw PatternProjectBridgeError.unsupportedLayerModel
         }
-        let documentDomainLocked: Bool
-        if project.metadata.sourceSchemaVersion
-            == PatternProjectFormat.currentSchemaVersion
-        {
-            documentDomainLocked = metadata.documentDomainLocked
-        } else {
-            switch storage {
-            case let .singleRaster(bytes):
-                documentDomainLocked = metadata.radialGeometryLocked
-                    || bytes.contains(where: { $0 != 0 })
-            case let .radialPages(pages):
-                documentDomainLocked = metadata.radialGeometryLocked
-                    || pages.contains {
-                        $0.bgra8PremultipliedBytes.contains {
-                            $0 != 0
-                        }
-                }
-            }
-        }
+        let documentDomainLocked = metadata.documentDomainLocked
         guard documentDomainLocked || !storage.containsNonzeroBytes else {
             throw PatternProjectBridgeError.incompatibleSurface
         }
@@ -234,12 +216,20 @@ enum PatternProjectBridge {
         from project: DecodedPatternProject,
         device: any MTLDevice,
         drawableSize: PatternSize
-    ) throws -> GridRenderer {
+    ) async throws -> GridRenderer {
+        let snapshot = try committedSnapshot(from: project)
+        let identity = try identity(from: project)
+        let configuration = try TilingCanvasConfiguration(
+            pixelSize: snapshot.canvasSize,
+            documentConfiguration: snapshot.documentConfiguration
+        )
         let renderer = try GridRenderer(
             device: device,
             drawableSize: drawableSize,
-            committedSnapshot: committedSnapshot(from: project)
+            configuration: configuration,
+            initialLayerID: identity.layerID
         )
+        try await renderer.restoreCommittedDocument(snapshot)
         let viewport = project.metadata.metadata.viewport
         renderer.restoreSavedViewport(
             worldCenter: WorldPoint(

@@ -207,6 +207,7 @@ struct DocumentColorPipelineTests {
     func declaresLinearWorkingAndEncodedDisplayFormats() {
         #expect(DocumentColorPipeline.workingPixelFormat == .rgba16Float)
         #expect(DocumentColorPipeline.displayPixelFormat == .bgra8Unorm_srgb)
+        #expect(DocumentColorPipeline.interchangePixelFormat == .bgra8Unorm)
     }
 
     @Test

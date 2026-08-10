@@ -145,7 +145,7 @@ struct StrokeInputQueue: Sendable {
             authoritativeCapacity:
                 budget.maximumPendingAuthoritativeInstances,
             predictionCapacity:
-                PredictionOverlay.maximumNormalizedSampleCount
+                PredictionAdmissionLimits.maximumNormalizedSampleCount
         )
     }
 
@@ -542,6 +542,11 @@ enum StrokePreparationCapacityFailure: Error, Equatable, Sendable {
     case projectedInstances(actual: Int, maximum: Int)
 }
 
+enum StrokePreparedCommitMutation: Sendable {
+    case source(StrokePreparedCommitMutationSource)
+    case noOp
+}
+
 enum StrokePreparationResult: Sendable {
     case prepared(StrokePreparedDepositionBatch)
     case predictionWasShed(
@@ -558,7 +563,10 @@ enum StrokePreparationResult: Sendable {
         error: TransientStrokeBufferError,
         capacityFailure: StrokePreparationCapacityFailure?
     )
-    case commitBarrierReached(generation: UInt64)
+    case commitBarrierReached(
+        generation: UInt64,
+        commitMutation: StrokePreparedCommitMutation
+    )
     case cancelled(
         generation: UInt64,
         reason: StrokeInputCancellationReason?
@@ -572,7 +580,7 @@ enum StrokePreparationResult: Sendable {
         case let .predictionWasShed(generation, _, _),
              let .estimatedUpdateWasIgnored(generation, _),
              let .estimatedUpdateWasRejected(generation, _, _),
-             let .commitBarrierReached(generation),
+             let .commitBarrierReached(generation, _),
              let .cancelled(generation, _),
              let .failed(generation, _):
             generation
@@ -587,6 +595,10 @@ struct StrokePreparationMailboxSnapshot: Equatable, Sendable {
     let resultStorageCapacity: Int
     let resultHighWater: Int
     let awaitingPreparedFrameSubmission: Bool
+    let awaitingPreparedFrameGeneration: UInt64?
+    let awaitingPreparedFrameToken: UInt64?
+    let pendingPreparedFrameAcknowledgement: Bool
+    let preparedFrameAcknowledgementIsInFlight: Bool
     let workerIsProcessing: Bool
     let maximumPreparedRecordCount: Int
     let maximumPreparedLogicalDabCount: Int
@@ -611,6 +623,380 @@ enum StrokePreparationAcknowledgementError: Error, Equatable, Sendable {
         actualToken: UInt64
     )
     case acknowledgementAlreadyPending
+    case acknowledgementAlreadyFulfilled
+    case schedulerReleaseFailed(StrokePreparationFailure)
+}
+
+/// Concrete, affine completion endpoint for one exact scheduler-owned frame.
+/// It carries no caller-selected generation/token and completion means the
+/// scheduler has actually released that frame, not merely accepted a request.
+struct StrokePreparedFrameAcknowledgement: Sendable {
+    fileprivate let core: StrokePreparedFrameAcknowledgementCore?
+
+    func fulfill() async throws {
+        guard let core else {
+            throw StrokePreparationAcknowledgementError.noPreparedFrame
+        }
+        try await core.fulfill()
+    }
+
+    func requestFulfillment() throws {
+        guard let core else {
+            throw StrokePreparationAcknowledgementError.noPreparedFrame
+        }
+        try core.requestFulfillment()
+    }
+
+    var status: StrokePreparedFrameAcknowledgementStatus {
+        core?.status ?? .failed(.noPreparedFrame)
+    }
+
+    #if DEBUG
+    var testingRequestCount: Int { core?.testingRequestCount ?? 0 }
+
+    func testingCompleteDeferredFulfillment() {
+        core?.testingCompleteDeferredFulfillment()
+    }
+    #endif
+}
+
+enum StrokePreparedFrameAcknowledgementStatus: Equatable, Sendable {
+    case available
+    case pending
+    case fulfilled
+    case failed(StrokePreparationAcknowledgementError)
+}
+
+/// Opaque display handoff built from the exact scheduler lease. Raw scheduler
+/// lease authority is deliberately not exposed through this value.
+struct StrokePreparedDisplayFrame: @unchecked Sendable {
+    fileprivate let lease: StrokePreparedSurfaceLease?
+    let surface: StrokePreparedDisplaySurface
+    let acknowledgement: StrokePreparedFrameAcknowledgement
+
+    let generation: UInt64
+    let layer: StrokePrivateSurfaceLayer
+    let authoritativeInstanceCount: Int
+    let predictedInstanceCount: Int
+    let clearedAuthoritativeSurface: Bool
+    let clearedPredictionSurface: Bool
+    let encodingRanOnMainThread: Bool
+    let newBindingCount: Int
+
+    fileprivate init(
+        lease: StrokePreparedSurfaceLease,
+        acknowledgement: StrokePreparedFrameAcknowledgement
+    ) {
+        self.lease = lease
+        self.acknowledgement = acknowledgement
+        generation = lease.generation
+        layer = lease.layer
+        authoritativeInstanceCount = lease.authoritativeInstanceCount
+        predictedInstanceCount = lease.predictedInstanceCount
+        clearedAuthoritativeSurface = lease.clearedAuthoritativeSurface
+        clearedPredictionSurface = lease.clearedPredictionSurface
+        encodingRanOnMainThread = lease.encodingRanOnMainThread
+        newBindingCount = lease.newBindingCount
+        surface = StrokePreparedDisplaySurface(lease: lease)
+    }
+
+    #if DEBUG
+    private init(
+        testingCapability capability: DocumentPaintStrokeSurfaceCapability,
+        layer: StrokePrivateSurfaceLayer,
+        changedCoordinates: [PaintTileCoordinate],
+        acknowledgementIsAvailable: Bool,
+        acknowledgementReleaseFailures: [StrokePreparationFailure],
+        acknowledgementCompletionIsDeferred: Bool
+    ) {
+        lease = nil
+        surface = StrokePreparedDisplaySurface(
+            capability: capability,
+            changedRole: layer,
+            changedCoordinates: changedCoordinates
+        )
+        acknowledgement = StrokePreparedFrameAcknowledgement(
+            core: acknowledgementIsAvailable
+                ? StrokePreparedFrameAcknowledgementCore(
+                    testingReleaseFailures: acknowledgementReleaseFailures,
+                    testingCompletionIsDeferred:
+                        acknowledgementCompletionIsDeferred
+                ) : nil
+        )
+        generation = capability.generation
+        self.layer = layer
+        authoritativeInstanceCount = 0
+        predictedInstanceCount = 0
+        clearedAuthoritativeSurface = false
+        clearedPredictionSurface = false
+        encodingRanOnMainThread = false
+        newBindingCount = 0
+    }
+
+    static func testing(
+        capability: DocumentPaintStrokeSurfaceCapability,
+        layer: StrokePrivateSurfaceLayer = .authoritative,
+        changedCoordinates: [PaintTileCoordinate] = [],
+        acknowledgementIsAvailable: Bool = false,
+        acknowledgementReleaseFailures: [StrokePreparationFailure] = [],
+        acknowledgementCompletionIsDeferred: Bool = false
+    ) -> Self {
+        Self(
+            testingCapability: capability,
+            layer: layer,
+            changedCoordinates: changedCoordinates,
+            acknowledgementIsAvailable: acknowledgementIsAvailable,
+            acknowledgementReleaseFailures: acknowledgementReleaseFailures,
+            acknowledgementCompletionIsDeferred:
+                acknowledgementCompletionIsDeferred
+        )
+    }
+    #endif
+}
+
+/// Operation-shaped transient surface view. It authenticates one concrete
+/// raster capability and can create only the complete authoritative/prediction
+/// pair for that capability; it never exposes the scheduler lease/backing.
+final class StrokePreparedDisplaySurface: @unchecked Sendable {
+    let layerID: UUID?
+    let storeIdentity: PaintTileStoreIdentity?
+    let generation: UInt64
+    let pixelSize: PixelSize?
+    let radialLayout: RadialSectorLayout?
+    let authoritativeSurfaceID: UUID?
+    let predictionSurfaceID: UUID?
+    let changedRole: StrokePrivateSurfaceLayer
+    let changedCoordinates: [PaintTileCoordinate]
+    let capability: DocumentPaintStrokeSurfaceCapability?
+
+    fileprivate init(lease: StrokePreparedSurfaceLease) {
+        generation = lease.generation
+        changedRole = lease.layer
+        let backing = lease.backing
+        let capability = backing.resources.capability
+        self.capability = capability
+        layerID = capability.layerID
+        storeIdentity = capability.storeIdentity
+        pixelSize = capability.pixelSize
+        radialLayout = capability.radialLayout
+        authoritativeSurfaceID = capability.authoritativeSurfaceID
+        predictionSurfaceID = capability.predictionSurfaceID
+        changedCoordinates = backing.bindingDeltaCoordinates
+    }
+
+
+    #if DEBUG
+    fileprivate init(
+        capability: DocumentPaintStrokeSurfaceCapability,
+        changedRole: StrokePrivateSurfaceLayer,
+        changedCoordinates: [PaintTileCoordinate]
+    ) {
+        self.capability = capability
+        layerID = capability.layerID
+        storeIdentity = capability.storeIdentity
+        generation = capability.generation
+        pixelSize = capability.pixelSize
+        radialLayout = capability.radialLayout
+        authoritativeSurfaceID = capability.authoritativeSurfaceID
+        predictionSurfaceID = capability.predictionSurfaceID
+        self.changedRole = changedRole
+        self.changedCoordinates = changedCoordinates.sorted()
+    }
+    #endif
+
+    func authenticates(
+        _ expected: DocumentPaintStrokeSurfaceCapability
+    ) -> Bool {
+        capability === expected
+    }
+
+}
+
+private final class StrokePreparedFrameAcknowledgementCore:
+    @unchecked Sendable
+{
+    private enum State {
+        case available(StrokePreparationAcknowledgementError?)
+        case pending(CheckedContinuation<Void, any Error>?)
+        case fulfilled
+    }
+
+    private let lock = NSLock()
+    private var state: State = .available(nil)
+    private let mailbox: StrokePreparationMailbox?
+    private let wake: AsyncStream<Void>.Continuation?
+    #if DEBUG
+    private var requestCount = 0
+    private var testingReleaseFailures: [StrokePreparationFailure]
+    private let testingCompletionIsDeferred: Bool
+    var testingRequestCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestCount
+    }
+    #endif
+    fileprivate let generation: UInt64
+    fileprivate let token: UInt64
+
+    init(
+        mailbox: StrokePreparationMailbox,
+        wake: AsyncStream<Void>.Continuation,
+        generation: UInt64,
+        token: UInt64
+    ) {
+        self.mailbox = mailbox
+        self.wake = wake
+        self.generation = generation
+        self.token = token
+        #if DEBUG
+        testingReleaseFailures = []
+        testingCompletionIsDeferred = false
+        #endif
+    }
+
+    #if DEBUG
+    init(
+        testingReleaseFailures: [StrokePreparationFailure] = [],
+        testingCompletionIsDeferred: Bool = false
+    ) {
+        mailbox = nil
+        wake = nil
+        generation = 0
+        token = 0
+        self.testingReleaseFailures = testingReleaseFailures
+        self.testingCompletionIsDeferred = testingCompletionIsDeferred
+    }
+    #endif
+
+    func fulfill() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            switch state {
+            case .available:
+                state = .pending(continuation)
+                lock.unlock()
+            case .pending:
+                lock.unlock()
+                continuation.resume(
+                    throwing: StrokePreparationAcknowledgementError
+                        .acknowledgementAlreadyPending
+                )
+                return
+            case .fulfilled:
+                lock.unlock()
+                continuation.resume(
+                    throwing: StrokePreparationAcknowledgementError
+                        .acknowledgementAlreadyFulfilled
+                )
+                return
+            }
+            do {
+                guard let mailbox, let wake else {
+                    complete()
+                    return
+                }
+                try mailbox.acknowledgePreparedFrame(endpoint: self)
+                wake.yield()
+            } catch {
+                lock.lock()
+                state = .available(nil)
+                lock.unlock()
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    var status: StrokePreparedFrameAcknowledgementStatus {
+        lock.lock()
+        defer { lock.unlock() }
+        switch state {
+        case let .available(failure):
+            return failure.map { .failed($0) } ?? .available
+        case .pending:
+            return .pending
+        case .fulfilled:
+            return .fulfilled
+        }
+    }
+
+    func requestFulfillment() throws {
+        lock.lock()
+        switch state {
+        case .available:
+            state = .pending(nil)
+            lock.unlock()
+        case .pending:
+            lock.unlock()
+            throw StrokePreparationAcknowledgementError
+                .acknowledgementAlreadyPending
+        case .fulfilled:
+            lock.unlock()
+            throw StrokePreparationAcknowledgementError
+                .acknowledgementAlreadyFulfilled
+        }
+        do {
+            #if DEBUG
+            lock.lock()
+            requestCount += 1
+            lock.unlock()
+            if let failure = consumeTestingReleaseFailure() {
+                fail(failure)
+                throw StrokePreparationAcknowledgementError
+                    .schedulerReleaseFailed(failure)
+            }
+            if testingCompletionIsDeferred { return }
+            #endif
+            guard let mailbox, let wake else {
+                complete()
+                return
+            }
+            try mailbox.acknowledgePreparedFrame(endpoint: self)
+            wake.yield()
+        } catch let error as StrokePreparationAcknowledgementError {
+            lock.lock()
+            state = .available(error)
+            lock.unlock()
+            throw error
+        }
+    }
+
+    fileprivate func complete() {
+        lock.lock()
+        guard case let .pending(continuation) = state else {
+            lock.unlock()
+            preconditionFailure("ACK completion without pending request")
+        }
+        state = .fulfilled
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    fileprivate func fail(_ failure: StrokePreparationFailure) {
+        lock.lock()
+        guard case let .pending(continuation) = state else {
+            lock.unlock()
+            preconditionFailure("ACK failure without pending request")
+        }
+        let error = StrokePreparationAcknowledgementError
+            .schedulerReleaseFailed(failure)
+        state = .available(error)
+        lock.unlock()
+        continuation?.resume(throwing: error)
+    }
+
+    #if DEBUG
+    func testingCompleteDeferredFulfillment() {
+        precondition(testingCompletionIsDeferred)
+        complete()
+    }
+
+    private func consumeTestingReleaseFailure() -> StrokePreparationFailure? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !testingReleaseFailures.isEmpty else { return nil }
+        return testingReleaseFailures.removeFirst()
+    }
+    #endif
 }
 
 enum StrokePreparationCancellationFrameDisposition: Equatable, Sendable {
@@ -788,6 +1174,13 @@ final class StrokePreparationMailbox: Sendable {
                 resultHighWater: state.resultHighWater,
                 awaitingPreparedFrameSubmission:
                     state.awaitingFrame != nil,
+                awaitingPreparedFrameGeneration:
+                    state.awaitingFrame?.generation,
+                awaitingPreparedFrameToken: state.awaitingFrame?.token,
+                pendingPreparedFrameAcknowledgement:
+                    state.pendingAcknowledgement != nil,
+                preparedFrameAcknowledgementIsInFlight:
+                    state.acknowledgementInFlight != nil,
                 workerIsProcessing: state.workerIsProcessing,
                 maximumPreparedRecordCount:
                     state.maximumPreparedRecordCount,
@@ -807,8 +1200,8 @@ final class StrokePreparationMailbox: Sendable {
         var results: StrokeResultRing
         var resultHighWater = 0
         var awaitingFrame: PreparedFrameIdentity?
-        var pendingAcknowledgement: PreparedFrameIdentity?
-        var acknowledgementInFlight: PreparedFrameIdentity?
+        var pendingAcknowledgement: PreparedFrameAcknowledgementRequest?
+        var acknowledgementInFlight: PreparedFrameAcknowledgementRequest?
         var workerIsProcessing = false
         var discardedGeneration: UInt64?
         var terminalCancellationPublicationCount: UInt64 = 0
@@ -825,6 +1218,11 @@ final class StrokePreparationMailbox: Sendable {
     private struct PreparedFrameIdentity: Equatable, Sendable {
         let generation: UInt64
         let token: UInt64
+    }
+
+    private struct PreparedFrameAcknowledgementRequest: @unchecked Sendable {
+        let identity: PreparedFrameIdentity
+        let endpoint: StrokePreparedFrameAcknowledgementCore?
     }
 
     private let state: OSAllocatedUnfairLock<State>
@@ -901,9 +1299,12 @@ final class StrokePreparationMailbox: Sendable {
                         == .abandonedBeforeSubmission)
                 {
                     if state.pendingAcknowledgement == nil,
-                       state.acknowledgementInFlight != awaiting
+                       state.acknowledgementInFlight?.identity != awaiting
                     {
-                        state.pendingAcknowledgement = awaiting
+                        state.pendingAcknowledgement = .init(
+                            identity: awaiting,
+                            endpoint: nil
+                        )
                     }
                 }
                 state.results.reset()
@@ -952,7 +1353,43 @@ final class StrokePreparationMailbox: Sendable {
                 throw StrokePreparationAcknowledgementError
                     .acknowledgementAlreadyPending
             }
-            state.pendingAcknowledgement = actual
+            state.pendingAcknowledgement = .init(
+                identity: actual,
+                endpoint: nil
+            )
+        }
+    }
+
+    fileprivate func acknowledgePreparedFrame(
+        endpoint: StrokePreparedFrameAcknowledgementCore
+    ) throws {
+        try state.withLock { state in
+            guard let awaiting = state.awaitingFrame else {
+                throw StrokePreparationAcknowledgementError.noPreparedFrame
+            }
+            let actual = PreparedFrameIdentity(
+                generation: endpoint.generation,
+                token: endpoint.token
+            )
+            guard awaiting == actual else {
+                throw StrokePreparationAcknowledgementError
+                    .invalidPreparedFrame(
+                        expectedGeneration: awaiting.generation,
+                        expectedToken: awaiting.token,
+                        actualGeneration: actual.generation,
+                        actualToken: actual.token
+                    )
+            }
+            guard state.pendingAcknowledgement == nil,
+                  state.acknowledgementInFlight == nil
+            else {
+                throw StrokePreparationAcknowledgementError
+                    .acknowledgementAlreadyPending
+            }
+            state.pendingAcknowledgement = .init(
+                identity: actual,
+                endpoint: endpoint
+            )
         }
     }
 
@@ -974,9 +1411,10 @@ final class StrokePreparationMailbox: Sendable {
             state.pendingAcknowledgement = nil
             state.acknowledgementInFlight = acknowledgement
             return (
-                acknowledgement.generation,
-                acknowledgement.token,
-                state.discardedGeneration != acknowledgement.generation
+                acknowledgement.identity.generation,
+                acknowledgement.identity.token,
+                state.discardedGeneration
+                    != acknowledgement.identity.generation
             )
         }
     }
@@ -990,20 +1428,46 @@ final class StrokePreparationMailbox: Sendable {
                 generation: generation,
                 token: token
             )
+            let endpoint = state.acknowledgementInFlight?.endpoint
             precondition(
                 state.awaitingFrame == identity
-                    && state.acknowledgementInFlight == identity
+                    && state.acknowledgementInFlight?.identity == identity
             )
             state.awaitingFrame = nil
             state.acknowledgementInFlight = nil
             state.progressRevision &+= 1
             return (
                 state.progressWaiter,
-                state.asyncProgressRegistration
+                state.asyncProgressRegistration,
+                endpoint
             )
         }
         progressObservers.0?.recordProgress()
         progressObservers.1?.recordProgress()
+        progressObservers.2?.complete()
+    }
+
+    func failPreparedFrameAcknowledgement(
+        generation: UInt64,
+        token: UInt64,
+        failure: StrokePreparationFailure
+    ) -> Bool {
+        let endpoint: StrokePreparedFrameAcknowledgementCore? =
+            state.withLock { state in
+            let identity = PreparedFrameIdentity(
+                generation: generation,
+                token: token
+            )
+            guard state.awaitingFrame == identity,
+                  state.acknowledgementInFlight?.identity == identity,
+                  let endpoint = state.acknowledgementInFlight?.endpoint
+            else { return nil }
+            state.acknowledgementInFlight = nil
+            state.progressRevision &+= 1
+            return endpoint
+            }
+        endpoint?.fail(failure)
+        return endpoint != nil
     }
 
     func publish(_ result: StrokePreparationResult) {
@@ -1032,7 +1496,10 @@ final class StrokePreparationMailbox: Sendable {
                     )
                     precondition(state.awaitingFrame == nil)
                     state.awaitingFrame = identity
-                    state.pendingAcknowledgement = identity
+                    state.pendingAcknowledgement = .init(
+                        identity: identity,
+                        endpoint: nil
+                    )
                 }
                 state.progressRevision &+= 1
                 return (
@@ -1294,22 +1761,79 @@ final class StrokePreparationBridge: Sendable {
                                     acknowledgement
                                         .resumeAuthoritativeContinuation
                             )
+                        let releaseStillOutstanding = await scheduler
+                            .ownsPreparedFrame(
+                                generation: acknowledgement.generation,
+                                token: acknowledgement.token
+                            )
+                        if releaseStillOutstanding,
+                           case let .failed(_, failure)? = result,
+                           mailbox.failPreparedFrameAcknowledgement(
+                                generation: acknowledgement.generation,
+                                token: acknowledgement.token,
+                                failure: failure
+                           )
+                        {
+                            mailbox.completeWorkerOperation()
+                            continue
+                        }
                         mailbox.completePreparedFrameAcknowledgement(
                             generation: acknowledgement.generation,
                             token: acknowledgement.token
                         )
-                        if let result { mailbox.publish(result) }
+                        if let result {
+                            Self.publishForDisplay(
+                                result,
+                                mailbox: mailbox,
+                                wake: pair.continuation
+                            )
+                        }
                         mailbox.completeWorkerOperation()
                         continue
                     }
                     guard let message = mailbox.takeInput() else { break }
                     if let result = await scheduler.process(message) {
-                        mailbox.publish(result)
+                        Self.publishForDisplay(
+                            result,
+                            mailbox: mailbox,
+                            wake: pair.continuation
+                        )
                     }
                     mailbox.completeWorkerOperation()
                 }
             }
         }
+    }
+
+    private static func publishForDisplay(
+        _ result: StrokePreparationResult,
+        mailbox: StrokePreparationMailbox,
+        wake: AsyncStream<Void>.Continuation
+    ) {
+        guard case let .prepared(batch) = result,
+              let lease = batch.surfaceLease,
+              let token = batch.frameToken
+        else {
+            mailbox.publish(result)
+            return
+        }
+        precondition(
+            lease.generation == batch.generation && lease.token == token
+        )
+        let core = StrokePreparedFrameAcknowledgementCore(
+            mailbox: mailbox,
+            wake: wake,
+            generation: batch.generation,
+            token: token
+        )
+        let acknowledgement = StrokePreparedFrameAcknowledgement(core: core)
+        let displayFrame = StrokePreparedDisplayFrame(
+            lease: lease,
+            acknowledgement: acknowledgement
+        )
+        mailbox.publish(
+            .prepared(batch.installingDisplayFrame(displayFrame))
+        )
     }
 
     deinit {

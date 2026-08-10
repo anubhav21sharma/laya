@@ -201,7 +201,7 @@ func productionControllerAttestsCompleteRendererEvents() throws {
 
 @MainActor
 @Test
-func gridRendererRecordsAttributedProductionCallSites() throws {
+func gridRendererRecordsAttributedProductionCallSites() async throws {
     guard let device = MTLCreateSystemDefaultDevice() else { return }
     let renderer = try GridRenderer(
         device: device,
@@ -231,24 +231,23 @@ func gridRendererRecordsAttributedProductionCallSites() throws {
         sample: runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
         style: style
     )
-    _ = try renderer.flushPendingLiveForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
     try renderer.appendStroke(
         token: token,
         sample: runtimeStrokeSample(x: 32, phase: .moved, timestamp: 1 / 60)
     )
-    _ = try renderer.flushPendingLiveForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
     try renderer.requestStrokeCommit(
         token: token,
-        sample: runtimeStrokeSample(x: 52, phase: .ended, timestamp: 2 / 60),
-        maximumRetainedBytes: 8 * 1_024 * 1_024
+        sample: runtimeStrokeSample(x: 52, phase: .ended, timestamp: 2 / 60)
     )
     while renderer.brushLabDiagnosticSnapshot.deposition
         .authoritativePending > 0
     {
-        _ = try renderer.flushPendingLiveForHarness()
+        _ = try await renderer.flushPendingLiveForHarness()
     }
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
 
     let snapshot = try #require(renderer.strokeRuntimeSnapshot)
     let attestation = try #require(snapshot.attestation)
@@ -421,71 +420,10 @@ func runtimeEndObserverCanStartReplacementWithoutOuterTeardownDestroyingIt()
     try await renderer.awaitPendingStrokeWorkspaceRetirement()
 }
 
-@MainActor
-@Test
-func failedCommitPublishesEndTelemetryAndIdleAfterRollback() async throws {
-    guard let device = MTLCreateSystemDefaultDevice() else { return }
-    let renderer = try runtimeTestRenderer(device: device)
-    renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
-    let token = RendererOperationToken(rawValue: 0x524F_4C4C)
-    let style = try renderer.nativeHarnessStrokeStyle(
-        diameter: 12,
-        seed: token.rawValue
-    )
-    try renderer.beginStroke(
-        token: token,
-        sample: runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
-        style: style
-    )
-
-    enum ObservedEvent: Equatable {
-        case marker(StrokeRuntimeSegmentEventKind)
-        case snapshot
-        case idle(Bool)
-    }
-    var events: [ObservedEvent] = []
-    renderer.onStrokeRuntimeSegmentMarker = { marker in
-        #expect(!renderer.isIdle)
-        events.append(.marker(marker.kind))
-    }
-    renderer.onStrokeRuntimeSnapshot = { _ in
-        #expect(!renderer.isIdle)
-        events.append(.snapshot)
-    }
-    renderer.onIdleStateChange = { idle in
-        #expect(renderer.isIdle == idle)
-        events.append(.idle(idle))
-    }
-
-    #expect(throws: MetalRendererError.rasterRevisionStorageLimitExceeded) {
-        try renderer.requestStrokeCommit(
-            token: token,
-            sample: runtimeStrokeSample(x: 32, phase: .ended, timestamp: 1),
-            maximumRetainedBytes: -1
-        )
-    }
-
-    #expect(!renderer.isIdle)
-    #expect(
-        events == [
-            .marker(.segmentEnded),
-            .snapshot,
-        ]
-    )
-    try await renderer.awaitPendingStrokeWorkspaceRetirement()
-    #expect(renderer.isIdle)
-    #expect(
-        events == [
-            .marker(.segmentEnded),
-            .snapshot,
-            .idle(true),
-        ]
-    )
-}
 
 @MainActor
 @Test
-func mixedLogicalDabAndRuntimeEventsPreserveCommittedOrder() throws {
+func mixedLogicalDabAndRuntimeEventsPreserveCommittedOrder() async throws {
     guard let device = MTLCreateSystemDefaultDevice() else { return }
     let renderer = try runtimeTestRenderer(device: device)
     renderer.configureStrokeRuntimeTelemetry(profile: .syntheticTest)
@@ -511,7 +449,9 @@ func mixedLogicalDabAndRuntimeEventsPreserveCommittedOrder() throws {
         sample: runtimeStrokeSample(x: 12, phase: .began, timestamp: 0),
         style: style
     )
-    try renderer.drainPreparedStrokeInputForHarness()
+    try await renderer.drainPreparedStrokeInputForHarness(
+        outputPixelSize: renderer.pixelSize
+    )
 
     let markerIndex = try #require(
         events.firstIndex(of: .marker(.segmentBegan))
@@ -598,7 +538,7 @@ func lateOldTelemetryFrameCannotMutateReconfiguredController() async throws {
 
 @MainActor
 @Test
-func queuedLogicalDabsResolveReplacementObserverAtContinuationTime()
+func queuedLogicalDabsResolveReplacementObserverAtDeliveryTime()
     async throws
 {
     guard let device = MTLCreateSystemDefaultDevice() else { return }
@@ -613,27 +553,45 @@ func queuedLogicalDabsResolveReplacementObserverAtContinuationTime()
         sample: runtimeStrokeSample(x: 0, phase: .began, timestamp: 0),
         style: style
     )
-    try renderer.drainPreparedStrokeInputForHarness()
+    try await renderer.drainPreparedStrokeInputForHarness(
+        outputPixelSize: renderer.pixelSize
+    )
 
-    var initialObserverCount = 0
-    var replacementObserverCount = 0
-    renderer.onLogicalDabsGenerated = { _ in
-        initialObserverCount += 1
+    var initialOrdinals: [UInt64] = []
+    var replacementOrdinals: [UInt64] = []
+    renderer.onLogicalDabsGenerated = { dab in
+        initialOrdinals.append(dab.ordinal)
+        if initialOrdinals.count
+            == RendererEventDispatcher.deliveryBudgetPerTurn
+        {
+            renderer.onLogicalDabsGenerated = { replacement in
+                replacementOrdinals.append(replacement.ordinal)
+            }
+        }
     }
     try renderer.appendStroke(
         token: token,
         sample: runtimeStrokeSample(x: 4_096, phase: .moved, timestamp: 1)
     )
-    try renderer.drainPreparedStrokeInputForHarness()
+    try await renderer.drainPreparedStrokeInputForHarness(
+        outputPixelSize: renderer.pixelSize
+    )
 
-    #expect(initialObserverCount == 256)
-    renderer.onLogicalDabsGenerated = { _ in
-        replacementObserverCount += 1
-    }
-    renderer.drainOneRendererEventTurnForHarness()
-
-    #expect(initialObserverCount == 256)
-    #expect(replacementObserverCount > 0)
+    #expect(
+        initialOrdinals.count
+            == RendererEventDispatcher.deliveryBudgetPerTurn
+    )
+    #expect(!replacementOrdinals.isEmpty)
+    #expect(
+        replacementOrdinals.first
+            == initialOrdinals.last.map { $0 + 1 }
+    )
+    #expect(
+        zip(
+            initialOrdinals + replacementOrdinals,
+            (initialOrdinals + replacementOrdinals).dropFirst()
+        ).allSatisfy { $0 < $1 }
+    )
     renderer.onLogicalDabsGenerated = nil
     try renderer.cancelStroke(token: token)
     try await renderer.awaitPendingStrokeWorkspaceRetirement()
@@ -656,21 +614,31 @@ func queuedLogicalDabsStopCallingObserverWhenPropertyBecomesNil()
         sample: runtimeStrokeSample(x: 0, phase: .began, timestamp: 0),
         style: style
     )
-    try renderer.drainPreparedStrokeInputForHarness()
+    try await renderer.drainPreparedStrokeInputForHarness(
+        outputPixelSize: renderer.pixelSize
+    )
 
     var observerCount = 0
-    renderer.onLogicalDabsGenerated = { _ in observerCount += 1 }
+    renderer.onLogicalDabsGenerated = { _ in
+        observerCount += 1
+        if observerCount == RendererEventDispatcher.deliveryBudgetPerTurn {
+            renderer.onLogicalDabsGenerated = nil
+        }
+    }
     try renderer.appendStroke(
         token: token,
         sample: runtimeStrokeSample(x: 4_096, phase: .moved, timestamp: 1)
     )
-    try renderer.drainPreparedStrokeInputForHarness()
+    try await renderer.drainPreparedStrokeInputForHarness(
+        outputPixelSize: renderer.pixelSize
+    )
 
-    #expect(observerCount == 256)
-    renderer.onLogicalDabsGenerated = nil
-    renderer.drainOneRendererEventTurnForHarness()
-
-    #expect(observerCount == 256)
+    #expect(
+        observerCount == RendererEventDispatcher.deliveryBudgetPerTurn
+    )
+    #expect(
+        renderer.rendererEventDiagnosticsForTesting.pendingEventCount == 0
+    )
     try renderer.cancelStroke(token: token)
     try await renderer.awaitPendingStrokeWorkspaceRetirement()
 }

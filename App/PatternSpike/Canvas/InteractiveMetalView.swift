@@ -655,7 +655,7 @@ final class InteractiveMetalView: MTKView {
             : []
         let predictionBatch = BrushInputBatchPolicy.predictionBatch(
             predicted,
-            maximumCount: PredictionOverlay.maximumNormalizedSampleCount
+            maximumCount: PredictionAdmissionLimits.maximumNormalizedSampleCount
         )
         pendingEstimatedTouches.discardPredicted()
         for ordinaryTouch in coalesced {

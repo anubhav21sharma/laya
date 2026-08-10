@@ -302,14 +302,10 @@ private func committedPredictionCadenceBytes(
         ),
         testHooks: .none
     )
-    let recipe = try BrushRecipe(
-        id: BrushRecipeID("builtin.native-ink"),
+    let definition = try stageCMetalTestProgram(
+        id: "test.metamorphic-ink",
         replayMode: .appendOnly
-    )
-    let definition = try LegacyBrushRecipeAdapter.definition(
-        from: recipe,
-        displayName: "Prediction Cadence"
-    )
+    ).definition
     let brush = try await compiler.compileAndActivate(
         package: BrushPackage(
             manifest: BrushPackageManifest(resources: []),
@@ -339,26 +335,17 @@ private func committedPredictionCadenceBytes(
         case let .batch(samples):
             try renderer.appendStrokeBatch(token: token, samples: samples)
         }
-        _ = try renderer.flushPendingLiveForHarness()
+        _ = try await renderer.flushPendingLiveForHarness()
     }
     try renderer.requestStrokeCommit(
         token: token,
-        sample: last,
-        maximumRetainedBytes: 1_000_000
+        sample: last
     )
-    _ = try renderer.finishCommitForHarness()
-    let texture = try renderer.copyCanonicalForHarness()
-    let bytesPerRow = texture.width * 4
-    var bytes = [UInt8](
-        repeating: 0,
-        count: bytesPerRow * texture.height
-    )
-    texture.getBytes(
-        &bytes,
-        bytesPerRow: bytesPerRow,
-        from: MTLRegionMake2D(0, 0, texture.width, texture.height),
-        mipmapLevel: 0
-    )
+    _ = try await renderer.finishCommitForHarness()
+    let snapshot = try await renderer.captureCommittedDocument()
+    guard case let .singleRaster(bytes) = snapshot.storage else {
+        throw MetalRendererError.committedSnapshotIncompatible
+    }
     return bytes
 }
 

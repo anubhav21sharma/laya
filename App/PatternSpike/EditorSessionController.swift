@@ -139,27 +139,11 @@ final class EditorSessionController {
     /// wait for the actor-owned stroke workspace to finish retiring. The
     /// reducer operation stays pending until this exact effect is applied.
     private var pendingRendererIdleMetadataEffect: EditorTransactionEffect?
-    private let releaseRasterRevisions: (Set<StoredRasterRevisionID>) -> Void
     private let layerRasterStorage: any EditorLayerRasterStorage
-    private let requestRasterRestore: (
-        RendererOperationToken,
-        UUID,
-        RasterRevisionReference
-    ) throws -> Void
-    private let requestClearOperation: (
-        RendererOperationToken,
-        Int
-    ) throws -> Void
-    private let requestResize: (
-        RendererOperationToken,
-        PixelSize,
-        Int
-    ) throws -> Void
-    private let requestResizeRestore: (
-        RendererOperationToken,
-        UUID,
-        RasterRevisionReference
-    ) throws -> Void
+    private var pendingPaintRevisionReleaseIDs:
+        Set<StoredRasterRevisionID> = []
+    private var paintRevisionReleaseTask: Task<Void, Never>?
+    private var emptyConfigurationReplacementInFlight = false
     private let requestStrokeCancellation: (
         RendererOperationToken
     ) throws -> Void
@@ -195,36 +179,15 @@ final class EditorSessionController {
     init(
         model: EditorModel = EditorModel(),
         renderer: GridRenderer,
-        layerStack: LayerStack = .compatibilityDefault(),
+        layerStack: LayerStack = .initial(),
         documentHistory: DocumentHistory? = nil,
         layerRasterStorage: (any EditorLayerRasterStorage)? = nil,
-        releaseRasterRevisions: ((Set<StoredRasterRevisionID>) -> Void)? = nil,
-        requestRasterRestore: ((
-            RendererOperationToken,
-            UUID,
-            RasterRevisionReference
-        ) throws -> Void)? = nil,
-        requestClear: ((
-            RendererOperationToken,
-            Int
-        ) throws -> Void)? = nil,
-        requestResize: ((
-            RendererOperationToken,
-            PixelSize,
-            Int
-        ) throws -> Void)? = nil,
-        requestResizeRestore: ((
-            RendererOperationToken,
-            UUID,
-            RasterRevisionReference
-        ) throws -> Void)? = nil,
         requestStrokeCancellation: ((
             RendererOperationToken
         ) throws -> Void)? = nil,
         compileDefinition: (@MainActor @Sendable
             (BrushDefinition) async throws -> CompiledBrush)? = nil,
         selectionStore: (any EditorBrushSelectionStore)? = nil,
-        historyMaximumBytes: Int = 200 * 1_024 * 1_024,
         strokeSeedSessionEntropy: UInt64 = EditorSessionController
             .makeStrokeSeedSessionEntropy()
     ) {
@@ -232,46 +195,22 @@ final class EditorSessionController {
         self.renderer = renderer
         activeDrawBrush = renderer.preparedBrush(for: .draw)
         activeEraserBrush = renderer.preparedBrush(for: .erase)
-        history = documentHistory ?? DocumentHistory(
-            maximumBytes: historyMaximumBytes,
-            initialDocumentIsEmpty: !renderer.documentDomainLocked
-        )
+        if let documentHistory {
+            precondition(
+                documentHistory.maximumBytes == renderer.historyByteBudget,
+                "Injected history must share the renderer history budget."
+            )
+            history = documentHistory
+        } else {
+            history = DocumentHistory(
+                maximumBytes: renderer.historyByteBudget,
+                initialDocumentIsEmpty: !renderer.documentDomainLocked
+            )
+        }
         self.layerStack = layerStack
         self.layerRasterStorage = layerRasterStorage
             ?? UnsupportedEditorLayerRasterStorage()
         self.strokeSeedSessionEntropy = strokeSeedSessionEntropy
-        self.releaseRasterRevisions = releaseRasterRevisions ?? {
-            renderer.releaseRasterRevisions($0)
-        }
-        self.requestRasterRestore = requestRasterRestore ?? { token, layerID, revision in
-            guard layerID == LayerStack.compatibilityLayerID else {
-                throw EditorSessionLayerError.rendererStorageUnavailable(
-                    layerID
-                )
-            }
-            try renderer.requestRasterRestore(token: token, revision: revision)
-        }
-        requestClearOperation = requestClear ?? {
-            try renderer.requestClear(
-                token: $0,
-                maximumRetainedBytes: $1
-            )
-        }
-        self.requestResize = requestResize ?? {
-            try renderer.requestResize(
-                token: $0,
-                to: $1,
-                maximumRetainedBytes: $2
-            )
-        }
-        self.requestResizeRestore = requestResizeRestore ?? { token, layerID, revision in
-            guard layerID == LayerStack.compatibilityLayerID else {
-                throw EditorSessionLayerError.rendererStorageUnavailable(
-                    layerID
-                )
-            }
-            try renderer.requestResizeRestore(token: token, revision: revision)
-        }
         self.requestStrokeCancellation = requestStrokeCancellation ?? {
             try renderer.cancelStroke(token: $0)
         }
@@ -570,7 +509,7 @@ final class EditorSessionController {
             predictionStart,
             offsetBy: min(
                 normalizedPredictionSampleCount,
-                PredictionOverlay.maximumNormalizedSampleCount
+                PredictionAdmissionLimits.maximumNormalizedSampleCount
             )
         )
         let effectiveSubmittedPredictionSampleCount = max(
@@ -938,13 +877,20 @@ final class EditorSessionController {
         guard transaction.state == .idle,
               transaction.pendingOperation == nil,
               awaitedClear == nil,
+              !emptyConfigurationReplacementInFlight,
               renderer.isIdle,
               history.currentDocumentIsEmpty
         else {
             throw MetalRendererError.commitPendingInput
         }
+        emptyConfigurationReplacementInFlight = true
+        refreshDerivedModelState()
+        defer {
+            emptyConfigurationReplacementInFlight = false
+            refreshDerivedModelState()
+        }
         do {
-            try renderer.replaceEmptyDocumentConfiguration(
+            try await renderer.replaceEmptyDocumentConfiguration(
                 configuration,
                 pixelSize: targetPixelSize(for: configuration)
             )
@@ -1250,8 +1196,7 @@ final class EditorSessionController {
         case let .requestStrokeCommit(token, sample):
             try renderer.requestStrokeCommit(
                 token: rendererToken(token),
-                sample: sample,
-                maximumRetainedBytes: history.maximumBytes
+                sample: sample
             )
         case let .finishStrokeTransient(token, sample):
             try renderer.finishStrokeTransient(
@@ -1264,10 +1209,7 @@ final class EditorSessionController {
                 sample: sample
             )
         case let .commitFinishedStroke(token):
-            try renderer.commitFinishedStroke(
-                token: rendererToken(token),
-                maximumRetainedBytes: history.maximumBytes
-            )
+            try renderer.commitFinishedStroke(token: rendererToken(token))
         case let .cancelStroke(token):
             try requestStrokeCancellation(rendererToken(token))
             ignorePendingEstimatedUpdates()
@@ -1295,18 +1237,14 @@ final class EditorSessionController {
                 return
             }
             try history.validateNewCommand(retainedBytes: 0)
-            try renderer.applyTiling(tiling)
-            let after = renderer.periodicConfiguration
-            model.confirmPeriodicConfiguration(after)
-            let released = history.appendSuccessful(
-                .periodicConfiguration(
-                    MetadataChange(before: before, after: after)
+            Task { @MainActor [weak self] in
+                await self?.completeTilingEffect(
+                    effect,
+                    token: token,
+                    before: before,
+                    tiling: tiling
                 )
-            )
-            if !released.isEmpty {
-                releaseHistoryRevisions(released)
             }
-            apply(.operationCompleted(token, succeeded: true))
         case let .applyPeriodicConfiguration(token, configuration):
             guard renderer.isIdle else {
                 precondition(pendingRendererIdleMetadataEffect == nil)
@@ -1319,22 +1257,14 @@ final class EditorSessionController {
                 return
             }
             try history.validateNewCommand(retainedBytes: 0)
-            try renderer.applyPeriodicConfiguration(configuration)
-            let after = renderer.periodicConfiguration
-            model.confirmPeriodicConfiguration(after)
-            if after == before {
-                apply(.operationCompleted(token, succeeded: true))
-                return
-            }
-            let released = history.appendSuccessful(
-                .periodicConfiguration(
-                    MetadataChange(before: before, after: after)
+            Task { @MainActor [weak self] in
+                await self?.completePeriodicConfigurationEffect(
+                    effect,
+                    token: token,
+                    before: before,
+                    configuration: configuration
                 )
-            )
-            if !released.isEmpty {
-                releaseHistoryRevisions(released)
             }
-            apply(.operationCompleted(token, succeeded: true))
         case let .performCommand(token, command):
             try perform(command, token: token)
         case let .applyTileSize(token, pixelSize):
@@ -1350,20 +1280,82 @@ final class EditorSessionController {
                 before: model.pixelSize,
                 after: pixelSize
             )
-            do {
-                try requestResize(
-                    rendererToken(token),
-                    pixelSize,
-                    history.maximumBytes
+            let rendererToken = rendererToken(token)
+            Task { @MainActor [renderer] in
+                // The renderer stages the sole terminal completion event,
+                // including failures. The controller must not synthesize a
+                // second reducer completion from this task.
+                try? await renderer.resizeDocument(
+                    token: rendererToken,
+                    to: pixelSize
                 )
-            } catch {
-                pendingTileResize = nil
-                throw error
             }
         case .clearSelectionOverlay, .beginTransform, .cancelTransform,
              .busy, .reportOperationFailure:
             break
         }
+    }
+
+    private func completeTilingEffect(
+        _ effect: EditorTransactionEffect,
+        token: EditorTransactionToken,
+        before: PeriodicSymmetryConfiguration,
+        tiling: TilingKind
+    ) async {
+        do {
+            try await renderer.applyTiling(tiling)
+            completePeriodicConfigurationChange(
+                token: token,
+                before: before
+            )
+        } catch {
+            handleAsynchronousFailure(of: effect, error: error)
+        }
+    }
+
+    private func completePeriodicConfigurationEffect(
+        _ effect: EditorTransactionEffect,
+        token: EditorTransactionToken,
+        before: PeriodicSymmetryConfiguration,
+        configuration: PeriodicSymmetryConfiguration
+    ) async {
+        do {
+            try await renderer.applyPeriodicConfiguration(configuration)
+            completePeriodicConfigurationChange(
+                token: token,
+                before: before
+            )
+        } catch {
+            handleAsynchronousFailure(of: effect, error: error)
+        }
+    }
+
+    private func completePeriodicConfigurationChange(
+        token: EditorTransactionToken,
+        before: PeriodicSymmetryConfiguration
+    ) {
+        let after = renderer.periodicConfiguration
+        model.confirmPeriodicConfiguration(after)
+        if after != before {
+            let released = history.appendSuccessful(
+                .periodicConfiguration(
+                    MetadataChange(before: before, after: after)
+                )
+            )
+            if !released.isEmpty {
+                releaseHistoryRevisions(released)
+            }
+        }
+        apply(.operationCompleted(token, succeeded: true))
+    }
+
+    private func handleAsynchronousFailure(
+        of effect: EditorTransactionEffect,
+        error: Error
+    ) {
+        let rendererError = (error as? MetalRendererError)
+            ?? .commandFailed(error.localizedDescription)
+        handleSynchronousFailure(of: effect, error: rendererError)
     }
 
     private func perform(
@@ -1379,14 +1371,11 @@ final class EditorSessionController {
                 kind: .clear,
                 layerID: layerID
             )
-            do {
-                try requestClearOperation(
-                    rendererToken(token),
-                    history.maximumBytes
-                )
-            } catch {
-                pendingRasterMutation = nil
-                throw error
+            let rendererToken = rendererToken(token)
+            Task { @MainActor [renderer] in
+                // `clearDocument` publishes success or failure before it
+                // returns, so history remains event-driven.
+                try? await renderer.clearDocument(token: rendererToken)
             }
         case .undo:
             try beginHistoryNavigation(
@@ -1430,54 +1419,66 @@ final class EditorSessionController {
                 guard layerStack.layer(id: command.layerID) != nil else {
                     throw LayerStackError.layerMissing(command.layerID)
                 }
-                let revision = navigation.direction == .undo
-                    ? command.before
-                    : command.after
-                try requestRasterRestore(
-                    rendererToken(operationToken),
-                    command.layerID,
-                    revision
-                )
-            case let .tiling(change):
-                let target = navigation.direction == .undo
-                    ? change.before
-                    : change.after
-                try renderer.applyTiling(target)
-                model.confirmPeriodicConfiguration(
-                    renderer.periodicConfiguration
-                )
-                try history.finishNavigation(
-                    token: navigation.token,
-                    succeeded: true
-                )
-                pendingHistoryNavigation = nil
-                apply(.operationCompleted(operationToken, succeeded: true))
-            case let .periodicConfiguration(change):
-                let target = navigation.direction == .undo
-                    ? change.before
-                    : change.after
-                try renderer.applyPeriodicConfiguration(target)
-                model.confirmPeriodicConfiguration(
-                    renderer.periodicConfiguration
-                )
-                try history.finishNavigation(
-                    token: navigation.token,
-                    succeeded: true
-                )
-                pendingHistoryNavigation = nil
-                apply(.operationCompleted(operationToken, succeeded: true))
-            case let .tileResize(command):
-                guard layerStack.layer(id: command.layerID) != nil else {
-                    throw LayerStackError.layerMissing(command.layerID)
+                guard command.layerID == LayerStack.initialLayerID else {
+                    throw EditorSessionLayerError.rendererStorageUnavailable(
+                        command.layerID
+                    )
                 }
                 let revision = navigation.direction == .undo
                     ? command.before
                     : command.after
-                try requestResizeRestore(
-                    rendererToken(operationToken),
-                    command.layerID,
-                    revision
-                )
+                let rendererToken = rendererToken(operationToken)
+                Task { @MainActor [renderer] in
+                    try? await renderer.restoreDocumentRevision(
+                        token: rendererToken,
+                        revision: revision
+                    )
+                }
+            case let .tiling(change):
+                let target = navigation.direction == .undo
+                    ? change.before
+                    : change.after
+                Task { @MainActor [weak self] in
+                    await self?.completeTilingHistoryNavigation(
+                        navigation,
+                        operationToken: operationToken,
+                        target: target
+                    )
+                }
+            case let .periodicConfiguration(change):
+                let target = navigation.direction == .undo
+                    ? change.before
+                    : change.after
+                Task { @MainActor [weak self] in
+                    await self?.completePeriodicHistoryNavigation(
+                        navigation,
+                        operationToken: operationToken,
+                        target: target
+                    )
+                }
+            case let .tileResize(command):
+                guard layerStack.layer(id: command.layerID) != nil else {
+                    throw LayerStackError.layerMissing(command.layerID)
+                }
+                guard command.layerID == LayerStack.initialLayerID else {
+                    throw EditorSessionLayerError.rendererStorageUnavailable(
+                        command.layerID
+                    )
+                }
+                let revision = navigation.direction == .undo
+                    ? command.before
+                    : command.after
+                let targetPixelSize = navigation.direction == .undo
+                    ? command.before.documentPixelSize
+                    : command.after.documentPixelSize
+                let rendererToken = rendererToken(operationToken)
+                Task { @MainActor [renderer] in
+                    try? await renderer.restoreDocumentRevision(
+                        token: rendererToken,
+                        revision: revision,
+                        targetPixelSize: targetPixelSize
+                    )
+                }
             case let .layerMetadata(command):
                 let target = navigation.direction == .undo
                     ? command.before
@@ -1536,6 +1537,73 @@ final class EditorSessionController {
             pendingHistoryNavigation = nil
             throw error
         }
+    }
+
+    private func completeTilingHistoryNavigation(
+        _ navigation: HistoryNavigation,
+        operationToken: EditorTransactionToken,
+        target: TilingKind
+    ) async {
+        do {
+            try await renderer.applyTiling(target)
+            try completeConfigurationHistoryNavigation(
+                navigation,
+                operationToken: operationToken
+            )
+        } catch {
+            failConfigurationHistoryNavigation(
+                navigation,
+                operationToken: operationToken,
+                error: error
+            )
+        }
+    }
+
+    private func completePeriodicHistoryNavigation(
+        _ navigation: HistoryNavigation,
+        operationToken: EditorTransactionToken,
+        target: PeriodicSymmetryConfiguration
+    ) async {
+        do {
+            try await renderer.applyPeriodicConfiguration(target)
+            try completeConfigurationHistoryNavigation(
+                navigation,
+                operationToken: operationToken
+            )
+        } catch {
+            failConfigurationHistoryNavigation(
+                navigation,
+                operationToken: operationToken,
+                error: error
+            )
+        }
+    }
+
+    private func completeConfigurationHistoryNavigation(
+        _ navigation: HistoryNavigation,
+        operationToken: EditorTransactionToken
+    ) throws {
+        model.confirmPeriodicConfiguration(renderer.periodicConfiguration)
+        try history.finishNavigation(
+            token: navigation.token,
+            succeeded: true
+        )
+        pendingHistoryNavigation = nil
+        apply(.operationCompleted(operationToken, succeeded: true))
+    }
+
+    private func failConfigurationHistoryNavigation(
+        _ navigation: HistoryNavigation,
+        operationToken: EditorTransactionToken,
+        error: Error
+    ) {
+        let command: EditorCommand = navigation.direction == .undo
+            ? .undo
+            : .redo
+        handleAsynchronousFailure(
+            of: .performCommand(operationToken, command),
+            error: error
+        )
     }
 
     private func handleSynchronousFailure(
@@ -1680,13 +1748,6 @@ final class EditorSessionController {
             } else if let pendingTileResize,
                       pendingTileResize.token == completedToken
             {
-                if rejectMismatchedTiledReceipt(
-                    receipt,
-                    expectedLayerID: pendingTileResize.layerID,
-                    completedToken: completedToken
-                ) {
-                    return
-                }
                 precondition(
                     receipt.before.documentPixelSize
                         == pendingTileResize.before
@@ -1719,13 +1780,6 @@ final class EditorSessionController {
                     "Renderer completed a raster mutation the controller did not accept."
                 )
             }
-            if rejectMismatchedTiledReceipt(
-                receipt,
-                expectedLayerID: layerID,
-                completedToken: completedToken
-            ) {
-                return
-            }
             let command = RasterHistoryCommand(
                 layerID: layerID,
                 kind: kind,
@@ -1748,6 +1802,20 @@ final class EditorSessionController {
             )
         case let .operationSuccess(token):
             let completedToken = editorToken(token)
+            if pendingRasterMutation?.token == completedToken {
+                pendingRasterMutation = nil
+                apply(
+                    .operationCompleted(
+                        completedToken,
+                        succeeded: true
+                    )
+                )
+                finishAwaitedClear(
+                    token: completedToken,
+                    result: .success(())
+                )
+                break
+            }
             if pendingHistoryNavigation?.operationToken == completedToken,
                let targetPixelSize = pendingHistoryNavigation?.targetPixelSize
             {
@@ -1795,35 +1863,6 @@ final class EditorSessionController {
         }
         refreshDerivedModelState()
         resumeDeferredPointerIfIdle()
-    }
-
-    private func rejectMismatchedTiledReceipt(
-        _ receipt: RasterMutationReceipt,
-        expectedLayerID: UUID,
-        completedToken: EditorTransactionToken
-    ) -> Bool {
-        guard let actualLayerID = receipt.layerID,
-              actualLayerID != expectedLayerID
-        else { return false }
-
-        let error = MetalRendererError.rasterRevisionLayerMismatch(
-            expected: expectedLayerID,
-            actual: actualLayerID
-        )
-        report(error)
-        releaseRasterRevisions([receipt.before.id, receipt.after.id])
-        activeStrokeLayerID = nil
-        if pendingRasterMutation?.token == completedToken {
-            pendingRasterMutation = nil
-        }
-        if pendingTileResize?.token == completedToken {
-            pendingTileResize = nil
-        }
-        apply(.operationCompleted(completedToken, succeeded: false))
-        finishAwaitedClear(token: completedToken, result: .failure(error))
-        refreshDerivedModelState()
-        resumeDeferredPointerIfIdle()
-        return true
     }
 
     private func handleLayerRasterStorageCompletion(
@@ -2138,8 +2177,38 @@ final class EditorSessionController {
     private func releaseHistoryRevisions(
         _ ids: Set<StoredRasterRevisionID>
     ) {
-        releaseRasterRevisions(ids)
+        guard !ids.isEmpty else { return }
         layerRasterStorage.releaseRevisions(ids)
+        pendingPaintRevisionReleaseIDs.formUnion(ids)
+        startPaintRevisionReleaseIfNeeded()
+    }
+
+    private func startPaintRevisionReleaseIfNeeded() {
+        guard paintRevisionReleaseTask == nil,
+              !pendingPaintRevisionReleaseIDs.isEmpty
+        else { return }
+        paintRevisionReleaseTask = Task { @MainActor [weak self] in
+            await self?.drainPendingPaintRevisionReleases()
+        }
+    }
+
+    private func drainPendingPaintRevisionReleases() async {
+        defer { paintRevisionReleaseTask = nil }
+        while !pendingPaintRevisionReleaseIDs.isEmpty {
+            let ids = pendingPaintRevisionReleaseIDs
+            pendingPaintRevisionReleaseIDs.removeAll(keepingCapacity: true)
+            do {
+                try await renderer.releasePaintRevisions(ids)
+            } catch let error as MetalRendererError {
+                pendingPaintRevisionReleaseIDs.formUnion(ids)
+                report(error)
+                return
+            } catch {
+                pendingPaintRevisionReleaseIDs.formUnion(ids)
+                report(.commandFailed(error.localizedDescription))
+                return
+            }
+        }
     }
 
     private func refreshDerivedModelState() {
@@ -2149,10 +2218,12 @@ final class EditorSessionController {
             documentDomainLocked: renderer.documentDomainLocked,
             radialGeometryLocked: renderer.radialGeometryLocked
         )
-        model.confirmBusy(transaction.isBusy)
+        let isBusy = transaction.isBusy
+            || emptyConfigurationReplacementInFlight
+        model.confirmBusy(isBusy)
         model.confirmHistoryAvailability(
-            canUndo: history.canUndo && !transaction.isBusy,
-            canRedo: history.canRedo && !transaction.isBusy
+            canUndo: history.canUndo && !isBusy,
+            canRedo: history.canRedo && !isBusy
         )
     }
 
@@ -2161,6 +2232,7 @@ final class EditorSessionController {
     ) {
         guard transaction.state == .idle,
               transaction.pendingOperation == nil,
+              !emptyConfigurationReplacementInFlight,
               renderer.isIdle
         else {
             report(.tilingChangeRequiresIdle)
@@ -2174,10 +2246,29 @@ final class EditorSessionController {
             }
             return
         }
-        do {
-            try renderer.replaceEmptyDocumentConfiguration(
+        let pixelSize = targetPixelSize(for: configuration)
+        emptyConfigurationReplacementInFlight = true
+        refreshDerivedModelState()
+        Task { @MainActor [weak self] in
+            await self?.completeEmptyDocumentConfigurationReplacement(
                 configuration,
-                pixelSize: targetPixelSize(for: configuration)
+                pixelSize: pixelSize
+            )
+        }
+    }
+
+    private func completeEmptyDocumentConfigurationReplacement(
+        _ configuration: SymmetryDocumentConfiguration,
+        pixelSize: PixelSize
+    ) async {
+        defer {
+            emptyConfigurationReplacementInFlight = false
+            refreshDerivedModelState()
+        }
+        do {
+            try await renderer.replaceEmptyDocumentConfiguration(
+                configuration,
+                pixelSize: pixelSize
             )
             releaseHistoryRevisions(history.removeAll())
             refreshDerivedModelState()
@@ -2194,7 +2285,7 @@ final class EditorSessionController {
 
     private func compatibilityRasterLayerID() throws -> UUID {
         let active = try layerStack.activeLayerForRasterMutation()
-        guard active.id == LayerStack.compatibilityLayerID else {
+        guard active.id == LayerStack.initialLayerID else {
             throw EditorSessionLayerError.rendererStorageUnavailable(active.id)
         }
         return active.id

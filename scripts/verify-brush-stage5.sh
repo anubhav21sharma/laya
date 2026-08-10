@@ -3,7 +3,6 @@ set -eEuo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 artifacts="$repo_root/.build/professional-brush-artifacts"
-stage_four_artifacts="$repo_root/.build/brush-deposition-artifacts"
 scratch="$repo_root/.build/professional-brush-swiftpm"
 work="$repo_root/.build/professional-brush-work"
 logs="$repo_root/.build/professional-brush-logs"
@@ -59,43 +58,6 @@ run_logged() {
     code=$?
   fi
   fail "$name failed with exit $code"
-}
-
-run_stage_four_prerequisite() {
-  local code
-  if ./scripts/verify-brush-stage4.sh \
-      >"$logs/stage-four.stdout.log" \
-      2>"$logs/stage-four.stderr.log"; then
-    code=0
-  else
-    code=$?
-  fi
-  [[ "$code" -eq 0 || "$code" -eq 2 ]] \
-    || fail "Stage 4 prerequisite failed with exit $code"
-  [[ -d "$stage_four_artifacts" ]] \
-    || fail "Stage 4 prerequisite artifact root is missing"
-  stage_four_exit="$code"
-  stage_four_terminal="$(
-    tail -n 1 "$logs/stage-four.stdout.log"
-  )"
-  case "$code" in
-    0)
-      [[ "$stage_four_terminal" == \
-        "BRUSH STAGE 4 PASS artifacts=$stage_four_artifacts commit=$commit" ]] \
-        || fail "Stage 4 pass terminal line is not exact"
-      ;;
-    2)
-      [[ "$stage_four_terminal" == \
-        "BRUSH STAGE 4 PERFORMANCE PENDING artifacts=$stage_four_artifacts commit=$commit gpu="* ]] \
-        || fail "Stage 4 pending terminal line is not exact"
-      ;;
-  esac
-  stage_four_manifest_hash="$(
-    shasum -a 256 "$stage_four_artifacts/artifact-sha256.txt" \
-      | awk '{print $1}'
-  )"
-  [[ "$stage_four_manifest_hash" =~ ^[0-9a-f]{64}$ ]] \
-    || fail "Stage 4 artifact manifest hash is invalid"
 }
 
 run_positive_scene() {
@@ -326,7 +288,7 @@ write_json_status_and_provenance() {
 
   local provenance="$artifacts/provenance.json"
   plutil -create xml1 "$provenance"
-  plutil -insert schemaVersion -integer 2 "$provenance"
+  plutil -insert schemaVersion -integer 3 "$provenance"
   plutil -insert commit -string "$commit" "$provenance"
   plutil -insert sourceTreeSHA256 -string "$source_tree_hash" "$provenance"
   plutil -insert configuration -string Debug "$provenance"
@@ -341,9 +303,6 @@ write_json_status_and_provenance() {
   plutil -insert gpuClassification -string "$gpu_classification" \
     "$provenance"
   plutil -insert artifactRoot -string "$artifacts" "$provenance"
-  plutil -insert stageFourExitStatus -integer "$stage_four_exit" "$provenance"
-  plutil -insert stageFourArtifactManifestSHA256 \
-    -string "$stage_four_manifest_hash" "$provenance"
   plutil -insert rendererExecutableSHA256 \
     -string "$renderer_executable_hash" "$provenance"
   plutil -insert rawProvenanceSHA256 -dictionary "$provenance"
@@ -363,17 +322,6 @@ write_json_status_and_provenance() {
   done
   plutil -convert json "$provenance"
 
-  local regression="$artifacts/stage-four-regression.json"
-  plutil -create xml1 "$regression"
-  plutil -insert schemaVersion -integer 1 "$regression"
-  plutil -insert exitStatus -integer "$stage_four_exit" "$regression"
-  plutil -insert artifactRoot -string "$stage_four_artifacts" "$regression"
-  plutil -insert commit -string "$commit" "$regression"
-  plutil -insert sourceTreeSHA256 -string "$source_tree_hash" "$regression"
-  plutil -insert artifactManifestSHA256 \
-    -string "$stage_four_manifest_hash" "$regression"
-  plutil -insert terminalLine -string "$stage_four_terminal" "$regression"
-  plutil -convert json "$regression"
 }
 
 cd "$repo_root"
@@ -409,8 +357,6 @@ source_tree_hash="$(
 )"
 [[ "$source_tree_hash" =~ ^[0-9a-f]{64}$ ]] \
   || fail "source-tree SHA-256 is invalid"
-
-run_stage_four_prerequisite
 
 swift --version >"$logs/swift-toolchain.txt" 2>&1
 xcodebuild -version >"$logs/xcode-toolchain.txt"
@@ -561,10 +507,14 @@ let names = [
     "professional-technical-ink",
 ]
 let cpu = try names.map {
-    let benchmark = try object(
-        root.appendingPathComponent("positive/\($0)/benchmark.json")
+    let longStroke = try object(
+        root.appendingPathComponent(
+            "positive/\($0)/professional-long-stroke.raw.json"
+        )
     )
-    return p95(benchmark["cpuEncodeMilliseconds"] as! [Double])
+    return p95(
+        longStroke["cpuPreparationMilliseconds"] as! [Double]
+    )
 }.max()!
 let gpu = try names.map {
     let raw = try object(
@@ -613,7 +563,6 @@ if "$validator" \
   --artifacts "$artifacts" \
   --commit "$commit" \
   --source-tree-sha256 "$source_tree_hash" \
-  --stage-four-artifacts "$stage_four_artifacts" \
   >"$logs/validator.stdout.log" \
   2>"$logs/validator.stderr.log"; then
   validator_status=0

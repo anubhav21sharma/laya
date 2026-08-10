@@ -84,15 +84,18 @@ public struct PatternPaintTileRecord: Codable, Equatable, Sendable {
 public struct PatternPaintTileSurface: Equatable, Sendable {
     public let layerID: UUID
     public let pixelSize: PixelSize
+    public let rasterRevision: UInt64
     public let tiles: [PatternPaintTileRecord]
 
     public init(
         layerID: UUID,
         pixelSize: PixelSize,
+        rasterRevision: UInt64,
         tiles: [PatternPaintTileRecord]
     ) {
         self.layerID = layerID
         self.pixelSize = pixelSize
+        self.rasterRevision = rasterRevision
         self.tiles = tiles
     }
 }
@@ -104,6 +107,12 @@ public enum PatternPaintTileError: Error, Equatable, Sendable {
     case duplicateLayerID(UUID)
     case duplicateTileID(UUID)
     case duplicateCoordinate(PatternPaintTileCoordinate)
+    case tileCountOutOfRange(actual: Int, maximum: Int)
+    case rasterRevisionMismatch(
+        tileID: UUID,
+        expected: UInt64,
+        actual: UInt64
+    )
     case invalidLogicalBounds(UUID)
     case invalidPixelSize
     case unsafePath(String)
@@ -127,6 +136,8 @@ public enum PatternPaintTileCodec {
     public static let maximumLayerCount = 8
     public static let maximumDecodedBytes = 512 * 1_024 * 1_024
     public static let maximumManifestBytes = 1_048_576
+    public static let maximumPhysicalDimension =
+        RadialSectorLayout.maximumAtlasDimension
 
     public static func makeRecord(
         layerID: UUID,
@@ -174,6 +185,7 @@ public enum PatternPaintTileCodec {
             PatternPaintTileSurface(
                 layerID: layerID,
                 pixelSize: pixelSize,
+                rasterRevision: rasterRevision,
                 tiles: [provisional]
             ),
         ])
@@ -259,6 +271,7 @@ public enum PatternPaintTileCodec {
         let surface = PatternPaintTileSurface(
             layerID: wire.layerID,
             pixelSize: pixelSize,
+            rasterRevision: wire.rasterRevision,
             tiles: wire.tiles
         )
         try validate(
@@ -270,7 +283,8 @@ public enum PatternPaintTileCodec {
     }
 
     public static func decodeManifestMetadata(
-        _ data: Data
+        _ data: Data,
+        maximumDecodedBytes: Int = maximumDecodedBytes
     ) throws -> PatternPaintTileSurface {
         guard data.count <= maximumManifestBytes else {
             throw PatternPaintTileError.invalidManifest
@@ -292,31 +306,66 @@ public enum PatternPaintTileCodec {
         let surface = PatternPaintTileSurface(
             layerID: wire.layerID,
             pixelSize: pixelSize,
+            rasterRevision: wire.rasterRevision,
             tiles: wire.tiles
         )
-        try validateMetadata([surface])
+        try validateMetadata(
+            [surface],
+            maximumDecodedBytes: maximumDecodedBytes
+        )
         return surface
     }
 
     public static func validateMetadata(
-        _ surfaces: [PatternPaintTileSurface]
+        _ surfaces: [PatternPaintTileSurface],
+        maximumDecodedBytes: Int = maximumDecodedBytes
     ) throws {
         guard (1...maximumLayerCount).contains(surfaces.count) else {
             throw PatternPaintTileError.layerCountOutOfRange(surfaces.count)
         }
+        guard maximumDecodedBytes >= 0 else {
+            throw PatternPaintTileError.decodedByteLimitExceeded(
+                actual: 0,
+                maximum: maximumDecodedBytes
+            )
+        }
+        let maximumTileCount = maximumDecodedBytes / bytesPerTile
+        var totalTileCount = 0
+        for surface in surfaces {
+            let (sum, overflow) = totalTileCount.addingReportingOverflow(
+                surface.tiles.count
+            )
+            let actual = overflow ? Int.max : sum
+            guard !overflow, actual <= maximumTileCount else {
+                throw PatternPaintTileError.tileCountOutOfRange(
+                    actual: actual,
+                    maximum: maximumTileCount
+                )
+            }
+            totalTileCount = sum
+        }
         var layerIDs = Set<UUID>()
         var tileIDs = Set<UUID>()
         var paths = Set<String>()
+        var declaredBytes = 0
         for surface in surfaces {
             guard layerIDs.insert(surface.layerID).inserted else {
                 throw PatternPaintTileError.duplicateLayerID(surface.layerID)
             }
-            guard surface.pixelSize.width > 0,
-                  surface.pixelSize.height > 0,
-                  surface.pixelSize.width <= 4_096,
-                  surface.pixelSize.height <= 4_096
-            else {
+            guard checkedPixelSize(
+                width: surface.pixelSize.width,
+                height: surface.pixelSize.height
+            ) == surface.pixelSize else {
                 throw PatternPaintTileError.invalidPixelSize
+            }
+            let addressableTileCount = try checkedAddressableTileCount(
+                for: surface.pixelSize
+            )
+            guard surface.tiles.count <= addressableTileCount else {
+                throw PatternPaintTileError.tileCountOutOfRange(
+                    actual: surface.tiles.count,
+                    maximum: addressableTileCount
+                )
             }
             var coordinates = Set<PatternPaintTileCoordinate>()
             for record in surface.tiles {
@@ -347,6 +396,24 @@ public enum PatternPaintTileCodec {
                         byteCount: record.byteCount
                     )
                 }
+                guard record.rasterRevision == surface.rasterRevision else {
+                    throw PatternPaintTileError.rasterRevisionMismatch(
+                        tileID: record.id,
+                        expected: surface.rasterRevision,
+                        actual: record.rasterRevision
+                    )
+                }
+                let (sum, overflow) = declaredBytes.addingReportingOverflow(
+                    record.byteCount
+                )
+                let actual = overflow ? Int.max : sum
+                guard !overflow, actual <= maximumDecodedBytes else {
+                    throw PatternPaintTileError.decodedByteLimitExceeded(
+                        actual: actual,
+                        maximum: maximumDecodedBytes
+                    )
+                }
+                declaredBytes = sum
                 guard isCanonicalSHA256(record.semanticSHA256) else {
                     throw PatternPaintTileError.invalidSemanticHash(record.id)
                 }
@@ -359,61 +426,16 @@ public enum PatternPaintTileCodec {
         payloadsByPath: [String: Data],
         maximumDecodedBytes: Int = maximumDecodedBytes
     ) throws {
-        try validateMetadata(surfaces)
-        guard maximumDecodedBytes >= 0 else {
-            throw PatternPaintTileError.decodedByteLimitExceeded(
-                actual: 0,
-                maximum: maximumDecodedBytes
-            )
-        }
-
-        var layerIDs = Set<UUID>()
-        var tileIDs = Set<UUID>()
-        var paths = Set<String>()
+        try validateMetadata(
+            surfaces,
+            maximumDecodedBytes: maximumDecodedBytes
+        )
         var expectedPaths = Set<String>()
         var decodedBytes = 0
 
         for surface in surfaces {
-            guard layerIDs.insert(surface.layerID).inserted else {
-                throw PatternPaintTileError.duplicateLayerID(surface.layerID)
-            }
-            guard surface.pixelSize.width > 0,
-                  surface.pixelSize.height > 0,
-                  surface.pixelSize.width <= 4_096,
-                  surface.pixelSize.height <= 4_096
-            else {
-                throw PatternPaintTileError.invalidPixelSize
-            }
-            var coordinates = Set<PatternPaintTileCoordinate>()
             for record in surface.tiles {
-                guard tileIDs.insert(record.id).inserted else {
-                    throw PatternPaintTileError.duplicateTileID(record.id)
-                }
-                guard coordinates.insert(record.coordinate).inserted else {
-                    throw PatternPaintTileError.duplicateCoordinate(
-                        record.coordinate
-                    )
-                }
-                try validatePath(record.file)
-                guard paths.insert(record.file).inserted else {
-                    throw PatternPaintTileError.duplicatePath(record.file)
-                }
                 expectedPaths.insert(record.file)
-                guard expectedBounds(
-                    coordinate: record.coordinate,
-                    pixelSize: surface.pixelSize
-                ) == record.logicalBounds else {
-                    throw PatternPaintTileError.invalidLogicalBounds(record.id)
-                }
-                guard record.byteCount == bytesPerTile else {
-                    throw PatternPaintTileError.unsupportedByteCount(
-                        tileID: record.id,
-                        byteCount: record.byteCount
-                    )
-                }
-                guard isCanonicalSHA256(record.semanticSHA256) else {
-                    throw PatternPaintTileError.invalidSemanticHash(record.id)
-                }
                 guard let payload = payloadsByPath[record.file] else {
                     throw PatternPaintTileError.missingPayload(record.file)
                 }
@@ -459,6 +481,7 @@ private extension PatternPaintTileCodec {
         let layerID: UUID
         let pixelWidth: Int
         let pixelHeight: Int
+        let rasterRevision: UInt64
         let tiles: [PatternPaintTileRecord]
 
         init(_ surface: PatternPaintTileSurface) {
@@ -466,6 +489,7 @@ private extension PatternPaintTileCodec {
             layerID = surface.layerID
             pixelWidth = surface.pixelSize.width
             pixelHeight = surface.pixelSize.height
+            rasterRevision = surface.rasterRevision
             tiles = surface.tiles.sorted {
                 if $0.coordinate == $1.coordinate {
                     return $0.id.uuidString < $1.id.uuidString
@@ -476,9 +500,27 @@ private extension PatternPaintTileCodec {
     }
 
     static func checkedPixelSize(width: Int, height: Int) -> PixelSize? {
-        guard (1...4_096).contains(width), (1...4_096).contains(height)
+        guard (1...maximumPhysicalDimension).contains(width),
+              (1...maximumPhysicalDimension).contains(height)
         else { return nil }
         return PixelSize(width: width, height: height)
+    }
+
+    static func checkedAddressableTileCount(
+        for pixelSize: PixelSize
+    ) throws -> Int {
+        let columns = pixelSize.width / tileSide
+            + (pixelSize.width % tileSide == 0 ? 0 : 1)
+        let rows = pixelSize.height / tileSide
+            + (pixelSize.height % tileSide == 0 ? 0 : 1)
+        let (count, overflow) = columns.multipliedReportingOverflow(by: rows)
+        guard !overflow else {
+            throw PatternPaintTileError.tileCountOutOfRange(
+                actual: Int.max,
+                maximum: maximumDecodedBytes / bytesPerTile
+            )
+        }
+        return count
     }
 
     static func expectedBounds(

@@ -1,18 +1,13 @@
-import BrushDepositionEvidenceValidation
 import Foundation
 
 public enum ProfessionalBrushArtifactValidator {
     public static func validate(
         artifactRoot: URL,
         expectedCommit: String,
-        expectedSourceTreeSHA256: String,
-        expectedStageFourArtifactRoot: URL
+        expectedSourceTreeSHA256: String
     ) throws -> ProfessionalBrushArtifactValidationStatus {
         guard artifactRoot.path.hasPrefix("/"),
               artifactRoot.standardizedFileURL.path == artifactRoot.path,
-              expectedStageFourArtifactRoot.path.hasPrefix("/"),
-              expectedStageFourArtifactRoot.standardizedFileURL.path
-                == expectedStageFourArtifactRoot.path,
               ArtifactFileSystem.isCommit(expectedCommit),
               ArtifactFileSystem.isSHA256(expectedSourceTreeSHA256)
         else {
@@ -35,7 +30,6 @@ public enum ProfessionalBrushArtifactValidator {
             "scene-matrix.json",
             "source-tree-terminal.txt",
             "source-tree.txt",
-            "stage-four-regression.json",
         ]
         guard try ArtifactFileSystem.entryNames(artifactRoot)
                 == expectedRootEntries
@@ -72,30 +66,11 @@ public enum ProfessionalBrushArtifactValidator {
             )
         }
 
-        let stageFour = try StageFourRegressionValidator.validate(
-            recordURL: artifactRoot.appendingPathComponent(
-                "stage-four-regression.json"
-            ),
-            stageFourRoot: expectedStageFourArtifactRoot,
-            expectedCommit: expectedCommit,
-            expectedSourceTreeSHA256: expectedSourceTreeSHA256,
-            expectedSourceTreeData: source
-        )
-        let stageFourExit: Int
-        switch stageFour.status {
-        case .passed:
-            stageFourExit = 0
-        case .performancePending:
-            stageFourExit = 2
-        }
         let provenance = try ProvenanceValidator.validate(
             root: artifactRoot.appendingPathComponent("raw-provenance"),
             artifactRoot: artifactRoot,
             expectedCommit: expectedCommit,
-            expectedSourceTreeSHA256: expectedSourceTreeSHA256,
-            expectedStageFourManifestSHA256:
-                stageFour.manifestSHA256,
-            expectedStageFourExitStatus: stageFourExit
+            expectedSourceTreeSHA256: expectedSourceTreeSHA256
         )
 
         try SceneInputValidator.validateMatrix(
@@ -103,11 +78,6 @@ public enum ProfessionalBrushArtifactValidator {
         )
         try SceneInputValidator.validate(
             root: artifactRoot.appendingPathComponent("scene-inputs")
-        )
-        let baseline = try CharacterizationValidator.validateBaseline(
-            artifactRoot.appendingPathComponent(
-                "characterization-baseline.json"
-            )
         )
         let rendererHash = ArtifactFileSystem.sha256(
             try ArtifactFileSystem.regularFileData(
@@ -117,25 +87,33 @@ public enum ProfessionalBrushArtifactValidator {
                 label: "renderer executable"
             )
         )
-        let maximumCPUP95 = try SceneArtifactValidator.validatePositive(
+        let positive = try SceneArtifactValidator.validatePositive(
             root: artifactRoot.appendingPathComponent("positive"),
             expectedCommit: expectedCommit,
             expectedGPUName: provenance.gpuName,
             expectedOperatingSystem: provenance.operatingSystem,
-            expectedRendererSHA256: rendererHash,
-            baseline: baseline
+            expectedRendererSHA256: rendererHash
+        )
+        _ = try CharacterizationValidator.validateBaseline(
+            artifactRoot.appendingPathComponent(
+                "characterization-baseline.json"
+            ),
+            identities: positive.identities,
+            positiveCharacterizations: positive.characterizations
         )
         try SceneArtifactValidator.validateNegative(
             root: artifactRoot.appendingPathComponent("negative-control")
         )
         let manualComplete = try ProfessionalManualEvidenceValidator.validate(
-            root: artifactRoot.appendingPathComponent("manual-cards")
+            root: artifactRoot.appendingPathComponent("manual-cards"),
+            identities: positive.identities
         )
         let physicalComplete = try PhysicalEvidenceValidator.validate(
             root: artifactRoot.appendingPathComponent("physical-profiles"),
             expectedCommit: expectedCommit,
             expectedSourceTreeSHA256: expectedSourceTreeSHA256,
-            expectedRendererSHA256: rendererHash
+            expectedRendererSHA256: rendererHash,
+            identities: positive.identities
         )
         let performanceComplete = try PerformanceStatusValidator.validate(
             ArtifactFileSystem.regularFileData(
@@ -148,8 +126,8 @@ public enum ProfessionalBrushArtifactValidator {
             expectedOperatingSystem: provenance.operatingSystem,
             expectedCommit: expectedCommit,
             expectedRendererSHA256: rendererHash,
-            measuredCPUP95Milliseconds: maximumCPUP95,
-            positiveRoot: artifactRoot.appendingPathComponent("positive")
+            positiveRoot: artifactRoot.appendingPathComponent("positive"),
+            identities: positive.identities
         )
         try ArtifactFileSystem.validateManifest(root: artifactRoot)
 

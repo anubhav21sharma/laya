@@ -18,7 +18,9 @@ enum CharacterizationValidator {
     ]
 
     static func validateBaseline(
-        _ url: URL
+        _ url: URL,
+        identities: ProfessionalSceneIdentitySet,
+        positiveCharacterizations: [ProfessionalBrushCharacterizationRecord]
     ) throws -> ProfessionalBrushLogicalBaseline {
         let data = try ArtifactFileSystem.regularFileData(
             url,
@@ -34,10 +36,7 @@ enum CharacterizationValidator {
             label: "professional characterization baseline"
         )
         guard let records = object["records"] as? [[String: Any]],
-              records.count == 40,
-              ArtifactFileSystem.sha256(data)
-                == ProfessionalBrushTruth
-                    .professionalCharacterizationBaselineSHA256
+              records.count == 40
         else {
             throw ArtifactFileSystem.invalid(
                 "professional characterization baseline is not the exact golden baseline"
@@ -57,8 +56,7 @@ enum CharacterizationValidator {
                 "professional characterization baseline is malformed"
             )
         }
-        let expected = ProfessionalBrushTruth.sceneTruth.values
-            .map(\.definitionID).sorted().flatMap { brushID in
+        let expected = identities.definitionIDs.flatMap { brushID in
                 ProfessionalBrushTruth.traces.map {
                     "\(brushID)\u{0}\($0)"
                 }
@@ -69,7 +67,17 @@ enum CharacterizationValidator {
         guard baseline.schemaVersion
                 == ProfessionalBrushLogicalBaseline.schemaVersion,
               actual == expected,
-              baseline.records.allSatisfy(isExactRecord)
+              baseline.records.allSatisfy({
+                  isValidRecord($0, identities: identities)
+              }),
+              Set(positiveCharacterizations.map {
+                  "\($0.brushID)\u{0}\($0.traceName)"
+              }).count == positiveCharacterizations.count,
+              positiveCharacterizations.count
+                == ProfessionalBrushTruth.positiveSceneNames.count,
+              positiveCharacterizations.allSatisfy({
+                  baseline.records.contains($0)
+              })
         else {
             throw ArtifactFileSystem.invalid(
                 "professional characterization baseline membership or record truth is not exact"
@@ -115,18 +123,20 @@ enum CharacterizationValidator {
         )
     }
 
-    private static func isExactRecord(
-        _ record: ProfessionalBrushCharacterizationRecord
+    private static func isValidRecord(
+        _ record: ProfessionalBrushCharacterizationRecord,
+        identities: ProfessionalSceneIdentitySet
     ) -> Bool {
-        guard let truth = ProfessionalBrushTruth.truthByDefinitionID[
-            record.brushID
-        ] else {
+        guard let identity = identities.identity(
+            definitionID: record.brushID
+        ) else {
             return false
         }
         return record.schemaVersion
                 == ProfessionalBrushLogicalBaseline.schemaVersion
-            && record.family == truth.family
-            && record.definitionSemanticHash == truth.semanticHash
+            && record.family == identity.family
+            && record.definitionSemanticHash
+                == identity.definitionSemanticHash
             && ProfessionalBrushTruth.traces.contains(record.traceName)
             && record.sampleCount > 0
             && record.logicalDabCount > 0

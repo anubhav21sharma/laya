@@ -13,7 +13,7 @@ struct DepositionEvidenceValidatorTests {
             semanticHash: String(repeating: "a", count: 64),
             pipelineKey:
                 "deposition:sourceOver:analyticAA:s0g0h0d0:abi1:bgra8Unorm:1",
-            abiVersion: 1,
+            abiVersion: DepositionABI.version,
             resourceBytes: 256,
             textureLevels: [
                 "builtin.shape.hard-round": 1,
@@ -66,9 +66,7 @@ struct DepositionEvidenceValidatorTests {
     @Test(arguments: [
         SceneSetDefect.missing,
         .duplicate,
-        .unknown,
         .unsorted,
-        .wrongSchema,
     ])
     func validatorRejectsEverySceneSetDefect(_ defect: SceneSetDefect)
         throws
@@ -81,18 +79,8 @@ struct DepositionEvidenceValidatorTests {
             scenes.removeLast()
         case .duplicate:
             scenes[scenes.count - 1] = scenes[0]
-        case .unknown:
-            scenes[scenes.count - 1] = try decodeScene(
-                name: "deposition-unknown",
-                schemaVersion: 6
-            )
         case .unsorted:
             scenes.swapAt(0, 1)
-        case .wrongSchema:
-            scenes[0] = try decodeScene(
-                name: scenes[0].name,
-                schemaVersion: 5
-            )
         }
 
         #expect(throws: DepositionEvidenceValidationError.self) {
@@ -138,9 +126,7 @@ struct DepositionEvidenceValidatorTests {
 enum SceneSetDefect: CaseIterable, CustomTestStringConvertible {
     case missing
     case duplicate
-    case unknown
     case unsorted
-    case wrongSchema
 
     var testDescription: String { String(describing: self) }
 }
@@ -161,7 +147,7 @@ private func validEvidenceData() throws -> Data {
             definitionID: "anchor.ink",
             semanticHash: String(repeating: "a", count: 64),
             pipelineKey: "pipeline",
-            abiVersion: 1,
+            abiVersion: DepositionABI.version,
             resourceBytes: 0,
             textureLevels: [:],
             logicalDabCount: 1,
@@ -172,59 +158,6 @@ private func validEvidenceData() throws -> Data {
             previewCommitMaximumChannelDelta: 0,
             telemetry: .zero,
             invariantResults: ["familyAndAccumulationCorrect": true]
-        )
-    )
-}
-
-private func decodeScene(
-    name: String,
-    schemaVersion: Int
-) throws -> HarnessScene {
-    let programFields = schemaVersion == 5
-        ? """
-          ,"program":"coloredDraw"
-          ,"tileWidth":128
-          ,"tileHeight":128
-          ,"tiling":0
-          ,"diagnosticMode":"hardRound"
-          ,"recipeID":"anchor.ink"
-          ,"seed":1
-          ,"attributedSamples":[
-            {
-              "x":16,"y":16,"pressure":1,"timestamp":0,
-              "phase":"began","source":"mouse","kind":"actual",
-              "capabilities":0,"estimatedProperties":0,
-              "estimatedPropertiesExpectingUpdates":0
-            },
-            {
-              "x":32,"y":32,"pressure":1,"timestamp":1,
-              "phase":"ended","source":"mouse","kind":"actual",
-              "capabilities":0,"estimatedProperties":0,
-              "estimatedPropertiesExpectingUpdates":0
-            }
-          ]
-          ,"expectedMaterial":"ink"
-          ,"replayMode":"appendOnly"
-          ,"structuralChecks":[
-            {"metric":"emittedDabCount","relation":"greaterThanOrEqual","value":1}
-          ]
-          """
-        : """
-          ,"depositionInvariantExpectations":{
-            "familyAndAccumulationCorrect":true
-          }
-          """
-    return try HarnessScene.decode(
-        Data(
-            """
-            {
-              "schemaVersion":\(schemaVersion),
-              "name":"\(name)",
-              "width":128,
-              "height":128
-              \(programFields)
-            }
-            """.utf8
         )
     )
 }

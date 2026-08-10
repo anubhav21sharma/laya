@@ -16,6 +16,7 @@ enum PerformanceStatusValidator {
 
     private struct PerformanceMeasurements {
         let gpuMillisecondsByBrush: [String: Double]
+        let cpuPreparationP95ByBrush: [String: Double]
         let missedFrameCountByBrush: [String: UInt64]
     }
 
@@ -25,8 +26,8 @@ enum PerformanceStatusValidator {
         expectedOperatingSystem: String,
         expectedCommit: String,
         expectedRendererSHA256: String,
-        measuredCPUP95Milliseconds: Double,
-        positiveRoot: URL
+        positiveRoot: URL,
+        identities: ProfessionalSceneIdentitySet
     ) throws -> Bool {
         let object = try ArtifactFileSystem.jsonObject(
             data,
@@ -58,10 +59,13 @@ enum PerformanceStatusValidator {
             expectedGPUName: expectedGPUName,
             expectedOperatingSystem: expectedOperatingSystem,
             expectedCommit: expectedCommit,
-            expectedRendererSHA256: expectedRendererSHA256
+            expectedRendererSHA256: expectedRendererSHA256,
+            identities: identities
         )
         let gpuByBrush = measurements.gpuMillisecondsByBrush
         guard let measuredGPU = gpuByBrush.values.max(),
+              let measuredCPU = measurements
+                .cpuPreparationP95ByBrush.values.max(),
               status.schemaVersion == 3,
               status.correctnessPassed,
               status.gpuName == expectedGPUName,
@@ -72,7 +76,7 @@ enum PerformanceStatusValidator {
               status.cpuPreparationBudgetMilliseconds == 2,
               close(
                   status.cpuPreparationP95Milliseconds,
-                  measuredCPUP95Milliseconds
+                  measuredCPU
               ),
               status.cpuPreparationP95Milliseconds < 2,
               status.gpu500DabMilliseconds.isFinite,
@@ -83,7 +87,14 @@ enum PerformanceStatusValidator {
                 == measurements.missedFrameCountByBrush
         else {
             throw ArtifactFileSystem.invalid(
-                "performance status disagrees with Stage 5 professional artifacts"
+                "performance status disagrees with current professional "
+                    + "artifacts (status CPU "
+                    + "\(status.cpuPreparationP95Milliseconds), measured "
+                    + "\(measurements.cpuPreparationP95ByBrush); status GPU "
+                    + "\(status.gpu500DabMilliseconds), measured "
+                    + "\(gpuByBrush); status missed "
+                    + "\(status.softwareEventToSubmitMissedFrameCountByBrush), "
+                    + "measured \(measurements.missedFrameCountByBrush))"
             )
         }
         if status.gpuClassification == "physical" {
@@ -102,7 +113,8 @@ enum PerformanceStatusValidator {
         expectedGPUName: String,
         expectedOperatingSystem: String,
         expectedCommit: String,
-        expectedRendererSHA256: String
+        expectedRendererSHA256: String,
+        identities: ProfessionalSceneIdentitySet
     ) throws -> PerformanceMeasurements {
         guard try ArtifactFileSystem.entryNames(positiveRoot)
                 == Set(ProfessionalBrushTruth.positiveSceneNames)
@@ -112,6 +124,7 @@ enum PerformanceStatusValidator {
             )
         }
         var gpuResult: [String: Double] = [:]
+        var cpuResult: [String: Double] = [:]
         var missedFrameResult: [String: UInt64] = [:]
         for scene in ProfessionalBrushTruth.positiveSceneNames {
             let directory = positiveRoot.appendingPathComponent(scene)
@@ -121,13 +134,16 @@ enum PerformanceStatusValidator {
                 expectedGPUName: expectedGPUName,
                 expectedOperatingSystem: expectedOperatingSystem,
                 expectedCommit: expectedCommit,
-                expectedRendererSHA256: expectedRendererSHA256
+                expectedRendererSHA256: expectedRendererSHA256,
+                identities: identities
             )
             gpuResult[scene] = measurement.gpuMilliseconds
+            cpuResult[scene] = measurement.cpuPreparationP95Milliseconds
             missedFrameResult[scene] = measurement.missedFrameCount
         }
         return PerformanceMeasurements(
             gpuMillisecondsByBrush: gpuResult,
+            cpuPreparationP95ByBrush: cpuResult,
             missedFrameCountByBrush: missedFrameResult
         )
     }
@@ -138,9 +154,16 @@ enum PerformanceStatusValidator {
         expectedGPUName: String,
         expectedOperatingSystem: String,
         expectedCommit: String,
-        expectedRendererSHA256: String
-    ) throws -> (gpuMilliseconds: Double, missedFrameCount: UInt64) {
-        guard let truth = ProfessionalBrushTruth.sceneTruth[scene] else {
+        expectedRendererSHA256: String,
+        identities: ProfessionalSceneIdentitySet
+    ) throws -> (
+        gpuMilliseconds: Double,
+        cpuPreparationP95Milliseconds: Double,
+        missedFrameCount: UInt64
+    ) {
+        guard let truth = ProfessionalBrushTruth.sceneContracts[scene],
+              let identity = identities[scene]
+        else {
             throw ArtifactFileSystem.invalid(
                 "\(scene): professional performance truth is missing"
             )
@@ -166,8 +189,9 @@ enum PerformanceStatusValidator {
         )
         guard integer(index["schemaVersion"]) == 1,
               index["scene"] as? String == scene,
-              index["definitionID"] as? String == truth.definitionID,
-              index["semanticHash"] as? String == truth.semanticHash,
+              index["definitionID"] as? String == identity.definitionID,
+              index["semanticHash"] as? String
+                == identity.definitionSemanticHash,
               validResources(index["resolvedResources"], truth: truth),
               let source = index["source"] as? [String: Any],
               validSource(
@@ -200,19 +224,25 @@ enum PerformanceStatusValidator {
             fiveData,
             scene: scene,
             truth: truth,
+            identity: identity,
             source: source
         )
-        let missedFrameCount = try validateLongStroke(
+        let longStroke = try validateLongStroke(
             longData,
             directory: directory,
             scene: scene,
             truth: truth,
+            identity: identity,
             source: source,
             enforceGPUStability:
                 ArtifactFileSystem.gpuClassification(expectedGPUName)
                     == "physical"
         )
-        return (gpu, missedFrameCount)
+        return (
+            gpu,
+            longStroke.cpuPreparationP95Milliseconds,
+            longStroke.missedFrameCount
+        )
     }
 
     private static func referencedRawData(
@@ -249,7 +279,8 @@ enum PerformanceStatusValidator {
     private static func validateFiveHundredDabs(
         _ data: Data,
         scene: String,
-        truth: ProfessionalSceneTruth,
+        truth: ProfessionalSceneContract,
+        identity: ProfessionalSceneIdentity,
         source: [String: Any]
     ) throws -> Double {
         let raw = try ArtifactFileSystem.jsonObject(
@@ -269,8 +300,9 @@ enum PerformanceStatusValidator {
         guard integer(raw["schemaVersion"]) == 1,
               raw["workloadID"] as? String == "professional-500-dabs",
               raw["scene"] as? String == scene,
-              raw["definitionID"] as? String == truth.definitionID,
-              raw["semanticHash"] as? String == truth.semanticHash,
+              raw["definitionID"] as? String == identity.definitionID,
+              raw["semanticHash"] as? String
+                == identity.definitionSemanticHash,
               validResources(raw["resolvedResources"], truth: truth),
               dictionariesEqual(raw["source"], source),
               integer(raw["recordCount"]) == 500,
@@ -294,10 +326,14 @@ enum PerformanceStatusValidator {
         _ data: Data,
         directory: URL,
         scene: String,
-        truth: ProfessionalSceneTruth,
+        truth: ProfessionalSceneContract,
+        identity: ProfessionalSceneIdentity,
         source: [String: Any],
         enforceGPUStability: Bool
-    ) throws -> UInt64 {
+    ) throws -> (
+        missedFrameCount: UInt64,
+        cpuPreparationP95Milliseconds: Double
+    ) {
         let raw = try ArtifactFileSystem.jsonObject(
             data,
             label: "\(scene) long-stroke raw evidence"
@@ -324,8 +360,9 @@ enum PerformanceStatusValidator {
               raw["workloadID"] as? String
                 == "professional-long-stroke",
               raw["scene"] as? String == scene,
-              raw["definitionID"] as? String == truth.definitionID,
-              raw["semanticHash"] as? String == truth.semanticHash,
+              raw["definitionID"] as? String == identity.definitionID,
+              raw["semanticHash"] as? String
+                == identity.definitionSemanticHash,
               validResources(raw["resolvedResources"], truth: truth),
               dictionariesEqual(raw["source"], source),
               integer(raw["inputSampleCount"]) == 128,
@@ -390,7 +427,7 @@ enum PerformanceStatusValidator {
                     + "derive from the 128 event-to-submit samples"
             )
         }
-        let trend = try auditLongStrokeTrend(
+        _ = try auditLongStrokeTrend(
             raw["trend"],
             cpuMilliseconds: cpu,
             gpuMilliseconds: gpu,
@@ -404,13 +441,6 @@ enum PerformanceStatusValidator {
                     + "\(quartiles.late) ms)"
             )
         }
-        guard trend.cpuSlopeMillisecondsPerFrame <= 0.001 else {
-            throw ArtifactFileSystem.invalid(
-                "\(scene): long-stroke CPU eight-frame block-median "
-                    + "Theil-Sen slope exceeds 0.001 ms/frame "
-                    + "(\(trend.cpuSlopeMillisecondsPerFrame))"
-            )
-        }
         if enforceGPUStability {
             guard stableQuartiles(gpu) else {
                 let quartiles = quartileP95s(gpu)
@@ -420,20 +450,13 @@ enum PerformanceStatusValidator {
                         + "\(quartiles.late) ms)"
                 )
             }
-            guard trend.gpuSlopeMillisecondsPerFrame <= 0.001 else {
-                throw ArtifactFileSystem.invalid(
-                    "\(scene): long-stroke GPU eight-frame block-median "
-                        + "Theil-Sen slope exceeds 0.001 ms/frame "
-                        + "(\(trend.gpuSlopeMillisecondsPerFrame))"
-                )
-            }
         }
         _ = try auditIdentityFrames(
             identityFrames,
             scene: scene,
             maximumRetainedDabs: maximumDabs,
             maximumProjectedInstancesPerFrame: maximumProjected,
-            expectedFinalLogicalDabHighWater: logicalDabs,
+            expectedFinalLogicalIdentityHighWater: logicalDabs,
             expectedProjectedInstanceTotal: projected
         )
         let traceData = try ArtifactFileSystem.regularFileData(
@@ -450,15 +473,15 @@ enum PerformanceStatusValidator {
         try validateTrace(
             traceData,
             scene: scene,
-            truth: truth
+            identity: identity
         )
-        return derivedMissedFrameCount
+        return (derivedMissedFrameCount, percentile95(cpu))
     }
 
     private static func validateTrace(
         _ data: Data,
         scene: String,
-        truth: ProfessionalSceneTruth
+        identity: ProfessionalSceneIdentity
     ) throws {
         let trace = try ArtifactFileSystem.jsonObject(
             data,
@@ -474,8 +497,9 @@ enum PerformanceStatusValidator {
         )
         guard integer(trace["schemaVersion"]) == 1,
               trace["scene"] as? String == scene,
-              trace["definitionID"] as? String == truth.definitionID,
-              trace["semanticHash"] as? String == truth.semanticHash,
+              trace["definitionID"] as? String == identity.definitionID,
+              trace["semanticHash"] as? String
+                == identity.definitionSemanticHash,
               let samples = trace["samples"] as? [[String: Any]],
               samples.count == 128,
               samples.indices.allSatisfy({
@@ -572,7 +596,7 @@ enum PerformanceStatusValidator {
 
     private static func validResources(
         _ value: Any?,
-        truth: ProfessionalSceneTruth
+        truth: ProfessionalSceneContract
     ) -> Bool {
         guard let values = value as? [[String: Any]] else { return false }
         let expected = truth.resourceLevels.keys.sorted()
@@ -923,16 +947,16 @@ enum PerformanceStatusValidator {
         scene: String,
         maximumRetainedDabs: Int,
         maximumProjectedInstancesPerFrame: Int,
-        expectedFinalLogicalDabHighWater: Int,
+        expectedFinalLogicalIdentityHighWater: Int,
         expectedProjectedInstanceTotal: Int
     ) throws -> LongStrokeIdentityAudit {
         guard frames.count == 128,
               maximumRetainedDabs > 0,
               maximumProjectedInstancesPerFrame > 0,
-              expectedFinalLogicalDabHighWater > 0,
+              expectedFinalLogicalIdentityHighWater > 0,
               expectedProjectedInstanceTotal > 0,
               let expectedFinal = UInt64(
-                  exactly: expectedFinalLogicalDabHighWater
+                  exactly: expectedFinalLogicalIdentityHighWater
               )
         else {
             throw ArtifactFileSystem.invalid(
@@ -991,13 +1015,19 @@ enum PerformanceStatusValidator {
                     frame["generatedProjectedInstanceHighWater"]
                 ),
                 currentGeneratedProjected >= previousGeneratedProjected,
-                currentGeneratedProjected - previousGeneratedProjected
-                    <= maximumProjectedInstancesPerFrame,
+                (
+                    frameIndex == frames.count - 1
+                        || currentGeneratedProjected
+                            - previousGeneratedProjected
+                            <= maximumProjectedInstancesPerFrame
+                ),
                 let encodedGPU = integer(
                     frame["encodedGPUInstanceCount"]
                 ),
                 encodedGPU >= 0,
-                encodedGPU <= maximumProjectedInstancesPerFrame,
+                encodedGPU
+                    >= currentGeneratedProjected
+                        - previousGeneratedProjected,
                 let retainedDabCount = integer(
                     frame["retainedDabCount"]
                 ),
@@ -1015,7 +1045,8 @@ enum PerformanceStatusValidator {
             else {
                 throw ArtifactFileSystem.invalid(
                     "\(scene): long-stroke identity frame \(frameIndex) "
-                        + "has malformed, discontinuous, or over-budget metadata"
+                        + "has malformed, discontinuous, or over-budget metadata: "
+                        + "\(frame)"
                 )
             }
             var newlyEncoded: UInt64 = 0

@@ -27,6 +27,55 @@ struct DocumentPaintSurfaceStoreTests {
     }
 
     @Test
+    func explicitSnapshotLiabilityBudgetReachesSoleSharedTileStore() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 768, height: 256),
+            storagePixelSize: PixelSize(width: 768, height: 256),
+            radialLayout: nil
+        )
+        let registry = try DocumentPaintSurfaceStore(
+            device: device,
+            byteBudget: tileBytes,
+            snapshotPayloadLiabilityByteBudget: tileBytes * 3,
+            transferByteCapacity: tileBytes * 5,
+            geometry: geometry,
+            layerIDs: [layer]
+        )
+        let physicalSurface = UUID()
+        for index in 0..<3 {
+            _ = try seed(
+                store: registry.sharedTileStore,
+                surfaceID: physicalSurface,
+                layerID: layer,
+                generation: 1,
+                size: geometry.storagePixelSize,
+                coordinate: .init(x: index, y: 0)
+            )
+        }
+        let references = try registry.sharedTileStore.references(
+            surfaceID: physicalSurface,
+            layerID: layer,
+            generation: 1
+        )
+        #expect(references.count == 3)
+
+        let token = try registry.sharedTileStore.retainSnapshotReferences(
+            references
+        )
+        #expect(
+            registry.sharedTileStore.snapshot()
+                .snapshotPayloadDebtByteCount == tileBytes * 3
+        )
+        token.close()
+        #expect(
+            registry.sharedTileStore.snapshot()
+                .snapshotPayloadDebtByteCount == 0
+        )
+    }
+
+    @Test
     func emptyRegistryHasGenericLayerBindingsAndCheckedGeometry() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let first = UUID()
@@ -109,10 +158,7 @@ struct DocumentPaintSurfaceStoreTests {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let layer = UUID()
         let registry = try makeRegistry(device: device, layers: [layer])
-        let lease = try registry.issueStrokeNamespace(
-            layerID: layer,
-            generation: registry.generation
-        )
+        let lease = try registry.issueCurrentStrokeNamespace(layerID: layer)
 
         #expect(lease.storeIdentity == registry.tileStoreIdentity)
         #expect(lease.layerID == layer)
@@ -136,6 +182,751 @@ struct DocumentPaintSurfaceStoreTests {
             layerID: layer,
             generation: registry.generation
         ))
+    }
+
+    @Test
+    func preparedEpochPublishesGenerationGeometryOrderAndLayersTogether() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let firstLayer = UUID()
+        let secondLayer = UUID()
+        let registry = try makeRegistry(
+            device: device,
+            layers: [firstLayer, secondLayer]
+        )
+        let beforeIdentity = registry.testingCurrentEpochIdentity
+        let before = registry.snapshot()
+        let replacementGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 2_048, height: 512),
+            storagePixelSize: PixelSize(width: 2_048, height: 512),
+            radialLayout: nil
+        )
+        let coordinate = PaintTileCoordinate(x: 3, y: 1)
+        let candidate = try registry.makeCandidate(
+            geometry: replacementGeometry,
+            dirtyCoordinatesByLayer: [secondLayer: [coordinate]]
+        )
+
+        let prepared = try registry.prepareCommit(candidate)
+        #expect(prepared.testingEpochIdentity != beforeIdentity)
+        #expect(registry.testingCurrentEpochIdentity == beforeIdentity)
+        #expect(registry.snapshot().generation == before.generation)
+        #expect(registry.snapshot().geometry == before.geometry)
+        #expect(registry.snapshot().layers == before.layers)
+
+        registry.commitPrepared(prepared)
+
+        let after = registry.snapshot()
+        #expect(registry.testingCurrentEpochIdentity
+            == prepared.testingEpochIdentity)
+        #expect(after.generation == candidate.generation)
+        #expect(after.geometry == replacementGeometry)
+        #expect(after.layers.map(\.layerID) == [firstLayer, secondLayer])
+        #expect(after.layers[0].references.isEmpty)
+        #expect(after.layers[1].references.map(\.coordinate) == [coordinate])
+        let firstBinding = try registry.binding(for: firstLayer)
+        let secondBinding = try registry.binding(for: secondLayer)
+        #expect(firstBinding.generation == candidate.generation)
+        #expect(secondBinding.generation == candidate.generation)
+        #expect(firstBinding.canonical.pixelSize
+            == replacementGeometry.storagePixelSize)
+        #expect(secondBinding.canonical.pixelSize
+            == replacementGeometry.storagePixelSize)
+    }
+
+    @Test
+    func currentStrokeAuthorityTracksGeometryChangingEpochCommit() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let initialGeneration = registry.generation
+        let initialGeometry = registry.geometry
+
+        let initialNamespace = try registry.issueCurrentStrokeNamespace(
+            layerID: layer
+        )
+        #expect(initialNamespace.generation == initialGeneration)
+        initialNamespace.reportRetired()
+
+        let initialOwner = UUID()
+        let initialCapability = try registry
+            .issueCurrentStrokeSurfaceCapability(
+                layerID: layer,
+                ownerIdentity: initialOwner,
+                onTerminal: { _ in }
+            )
+        #expect(initialCapability.generation == initialGeneration)
+        #expect(initialCapability.pixelSize == initialGeometry.storagePixelSize)
+        #expect(initialCapability.radialLayout == initialGeometry.radialLayout)
+        try initialCapability.cancel(expectedOwnerIdentity: initialOwner)
+
+        let replacementGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 1_536, height: 768),
+            storagePixelSize: PixelSize(width: 1_536, height: 768),
+            radialLayout: nil
+        )
+        let replacement = try registry.makeCandidate(
+            geometry: replacementGeometry
+        )
+        registry.commitPrepared(try registry.prepareCommit(replacement))
+
+        let replacementNamespace = try registry.issueCurrentStrokeNamespace(
+            layerID: layer
+        )
+        #expect(replacementNamespace.generation == replacement.generation)
+        replacementNamespace.reportRetired()
+
+        let replacementOwner = UUID()
+        let replacementCapability = try registry
+            .issueCurrentStrokeSurfaceCapability(
+                layerID: layer,
+                ownerIdentity: replacementOwner,
+                onTerminal: { _ in }
+            )
+        #expect(replacementCapability.generation == replacement.generation)
+        #expect(replacementCapability.pixelSize
+            == replacementGeometry.storagePixelSize)
+        #expect(replacementCapability.radialLayout
+            == replacementGeometry.radialLayout)
+        try replacementCapability.cancel(
+            expectedOwnerIdentity: replacementOwner
+        )
+    }
+
+    @Test
+    func visibleCaptureRetriesPublicationBetweenSelectionAndRetention() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let initial = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [.init(x: 0, y: 0)]]
+        )
+        registry.commitPrepared(try registry.prepareCommit(initial))
+
+        let replacement = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [.init(x: 1, y: 0)]]
+        )
+        let preparedReplacement = try registry.prepareCommit(replacement)
+        let publication = OneShotDocumentPaintAction()
+        registry.testingVisibleSelectionCompleted = {
+            publication.run {
+                registry.commitPrepared(preparedReplacement)
+            }
+        }
+
+        let capture = try registry.captureCanonicalVisibleSources(
+            layerID: layer,
+            addressing: .finite(registry.geometry.storagePixelSize),
+            addressingRevision: 9,
+            outputRegion: try SparseTileOutputRegion(
+                minX: 256, minY: 0, maxX: 257, maxY: 1
+            ),
+            outputGeometryRevision: 11
+        )
+        registry.testingVisibleSelectionCompleted = nil
+
+        #expect(publication.runCount == 1)
+        #expect(capture.key.documentGeneration == replacement.generation)
+        #expect(capture.key.addressingRevision == 9)
+        #expect(capture.key.outputGeometryRevision == 11)
+        #expect(capture.sourceBatch.sources.count == 1)
+        #expect(capture.sourceBatch.sources[0].references.map(\.coordinate)
+            == [.init(x: 0, y: 0), .init(x: 1, y: 0)])
+        #expect(capture.sourceBatch.sources[0].provider
+            .entitledReferences.map(\.coordinate) == [.init(x: 1, y: 0)])
+        #expect(registry.sharedTileStore.snapshot().activeSnapshotTokenCount == 1)
+        try capture.sourceBatch.abandon()
+        #expect(registry.sharedTileStore.snapshot().activeSnapshotTokenCount == 0)
+    }
+
+    @Test
+    func capturedOldEpochReferenceSurvivesReplacementUntilExplicitClose()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let initial = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [.init(x: 0, y: 0)]]
+        )
+        registry.commitPrepared(try registry.prepareCommit(initial))
+        let oldReference = try #require(
+            registry.binding(for: layer).canonical.references.first
+        )
+        let capture = try registry.captureCanonicalVisibleSources(
+            layerID: layer,
+            addressing: .finite(registry.geometry.storagePixelSize),
+            addressingRevision: 1,
+            outputRegion: try SparseTileOutputRegion(
+                minX: 0, minY: 0, maxX: 1, maxY: 1
+            ),
+            outputGeometryRevision: 1
+        )
+
+        let replacement = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [.init(x: 0, y: 0)]]
+        )
+        registry.commitPrepared(try registry.prepareCommit(replacement))
+        let newReference = try #require(
+            registry.binding(for: layer).canonical.references.first
+        )
+        #expect(newReference.identity != oldReference.identity)
+        let retained = registry.sharedTileStore.snapshot()
+        #expect(retained.pendingRetirementCount == 1)
+        #expect(retained.entries.first {
+            $0.identity == oldReference.identity
+        }?.snapshotRetainCount == 1)
+
+        try capture.sourceBatch.abandon()
+        let released = registry.sharedTileStore.snapshot()
+        #expect(released.pendingRetirementCount == 0)
+        #expect(!released.entries.contains {
+            $0.identity == oldReference.identity
+        })
+        #expect(released.entries.contains {
+            $0.identity == newReference.identity
+        })
+    }
+
+    @Test
+    func disjointVisibleCapturePreservesFingerprintButOwnsNoToken() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let emptyCapture = try registry.captureCanonicalVisibleSources(
+            layerID: layer,
+            addressing: .finite(registry.geometry.storagePixelSize),
+            addressingRevision: 1,
+            outputRegion: try SparseTileOutputRegion(
+                minX: 0, minY: 0, maxX: 1, maxY: 1
+            ),
+            outputGeometryRevision: 1
+        )
+        #expect(emptyCapture.sourceBatch.sources[0].references.isEmpty)
+        #expect(emptyCapture.sourceBatch.sources[0].provider
+            .entitledReferences.isEmpty)
+        #expect(registry.sharedTileStore.snapshot().activeSnapshotTokenCount == 0)
+        try emptyCapture.sourceBatch.abandon()
+
+        let initial = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [.init(x: 0, y: 0)]]
+        )
+        registry.commitPrepared(try registry.prepareCommit(initial))
+        let expected = try registry.binding(for: layer).canonical.references
+
+        let capture = try registry.captureCanonicalVisibleSources(
+            layerID: layer,
+            addressing: .finite(registry.geometry.storagePixelSize),
+            addressingRevision: 1,
+            outputRegion: try SparseTileOutputRegion(
+                minX: 768, minY: 768, maxX: 769, maxY: 769
+            ),
+            outputGeometryRevision: 1
+        )
+
+        #expect(capture.sourceBatch.sources[0].references == expected)
+        #expect(capture.sourceBatch.sources[0].provider
+            .entitledReferences.isEmpty)
+        let snapshot = registry.sharedTileStore.snapshot()
+        #expect(snapshot.activeSnapshotTokenCount == 0)
+        #expect(snapshot.aggregateSnapshotReferenceCount == 0)
+        try capture.sourceBatch.abandon()
+    }
+
+    @Test
+    func visibleCaptureContentionIsBoundedAndLeavesNoRetentionDebt() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let initial = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [.init(x: 0, y: 0)]]
+        )
+        registry.commitPrepared(try registry.prepareCommit(initial))
+        let beforeGeneration = registry.generation
+        let publisher = RepeatingDocumentPaintPublisher(
+            registry: registry
+        )
+        registry.testingVisibleSelectionCompleted = publisher.run
+
+        #expect(throws: DocumentPaintSurfaceStoreError
+            .visibleCaptureContention(
+                maximumAttempts:
+                    DocumentPaintSurfaceStore.maximumVisibleCaptureAttempts
+            )) {
+            _ = try registry.captureCanonicalVisibleSources(
+                layerID: layer,
+                addressing: .finite(registry.geometry.storagePixelSize),
+                addressingRevision: 1,
+                outputRegion: try SparseTileOutputRegion(
+                    minX: 0, minY: 0, maxX: 1, maxY: 1
+                ),
+                outputGeometryRevision: 1
+            )
+        }
+        registry.testingVisibleSelectionCompleted = nil
+
+        #expect(publisher.failureDescription == nil)
+        #expect(publisher.runCount
+            == DocumentPaintSurfaceStore.maximumVisibleCaptureAttempts)
+        #expect(registry.generation == beforeGeneration
+            + UInt64(DocumentPaintSurfaceStore.maximumVisibleCaptureAttempts))
+        let snapshot = registry.sharedTileStore.snapshot()
+        #expect(snapshot.activeSnapshotTokenCount == 0)
+        #expect(snapshot.aggregateSnapshotReferenceCount == 0)
+    }
+
+    @Test
+    func transientUnionCaptureOwnsOneAggregateTokenForThreeRoles() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let coordinate = PaintTileCoordinate(x: 0, y: 0)
+        let canonical = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [layer: [coordinate]]
+        )
+        registry.commitPrepared(try registry.prepareCommit(canonical))
+        let owner = UUID()
+        let capability = try registry.issueCurrentStrokeSurfaceCapability(
+            layerID: layer,
+            ownerIdentity: owner,
+            onTerminal: { _ in }
+        )
+        let reservation = try capability.reserveStrokeTiles(
+            role: .authoritative,
+            coordinates: [coordinate],
+            pinReasons: [.visible, .inFlight],
+            workspace: PaintTileStrokeLeaseWorkspace(maximumBindingCount: 1),
+            failureInjection: nil
+        )
+        try capability.testingMarkDirty(reservation)
+        try capability.releaseFrameReservations(
+            authoritative: reservation,
+            prediction: nil
+        )
+        let addressing = SparseTileAddressing.finite(
+            registry.geometry.storagePixelSize
+        )
+        let descriptor = try DocumentPaintTransientVisibleSourceDescriptor(
+            capability: capability,
+            changedRole: .authoritative,
+            changedCoordinates: [coordinate],
+            addressing: addressing,
+            disposition: .fullSnapshot
+        )
+
+        let capture = try registry.captureTransientVisibleSources(
+            layerID: layer,
+            descriptor: descriptor,
+            addressing: addressing,
+            addressingRevision: 3,
+            outputRegion: try SparseTileOutputRegion(
+                minX: 0, minY: 0, maxX: 1, maxY: 1
+            ),
+            outputGeometryRevision: 4
+        )
+        #expect(capture.sourceBatch.sources.map(\.role)
+            == [.canonical, .authoritative, .prediction])
+        let retained = registry.sharedTileStore.snapshot()
+        #expect(retained.activeSnapshotTokenCount == 1)
+        #expect(retained.aggregateSnapshotReferenceCount == 2)
+        try capture.sourceBatch.abandon()
+        #expect(registry.sharedTileStore.snapshot().activeSnapshotTokenCount == 0)
+        try capability.cancel(expectedOwnerIdentity: owner)
+    }
+
+    @Test
+    func transientCaptureRejectsForeignStaleAndRetiredAuthorityWithZeroDebt()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let foreignRegistry = try makeRegistry(device: device, layers: [layer])
+        let addressing = SparseTileAddressing.finite(
+            registry.geometry.storagePixelSize
+        )
+        let output = try SparseTileOutputRegion(
+            minX: 0, minY: 0, maxX: 1, maxY: 1
+        )
+
+        let foreignOwner = UUID()
+        let foreignCapability = try foreignRegistry
+            .issueCurrentStrokeSurfaceCapability(
+                layerID: layer,
+                ownerIdentity: foreignOwner,
+                onTerminal: { _ in }
+            )
+        let foreignDescriptor = try
+            DocumentPaintTransientVisibleSourceDescriptor(
+                capability: foreignCapability,
+                changedRole: .authoritative,
+                changedCoordinates: [],
+                addressing: addressing,
+                disposition: .delta
+            )
+        #expect(throws: DocumentPaintStrokeSurfaceError.staleCapability) {
+            _ = try registry.captureTransientVisibleSources(
+                layerID: layer,
+                descriptor: foreignDescriptor,
+                addressing: addressing,
+                addressingRevision: 1,
+                outputRegion: output,
+                outputGeometryRevision: 1
+            )
+        }
+        try foreignCapability.cancel(expectedOwnerIdentity: foreignOwner)
+
+        let staleOwner = UUID()
+        let staleCapability = try registry.issueCurrentStrokeSurfaceCapability(
+            layerID: layer,
+            ownerIdentity: staleOwner,
+            onTerminal: { _ in }
+        )
+        let staleDescriptor = try
+            DocumentPaintTransientVisibleSourceDescriptor(
+                capability: staleCapability,
+                changedRole: .authoritative,
+                changedCoordinates: [],
+                addressing: addressing,
+                disposition: .delta
+            )
+        let replacement = try registry.makeCandidate()
+        registry.commitPrepared(try registry.prepareCommit(replacement))
+        #expect(throws: DocumentPaintStrokeSurfaceError.staleCapability) {
+            _ = try registry.captureTransientVisibleSources(
+                layerID: layer,
+                descriptor: staleDescriptor,
+                addressing: addressing,
+                addressingRevision: 1,
+                outputRegion: output,
+                outputGeometryRevision: 1
+            )
+        }
+        try staleCapability.cancel(expectedOwnerIdentity: staleOwner)
+
+        let retiredOwner = UUID()
+        let retiredCapability = try registry.issueCurrentStrokeSurfaceCapability(
+            layerID: layer,
+            ownerIdentity: retiredOwner,
+            onTerminal: { _ in }
+        )
+        let retiredDescriptor = try
+            DocumentPaintTransientVisibleSourceDescriptor(
+                capability: retiredCapability,
+                changedRole: .authoritative,
+                changedCoordinates: [],
+                addressing: addressing,
+                disposition: .delta
+            )
+        try retiredCapability.cancel(expectedOwnerIdentity: retiredOwner)
+        #expect(throws: DocumentPaintStrokeSurfaceError.staleCapability) {
+            _ = try registry.captureTransientVisibleSources(
+                layerID: layer,
+                descriptor: retiredDescriptor,
+                addressing: addressing,
+                addressingRevision: 1,
+                outputRegion: output,
+                outputGeometryRevision: 1
+            )
+        }
+        let snapshot = registry.sharedTileStore.snapshot()
+        #expect(snapshot.activeSnapshotTokenCount == 0)
+        #expect(snapshot.aggregateSnapshotReferenceCount == 0)
+    }
+
+    @Test
+    func resizedEpochRejectsStaleVisibleAddressingWithoutRetentionDebt()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let oldAddressing = SparseTileAddressing.finite(
+            registry.geometry.storagePixelSize
+        )
+        let replacementGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 512, height: 512),
+            storagePixelSize: PixelSize(width: 512, height: 512),
+            radialLayout: nil
+        )
+        let replacement = try registry.makeCandidate(
+            geometry: replacementGeometry
+        )
+        let prepared = try registry.prepareCommit(replacement)
+        let publication = OneShotDocumentPaintAction()
+        registry.testingVisibleSelectionCompleted = {
+            publication.run { registry.commitPrepared(prepared) }
+        }
+
+        #expect(throws: SparseTileSamplingPlanError.inconsistentAddressing) {
+            _ = try registry.captureCanonicalVisibleSources(
+                layerID: layer,
+                addressing: oldAddressing,
+                addressingRevision: 1,
+                outputRegion: try SparseTileOutputRegion(
+                    minX: 0, minY: 0, maxX: 1, maxY: 1
+                ),
+                outputGeometryRevision: 1
+            )
+        }
+        registry.testingVisibleSelectionCompleted = nil
+        #expect(publication.runCount == 1)
+        #expect(registry.geometry == replacementGeometry)
+        let snapshot = registry.sharedTileStore.snapshot()
+        #expect(snapshot.activeSnapshotTokenCount == 0)
+        #expect(snapshot.aggregateSnapshotReferenceCount == 0)
+    }
+
+    @Test
+    func transientPublicationInterleaveRejectsOldNamespaceWithZeroDebt()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let owner = UUID()
+        let capability = try registry.issueCurrentStrokeSurfaceCapability(
+            layerID: layer,
+            ownerIdentity: owner,
+            onTerminal: { _ in }
+        )
+        let addressing = SparseTileAddressing.finite(
+            registry.geometry.storagePixelSize
+        )
+        let descriptor = try DocumentPaintTransientVisibleSourceDescriptor(
+            capability: capability,
+            changedRole: .authoritative,
+            changedCoordinates: [],
+            addressing: addressing,
+            disposition: .delta
+        )
+        let replacement = try registry.makeCandidate()
+        let prepared = try registry.prepareCommit(replacement)
+        let publication = OneShotDocumentPaintAction()
+        registry.testingVisibleSelectionCompleted = {
+            publication.run { registry.commitPrepared(prepared) }
+        }
+
+        #expect(throws: DocumentPaintStrokeSurfaceError.staleCapability) {
+            _ = try registry.captureTransientVisibleSources(
+                layerID: layer,
+                descriptor: descriptor,
+                addressing: addressing,
+                addressingRevision: 1,
+                outputRegion: try SparseTileOutputRegion(
+                    minX: 0, minY: 0, maxX: 1, maxY: 1
+                ),
+                outputGeometryRevision: 1
+            )
+        }
+        registry.testingVisibleSelectionCompleted = nil
+        #expect(publication.runCount == 1)
+        let snapshot = registry.sharedTileStore.snapshot()
+        #expect(snapshot.activeSnapshotTokenCount == 0)
+        #expect(snapshot.aggregateSnapshotReferenceCount == 0)
+        try capability.cancel(expectedOwnerIdentity: owner)
+    }
+
+    @Test
+    func concurrentCommitAndSnapshotObserveOnlyCompleteEpochs() async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let firstLayer = UUID()
+        let secondLayer = UUID()
+        let registry = try makeRegistry(
+            device: device,
+            layers: [firstLayer, secondLayer]
+        )
+        let old = registry.snapshot()
+        let firstGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 1_536, height: 768),
+            storagePixelSize: PixelSize(width: 1_536, height: 768),
+            radialLayout: nil
+        )
+        let firstCoordinate = PaintTileCoordinate(x: 4, y: 2)
+        let firstCandidate = try registry.makeCandidate(
+            geometry: firstGeometry,
+            dirtyCoordinatesByLayer: [secondLayer: [firstCoordinate]]
+        )
+        let firstPrepared = try registry.prepareCommit(firstCandidate)
+
+        // Reader owns the lock first: the overlapping commit must publish only
+        // after this snapshot has completed from the old immutable epoch.
+        let oldReadBarrier = DocumentPaintEpochRaceBarrier(
+            target: .snapshotCaptured
+        )
+        registry.testingEpochHook = oldReadBarrier.hook
+        let oldSnapshotTask = Task.detached { registry.snapshot() }
+        try await oldReadBarrier.waitUntilReached()
+        defer { oldReadBarrier.release() }
+        let firstCommitStarted = DispatchSemaphore(value: 0)
+        let firstCommitTask = Task.detached {
+            firstCommitStarted.signal()
+            registry.commitPrepared(firstPrepared)
+        }
+        let didStartFirstCommit = await waitForDocumentPaintSignal(
+            firstCommitStarted
+        )
+        #expect(didStartFirstCommit)
+        oldReadBarrier.release()
+        let observedOld = await oldSnapshotTask.value
+        await firstCommitTask.value
+        registry.testingEpochHook = nil
+
+        #expect(observedOld.generation == old.generation)
+        #expect(observedOld.geometry == old.geometry)
+        #expect(observedOld.layers == old.layers)
+        let firstPublished = registry.snapshot()
+        #expect(firstPublished.generation == firstCandidate.generation)
+        #expect(firstPublished.geometry == firstGeometry)
+        #expect(firstPublished.layers.map(\.layerID)
+            == [firstLayer, secondLayer])
+        #expect(firstPublished.layers[0].references.isEmpty)
+        #expect(firstPublished.layers[1].references.map(\.coordinate)
+            == [firstCoordinate])
+
+        let secondGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 768, height: 1_536),
+            storagePixelSize: PixelSize(width: 768, height: 1_536),
+            radialLayout: nil
+        )
+        let secondCoordinate = PaintTileCoordinate(x: 1, y: 4)
+        let secondCandidate = try registry.makeCandidate(
+            geometry: secondGeometry,
+            dirtyCoordinatesByLayer: [firstLayer: [secondCoordinate]]
+        )
+        let secondPrepared = try registry.prepareCommit(secondCandidate)
+
+        // Publisher owns the lock first: the overlapping reader must observe
+        // the complete replacement epoch after the single pointer swap.
+        let publicationBarrier = DocumentPaintEpochRaceBarrier(
+            target: .beforePublication
+        )
+        registry.testingEpochHook = publicationBarrier.hook
+        let secondCommitTask = Task.detached {
+            registry.commitPrepared(secondPrepared)
+        }
+        try await publicationBarrier.waitUntilReached()
+        defer { publicationBarrier.release() }
+        let newReadStarted = DispatchSemaphore(value: 0)
+        let newSnapshotTask = Task.detached {
+            newReadStarted.signal()
+            return registry.snapshot()
+        }
+        let didStartNewRead = await waitForDocumentPaintSignal(newReadStarted)
+        #expect(didStartNewRead)
+        publicationBarrier.release()
+        await secondCommitTask.value
+        let observedNew = await newSnapshotTask.value
+        registry.testingEpochHook = nil
+
+        #expect(observedNew.generation == secondCandidate.generation)
+        #expect(observedNew.geometry == secondGeometry)
+        #expect(observedNew.layers.map(\.layerID)
+            == [firstLayer, secondLayer])
+        #expect(observedNew.layers[0].references.map(\.coordinate)
+            == [secondCoordinate])
+        #expect(observedNew.layers[1].references.isEmpty)
+    }
+
+    @Test
+    func concurrentCommitAndCurrentAuthorityCannotMixOrForgeEpochs() async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let layer = UUID()
+        let registry = try makeRegistry(device: device, layers: [layer])
+        let oldGeneration = registry.generation
+        let oldGeometry = registry.geometry
+        let firstGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 1_536, height: 768),
+            storagePixelSize: PixelSize(width: 1_536, height: 768),
+            radialLayout: nil
+        )
+        let firstCandidate = try registry.makeCandidate(
+            geometry: firstGeometry
+        )
+        let firstPrepared = try registry.prepareCommit(firstCandidate)
+
+        // Issuance captures the old epoch first while the commit is blocked on
+        // the registry lock. Capability construction may finish after publish,
+        // but its generation and geometry must remain the captured old tuple.
+        let oldAuthorityBarrier = DocumentPaintEpochRaceBarrier(
+            target: .strokeAuthorityCaptured
+        )
+        registry.testingEpochHook = oldAuthorityBarrier.hook
+        let oldOwner = UUID()
+        let oldCapabilityTask = Task.detached {
+            try registry.issueCurrentStrokeSurfaceCapability(
+                layerID: layer,
+                ownerIdentity: oldOwner,
+                onTerminal: { _ in }
+            )
+        }
+        try await oldAuthorityBarrier.waitUntilReached()
+        defer { oldAuthorityBarrier.release() }
+        let firstCommitStarted = DispatchSemaphore(value: 0)
+        let firstCommitTask = Task.detached {
+            firstCommitStarted.signal()
+            registry.commitPrepared(firstPrepared)
+        }
+        let didStartFirstCommit = await waitForDocumentPaintSignal(
+            firstCommitStarted
+        )
+        #expect(didStartFirstCommit)
+        oldAuthorityBarrier.release()
+        let oldCapability = try await oldCapabilityTask.value
+        await firstCommitTask.value
+        registry.testingEpochHook = nil
+
+        #expect(oldCapability.layerID == layer)
+        #expect(oldCapability.generation == oldGeneration)
+        #expect(oldCapability.pixelSize == oldGeometry.storagePixelSize)
+        #expect(oldCapability.radialLayout == oldGeometry.radialLayout)
+        try oldCapability.cancel(expectedOwnerIdentity: oldOwner)
+
+        let secondGeometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 768, height: 1_536),
+            storagePixelSize: PixelSize(width: 768, height: 1_536),
+            radialLayout: nil
+        )
+        let secondCandidate = try registry.makeCandidate(
+            geometry: secondGeometry
+        )
+        let secondPrepared = try registry.prepareCommit(secondCandidate)
+
+        // Publication owns the lock first, so concurrent current-only issuance
+        // must derive both authority generation and geometry from the new epoch.
+        let publicationBarrier = DocumentPaintEpochRaceBarrier(
+            target: .beforePublication
+        )
+        registry.testingEpochHook = publicationBarrier.hook
+        let secondCommitTask = Task.detached {
+            registry.commitPrepared(secondPrepared)
+        }
+        try await publicationBarrier.waitUntilReached()
+        defer { publicationBarrier.release() }
+        let newOwner = UUID()
+        let newAuthorityStarted = DispatchSemaphore(value: 0)
+        let newCapabilityTask = Task.detached {
+            newAuthorityStarted.signal()
+            return try registry.issueCurrentStrokeSurfaceCapability(
+                layerID: layer,
+                ownerIdentity: newOwner,
+                onTerminal: { _ in }
+            )
+        }
+        let didStartNewAuthority = await waitForDocumentPaintSignal(
+            newAuthorityStarted
+        )
+        #expect(didStartNewAuthority)
+        publicationBarrier.release()
+        await secondCommitTask.value
+        let newCapability = try await newCapabilityTask.value
+        registry.testingEpochHook = nil
+
+        #expect(newCapability.layerID == layer)
+        #expect(newCapability.generation == secondCandidate.generation)
+        #expect(newCapability.pixelSize == secondGeometry.storagePixelSize)
+        #expect(newCapability.radialLayout == secondGeometry.radialLayout)
+        try newCapability.cancel(expectedOwnerIdentity: newOwner)
+
     }
 
     @Test
@@ -798,5 +1589,120 @@ struct DocumentPaintSurfaceStoreTests {
             layerID: layerID,
             generation: generation
         ).first)
+    }
+}
+
+private final class DocumentPaintEpochRaceBarrier: @unchecked Sendable {
+    private let target: DocumentPaintSurfaceEpochTestingPoint
+    private let reached = DispatchSemaphore(value: 0)
+    private let permit = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var didReach = false
+
+    init(target: DocumentPaintSurfaceEpochTestingPoint) {
+        self.target = target
+    }
+
+    lazy var hook: @Sendable (DocumentPaintSurfaceEpochTestingPoint) -> Void = {
+        [weak self] point in
+        self?.pauseIfTarget(point)
+    }
+
+    func waitUntilReached() async throws {
+        guard await waitForDocumentPaintSignal(reached) else {
+            throw DocumentPaintEpochRaceBarrierError.timeout
+        }
+    }
+
+    func release() { permit.signal() }
+
+    private func pauseIfTarget(
+        _ point: DocumentPaintSurfaceEpochTestingPoint
+    ) {
+        guard point == target else { return }
+        lock.lock()
+        let shouldPause = !didReach
+        if shouldPause { didReach = true }
+        lock.unlock()
+        guard shouldPause else { return }
+        reached.signal()
+        _ = permit.wait(timeout: .now() + 5)
+    }
+}
+
+private enum DocumentPaintEpochRaceBarrierError: Error {
+    case timeout
+}
+
+private func waitForDocumentPaintSignal(
+    _ semaphore: DispatchSemaphore
+) async -> Bool {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            continuation.resume(
+                returning: semaphore.wait(timeout: .now() + 5) == .success
+            )
+        }
+    }
+}
+
+private final class OneShotDocumentPaintAction: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didRun = false
+    private var count = 0
+
+    var runCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func run(_ action: () -> Void) {
+        lock.lock()
+        guard !didRun else {
+            lock.unlock()
+            return
+        }
+        didRun = true
+        count += 1
+        lock.unlock()
+        action()
+    }
+}
+
+private final class RepeatingDocumentPaintPublisher: @unchecked Sendable {
+    private let registry: DocumentPaintSurfaceStore
+    private let lock = NSLock()
+    private var count = 0
+    private var failure: String?
+
+    init(registry: DocumentPaintSurfaceStore) {
+        self.registry = registry
+    }
+
+    var runCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    var failureDescription: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return failure
+    }
+
+    func run() {
+        do {
+            let candidate = try registry.makeCandidate()
+            registry.commitPrepared(try registry.prepareCommit(candidate))
+            lock.lock()
+            count += 1
+            lock.unlock()
+        } catch {
+            lock.lock()
+            failure = String(describing: error)
+            lock.unlock()
+        }
     }
 }

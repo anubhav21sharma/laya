@@ -42,14 +42,16 @@ public enum FlattenedSceneExportError:
     }
 }
 
-@MainActor
-public extension GridRenderer {
-    /// Flattens the current committed preview viewport without guides, live
-    /// pixels, or replay pixels.
-    func exportFlattenedScene(
+struct DocumentPaintStableFlattenedOutputRequest: Sendable {
+    let pixelSize: PixelSize
+    let outputMapping: SparseTileSamplingOutputMapping
+    let transparentBackground: Bool
+
+    init(
         pixelSize: PixelSize,
-        transparentBackground: Bool = false
-    ) throws -> FlattenedSceneExport {
+        outputMapping: SparseTileSamplingOutputMapping,
+        transparentBackground: Bool
+    ) throws {
         guard (64...4_096).contains(pixelSize.width),
               (64...4_096).contains(pixelSize.height)
         else {
@@ -58,55 +60,44 @@ public extension GridRenderer {
                 height: pixelSize.height
             )
         }
-        let bytesPerRow = pixelSize.width * 4
-        let (byteCount, overflow) = bytesPerRow
+        let (bytesPerRow, rowOverflow) = pixelSize.width
+            .multipliedReportingOverflow(by: 4)
+        let (_, byteOverflow) = bytesPerRow
             .multipliedReportingOverflow(by: pixelSize.height)
-        guard !overflow else {
+        guard !rowOverflow, !byteOverflow else {
             throw FlattenedSceneExportError.byteCountOverflow
         }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: pixelSize.width,
-            height: pixelSize.height,
-            mipmapped: false
+        self.pixelSize = pixelSize
+        self.outputMapping = outputMapping
+        self.transparentBackground = transparentBackground
+    }
+}
+
+extension FlattenedSceneExport {
+    static func collectStable(
+        request: DocumentPaintStableFlattenedOutputRequest,
+        snapshot: DocumentPaintStableCanonicalSnapshot,
+        renderer: DocumentPaintStableSnapshotRenderer,
+        outputGeometryRevision: UInt64
+    ) async throws -> FlattenedSceneExport {
+        defer { snapshot.close() }
+        let image = try await DocumentPaintStableExportAdapter.collect(
+            snapshot: snapshot,
+            renderer: renderer,
+            outputRegion: try DocumentPaintStableExportAdapter.outputRegion(
+                pixelSize: request.pixelSize
+            ),
+            outputGeometryRevision: outputGeometryRevision,
+            outputMapping: request.outputMapping
         )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.renderTarget, .shaderRead]
-        guard let target = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        try encodeDisplay(
-            into: target,
-            commandBuffer: commandBuffer,
-            showGridLines: false,
-            liveVisible: false,
-            transparentBackground: transparentBackground,
-            showCanvasBoundary: false
-        )
-        commandBuffer.commit()
-        try waitForHarnessCommand(commandBuffer)
-        var bytes = [UInt8](repeating: 0, count: byteCount)
-        bytes.withUnsafeMutableBytes { storage in
-            target.getBytes(
-                storage.baseAddress!,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegionMake2D(
-                    0,
-                    0,
-                    pixelSize.width,
-                    pixelSize.height
-                ),
-                mipmapLevel: 0
-            )
-        }
         return FlattenedSceneExport(
-            pixelSize: pixelSize,
-            bytesPerRow: bytesPerRow,
-            bgra8Bytes: bytes,
-            hasTransparentBackground: transparentBackground
+            pixelSize: request.pixelSize,
+            bytesPerRow: image.bytesPerRow,
+            bgra8Bytes: try DocumentPaintStableExportAdapter.destinationBytes(
+                image,
+                transparentBackground: request.transparentBackground
+            ),
+            hasTransparentBackground: request.transparentBackground
         )
     }
 }

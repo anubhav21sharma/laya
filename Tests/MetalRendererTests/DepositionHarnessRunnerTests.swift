@@ -1,5 +1,4 @@
 import BrushFormat
-import BrushDepositionEvidenceValidation
 import EditorCore
 import Foundation
 import Metal
@@ -91,7 +90,10 @@ struct DepositionHarnessRunnerTests {
             definitionID: "builtin.native-ink",
             semanticHash: String(repeating: "a", count: 64),
             pipelineKey:
-                "deposition:flow:none:s0:g0:h0:d0:abi1:format80:samples1",
+                "deposition:flow:none:s0:g0:h0:d0"
+                + ":abi\(DepositionABI.version)"
+                + ":format\(DocumentColorPipeline.workingPixelFormat.rawValue)"
+                + ":samples1",
             abiVersion: DepositionABI.version,
             resourceBytes: 5_461,
             textureLevels: ["builtin.shape.hard-round": 7],
@@ -308,11 +310,6 @@ struct DepositionHarnessRunnerTests {
             #expect(evidence.definitionID == anchor.id.rawValue)
             #expect(evidence.semanticHash == expectedSemanticHash)
             #expect(
-                StageFourEvidenceValidator.expectedSemanticHash(
-                    forPositiveScene: sceneName
-                ) == expectedSemanticHash
-            )
-            #expect(
                 evidence.invariantResults[
                     "productionAnchorIdentityExact"
                 ] == true
@@ -373,11 +370,6 @@ struct DepositionHarnessRunnerTests {
         )
 
         #expect(evidence.invariantResults[invariant] == true)
-        #expect(
-            StageFourEvidenceValidator.expectedSemanticHash(
-                forPositiveScene: sceneName
-            ) == evidence.semanticHash
-        )
     }
 }
 

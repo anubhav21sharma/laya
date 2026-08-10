@@ -317,6 +317,7 @@ struct StrokeTileSurfaceEncoderTests {
         let store = PaintTileStore(device: context.device, byteBudget: bytes * 8)
         let resources = try StrokeTileSurfaceResources(
             device: context.device,
+            commandQueue: context.device.makeCommandQueue()!,
             store: store,
             layerID: context.layerID,
             pixelSize: PixelSize(width: 4096, height: 4096),
@@ -327,15 +328,15 @@ struct StrokeTileSurfaceEncoderTests {
             namespaceLease: .testing(generation: 7)
         )
 
-        #expect(resources.store === store)
+        #expect(resources.capability.storeIdentity == store.identity)
         #expect(resources.pipeline.key.colorPixelFormatRawValue
             == MTLPixelFormat.rgba16Float.rawValue)
         #expect(resources.snapshot.residentTileCount == 0)
         #expect(resources.snapshot.fullCanvasTextureCount == 0)
-        #expect(resources.authoritative.pixelSize == PixelSize(
+        #expect(resources.capability.pixelSize == PixelSize(
             width: 4096, height: 4096
         ))
-        #expect(resources.prediction.pixelSize == PixelSize(
+        #expect(resources.capability.pixelSize == PixelSize(
             width: 4096, height: 4096
         ))
 
@@ -347,6 +348,7 @@ struct StrokeTileSurfaceEncoderTests {
         )) {
             _ = try StrokeTileSurfaceResources(
                 device: invalid.device,
+                commandQueue: invalid.device.makeCommandQueue()!,
                 store: store,
                 layerID: context.layerID,
                 pixelSize: PixelSize(width: 4096, height: 4096),
@@ -378,12 +380,12 @@ struct StrokeTileSurfaceEncoderTests {
             layerIDs: [context.layerID],
             generation: 7
         )
-        let namespace = try registry.issueStrokeNamespace(
-            layerID: context.layerID,
-            generation: 7
+        let namespace = try registry.issueCurrentStrokeNamespace(
+            layerID: context.layerID
         )
         let resources = try StrokeTileSurfaceResources(
             device: context.device,
+            commandQueue: context.device.makeCommandQueue()!,
             store: registry.sharedTileStore,
             layerID: context.layerID,
             pixelSize: geometry.storagePixelSize,
@@ -393,10 +395,10 @@ struct StrokeTileSurfaceEncoderTests {
             pipeline: context.pipeline,
             namespaceLease: namespace
         )
-        #expect(resources.store === registry.sharedTileStore)
-        #expect(resources.authoritative.surfaceID
+        #expect(resources.capability.storeIdentity == registry.tileStoreIdentity)
+        #expect(resources.capability.testingAuthoritativeSurfaceID
             == namespace.authoritative.surfaceID)
-        #expect(resources.prediction.surfaceID
+        #expect(resources.capability.testingPredictionSurfaceID
             == namespace.prediction.surfaceID)
 
         let foreign = PaintTileStore(
@@ -406,6 +408,7 @@ struct StrokeTileSurfaceEncoderTests {
         #expect(throws: StrokeTileSurfaceError.unauthenticatedSurfaceNamespace) {
             _ = try StrokeTileSurfaceResources(
                 device: context.device,
+                commandQueue: context.device.makeCommandQueue()!,
                 store: foreign,
                 layerID: context.layerID,
                 pixelSize: geometry.storagePixelSize,
@@ -441,6 +444,7 @@ struct StrokeTileSurfaceEncoderTests {
 
         var resources: StrokeTileSurfaceResources? = try .init(
             device: context.device,
+            commandQueue: context.device.makeCommandQueue()!,
             store: registry.sharedTileStore,
             layerID: context.layerID,
             pixelSize: geometry.storagePixelSize,
@@ -448,9 +452,8 @@ struct StrokeTileSurfaceEncoderTests {
             maximumRecordCount: 32,
             maximumTileReferenceCount: 128,
             pipeline: context.pipeline,
-            namespaceLease: registry.issueStrokeNamespace(
-                layerID: context.layerID,
-                generation: 7
+            namespaceLease: registry.issueCurrentStrokeNamespace(
+                layerID: context.layerID
             )
         )
         #expect(resources != nil)
@@ -458,9 +461,8 @@ struct StrokeTileSurfaceEncoderTests {
         resources = nil
         #expect(registry.snapshot().issuedNamespaceCount == 0)
 
-        let failing = try registry.issueStrokeNamespace(
-            layerID: context.layerID,
-            generation: 7
+        let failing = try registry.issueCurrentStrokeNamespace(
+            layerID: context.layerID
         )
         #expect(throws: StrokeTileSurfaceError.invalidPipelinePixelFormat(
             expected: MTLPixelFormat.rgba16Float.rawValue,
@@ -468,6 +470,7 @@ struct StrokeTileSurfaceEncoderTests {
         )) {
             _ = try StrokeTileSurfaceResources(
                 device: context.device,
+                commandQueue: context.device.makeCommandQueue()!,
                 store: registry.sharedTileStore,
                 layerID: context.layerID,
                 pixelSize: geometry.storagePixelSize,
@@ -480,13 +483,13 @@ struct StrokeTileSurfaceEncoderTests {
         }
         #expect(registry.snapshot().issuedNamespaceCount == 0)
 
-        let invalidCapacity = try registry.issueStrokeNamespace(
-            layerID: context.layerID,
-            generation: 7
+        let invalidCapacity = try registry.issueCurrentStrokeNamespace(
+            layerID: context.layerID
         )
         #expect(throws: StrokeTileSurfaceError.invalidCapacity) {
             _ = try StrokeTileSurfaceResources(
                 device: context.device,
+                commandQueue: context.device.makeCommandQueue()!,
                 store: registry.sharedTileStore,
                 layerID: context.layerID,
                 pixelSize: geometry.storagePixelSize,
@@ -499,9 +502,8 @@ struct StrokeTileSurfaceEncoderTests {
         }
         #expect(registry.snapshot().issuedNamespaceCount == 0)
 
-        let cancelled = try registry.issueStrokeNamespace(
-            layerID: context.layerID,
-            generation: 7
+        let cancelled = try registry.issueCurrentStrokeNamespace(
+            layerID: context.layerID
         )
         #expect(registry.snapshot().issuedNamespaceCount == 1)
         cancelled.cancel()
@@ -509,7 +511,7 @@ struct StrokeTileSurfaceEncoderTests {
         #expect(registry.snapshot().issuedNamespaceCount == 0)
 
         var abandoned: StrokeTileSurfaceNamespaceLease? = try registry
-            .issueStrokeNamespace(layerID: context.layerID, generation: 7)
+            .issueCurrentStrokeNamespace(layerID: context.layerID)
         #expect(abandoned != nil)
         #expect(registry.snapshot().issuedNamespaceCount == 1)
         abandoned = nil
@@ -567,7 +569,7 @@ struct StrokeTileSurfaceEncoderTests {
         )
         try encoder.acknowledge(first)
         #expect(resources.snapshot.activeLeaseCount == 0)
-        #expect(resources.store.snapshot().entries.allSatisfy {
+        #expect(resources.capability.testingStoreSnapshot.entries.allSatisfy {
             $0.pinCounts[.active] == 1
         })
 
@@ -637,14 +639,11 @@ struct StrokeTileSurfaceEncoderTests {
             try encoder.acknowledge(wrongLayer)
         }
         #expect(encoder.snapshot.hasOutstandingLease)
-        guard case let .tiled(secondBacking) = second.backing else {
-            Issue.record("Expected tiled lease backing")
-            return
-        }
-        #expect(secondBacking.authoritativeStoreLease?.bindings.count == 1)
+        let secondBacking = second.backing
+        #expect(secondBacking.authoritativeReservation?.bindings.count == 1)
         #expect(ObjectIdentifier(
             try #require(
-                secondBacking.authoritativeStoreLease?.bindings.first
+                secondBacking.authoritativeReservation?.bindings.first
             ).texture as AnyObject
         ) == ObjectIdentifier(
             try #require(second.tiledBindings.first).texture as AnyObject
@@ -664,8 +663,8 @@ struct StrokeTileSurfaceEncoderTests {
         #expect(encoder.snapshot.bindingChunkCount == 4)
         let forgedBacking = StrokeTileSurfaceLeaseBacking(
             resources: secondBacking.resources,
-            authoritativeStoreLease: nil,
-            predictionStoreLease: nil,
+            authoritativeReservation: nil,
+            predictionReservation: nil,
             publicationSlot: StrokeTilePublicationSlot(capacity: 1),
             publicationVersion: 0,
             layerID: secondBacking.layerID
@@ -680,7 +679,7 @@ struct StrokeTileSurfaceEncoderTests {
                 second.clearedAuthoritativeSurface,
             clearedPredictionSurface: second.clearedPredictionSurface,
             encodingRanOnMainThread: second.encodingRanOnMainThread,
-            backing: .tiled(forgedBacking),
+            backing: forgedBacking,
             newBindingCount: second.newBindingCount
         )
         #expect(throws: StrokeTileSurfaceError.staleLease) {
@@ -715,6 +714,7 @@ struct StrokeTileSurfaceEncoderTests {
         )
         let resources = try StrokeTileSurfaceResources(
             device: context.device,
+            commandQueue: context.device.makeCommandQueue()!,
             store: registry.sharedTileStore,
             layerID: context.layerID,
             pixelSize: geometry.storagePixelSize,
@@ -722,9 +722,8 @@ struct StrokeTileSurfaceEncoderTests {
             maximumRecordCount: 32,
             maximumTileReferenceCount: 128,
             pipeline: context.pipeline,
-            namespaceLease: registry.issueStrokeNamespace(
-                layerID: context.layerID,
-                generation: 7
+            namespaceLease: registry.issueCurrentStrokeNamespace(
+                layerID: context.layerID
             )
         )
         let encoder = StrokeTileSurfaceEncoder()
@@ -742,10 +741,6 @@ struct StrokeTileSurfaceEncoderTests {
             ),
             generation: 7
         )
-        #expect(throws: StrokeTileSurfaceError.emptyAuthoritativeMutation) {
-            _ = try encoder.acquireAuthoritativeMutationLease()
-        }
-        #expect(!encoder.snapshot.isTerminallySealed)
         let seamBounds = try #require(PixelRect(
             minX: 250, minY: 250, maxX: 270, maxY: 270
         ))
@@ -760,7 +755,12 @@ struct StrokeTileSurfaceEncoderTests {
         ))
 
         #expect(throws: StrokeTileSurfaceError.outstandingLease) {
-            _ = try encoder.acquireAuthoritativeMutationLease()
+            _ = try encoder.acquireCommitMutationSource()
+        }
+        #expect(throws: DocumentPaintStrokeSurfaceError.outstandingFrame) {
+            try resources.capability.cancel(
+                expectedOwnerIdentity: resources.capability.ownerIdentity
+            )
         }
         try encoder.acknowledge(frame)
 
@@ -779,28 +779,42 @@ struct StrokeTileSurfaceEncoderTests {
         #expect(delta.tiledBindings.count == 1)
         try encoder.acknowledge(delta)
 
-        let lease = try encoder.acquireAuthoritativeMutationLease()
-        #expect(lease.storeIdentity == registry.tileStoreIdentity)
-        #expect(lease.layerID == context.layerID)
-        #expect(lease.generation == 7)
-        #expect(lease.pixelSize == geometry.storagePixelSize)
-        #expect(lease.radialLayout == nil)
+        let source = try encoder.acquireCommitMutationSource()
+        #expect(source.storeIdentity == registry.tileStoreIdentity)
+        #expect(source.layerID == context.layerID)
+        #expect(source.generation == 7)
+        #expect(source.pixelSize == geometry.storagePixelSize)
+        #expect(source.radialLayout == nil)
         #expect(encoder.snapshot.isTerminallySealed)
-        #expect(lease.bindings.map(\.descriptor.coordinate) == [
+        #expect(source.coordinates == [
             PaintTileCoordinate(x: 0, y: 0),
             PaintTileCoordinate(x: 1, y: 0),
             PaintTileCoordinate(x: 0, y: 1),
             PaintTileCoordinate(x: 1, y: 1),
         ])
         #expect(resources.snapshot.activeLeaseCount == 1)
-        try encoder.returnAuthoritativeMutationLease(lease)
+        let transactionID = UUID()
+        let claimed = try source.claim(transactionID: transactionID)
+        #expect(claimed.map(\.coordinate) == source.coordinates)
+        #expect(throws: DocumentPaintStrokeSurfaceError.alreadyClaimed) {
+            try resources.capability.cancel(
+                expectedOwnerIdentity: resources.capability.ownerIdentity
+            )
+        }
+        #expect(throws: DocumentPaintStrokeSurfaceError.alreadyClaimed) {
+            _ = try source.claim(transactionID: UUID())
+        }
+        #expect(throws: DocumentPaintStrokeSurfaceError.wrongTransaction) {
+            try source.complete(transactionID: UUID(), as: .consumed)
+        }
+        try source.complete(transactionID: transactionID, as: .consumed)
         #expect(resources.snapshot.activeLeaseCount == 0)
         #expect(encoder.snapshot.isTerminallySealed)
-        #expect(throws: StrokeTileSurfaceError.staleLease) {
-            try encoder.returnAuthoritativeMutationLease(lease)
+        #expect(throws: DocumentPaintStrokeSurfaceError.staleCapability) {
+            try source.complete(transactionID: transactionID, as: .consumed)
         }
         #expect(throws: StrokeTileSurfaceError.terminallySealed) {
-            _ = try encoder.acquireAuthoritativeMutationLease()
+            _ = try encoder.acquireCommitMutationSource()
         }
         #expect(encoder.beginPredictionReplacement()
             == StrokeTileSurfaceError.terminallySealed)
@@ -837,38 +851,10 @@ struct StrokeTileSurfaceEncoderTests {
 
     @Test
     @MainActor
-    func transactionAuthenticatesImmutableWholeStrokeAndRetriesAfterPreflightFailure()
-        async throws
-    {
-        guard let context = try await makeContext(pixelFormat: .rgba16Float),
-              let queue = context.device.makeCommandQueue()
+    func emptyCommitMutationSealsAsExplicitNoOp() async throws {
+        guard let context = try await makeContext(pixelFormat: .rgba16Float)
         else { return }
-        let geometry = try DocumentPaintGeometry(
-            documentPixelSize: PixelSize(width: 256, height: 256),
-            storagePixelSize: PixelSize(width: 256, height: 256),
-            radialLayout: nil
-        )
-        let registry = try DocumentPaintSurfaceStore(
-            device: context.device,
-            byteBudget: PaintTileDescriptor.residentByteCount * 8,
-            geometry: geometry,
-            layerIDs: [context.layerID],
-            generation: 7
-        )
-        let resources = try StrokeTileSurfaceResources(
-            device: context.device,
-            store: registry.sharedTileStore,
-            layerID: context.layerID,
-            pixelSize: geometry.storagePixelSize,
-            generation: 7,
-            maximumRecordCount: 8,
-            maximumTileReferenceCount: 8,
-            pipeline: context.pipeline,
-            namespaceLease: registry.issueStrokeNamespace(
-                layerID: context.layerID,
-                generation: 7
-            )
-        )
+        let resources = try makeResources(context: context)
         let encoder = StrokeTileSurfaceEncoder()
         try encoder.configure(
             StrokeTileEncodingConfiguration(
@@ -878,266 +864,103 @@ struct StrokeTileSurfaceEncoderTests {
                 secondaryShape: nil,
                 primaryGrain: nil,
                 secondaryGrain: nil,
-                frameUniforms: frameUniforms(side: 256),
+                frameUniforms: frameUniforms(side: 512),
                 radialLayout: nil,
                 forceCommandFailure: false
             ),
             generation: 7
         )
-        let bounds = try #require(PixelRect(
-            minX: 8, minY: 8, maxX: 12, maxY: 12
-        ))
-        let record = try projectedRecord(ordinal: 0, bounds: bounds)
-        let frame = try #require(try await encoder.encode(
-            generation: 7,
-            records: [record],
-            layer: .authoritative,
-            allocationProbe: nil
-        ))
-        try encoder.acknowledge(frame)
-        let source = try encoder.acquireAuthoritativeMutationLease()
-        let sourceBytes = try download(
-            try #require(source.bindings.first).texture,
-            device: context.device
-        )
 
-        let backend = TerminalStrokeTransactionBackend()
-        let coordinator = DocumentPaintSurfaceTransaction(
-            registry: registry,
-            revisionStore: TiledRasterRevisionStore(
-                device: context.device,
-                maximumRetainedBytes:
-                    PaintTileDescriptor.residentByteCount * 8
-            ),
-            commandQueue: queue,
-            mutationBackend: backend
-        )
-        let coordinate = PaintTileCoordinate(x: 0, y: 0)
-        let request = DocumentPaintSurfaceMutationRequest(
-            kind: .stroke,
-            layerID: context.layerID,
-            baseGeometry: geometry,
-            candidateGeometry: geometry,
-            dirtyCoordinates: [coordinate],
-            explicitlyRemovedCoordinates: [],
-            requiresHistoryPair: false
-        )
-        guard case let .prepared(prepared) = try coordinator
-            .prepareMutation(request)
-        else {
-            Issue.record("Non-empty stroke unexpectedly became a no-op")
-            return
-        }
-        let foreignRegistry = try DocumentPaintSurfaceStore(
-            device: context.device,
-            byteBudget: PaintTileDescriptor.residentByteCount * 2,
-            geometry: geometry,
-            layerIDs: [context.layerID],
-            generation: 7
-        )
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .strokeSourceStoreMismatch) {
-            _ = try coordinator.encodeStrokeMutation(
-                prepared,
-                sourceOwner: encoder,
-                sourceLease: source.replacingForTesting(
-                    storeIdentity: foreignRegistry.tileStoreIdentity
-                ),
-                compositeParameters: .opaqueDraw
-            )
-        }
-        let foreignLayer = UUID()
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .strokeSourceLayerMismatch(
-                expected: context.layerID,
-                actual: foreignLayer
-            )) {
-            _ = try coordinator.encodeStrokeMutation(
-                prepared,
-                sourceOwner: encoder,
-                sourceLease: source.replacingForTesting(layerID: foreignLayer),
-                compositeParameters: .opaqueDraw
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .strokeSourceGenerationMismatch(expected: 7, actual: 8)) {
-            _ = try coordinator.encodeStrokeMutation(
-                prepared,
-                sourceOwner: encoder,
-                sourceLease: source.replacingForTesting(generation: 8),
-                compositeParameters: .opaqueDraw
-            )
-        }
-        let foreignSize = PixelSize(width: 512, height: 256)
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .strokeSourceGeometryMismatch(
-                expected: geometry.storagePixelSize,
-                actual: foreignSize
-            )) {
-            _ = try coordinator.encodeStrokeMutation(
-                prepared,
-                sourceOwner: encoder,
-                sourceLease: source.replacingForTesting(pixelSize: foreignSize),
-                compositeParameters: .opaqueDraw
-            )
-        }
-        let differentMapping = try RadialSectorLayout(
-            maximumRadius: 100,
-            sectorAngleRadians: .pi / 6
-        )
-        #expect(differentMapping.atlasPixelSize == geometry.storagePixelSize)
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .strokeSourceRadialLayoutMismatch) {
-            _ = try coordinator.encodeStrokeMutation(
-                prepared,
-                sourceOwner: encoder,
-                sourceLease: source.replacingForTesting(
-                    radialLayout: differentMapping
-                ),
-                compositeParameters: .opaqueDraw
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .strokeSourceCoordinateMismatch) {
-            _ = try coordinator.encodeStrokeMutation(
-                prepared,
-                sourceOwner: encoder,
-                sourceLease: source.replacingForTesting(bindings: []),
-                compositeParameters: .opaqueDraw
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .strokeSourceCoordinateMismatch) {
-            _ = try coordinator.encodeStrokeMutation(
-                prepared,
-                sourceOwner: encoder,
-                sourceLease: source.replacingForTesting(
-                    bindings: source.bindings + source.bindings
-                ),
-                compositeParameters: .opaqueDraw
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .invalidStrokeCompositeParameters) {
-            _ = try coordinator.encodeStrokeMutation(
-                prepared,
-                sourceOwner: encoder,
-                sourceLease: source,
-                compositeParameters: DocumentPaintStrokeCompositeParameters(
-                    mode: .draw,
-                    strokeOpacity: .nan,
-                    accumulationLimit: 1,
-                    eraserStrength: 1
-                )
-            )
-        }
-        let wrongOwner = StrokeTileSurfaceEncoder()
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .strokeSourceOwnerMismatch) {
-            _ = try coordinator.encodeStrokeMutation(
-                prepared,
-                sourceOwner: wrongOwner,
-                sourceLease: source,
-                compositeParameters: .opaqueDraw
-            )
-        }
-        #expect(encoder.ownsAuthoritativeMutationLease(source))
-        #expect(backend.preflightCount == 0)
-
-        backend.failPreflight = true
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .backendEncodingFailed) {
-            _ = try coordinator.encodeStrokeMutation(
-                prepared,
-                sourceOwner: encoder,
-                sourceLease: source,
-                compositeParameters: .opaqueDraw
-            )
-        }
-        #expect(!encoder.snapshot
-            .hasOutstandingAuthoritativeMutationLease)
+        let source = try encoder.sealCommitMutationSource()
+        #expect(source == nil)
         #expect(encoder.snapshot.isTerminallySealed)
+        #expect(resources.snapshot.activeLeaseCount == 0)
+        #expect(resources.capability.testingStoreSnapshot.entries.isEmpty)
         #expect(throws: StrokeTileSurfaceError.terminallySealed) {
-            _ = try encoder.acquireAuthoritativeMutationLease()
+            _ = try encoder.sealCommitMutationSource()
         }
+
         try encoder.cancel(frameDisposition: .unpublished)
-        let retryResources = try StrokeTileSurfaceResources(
-            device: context.device,
-            store: registry.sharedTileStore,
-            layerID: context.layerID,
-            pixelSize: geometry.storagePixelSize,
-            generation: 7,
-            maximumRecordCount: 8,
-            maximumTileReferenceCount: 8,
-            pipeline: context.pipeline,
-            namespaceLease: registry.issueStrokeNamespace(
-                layerID: context.layerID,
-                generation: 7
-            )
-        )
+        #expect(!encoder.snapshot.isTerminallySealed)
+    }
+
+    @Test
+    @MainActor
+    func commitMutationOwnsAlignedDisjointRoleUnionUntilOneTerminalRelease()
+        async throws
+    {
+        guard let context = try await makeContext(pixelFormat: .rgba16Float)
+        else { return }
+        let resources = try makeResources(context: context)
+        let encoder = StrokeTileSurfaceEncoder()
         try encoder.configure(
             StrokeTileEncodingConfiguration(
-                resources: retryResources,
-                materialUniforms: PatternDepositionMaterialUniforms(),
+                resources: resources,
+                materialUniforms: visibleMaterialUniforms(),
                 primaryShape: nil,
                 secondaryShape: nil,
                 primaryGrain: nil,
                 secondaryGrain: nil,
-                frameUniforms: frameUniforms(side: 256),
+                frameUniforms: frameUniforms(side: 512),
                 radialLayout: nil,
                 forceCommandFailure: false
             ),
             generation: 7
         )
-        let retryFrame = try #require(try await encoder.encode(
+
+        let authoritativeCoordinate = PaintTileCoordinate(x: 0, y: 0)
+        let predictionCoordinate = PaintTileCoordinate(x: 1, y: 0)
+        let authoritative = try #require(try await encoder.encode(
             generation: 7,
-            records: [record],
+            records: [try recordInTile(
+                ordinal: 1,
+                coordinate: authoritativeCoordinate,
+                predicted: false
+            )],
             layer: .authoritative,
             allocationProbe: nil
         ))
-        try encoder.acknowledge(retryFrame)
-        let retrySource = try encoder.acquireAuthoritativeMutationLease()
-        backend.failPreflight = false
-        let encoded = try coordinator.encodeStrokeMutation(
-            prepared,
-            sourceOwner: encoder,
-            sourceLease: retrySource,
-            compositeParameters: .opaqueDraw
-        )
-        let payload = try #require(backend.strokePayload)
-        #expect(payload.baseSources.map(\.coordinate) == [coordinate])
-        #expect(payload.authoritativeSources.map(\.coordinate) == [coordinate])
-        guard case .knownClear = payload.baseSources[0],
-              case let .texture(authoritative) = payload.authoritativeSources[0]
-        else {
-            Issue.record("Expected clear canonical plus textured Task5 source")
-            return
+        try encoder.acknowledge(authoritative)
+        encoder.beginPredictionReplacement()
+        let prediction = try #require(try await encoder.encode(
+            generation: 7,
+            records: [try recordInTile(
+                ordinal: 2,
+                coordinate: predictionCoordinate,
+                predicted: true
+            )],
+            layer: .prediction,
+            allocationProbe: nil
+        ))
+        try encoder.acknowledge(prediction)
+
+        let source = try encoder.acquireCommitMutationSource()
+        #expect(source.coordinates == [
+            authoritativeCoordinate,
+            predictionCoordinate,
+        ])
+        #expect(resources.snapshot.activeLeaseCount == 2)
+        let transactionID = UUID()
+        let claimed = try source.claim(transactionID: transactionID)
+        #expect(claimed.count == 2)
+        #expect(claimed[0].coordinate == authoritativeCoordinate)
+        #expect(claimed[0].authoritative != nil)
+        #expect(claimed[0].prediction == nil)
+        #expect(claimed[1].coordinate == predictionCoordinate)
+        #expect(claimed[1].authoritative == nil)
+        #expect(claimed[1].prediction != nil)
+
+        try source.complete(transactionID: transactionID, as: .consumed)
+        #expect(resources.snapshot.activeLeaseCount == 0)
+        #expect(resources.snapshot.residentTileCount == 0)
+        #expect(resources.capability.testingStoreSnapshot.entries.isEmpty)
+        #expect(throws: DocumentPaintStrokeSurfaceError.staleCapability) {
+            try source.complete(transactionID: transactionID, as: .consumed)
         }
-        #expect(ObjectIdentifier(authoritative.texture as AnyObject)
-            == ObjectIdentifier(retrySource.bindings[0].texture as AnyObject))
-        #expect(ObjectIdentifier(authoritative.texture as AnyObject)
-            != ObjectIdentifier(payload.destinations[0].texture as AnyObject))
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .sourceLeaseReturnFailed) {
-            _ = try coordinator.completeMutation(
-                encoded,
-                as: .succeeded,
-                failureInjection: .init(failingAt: .sourceLeaseReturn)
-            )
-        }
-        #expect(encoder.snapshot.hasOutstandingAuthoritativeMutationLease)
-        #expect(coordinator.ownershipSnapshotForTesting()
-            .strokeAuthoritativeSourceLeaseID != nil)
-        #expect(try download(
-            retrySource.bindings[0].texture,
-            device: context.device
-        ) == sourceBytes)
-        try coordinator.retryDiscard()
-        #expect(!encoder.snapshot
-            .hasOutstandingAuthoritativeMutationLease)
-        #expect(coordinator.ownershipSnapshotForTesting() == .empty)
         try encoder.cancel(frameDisposition: .unpublished)
+        #expect(!encoder.snapshot.isTerminallySealed)
     }
+
 
     @Test
     @MainActor
@@ -1171,7 +994,7 @@ struct StrokeTileSurfaceEncoderTests {
             layer: .authoritative,
             allocationProbe: nil
         ))
-        guard case let .tiled(firstBacking) = first.backing else { return }
+        let firstBacking = first.backing
         let firstSlot = try #require(
             firstBacking.debugPublishedChunkIndices.first
         )
@@ -1187,7 +1010,7 @@ struct StrokeTileSurfaceEncoderTests {
             layer: .authoritative,
             allocationProbe: nil
         ))
-        guard case let .tiled(secondBacking) = second.backing else { return }
+        let secondBacking = second.backing
         let secondSlot = try #require(
             secondBacking.debugPublishedChunkIndices.first
         )
@@ -1253,7 +1076,7 @@ struct StrokeTileSurfaceEncoderTests {
         try encoder.acknowledge(clear)
         #expect(resources.snapshot.activeLeaseCount == 0)
         #expect(resources.snapshot.residentTileCount == 0)
-        #expect(resources.store.snapshot().entries.isEmpty)
+        #expect(resources.capability.testingStoreSnapshot.entries.isEmpty)
         #expect(encoder.snapshot.bindingChunkCount == 0)
     }
 
@@ -1292,7 +1115,7 @@ struct StrokeTileSurfaceEncoderTests {
         ))
         try encoder.acknowledge(actual)
         let authoritativeBefore = try readTile(
-            resources.authoritative,
+            resources.capability,
             coordinate: .init(x: 0, y: 0),
             device: context.device
         )
@@ -1370,7 +1193,7 @@ struct StrokeTileSurfaceEncoderTests {
         #expect(encoder.snapshot.predictionVisibleTileCount == 0)
 
         let authoritativeAfter = try readTile(
-            resources.authoritative,
+            resources.capability,
             coordinate: c00,
             device: context.device
         )
@@ -1398,7 +1221,7 @@ struct StrokeTileSurfaceEncoderTests {
             ),
             generation: 7
         )
-        let before = resources.store.snapshot()
+        let before = resources.capability.testingStoreSnapshot
         let record = try projectedRecord(
             ordinal: 0,
             bounds: try #require(PixelRect(
@@ -1416,7 +1239,7 @@ struct StrokeTileSurfaceEncoderTests {
                 allocationProbe: nil
             )
         }
-        let afterFailure = resources.store.snapshot()
+        let afterFailure = resources.capability.testingStoreSnapshot
         #expect(afterFailure.entries == before.entries)
         #expect(afterFailure.activeLeaseCount == before.activeLeaseCount)
         #expect(afterFailure.residentByteCount == before.residentByteCount)
@@ -1521,6 +1344,7 @@ struct StrokeTileSurfaceEncoderTests {
         })
         let resources = try StrokeTileSurfaceResources(
             device: context.device,
+            commandQueue: context.device.makeCommandQueue()!,
             store: PaintTileStore(
                 device: context.device,
                 byteBudget: PaintTileDescriptor.residentByteCount * 16
@@ -1595,6 +1419,7 @@ struct StrokeTileSurfaceEncoderTests {
         else { return }
         let resources = try StrokeTileSurfaceResources(
             device: context.device,
+            commandQueue: context.device.makeCommandQueue()!,
             store: PaintTileStore(
                 device: context.device,
                 byteBudget: PaintTileDescriptor.residentByteCount * 4
@@ -1710,15 +1535,21 @@ struct StrokeTileSurfaceEncoderTests {
             )
         }
 
-        let inspection = try resources.authoritative.reserveSortedUniqueTiles(
-            at: [PaintTileCoordinate(x: 0, y: 0)],
-            pinReasons: [.inFlight]
+        let inspection = try resources.capability.reserveStrokeTiles(
+            role: .authoritative,
+            coordinates: [PaintTileCoordinate(x: 0, y: 0)],
+            pinReasons: [.inFlight],
+            workspace: PaintTileStrokeLeaseWorkspace(maximumBindingCount: 1),
+            failureInjection: nil
         )
         let after = try download(
             try #require(inspection.bindings.first?.texture),
             device: context.device
         )
-        try resources.authoritative.returnLease(inspection)
+        try resources.capability.releaseFrameReservations(
+            authoritative: inspection,
+            prediction: nil
+        )
         #expect(after == before)
     }
 
@@ -1751,7 +1582,7 @@ struct StrokeTileSurfaceEncoderTests {
                 ),
                 generation: 7
             )
-            let before = resources.store.snapshot()
+            let before = resources.capability.testingStoreSnapshot
             await #expect(throws: StrokeTileSurfaceError.injectedFailure(seam)) {
                 _ = try await encoder.encode(
                     generation: 7,
@@ -1760,7 +1591,7 @@ struct StrokeTileSurfaceEncoderTests {
                     allocationProbe: nil
                 )
             }
-            let after = resources.store.snapshot()
+            let after = resources.capability.testingStoreSnapshot
             #expect(after.entries == before.entries)
             #expect(after.activeLeaseCount == 0)
             #expect(!encoder.snapshot.hasOutstandingLease)
@@ -1823,10 +1654,10 @@ struct StrokeTileSurfaceEncoderTests {
                 ),
                 generation: 7
             )
-            let before = resources.store.snapshot()
-            await #expect(throws: StrokeTileSurfaceError.store(
+            let before = resources.capability.testingStoreSnapshot
+            await #expect(throws: StrokeTileSurfaceError.raster(.store(
                 .injectedAllocationFailure(reserveIndex: reserveIndex)
-            )) {
+            ))) {
                 _ = try await encoder.encode(
                     generation: 7,
                     records: [seam],
@@ -1834,7 +1665,7 @@ struct StrokeTileSurfaceEncoderTests {
                     allocationProbe: nil
                 )
             }
-            let after = resources.store.snapshot()
+            let after = resources.capability.testingStoreSnapshot
             #expect(after.entries == before.entries)
             #expect(after.activeLeaseCount == 0)
             #expect(!encoder.snapshot.hasOutstandingLease)
@@ -1856,6 +1687,7 @@ struct StrokeTileSurfaceEncoderTests {
         )
         let resources = try StrokeTileSurfaceResources(
             device: context.device,
+            commandQueue: context.device.makeCommandQueue()!,
             store: store,
             layerID: context.layerID,
             pixelSize: PixelSize(width: 512, height: 512),
@@ -1884,12 +1716,19 @@ struct StrokeTileSurfaceEncoderTests {
             PaintTileCoordinate(x: 1, y: 1),
         ]
         for coordinate in warmCoordinates {
-            let warm = try resources.authoritative.reserveSortedUniqueTiles(
-                at: [coordinate],
-                pinReasons: [.inFlight]
+            let warm = try resources.capability.reserveStrokeTiles(
+                role: .authoritative,
+                coordinates: [coordinate],
+                pinReasons: [.inFlight],
+                workspace:
+                    PaintTileStrokeLeaseWorkspace(maximumBindingCount: 1),
+                failureInjection: nil
             )
-            try resources.authoritative.markDirty(warm)
-            try resources.authoritative.returnLease(warm)
+            try resources.capability.testingMarkDirty(warm)
+            try resources.capability.releaseFrameReservations(
+                authoritative: warm,
+                prediction: nil
+            )
         }
         try encoder.configure(configuration, generation: 7)
         let seam = try projectedRecord(
@@ -1899,7 +1738,7 @@ struct StrokeTileSurfaceEncoderTests {
             )),
             position: SIMD2(256, 256)
         )
-        await #expect(throws: StrokeTileSurfaceError.store(
+        await #expect(throws: StrokeTileSurfaceError.raster(.store(
             .transferCapacityExceeded(
                 requiredBytes: bytes * 9,
                 capacityBytes: bytes * 6,
@@ -1908,7 +1747,7 @@ struct StrokeTileSurfaceEncoderTests {
                 persistentZeroBytes: bytes,
                 stagingBytes: 0
             )
-        )) {
+        ))) {
             _ = try await encoder.encode(
                 generation: 7,
                 records: [seam],
@@ -2064,8 +1903,8 @@ struct StrokeTileSurfaceEncoderTests {
             allocationProbe: nil
         ))
         try encoder.acknowledge(wide)
-        #expect(resources.store.snapshot().entries.count == 4)
-        #expect(resources.store.snapshot().entries.allSatisfy {
+        #expect(resources.capability.testingStoreSnapshot.entries.count == 4)
+        #expect(resources.capability.testingStoreSnapshot.entries.allSatisfy {
             $0.pinCounts[.active] == 1
         })
 
@@ -2081,14 +1920,14 @@ struct StrokeTileSurfaceEncoderTests {
             allocationProbe: nil
         ))
         try encoder.acknowledge(narrow)
-        #expect(resources.store.snapshot().entries.count == 1)
-        #expect(resources.store.snapshot().provisionalByteCount == 0)
+        #expect(resources.capability.testingStoreSnapshot.entries.count == 1)
+        #expect(resources.capability.testingStoreSnapshot.provisionalByteCount == 0)
         #expect(encoder.snapshot.retainedLeaseWorkspaceBindingCount == 0)
         #expect(encoder.snapshot.retainedProvisionalBindingCount == 0)
 
         try encoder.cancel(frameDisposition: .unpublished)
-        #expect(resources.store.snapshot().entries.isEmpty)
-        #expect(resources.store.snapshot().provisionalByteCount == 0)
+        #expect(resources.capability.testingStoreSnapshot.entries.isEmpty)
+        #expect(resources.capability.testingStoreSnapshot.provisionalByteCount == 0)
         #expect(encoder.snapshot.bindingChunkCount == 0)
         #expect(encoder.snapshot.retainedLeaseWorkspaceBindingCount == 0)
         #expect(encoder.snapshot.retainedProvisionalBindingCount == 0)
@@ -2129,11 +1968,11 @@ struct StrokeTileSurfaceEncoderTests {
         ))
 
         try encoder.cancel(frameDisposition: .mainOwnsLease)
-        #expect(resources.store.snapshot().activeLeaseCount == 1)
+        #expect(resources.capability.testingStoreSnapshot.activeLeaseCount == 1)
         #expect(encoder.snapshot.hasOutstandingLease)
         try encoder.acknowledge(lease)
-        #expect(resources.store.snapshot().activeLeaseCount == 0)
-        #expect(resources.store.snapshot().entries.isEmpty)
+        #expect(resources.capability.testingStoreSnapshot.activeLeaseCount == 0)
+        #expect(resources.capability.testingStoreSnapshot.entries.isEmpty)
         #expect(!encoder.snapshot.hasOutstandingLease)
     }
 
@@ -2173,8 +2012,8 @@ struct StrokeTileSurfaceEncoderTests {
 
         try encoder.cancel(frameDisposition: .unpublished)
 
-        #expect(resources.store.snapshot().activeLeaseCount == 0)
-        #expect(resources.store.snapshot().entries.isEmpty)
+        #expect(resources.capability.testingStoreSnapshot.activeLeaseCount == 0)
+        #expect(resources.capability.testingStoreSnapshot.entries.isEmpty)
         #expect(!encoder.snapshot.hasOutstandingLease)
     }
 
@@ -2194,6 +2033,7 @@ struct StrokeTileSurfaceEncoderTests {
         )
         let resources = try StrokeTileSurfaceResources(
             device: context.device,
+            commandQueue: context.device.makeCommandQueue()!,
             store: store,
             layerID: context.layerID,
             pixelSize: PixelSize(width: 512, height: 512),
@@ -2211,8 +2051,8 @@ struct StrokeTileSurfaceEncoderTests {
                 onRetired: recorder.record
             )
         )
-        #expect(resources.authoritative.surfaceID == authoritativeID)
-        #expect(resources.prediction.surfaceID == predictionID)
+        #expect(resources.capability.testingAuthoritativeSurfaceID == authoritativeID)
+        #expect(resources.capability.testingPredictionSurfaceID == predictionID)
         let encoder = StrokeTileSurfaceEncoder()
         try encoder.configure(
             StrokeTileEncodingConfiguration(
@@ -2247,7 +2087,7 @@ struct StrokeTileSurfaceEncoderTests {
         #expect(recorder.tokens == [0xD5])
         try encoder.cancel(frameDisposition: .unpublished)
         #expect(recorder.tokens == [0xD5])
-        #expect(resources.store.snapshot().entries.isEmpty)
+        #expect(resources.capability.testingStoreSnapshot.entries.isEmpty)
     }
 
     @Test
@@ -2265,6 +2105,7 @@ struct StrokeTileSurfaceEncoderTests {
         )) {
             _ = try StrokeTileSurfaceResources(
                 device: context.device,
+                commandQueue: context.device.makeCommandQueue()!,
                 store: store,
                 layerID: context.layerID,
                 pixelSize: PixelSize(width: 512, height: 512),
@@ -2283,6 +2124,67 @@ struct StrokeTileSurfaceEncoderTests {
                 )
             )
         }
+    }
+
+    @MainActor
+    private func makeOpaqueSource(
+        context: (
+            device: any MTLDevice,
+            pipeline: DepositionPipelineBinding,
+            layerID: UUID
+        ),
+        registry: DocumentPaintSurfaceStore,
+        geometry: DocumentPaintGeometry,
+        ownerIdentity: UUID,
+        record: StrokePreparedProjectedRecord
+    ) async throws -> (
+        resources: StrokeTileSurfaceResources,
+        encoder: StrokeTileSurfaceEncoder,
+        source: StrokePreparedCommitMutationSource
+    ) {
+        let resources = try StrokeTileSurfaceResources(
+            device: context.device,
+            commandQueue: context.device.makeCommandQueue()!,
+            capability: try .testing(
+                store: registry.sharedTileStore,
+                layerID: context.layerID,
+                pixelSize: geometry.storagePixelSize,
+                generation: 7,
+                ownerIdentity: ownerIdentity
+            ),
+            maximumRecordCount: 8,
+            maximumTileReferenceCount: 8,
+            pipeline: context.pipeline
+        )
+        let encoder = StrokeTileSurfaceEncoder()
+        try encoder.configure(
+            StrokeTileEncodingConfiguration(
+                resources: resources,
+                materialUniforms: PatternDepositionMaterialUniforms(),
+                primaryShape: nil,
+                secondaryShape: nil,
+                primaryGrain: nil,
+                secondaryGrain: nil,
+                frameUniforms: frameUniforms(
+                    pixelSize: geometry.storagePixelSize
+                ),
+                radialLayout: geometry.radialLayout,
+                forceCommandFailure: false
+            ),
+            generation: 7
+        )
+        let frame = try #require(try await encoder.encode(
+            generation: 7,
+            records: [record],
+            layer: .authoritative,
+            allocationProbe: nil
+        ))
+        try encoder.acknowledge(frame)
+        return (
+            resources,
+            encoder,
+            try encoder.acquireCommitMutationSource()
+        )
     }
 
     @MainActor
@@ -2317,28 +2219,48 @@ struct StrokeTileSurfaceEncoderTests {
             ),
             options: nil
         )
-        let key = DepositionPipelineKey(
-            brush: BrushPipelineKey(
-                backend: .deposition,
-                accumulation: .flow,
-                edgeTreatment: .none,
-                functionConstants: BrushFunctionConstants(
-                    usesSecondaryShape: false,
-                    usesGrain: false,
-                    usesSecondaryGrain: false,
-                    usesDestinationSampling: false
-                )
-            ),
+        let brushKey = BrushPipelineKey(
+            backend: .deposition,
+            accumulation: .flow,
+            edgeTreatment: .none,
+            functionConstants: BrushFunctionConstants(
+                usesSecondaryShape: false,
+                usesGrain: false,
+                usesSecondaryGrain: false,
+                usesDestinationSampling: false
+            )
+        )
+        let workingKey = DepositionPipelineKey(
+            brush: brushKey,
             abiVersion: DepositionABI.version,
-            colorPixelFormatRawValue: pixelFormat.rawValue,
+            colorPixelFormatRawValue:
+                DocumentColorPipeline.workingPixelFormat.rawValue,
             sampleCount: 1
         )
+        let workingPipeline = try await DepositionPipelineLibrary(
+            device: device,
+            library: library
+        ).prepare(for: workingKey)
+        let pipeline: DepositionPipelineBinding
+        if pixelFormat == DocumentColorPipeline.workingPixelFormat {
+            pipeline = workingPipeline
+        } else {
+            // The library now rejects non-working formats before it can create
+            // a state. Forge only the key in this test seam so the independent
+            // StrokeTileSurfaceResources guard remains executable.
+            pipeline = DepositionPipelineBinding(
+                key: DepositionPipelineKey(
+                    brush: brushKey,
+                    abiVersion: DepositionABI.version,
+                    colorPixelFormatRawValue: pixelFormat.rawValue,
+                    sampleCount: 1
+                ),
+                state: workingPipeline.state
+            )
+        }
         return (
             device,
-            try await DepositionPipelineLibrary(
-                device: device,
-                library: library
-            ).prepare(for: key),
+            pipeline,
             UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
         )
     }
@@ -2353,6 +2275,7 @@ struct StrokeTileSurfaceEncoderTests {
     ) throws -> StrokeTileSurfaceResources {
         try StrokeTileSurfaceResources(
             device: context.device,
+            commandQueue: context.device.makeCommandQueue()!,
             store: PaintTileStore(
                 device: context.device,
                 byteBudget: PaintTileDescriptor.residentByteCount * 16
@@ -2446,23 +2369,32 @@ struct StrokeTileSurfaceEncoderTests {
     }
 
     private func readTile(
-        _ surface: TiledRasterSurface,
+        _ capability: DocumentPaintStrokeSurfaceCapability,
         coordinate: PaintTileCoordinate,
         device: any MTLDevice
     ) throws -> Data {
-        let lease = try surface.reserveSortedUniqueTiles(
-            at: [coordinate],
-            pinReasons: [.inFlight]
+        let lease = try capability.reserveStrokeTiles(
+            role: .authoritative,
+            coordinates: [coordinate],
+            pinReasons: [.inFlight],
+            workspace: PaintTileStrokeLeaseWorkspace(maximumBindingCount: 1),
+            failureInjection: nil
         )
         do {
             let data = try download(
                 try #require(lease.bindings.first?.texture),
                 device: device
             )
-            try surface.returnLease(lease)
+            try capability.releaseFrameReservations(
+                authoritative: lease,
+                prediction: nil
+            )
             return data
         } catch {
-            try? surface.returnLease(lease)
+            try? capability.releaseFrameReservations(
+                authoritative: lease,
+                prediction: nil
+            )
             throw error
         }
     }
@@ -2599,9 +2531,12 @@ private final class TerminalStrokeTransactionBackend:
     DocumentPaintSurfaceMutationBackend, @unchecked Sendable
 {
     var failPreflight = false
+    var failEncode = false
+    var failComplete = false
     private(set) var preflightCount = 0
     private(set) var strokePayload: DocumentPaintSurfaceStrokeBackendPayload?
     private var activeEncodingIDs: Set<UUID> = []
+    var activeEncodingCount: Int { activeEncodingIDs.count }
 
     func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws {
         preflightCount += 1
@@ -2612,6 +2547,7 @@ private final class TerminalStrokeTransactionBackend:
     func encode(
         _ operation: DocumentPaintSurfaceBackendOperation
     ) throws -> DocumentPaintSurfaceMutationBackendEncoding {
+        if failEncode { throw StrokeTileSurfaceError.commandFailed("encode") }
         if case let .stroke(payload) = operation { strokePayload = payload }
         let encoding = DocumentPaintSurfaceMutationBackendEncoding()
         activeEncodingIDs.insert(encoding.rawValue)
@@ -2623,6 +2559,9 @@ private final class TerminalStrokeTransactionBackend:
         as outcome: RasterRevisionOperationOutcome
     ) throws -> [DocumentPaintSurfaceMutationEvidence] {
         _ = outcome
+        if failComplete {
+            throw StrokeTileSurfaceError.commandFailed("complete")
+        }
         activeEncodingIDs.remove(encoding.rawValue)
         return (strokePayload?.destinations ?? []).map {
             DocumentPaintSurfaceMutationEvidence(

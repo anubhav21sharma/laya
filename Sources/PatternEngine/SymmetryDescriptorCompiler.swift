@@ -532,6 +532,7 @@ public enum SymmetryDescriptorCompiler {
         )
     }
 
+
     private static func compiledProgram(
         for presetID: SymmetryPresetID,
         canonicalSize: PatternSize

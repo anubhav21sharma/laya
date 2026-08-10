@@ -83,12 +83,8 @@ extension PatternDepositionStampInstance {
         let secondaryGrainToCanonical = dab.secondaryGrainToWorld?
             .concatenating(worldToCanonical)
         let packedClips = Self.packClips(fragment.brushClip.halfPlanes)
-        let color = dab.color.simd
-        let premultipliedColor = SIMD4(
-            color.x * color.w,
-            color.y * color.w,
-            color.z * color.w,
-            color.w
+        let premultipliedColor = DocumentColorPipeline.packShaderColor(
+            EncodedSRGBColor(dab.color)
         )
         let identityFlags = dab.isPredicted
             ? DepositionIdentityFlags.predicted

@@ -95,55 +95,21 @@ struct PatternProjectPackageCodecTests {
     }
 
     @Test
-    func legacyPackageMigratesAndDecodesItsRaster() throws {
-        let raster = try opaqueImage(
-            PixelSize(width: 64, height: 64),
-            salt: 7
-        )
-        let encodedRaster = try PatternRasterPNGCodec.encode(raster)
-        let layerID = "11111111-2222-3333-4444-555555555555"
-        let layerPath = "layers/\(layerID).json"
-        let rasterPath = "rasters/\(layerID).png"
-        let entries: [String: Data] = [
-            "manifest.json": try jsonData([
-                "schemaVersion": 1,
-                "documentID":
-                    "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-                "title": "Legacy",
-                "appVersion": "0.0.9",
-                "createdAt": 1_700_000_000.0,
-                "modifiedAt": 1_700_000_100.0,
-                "canvasWidth": 64,
-                "canvasHeight": 64,
-                "viewport": [
-                    "scale": 1.0,
-                    "offsetX": 0.0,
-                    "offsetY": 0.0,
-                ],
-                "activeLayerID": layerID,
-                "layerFiles": [layerPath],
-            ]),
-            "tiling.json": try jsonData(["type": 6]),
-            layerPath: try jsonData([
-                "id": layerID,
-                "kind": 0,
-                "name": "Layer 1",
-                "order": 0,
-                "opacity": 1.0,
-                "blendMode": 0,
-                "isVisible": true,
-                "isLocked": false,
-                "rasterFile": rasterPath,
-            ]),
-            rasterPath: encodedRaster,
-        ]
-        let archive = try PatternProjectArchiveCodec.encode(entries: entries)
-
-        let decoded = try PatternProjectPackageCodec.open(archive)
-
-        #expect(decoded.metadata.wasMigrated)
-        #expect(decoded.metadata.compiledSymmetry.presetID == .rotational)
-        #expect(decoded.rastersByPath[rasterPath] == raster)
+    func unsupportedNativeSchemasWinBeforePayloadLookup() throws {
+        for version in [1, 2, 3, 5] {
+            let archive = try PatternProjectArchiveCodec.encode(entries: [
+                "manifest.json": Data(
+                    "{\"schemaVersion\":\(version)}".utf8
+                ),
+            ])
+            #expect(
+                throws: PatternProjectFileError.metadata(
+                    .unsupportedSchema(version)
+                )
+            ) {
+                try PatternProjectPackageCodec.open(archive)
+            }
+        }
     }
 
     @Test
@@ -274,6 +240,7 @@ private func paintTilePackageFixture() throws -> PatternProjectMetadata {
         surface: .paintTiles(PatternProjectPaintTileSurface(
             manifestFile: "surfaces/layer.tiles.json",
             pixelSize: base.canvasSize,
+            rasterRevision: 1,
             tiles: []
         ))
     )
@@ -366,6 +333,7 @@ private func packageFixture(
             offsetY: 0
         ),
         documentConfiguration: configuration,
+        documentDomainLocked: radial,
         radialGeometryLocked: radial,
         activeLayerID: layerID,
         layers: [

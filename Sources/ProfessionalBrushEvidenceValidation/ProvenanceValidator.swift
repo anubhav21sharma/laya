@@ -23,9 +23,7 @@ enum ProvenanceValidator {
         root: URL,
         artifactRoot: URL,
         expectedCommit: String,
-        expectedSourceTreeSHA256: String,
-        expectedStageFourManifestSHA256: String,
-        expectedStageFourExitStatus: Int
+        expectedSourceTreeSHA256: String
     ) throws -> ProfessionalProvenance {
         guard try ArtifactFileSystem.entryNames(root) == Set(rawNames) else {
             throw ArtifactFileSystem.invalid(
@@ -64,13 +62,11 @@ enum ProvenanceValidator {
                 "xcodegenVersion", "operatingSystem", "kernel",
                 "hardwareMachine", "hardwareModel", "gpuName",
                 "gpuClassification", "artifactRoot",
-                "stageFourExitStatus",
-                "stageFourArtifactManifestSHA256",
                 "rawProvenanceSHA256", "rendererExecutableSHA256",
             ],
             label: "provenance"
         )
-        guard object["schemaVersion"] as? Int == 2,
+        guard object["schemaVersion"] as? Int == 3,
               object["commit"] as? String == expectedCommit,
               ArtifactFileSystem.isCommit(expectedCommit),
               object["sourceTreeSHA256"] as? String
@@ -79,10 +75,6 @@ enum ProvenanceValidator {
               object["configuration"] as? String == "Debug",
               object["artifactRoot"] as? String
                 == artifactRoot.standardizedFileURL.path,
-              object["stageFourExitStatus"] as? Int
-                == expectedStageFourExitStatus,
-              object["stageFourArtifactManifestSHA256"] as? String
-                == expectedStageFourManifestSHA256,
               let raw = object["rawProvenanceSHA256"] as? [String: String],
               raw == digests,
               let gpuName = ArtifactFileSystem.nonemptyString(

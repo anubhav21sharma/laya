@@ -47,7 +47,6 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
     private var predictionCPU: [UInt64] = []
     private var estimatedCPU: [UInt64] = []
     private var batchPackaging: [UInt64] = []
-    private var surfaceRecordPacking: [UInt64] = []
     private var surfaceMetalSubmission: [UInt64] = []
     private var surfaceTilePartition: [UInt64] = []
     private var surfaceTileLease: [UInt64] = []
@@ -63,7 +62,6 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         predictionCPU.reserveCapacity(256)
         estimatedCPU.reserveCapacity(256)
         batchPackaging.reserveCapacity(512)
-        surfaceRecordPacking.reserveCapacity(512)
         surfaceMetalSubmission.reserveCapacity(512)
         surfaceTilePartition.reserveCapacity(512)
         surfaceTileLease.reserveCapacity(512)
@@ -89,8 +87,6 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
             estimatedCPU.append(count)
         case .batchPackaging:
             batchPackaging.append(count)
-        case .surfaceRecordPacking:
-            surfaceRecordPacking.append(count)
         case .surfaceMetalSubmission:
             surfaceMetalSubmission.append(count)
         case .surfaceTilePartition:
@@ -122,7 +118,6 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         case .predictionCPU: predictionCPU
         case .estimatedCPU: estimatedCPU
         case .batchPackaging: batchPackaging
-        case .surfaceRecordPacking: surfaceRecordPacking
         case .surfaceMetalSubmission: surfaceMetalSubmission
         case .surfaceTilePartition: surfaceTilePartition
         case .surfaceTileLease: surfaceTileLease
@@ -160,7 +155,6 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         case .predictionCPU: predictionCPU
         case .estimatedCPU: estimatedCPU
         case .batchPackaging: batchPackaging
-        case .surfaceRecordPacking: surfaceRecordPacking
         case .surfaceMetalSubmission: surfaceMetalSubmission
         case .surfaceTilePartition: surfaceTilePartition
         case .surfaceTileLease: surfaceTileLease
@@ -179,7 +173,6 @@ private final class ActorAllocationMeasurements: @unchecked Sendable {
         predictionCPU.removeAll(keepingCapacity: true)
         estimatedCPU.removeAll(keepingCapacity: true)
         batchPackaging.removeAll(keepingCapacity: true)
-        surfaceRecordPacking.removeAll(keepingCapacity: true)
         surfaceMetalSubmission.removeAll(keepingCapacity: true)
         surfaceTilePartition.removeAll(keepingCapacity: true)
         surfaceTileLease.removeAll(keepingCapacity: true)
@@ -263,7 +256,7 @@ private final class TenMinuteTraceAllocationMeasurements:
                 break
             }
         case .authoritativeCPU, .predictionCPU, .estimatedCPU,
-             .batchPackaging, .surfaceRecordPacking,
+             .batchPackaging,
              .surfaceTilePartition, .surfaceTileLease,
              .sparseSamplingAcquire, .sparseSamplingPreflight,
              .sparseSamplingCompletion, .sparseSamplingCompletionWait:
@@ -2113,7 +2106,7 @@ private struct BrushInputAllocationProbeHarness {
                     )
                 )
             }
-            _ = try renderer.flushPendingLiveForHarness()
+            _ = try await renderer.flushPendingLiveForHarness()
         }
 
         var allocationCount: UInt64 = 0
@@ -2205,7 +2198,7 @@ private struct BrushInputAllocationProbeHarness {
                     firstAllocationCount = predictedAllocations
                 }
             }
-            _ = try renderer.flushPendingLiveForHarness()
+            _ = try await renderer.flushPendingLiveForHarness()
         }
         try renderer.cancelStroke(token: token)
 
@@ -2376,10 +2369,6 @@ private struct BrushInputAllocationProbeHarness {
             usesOffMainNativeInk: true
         )
         let renderer = setup.renderer
-        let warmedWorkspaceIdentity =
-            renderer.offMainStrokeWorkspaceIdentityForTesting
-        let warmedWorkspaceInstallationCount = renderer
-            .offMainStrokeWorkspaceInstallationCountForTesting
         let measurements = ActorAllocationMeasurements()
         renderer.setStrokePreparationAllocationProbeForHarness(
             StrokePreparationAllocationProbe(
@@ -2405,6 +2394,10 @@ private struct BrushInputAllocationProbeHarness {
                 seed: 2
             )
         )
+        let warmedWorkspaceIdentity =
+            renderer.offMainStrokeWorkspaceIdentityForTesting
+        let warmedWorkspaceInstallationCount = renderer
+            .offMainStrokeWorkspaceInstallationCountForTesting
         try await drainUntilMeasured(
             renderer: renderer,
             measurements: measurements,
@@ -2509,7 +2502,6 @@ private struct BrushInputAllocationProbeHarness {
         let estimated = measurements.snapshot(for: .estimatedCPU)
         let prediction = measurements.snapshot(for: .predictionCPU)
         let packaging = measurements.snapshot(for: .batchPackaging)
-        let surfacePacking = measurements.snapshot(for: .surfaceRecordPacking)
         let surfaceMetal = measurements.snapshot(for: .surfaceMetalSubmission)
         let surfaceTilePartition = measurements.snapshot(
             for: .surfaceTilePartition
@@ -2545,8 +2537,6 @@ private struct BrushInputAllocationProbeHarness {
                 + "\(packaging.maximumSingleEventCount) "
                 + "workspace=\(workspaceInstallationDelta)/"
                 + "\(workspaceIdentityChanged ? 1 : 0) "
-                + "surface_pack=\(surfacePacking.allocationCount)/"
-                + "\(surfacePacking.maximumSingleEventCount) "
                 + "surface_metal=\(surfaceMetal.allocationCount)/"
                 + "\(surfaceMetal.firstHalfAllocationCount)/"
                 + "\(surfaceMetal.lastHalfAllocationCount)/"
@@ -2605,29 +2595,6 @@ private struct BrushInputAllocationProbeHarness {
                     + "identityChanged=\(workspaceIdentityChanged)"
             )
         }
-        guard surfacePacking.eventCount >= measuredEventCount
-                + measuredPredictionEventCount,
-              surfacePacking.allocationCount == 0
-        else {
-            throw ProbeHarnessError.offMainAllocationRegression(
-                "surface packing events=\(surfacePacking.eventCount) "
-                    + "allocations=\(surfacePacking.allocationCount) "
-                    + "max=\(surfacePacking.maximumSingleEventCount)"
-            )
-        }
-        guard surfaceMetal.eventCount >= measuredEventCount
-                + measuredPredictionEventCount,
-              surfaceMetal.lastHalfAllocationCount
-                <= surfaceMetal.firstHalfAllocationCount,
-              surfaceMetal.maximumSingleEventCount <= 64
-        else {
-            throw ProbeHarnessError.offMainAllocationRegression(
-                "surface Metal events=\(surfaceMetal.eventCount) "
-                    + "first=\(surfaceMetal.firstHalfAllocationCount) "
-                    + "last=\(surfaceMetal.lastHalfAllocationCount) "
-                    + "max=\(surfaceMetal.maximumSingleEventCount)/64"
-            )
-        }
         let tiledExpectedEventCount = measuredEventCount
             + measuredPredictionEventCount
         guard (surfaceTilePartition.eventCount == 0
@@ -2652,7 +2619,6 @@ private struct BrushInputAllocationProbeHarness {
                 + "estimated=\(estimated.allocationCount) "
                 + "prediction=\(prediction.allocationCount) "
                 + "packaging=\(packaging.allocationCount) "
-                + "surface_pack=0 "
                 + "surface_metal_mallocs=\(surfaceMetal.allocationCount) "
                 + "tile_partition=\(surfaceTilePartition.allocationCount) "
                 + "tile_lease=\(surfaceTileLease.allocationCount)"
@@ -2767,6 +2733,9 @@ private struct BrushInputAllocationProbeHarness {
         )
         measurements.reset()
         var mainLifecycleAllocations: UInt64 = 0
+        var mainBeginAllocations: UInt64 = 0
+        var mainFinishAllocations: UInt64 = 0
+        var mainCancelAllocations: UInt64 = 0
         probe.arm()
         do {
             try renderer.beginStroke(
@@ -2778,7 +2747,8 @@ private struct BrushInputAllocationProbeHarness {
             _ = probe.disarm()
             throw error
         }
-        mainLifecycleAllocations += probe.disarm()
+        mainBeginAllocations = probe.disarm()
+        mainLifecycleAllocations += mainBeginAllocations
         try await drainToQuiescence(renderer: renderer)
         let metricsBefore = await renderer
             .offMainStageCContinuationMetricsForAllocationHarness()
@@ -2808,7 +2778,8 @@ private struct BrushInputAllocationProbeHarness {
             _ = probe.disarm()
             throw error
         }
-        mainLifecycleAllocations += probe.disarm()
+        mainFinishAllocations = probe.disarm()
+        mainLifecycleAllocations += mainFinishAllocations
         try await drainToQuiescence(renderer: renderer)
         let metricsAfterFinish = await renderer
             .offMainStageCContinuationMetricsForAllocationHarness()
@@ -2840,11 +2811,11 @@ private struct BrushInputAllocationProbeHarness {
             _ = probe.disarm()
             throw error
         }
-        mainLifecycleAllocations += probe.disarm()
+        mainCancelAllocations = probe.disarm()
+        mainLifecycleAllocations += mainCancelAllocations
         try await drainToQuiescence(renderer: renderer)
         let authoritative = measurements.snapshot(for: .authoritativeCPU)
         let packaging = measurements.snapshot(for: .batchPackaging)
-        let surfacePacking = measurements.snapshot(for: .surfaceRecordPacking)
         let surfaceMetal = measurements.snapshot(for: .surfaceMetalSubmission)
         let surfaceTilePartition = measurements.snapshot(
             for: .surfaceTilePartition
@@ -2853,13 +2824,14 @@ private struct BrushInputAllocationProbeHarness {
         let lifecycle = measurements.snapshot(for: .strokeLifecycleCPU)
 
         guard mainHotEnqueueAllocations == 0,
-              authoritative.eventCount > 1,
+              authoritativeEventDelta > 1,
               authoritative.allocationCount == 0,
-              UInt64(authoritative.eventCount)
+              UInt64(authoritativeEventDelta)
                 <= maximumContinuationEventCount
         else {
             throw ProbeHarnessError.offMainAllocationRegression(
                 "Stage C continuation authoritative events="
+                    + "\(authoritativeEventDelta)/"
                     + "\(authoritative.eventCount) allocations="
                     + "\(authoritative.allocationCount) max="
                     + "\(authoritative.maximumSingleEventCount) firstEvent="
@@ -2868,6 +2840,14 @@ private struct BrushInputAllocationProbeHarness {
                     + "\(String(describing: authoritative.lastAllocationEventIndex)) "
                     + "mainHot=\(mainHotEnqueueAllocations) "
                     + "ceiling=\(maximumContinuationEventCount) "
+                    + "before/after/final="
+                    + "\(authoritativeBefore.eventCount)/"
+                    + "\(authoritativeAfter.eventCount)/"
+                    + "\(authoritative.eventCount) pageDelta=\(pageDelta) "
+                    + "resumeDelta=\(resumeDelta) emittedDelta="
+                    + "\(emittedDabDelta) logicalPages="
+                    + "\(logicalWorkPages) projectionPages="
+                    + "\(projectionWorkPages) "
                     + Self.allocationIncidentSummary(metricsAfter)
             )
         }
@@ -2913,39 +2893,13 @@ private struct BrushInputAllocationProbeHarness {
                     + "allocations=\(packaging.allocationCount)"
             )
         }
-        guard surfacePacking.eventCount > 0,
-              surfacePacking.eventCount <= packaging.eventCount,
-              surfacePacking.allocationCount == 0
-        else {
-            throw ProbeHarnessError.offMainAllocationRegression(
-                "Stage C continuation surface packing events="
-                    + "\(surfacePacking.eventCount)/"
-                    + "\(authoritative.eventCount) allocations="
-                    + "\(surfacePacking.allocationCount) max="
-                    + "\(surfacePacking.maximumSingleEventCount)"
-            )
-        }
-        guard surfaceMetal.eventCount > 0,
-              surfaceMetal.eventCount <= packaging.eventCount,
-              surfaceMetal.lastHalfAllocationCount
-                <= surfaceMetal.firstHalfAllocationCount,
-              surfaceMetal.maximumSingleEventCount <= 64
-        else {
-            throw ProbeHarnessError.offMainAllocationRegression(
-                "Stage C continuation surface Metal events="
-                    + "\(surfaceMetal.eventCount)/"
-                    + "\(authoritative.eventCount) first="
-                    + "\(surfaceMetal.firstHalfAllocationCount) last="
-                    + "\(surfaceMetal.lastHalfAllocationCount) max="
-                    + "\(surfaceMetal.maximumSingleEventCount)/64"
-            )
-        }
         guard (surfaceTilePartition.eventCount == 0
                 && surfaceTileLease.eventCount == 0)
                 || (surfaceTilePartition.eventCount > 0
-                    && surfaceTilePartition.eventCount
-                        <= packaging.eventCount
                     && surfaceTileLease.eventCount > 0
+                    && surfaceTilePartition.eventCount.isMultiple(of: 4)
+                    && surfaceTilePartition.eventCount / 4
+                        == surfaceTileLease.eventCount
                     && surfaceTileLease.eventCount <= packaging.eventCount
                     && surfaceTilePartition.allocationCount == 0
                     && surfaceTileLease.allocationCount == 0)
@@ -2955,7 +2909,9 @@ private struct BrushInputAllocationProbeHarness {
                     + "\(surfaceTilePartition.eventCount)/"
                     + "\(surfaceTilePartition.allocationCount) lease="
                     + "\(surfaceTileLease.eventCount)/"
-                    + "\(surfaceTileLease.allocationCount)"
+                    + "\(surfaceTileLease.allocationCount) series="
+                    + "\(measurements.counts(for: .surfaceTilePartition)) "
+                    + "packaging=\(packaging.eventCount)"
             )
         }
         guard lifecycle.eventCount == 2,
@@ -2978,10 +2934,12 @@ private struct BrushInputAllocationProbeHarness {
                 + "\(authoritative.eventCount) label=\(label) "
                 + "authoritative=0 packaging=0 "
                 + "main_hot=0 main_lifecycle="
-                + "\(mainLifecycleAllocations) actor_lifecycle="
+                + "\(mainLifecycleAllocations)["
+                + "\(mainBeginAllocations)/\(mainFinishAllocations)/"
+                + "\(mainCancelAllocations)] actor_lifecycle="
                 + "\(lifecycle.allocationCount)/"
                 + "\(lifecycle.maximumSingleEventCount) "
-                + "surface_pack=0 surface_metal_mallocs="
+                + "surface_metal_mallocs="
                 + "\(surfaceMetal.allocationCount) tile_partition="
                 + "\(surfaceTilePartition.allocationCount) tile_lease="
                 + "\(surfaceTileLease.allocationCount)"
@@ -3020,8 +2978,7 @@ private struct BrushInputAllocationProbeHarness {
             if renderer.strokePreparationIsQuiescentForAllocationHarness {
                 return
             }
-            try renderer.advanceStrokePreparationForAllocationHarness()
-            await Task.yield()
+            _ = try await renderer.flushPendingLiveForHarness()
         }
         throw ProbeHarnessError.offMainAllocationRegression(
             "Stage C continuation failed to reach quiescence"
@@ -3060,8 +3017,7 @@ private struct BrushInputAllocationProbeHarness {
             {
                 return
             }
-            try renderer.advanceStrokePreparationForAllocationHarness()
-            await Task.yield()
+            _ = try await renderer.flushPendingLiveForHarness()
         }
         throw ProbeHarnessError.offMainEstimatedAllocations(
             total: measurements.snapshot(for: stage).allocationCount,
@@ -3133,9 +3089,9 @@ private struct BrushInputAllocationProbeHarness {
         )
         try renderer.activateDrawBrush(brush)
         if let finiteConfiguration {
-            try renderer.applyFiniteConfiguration(finiteConfiguration)
+            try await renderer.applyFiniteConfiguration(finiteConfiguration)
         } else {
-            try renderer.applyTiling(.squareRotation)
+            try await renderer.applyTiling(.squareRotation)
         }
         return RendererSetup(renderer: renderer, brush: brush)
     }

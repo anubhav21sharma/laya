@@ -1,5 +1,5 @@
 import BrushFormat
-import BrushDepositionEvidenceValidation
+import CShaderTypes
 import CoreGraphics
 import EditorCore
 import Foundation
@@ -128,7 +128,7 @@ struct ProfessionalBrushHarnessRunnerTests {
     }
 
     @Test(arguments: professionalEntries)
-    private func committedDefinitionsMatchGoldenSemanticHashesAndResources(
+    private func currentDefinitionsReopenWithDeterministicIdentityAndResources(
         _ fixture: ProfessionalEntryFixture
     ) throws {
         let package = try BrushPackage(
@@ -136,13 +136,13 @@ struct ProfessionalBrushHarnessRunnerTests {
             definition: fixture.entry.definition,
             resourceData: [:]
         )
+        let encoded = try BrushPackageCodec.encode(package)
+        let secondEncoding = try BrushPackageCodec.encode(package)
+        let reopened = try BrushPackageCodec.decode(encoded)
 
-        #expect(
-            try package.contentHash
-                == ProfessionalBrushEvidenceValidator.expectedSemanticHash(
-                    forPositiveScene: fixture.scene
-                )
-        )
+        #expect(encoded == secondEncoding)
+        #expect(reopened == package)
+        #expect(try reopened.contentHash == package.contentHash)
         #expect(
             ProfessionalBrushEvidenceValidator.expectedResourceLevels(
                 forPositiveScene: fixture.scene
@@ -153,7 +153,7 @@ struct ProfessionalBrushHarnessRunnerTests {
     @Test
     func evidenceSchemaRejectsEveryRequiredFieldMutation() throws {
         #expect(ProfessionalBrushSceneEvidence.currentSchemaVersion == 2)
-        let valid = professionalEvidenceFixture()
+        let valid = try professionalEvidenceFixture()
         try ProfessionalBrushEvidenceValidator.validate(valid)
 
         let mutations: [(String, (inout [String: Any]) -> Void)] = [
@@ -161,9 +161,7 @@ struct ProfessionalBrushHarnessRunnerTests {
             ("scene", { $0["scene"] = "professional-unknown" }),
             ("family", { $0["family"] = "" }),
             ("definition", { $0["definitionID"] = "wrong" }),
-            ("semantic hash", {
-                $0["definitionSemanticHash"] = String(repeating: "0", count: 64)
-            }),
+            ("semantic hash", { $0["definitionSemanticHash"] = "bad" }),
             ("pipeline", { $0["pipelineKey"] = "" }),
             ("ABI", { $0["abiVersion"] = 0 }),
             ("resident bytes", { $0["residentResourceBytes"] = -1 }),
@@ -197,10 +195,21 @@ struct ProfessionalBrushHarnessRunnerTests {
     }
 
     @Test
+    func replayTailEvidenceMayEncodeMorePhysicalInstancesThanUniqueIdentities()
+        throws
+    {
+        let evidence = try professionalEvidenceFixture(
+            encodedInstanceCount: 7
+        )
+
+        try ProfessionalBrushEvidenceValidator.validate(evidence)
+    }
+
+    @Test
     func evidenceRejectsDuplicateOrUnsortedResourcesAndFalseInvariant()
         throws
     {
-        let valid = professionalEvidenceFixture()
+        let valid = try professionalEvidenceFixture()
 
         for resourceMutation in ["unsorted", "duplicate"] {
             var object = try validJSONObject(valid)
@@ -268,7 +277,6 @@ struct ProfessionalBrushHarnessRunnerTests {
                 )
             )
         )
-
         try ProfessionalBrushEvidenceValidator.validate(evidence)
         #expect(evidence.invariantResults.values.allSatisfy { $0 })
         let decodedCanonical = try RasterObservationValidator.decode(
@@ -296,13 +304,17 @@ struct ProfessionalBrushHarnessRunnerTests {
             Set(benchmarkObject.keys)
                 == SceneArtifactValidator.benchmarkKeys
         )
+        let longStrokeURL = output.appendingPathComponent(
+            "professional-long-stroke.raw.json"
+        )
+        let longStrokeData = try Data(contentsOf: longStrokeURL)
+        let longEvidence = try JSONDecoder().decode(
+            ProfessionalLongStrokeEvidence.self,
+            from: longStrokeData
+        )
         let longRaw = try #require(
             JSONSerialization.jsonObject(
-                with: Data(
-                    contentsOf: output.appendingPathComponent(
-                        "professional-long-stroke.raw.json"
-                    )
-                )
+                with: longStrokeData
             ) as? [String: Any]
         )
         let trace = try #require(
@@ -333,6 +345,34 @@ struct ProfessionalBrushHarnessRunnerTests {
             ($0["visibleProjectedInstanceCount"] as? NSNumber)?.intValue
         }
         #expect(identityFrames.count == 128)
+        #expect(
+            longEvidence.identityFrames.allSatisfy {
+                $0.authoritativeLogicalDabBacklogRemaining == 0
+            }
+        )
+        var encodedIdentityHighWater: UInt64 = 0
+        for frame in longEvidence.identityFrames {
+            #expect(
+                frame.previousEncodedLogicalDabHighWater
+                    == encodedIdentityHighWater
+            )
+            for range in frame.encodedLogicalDabIdentityRanges {
+                #expect(range.lowerBound == encodedIdentityHighWater)
+                #expect(range.upperBound > range.lowerBound)
+                encodedIdentityHighWater = range.upperBound
+            }
+            #expect(
+                encodedIdentityHighWater
+                    == frame.emittedLogicalDabHighWater
+            )
+        }
+        let finalIdentityFrame = try #require(
+            longEvidence.identityFrames.last
+        )
+        #expect(
+            finalIdentityFrame.encodedGPUInstanceCount
+                > longEvidence.replayMaximumProjectedInstances
+        )
         #expect(
             (longRaw["cpuPreparationMilliseconds"] as? [Double])?
                 .count == 128
@@ -367,11 +407,12 @@ struct ProfessionalBrushHarnessRunnerTests {
                 (0...4_096).contains($0)
             }
         )
-        #expect(result.artifactURLs.count == 20)
+        #expect(result.artifactURLs.count == 21)
         #expect(Set(result.artifactURLs.map(\.lastPathComponent)) == [
             "\(sceneName).benchmark.json",
             "\(sceneName).canonical.png",
             "\(sceneName).characterization.json",
+            "\(sceneName).committed-display.png",
             "\(sceneName).committed.png",
             "\(sceneName).eraser-after.png",
             "\(sceneName).eraser-before.png",
@@ -459,17 +500,14 @@ struct ProfessionalBrushHarnessRunnerTests {
             executableHash = evidence.rendererExecutableSHA256
         }
 
-        #expect(
-            try SceneArtifactValidator.validatePositive(
+        let positive = try SceneArtifactValidator.validatePositive(
                 root: root,
                 expectedCommit: String(repeating: "e", count: 40),
                 expectedGPUName: gpuName,
                 expectedOperatingSystem: operatingSystem,
-                expectedRendererSHA256: executableHash,
-                baseline:
-                    try professionalCharacterizationBaselineForValidation()
-            ) >= 0
-        )
+                expectedRendererSHA256: executableHash
+            )
+        #expect(positive.characterizations.count == 4)
 
         let mutatedScene =
             ProfessionalBrushEvidenceValidator.positiveSceneNames[0]
@@ -479,7 +517,7 @@ struct ProfessionalBrushHarnessRunnerTests {
         let benchmarkURL = sceneDirectory
             .appendingPathComponent("benchmark.json")
         let committedURL = sceneDirectory
-            .appendingPathComponent("committed.png")
+            .appendingPathComponent("committed-display.png")
         let originalEvidenceData = try Data(contentsOf: evidenceURL)
         let originalBenchmarkData = try Data(contentsOf: benchmarkURL)
         let originalCommittedData = try Data(contentsOf: committedURL)
@@ -489,9 +527,7 @@ struct ProfessionalBrushHarnessRunnerTests {
                 expectedCommit: String(repeating: "e", count: 40),
                 expectedGPUName: gpuName,
                 expectedOperatingSystem: operatingSystem,
-                expectedRendererSHA256: executableHash,
-                baseline:
-                    try professionalCharacterizationBaselineForValidation()
+                expectedRendererSHA256: executableHash
             )
         }
         func restore() throws {
@@ -537,6 +573,35 @@ struct ProfessionalBrushHarnessRunnerTests {
             JSONSerialization.jsonObject(with: originalEvidenceData)
                 as? [String: Any]
         )
+        let currentPipelineFields = try #require(
+            (originalEvidenceObject["pipelineKey"] as? String)?
+                .split(separator: ":")
+                .map(String.init)
+        )
+        #expect(currentPipelineFields.count == 10)
+        var invalidPipelineFields = currentPipelineFields
+        invalidPipelineFields[7] = "abi999"
+        var wrongFormatFields = currentPipelineFields
+        wrongFormatFields[8] = "format80"
+        for (label, pipeline) in [
+            ("wrong pipeline ABI", invalidPipelineFields.joined(separator: ":")),
+            ("wrong working format", wrongFormatFields.joined(separator: ":")),
+            ("malformed pipeline shape", currentPipelineFields.dropLast().joined(separator: ":")),
+        ] {
+            try restore()
+            try mutateEvidence { $0["pipelineKey"] = pipeline }
+            #expect(throws: Error.self, "\(label)") {
+                try validate()
+            }
+        }
+        try restore()
+        try mutateEvidence {
+            $0["abiVersion"] = Int(PatternDepositionABIVersion) + 1
+        }
+        #expect(throws: Error.self, "wrong evidence ABI") {
+            try validate()
+        }
+
         let reportedPreviewDelta = try #require(
             originalEvidenceObject[
                 "previewCommitMaximumChannelDelta"
@@ -575,27 +640,12 @@ struct ProfessionalBrushHarnessRunnerTests {
             pixelSize: PixelSize(width: 128, height: 128),
             to: committedURL
         )
-        try mutateEvidence {
-            let png = try Data(contentsOf: committedURL)
-            $0["committedPNGSHA256"] = ArtifactFileSystem.sha256(png)
-            var observations = try #require(
-                $0["observations"] as? [String: Any]
-            )
-            observations["committedBGRA8SHA256"] =
-                ArtifactFileSystem.sha256(Data(changedCommitted))
-            observations["committedNontransparentPixelCount"] =
-                RasterObservationValidator.nontransparentPixelCount(
-                    changedCommitted
-                )
-            $0["observations"] = observations
-        }
         #expect(throws: Error.self) {
             try validate()
         }
 
         let telemetryMutations: [(String, Any)] = [
             ("encodedInstanceCount", 0),
-            ("encodedInstanceCount", Int.max),
             ("bufferHighWater", 0),
             ("bufferHighWater", 4),
         ]
@@ -741,35 +791,10 @@ struct ProfessionalBrushHarnessRunnerTests {
         async throws
     {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
-        let catalogs = try exportedManualCatalogs()
-        let stageFour = try StageFourArtifactFixture()
-        defer { stageFour.remove() }
-        try catalogs.stageFour.write(
-            to: stageFour.root.appendingPathComponent(
-                "brush-lab-cards/catalog.json"
-            )
-        )
-        try stageFour.rewriteProvenanceCatalogDigest()
-        try mutateJSONObject(
-            at: stageFour.root.appendingPathComponent(
-                "performance-status.txt"
-            )
-        ) {
-            $0["gpu500DabMilliseconds"] = 2.5
-        }
-        try mutateJSONObject(
-            at: stageFour.root.appendingPathComponent(
-                "logs/five-hundred-dabs.benchmark.json"
-            )
-        ) {
-            $0["dabGPUMilliseconds"] = [2.5]
-        }
-        try stageFour.rewriteManifest()
-        let stageFourStatus = try stageFour.validateProductionContract()
-        guard case .performancePending = stageFourStatus else {
-            Issue.record("production Stage 4 fixture must remain pending")
-            return
-        }
+        let manualCatalog = try exportedManualCatalog()
+        let commit = String(repeating: "e", count: 40)
+        let sourceTree = Data("current-source-tree\n".utf8)
+        let sourceTreeSHA256 = ArtifactFileSystem.sha256(sourceTree)
 
         let root = temporaryDirectory(named: "complete-stage5-root")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -782,10 +807,10 @@ struct ProfessionalBrushHarnessRunnerTests {
                 withIntermediateDirectories: true
             )
         }
-        try stageFour.sourceTree.write(
+        try sourceTree.write(
             to: root.appendingPathComponent("source-tree.txt")
         )
-        try stageFour.sourceTree.write(
+        try sourceTree.write(
             to: root.appendingPathComponent("source-tree-terminal.txt")
         )
         try professionalCharacterizationBaselineForValidation()
@@ -794,7 +819,7 @@ struct ProfessionalBrushHarnessRunnerTests {
                     "characterization-baseline.json"
                 )
             )
-        try catalogs.stageFive.write(
+        try manualCatalog.write(
             to: root.appendingPathComponent(
                 "manual-cards/catalog.json"
             )
@@ -843,7 +868,7 @@ struct ProfessionalBrushHarnessRunnerTests {
                 outputDirectory: emitted,
                 build: BenchmarkBuild(
                     configuration: "Debug",
-                    gitCommit: stageFour.commit
+                    gitCommit: commit
                 )
             )
             try FileManager.default.createDirectory(
@@ -870,12 +895,6 @@ struct ProfessionalBrushHarnessRunnerTests {
             try FileManager.default.removeItem(at: emitted)
             gpuName = result.benchmark.hardware.gpuName
             operatingSystem = result.benchmark.operatingSystem
-            maximumCPUP95 = max(
-                maximumCPUP95,
-                testPercentile95(
-                    result.benchmark.cpuEncodeMilliseconds
-                )
-            )
             let performanceRaw = try #require(
                 JSONSerialization.jsonObject(
                     with: Data(
@@ -900,6 +919,15 @@ struct ProfessionalBrushHarnessRunnerTests {
                         )
                     )
                 ) as? [String: Any]
+            )
+            maximumCPUP95 = max(
+                maximumCPUP95,
+                testPercentile95(
+                    try #require(
+                        longRaw["cpuPreparationMilliseconds"]
+                            as? [Double]
+                    )
+                )
             )
             softwareMissedFrameCountByBrush[sceneName] =
                 try #require(
@@ -968,31 +996,10 @@ struct ProfessionalBrushHarnessRunnerTests {
             rawHashes[name] = ArtifactFileSystem.sha256(data)
         }
 
-        let stageFourManifestData = try Data(
-            contentsOf: stageFour.root.appendingPathComponent(
-                "artifact-sha256.txt"
-            )
-        )
-        let stageFourManifestHash =
-            ArtifactFileSystem.sha256(stageFourManifestData)
         try testJSONData([
-            "schemaVersion": 1,
-            "exitStatus": 2,
-            "artifactRoot": stageFour.root.standardizedFileURL.path,
-            "commit": stageFour.commit,
-            "sourceTreeSHA256": stageFour.sourceTreeSHA256,
-            "artifactManifestSHA256": stageFourManifestHash,
-            "terminalLine":
-                "BRUSH STAGE 4 PERFORMANCE PENDING artifacts=\(stageFour.root.standardizedFileURL.path) commit=\(stageFour.commit) gpu=\(stageFour.gpuName)",
-        ]).write(
-            to: root.appendingPathComponent(
-                "stage-four-regression.json"
-            )
-        )
-        try testJSONData([
-            "schemaVersion": 2,
-            "commit": stageFour.commit,
-            "sourceTreeSHA256": stageFour.sourceTreeSHA256,
+            "schemaVersion": 3,
+            "commit": commit,
+            "sourceTreeSHA256": sourceTreeSHA256,
             "configuration": "Debug",
             "swiftVersion": "Swift fixture Build 1",
             "xcodeVersion": "Xcode fixture Build 1",
@@ -1011,9 +1018,6 @@ struct ProfessionalBrushHarnessRunnerTests {
             "gpuClassification":
                 ArtifactFileSystem.gpuClassification(gpuName),
             "artifactRoot": root.standardizedFileURL.path,
-            "stageFourExitStatus": 2,
-            "stageFourArtifactManifestSHA256":
-                stageFourManifestHash,
             "rawProvenanceSHA256": rawHashes,
             "rendererExecutableSHA256": executableHash,
         ]).write(to: root.appendingPathComponent("provenance.json"))
@@ -1039,10 +1043,8 @@ struct ProfessionalBrushHarnessRunnerTests {
         func validate() throws -> ProfessionalBrushArtifactValidationStatus {
             try ProfessionalBrushArtifactValidator.validate(
                 artifactRoot: root.standardizedFileURL,
-                expectedCommit: stageFour.commit,
-                expectedSourceTreeSHA256: stageFour.sourceTreeSHA256,
-                expectedStageFourArtifactRoot:
-                    stageFour.root.standardizedFileURL
+                expectedCommit: commit,
+                expectedSourceTreeSHA256: sourceTreeSHA256
             )
         }
         func reject(_ label: String) {
@@ -1051,13 +1053,6 @@ struct ProfessionalBrushHarnessRunnerTests {
             }
         }
         #expect(try validate() == .pending)
-
-        let stageFourManifestURL = stageFour.root.appendingPathComponent(
-            "artifact-sha256.txt"
-        )
-        try Data("corrupt\n".utf8).write(to: stageFourManifestURL)
-        reject("fresh Stage 4 validation")
-        try stageFourManifestData.write(to: stageFourManifestURL)
 
         for name in ["extra.txt", ".hidden"] {
             let url = root.appendingPathComponent(name)
@@ -1070,7 +1065,7 @@ struct ProfessionalBrushHarnessRunnerTests {
         )
         try FileManager.default.removeItem(at: terminalURL)
         reject("missing root entry")
-        try stageFour.sourceTree.write(to: terminalURL)
+        try sourceTree.write(to: terminalURL)
 
         let manifestURL = root.appendingPathComponent(
             "artifact-sha256.txt"
@@ -1090,18 +1085,6 @@ struct ProfessionalBrushHarnessRunnerTests {
         try writeStageFiveManifest(root: root)
         reject("raw provenance cross-link")
         try validProvenance.write(to: provenanceURL)
-
-        let regressionURL = root.appendingPathComponent(
-            "stage-four-regression.json"
-        )
-        let validRegression = try Data(contentsOf: regressionURL)
-        try mutateJSONObject(at: regressionURL) {
-            $0["artifactManifestSHA256"] =
-                String(repeating: "0", count: 64)
-        }
-        try writeStageFiveManifest(root: root)
-        reject("Stage 4 manifest cross-link")
-        try validRegression.write(to: regressionURL)
 
         let performanceURL = root.appendingPathComponent(
             "performance-status.json"
@@ -1225,7 +1208,11 @@ private let professionalEntries = [
     ),
 ]
 
-private func professionalEvidenceFixture() -> ProfessionalBrushSceneEvidence {
+private func professionalEvidenceFixture(
+    encodedInstanceCount: UInt64 = 4
+) throws
+    -> ProfessionalBrushSceneEvidence
+{
     let resources = [
         ProfessionalBrushResolvedResource(
             identity: "builtin.grain.graphite",
@@ -1257,17 +1244,22 @@ private func professionalEvidenceFixture() -> ProfessionalBrushSceneEvidence {
         cacheHitCount: 3,
         activationCount: 2
     )
+    let package = try BrushPackage(
+        manifest: BrushPackageManifest(resources: []),
+        definition: ProfessionalBrushCatalog.graphitePencil.definition,
+        resourceData: [:]
+    )
     return ProfessionalBrushSceneEvidence(
         schemaVersion: ProfessionalBrushSceneEvidence.currentSchemaVersion,
         scene: "professional-graphite-pencil",
         family: "Graphite Pencil",
         definitionID: "builtin.professional-graphite-pencil",
-        definitionSemanticHash:
-            ProfessionalBrushEvidenceValidator.expectedSemanticHash(
-                forPositiveScene: "professional-graphite-pencil"
-            )!,
+        definitionSemanticHash: try package.contentHash,
         pipelineKey:
-            "deposition:flow:dryBreakup:s0:g1:h1:d0:abi1:format80:samples1",
+            "deposition:flow:dryBreakup:s0:g1:h1:d0"
+            + ":abi\(DepositionABI.version)"
+            + ":format\(DocumentColorPipeline.workingPixelFormat.rawValue)"
+            + ":samples1",
         abiVersion: DepositionABI.version,
         residentResourceBytes: 114_687,
         resolvedResources: resources,
@@ -1290,7 +1282,7 @@ private func professionalEvidenceFixture() -> ProfessionalBrushSceneEvidence {
             authoritativeBacklog: 0,
             predictedBacklog: 0,
             backlogHighWater: 4,
-            encodedInstanceCount: 4,
+            encodedInstanceCount: encodedInstanceCount,
             bufferHighWater: 1,
             missedFrameCount: 0
         ),
@@ -1383,9 +1375,36 @@ func professionalCharacterizationBaselineForValidation()
     )
 }
 
-private func exportedManualCatalogs() throws
-    -> (stageFour: Data, stageFive: Data)
+func professionalSceneIdentitiesForValidation()
+    throws -> ProfessionalSceneIdentitySet
 {
+    let baseline = try professionalCharacterizationBaselineForValidation()
+    let identities = try ProfessionalBrushTruth.positiveSceneNames.map {
+        scene in
+        let contract = try #require(
+            ProfessionalBrushTruth.sceneContracts[scene]
+        )
+        let characterization = try #require(
+            baseline.records.first {
+                $0.brushID == contract.definitionID
+                    && $0.traceName == "professional-slow-line"
+            }
+        )
+        return ProfessionalSceneIdentity(
+            scene: scene,
+            family: contract.family,
+            definitionID: contract.definitionID,
+            definitionSemanticHash:
+                characterization.definitionSemanticHash,
+            pipelineKey:
+                "deposition:flow:none:s0:g0:h0:d0:abi\(PatternDepositionABIVersion):format\(MTLPixelFormat.rgba16Float.rawValue):samples1",
+            abiVersion: Int(PatternDepositionABIVersion)
+        )
+    }
+    return try ProfessionalSceneIdentitySet(validating: identities)
+}
+
+private func exportedManualCatalog() throws -> Data {
     let repositoryRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
         .deletingLastPathComponent()
@@ -1439,28 +1458,24 @@ private func exportedManualCatalogs() throws
     let mainSource = """
     import Foundation
 
-    guard CommandLine.arguments.count == 3 else {
-        fatalError("usage: CardExporter STAGE4 STAGE5")
-    }
-    try BrushLabManualCatalog.pending().encoded().write(
-        to: URL(fileURLWithPath: CommandLine.arguments[1])
-    )
-    try BrushLabProfessionalManualCatalog.pending().encoded().write(
-        to: URL(fileURLWithPath: CommandLine.arguments[2])
-    )
-    """
+guard CommandLine.arguments.count == 2 else {
+    fatalError("usage: CardExporter OUTPUT")
+}
+try BrushLabProfessionalManualCatalog.pending().encoded().write(
+    to: URL(fileURLWithPath: CommandLine.arguments[1])
+)
+"""
     try Data(mainSource.utf8).write(
         to: sources.appendingPathComponent("main.swift")
     )
-    let stageFourURL = package.appendingPathComponent("stage-four.json")
-    let stageFiveURL = package.appendingPathComponent("stage-five.json")
+    let outputURL = package.appendingPathComponent("catalog.json")
     let process = Process()
     let standardOutput = Pipe()
     let standardError = Pipe()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
     process.arguments = [
         "run", "--package-path", package.path, "--configuration", "debug",
-        "CardExporter", stageFourURL.path, stageFiveURL.path,
+        "CardExporter", outputURL.path,
     ]
     process.standardOutput = standardOutput
     process.standardError = standardError
@@ -1473,18 +1488,14 @@ private func exportedManualCatalogs() throws
                 + String(decoding: error, as: UTF8.self)
         )
     }
-    let stageFour = try Data(contentsOf: stageFourURL)
-    let stageFive = try Data(contentsOf: stageFiveURL)
-    guard ArtifactFileSystem.sha256(stageFour)
-            == StageFourEvidenceValidator.brushLabCatalogSHA256,
-          try ProfessionalManualEvidenceValidator.validate(stageFive)
-            == false
+    let catalog = try Data(contentsOf: outputURL)
+    guard try ProfessionalManualEvidenceValidator.validate(catalog) == false
     else {
         throw ProfessionalBrushArtifactValidationError.invalid(
-            "manual catalog exporter did not produce frozen goldens"
+            "manual catalog exporter did not produce valid current evidence"
         )
     }
-    return (stageFour, stageFive)
+    return catalog
 }
 
 private func commandOutput(

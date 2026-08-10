@@ -115,7 +115,6 @@ public final class StrokeRenderCoordinator {
 
     var generatorSnapshot: BrushStrokeGenerator { generator }
     var inputDeriverSnapshot: BrushInputDeriver { inputDeriver }
-    private(set) var synchronousCompatibilityReplayInvocationCount: UInt64 = 0
     public var predictionProvenanceBoundary:
         PredictionProvenanceBoundary
     {
@@ -458,7 +457,6 @@ public final class StrokeRenderCoordinator {
                 generator: &candidateGenerator
             )
         } else {
-            synchronousCompatibilityReplayInvocationCount &+= 1
             try advanceSettledReplayGeneratorChunks(
                 chunks,
                 startingExpectedOrdinal: replayStartingOrdinal,

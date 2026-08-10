@@ -68,7 +68,6 @@ struct PredictionOverlayTests {
         #expect(setup.renderer.transientStrokeBuffer == nil)
         #expect(setup.renderer.harnessScheduledAuthoritativeRecords.isEmpty)
         #expect(setup.renderer.harnessScheduledPredictedRecords.isEmpty)
-        #expect(setup.renderer.predictionOverlay.snapshot.provenance == nil)
     }
 
     @Test(arguments: [StrokeSampleKind.predicted, .estimatedUpdate])
@@ -143,8 +142,7 @@ struct PredictionOverlayTests {
                     timestamp: 0.01,
                     phase: .ended,
                     kind: kind
-                ),
-                maximumRetainedBytes: 1_024 * 1_024
+                )
             )
         }
 
@@ -310,275 +308,6 @@ struct PredictionOverlayTests {
         try setup.renderer.cancelStroke(token: token)
     }
 
-    @Test
-    func admissionTruncatesEachPredictionDimensionAndRecordsEveryOverload() {
-        let admission = PredictionOverlay.admit(
-            normalizedSampleCount: 65,
-            logicalDabCount: 513,
-            projectedInstanceCount: 7,
-            predictedInstanceBudget: 3
-        )
-
-        #expect(admission.normalizedSampleCount == 64)
-        #expect(admission.logicalDabCount == 512)
-        #expect(admission.projectedInstanceCount == 3)
-        #expect(
-            admission.overload == [
-                .normalizedSamples,
-                .logicalDabs,
-                .projectedInstances,
-            ]
-        )
-    }
-
-    @Test
-    @MainActor
-    func replacementClearsOnlyThePreviouslySubmittedDirtyRegions() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
-        let size = PixelSize(width: 128, height: 128)
-        let overlay = try PredictionOverlay(
-            device: device,
-            pixelSize: size
-        )
-        let first = PixelRect(minX: 4, minY: 6, maxX: 20, maxY: 22)!
-        let second = PixelRect(minX: 80, minY: 82, maxX: 96, maxY: 98)!
-        let boundary = PredictionProvenanceBoundary(
-            coordinatorRevision: 1,
-            nextAuthoritativeOrdinal: 12
-        )
-
-        _ = overlay.planReplacement(
-            epoch: 1,
-            provenance: boundary,
-            admission: PredictionOverlay.admit(
-                normalizedSampleCount: 1,
-                logicalDabCount: 2,
-                projectedInstanceCount: 2,
-                predictedInstanceBudget: 8
-            ),
-            dirtyRegions: [first]
-        )
-        overlay.markVisible(epoch: 1)
-
-        let clear = overlay.planReplacement(
-            epoch: 2,
-            provenance: boundary,
-            admission: PredictionOverlay.admit(
-                normalizedSampleCount: 1,
-                logicalDabCount: 2,
-                projectedInstanceCount: 2,
-                predictedInstanceBudget: 8
-            ),
-            dirtyRegions: [second]
-        )
-
-        #expect(
-            clear == .regional(
-                PixelRegionSet([first], clippedTo: size)
-            )
-        )
-        #expect(
-            clear != .regional(
-                PixelRegionSet([first, second], clippedTo: size)
-            )
-        )
-    }
-
-    @Test
-    @MainActor
-    func overlappingRawFootprintBeyondTwoHundredFiftySixStaysExact()
-        throws
-    {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
-        let size = PixelSize(width: 256, height: 256)
-        let overlay = try PredictionOverlay(device: device, pixelSize: size)
-        let exact = PixelRect(
-            minX: 20,
-            minY: 24,
-            maxX: 36,
-            maxY: 40
-        )!
-        let raw = [PixelRect](repeating: exact, count: 257)
-
-        _ = overlay.planReplacement(
-            epoch: 1,
-            provenance: nil,
-            admission: PredictionOverlay.admit(
-                normalizedSampleCount: 1,
-                logicalDabCount: 257,
-                projectedInstanceCount: 257,
-                predictedInstanceBudget: 512
-            ),
-            dirtyRegions: raw
-        )
-        overlay.markVisible(epoch: 1)
-        let clear = overlay.planReplacement(
-            epoch: 2,
-            provenance: nil,
-            admission: PredictionOverlay.admit(
-                normalizedSampleCount: 0,
-                logicalDabCount: 0,
-                projectedInstanceCount: 0,
-                predictedInstanceBudget: 512
-            ),
-            dirtyRegions: []
-        )
-
-        #expect(
-            overlay.snapshot.previousDirtyRegions
-                == PixelRegionSet([exact], clippedTo: size)
-        )
-        #expect(
-            clear == .regional(
-                PixelRegionSet([exact], clippedTo: size)
-            )
-        )
-    }
-
-    @Test
-    @MainActor
-    func disjointCanonicalFootprintBeyondThirtyTwoStaysRegional() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
-        let size = PixelSize(width: 256, height: 256)
-        let overlay = try PredictionOverlay(device: device, pixelSize: size)
-        let disjoint = (0..<40).map { index in
-            PixelRect(
-                minX: index * 3,
-                minY: 12,
-                maxX: index * 3 + 1,
-                maxY: 13
-            )!
-        }
-        let exact = PixelRegionSet(disjoint, clippedTo: size)
-
-        _ = overlay.planReplacement(
-            epoch: 1,
-            provenance: nil,
-            admission: PredictionOverlay.admit(
-                normalizedSampleCount: 1,
-                logicalDabCount: 40,
-                projectedInstanceCount: 40,
-                predictedInstanceBudget: 512
-            ),
-            dirtyRegions: disjoint
-        )
-        overlay.markVisible(epoch: 1)
-        let clear = overlay.planReplacement(
-            epoch: 2,
-            provenance: nil,
-            admission: PredictionOverlay.admit(
-                normalizedSampleCount: 0,
-                logicalDabCount: 0,
-                projectedInstanceCount: 0,
-                predictedInstanceBudget: 512
-            ),
-            dirtyRegions: []
-        )
-
-        #expect(overlay.snapshot.previousDirtyRegions == exact)
-        #expect(clear == .regional(exact))
-    }
-
-    @Test
-    @MainActor
-    func visibilityInstallsOnlyTheExactLatestPlannedEpoch() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
-        let size = PixelSize(width: 64, height: 64)
-        let overlay = try PredictionOverlay(device: device, pixelSize: size)
-        let first = PredictionProvenanceBoundary(
-            coordinatorRevision: 3,
-            nextAuthoritativeOrdinal: 30
-        )
-        let latest = PredictionProvenanceBoundary(
-            coordinatorRevision: 4,
-            nextAuthoritativeOrdinal: 40
-        )
-        let admission = PredictionOverlay.admit(
-            normalizedSampleCount: 1,
-            logicalDabCount: 1,
-            projectedInstanceCount: 1,
-            predictedInstanceBudget: 8
-        )
-
-        _ = overlay.planReplacement(
-            epoch: 3,
-            provenance: first,
-            admission: admission,
-            dirtyRegions: []
-        )
-        #expect(
-            overlay.planReplacement(
-                epoch: 2,
-                provenance: latest,
-                admission: admission,
-                dirtyRegions: []
-            ) == nil
-        )
-        _ = overlay.planReplacement(
-            epoch: 4,
-            provenance: latest,
-            admission: admission,
-            dirtyRegions: []
-        )
-        overlay.markVisible(epoch: 3)
-
-        #expect(overlay.surface.visibleEpoch == 0)
-        #expect(overlay.snapshot.provenance == latest)
-
-        overlay.markVisible(epoch: 4)
-        overlay.markVisible(epoch: 3)
-
-        #expect(overlay.surface.visibleEpoch == 4)
-        #expect(overlay.snapshot.provenance == latest)
-    }
-
-    @Test
-    @MainActor
-    func actualInvalidatesOnlyPredictionFromItsMatchingBoundary() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
-        let size = PixelSize(width: 64, height: 64)
-        let overlay = try PredictionOverlay(
-            device: device,
-            pixelSize: size
-        )
-        let dirty = PixelRect(minX: 3, minY: 4, maxX: 13, maxY: 14)!
-        let boundary = PredictionProvenanceBoundary(
-            coordinatorRevision: 7,
-            nextAuthoritativeOrdinal: 41
-        )
-        _ = overlay.planReplacement(
-            epoch: 1,
-            provenance: boundary,
-            admission: PredictionOverlay.admit(
-                normalizedSampleCount: 2,
-                logicalDabCount: 5,
-                projectedInstanceCount: 5,
-                predictedInstanceBudget: 8
-            ),
-            dirtyRegions: [dirty]
-        )
-        overlay.markVisible(epoch: 1)
-
-        #expect(
-            !overlay.invalidatePrediction(
-                from: PredictionProvenanceBoundary(
-                    coordinatorRevision: 6,
-                    nextAuthoritativeOrdinal: 41
-                ),
-                epoch: 2
-            )
-        )
-        #expect(overlay.snapshot.provenance == boundary)
-        #expect(
-            overlay.invalidatePrediction(from: boundary, epoch: 2)
-        )
-        #expect(overlay.snapshot.provenance == nil)
-        #expect(
-            overlay.surface.lastClearPlan == .regional(
-                PixelRegionSet([dirty], clippedTo: size)
-            )
-        )
-    }
 
     @Test
     func frameBudgetTruncatesTruePredictionWithoutDroppingCorrection() throws {
@@ -691,9 +420,6 @@ struct PredictionOverlayTests {
             style: predictionStyle(brush)
         )
         try await drainPredictionActor(setup.renderer)
-        let authoritativeBefore = try #require(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-        )
         var predicted = (0..<64).map { index in
             predictionInputSample(
                 x: 9 + Float(index) * 0.25,
@@ -761,15 +487,6 @@ struct PredictionOverlayTests {
             setup.renderer.strokeRuntimeSnapshot?.inputProvenance.predicted
                 == 3 * 64
         )
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.lastOverload
-                .contains(.normalizedSamples)
-        )
-        #expect(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == authoritativeBefore
-        )
-
         try setup.renderer.appendStrokeBatch(
             token: token,
             authoritativeSamples: predicted[..<predicted.startIndex],
@@ -792,14 +509,6 @@ struct PredictionOverlayTests {
         let clearedActorState = await setup.renderer
             .offMainTransientSnapshotForTesting()
         #expect(clearedActorState.predictedSamples.isEmpty)
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.normalizedSampleCount
-                == 0
-        )
-        #expect(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == authoritativeBefore
-        )
         try setup.renderer.cancelStroke(token: token)
     }
 
@@ -839,10 +548,6 @@ struct PredictionOverlayTests {
             .offMainTransientSnapshotForTesting()
 
         #expect(actorState.predictedSamples.count == 64)
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.lastOverload
-                .contains(.normalizedSamples)
-        )
         try setup.renderer.cancelStroke(token: token)
     }
 
@@ -886,10 +591,6 @@ struct PredictionOverlayTests {
         #expect(actorState.actualSamples == actualBefore.actualSamples)
         #expect(actorState.actualDabs == actualBefore.actualDabs)
         #expect(actorState.predictedSamples.isEmpty)
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.lastOverload
-                .contains(.normalizedSamples)
-        )
         try setup.renderer.cancelStroke(token: token)
     }
 
@@ -934,10 +635,6 @@ struct PredictionOverlayTests {
 
         #expect(actorState.actualDabs.count == 1)
         #expect(actorState.predictedDabs.isEmpty)
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.lastOverload
-                .contains(.logicalDabs)
-        )
         try setup.renderer.cancelStroke(token: token)
     }
 
@@ -982,10 +679,6 @@ struct PredictionOverlayTests {
         #expect(
             await setup.renderer.offMainTransientSnapshotForTesting()
                 .predictedDabs.isEmpty
-        )
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.lastOverload
-                .contains(.projectedInstances)
         )
         try setup.renderer.cancelStroke(token: token)
     }
@@ -1032,9 +725,6 @@ struct PredictionOverlayTests {
         try await drainPredictionActor(setup.renderer)
         let actualBefore = await setup.renderer
             .offMainTransientSnapshotForTesting()
-        let coordinatorBefore = try #require(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-        )
 
         try setup.renderer.appendStroke(
             token: token,
@@ -1056,14 +746,6 @@ struct PredictionOverlayTests {
         #expect(
             setup.renderer.offMainPredictedInstanceCountForTesting
                 == correctionCount
-        )
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.lastOverload
-                .contains(.projectedInstances)
-        )
-        #expect(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == coordinatorBefore
         )
         try setup.renderer.cancelStroke(token: token)
     }
@@ -1102,15 +784,6 @@ struct PredictionOverlayTests {
 
         #expect(actorState.predictedDabs.count == 512)
         #expect(
-            setup.renderer.predictionOverlay.snapshot
-                .projectedInstanceCount
-                == setup.renderer.offMainPredictedInstanceCountForTesting
-        )
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.lastOverload
-                .contains(.logicalDabs)
-        )
-        #expect(
             setup.renderer.harnessScheduledAuthoritativeRecords
                 .allSatisfy { !$0.isPredicted }
         )
@@ -1144,10 +817,6 @@ struct PredictionOverlayTests {
             )
         )
         try await drainPredictionActor(setup.renderer)
-        let provenance = try #require(
-            setup.renderer.predictionOverlay.snapshot.provenance
-        )
-
         try setup.renderer.applyEstimatedStrokeUpdate(
             token: token,
             sample: predictionEstimatedUpdateSample(
@@ -1161,19 +830,6 @@ struct PredictionOverlayTests {
             .offMainTransientSnapshotForTesting()
 
         #expect(actorState.predictedDabs.count == 512)
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.provenance
-                == provenance
-        )
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.lastOverload
-                .contains(.logicalDabs)
-        )
-        #expect(
-            setup.renderer.predictionOverlay.snapshot
-                .projectedInstanceCount
-                == setup.renderer.offMainPredictedInstanceCountForTesting
-        )
         try setup.renderer.cancelStroke(token: token)
     }
 
@@ -1227,13 +883,6 @@ struct PredictionOverlayTests {
         try await drainPredictionActor(setup.renderer)
         let actualBefore = await setup.renderer
             .offMainTransientSnapshotForTesting()
-        let coordinatorBefore = try #require(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-        )
-        let provenanceBefore = try #require(
-            setup.renderer.predictionOverlay.snapshot.provenance
-        )
-
         try setup.renderer.applyEstimatedStrokeUpdate(
             token: token,
             sample: predictionEstimatedUpdateSample(
@@ -1254,137 +903,10 @@ struct PredictionOverlayTests {
             setup.renderer.offMainPredictedInstanceCountForTesting
                 == correctionCount
         )
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.lastOverload
-                .contains(.projectedInstances)
-        )
-        #expect(
-            setup.renderer.predictionOverlay.snapshot.provenance
-                == provenanceBefore
-        )
-        #expect(
-            setup.renderer.compatibilityInkCoordinatorSnapshotForTesting
-                == coordinatorBefore
-        )
         #expect(setup.renderer.activeStroke?.token == token)
         #expect(setup.renderer.activeStroke?.isFinishedTransiently == false)
         try setup.renderer.cancelStroke(token: token)
     }
-
-    @Test
-    @MainActor
-    func rendererRejectsMismatchedPredictionInvalidationAtomically()
-        async throws
-    {
-        guard let setup = try predictionRendererSetup() else { return }
-        let brush = try await setup.compileNativeInk()
-        try setup.renderer.activateDrawBrush(brush)
-        let token = RendererOperationToken(rawValue: 705)
-        try setup.renderer.beginStroke(
-            token: token,
-            sample: predictionInputSample(
-                x: 8,
-                timestamp: 0,
-                phase: .began
-            ),
-            style: predictionStyle(brush)
-        )
-        try setup.renderer.appendStroke(
-            token: token,
-            sample: predictionEstimatedSample(
-                x: 24,
-                timestamp: 0.01,
-                index: 92
-            )
-        )
-        try await drainPredictionActor(setup.renderer)
-        let matching = try #require(
-            setup.renderer.predictionOverlay.snapshot.provenance
-        )
-        _ = setup.renderer.predictionOverlay.planReplacement(
-            epoch: UInt64.max - 1,
-            provenance: PredictionProvenanceBoundary(
-                coordinatorRevision:
-                    matching.coordinatorRevision &+ 1,
-                nextAuthoritativeOrdinal:
-                    matching.nextAuthoritativeOrdinal
-            ),
-            admission: PredictionOverlay.admit(
-                normalizedSampleCount: 0,
-                logicalDabCount: 0,
-                projectedInstanceCount: 0,
-                predictedInstanceBudget: 1
-            ),
-            dirtyRegions: []
-        )
-        let before = await predictionMutationSnapshot(setup.renderer)
-        let snapshotMaterializationCountBeforePreflight =
-            setup.renderer.predictionOverlay
-                .snapshotMaterializationCountForTesting
-
-        #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
-            try setup.renderer.appendStroke(
-                token: token,
-                sample: predictionInputSample(
-                    x: 26,
-                    timestamp: 0.02,
-                    phase: .moved
-                )
-            )
-        }
-        #expect(
-            setup.renderer.predictionOverlay
-                .snapshotMaterializationCountForTesting
-                == snapshotMaterializationCountBeforePreflight
-        )
-        #expect(
-            await predictionMutationSnapshot(setup.renderer) == before
-        )
-
-        #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
-            try setup.renderer.applyEstimatedStrokeUpdate(
-                token: token,
-                sample: predictionEstimatedUpdateSample(
-                    x: 28,
-                    timestamp: 0.03,
-                    index: 92
-                )
-            )
-        }
-        #expect(
-            await predictionMutationSnapshot(setup.renderer) == before
-        )
-
-        #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
-            try setup.renderer.finishStrokeTransient(
-                token: token,
-                sample: predictionInputSample(
-                    x: 29,
-                    timestamp: 0.035,
-                    phase: .ended
-                )
-            )
-        }
-        #expect(
-            await predictionMutationSnapshot(setup.renderer) == before
-        )
-
-        #expect(throws: MetalRendererError.invalidStrokeLifecycle) {
-            try setup.renderer.appendStroke(
-                token: token,
-                sample: predictionEstimatedActualMoved(
-                    x: 30,
-                    timestamp: 0.04,
-                    index: 93
-                )
-            )
-        }
-        #expect(
-            await predictionMutationSnapshot(setup.renderer) == before
-        )
-        try setup.renderer.cancelStroke(token: token)
-    }
-
 
     @Test
     @MainActor
@@ -1416,7 +938,6 @@ struct PredictionOverlayTests {
             await setup.renderer.offMainTransientSnapshotForTesting()
                 .predictedDabs.contains { $0.attributes.isPredicted }
         )
-        #expect(setup.renderer.predictionOverlay.snapshot.provenance != nil)
 
         try setup.renderer.finishStrokeTransient(
             token: token,
@@ -1434,7 +955,6 @@ struct PredictionOverlayTests {
             !$0.attributes.isPredicted
         })
         #expect(actorState.predictedSamples.isEmpty)
-        #expect(setup.renderer.predictionOverlay.snapshot.provenance == nil)
         #expect(setup.renderer.activeStroke?.isFinishedTransiently == true)
         try setup.renderer.cancelStroke(token: token)
     }
@@ -1446,14 +966,10 @@ private struct PredictionRendererSetup {
     let compiler: BrushCompiler
 
     func compileNativeInk() async throws -> CompiledBrush {
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("builtin.native-ink"),
+        let definition = try stageCMetalTestProgram(
+            id: "test.prediction-overlay-append-only",
             replayMode: .appendOnly
-        )
-        let definition = try LegacyBrushRecipeAdapter.definition(
-            from: recipe,
-            displayName: "Prediction Overlay"
-        )
+        ).definition
         return try await compiler.compileAndActivate(
             package: BrushPackage(
                 manifest: BrushPackageManifest(resources: []),
@@ -1466,15 +982,11 @@ private struct PredictionRendererSetup {
     func compileReplayTail(
         limits: BrushReplayLimits = BrushRecipePolicy.replayTailLimits
     ) async throws -> CompiledBrush {
-        let recipe = try BrushRecipe(
-            id: BrushRecipeID("brush.prediction-overlay-replay-tail"),
+        let definition = try stageCMetalTestProgram(
+            id: "test.prediction-overlay-replay-tail",
             replayMode: .replayTail,
             replayLimits: limits
-        )
-        let definition = try LegacyBrushRecipeAdapter.definition(
-            from: recipe,
-            displayName: "Prediction Overlay Replay Tail"
-        )
+        ).definition
         return try await compiler.compileAndActivate(
             package: BrushPackage(
                 manifest: BrushPackageManifest(resources: []),
@@ -1489,10 +1001,8 @@ private struct PredictionMutationSnapshot: Equatable {
     let receiptPending: Bool
     let runtimeInputProvenance: StrokeRuntimeInputProvenanceCounts?
     let eventDiagnostics: RendererEventDispatcher.Diagnostics
-    let coordinator: StrokeRenderSnapshot?
     let scheduler: StrokeFrameSchedulerSnapshot
     let transient: StrokeTransientPreparationSnapshot
-    let overlay: PredictionOverlaySnapshot
     let activeToken: RendererOperationToken?
     let isFinishedTransiently: Bool?
 }
@@ -1508,11 +1018,8 @@ private func predictionMutationSnapshot(
         runtimeInputProvenance:
             renderer.strokeRuntimeSnapshot?.inputProvenance,
         eventDiagnostics: renderer.rendererEventDiagnosticsForTesting,
-        coordinator:
-            renderer.compatibilityInkCoordinatorSnapshotForTesting,
         scheduler: scheduler,
         transient: transient,
-        overlay: renderer.predictionOverlay.snapshot,
         activeToken: renderer.activeStroke?.token,
         isFinishedTransiently:
             renderer.activeStroke?.isFinishedTransiently
@@ -1525,14 +1032,15 @@ private func drainPredictionActor(
 ) async throws {
     for _ in 0..<20_000 {
         try renderer.drainCompletedInteractiveOperations()
-        if renderer.hasPendingOffMainSurfaceLeaseForTesting {
-            _ = try renderer.completeNextPendingInteractiveFrame()
-            continue
+        if renderer.strokePreparationIsQuiescentForAllocationHarness {
+            return
         }
-        if let mailbox = renderer.offMainPreparationMailboxSnapshotForTesting,
-           mailbox.isQuiescent,
-           !renderer.hasSubmittedOffMainSurfaceLeaseForTesting
-        {
+        _ = try await renderer.renderCurrentPaintFrameForHarness(
+            width: renderer.pixelSize.width,
+            height: renderer.pixelSize.height,
+            includeTransient: true
+        )
+        if renderer.strokePreparationIsQuiescentForAllocationHarness {
             return
         }
         await Task.yield()

@@ -6,7 +6,7 @@ import Testing
 struct DepositionContractsTests {
     @Test
     func abiVersionIsPinned() {
-        #expect(DepositionABI.version == 1)
+        #expect(DepositionABI.version == 2)
     }
 
     @Test

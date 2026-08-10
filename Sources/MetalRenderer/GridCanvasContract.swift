@@ -1,3 +1,4 @@
+import Metal
 import PatternEngine
 
 public struct TilingCanvasConfiguration: Equatable, Sendable {
@@ -132,7 +133,23 @@ public enum GridCanvasContract {
     public static let dabSpacing: Float = 2.5
     public static let zoomRange: ClosedRange<Float> = 0.25...8
     public static let paperBGRA = SIMD4<UInt8>(241, 244, 242, 255)
+    public static let paperLinearPremultiplied =
+        DocumentColorPipeline.importEncodedPremultipliedBGRA8(
+            EncodedPremultipliedBGRA8(
+                blue: paperBGRA.x,
+                green: paperBGRA.y,
+                red: paperBGRA.z,
+                alpha: paperBGRA.w
+            )
+        )
+    public static let paperClearColor = MTLClearColor(
+        red: Double(paperLinearPremultiplied.red),
+        green: Double(paperLinearPremultiplied.green),
+        blue: Double(paperLinearPremultiplied.blue),
+        alpha: Double(paperLinearPremultiplied.alpha)
+    )
     public static let instanceCapacity = 4_096
     public static let pendingCapacity = instanceCapacity * 3
     public static let inFlightBufferCount = 3
+    static let maximumStrokeTileReferenceCount = instanceCapacity * 64
 }

@@ -50,6 +50,48 @@ struct SparseTileSamplingPipelineKey: Hashable, Sendable {
     let outputPixelFormatRawValue: UInt
     let sampleCount: Int
     let abiVersion: UInt16
+    let outputMappingKind: SparseTileSamplingOutputMappingKind
+
+    init(
+        backend: SparseTileSamplingBackend,
+        outputPixelFormatRawValue: UInt,
+        sampleCount: Int,
+        abiVersion: UInt16,
+        outputMappingKind: SparseTileSamplingOutputMappingKind = .affine
+    ) {
+        self.backend = backend
+        self.outputPixelFormatRawValue = outputPixelFormatRawValue
+        self.sampleCount = sampleCount
+        self.abiVersion = abiVersion
+        self.outputMappingKind = outputMappingKind
+    }
+}
+
+enum SparseTileSamplingOutputContract: Equatable, Sendable {
+    case workingLinearPremultiplied
+    case displayOpaqueSRGB
+    case interchangeEncodedPremultiplied
+
+    static func derive(pixelFormatRawValue: UInt) throws -> Self {
+        if pixelFormatRawValue
+            == DocumentColorPipeline.workingPixelFormat.rawValue
+        {
+            return .workingLinearPremultiplied
+        }
+        if pixelFormatRawValue
+            == DocumentColorPipeline.displayPixelFormat.rawValue
+        {
+            return .displayOpaqueSRGB
+        }
+        if pixelFormatRawValue
+            == DocumentColorPipeline.interchangePixelFormat.rawValue
+        {
+            return .interchangeEncodedPremultiplied
+        }
+        throw SparseTileSamplingPipelineError.invalidPixelFormat(
+            pixelFormatRawValue
+        )
+    }
 }
 
 enum SparseTileSamplingPipelineError: Error, Equatable, Sendable {
@@ -73,23 +115,49 @@ enum SparseTileSamplingPipelineError: Error, Equatable, Sendable {
     case pipelineCreationFailed(String)
     case argumentEncoderUnavailable
     case bufferCreationFailed(String)
+    case proportionalBufferCreationFailed(label: String, requiredBytes: Int)
     case injectedFailure(String)
     case alreadyConsumed
 }
 
+final class SparseTileSamplingPreparedAbandonmentFailureInjector:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var remainingFailures: Int
+
+    init(failures: Int) {
+        precondition(failures >= 0)
+        remainingFailures = failures
+    }
+
+    fileprivate func failIfRequested() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard remainingFailures > 0 else { return }
+        remainingFailures -= 1
+        throw SparseTileSamplingPipelineError.injectedFailure(
+            "preparedAbandonment"
+        )
+    }
+}
+
 final class SparseTileSamplingPipelineBinding: @unchecked Sendable {
     let key: SparseTileSamplingPipelineKey
+    let outputContract: SparseTileSamplingOutputContract
     let state: any MTLRenderPipelineState
     fileprivate let deviceRegistryID: UInt64
     private let fragmentFunction: any MTLFunction
 
     fileprivate init(
         key: SparseTileSamplingPipelineKey,
+        outputContract: SparseTileSamplingOutputContract,
         state: any MTLRenderPipelineState,
         fragmentFunction: any MTLFunction,
         deviceRegistryID: UInt64
     ) {
         self.key = key
+        self.outputContract = outputContract
         self.state = state
         self.fragmentFunction = fragmentFunction
         self.deviceRegistryID = deviceRegistryID
@@ -118,11 +186,12 @@ enum SparseTileSamplingPipeline {
                 key.abiVersion
             )
         }
+        let outputContract = try SparseTileSamplingOutputContract.derive(
+            pixelFormatRawValue: key.outputPixelFormatRawValue
+        )
         guard let outputPixelFormat = MTLPixelFormat(
             rawValue: key.outputPixelFormatRawValue
-        ), outputPixelFormat == .rgba16Float
-                || outputPixelFormat == .bgra8Unorm_srgb
-        else {
+        ) else {
             throw SparseTileSamplingPipelineError.invalidPixelFormat(
                 key.outputPixelFormatRawValue
             )
@@ -148,10 +217,48 @@ enum SparseTileSamplingPipeline {
                 "patternSparseSamplingVertex"
             )
         }
-        let fragmentName = switch key.backend {
-        case .tier2ArgumentBuffer:
+        let fragmentName = switch (
+            key.outputMappingKind,
+            outputContract,
+            key.backend
+        ) {
+        case (
+            .finiteRadial, .workingLinearPremultiplied,
+            .tier2ArgumentBuffer
+        ):
+            "patternSparseRadialSamplingWorkingTier2Fragment"
+        case (
+            .finiteRadial, .workingLinearPremultiplied,
+            .directFallback
+        ):
+            "patternSparseRadialSamplingWorkingFallbackFragment"
+        case (.finiteRadial, .displayOpaqueSRGB, .tier2ArgumentBuffer):
+            "patternSparseRadialSamplingDisplayTier2Fragment"
+        case (.finiteRadial, .displayOpaqueSRGB, .directFallback):
+            "patternSparseRadialSamplingDisplayFallbackFragment"
+        case (
+            .finiteRadial, .interchangeEncodedPremultiplied,
+            .tier2ArgumentBuffer
+        ):
+            "patternSparseRadialSamplingInterchangeTier2Fragment"
+        case (
+            .finiteRadial, .interchangeEncodedPremultiplied,
+            .directFallback
+        ):
+            "patternSparseRadialSamplingInterchangeFallbackFragment"
+        case (
+            .affine, .interchangeEncodedPremultiplied,
+            .tier2ArgumentBuffer
+        ):
+            "patternSparseSamplingInterchangeTier2Fragment"
+        case (
+            .affine, .interchangeEncodedPremultiplied,
+            .directFallback
+        ):
+            "patternSparseSamplingInterchangeFallbackFragment"
+        case (.affine, _, .tier2ArgumentBuffer):
             "patternSparseSamplingTier2Fragment"
-        case .directFallback:
+        case (.affine, _, .directFallback):
             "patternSparseSamplingFallbackFragment"
         }
         guard let fragment = library.makeFunction(name: fragmentName) else {
@@ -170,7 +277,7 @@ enum SparseTileSamplingPipeline {
             )
         }
         attachment.pixelFormat = outputPixelFormat
-        if attachment.pixelFormat == .bgra8Unorm_srgb {
+        if outputContract == .displayOpaqueSRGB {
             // The drawable is cleared opaque by its owner. Premultiplied
             // source-over therefore preserves that opaque boundary while the
             // sRGB attachment performs the sole linear-to-encoded conversion.
@@ -185,6 +292,7 @@ enum SparseTileSamplingPipeline {
         do {
             return SparseTileSamplingPipelineBinding(
                 key: key,
+                outputContract: outputContract,
                 state: try device.makeRenderPipelineState(
                     descriptor: descriptor
                 ),
@@ -254,9 +362,42 @@ struct SparseTileSamplingGPUCacheSnapshot: Equatable, Sendable {
     let uploadRing: SparseTileSamplingUploadRingSnapshot?
 }
 
+/// Read-only identities for auditing one exact prepared sparse submission.
+/// They expose no Metal resource or lifetime authority.
+struct SparseTileSamplingPreparedResourceIdentity:
+    Hashable, @unchecked Sendable
+{
+    let preparedSubmission: ObjectIdentifier
+    let gpuPlanContent: ObjectIdentifier
+    let uploadRing: ObjectIdentifier
+    let uploadLease: ObjectIdentifier
+}
+
+/// Authentication minted only by P4 after every retained frame resource has
+/// been returned. Higher layers cannot manufacture an early terminal event.
+struct SparseTileSamplingResourceReturnReceipt: Hashable, Sendable {
+    let identity: UUID
+    init() { identity = UUID() }
+}
+
+/// Unauthenticated command-terminal observation. Unlike the exact resource
+/// return receipt, this record always fires once after the mailbox has either
+/// returned the plan or retained it for retryable cleanup.
+enum SparseTileSamplingTerminalKind: Equatable, Sendable {
+    case command(succeeded: Bool)
+    case abandoned
+}
+
+struct SparseTileSamplingTerminalRecord: Equatable, Sendable {
+    let kind: SparseTileSamplingTerminalKind
+    let resourcesReturned: Bool
+}
+
 private final class SparseTileSamplingUploadLease: @unchecked Sendable {
     let buffer: any MTLBuffer
     let uniformsOffset: Int
+    let gridFrameOffset: Int
+    let radialFrameOffset: Int
     let materialOffset: Int
     private let ring: SparseTileSamplingUploadRing
     private let slot: Int
@@ -267,6 +408,8 @@ private final class SparseTileSamplingUploadLease: @unchecked Sendable {
     init(
         buffer: any MTLBuffer,
         uniformsOffset: Int,
+        gridFrameOffset: Int,
+        radialFrameOffset: Int,
         materialOffset: Int,
         ring: SparseTileSamplingUploadRing,
         slot: Int,
@@ -274,6 +417,8 @@ private final class SparseTileSamplingUploadLease: @unchecked Sendable {
     ) {
         self.buffer = buffer
         self.uniformsOffset = uniformsOffset
+        self.gridFrameOffset = gridFrameOffset
+        self.radialFrameOffset = radialFrameOffset
         self.materialOffset = materialOffset
         self.ring = ring
         self.slot = slot
@@ -296,6 +441,8 @@ private final class SparseTileSamplingUploadLease: @unchecked Sendable {
 
 private final class SparseTileSamplingUploadRing: @unchecked Sendable {
     private static let slotStride = 512
+    private static let gridFrameOffsetInSlot = 64
+    private static let radialFrameOffsetInSlot = 160
     private static let materialOffsetInSlot = 256
 
     private let buffer: any MTLBuffer
@@ -333,7 +480,11 @@ private final class SparseTileSamplingUploadRing: @unchecked Sendable {
 
     func acquire(
         uniforms: PatternSparseSamplingUniforms,
-        material: PatternCompositeUniforms
+        material: PatternCompositeUniforms,
+        radialFrames: (
+            grid: PatternGridFrameUniforms,
+            radial: PatternRadialFrameUniforms
+        )? = nil
     ) throws -> SparseTileSamplingUploadLease {
         lock.lock()
         guard let slot = active.firstIndex(of: false) else {
@@ -356,6 +507,16 @@ private final class SparseTileSamplingUploadRing: @unchecked Sendable {
         buffer.contents().advanced(by: base)
             .assumingMemoryBound(to: PatternSparseSamplingUniforms.self)
             .pointee = uniforms
+        if let radialFrames {
+            buffer.contents().advanced(
+                by: base + Self.gridFrameOffsetInSlot
+            ).assumingMemoryBound(to: PatternGridFrameUniforms.self)
+                .pointee = radialFrames.grid
+            buffer.contents().advanced(
+                by: base + Self.radialFrameOffsetInSlot
+            ).assumingMemoryBound(to: PatternRadialFrameUniforms.self)
+                .pointee = radialFrames.radial
+        }
         buffer.contents().advanced(by: base + Self.materialOffsetInSlot)
             .assumingMemoryBound(to: PatternCompositeUniforms.self)
             .pointee = material
@@ -363,6 +524,8 @@ private final class SparseTileSamplingUploadRing: @unchecked Sendable {
         return SparseTileSamplingUploadLease(
             buffer: buffer,
             uniformsOffset: base,
+            gridFrameOffset: base + Self.gridFrameOffsetInSlot,
+            radialFrameOffset: base + Self.radialFrameOffsetInSlot,
             materialOffset: base + Self.materialOffsetInSlot,
             ring: self,
             slot: slot,
@@ -411,12 +574,18 @@ struct SparseTileSamplingCompletionSnapshot: Equatable, Sendable {
 }
 
 final class SparseTileSamplingCompletionMailbox: @unchecked Sendable {
+    private struct PendingPlanCompletion {
+        let plan: SparseTileSamplingGPUPlanLease
+        let receipt: SparseTileSamplingResourceReturnReceipt
+        let observer: (@Sendable (SparseTileSamplingResourceReturnReceipt) -> Void)?
+    }
+
     private let lock = NSLock()
     private var terminalCommandCount: UInt64 = 0
     private var commandFailureCount: UInt64 = 0
     private var planCompletionFailureCount: UInt64 = 0
     private var nextPendingID: UInt64 = 0
-    private var pending: [UInt64: SparseTileSamplingGPUPlanLease] = [:]
+    private var pending: [UInt64: PendingPlanCompletion] = [:]
     private var pendingConsumers: [
         UInt64: SparseTileSamplingPlanConsumerHandle
     ] = [:]
@@ -425,11 +594,30 @@ final class SparseTileSamplingCompletionMailbox: @unchecked Sendable {
     fileprivate func recordTerminal(
         commandBuffer: any MTLCommandBuffer,
         plan: SparseTileSamplingGPUPlanLease,
-        upload: SparseTileSamplingUploadLease
+        upload: SparseTileSamplingUploadLease,
+        afterResourcesReturned: (@Sendable (
+            SparseTileSamplingResourceReturnReceipt,
+            Bool
+        ) -> Void)? = nil,
+        afterTerminalRecorded: (@Sendable (
+            SparseTileSamplingTerminalRecord
+        ) -> Void)? = nil
     ) {
         upload.complete()
         let commandFailed = commandBuffer.status != .completed
             || commandBuffer.error != nil
+        let commandSucceeded = !commandFailed
+        let receipt = SparseTileSamplingResourceReturnReceipt()
+        let terminalObserver: (@Sendable (
+            SparseTileSamplingResourceReturnReceipt
+        ) -> Void)?
+        if let afterResourcesReturned {
+            terminalObserver = { receipt in
+                afterResourcesReturned(receipt, commandSucceeded)
+            }
+        } else {
+            terminalObserver = nil
+        }
         let completionError: (any Error)?
         do {
             try plan.completeFromTerminalOwner()
@@ -438,6 +626,7 @@ final class SparseTileSamplingCompletionMailbox: @unchecked Sendable {
             completionError = error
         }
 
+        var notifyNow = false
         lock.lock()
         terminalCommandCount &+= 1
         if commandFailed {
@@ -449,27 +638,58 @@ final class SparseTileSamplingCompletionMailbox: @unchecked Sendable {
             planCompletionFailureCount &+= 1
             if nextPendingID < UInt64.max {
                 nextPendingID += 1
-                pending[nextPendingID] = plan
+                pending[nextPendingID] = PendingPlanCompletion(
+                    plan: plan,
+                    receipt: receipt,
+                    observer: terminalObserver
+                )
+            } else {
+                preconditionFailure("Sparse completion identity exhausted")
             }
             lastFailure = String(describing: completionError)
+        } else {
+            notifyNow = true
         }
         lock.unlock()
+        afterTerminalRecorded?(SparseTileSamplingTerminalRecord(
+            kind: .command(succeeded: commandSucceeded),
+            resourcesReturned: completionError == nil
+        ))
+        if notifyNow {
+            afterResourcesReturned?(receipt, commandSucceeded)
+        }
     }
 
     fileprivate func recordPreparedAbandonmentFailure(
         _ plan: SparseTileSamplingGPUPlanLease,
-        error: any Error
+        error: any Error,
+        receipt: SparseTileSamplingResourceReturnReceipt =
+            SparseTileSamplingResourceReturnReceipt(),
+        afterResourcesReturned: (@Sendable (
+            SparseTileSamplingResourceReturnReceipt
+        ) -> Void)? = nil,
+        afterTerminalRecorded: (@Sendable (
+            SparseTileSamplingTerminalRecord
+        ) -> Void)? = nil
     ) {
         lock.lock()
         planCompletionFailureCount &+= 1
         if nextPendingID < UInt64.max {
             nextPendingID += 1
-            pending[nextPendingID] = plan
+            pending[nextPendingID] = PendingPlanCompletion(
+                plan: plan,
+                receipt: receipt,
+                observer: afterResourcesReturned
+            )
         } else {
             preconditionFailure("Sparse completion identity exhausted")
         }
         lastFailure = String(describing: error)
         lock.unlock()
+        afterTerminalRecorded?(SparseTileSamplingTerminalRecord(
+            kind: .abandoned,
+            resourcesReturned: false
+        ))
     }
 
     fileprivate func recordConsumerCompletionFailure(
@@ -497,10 +717,12 @@ final class SparseTileSamplingCompletionMailbox: @unchecked Sendable {
         let consumerCandidates = pendingConsumers.sorted { $0.key < $1.key }
         lock.unlock()
         var completed: [UInt64] = []
-        for (identity, plan) in candidates {
+        var notifications: [PendingPlanCompletion] = []
+        for (identity, pendingCompletion) in candidates {
             do {
-                try plan.completeFromMailbox()
+                try pendingCompletion.plan.completeFromMailbox()
                 completed.append(identity)
+                notifications.append(pendingCompletion)
             } catch {
                 lock.lock()
                 lastFailure = String(describing: error)
@@ -525,6 +747,9 @@ final class SparseTileSamplingCompletionMailbox: @unchecked Sendable {
         }
         let remaining = pending.count + pendingConsumers.count
         lock.unlock()
+        for notification in notifications {
+            notification.observer?(notification.receipt)
+        }
         return remaining
     }
 
@@ -584,6 +809,7 @@ private final class SparseTileSamplingGPUPlanContent: @unchecked Sendable {
     let bindingCount: Int
     let layerCount: Int
     let addressing: SparseTileAddressing
+    let outputMapping: SparseTileSamplingOutputMapping
     let outputToSourceTransform: SparseTileOutputToSourceTransform
     let shaderSourceOrigin: SIMD2<Float>
     let uploadRing: SparseTileSamplingUploadRing
@@ -604,6 +830,7 @@ private final class SparseTileSamplingGPUPlanContent: @unchecked Sendable {
         bindingCount: Int,
         layerCount: Int,
         addressing: SparseTileAddressing,
+        outputMapping: SparseTileSamplingOutputMapping,
         outputToSourceTransform: SparseTileOutputToSourceTransform,
         shaderSourceOrigin: SIMD2<Float>,
         uploadRing: SparseTileSamplingUploadRing,
@@ -623,6 +850,7 @@ private final class SparseTileSamplingGPUPlanContent: @unchecked Sendable {
         self.bindingCount = bindingCount
         self.layerCount = layerCount
         self.addressing = addressing
+        self.outputMapping = outputMapping
         self.outputToSourceTransform = outputToSourceTransform
         self.shaderSourceOrigin = shaderSourceOrigin
         self.uploadRing = uploadRing
@@ -649,16 +877,22 @@ final class SparseTileSamplingGPUPlanLease: @unchecked Sendable {
 
     fileprivate let content: SparseTileSamplingGPUPlanContent
     private let consumer: SparseTileSamplingPlanConsumerHandle
+    private let preparedAbandonmentFailureInjector:
+        SparseTileSamplingPreparedAbandonmentFailureInjector?
     private let lock = NSLock()
     private var completionInProgress = false
     private var ownership = Ownership.available
 
     fileprivate init(
         content: SparseTileSamplingGPUPlanContent,
-        consumer: SparseTileSamplingPlanConsumerHandle
+        consumer: SparseTileSamplingPlanConsumerHandle,
+        preparedAbandonmentFailureInjector:
+            SparseTileSamplingPreparedAbandonmentFailureInjector?
     ) {
         self.content = content
         self.consumer = consumer
+        self.preparedAbandonmentFailureInjector =
+            preparedAbandonmentFailureInjector
     }
 
     var backend: SparseTileSamplingBackend { content.pipeline.key.backend }
@@ -718,6 +952,7 @@ final class SparseTileSamplingGPUPlanLease: @unchecked Sendable {
     }
 
     fileprivate func completePreparedAbandonment() throws {
+        try preparedAbandonmentFailureInjector?.failIfRequested()
         try completeConsumer(authority: .preparedAbandonment)
     }
 
@@ -726,6 +961,12 @@ final class SparseTileSamplingGPUPlanLease: @unchecked Sendable {
     }
 
     fileprivate func completeFromMailbox() throws {
+        lock.lock()
+        let isPreparedAbandonment = ownership == .prepared
+        lock.unlock()
+        if isPreparedAbandonment {
+            try preparedAbandonmentFailureInjector?.failIfRequested()
+        }
         try completeConsumer(authority: .mailbox)
     }
 
@@ -821,6 +1062,8 @@ actor SparseTileSamplingGPUPlanCache {
     private let buildObserver: @Sendable (Bool) -> Void
     private let workspaceAllocationObserver:
         @Sendable (SparseTileSamplingWorkspaceAllocation) -> Void
+    private let preparedAbandonmentFailureInjector:
+        SparseTileSamplingPreparedAbandonmentFailureInjector?
     private var prepared: [SparseTileSamplingGPUPlanKey: CachedPlan] = [:]
     private var cachedPlanMetalBufferBytes = 0
     private var accessClock: UInt64 = 0
@@ -836,12 +1079,16 @@ actor SparseTileSamplingGPUPlanCache {
         buildObserver: @escaping @Sendable (Bool) -> Void = { _ in },
         workspaceAllocationObserver: @escaping @Sendable (
             SparseTileSamplingWorkspaceAllocation
-        ) -> Void = { _ in }
+        ) -> Void = { _ in },
+        preparedAbandonmentFailureInjector:
+            SparseTileSamplingPreparedAbandonmentFailureInjector? = nil
     ) {
         self.device = device
         self.limits = limits
         self.buildObserver = buildObserver
         self.workspaceAllocationObserver = workspaceAllocationObserver
+        self.preparedAbandonmentFailureInjector =
+            preparedAbandonmentFailureInjector
     }
 
     func acquire(
@@ -871,7 +1118,9 @@ actor SparseTileSamplingGPUPlanCache {
             }
             return SparseTileSamplingGPUPlanLease(
                 content: content,
-                consumer: consumer
+                consumer: consumer,
+                preparedAbandonmentFailureInjector:
+                    preparedAbandonmentFailureInjector
             )
         } catch {
             do {
@@ -952,6 +1201,9 @@ actor SparseTileSamplingGPUPlanCache {
         buildObserver(Thread.isMainThread)
         let content = plan.content
         guard pipeline.deviceRegistryID == device.registryID else {
+            throw SparseTileSamplingPipelineError.stalePlan
+        }
+        guard pipeline.key.outputMappingKind == content.outputMapping.kind else {
             throw SparseTileSamplingPipelineError.stalePlan
         }
         guard content.key.orderedLayers.count == 1 else {
@@ -1143,7 +1395,8 @@ actor SparseTileSamplingGPUPlanCache {
         let entriesBuffer = try makeBuffer(
             entries,
             label: "Sparse Page Entries",
-            allocationTally: &allocationTally
+            allocationTally: &allocationTally,
+            failureIsProportional: true
         )
         let argumentBuffer: (any MTLBuffer)?
         let draws: [SparseTileSamplingDraw]
@@ -1216,7 +1469,8 @@ actor SparseTileSamplingGPUPlanCache {
                     remapBuffer: try makeBuffer(
                         remap,
                         label: "Sparse Fallback Binding Remap",
-                        allocationTally: &allocationTally
+                        allocationTally: &allocationTally,
+                        failureIsProportional: true
                     ),
                     textures: textures
                 ))
@@ -1252,6 +1506,7 @@ actor SparseTileSamplingGPUPlanCache {
             bindingCount: bindingCount,
             layerCount: 1,
             addressing: content.addressing,
+            outputMapping: content.outputMapping,
             outputToSourceTransform: content.outputToSourceTransform,
             shaderSourceOrigin: content.shaderSourceOrigin,
             uploadRing: uploadRing,
@@ -1477,7 +1732,8 @@ actor SparseTileSamplingGPUPlanCache {
     private func makeBuffer<T>(
         _ values: [T],
         label: String,
-        allocationTally: inout BuildAllocationTally
+        allocationTally: inout BuildAllocationTally,
+        failureIsProportional: Bool = false
     ) throws -> any MTLBuffer {
         let byteCount = try checkedMultiply(
             max(values.count, 1),
@@ -1505,6 +1761,13 @@ actor SparseTileSamplingGPUPlanCache {
             }
         }
         guard let buffer else {
+            if failureIsProportional {
+                throw SparseTileSamplingPipelineError
+                    .proportionalBufferCreationFailed(
+                        label: label,
+                        requiredBytes: byteCount
+                    )
+            }
             throw SparseTileSamplingPipelineError.bufferCreationFailed(label)
         }
         allocationTally.record(bytes: buffer.length)
@@ -1540,15 +1803,61 @@ actor SparseTileSamplingGPUPlanCache {
 }
 
 struct SparseTileSamplingEncodeParameters: Equatable, Sendable {
-    let outputToSourceTransform: SparseTileOutputToSourceTransform
+    let outputMapping: SparseTileSamplingOutputMapping
     let compositeMode: UInt32
     let liveVisible: Bool
     let strokeOpacity: Float
     let accumulationLimit: Float
     let eraserStrength: Float
+    let showGridLines: Bool
+    let showCanvasBoundary: Bool
+
+    var outputToSourceTransform: SparseTileOutputToSourceTransform {
+        outputMapping.affineTransform ?? .identity
+    }
+
+    init(
+        outputToSourceTransform: SparseTileOutputToSourceTransform,
+        compositeMode: UInt32,
+        liveVisible: Bool,
+        strokeOpacity: Float,
+        accumulationLimit: Float,
+        eraserStrength: Float,
+        showGridLines: Bool = false,
+        showCanvasBoundary: Bool = false
+    ) {
+        outputMapping = .affine(outputToSourceTransform)
+        self.compositeMode = compositeMode
+        self.liveVisible = liveVisible
+        self.strokeOpacity = strokeOpacity
+        self.accumulationLimit = accumulationLimit
+        self.eraserStrength = eraserStrength
+        self.showGridLines = showGridLines
+        self.showCanvasBoundary = showCanvasBoundary
+    }
+
+    init(
+        outputMapping: SparseTileSamplingOutputMapping,
+        compositeMode: UInt32,
+        liveVisible: Bool,
+        strokeOpacity: Float,
+        accumulationLimit: Float,
+        eraserStrength: Float,
+        showGridLines: Bool = false,
+        showCanvasBoundary: Bool = false
+    ) {
+        self.outputMapping = outputMapping
+        self.compositeMode = compositeMode
+        self.liveVisible = liveVisible
+        self.strokeOpacity = strokeOpacity
+        self.accumulationLimit = accumulationLimit
+        self.eraserStrength = eraserStrength
+        self.showGridLines = showGridLines
+        self.showCanvasBoundary = showCanvasBoundary
+    }
 
     static let identity = SparseTileSamplingEncodeParameters(
-        outputToSourceTransform: .identity,
+        outputMapping: .affine(.identity),
         compositeMode: PatternCompositeWireDraw,
         liveVisible: true,
         strokeOpacity: 1,
@@ -1557,7 +1866,109 @@ struct SparseTileSamplingEncodeParameters: Equatable, Sendable {
     )
 }
 
-final class SparseTileSamplingPreparedEncode: @unchecked Sendable {
+private enum SparseTileSamplingRadialFrames {
+    static func make(
+        mapping: SparseTileFiniteRadialOutputMapping,
+        outputOrigin: SIMD2<Int>,
+        outputSize: SIMD2<Int>,
+        parameters: SparseTileSamplingEncodeParameters
+    ) throws -> (
+        grid: PatternGridFrameUniforms,
+        radial: PatternRadialFrameUniforms
+    ) {
+        let drawableSize = SIMD2(
+            Float(outputSize.x),
+            Float(outputSize.y)
+        )
+        let origin = SIMD2(
+            Float(outputOrigin.x),
+            Float(outputOrigin.y)
+        )
+        guard drawableSize.x.isFinite,
+              drawableSize.y.isFinite,
+              origin.x.isFinite,
+              origin.y.isFinite,
+              Int(exactly: drawableSize.x) == outputSize.x,
+              Int(exactly: drawableSize.y) == outputSize.y,
+              Int(exactly: origin.x) == outputOrigin.x,
+              Int(exactly: origin.y) == outputOrigin.y
+        else {
+            throw SparseTileSamplingPipelineError.byteOverflow
+        }
+        let transform = mapping.outputToWorldTransform
+        let worldCenter = origin + transform.sourceOffset
+            + drawableSize * 0.5 * transform.sourceStep
+        let zoom = 1 / transform.sourceStep.x
+        guard worldCenter.x.isFinite, worldCenter.y.isFinite,
+              zoom.isFinite, zoom > 0
+        else {
+            throw SparseTileSamplingPipelineError.byteOverflow
+        }
+        let strategy = mapping.strategy
+        let compiled = strategy.compiledSymmetry
+        let radial = mapping.radial
+        let configuration = radial.configuration!
+        let layout = mapping.layout
+        guard compiled.displayProgram.family == .radial,
+              let displayedSectorCount = UInt32(
+                exactly: radial.displayedSectorCount
+              ),
+              let atlasColumns = UInt32(exactly: layout.atlasColumns)
+        else {
+            throw SparseTileSamplingPipelineError.malformedDescriptor(0)
+        }
+        let grid = PatternGridFrameUniforms(
+            drawableSize: drawableSize,
+            worldCenter: worldCenter,
+            tileSize: strategy.tileSize.simd,
+            zoom: zoom,
+            gridLineWidth: 1,
+            showGridLines: parameters.showGridLines ? 1 : 0,
+            liveVisible: parameters.liveVisible ? 1 : 0,
+            tilingKind: compiled.displayProgram.presetWireID,
+            diagnosticMode: PatternDiagnosticWireNone,
+            compositeMode: parameters.compositeMode,
+            symmetryFamily: compiled.displayProgram.family.rawValue,
+            repeatSize: SIMD2(
+                Float(strategy.canvasSize.width),
+                Float(strategy.canvasSize.height)
+            ),
+            latticeXAxis: SIMD2(1, 0),
+            latticeYAxis: SIMD2(0, 1),
+            latticeTranslation: .zero,
+            guideKind: compiled.displayProgram.guideKind.rawValue,
+            showCanvasBoundary: parameters.showCanvasBoundary ? 1 : 0
+        )
+        let radialFrame = PatternRadialFrameUniforms(
+            canvasSize: SIMD2(
+                Float(radial.canvasSize.width),
+                Float(radial.canvasSize.height)
+            ),
+            center: configuration.center.simd,
+            referenceAngle: configuration.referenceAngleRadians,
+            sectorAngle: radial.sectorAngleRadians,
+            displayedSectorCount: displayedSectorCount,
+            dihedral: configuration.kind == .rotation ? 0 : 1,
+            pageOrigin: SIMD2(
+                Float(layout.pageOrigin.x),
+                Float(layout.pageOrigin.y)
+            ),
+            pageTableSize: SIMD2(
+                Float(layout.pageTableSize.width),
+                Float(layout.pageTableSize.height)
+            ),
+            atlasColumns: atlasColumns,
+            pageSide: UInt32(RadialSectorLayout.pageSide),
+            atlasSize: SIMD2(
+                Float(layout.atlasPixelSize.width),
+                Float(layout.atlasPixelSize.height)
+            )
+        )
+        return (grid, radialFrame)
+    }
+}
+
+final class SparseTileSamplingPreparedSubmission: @unchecked Sendable {
     private enum State {
         case available
         case encoding
@@ -1566,25 +1977,39 @@ final class SparseTileSamplingPreparedEncode: @unchecked Sendable {
 
     private let plan: SparseTileSamplingGPUPlanLease
     private let upload: SparseTileSamplingUploadLease
-    private let target: any MTLTexture
     private let lock = NSLock()
     private var state = State.available
 
     fileprivate init(
         plan: SparseTileSamplingGPUPlanLease,
-        upload: SparseTileSamplingUploadLease,
-        target: any MTLTexture
+        upload: SparseTileSamplingUploadLease
     ) {
         self.plan = plan
         self.upload = upload
-        self.target = target
+    }
+
+    var resourceIdentity: SparseTileSamplingPreparedResourceIdentity {
+        SparseTileSamplingPreparedResourceIdentity(
+            preparedSubmission: ObjectIdentifier(self),
+            gpuPlanContent: plan.immutableContentIdentity,
+            uploadRing: ObjectIdentifier(plan.content.uploadRing),
+            uploadLease: ObjectIdentifier(upload)
+        )
     }
 
     func encode(
+        target: any MTLTexture,
         commandBuffer: any MTLCommandBuffer,
         renderPassDescriptor: MTLRenderPassDescriptor,
         allocationProbe: StrokePreparationAllocationProbe? = nil,
-        completionAllocationProbe: StrokePreparationAllocationProbe? = nil
+        completionAllocationProbe: StrokePreparationAllocationProbe? = nil,
+        afterResourcesReturned: (@Sendable (
+            SparseTileSamplingResourceReturnReceipt,
+            Bool
+        ) -> Void)? = nil,
+        afterTerminalRecorded: (@Sendable (
+            SparseTileSamplingTerminalRecord
+        ) -> Void)? = nil
     ) throws {
         allocationProbe?.arm()
         defer {
@@ -1592,7 +2017,7 @@ final class SparseTileSamplingPreparedEncode: @unchecked Sendable {
                 .sparseSamplingMetalSubmission
             )
         }
-        try validateRenderPassDescriptor(renderPassDescriptor)
+        try validateTarget(target, renderPassDescriptor: renderPassDescriptor)
         lock.lock()
         guard state == .available else {
             lock.unlock()
@@ -1632,6 +2057,18 @@ final class SparseTileSamplingPreparedEncode: @unchecked Sendable {
             offset: upload.materialOffset,
             index: Int(PatternBufferIndexBrushMaterial)
         )
+        if content.outputMapping.kind == .finiteRadial {
+            renderEncoder.setFragmentBuffer(
+                upload.buffer,
+                offset: upload.gridFrameOffset,
+                index: Int(PatternBufferIndexGridFrameUniforms)
+            )
+            renderEncoder.setFragmentBuffer(
+                upload.buffer,
+                offset: upload.radialFrameOffset,
+                index: Int(PatternBufferIndexRadialFrameUniforms)
+            )
+        }
         renderEncoder.setFragmentBuffer(
             upload.buffer,
             offset: upload.uniformsOffset,
@@ -1702,7 +2139,9 @@ final class SparseTileSamplingPreparedEncode: @unchecked Sendable {
             mailbox.recordTerminal(
                 commandBuffer: commandBuffer,
                 plan: retainedPlan,
-                upload: retainedUpload
+                upload: retainedUpload,
+                afterResourcesReturned: afterResourcesReturned,
+                afterTerminalRecorded: afterTerminalRecorded
             )
         }
         renderEncoder.endEncoding()
@@ -1711,74 +2150,10 @@ final class SparseTileSamplingPreparedEncode: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func validateRenderPassDescriptor(
-        _ descriptor: MTLRenderPassDescriptor
+    func validateTarget(
+        _ target: any MTLTexture,
+        renderPassDescriptor descriptor: MTLRenderPassDescriptor
     ) throws {
-        guard let attachment = descriptor.colorAttachments[0],
-              let attachmentTexture = attachment.texture,
-              ObjectIdentifier(attachmentTexture as AnyObject)
-                == ObjectIdentifier(target as AnyObject),
-              attachment.level == 0,
-              attachment.slice == 0,
-              attachment.depthPlane == 0,
-              attachment.resolveTexture == nil
-        else {
-            throw SparseTileSamplingPipelineError.invalidTarget(
-                "render pass does not own the preflight target"
-            )
-        }
-    }
-
-    deinit {
-        lock.lock()
-        let wasAbandoned = state != .submitted
-        state = .submitted
-        lock.unlock()
-        guard wasAbandoned else { return }
-        upload.complete()
-        do {
-            try plan.completePreparedAbandonment()
-        } catch {
-            plan.content.completionMailbox.recordPreparedAbandonmentFailure(
-                plan,
-                error: error
-            )
-        }
-    }
-}
-
-enum SparseTileSamplingEncoder {
-    static func preflightEncode(
-        target: any MTLTexture,
-        plan: SparseTileSamplingGPUPlanLease,
-        parameters: SparseTileSamplingEncodeParameters,
-        injectedFailure: SparseTileSamplingFailurePhase? = nil,
-        allocationProbe: StrokePreparationAllocationProbe? = nil
-    ) throws -> SparseTileSamplingPreparedEncode {
-        allocationProbe?.arm()
-        defer {
-            allocationProbe?.disarmAndRecord(.sparseSamplingPreflight)
-        }
-        try plan.beginPreflight()
-        do {
-            return try makePreparedEncode(
-                target: target,
-                plan: plan,
-                parameters: parameters,
-                injectedFailure: injectedFailure
-            )
-        } catch {
-            plan.cancelPreflight()
-            throw error
-        }
-    }
-
-    private static func makePreparedEncode(
-        target: any MTLTexture,
-        plan: SparseTileSamplingGPUPlanLease,
-        parameters: SparseTileSamplingEncodeParameters,
-        injectedFailure: SparseTileSamplingFailurePhase?
-    ) throws -> SparseTileSamplingPreparedEncode {
         let content = plan.content
         guard target.device.registryID == content.pipeline.deviceRegistryID else {
             throw SparseTileSamplingPipelineError.stalePlan
@@ -1805,8 +2180,130 @@ enum SparseTileSamplingEncoder {
         }) else {
             throw SparseTileSamplingPipelineError.targetSourceAlias
         }
-        guard parameters.outputToSourceTransform
-                == content.outputToSourceTransform
+        guard let attachment = descriptor.colorAttachments[0],
+              let attachmentTexture = attachment.texture,
+              ObjectIdentifier(attachmentTexture as AnyObject)
+                == ObjectIdentifier(target as AnyObject),
+              attachment.level == 0,
+              attachment.slice == 0,
+              attachment.depthPlane == 0,
+              attachment.resolveTexture == nil
+        else {
+            throw SparseTileSamplingPipelineError.invalidTarget(
+                "render pass attachment"
+            )
+        }
+        if content.pipeline.outputContract == .displayOpaqueSRGB {
+            let clear = attachment.clearColor
+            guard attachment.loadAction == .clear,
+                  attachment.storeAction == .store,
+                  clear.red.isFinite,
+                  clear.green.isFinite,
+                  clear.blue.isFinite,
+                  clear.alpha.isFinite,
+                  (0...1).contains(clear.red),
+                  (0...1).contains(clear.green),
+                  (0...1).contains(clear.blue),
+                  clear.alpha == 1
+            else {
+                throw SparseTileSamplingPipelineError.invalidTarget(
+                    "render pass opaque display contract"
+                )
+            }
+        } else if content.pipeline.outputContract
+            == .interchangeEncodedPremultiplied
+        {
+            let loadIsValid = attachment.loadAction == .dontCare
+                || attachment.loadAction == .clear
+            let clear = attachment.clearColor
+            let clearIsValid = attachment.loadAction != .clear || (
+                clear.red.isFinite
+                    && clear.green.isFinite
+                    && clear.blue.isFinite
+                    && clear.alpha.isFinite
+                    && (0...1).contains(clear.red)
+                    && (0...1).contains(clear.green)
+                    && (0...1).contains(clear.blue)
+                    && (0...1).contains(clear.alpha)
+            )
+            guard loadIsValid,
+                  attachment.storeAction == .store,
+                  clearIsValid
+            else {
+                throw SparseTileSamplingPipelineError.invalidTarget(
+                    "render pass transparent interchange contract"
+                )
+            }
+        }
+    }
+
+    func abandon(
+        afterResourcesReturned: (@Sendable (
+            SparseTileSamplingResourceReturnReceipt
+        ) -> Void)? = nil,
+        afterTerminalRecorded: (@Sendable (
+            SparseTileSamplingTerminalRecord
+        ) -> Void)? = nil
+    ) {
+        lock.lock()
+        let wasAbandoned = state != .submitted
+        state = .submitted
+        lock.unlock()
+        guard wasAbandoned else { return }
+        upload.complete()
+        let receipt = SparseTileSamplingResourceReturnReceipt()
+        do {
+            try plan.completePreparedAbandonment()
+            afterTerminalRecorded?(SparseTileSamplingTerminalRecord(
+                kind: .abandoned,
+                resourcesReturned: true
+            ))
+            afterResourcesReturned?(receipt)
+        } catch {
+            plan.content.completionMailbox.recordPreparedAbandonmentFailure(
+                plan,
+                error: error,
+                receipt: receipt,
+                afterResourcesReturned: afterResourcesReturned,
+                afterTerminalRecorded: afterTerminalRecorded
+            )
+        }
+    }
+
+    deinit { abandon() }
+}
+
+enum SparseTileSamplingEncoder {
+    static func prepareSubmission(
+        plan: SparseTileSamplingGPUPlanLease,
+        parameters: SparseTileSamplingEncodeParameters,
+        injectedFailure: SparseTileSamplingFailurePhase? = nil,
+        allocationProbe: StrokePreparationAllocationProbe? = nil
+    ) throws -> SparseTileSamplingPreparedSubmission {
+        allocationProbe?.arm()
+        defer {
+            allocationProbe?.disarmAndRecord(.sparseSamplingPreflight)
+        }
+        try plan.beginPreflight()
+        do {
+            return try makePreparedSubmission(
+                plan: plan,
+                parameters: parameters,
+                injectedFailure: injectedFailure
+            )
+        } catch {
+            plan.cancelPreflight()
+            throw error
+        }
+    }
+
+    private static func makePreparedSubmission(
+        plan: SparseTileSamplingGPUPlanLease,
+        parameters: SparseTileSamplingEncodeParameters,
+        injectedFailure: SparseTileSamplingFailurePhase?
+    ) throws -> SparseTileSamplingPreparedSubmission {
+        let content = plan.content
+        guard parameters.outputMapping == content.outputMapping
         else { throw SparseTileSamplingPipelineError.incompleteHalo }
         guard parameters.strokeOpacity.isFinite,
               parameters.accumulationLimit.isFinite,
@@ -1818,8 +2315,8 @@ enum SparseTileSamplingEncoder {
                 "non-finite sampling parameters"
             )
         }
-        guard target.width <= Int(UInt32.max),
-              target.height <= Int(UInt32.max),
+        guard content.outputSize.x <= Int(UInt32.max),
+              content.outputSize.y <= Int(UInt32.max),
               content.descriptorCount <= Int(UInt32.max),
               content.bindingCount <= Int(UInt32.max),
               content.layerCount <= Int(UInt32.max)
@@ -1842,7 +2339,10 @@ enum SparseTileSamplingEncoder {
             addressing = (PatternSparseAddressingRadial, SIMD2(0, 0))
         }
         var uniforms = PatternSparseSamplingUniforms()
-        uniforms.outputSize = SIMD2(UInt32(target.width), UInt32(target.height))
+        uniforms.outputSize = SIMD2(
+            UInt32(content.outputSize.x),
+            UInt32(content.outputSize.y)
+        )
         uniforms.sourceOrigin = content.shaderSourceOrigin
         uniforms.sourceStep = content.outputToSourceTransform.sourceStep
         uniforms.descriptorCount = UInt32(content.descriptorCount)
@@ -1870,14 +2370,29 @@ enum SparseTileSamplingEncoder {
                 SparseTileSamplingFailurePhase.preflightMaterialBuffer.rawValue
             )
         }
+        let radialFrames: (
+            grid: PatternGridFrameUniforms,
+            radial: PatternRadialFrameUniforms
+        )?
+        switch content.outputMapping {
+        case .affine:
+            radialFrames = nil
+        case let .finiteRadial(mapping):
+            radialFrames = try SparseTileSamplingRadialFrames.make(
+                mapping: mapping,
+                outputOrigin: content.outputOrigin,
+                outputSize: content.outputSize,
+                parameters: parameters
+            )
+        }
         let upload = try content.uploadRing.acquire(
             uniforms: uniforms,
-            material: material
+            material: material,
+            radialFrames: radialFrames
         )
-        let prepared = SparseTileSamplingPreparedEncode(
+        let prepared = SparseTileSamplingPreparedSubmission(
             plan: plan,
-            upload: upload,
-            target: target
+            upload: upload
         )
         plan.finishPreflight()
         return prepared
@@ -2272,21 +2787,18 @@ package enum SparseTileSamplingAllocationProbeHarness {
             cache: cache,
             sourcePlan: sourcePlan,
             pipeline: pipeline,
-            target: targets.0,
             probe: probe
         )
         let second = try await prepare(
             cache: cache,
             sourcePlan: sourcePlan,
             pipeline: pipeline,
-            target: targets.1,
             probe: probe
         )
         let third = try await prepare(
             cache: cache,
             sourcePlan: sourcePlan,
             pipeline: pipeline,
-            target: targets.2,
             probe: probe
         )
         guard first.plan.uploadRingSnapshot.activeSlotCount == 3 else {
@@ -2322,19 +2834,17 @@ package enum SparseTileSamplingAllocationProbeHarness {
         cache: SparseTileSamplingGPUPlanCache,
         sourcePlan: SparseTileSamplingPlanLease,
         pipeline: SparseTileSamplingPipelineBinding,
-        target: any MTLTexture,
         probe: StrokePreparationAllocationProbe?
     ) async throws -> (
         plan: SparseTileSamplingGPUPlanLease,
-        prepared: SparseTileSamplingPreparedEncode
+        prepared: SparseTileSamplingPreparedSubmission
     ) {
         let plan = try await cache.acquire(
             plan: sourcePlan,
             pipeline: pipeline,
             allocationProbe: probe
         )
-        let prepared = try SparseTileSamplingEncoder.preflightEncode(
-            target: target,
+        let prepared = try SparseTileSamplingEncoder.prepareSubmission(
             plan: plan,
             parameters: .identity,
             allocationProbe: probe
@@ -2344,7 +2854,7 @@ package enum SparseTileSamplingAllocationProbeHarness {
 
     @MainActor
     private static func submit(
-        prepared: SparseTileSamplingPreparedEncode,
+        prepared: SparseTileSamplingPreparedSubmission,
         target: any MTLTexture,
         queue: any MTLCommandQueue,
         probe: StrokePreparationAllocationProbe?
@@ -2365,6 +2875,7 @@ package enum SparseTileSamplingAllocationProbeHarness {
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
         let waiter = SparseTileSamplingCommandWaiter()
         try prepared.encode(
+            target: target,
             commandBuffer: commandBuffer,
             renderPassDescriptor: pass,
             completionAllocationProbe: probe
@@ -2432,13 +2943,14 @@ package enum SparseTileSamplingAllocationProbeHarness {
         try surface.returnLease(lease)
         let roleKey = SparseTileRoleContentKey(
             role: .canonical,
+            surfaceIdentity: surface.surfaceID,
             contentRevision: surface.revision.rawValue,
             bindingChunkRevision: 1
         )
         let source = try SparseTileSourceRequest(
             contentKey: roleKey,
             addressing: .finite(size),
-            surface: surface,
+            provider: surface.makeExactReferenceProvider(),
             changedCoordinates: coordinates,
             disposition: .fullSnapshot
         )
@@ -2453,7 +2965,13 @@ package enum SparseTileSamplingAllocationProbeHarness {
         )
         let plan = try SparseTileSamplingPlanCache().acquire(
             key: planKey,
-            sources: [source],
+            sourceBatch: try SparseTileOwnedSourceBatch.capturingSelection(
+                sources: [source],
+                key: planKey,
+                outputRegion: try SparseTileOutputRegion(
+                    minX: 0, minY: 0, maxX: size.width, maxY: 1
+                )
+            ),
             outputRegion: try SparseTileOutputRegion(
                 minX: 0, minY: 0, maxX: size.width, maxY: 1
             ),

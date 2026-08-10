@@ -79,17 +79,8 @@ public struct BrushLabRendererDepositionDiagnosticSnapshot:
     }
 }
 
-struct HarnessDiagnosticRenderedFrame {
-    let canonical: any MTLTexture
-    let screen: any MTLTexture
-    let displayValidationCanonical: any MTLTexture
-    let displayValidationScreen: any MTLTexture
-    let gridLinesScreen: any MTLTexture
-    let fragments: [CellFragment]
-    let metrics: GPUFrameMetrics
-}
-
 public struct HarnessLiveFlushResult {
+    public let frame: RenderedFrame
     public let metrics: GPUFrameMetrics
     public let emittedHighWater: UInt64
     public let encodedIdentityRanges: [Range<UInt64>]
@@ -100,20 +91,6 @@ public struct HarnessLiveFlushResult {
 public struct HarnessReplayRetentionSnapshot: Equatable, Sendable {
     public let retainedDabCount: Int
     public let visibleProjectedInstanceCount: Int
-}
-
-struct HarnessTilingMutationSnapshot: Equatable {
-    let canonicalFront: ObjectIdentifier
-    let canonicalScratch: ObjectIdentifier
-    let liveTexture: ObjectIdentifier
-    let revision: RasterRevision
-    let liveVisible: Bool
-    let liveDirty: Bool
-    let needsLiveClear: Bool
-    let counters: GridStructuralCounters
-    let pendingInstanceCount: Int
-    let bakedHighWater: UInt64
-    let emittedHighWater: UInt64
 }
 
 struct StrokeRuntimeReplayEpochTracker {
@@ -210,8 +187,11 @@ private struct OffMainStrokeTraceInactivityWatchdog {
 @MainActor
 public final class GridRenderer: NSObject, MTKViewDelegate {
     public let device: any MTLDevice
-    public var pixelSize: PixelSize { resources.canvasPixelSize }
-    var storagePixelSize: PixelSize { resources.pixelSize }
+    public let historyByteBudget: Int
+    private var documentPixelSizeState: PixelSize
+    private var storagePixelSizeState: PixelSize
+    public var pixelSize: PixelSize { documentPixelSizeState }
+    var storagePixelSize: PixelSize { storagePixelSizeState }
     public private(set) var lastError: MetalRendererError?
     public var onError: ((MetalRendererError) -> Void)?
     public var onIdleStateChange: ((Bool) -> Void)?
@@ -248,7 +228,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public private(set) var interactiveGridVisibility = false
     public var isIdle: Bool {
         activeStroke == nil
-            && pendingRasterOperation == nil
             && strokeWorkspaceState == .available
     }
     public var strokeRuntimeSnapshot: StrokeRuntimeTelemetrySnapshot? {
@@ -303,10 +282,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         pendingStrokeRuntimeFrameIDs.removeAll(keepingCapacity: true)
     }
     public var hasActiveStroke: Bool {
-        guard pendingRasterOperation == nil else { return false }
         guard let activeStroke else { return false }
         return !activeStroke.commitRequested
-            && activeStroke.pendingRevisions == nil
     }
     public var tiling: TilingKind { tilingStrategy.kind }
     public var brushLabDiagnosticSnapshot:
@@ -331,7 +308,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             predictedDabCount: brushLabPredictedDabCount,
             replayCount: transientStrokeBuffer?.replayEpoch ?? 0,
             dirtyRegionCount: liveDirty + replayDirty,
-            rasterRevisionResidentBytes: revisionStore.residentBytes,
+            rasterRevisionResidentBytes: paintRevisionResidentBytesState,
             builtInTextureCount:
                 (activeDrawBrush?.textures.count ?? 0)
                     + (activeEraserBrush?.textures.count ?? 0),
@@ -389,54 +366,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public internal(set) var radialGeometryLocked = false
     public internal(set) var documentDomainLocked = false
 
-    struct FrameUpload {
-        enum Layer: Equatable {
-            case settled
-            case replay
-        }
-
-        let lease: DabInstanceBufferPool.Lease
-        let identityRange: Range<UInt64>
-        let throughExclusive: UInt64
-        let count: Int
-        let layer: Layer
-        let replayEpoch: UInt64
-    }
-
-    struct PendingLiveEncoding {
-        let uploads: [FrameUpload]
-        let encodedReplayClear: Bool
-    }
-
-    struct NativeDepositionFrameEncoding {
-        let authoritativeCount: Int
-        let predictedCount: Int
-        let logicalDabCount: Int
-        let uploadBufferCount: Int
-        let encodedLiveClear: Bool
-        let encodedReplayClear: Bool
-        let replayEpoch: UInt64
-        let encodedAuthoritativeIdentityRange: Range<UInt64>?
-        let preparedWorkerFrame: PreparedWorkerFrameIdentity?
-
-        var instanceCount: Int {
-            authoritativeCount + predictedCount
-        }
-    }
-
-    struct PreparedWorkerFrameIdentity: Equatable, Sendable {
-        let generation: UInt64
-        let token: UInt64
-        let recordCount: Int
-    }
-
-    struct PendingPreparedSurfaceFrame: Sendable {
-        let identity: PreparedWorkerFrameIdentity
-        let lease: StrokePreparedSurfaceLease
-        let logicalDabCount: Int
-        let replayEpoch: UInt64
-    }
-
     struct ActiveStrokeExecution {
         let token: RendererOperationToken
         let style: StrokeRenderStyle
@@ -446,20 +375,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         /// Interactive compiled-brush strokes always leave this nil.
         var frozenHarnessScheduler: FrameScheduler?
         var commitRequested: Bool
-        var commitRetainedByteLimit: Int?
-        var pendingRevisions: PendingRasterRevisionPair?
-        var pendingTokenBearingFrameCount: Int
         var isFinishedTransiently: Bool
-
-        var isCommitSubmitted: Bool {
-            !commitRequested && pendingRevisions != nil
-        }
-    }
-
-    struct EncodedRasterCommit {
-        let token: RendererOperationToken
-        let revisions: PendingRasterRevisionPair
-        let captureTokens: [RasterRevisionOperationToken]
     }
 
     struct ProjectedDabRecord {
@@ -580,104 +496,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    struct RasterResources {
-        let canvasPixelSize: PixelSize
-        let pixelSize: PixelSize
-        let tileSize: PatternSize
-        let canonical: CanonicalRaster
-        let liveTile: PersistentLiveTile
-        let predictionOverlay: PredictionOverlay
-    }
-
-    struct PreparedRasterReplacement {
-        let resources: RasterResources
-        let strokeMetalSurfaceResources: StrokeMetalSurfaceResources
-        let strategy: TilingStrategy
-        let radialPageTableTexture: any MTLTexture
-    }
-
-    struct PendingClearOperation {
-        let submissionID: UInt64
-        let token: RendererOperationToken
-        let revisions: PendingRasterRevisionPair
-        let captureTokens: [RasterRevisionOperationToken]
-        let commandBuffer: any MTLCommandBuffer
-    }
-
-    struct PendingRestoreOperation {
-        let submissionID: UInt64
-        let token: RendererOperationToken
-        let revision: RasterRevisionReference
-        let restoreToken: RasterRevisionOperationToken
-        let commandBuffer: any MTLCommandBuffer
-    }
-
-    struct PendingResizeOperation {
-        let submissionID: UInt64
-        let token: RendererOperationToken
-        let replacement: PreparedRasterReplacement
-        let revisions: PendingRasterRevisionPair
-        let captureTokens: [RasterRevisionOperationToken]
-        let commandBuffer: any MTLCommandBuffer
-    }
-
-    struct PendingResizeRestoreOperation {
-        let submissionID: UInt64
-        let token: RendererOperationToken
-        let replacement: PreparedRasterReplacement
-        let restoreToken: RasterRevisionOperationToken
-        let commandBuffer: any MTLCommandBuffer
-    }
-
-    enum PendingRasterOperation {
-        case clear(PendingClearOperation)
-        case restore(PendingRestoreOperation)
-        case resize(PendingResizeOperation)
-        case resizeRestore(PendingResizeRestoreOperation)
-
-        var submissionID: UInt64 {
-            switch self {
-            case let .clear(operation):
-                operation.submissionID
-            case let .restore(operation):
-                operation.submissionID
-            case let .resize(operation):
-                operation.submissionID
-            case let .resizeRestore(operation):
-                operation.submissionID
-            }
-        }
-
-        var token: RendererOperationToken {
-            switch self {
-            case let .clear(operation):
-                operation.token
-            case let .restore(operation):
-                operation.token
-            case let .resize(operation):
-                operation.token
-            case let .resizeRestore(operation):
-                operation.token
-            }
-        }
-
-        var commandBuffer: any MTLCommandBuffer {
-            switch self {
-            case let .clear(operation):
-                operation.commandBuffer
-            case let .restore(operation):
-                operation.commandBuffer
-            case let .resize(operation):
-                operation.commandBuffer
-            case let .resizeRestore(operation):
-                operation.commandBuffer
-            }
-        }
-    }
-
     let commandQueue: any MTLCommandQueue
     let library: any MTLLibrary
-    private let pipelines: GridPipelineLibrary
+    private let paintContext: DocumentPaintRenderContext
+    private var paintOutputGeometryRevision: UInt64 = 0
+    private var paintDisplayPreparationSequence: UInt64 = 0
+    private var paintDisplayPreparationTask: Task<Void, Never>?
+    private var preparedPaintDisplaySubmission:
+        DocumentPaintPreparedDisplaySubmission?
+    private var activePaintTransientSource:
+        DocumentPaintTransientDisplaySource?
+    private var paintCommitTask: Task<Void, Never>?
+    private var paintLifecycleTask: Task<Void, Never>?
+    private var paintCommandError: MetalRendererError?
+    private var paintRevisionResidentBytesState = 0
+    private var pendingPaintHarnessDabCount = 0
+    private var pendingPaintHarnessInstanceCount = 0
+    private weak var paintDisplayView: MTKView?
     var depositionFrameBudget: DepositionFrameBudget
     private(set) var activeDrawBrush: CompiledBrush?
     private(set) var activeEraserBrush: CompiledBrush?
@@ -702,24 +537,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     )
     var scheduledAuthoritativeIdentityHighWater: UInt64 = 0
     private var encodedAuthoritativeIdentityHighWater: UInt64 = 0
-    var lastEncodedAuthoritativeIdentityRange: Range<UInt64>?
-    let revisionStore: RasterRevisionStore
-    let completionMailbox = GridRenderCompletionMailbox()
-    private let rasterCompletionMailbox = RendererRasterCompletionMailbox()
-    var resources: RasterResources
-    private var strokeMetalSurfaceResources: StrokeMetalSurfaceResources
-    private var strokeMetalSurfaceInstallationCount: UInt64 = 1
-    private var radialPageTableTexture: (any MTLTexture)?
-    var tileSize: PatternSize { resources.tileSize }
-    var canonical: CanonicalRaster { resources.canonical }
-    var liveTile: PersistentLiveTile { resources.liveTile }
-    var predictionOverlay: PredictionOverlay {
-        resources.predictionOverlay
+    private var lastEncodedAuthoritativeIdentityRange: Range<UInt64>?
+    private var activeStrokeTileSurfaceResources: StrokeTileSurfaceResources?
+    var tileSize: PatternSize {
+        PatternSize(
+            width: Float(storagePixelSizeState.width),
+            height: Float(storagePixelSizeState.height)
+        )
     }
-    var replayTile: ReplayLiveTile { predictionOverlay.surface }
     var tilingStrategy: TilingStrategy
     var activeStroke: ActiveStrokeExecution?
-    var pendingRasterOperation: PendingRasterOperation?
     var strokeGenerator: BrushStrokeGenerator?
     private var strokePreparationBridge: StrokePreparationBridge?
     private var warmedStrokePreparationBridge: StrokePreparationBridge
@@ -743,24 +570,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private var predictionSubmissionLastShedSampleCount = 0
     private var predictionSubmissionLastValidatedSampleCount = 0
     private var predictionSubmissionLastTelemetrySampleCount = 0
-    private var pendingPreparedWorkerFrame: PreparedWorkerFrameIdentity?
-    private var pendingPreparedSurfaceFrame: PendingPreparedSurfaceFrame?
-    private var submittedPreparedWorkerFrame:
-        PreparedWorkerFrameIdentity?
-    private var currentPreparedSurfaceLease:
-        StrokePreparedSurfaceLease?
-    private var offMainLiveVisible = false
-    private var offMainReplayVisible = false
     var compositeLiveIsVisible: Bool {
-        if strokePreparationBridge != nil {
-            return offMainLiveVisible || offMainReplayVisible
-        }
-        return liveTile.isVisible || replayTile.isVisible
+        activePaintTransientSource != nil
     }
-    private var pendingPreparationCommitRetainedBytes: Int?
     private var lastOffMainCoordinatorSnapshot: StrokeRenderSnapshot?
-    private var lastOffMainPredictionProvenanceBoundary:
-        PredictionProvenanceBoundary?
+    private var lastOffMainReplayRetention = StrokePreparedReplayRetention(
+        retainedDabCount: 0,
+        visibleProjectedInstanceCount: 0
+    )
     private var lastOffMainEncodingRanOnMainThread: Bool?
     private var lastOffMainSurfaceSnapshot:
         StrokePrivateSurfaceEncoderSnapshot?
@@ -775,18 +592,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         capacity: TransientStrokeBufferContract
             .visibleEpochProjectedInstanceCapacity
     )
-    private var completedUploadRanges: [
-        (
-            signal: UInt64,
-            throughExclusive: UInt64,
-            layer: FrameUpload.Layer,
-            replayEpoch: UInt64
-        )
-    ] = []
-    var needsLiveClear = true
-    var needsReplayClear = true
     private var nextHarnessTokenRawValue: UInt64 = 1
-    private var nextRasterSubmissionID: UInt64 = 1
     private var nextReplayEpoch: UInt64 = 1
     private var knownStrokeTotalDistance: Float?
 
@@ -795,7 +601,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public convenience init(
         device: any MTLDevice,
         drawableSize: PatternSize,
-        configuration: TilingCanvasConfiguration
+        configuration: TilingCanvasConfiguration,
+        initialLayerID: UUID = UUID(),
+        historyByteBudget: Int = 200 * 1_024 * 1_024
     ) throws {
         guard let library = device.makeDefaultLibrary() else {
             throw MetalRendererError.defaultLibraryUnavailable
@@ -804,7 +612,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             device: device,
             library: library,
             drawableSize: drawableSize,
-            configuration: configuration
+            configuration: configuration,
+            initialLayerID: initialLayerID,
+            historyByteBudget: historyByteBudget
         )
     }
 
@@ -812,9 +622,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         device: any MTLDevice,
         library: any MTLLibrary,
         drawableSize: PatternSize,
-        configuration: TilingCanvasConfiguration
+        configuration: TilingCanvasConfiguration,
+        initialLayerID: UUID = UUID(),
+        historyByteBudget: Int = 200 * 1_024 * 1_024
     ) throws {
         ShaderABI.preconditionValid()
+        guard historyByteBudget > 0 else {
+            throw MetalRendererError.rasterRevisionStorageLimitExceeded
+        }
         guard let commandQueue = device.makeCommandQueue() else {
             throw MetalRendererError.commandQueueUnavailable
         }
@@ -833,17 +648,29 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             width: Int(strategy.tileSize.width),
             height: Int(strategy.tileSize.height)
         )
-        let resources = try Self.makeRasterResources(
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: configuration.pixelSize,
+            storagePixelSize: storageSize,
+            radialLayout: strategy.compiledSymmetry.domain.finite?.radial.layout
+        )
+        let paintContext = try DocumentPaintRenderContext(
             device: device,
-            canvasPixelSize: configuration.pixelSize,
-            pixelSize: storageSize,
-            initialRevision: RasterRevision(rawValue: 0),
-            forceAllocationFailure: false
+            commandQueue: commandQueue,
+            library: library,
+            geometry: geometry,
+            initialLayerID: initialLayerID,
+            byteBudget: 512 * 1_024 * 1_024,
+            snapshotPayloadLiabilityByteBudget: 512 * 1_024 * 1_024,
+            transferByteCapacity: 64 * 1_024 * 1_024,
+            maximumRevisionBytes: historyByteBudget
         )
         self.device = device
+        self.historyByteBudget = historyByteBudget
         self.commandQueue = commandQueue
         self.library = library
-        self.resources = resources
+        self.paintContext = paintContext
+        documentPixelSizeState = configuration.pixelSize
+        storagePixelSizeState = storageSize
         let frameBudget = try DepositionFrameBudget(
             cpuPreparationNanoseconds: 1_500_000,
             maximumAuthoritativeInstances:
@@ -860,14 +687,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 GridCanvasContract.inFlightBufferCount
         )
         depositionFrameBudget = frameBudget
-        strokeMetalSurfaceResources = try StrokeMetalSurfaceResources(
-            device: device,
-            pixelSize: storageSize,
-            maximumRecordCount: max(
-                frameBudget.maximumAuthoritativeInstances,
-                frameBudget.maximumPredictedInstances
-            )
-        )
+        activeStrokeTileSurfaceResources = nil
         warmedStrokePreparationBridge = StrokePreparationBridge(
             budget: frameBudget,
             targetFramesPerSecond: 120
@@ -875,28 +695,19 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         activeDrawBrush = nil
         activeEraserBrush = nil
         tilingStrategy = strategy
-        radialPageTableTexture = try Self.makeRadialPageTableTexture(
-            device: device,
-            compiled: strategy.compiledSymmetry
-        )
-        pipelines = try GridPipelineLibrary(device: device, library: library)
         instancePool = try DabInstanceBufferPool(device: device)
         depositionEncoder = nil
-        revisionStore = RasterRevisionStore(device: device)
         viewport = ViewportTransform(
             drawableSize: drawableSize,
             worldCenter: WorldPoint(
-                x: Float(resources.canvasPixelSize.width) * 0.5,
-                y: Float(resources.canvasPixelSize.height) * 0.5
+                x: Float(configuration.pixelSize.width) * 0.5,
+                y: Float(configuration.pixelSize.height) * 0.5
             ),
             zoom: 1
         )
-        completedUploadRanges.reserveCapacity(
-            GridCanvasContract.inFlightBufferCount
-        )
         strokePreparationResultScratch.reserveCapacity(1)
         predictionSubmissionScratch.reserveCapacity(
-            PredictionOverlay.maximumNormalizedSampleCount
+            PredictionAdmissionLimits.maximumNormalizedSampleCount
         )
         super.init()
         depositionEncoder = DepositionEncoder(
@@ -907,10 +718,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 liveVisible: true
             )
         )
-        try clearInitialTextures()
     }
 
-    public func applyTiling(_ tiling: TilingKind) throws {
+    public func applyTiling(_ tiling: TilingKind) async throws {
         guard case .periodic = tilingStrategy.documentConfiguration else {
             throw MetalRendererError.documentDomainLocked
         }
@@ -936,12 +746,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 orientationRadians: 0
             )
         }
-        try applyPeriodicConfiguration(proposed)
+        try await applyPeriodicConfiguration(proposed)
     }
 
     public func applyPeriodicConfiguration(
         _ configuration: PeriodicSymmetryConfiguration
-    ) throws {
+    ) async throws {
         guard isIdle else {
             throw MetalRendererError.tilingChangeRequiresIdle
         }
@@ -958,16 +768,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         if case .finite = tilingStrategy.documentConfiguration {
             try requireEmptyConfigurationChangeAllowed()
-            try installEmptyStrategy(proposed)
+            try await installEmptyStrategy(proposed)
         } else {
             tilingStrategy = proposed
+            invalidatePaintDisplayPreparation()
         }
     }
 
     public func applyFiniteConfiguration(
         _ configuration: FiniteSymmetryConfiguration
-    ) throws {
-        try replaceEmptyDocumentConfiguration(
+    ) async throws {
+        try await replaceEmptyDocumentConfiguration(
             .finite(configuration),
             pixelSize: pixelSize
         )
@@ -976,32 +787,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public func replaceEmptyDocumentConfiguration(
         _ configuration: SymmetryDocumentConfiguration,
         pixelSize proposedPixelSize: PixelSize
-    ) throws {
-        try replaceEmptyDocumentConfiguration(
-            configuration,
-            pixelSize: proposedPixelSize,
-            forceStrokeSurfaceAllocationFailure: false
-        )
-    }
-
-    func replaceEmptyDocumentConfigurationForTesting(
-        _ configuration: SymmetryDocumentConfiguration,
-        pixelSize proposedPixelSize: PixelSize,
-        forceStrokeSurfaceAllocationFailure: Bool
-    ) throws {
-        try replaceEmptyDocumentConfiguration(
-            configuration,
-            pixelSize: proposedPixelSize,
-            forceStrokeSurfaceAllocationFailure:
-                forceStrokeSurfaceAllocationFailure
-        )
-    }
-
-    private func replaceEmptyDocumentConfiguration(
-        _ configuration: SymmetryDocumentConfiguration,
-        pixelSize proposedPixelSize: PixelSize,
-        forceStrokeSurfaceAllocationFailure: Bool
-    ) throws {
+    ) async throws {
         guard isIdle else {
             throw MetalRendererError.tilingChangeRequiresIdle
         }
@@ -1025,11 +811,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 )
             }
         }
-        try installEmptyStrategy(
-            proposed,
-            forceStrokeSurfaceAllocationFailure:
-                forceStrokeSurfaceAllocationFailure
-        )
+        try await installEmptyStrategy(proposed)
     }
 
     public func reconcileGeometryLock(documentIsEmpty: Bool) throws {
@@ -1041,68 +823,41 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     public func setFiniteConfiguration(
         _ configuration: FiniteSymmetryConfiguration
-    ) throws {
-        try applyFiniteConfiguration(configuration)
+    ) async throws {
+        try await applyFiniteConfiguration(configuration)
     }
 
     private func installEmptyStrategy(
-        _ proposed: TilingStrategy,
-        forceStrokeSurfaceAllocationFailure: Bool = false
-    ) throws {
+        _ proposed: TilingStrategy
+    ) async throws {
         let canvasSizeChanged = proposed.canvasSize != pixelSize
         let proposedStorageSize = PixelSize(
             width: Int(proposed.tileSize.width),
             height: Int(proposed.tileSize.height)
         )
-        let replacement = try Self.makeRasterResources(
-            device: device,
-            canvasPixelSize: proposed.canvasSize,
-            pixelSize: proposedStorageSize,
-            initialRevision: canonical.revision,
-            forceAllocationFailure: false
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: proposed.canvasSize,
+            storagePixelSize: proposedStorageSize,
+            radialLayout:
+                proposed.compiledSymmetry.domain.finite?.radial.layout
         )
-        let replacementPageTable = try Self.makeRadialPageTableTexture(
-            device: device,
-            compiled: proposed.compiledSymmetry
+        let result = try await paintContext.resize(
+            to: geometry,
+            targetRadialConfiguration:
+                proposed.compiledSymmetry.domain.finite?.radial.configuration
         )
-        if forceStrokeSurfaceAllocationFailure {
-            throw MetalRendererError.textureAllocationFailed
+        if let pair = result.historyPair {
+            try await paintContext.releaseRevisions([
+                pair.before.id,
+                pair.after.id,
+            ])
         }
-        let replacementStrokeMetalSurfaceResources =
-            try StrokeMetalSurfaceResources(
-                device: device,
-                pixelSize: proposedStorageSize,
-                maximumRecordCount: max(
-                    depositionFrameBudget.maximumAuthoritativeInstances,
-                    depositionFrameBudget.maximumPredictedInstances
-                )
-            )
-        let priorResources = resources
-        let priorStrategy = tilingStrategy
-        let priorPageTable = radialPageTableTexture
-        let priorStrokeMetalSurfaceResources =
-            strokeMetalSurfaceResources
-        let priorStrokeMetalSurfaceInstallationCount =
-            strokeMetalSurfaceInstallationCount
-        resources = replacement
-        strokeMetalSurfaceResources =
-            replacementStrokeMetalSurfaceResources
-        strokeMetalSurfaceInstallationCount &+= 1
+        await refreshPaintRevisionResidentBytes()
         tilingStrategy = proposed
-        radialPageTableTexture = replacementPageTable
-        do {
-            try clearInitialTextures()
-        } catch {
-            resources = priorResources
-            strokeMetalSurfaceResources =
-                priorStrokeMetalSurfaceResources
-            strokeMetalSurfaceInstallationCount =
-                priorStrokeMetalSurfaceInstallationCount
-            tilingStrategy = priorStrategy
-            radialPageTableTexture = priorPageTable
-            throw error
-        }
+        documentPixelSizeState = proposed.canvasSize
+        storagePixelSizeState = proposedStorageSize
         setDocumentGeometryLocked(false)
+        invalidatePaintDisplayPreparation()
         if canvasSizeChanged {
             viewport = ViewportTransform(
                 drawableSize: viewport.drawableSize,
@@ -1126,8 +881,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    public func setTiling(_ tiling: TilingKind) throws {
-        try applyTiling(tiling)
+    public func setTiling(_ tiling: TilingKind) async throws {
+        try await applyTiling(tiling)
     }
 
     public func activateDrawBrush(_ brush: CompiledBrush) throws {
@@ -1193,8 +948,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
               brush.pipelineKey == pipelineKey.brush,
               pipelineKey.abiVersion == DepositionABI.version,
               pipelineKey.colorPixelFormatRawValue
-                == GridPipelineLibrary.colorPixelFormat.rawValue,
-              pipelineKey.sampleCount == GridPipelineLibrary.sampleCount,
+                == DocumentColorPipeline.workingPixelFormat.rawValue,
+              pipelineKey.sampleCount
+                == DocumentColorPipeline.renderSampleCount,
               brush.uniformTemplate.placement == definition.placement,
               brush.uniformTemplate.coverage == definition.coverage,
               brush.uniformTemplate.color == definition.color,
@@ -1319,8 +1075,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     public func setPeriodicConfiguration(
         _ configuration: PeriodicSymmetryConfiguration
-    ) throws {
-        try applyPeriodicConfiguration(configuration)
+    ) async throws {
+        try await applyPeriodicConfiguration(configuration)
     }
 
     public func beginStroke(
@@ -1380,26 +1136,40 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             renderIdentity: style.renderIdentity,
             frozenHarnessScheduler: nil,
             commitRequested: false,
-            commitRetainedByteLimit: nil,
-            pendingRevisions: nil,
-            pendingTokenBearingFrameCount: 0,
             isFinishedTransiently: false
         )
-        let generation = rendererEventDispatcher.advanceStrokeGeneration()
-        strokeEventGeneration = generation
+        strokeEventGeneration = rendererEventDispatcher
+            .advanceStrokeGeneration()
         let runtimeBeginEvents = beginStrokeRuntime(sample)
         do {
             counters.newDabsThisEvent = 0
             let forceOffMainCommandFailure =
                 forceOffMainStrokeCommandFailureForTesting
+            let capability = try paintContext.beginStrokeSurface()
+            let generation = capability.generation
+            let tileSurfaces = try StrokeTileSurfaceResources(
+                device: device,
+                commandQueue: commandQueue,
+                capability: capability,
+                maximumRecordCount: max(
+                    depositionFrameBudget.maximumAuthoritativeInstances,
+                    depositionFrameBudget.maximumPredictedInstances
+                ),
+                maximumTileReferenceCount:
+                    GridCanvasContract.maximumStrokeTileReferenceCount,
+                pipeline: brushRenderState.resources.depositionPipeline
+            )
+            activeStrokeTileSurfaceResources = tileSurfaces
             let metalResourceDescriptor = StrokeMetalResourceDescriptor(
-                surfaces: strokeMetalSurfaceResources,
+                surfaces: tileSurfaces,
                 brush: brushRenderState,
                 frameUniforms: frameUniforms(
                     drawableSize: tileSize,
                     showGridLines: false,
                     liveVisible: true
                 ),
+                radialLayout:
+                    tilingStrategy.compiledSymmetry.domain.finite?.radial.layout,
                 forceCommandFailure: forceOffMainCommandFailure
             )
             let bridge = warmedStrokePreparationBridge
@@ -1423,10 +1193,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 ),
                 using: bridge
             )
+            startPaintLifecyclePump()
             stageStrokeRuntimeEvents(runtimeBeginEvents)
             operationSucceeded = true
         } catch {
             _ = endStrokeRuntimeIfPossible()
+            if let capability = activeStrokeTileSurfaceResources?.capability {
+                try? paintContext.cancelStrokeSurface(capability)
+            }
+            activeStrokeTileSurfaceResources = nil
             activeStroke = nil
             resetLiveState()
             throw error
@@ -1440,7 +1215,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try validateStrokeAppendSample(sample)
         if sample.kind != .predicted {
             try requireCollectingStroke(token: token)
-            try requireCurrentPredictionProvenance()
         }
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
@@ -1482,7 +1256,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         if samples.contains(where: { $0.kind != .predicted }) {
             try requireCollectingStroke(token: token)
-            try requireCurrentPredictionProvenance()
         }
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
@@ -1559,7 +1332,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         predictionSubmissionScratch.removeAll(keepingCapacity: true)
         for sample in predictedSamples.prefix(
-            PredictionOverlay.maximumNormalizedSampleCount
+            PredictionAdmissionLimits.maximumNormalizedSampleCount
         ) {
             try validateStrokeAppendSample(sample)
             guard sample.kind == .predicted else {
@@ -1569,7 +1342,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         if !authoritativeSamples.isEmpty {
             try requireCollectingStroke(token: token)
-            try requireCurrentPredictionProvenance()
         } else {
             try requireCollectingStroke(token: token)
         }
@@ -1713,8 +1485,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     public func requestStrokeCommit(
         token: RendererOperationToken,
-        sample: StrokeSample,
-        maximumRetainedBytes: Int
+        sample: StrokeSample
     ) throws {
         try validateStrokeFinishSample(sample)
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
@@ -1730,13 +1501,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         try requireCollectingStroke(token: token)
         do {
             try finishStrokeTransient(token: token, sample: sample)
-            try requestOffMainStrokeCommit(
-                maximumRetainedBytes: maximumRetainedBytes
-            )
+            try requestOffMainStrokeCommit()
             operationSucceeded = true
         } catch {
             let runtimeEndEvents = endStrokeRuntimeIfPossible()
-            discardPendingRevisionsIfPossible()
             activeStroke = nil
             resetLiveState()
             stageStrokeRuntimeEvents(runtimeEndEvents)
@@ -1751,7 +1519,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) throws {
         try validateStrokeFinishSample(sample)
         try requireCollectingStroke(token: token)
-        try requireCurrentPredictionProvenance()
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         defer {
@@ -1777,8 +1544,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     public func commitFinishedStroke(
-        token: RendererOperationToken,
-        maximumRetainedBytes: Int
+        token: RendererOperationToken
     ) throws {
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
@@ -1795,13 +1561,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
         do {
-            try requestOffMainStrokeCommit(
-                maximumRetainedBytes: maximumRetainedBytes
-            )
+            try requestOffMainStrokeCommit()
             operationSucceeded = true
         } catch {
             let runtimeEndEvents = endStrokeRuntimeIfPossible()
-            discardPendingRevisionsIfPossible()
             activeStroke = nil
             resetLiveState()
             stageStrokeRuntimeEvents(runtimeEndEvents)
@@ -1816,7 +1579,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) throws {
         try validateEstimatedStrokeUpdateSample(sample)
         try requireEditableStroke(token: token)
-        try requireCurrentPredictionProvenance()
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
         var operationSucceeded = false
         defer {
@@ -1860,505 +1622,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         operationSucceeded = true
     }
 
-    public func releaseRasterRevisions(
-        _ ids: Set<StoredRasterRevisionID>
-    ) {
-        guard !ids.isEmpty else { return }
-        revisionStore.release(ids)
-    }
-
-    public func requestClear(
-        token: RendererOperationToken,
-        maximumRetainedBytes: Int
-    ) throws {
-        try requestClear(
-            token: token,
-            maximumRetainedBytes: maximumRetainedBytes,
-            forceFailure: false
-        )
-    }
-
-    public func requestRasterRestore(
-        token: RendererOperationToken,
-        revision: RasterRevisionReference
-    ) throws {
-        try requestRasterRestore(
-            token: token,
-            revision: revision,
-            forceFailure: false
-        )
-    }
-
-    public func requestResize(
-        token: RendererOperationToken,
-        to pixelSize: PixelSize,
-        maximumRetainedBytes: Int
-    ) throws {
-        try requestResize(
-            token: token,
-            to: pixelSize,
-            maximumRetainedBytes: maximumRetainedBytes,
-            forceResourceAllocationFailure: false,
-            forceCommandFailure: false
-        )
-    }
-
-    public func requestResizeRestore(
-        token: RendererOperationToken,
-        revision: RasterRevisionReference
-    ) throws {
-        try requestResizeRestore(
-            token: token,
-            revision: revision,
-            forceCommandFailure: false
-        )
-    }
-
-    func requestResizeRestore(
-        token: RendererOperationToken,
-        revision: RasterRevisionReference,
-        forceCommandFailure: Bool
-    ) throws {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        let wasIdle = isIdle
-        defer {
-            notifyIdleStateIfChanged(from: wasIdle)
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        guard isIdle else {
-            throw MetalRendererError.commitPendingInput
-        }
-        try validateTileSize(revision.documentPixelSize)
-        guard revision.regions == fullRasterRegions(for: revision.pixelSize) else {
-            throw MetalRendererError.commandFailed(
-                "Resize restore requires a full-raster revision."
-            )
-        }
-
-        let replacementStrategy = try resizedStrategy(
-            canvasPixelSize: revision.documentPixelSize
-        )
-        let expectedStorageSize = storageSize(for: replacementStrategy)
-        guard revision.pixelSize == expectedStorageSize else {
-            throw MetalRendererError.rasterRevisionTextureSizeMismatch(
-                expectedWidth: expectedStorageSize.width,
-                expectedHeight: expectedStorageSize.height,
-                actualWidth: revision.pixelSize.width,
-                actualHeight: revision.pixelSize.height
-            )
-        }
-        let replacementResources = try Self.makeRasterResources(
-            device: device,
-            canvasPixelSize: revision.documentPixelSize,
-            pixelSize: revision.pixelSize,
-            initialRevision: canonical.revision,
-            forceAllocationFailure: false
-        )
-        let replacement = PreparedRasterReplacement(
-            resources: replacementResources,
-            strokeMetalSurfaceResources: try StrokeMetalSurfaceResources(
-                device: device,
-                pixelSize: revision.pixelSize,
-                maximumRecordCount: max(
-                    depositionFrameBudget.maximumAuthoritativeInstances,
-                    depositionFrameBudget.maximumPredictedInstances
-                )
-            ),
-            strategy: replacementStrategy,
-            radialPageTableTexture: try Self.makeRadialPageTableTexture(
-                device: device,
-                compiled: replacementStrategy.compiledSymmetry
-            )
-        )
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-
-        let restoreToken: RasterRevisionOperationToken
-        do {
-            try encodeTransparentClear(
-                of: replacement.resources.canonical.front,
-                on: commandBuffer,
-                label: "Resize Restore Front Clear"
-            )
-            try encodeTransparentClear(
-                of: replacement.resources.canonical.scratch,
-                on: commandBuffer,
-                label: "Resize Restore Scratch Clear"
-            )
-            try encodeTransparentClear(
-                of: replacement.resources.liveTile.texture,
-                on: commandBuffer,
-                label: "Resize Restore Live Clear"
-            )
-            try encodeTransparentClear(
-                of: replacement.resources.predictionOverlay.surface.texture,
-                on: commandBuffer,
-                label: "Resize Restore Replay Clear"
-            )
-            restoreToken = try revisionStore.encodeRestore(
-                revision,
-                into: replacement.resources.canonical.scratch,
-                on: commandBuffer
-            )
-        } catch {
-            throw error
-        }
-
-        let submissionID = takeRasterSubmissionID()
-        pendingRasterOperation = .resizeRestore(
-            PendingResizeRestoreOperation(
-                submissionID: submissionID,
-                token: token,
-                replacement: replacement,
-                restoreToken: restoreToken,
-                commandBuffer: commandBuffer
-            )
-        )
-        installRasterCompletionHandler(
-            on: commandBuffer,
-            submissionID: submissionID,
-            token: token,
-            forceFailure: forceCommandFailure
-        )
-        commandBuffer.commit()
-    }
-
-    func requestResize(
-        token: RendererOperationToken,
-        to newPixelSize: PixelSize,
-        maximumRetainedBytes: Int,
-        forceResourceAllocationFailure: Bool,
-        forceCommandFailure: Bool
-    ) throws {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        let wasIdle = isIdle
-        defer {
-            notifyIdleStateIfChanged(from: wasIdle)
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        guard isIdle else {
-            throw MetalRendererError.commitPendingInput
-        }
-        try validateTileSize(newPixelSize)
-        guard maximumRetainedBytes >= 0 else {
-            throw MetalRendererError.rasterRevisionStorageLimitExceeded
-        }
-
-        let replacementStrategy = try resizedStrategy(
-            canvasPixelSize: newPixelSize
-        )
-        let newStoragePixelSize = storageSize(for: replacementStrategy)
-        let beforeRegions = fullRasterRegions(for: storagePixelSize)
-        let afterRegions = fullRasterRegions(for: newStoragePixelSize)
-        let beforeBytes = try revisionStore.retainedBytes(
-            pixelSize: storagePixelSize,
-            regions: beforeRegions
-        )
-        let afterBytes = try revisionStore.retainedBytes(
-            pixelSize: newStoragePixelSize,
-            regions: afterRegions
-        )
-        let (pairBytes, overflow) = beforeBytes.addingReportingOverflow(
-            afterBytes
-        )
-        guard !overflow, pairBytes <= maximumRetainedBytes else {
-            throw MetalRendererError.rasterRevisionStorageLimitExceeded
-        }
-
-        let replacementResources = try Self.makeRasterResources(
-            device: device,
-            canvasPixelSize: newPixelSize,
-            pixelSize: newStoragePixelSize,
-            initialRevision: canonical.revision,
-            forceAllocationFailure: forceResourceAllocationFailure
-        )
-        let replacement = PreparedRasterReplacement(
-            resources: replacementResources,
-            strokeMetalSurfaceResources: try StrokeMetalSurfaceResources(
-                device: device,
-                pixelSize: newStoragePixelSize,
-                maximumRecordCount: max(
-                    depositionFrameBudget.maximumAuthoritativeInstances,
-                    depositionFrameBudget.maximumPredictedInstances
-                )
-            ),
-            strategy: replacementStrategy,
-            radialPageTableTexture: try Self.makeRadialPageTableTexture(
-                device: device,
-                compiled: replacementStrategy.compiledSymmetry
-            )
-        )
-        let revisions = try revisionStore.allocatePair(
-            beforePixelSize: storagePixelSize,
-            beforeDocumentPixelSize: pixelSize,
-            beforeRegions: beforeRegions,
-            afterPixelSize: newStoragePixelSize,
-            afterDocumentPixelSize: newPixelSize,
-            afterRegions: afterRegions
-        )
-        precondition(
-            revisions.retainedBytes == pairBytes,
-            "Raster revision preflight and allocation must agree."
-        )
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            revisionStore.discard(revisions)
-            throw MetalRendererError.commandBufferUnavailable
-        }
-
-        var captureTokens: [RasterRevisionOperationToken] = []
-        do {
-            captureTokens.append(
-                try revisionStore.encodeCapture(
-                    revisions.before,
-                    from: canonical.front,
-                    on: commandBuffer
-                )
-            )
-            try encodeTransparentClear(
-                of: replacement.resources.canonical.front,
-                on: commandBuffer,
-                label: "Resize Front Clear"
-            )
-            try encodeTransparentClear(
-                of: replacement.resources.canonical.scratch,
-                on: commandBuffer,
-                label: "Resize Scratch Clear"
-            )
-            try encodeTransparentClear(
-                of: replacement.resources.liveTile.texture,
-                on: commandBuffer,
-                label: "Resize Live Clear"
-            )
-            try encodeTransparentClear(
-                of: replacement.resources.predictionOverlay.surface.texture,
-                on: commandBuffer,
-                label: "Resize Replay Clear"
-            )
-            if tilingStrategy.compiledSymmetry.family == .radial,
-               replacementStrategy.compiledSymmetry.family == .radial,
-               tiling != .plainCanvas
-            {
-                try encodeRadialResizeCopy(
-                    from: canonical.front,
-                    sourceStrategy: tilingStrategy,
-                    sourcePageTable: radialPageTableTexture,
-                    to: replacement.resources.canonical.scratch,
-                    destinationStrategy: replacementStrategy,
-                    on: commandBuffer
-                )
-            } else {
-                try encodeResizeIntersectionCopy(
-                    from: canonical.front,
-                    oldPixelSize: storagePixelSize,
-                    to: replacement.resources.canonical.scratch,
-                    newPixelSize: newStoragePixelSize,
-                    on: commandBuffer
-                )
-            }
-            captureTokens.append(
-                try revisionStore.encodeCapture(
-                    revisions.after,
-                    from: replacement.resources.canonical.scratch,
-                    on: commandBuffer
-                )
-            )
-        } catch {
-            finalizeCaptureTokens(captureTokens, as: .cancelled)
-            revisionStore.discard(revisions)
-            throw error
-        }
-
-        let submissionID = takeRasterSubmissionID()
-        pendingRasterOperation = .resize(
-            PendingResizeOperation(
-                submissionID: submissionID,
-                token: token,
-                replacement: replacement,
-                revisions: revisions,
-                captureTokens: captureTokens,
-                commandBuffer: commandBuffer
-            )
-        )
-        installRasterCompletionHandler(
-            on: commandBuffer,
-            submissionID: submissionID,
-            token: token,
-            forceFailure: forceCommandFailure
-        )
-        commandBuffer.commit()
-    }
-
-    func requestClear(
-        token: RendererOperationToken,
-        maximumRetainedBytes: Int,
-        forceFailure: Bool
-    ) throws {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        let wasIdle = isIdle
-        defer {
-            notifyIdleStateIfChanged(from: wasIdle)
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        guard isIdle else {
-            throw MetalRendererError.commitPendingInput
-        }
-        guard maximumRetainedBytes >= 0 else {
-            throw MetalRendererError.rasterRevisionStorageLimitExceeded
-        }
-
-        let fullRegion = PixelRegionSet(
-            [
-                PixelRect(
-                    minX: 0,
-                    minY: 0,
-                    maxX: storagePixelSize.width,
-                    maxY: storagePixelSize.height
-                )!,
-            ],
-            clippedTo: storagePixelSize
-        )
-        let oneRevisionBytes = try revisionStore.retainedBytes(
-            pixelSize: storagePixelSize,
-            regions: fullRegion
-        )
-        let (pairBytes, overflow) = oneRevisionBytes.multipliedReportingOverflow(
-            by: 2
-        )
-        guard !overflow, pairBytes <= maximumRetainedBytes else {
-            throw MetalRendererError.rasterRevisionStorageLimitExceeded
-        }
-
-        let revisions = try revisionStore.allocatePair(
-            beforePixelSize: storagePixelSize,
-            beforeRegions: fullRegion,
-            afterPixelSize: storagePixelSize,
-            afterRegions: fullRegion
-        )
-        precondition(
-            revisions.retainedBytes == pairBytes,
-            "Raster revision preflight and allocation must agree."
-        )
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            revisionStore.discard(revisions)
-            throw MetalRendererError.commandBufferUnavailable
-        }
-
-        var captureTokens: [RasterRevisionOperationToken] = []
-        do {
-            captureTokens.append(
-                try revisionStore.encodeCapture(
-                    revisions.before,
-                    from: canonical.front,
-                    on: commandBuffer
-                )
-            )
-            try encodeTransparentClear(
-                of: canonical.scratch,
-                on: commandBuffer,
-                label: "Canonical Scratch Clear"
-            )
-            captureTokens.append(
-                try revisionStore.encodeCapture(
-                    revisions.after,
-                    from: canonical.scratch,
-                    on: commandBuffer
-                )
-            )
-        } catch {
-            finalizeCaptureTokens(captureTokens, as: .cancelled)
-            revisionStore.discard(revisions)
-            throw error
-        }
-
-        let submissionID = takeRasterSubmissionID()
-        pendingRasterOperation = .clear(
-            PendingClearOperation(
-                submissionID: submissionID,
-                token: token,
-                revisions: revisions,
-                captureTokens: captureTokens,
-                commandBuffer: commandBuffer
-            )
-        )
-        installRasterCompletionHandler(
-            on: commandBuffer,
-            submissionID: submissionID,
-            token: token,
-            forceFailure: forceFailure
-        )
-        commandBuffer.commit()
-    }
-
-    func requestRasterRestore(
-        token: RendererOperationToken,
-        revision: RasterRevisionReference,
-        forceFailure: Bool
-    ) throws {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        let wasIdle = isIdle
-        defer {
-            notifyIdleStateIfChanged(from: wasIdle)
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        guard isIdle else {
-            throw MetalRendererError.commitPendingInput
-        }
-        guard revision.pixelSize == storagePixelSize else {
-            throw MetalRendererError.rasterRevisionTextureSizeMismatch(
-                expectedWidth: storagePixelSize.width,
-                expectedHeight: storagePixelSize.height,
-                actualWidth: revision.pixelSize.width,
-                actualHeight: revision.pixelSize.height
-            )
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-
-        try encodeCanonicalFrontCopy(to: canonical.scratch, on: commandBuffer)
-        let restoreToken: RasterRevisionOperationToken
-        do {
-            restoreToken = try revisionStore.encodeRestore(
-                revision,
-                into: canonical.scratch,
-                on: commandBuffer
-            )
-        } catch {
-            throw error
-        }
-
-        let submissionID = takeRasterSubmissionID()
-        pendingRasterOperation = .restore(
-            PendingRestoreOperation(
-                submissionID: submissionID,
-                token: token,
-                revision: revision,
-                restoreToken: restoreToken,
-                commandBuffer: commandBuffer
-            )
-        )
-        installRasterCompletionHandler(
-            on: commandBuffer,
-            submissionID: submissionID,
-            token: token,
-            forceFailure: forceFailure
-        )
-        commandBuffer.commit()
-    }
-
     private func requireCollectingStroke(
         token: RendererOperationToken
     ) throws {
@@ -2377,111 +1640,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         guard activeStroke.token == token else {
             throw MetalRendererError.invalidRendererOperationToken
         }
-        guard !activeStroke.commitRequested,
-              activeStroke.pendingRevisions == nil
-        else {
+        guard !activeStroke.commitRequested else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
     }
 
-    private func requireCurrentPredictionProvenance() throws {
-        guard let visibleBoundary =
-            predictionOverlay.currentProvenance
-        else {
-            return
-        }
-        guard visibleBoundary
-            == lastOffMainPredictionProvenanceBoundary
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-    }
-
-    func prepareFrozenProjectionHarnessCommit(
-        maximumRetainedBytes: Int
-    ) throws {
-        try requestFrozenProjectionHarnessCommit(
-            maximumRetainedBytes: maximumRetainedBytes
-        )
-    }
-
-    private func requestFrozenProjectionHarnessCommit(
-        maximumRetainedBytes: Int
-    ) throws {
-        markBrushLabInputReceipt()
-        guard maximumRetainedBytes >= 0 else {
-            throw MetalRendererError.rasterRevisionStorageLimitExceeded
-        }
-        guard var execution = activeStroke,
-              !execution.commitRequested,
-              execution.pendingRevisions == nil
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        guard strokePreparationBridge == nil,
-              let scheduler = execution.frozenHarnessScheduler
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let replayPreparation: ReplayCommitPreparation
-        do {
-            replayPreparation = try scheduler.prepareReplayForCommit()
-        } catch let error as FrameSchedulerError {
-            throw rendererError(for: error)
-        }
-        let promotedPredictionCount = replayPreparation
-            .promotedNonPredictedInstanceCount
-        if replayPreparation.discardedPredictedInstanceCount > 0 {
-            let epoch = takeReplayEpoch()
-            predictionOverlay.discard(epoch: epoch)
-            replayStroke.beginReplacementEpoch(epoch)
-            needsReplayClear = true
-        }
-        let (scheduledHighWater, overflow) =
-            scheduledAuthoritativeIdentityHighWater.addingReportingOverflow(
-                UInt64(promotedPredictionCount)
-            )
-        guard !overflow else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                depositionFrameBudget.maximumPendingAuthoritativeInstances
-            )
-        }
-        scheduledAuthoritativeIdentityHighWater = scheduledHighWater
-        recordBrushLabScheduler(scheduler)
-        execution.commitRequested = true
-        execution.commitRetainedByteLimit = maximumRetainedBytes
-        activeStroke = execution
-    }
-
-    private func markOffMainStrokeCommitReady(
-        maximumRetainedBytes: Int
-    ) throws {
-        markBrushLabInputReceipt()
-        guard maximumRetainedBytes >= 0 else {
-            throw MetalRendererError.rasterRevisionStorageLimitExceeded
-        }
-        guard strokePreparationBridge != nil,
+    private func requestOffMainStrokeCommit() throws {
+        guard let bridge = strokePreparationBridge,
+              let generation = strokePreparationGeneration,
               var execution = activeStroke,
-              execution.frozenHarnessScheduler == nil,
-              !execution.commitRequested,
-              execution.pendingRevisions == nil
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        execution.commitRequested = true
-        execution.commitRetainedByteLimit = maximumRetainedBytes
-        activeStroke = execution
-    }
-
-    private func requestOffMainStrokeCommit(
-        maximumRetainedBytes: Int
-    ) throws {
-        guard maximumRetainedBytes >= 0 else {
-            throw MetalRendererError.rasterRevisionStorageLimitExceeded
-        }
-        guard pendingPreparationCommitRetainedBytes == nil,
-              let bridge = strokePreparationBridge,
-              let generation = strokePreparationGeneration
+              !execution.commitRequested
         else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
@@ -2489,7 +1657,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             .commit(generation: generation),
             using: bridge
         )
-        pendingPreparationCommitRetainedBytes = maximumRetainedBytes
+        execution.commitRequested = true
+        activeStroke = execution
     }
 
     @discardableResult
@@ -2517,131 +1686,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             failActiveOperationIfNeeded(rendererError)
             throw rendererError
         }
-    }
-
-    func prepareCompiledCommitIfReady() throws {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        defer {
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        do {
-            try prepareCompiledCommitIfReadyCore()
-        } catch let error as MetalRendererError {
-            failActiveOperationIfNeeded(error)
-            throw error
-        } catch {
-            let rendererError = MetalRendererError.commandFailed(
-                error.localizedDescription
-            )
-            failActiveOperationIfNeeded(rendererError)
-            throw rendererError
-        }
-    }
-
-    private func prepareCompiledCommitIfReadyCore() throws {
-        guard var execution = activeStroke else { return }
-        let schedulerIsReady: Bool
-        if let scheduler = execution.frozenHarnessScheduler {
-            schedulerIsReady = scheduler.authoritativeIsDrained
-                && scheduler.predictedCount == 0
-        } else {
-            schedulerIsReady = strokePreparationBridge != nil
-                && pendingPreparedWorkerFrame == nil
-                && pendingPreparedSurfaceFrame == nil
-                && submittedPreparedWorkerFrame == nil
-        }
-        guard
-              execution.commitRequested,
-              execution.pendingRevisions == nil,
-              schedulerIsReady,
-              execution.pendingTokenBearingFrameCount == 0,
-              !needsReplayClear,
-              let maximumRetainedBytes =
-                execution.commitRetainedByteLimit
-        else {
-            return
-        }
-        let settledRegions = liveStroke.dirtyRegions(
-            clippedTo: storagePixelSize
-        )
-        let replayRegions = replayStroke.dirtyRegions(
-            clippedTo: storagePixelSize
-        )
-        if settledRegions.rectangles.isEmpty,
-           replayRegions.rectangles.isEmpty
-        {
-            finalizeNoOpStrokeCommit(execution)
-            return
-        }
-        execution.pendingRevisions = try allocateCurrentStrokeRevisions(
-            maximumRetainedBytes: maximumRetainedBytes
-        )
-        activeStroke = execution
-    }
-
-    /// A completely clipped stroke is a successful operation but not a
-    /// raster mutation. It must not manufacture an empty history pair merely
-    /// to drive the ordinary commit completion path.
-    private func finalizeNoOpStrokeCommit(
-        _ execution: ActiveStrokeExecution
-    ) {
-        let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
-        let runtimeEndEvents = endStrokeRuntimeIfPossible()
-        activeStroke = nil
-        resetLiveState(invalidateStrokeEvents: false)
-        stageStrokeRuntimeEvents(runtimeEndEvents)
-        stageRendererEvent(
-            .operationCompleted(.operationSuccess(execution.token))
-        )
-    }
-
-    private func allocateCurrentStrokeRevisions(
-        maximumRetainedBytes: Int
-    ) throws -> PendingRasterRevisionPair {
-        guard maximumRetainedBytes >= 0 else {
-            throw MetalRendererError.rasterRevisionStorageLimitExceeded
-        }
-        let settledRegions = liveStroke.dirtyRegions(
-            clippedTo: storagePixelSize
-        )
-        let replayRegions = replayStroke.dirtyRegions(
-            clippedTo: storagePixelSize
-        )
-        let regions = PixelRegionSet(
-            settledRegions.rectangles + replayRegions.rectangles,
-            clippedTo: storagePixelSize
-        )
-        let oneRevisionBytes = try revisionStore.retainedBytes(
-            pixelSize: storagePixelSize,
-            regions: regions
-        )
-        let (pairBytes, overflow) = oneRevisionBytes.multipliedReportingOverflow(
-            by: 2
-        )
-        guard !overflow, pairBytes <= maximumRetainedBytes else {
-            throw MetalRendererError.rasterRevisionStorageLimitExceeded
-        }
-        let pair = try revisionStore.allocatePair(
-            beforePixelSize: storagePixelSize,
-            beforeRegions: regions,
-            afterPixelSize: storagePixelSize,
-            afterRegions: regions
-        )
-        precondition(
-            pair.retainedBytes == pairBytes,
-            "Raster revision preflight and allocation must agree."
-        )
-        return pair
-    }
-
-    private func discardPendingRevisionsIfPossible() {
-        guard let pair = activeStroke?.pendingRevisions else { return }
-        revisionStore.discard(pair)
-        activeStroke?.pendingRevisions = nil
     }
 
     /// Frozen projected-dab oracle entry point. It bypasses public stroke
@@ -2682,9 +1726,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 budget: depositionFrameBudget
             ),
             commitRequested: false,
-            commitRetainedByteLimit: nil,
-            pendingRevisions: nil,
-            pendingTokenBearingFrameCount: 0,
             isFinishedTransiently: false
         )
     }
@@ -2692,11 +1733,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     public func pan(byScreenDelta delta: SIMD2<Float>) {
         guard isIdle else { return }
         viewport = viewport.panned(byScreenDelta: delta)
+        invalidatePaintDisplayPreparation()
     }
 
     public func zoom(by factor: Float, anchor: ScreenPoint) {
         guard isIdle else { return }
         viewport = viewport.zoomed(by: factor, anchorScreen: anchor)
+        invalidatePaintDisplayPreparation()
     }
 
     public func strokeFootprintIntersectsDocument(
@@ -2731,528 +1774,560 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             worldCenter: worldCenter,
             zoom: zoom
         )
+        invalidatePaintDisplayPreparation()
     }
 
     public func resize(to size: PatternSize) {
         viewport = viewport.resized(to: size)
+        invalidatePaintDisplayPreparation()
     }
 
     public func setInteractiveGridVisibility(_ visible: Bool) {
         interactiveGridVisibility = visible
     }
 
-    /// Internal marker for a fatal completion outcome that already published
-    /// its renderer error and terminal operation event while it was drained.
-    /// Orchestration roots unwrap it without publishing the same failure again.
-    private struct PreviouslyPublishedInteractiveFailure: Error {
-        let error: MetalRendererError
+    private var paintAddressing: SparseTileAddressing {
+        if let layout = tilingStrategy.compiledSymmetry.domain.finite?.radial.layout {
+            return .radial(layout: layout)
+        }
+        switch tilingStrategy.documentConfiguration {
+        case .periodic:
+            return .periodic(period: storagePixelSize)
+        case .finite:
+            return .finite(storagePixelSize)
+        }
     }
 
-    public func completePendingInteractiveStroke() throws
-        -> GPUFrameMetrics
+    private func paintOutputMapping(
+        pixelSize: PixelSize
+    ) throws -> SparseTileSamplingOutputMapping {
+        let inverseZoom = 1 / viewport.zoom
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: viewport.worldCenter.simd - SIMD2(
+                Float(pixelSize.width) * 0.5 * inverseZoom,
+                Float(pixelSize.height) * 0.5 * inverseZoom
+            ),
+            sourceStep: SIMD2(repeating: inverseZoom)
+        )
+        if tilingStrategy.compiledSymmetry.domain.finite?.radial.layout != nil {
+            return try .finiteRadial(
+                strategy: tilingStrategy,
+                outputToWorldTransform: transform
+            )
+        }
+        return .affine(transform)
+    }
+
+    private func paintDisplayParameters(
+        outputMapping: SparseTileSamplingOutputMapping,
+        transient: Bool,
+        showGridLines: Bool? = nil
+    ) -> SparseTileSamplingEncodeParameters {
+        let displayGridLines = showGridLines ?? interactiveGridVisibility
+        guard transient, let style = activeStroke?.style else {
+            return SparseTileSamplingEncodeParameters(
+                outputMapping: outputMapping,
+                compositeMode: PatternCompositeWireDraw,
+                liveVisible: false,
+                strokeOpacity: 1,
+                accumulationLimit: 1,
+                eraserStrength: 1,
+                showGridLines: displayGridLines,
+                showCanvasBoundary: true
+            )
+        }
+        return SparseTileSamplingEncodeParameters(
+            outputMapping: outputMapping,
+            compositeMode: style.compositeMode.rawValue,
+            liveVisible: true,
+            strokeOpacity: style.color.alpha,
+            accumulationLimit:
+                style.program.definition.material.accumulationLimit,
+            eraserStrength:
+                style.compositeMode == .erase ? style.eraserStrength : 1,
+            showGridLines: displayGridLines,
+            showCanvasBoundary: true
+        )
+    }
+
+    private func invalidatePaintDisplayPreparation() {
+        paintOutputGeometryRevision &+= 1
+        if paintOutputGeometryRevision == 0 { paintOutputGeometryRevision = 1 }
+        paintDisplayPreparationSequence &+= 1
+        paintDisplayPreparationTask?.cancel()
+        paintDisplayPreparationTask = nil
+        if let preparedPaintDisplaySubmission {
+            try? paintContext.cancelDisplaySubmission(
+                preparedPaintDisplaySubmission
+            )
+            self.preparedPaintDisplaySubmission = nil
+        }
+        if let paintDisplayView {
+            schedulePaintDisplayPreparation(in: paintDisplayView)
+        }
+    }
+
+    private func schedulePaintDisplayPreparation(in view: MTKView) {
+        paintDisplayView = view
+        guard paintDisplayPreparationTask == nil,
+              preparedPaintDisplaySubmission == nil
+        else { return }
+        let width = Int(view.drawableSize.width)
+        let height = Int(view.drawableSize.height)
+        guard width > 0, height > 0 else { return }
+        let outputPixelSize = PixelSize(width: width, height: height)
+        let sequence = paintDisplayPreparationSequence &+ 1
+        guard sequence != 0 else {
+            paintCommandError = .commandFailed(
+                "paint display preparation sequence overflow"
+            )
+            return
+        }
+        paintDisplayPreparationSequence = sequence
+        let transient = activePaintTransientSource
+        paintDisplayPreparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let submission = try await self.makePaintDisplaySubmission(
+                    outputPixelSize: outputPixelSize,
+                    transient: transient
+                )
+                guard !Task.isCancelled,
+                      self.paintDisplayPreparationSequence == sequence
+                else {
+                    try self.paintContext.cancelDisplaySubmission(submission)
+                    return
+                }
+                self.preparedPaintDisplaySubmission = submission
+                self.paintDisplayPreparationTask = nil
+                self.requestPaintDisplay(in: view)
+            } catch is CancellationError {
+                if self.paintDisplayPreparationSequence == sequence {
+                    self.paintDisplayPreparationTask = nil
+                }
+            } catch {
+                if self.paintDisplayPreparationSequence == sequence {
+                    self.paintDisplayPreparationTask = nil
+                    self.paintCommandError = (error as? MetalRendererError)
+                        ?? .commandFailed(error.localizedDescription)
+                    self.failActiveOperationIfNeeded(
+                        self.paintCommandError!
+                    )
+                }
+            }
+        }
+    }
+
+    private func makePaintDisplaySubmission(
+        outputPixelSize: PixelSize,
+        transient: DocumentPaintTransientDisplaySource?,
+        showGridLines: Bool? = nil
+    ) async throws -> DocumentPaintPreparedDisplaySubmission {
+        let outputRegion = try SparseTileOutputRegion(
+            minX: 0,
+            minY: 0,
+            maxX: outputPixelSize.width,
+            maxY: outputPixelSize.height
+        )
+        let mapping = try paintOutputMapping(pixelSize: outputPixelSize)
+        let prepared: DocumentPaintPreparedVisiblePlanToken
+        if let transient {
+            let request = try await paintContext.requestTransientVisiblePlan(
+                transient,
+                addressingRevision: paintOutputGeometryRevision,
+                outputRegion: outputRegion,
+                outputGeometryRevision: paintOutputGeometryRevision,
+                outputMapping: mapping
+            )
+            prepared = try await paintContext.prepareTransientVisiblePlan(
+                request
+            )
+        } else {
+            let request = try await paintContext.requestCanonicalVisiblePlan(
+                addressing: paintAddressing,
+                addressingRevision: paintOutputGeometryRevision,
+                outputRegion: outputRegion,
+                outputGeometryRevision: paintOutputGeometryRevision,
+                outputMapping: mapping
+            )
+            prepared = try await paintContext.prepareVisiblePlan(request)
+        }
+        _ = try await paintContext.installVisiblePlan(prepared)
+        return try await paintContext.prepareDisplaySubmission(
+            parameters: paintDisplayParameters(
+                outputMapping: mapping,
+                transient: transient != nil,
+                showGridLines: showGridLines
+            )
+        )
+    }
+
+    private func requestPaintDisplay(in view: MTKView) {
+        #if os(macOS)
+        view.needsDisplay = true
+        #else
+        view.setNeedsDisplay()
+        #endif
+    }
+
+    func paintStateSnapshotForTesting() async
+        -> DocumentPaintRenderContextSnapshot
     {
-        try completePendingInteractiveStroke(forceCommitFailure: false)
+        await paintContext.snapshot()
     }
 
-    /// Completes a scripted/headless interactive stroke and does not resume
-    /// until the actor-owned preparation workspace is truly reusable. The
-    /// regular pointer path remains request-driven and never awaits here.
+    public func releasePaintRevisions(
+        _ revisionIDs: Set<StoredRasterRevisionID>
+    ) async throws {
+        try await paintContext.releaseRevisions(revisionIDs)
+        await refreshPaintRevisionResidentBytes()
+    }
+
+    public func clearDocument(
+        token: RendererOperationToken
+    ) async throws {
+        do {
+            let result = try await paintContext.clear()
+            await refreshPaintRevisionResidentBytes()
+            setDocumentGeometryLocked(false)
+            try publishPaintMutation(result, token: token)
+            invalidatePaintDisplayPreparation()
+        } catch {
+            let rendererError = currentPaintError(error)
+            report(rendererError)
+            stageRendererEvent(
+                .operationCompleted(.failure(token, rendererError))
+            )
+            throw rendererError
+        }
+    }
+
+    public func resizeDocument(
+        token: RendererOperationToken,
+        to pixelSize: PixelSize
+    ) async throws {
+        do {
+            let strategy = try TilingStrategy(
+                documentConfiguration: documentConfiguration,
+                canvasSize: pixelSize
+            )
+            let storageSize = PixelSize(
+                width: Int(strategy.tileSize.width),
+                height: Int(strategy.tileSize.height)
+            )
+            let geometry = try DocumentPaintGeometry(
+                documentPixelSize: pixelSize,
+                storagePixelSize: storageSize,
+                radialLayout:
+                    strategy.compiledSymmetry.domain.finite?.radial.layout
+            )
+            let result = try await paintContext.resize(
+                to: geometry,
+                targetRadialConfiguration:
+                    strategy.compiledSymmetry.domain.finite?.radial
+                        .configuration
+            )
+            await refreshPaintRevisionResidentBytes()
+            installPaintGeometry(strategy: strategy)
+            try publishPaintMutation(result, token: token)
+            invalidatePaintDisplayPreparation()
+        } catch {
+            let rendererError = currentPaintError(error)
+            report(rendererError)
+            stageRendererEvent(
+                .operationCompleted(.failure(token, rendererError))
+            )
+            throw rendererError
+        }
+    }
+
+    public func restoreDocumentRevision(
+        token: RendererOperationToken,
+        revision: RasterRevisionReference,
+        targetPixelSize: PixelSize? = nil
+    ) async throws {
+        do {
+            let documentSize = targetPixelSize
+                ?? revision.documentPixelSize
+            let strategy = try TilingStrategy(
+                documentConfiguration: documentConfiguration,
+                canvasSize: documentSize
+            )
+            let storageSize = PixelSize(
+                width: Int(strategy.tileSize.width),
+                height: Int(strategy.tileSize.height)
+            )
+            let geometry = try DocumentPaintGeometry(
+                documentPixelSize: documentSize,
+                storagePixelSize: storageSize,
+                radialLayout:
+                    strategy.compiledSymmetry.domain.finite?.radial.layout
+            )
+            _ = try await paintContext.restorePublishedRevision(
+                revision,
+                targetGeometry: geometry
+            )
+            await refreshPaintRevisionResidentBytes()
+            installPaintGeometry(strategy: strategy)
+            setDocumentGeometryLocked(!revision.tileCoordinates.isEmpty)
+            stageRendererEvent(
+                .operationCompleted(.operationSuccess(token))
+            )
+            invalidatePaintDisplayPreparation()
+        } catch {
+            let rendererError = currentPaintError(error)
+            report(rendererError)
+            stageRendererEvent(
+                .operationCompleted(.failure(token, rendererError))
+            )
+            throw rendererError
+        }
+    }
+
+    private func publishPaintMutation(
+        _ result: DocumentPaintSurfaceApplicationResult,
+        token: RendererOperationToken
+    ) throws {
+        if let pair = result.historyPair {
+            stageRendererEvent(.operationCompleted(.rasterSuccess(
+                RasterMutationReceipt(
+                    token: token,
+                    before: pair.before,
+                    after: pair.after
+                )
+            )))
+        } else {
+            stageRendererEvent(.operationCompleted(.operationSuccess(token)))
+        }
+    }
+
+    private func refreshPaintRevisionResidentBytes() async {
+        paintRevisionResidentBytesState = await paintContext.snapshot()
+            .revisionResidentBytes
+    }
+
+    private func installPaintGeometry(strategy: TilingStrategy) {
+        let canvasSizeChanged = strategy.canvasSize != pixelSize
+        tilingStrategy = strategy
+        documentPixelSizeState = strategy.canvasSize
+        storagePixelSizeState = PixelSize(
+            width: Int(strategy.tileSize.width),
+            height: Int(strategy.tileSize.height)
+        )
+        if canvasSizeChanged {
+            viewport = ViewportTransform(
+                drawableSize: viewport.drawableSize,
+                worldCenter: WorldPoint(
+                    x: Float(strategy.canvasSize.width) * 0.5,
+                    y: Float(strategy.canvasSize.height) * 0.5
+                ),
+                zoom: viewport.zoom
+            )
+        }
+    }
+
+    private func currentPaintError(_ error: Error) -> MetalRendererError {
+        (error as? MetalRendererError)
+            ?? .commandFailed(error.localizedDescription)
+    }
+
+    public func captureCommittedDocument() async throws
+        -> CommittedDocumentSnapshot
+    {
+        try await paintContext.captureCommittedDocument(
+            strategy: tilingStrategy,
+            documentDomainLocked: documentDomainLocked,
+            radialGeometryLocked: radialGeometryLocked,
+            outputGeometryRevision: paintOutputGeometryRevision
+        )
+    }
+
+    /// Resolves committed finite paint at document-pixel geometry. Transient
+    /// stroke surfaces, viewport state, and grid guides are excluded.
+    public func exportFiniteCanvas(
+        transparentBackground: Bool = false
+    ) async throws -> FiniteCanvasExport {
+        try await paintContext.exportFiniteCanvas(
+            strategy: tilingStrategy,
+            outputGeometryRevision: paintOutputGeometryRevision,
+            transparentBackground: transparentBackground
+        )
+    }
+
+    /// Resolves one half-open metric repeat from committed sparse paint.
+    public func exportPeriodicRepeat(
+        density: Int
+    ) async throws -> PeriodicRepeatExport {
+        try await paintContext.exportPeriodicMetric(
+            strategy: tilingStrategy,
+            density: density,
+            outputGeometryRevision: paintOutputGeometryRevision
+        )
+    }
+
+    /// Resolves the natural-density baked repeat from committed sparse paint.
+    public func exportBakedPeriodicRepeat() async throws
+        -> PeriodicRepeatExport
+    {
+        try await paintContext.exportPeriodicBaked(
+            strategy: tilingStrategy,
+            outputGeometryRevision: paintOutputGeometryRevision
+        )
+    }
+
+    /// Flattens the committed preview viewport without guides or transient
+    /// stroke pixels.
+    public func exportFlattenedScene(
+        pixelSize: PixelSize,
+        transparentBackground: Bool = false
+    ) async throws -> FlattenedSceneExport {
+        let mapping: SparseTileSamplingOutputMapping
+        if tilingStrategy.compiledSymmetry.domain.finite?.radial.layout != nil {
+            mapping = try .finiteRadial(strategy: tilingStrategy)
+        } else {
+            let inverseZoom = 1 / viewport.zoom
+            mapping = .affine(SparseTileOutputToSourceTransform(
+                sourceOffset: viewport.worldCenter.simd - SIMD2(
+                    Float(pixelSize.width) * 0.5 * inverseZoom,
+                    Float(pixelSize.height) * 0.5 * inverseZoom
+                ),
+                sourceStep: SIMD2(repeating: inverseZoom)
+            ))
+        }
+        let request = try DocumentPaintStableFlattenedOutputRequest(
+            pixelSize: pixelSize,
+            outputMapping: mapping,
+            transparentBackground: transparentBackground
+        )
+        return try await paintContext.exportFlattenedScene(
+            strategy: tilingStrategy,
+            request: request,
+            outputGeometryRevision: paintOutputGeometryRevision
+        )
+    }
+
+    public func restoreCommittedDocument(
+        _ snapshot: CommittedDocumentSnapshot
+    ) async throws {
+        guard snapshot.canvasSize == pixelSize,
+              snapshot.documentConfiguration == documentConfiguration
+        else {
+            throw MetalRendererError.committedSnapshotIncompatible
+        }
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: snapshot.canvasSize,
+            storagePixelSize: storagePixelSize,
+            radialLayout:
+                tilingStrategy.compiledSymmetry.domain.finite?.radial.layout
+        )
+        let input: DocumentPaintEncodedImportInput
+        switch snapshot.storage {
+        case let .singleRaster(bytes):
+            input = .singleRaster(DocumentPaintEncodedBGRA8PlaneInput(
+                width: storagePixelSize.width,
+                height: storagePixelSize.height,
+                bytesPerRow: storagePixelSize.width * 4,
+                bytes: Data(bytes)
+            ))
+        case let .radialPages(pages):
+            input = .radialPages(pages.map {
+                DocumentPaintEncodedBGRA8RadialPageInput(
+                    coordinate: $0.coordinate,
+                    plane: DocumentPaintEncodedBGRA8PlaneInput(
+                        width: RadialSectorLayout.pageSide,
+                        height: RadialSectorLayout.pageSide,
+                        bytesPerRow: RadialSectorLayout.pageSide * 4,
+                        bytes: Data($0.bgra8PremultipliedBytes)
+                    )
+                )
+            })
+        }
+        let result = try await paintContext.importEncodedBGRA8(
+            candidateGeometry: geometry,
+            input: input
+        )
+        if let pair = result.historyPair {
+            try await paintContext.releaseRevisions([
+                pair.before.id,
+                pair.after.id,
+            ])
+        }
+        await refreshPaintRevisionResidentBytes()
+        documentDomainLocked = snapshot.documentDomainLocked
+        radialGeometryLocked = snapshot.radialGeometryLocked
+    }
+
+    func shutdown(
+        reason: DocumentPaintRenderContextShutdownReason
+    ) async throws -> DocumentPaintRenderContextShutdownSnapshot {
+        try await paintContext.shutdown(reason: reason)
+    }
+
+    /// Awaits a previously requested current stroke commit and returns only
+    /// after the Context-owned stroke surface and worker workspace are reusable.
     public func completePendingInteractiveStrokeAndAwaitIdle() async throws
         -> GPUFrameMetrics
     {
-        guard let mailbox = strokePreparationBridge?.mailbox else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let progressRegistration =
-            StrokePreparationAsyncProgressRegistration(mailbox: mailbox)
-        defer { progressRegistration.remove() }
-
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        defer {
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        do {
-            var frames: [GPUFrameMetrics] = []
-            while true {
-                let observedRevision = progressRegistration.currentRevision
-                try drainCompletedInteractiveOperationsCore()
-                try prepareCompiledCommitIfReadyCore()
-                if activeStroke == nil { break }
-                if activeStroke?.pendingRevisions != nil {
-                    break
-                }
-                if pendingPreparedSurfaceFrame != nil {
-                    frames.append(
-                        try completeNextPendingInteractiveFrameCore()
-                    )
-                    continue
-                }
-                if progressRegistration.currentRevision
-                    != observedRevision
-                {
-                    continue
-                }
-                guard try await progressRegistration.waitForProgress(
-                    after: observedRevision
-                ) else {
-                    throw MetalRendererError.commandFailed(
-                        "stroke commit preparation exceeded its async bound"
-                    )
-                }
-            }
-            if activeStroke != nil {
-                try prepareCompiledCommitIfReadyCore()
-                frames.append(try submitPendingInteractiveCommitCore())
-            }
-            try drainCompletedInteractiveOperationsCore()
-
-            while true {
-                if isIdle { break }
-                let observedRevision = progressRegistration.currentRevision
-                try drainCompletedInteractiveOperationsCore()
-                if isIdle { break }
-                if progressRegistration.currentRevision
-                    != observedRevision
-                {
-                    continue
-                }
-                guard try await progressRegistration.waitForProgress(
-                    after: observedRevision
-                ) else {
-                    throw MetalRendererError.commandFailed(
-                        "stroke workspace retirement exceeded its async bound"
-                    )
-                }
-            }
-            return GPUFrameMetrics(
-                cpuEncodeMilliseconds: frames.reduce(0) {
-                    $0 + $1.cpuEncodeMilliseconds
-                },
-                gpuMilliseconds: frames.reduce(0) {
-                    $0 + $1.gpuMilliseconds
-                },
-                eventToSubmitNanoseconds: frames.map(
-                    \.eventToSubmitNanoseconds
-                ).max() ?? 0,
-                gpuCompletionNanoseconds: frames.reduce(0) {
-                    Self.saturatingAdd(
-                        $0,
-                        $1.gpuCompletionNanoseconds
-                    )
-                },
-                encodedDabCount: frames.reduce(0) {
-                    $0 + $1.encodedDabCount
-                },
-                encodedInstanceCount: frames.reduce(0) {
-                    $0 + $1.encodedInstanceCount
-                },
-                bufferLeaseCount: frames.map(
-                    \.bufferLeaseCount
-                ).max() ?? 0
-            )
-        } catch let published as PreviouslyPublishedInteractiveFailure {
-            throw published.error
-        } catch let error as MetalRendererError {
-            failActiveOperationIfNeeded(error)
-            throw error
-        } catch {
-            let rendererError = MetalRendererError.commandFailed(
-                error.localizedDescription
-            )
-            failActiveOperationIfNeeded(rendererError)
-            throw rendererError
-        }
-    }
-
-    /// Awaits only an already-requested actor workspace retirement. This is
-    /// useful for async workflows that cancel a transient stroke and must
-    /// subsequently capture state or begin another scripted operation.
-    public func awaitPendingStrokeWorkspaceRetirement() async throws {
-        if isIdle { return }
-        guard case let .retiring(retiringGeneration) = strokeWorkspaceState,
-              let mailbox = strokePreparationBridge?.mailbox
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let progressRegistration =
-            StrokePreparationAsyncProgressRegistration(mailbox: mailbox)
-        defer { progressRegistration.remove() }
-
-        while true {
-            let observedRevision = progressRegistration.currentRevision
+        var frames: [GPUFrameMetrics] = []
+        let deadline = DispatchTime.now().uptimeNanoseconds
+            &+ 5_000_000_000
+        while DispatchTime.now().uptimeNanoseconds < deadline {
             try drainCompletedInteractiveOperations()
-            if strokeWorkspaceState != .retiring(retiringGeneration) {
-                return
-            }
-            if progressRegistration.currentRevision != observedRevision {
+            if activeStroke == nil, isIdle { break }
+            if let frame = try await renderCurrentPaintFrameForHarness(
+                width: pixelSize.width,
+                height: pixelSize.height,
+                includeTransient: true
+            ) {
+                frames.append(frame.metrics)
                 continue
             }
-            guard try await progressRegistration.waitForProgress(
-                after: observedRevision
-            ) else {
-                throw MetalRendererError.commandFailed(
-                    "stroke workspace retirement exceeded its async bound"
-                )
-            }
+            try await Task.sleep(nanoseconds: 1_000_000)
         }
+        guard activeStroke == nil, isIdle else {
+            throw lastError ?? MetalRendererError.commandFailed(
+                "stroke completion exceeded its bound"
+            )
+        }
+        return GPUFrameMetrics(
+            cpuEncodeMilliseconds: frames.reduce(0) {
+                $0 + $1.cpuEncodeMilliseconds
+            },
+            gpuMilliseconds: frames.reduce(0) {
+                $0 + $1.gpuMilliseconds
+            },
+            eventToSubmitNanoseconds:
+                frames.map(\.eventToSubmitNanoseconds).max() ?? 0,
+            gpuCompletionNanoseconds: frames.reduce(0) {
+                Self.saturatingAdd($0, $1.gpuCompletionNanoseconds)
+            },
+            encodedDabCount: frames.reduce(0) {
+                $0 + $1.encodedDabCount
+            },
+            encodedInstanceCount: frames.reduce(0) {
+                $0 + $1.encodedInstanceCount
+            },
+            bufferLeaseCount:
+                frames.map(\.bufferLeaseCount).max() ?? 0
+        )
     }
 
-    func completePendingInteractiveStroke(
-        forceCommitFailure: Bool
-    ) throws -> GPUFrameMetrics {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        defer {
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
+    public func awaitPendingStrokeWorkspaceRetirement() async throws {
+        guard case let .retiring(generation) = strokeWorkspaceState else {
+            return
         }
-        do {
-            var frames: [GPUFrameMetrics] = []
-            let maximumFrameAttempts = strokePreparationBridge == nil
-                ? 64
-                : 20_000
-            for _ in 0..<maximumFrameAttempts {
-                try drainCompletedInteractiveOperationsCore()
-                try prepareCompiledCommitIfReadyCore()
-                if activeStroke == nil { break }
-                if activeStroke?.pendingRevisions != nil {
-                    break
-                }
-                if strokePreparationBridge != nil,
-                   pendingPreparedSurfaceFrame == nil
-                {
-                    // This synchronous API is a capture/test drain. Give the
-                    // independent preparation executor a scheduling window
-                    // instead of submitting empty GPU frames in a hot loop.
-                    Thread.sleep(forTimeInterval: 0.000_01)
-                    continue
-                }
-                frames.append(
-                    try completeNextPendingInteractiveFrameCore()
-                )
-            }
-            if activeStroke != nil {
-                try prepareCompiledCommitIfReadyCore()
-                frames.append(
-                    try submitPendingInteractiveCommitCore(
-                        forceFailure: forceCommitFailure
-                    )
-                )
-            }
-            try drainCompletedInteractiveOperationsCore()
-            return GPUFrameMetrics(
-                cpuEncodeMilliseconds: frames.reduce(0) {
-                    $0 + $1.cpuEncodeMilliseconds
-                },
-                gpuMilliseconds: frames.reduce(0) {
-                    $0 + $1.gpuMilliseconds
-                },
-                eventToSubmitNanoseconds: frames.map(
-                    \.eventToSubmitNanoseconds
-                ).max() ?? 0,
-                gpuCompletionNanoseconds: frames.reduce(0) {
-                    Self.saturatingAdd(
-                        $0,
-                        $1.gpuCompletionNanoseconds
-                    )
-                },
-                encodedDabCount: frames.reduce(0) {
-                    $0 + $1.encodedDabCount
-                },
-                encodedInstanceCount: frames.reduce(0) {
-                    $0 + $1.encodedInstanceCount
-                },
-                bufferLeaseCount: frames.map(
-                    \.bufferLeaseCount
-                ).max() ?? 0
-            )
-        } catch let published as PreviouslyPublishedInteractiveFailure {
-            throw published.error
-        } catch let error as MetalRendererError {
-            failActiveOperationIfNeeded(error)
-            throw error
-        } catch {
-            let rendererError = MetalRendererError.commandFailed(
-                error.localizedDescription
-            )
-            failActiveOperationIfNeeded(rendererError)
-            throw rendererError
+        let deadline = DispatchTime.now().uptimeNanoseconds
+            &+ 5_000_000_000
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            try drainCompletedInteractiveOperations()
+            if strokeWorkspaceState != .retiring(generation) { return }
+            try await Task.sleep(nanoseconds: 1_000_000)
         }
+        throw MetalRendererError.commandFailed(
+            "stroke workspace retirement exceeded its bound"
+        )
     }
 
-    func completeNextPendingInteractiveFrame(
-        forceFailure: Bool = false,
-        forceCommandBufferUnavailable: Bool = false,
-        forcePostSurfaceEncodingFailure: Bool = false
-    ) throws -> GPUFrameMetrics {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        defer {
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        do {
-            return try completeNextPendingInteractiveFrameCore(
-                forceFailure: forceFailure,
-                forceCommandBufferUnavailable:
-                    forceCommandBufferUnavailable,
-                forcePostSurfaceEncodingFailure:
-                    forcePostSurfaceEncodingFailure
-            )
-        } catch let published as PreviouslyPublishedInteractiveFailure {
-            throw published.error
-        } catch let error as MetalRendererError {
-            failActiveOperationIfNeeded(error)
-            throw error
-        } catch {
-            let rendererError = MetalRendererError.commandFailed(
-                error.localizedDescription
-            )
-            failActiveOperationIfNeeded(rendererError)
-            throw rendererError
-        }
-    }
-
-    private func completeNextPendingInteractiveFrameCore(
-        forceFailure: Bool = false,
-        forceCommandBufferUnavailable: Bool = false,
-        forcePostSurfaceEncodingFailure: Bool = false
-    ) throws -> GPUFrameMetrics {
-        if let submittedError = drainFrameOutcomes() {
-            throw PreviouslyPublishedInteractiveFailure(
-                error: submittedError
-            )
-        }
-        drainCompletedUploadRanges()
-        try drainStrokePreparationResultsCore()
-        guard !forceCommandBufferUnavailable,
-              let commandBuffer = commandQueue.makeCommandBuffer()
-        else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-
-        let uploads: [FrameUpload] = []
-        var nativeEncoding: NativeDepositionFrameEncoding?
-        var submissions: [DabBufferSubmissionIdentity] = []
-        var didFinalize = false
-        let runtimePrepareStarted = DispatchTime.now().uptimeNanoseconds
-        let runtimeFrameID = beginStrokeRuntimeFrame(
-            at: runtimePrepareStarted,
-            targetFrameDurationNanoseconds: 16_666_667
-        )
-        let start = CFAbsoluteTimeGetCurrent()
-        do {
-            let encoding = try encodeScheduledDeposition(commandBuffer)
-            nativeEncoding = encoding
-            if forcePostSurfaceEncodingFailure,
-               encoding.preparedWorkerFrame != nil
-            {
-                throw MetalRendererError.commandFailed(
-                    "injected post-surface encoding failure"
-                )
-            }
-            recordStrokeRuntimePreparedFrame(
-                id: runtimeFrameID,
-                encoding: encoding
-            )
-            submissions = try finalizeFrameEncoding(
-                encodedClear: encoding.encodedLiveClear,
-                encodedReplayClear: encoding.encodedReplayClear,
-                uploads: uploads,
-                nativeEncoding: encoding,
-                rasterCommit: nil,
-                commandBuffer: commandBuffer,
-                forceFailure: forceFailure
-            )
-            didFinalize = true
-            if activeStroke != nil {
-                counters.renderedFramesThisStroke += 1
-            }
-            let submittedAtNanoseconds =
-                DispatchTime.now().uptimeNanoseconds
-            recordStrokeRuntimeSubmittedFrame(
-                id: runtimeFrameID,
-                at: submittedAtNanoseconds
-            )
-            commandBuffer.commit()
-            let cpuMilliseconds = elapsedMilliseconds(since: start)
-            commandBuffer.waitUntilCompleted()
-            let completedAtNanoseconds =
-                DispatchTime.now().uptimeNanoseconds
-            let submittedError = drainFrameOutcomes()
-            drainCompletedUploadRanges()
-            if let submittedError {
-                throw PreviouslyPublishedInteractiveFailure(
-                    error: submittedError
-                )
-            }
-            do {
-                try validateCompletedCommand(commandBuffer)
-            } catch {
-                instancePool.reclaimTerminalFailure(submissions)
-                throw error
-            }
-            let frameMetrics = metrics(
-                commandBuffer: commandBuffer,
-                cpuMilliseconds: cpuMilliseconds,
-                submittedAtNanoseconds: submittedAtNanoseconds,
-                completedAtNanoseconds: completedAtNanoseconds,
-                nativeEncoding: nativeEncoding
-            )
-            recordBrushLabCompletedFrame(frameMetrics)
-            recordStrokeRuntimeCompletedFrame(
-                id: runtimeFrameID,
-                commandBuffer: commandBuffer,
-                submittedAt: submittedAtNanoseconds,
-                completedAt: completedAtNanoseconds
-            )
-            return frameMetrics
-        } catch {
-            if let runtimeFrameID {
-                discardStrokeRuntimeFrame(runtimeFrameID)
-            }
-            if !didFinalize {
-                if nativeEncoding != nil,
-                   commandBuffer.status == .notEnqueued
-                {
-                    installPreparedSurfaceTerminalHandler(
-                        for: nativeEncoding,
-                        on: commandBuffer
-                    )
-                    commandBuffer.commit()
-                    commandBuffer.waitUntilCompleted()
-                }
-                abandon(uploads)
-                _ = drainFrameOutcomes()
-            }
-            throw error
-        }
-    }
-
-    func submitPendingInteractiveCommit(
-        forceFailure: Bool = false
-    ) throws -> GPUFrameMetrics {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        defer {
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        do {
-            return try submitPendingInteractiveCommitCore(
-                forceFailure: forceFailure
-            )
-        } catch let published as PreviouslyPublishedInteractiveFailure {
-            throw published.error
-        } catch let error as MetalRendererError {
-            failActiveOperationIfNeeded(error)
-            throw error
-        } catch {
-            let rendererError = MetalRendererError.commandFailed(
-                error.localizedDescription
-            )
-            failActiveOperationIfNeeded(rendererError)
-            throw rendererError
-        }
-    }
-
-    private func submitPendingInteractiveCommitCore(
-        forceFailure: Bool = false
-    ) throws -> GPUFrameMetrics {
-        if let submittedError = drainFrameOutcomes() {
-            throw PreviouslyPublishedInteractiveFailure(
-                error: submittedError
-            )
-        }
-        drainCompletedUploadRanges()
-        try prepareCompiledCommitIfReadyCore()
-        let nativeIsReady =
-            if let scheduler = activeStroke?.frozenHarnessScheduler {
-                scheduler.authoritativeIsDrained
-                    && scheduler.predictedCount == 0
-                    && !needsReplayClear
-            } else {
-                strokePreparationBridge != nil
-                    && pendingPreparedWorkerFrame == nil
-                    && pendingPreparedSurfaceFrame == nil
-                    && submittedPreparedWorkerFrame == nil
-                    && !needsReplayClear
-            }
-        guard activeStroke?.commitRequested == true,
-              activeStroke?.pendingTokenBearingFrameCount == 0,
-              activeStroke?.pendingRevisions != nil,
-              nativeIsReady
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-
-        let runtimePrepareStarted = DispatchTime.now().uptimeNanoseconds
-        let runtimeFrameID = beginStrokeRuntimeFrame(
-            at: runtimePrepareStarted,
-            targetFrameDurationNanoseconds: 16_666_667
-        )
-        let start = CFAbsoluteTimeGetCurrent()
-        let rasterCommit = try encodeCommit(
-            commandBuffer,
-            liveVisible: compositeLiveIsVisible
-        )
-        _ = try finalizeFrameEncoding(
-            encodedClear: false,
-            uploads: [],
-            rasterCommit: rasterCommit,
-            commandBuffer: commandBuffer,
-            forceFailure: forceFailure
-        )
-        recordStrokeRuntimePreparedFrame(
-            id: runtimeFrameID,
-            encoding: nil
-        )
-        counters.renderedFramesThisStroke += 1
-        let cpuMilliseconds = elapsedMilliseconds(since: start)
-        let submittedAtNanoseconds =
-            DispatchTime.now().uptimeNanoseconds
-        recordStrokeRuntimeSubmittedFrame(
-            id: runtimeFrameID,
-            at: submittedAtNanoseconds
-        )
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        let completedAtNanoseconds =
-            DispatchTime.now().uptimeNanoseconds
-        if commandBuffer.status == .completed, !forceFailure {
-            recordStrokeRuntimeCompletedFrame(
-                id: runtimeFrameID,
-                commandBuffer: commandBuffer,
-                submittedAt: submittedAtNanoseconds,
-                completedAt: completedAtNanoseconds
-            )
-        }
-        let submittedError = drainFrameOutcomes()
-        drainCompletedUploadRanges()
-        if let submittedError {
-            throw PreviouslyPublishedInteractiveFailure(
-                error: submittedError
-            )
-        }
-        try validateCompletedCommand(commandBuffer)
-        let frameMetrics = metrics(
-            commandBuffer: commandBuffer,
-            cpuMilliseconds: cpuMilliseconds,
-            submittedAtNanoseconds: submittedAtNanoseconds,
-            completedAtNanoseconds: completedAtNanoseconds
-        )
-        recordBrushLabCompletedFrame(frameMetrics)
-        return frameMetrics
-    }
 
     func drainCompletedInteractiveOperations() throws {
         let ownsEventOperation = beginRendererEventOperationIfNeeded()
@@ -3264,8 +2339,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         do {
             try drainCompletedInteractiveOperationsCore()
-        } catch let published as PreviouslyPublishedInteractiveFailure {
-            throw published.error
         } catch let error as MetalRendererError {
             failActiveOperationIfNeeded(error)
             throw error
@@ -3279,17 +2352,43 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     private func drainCompletedInteractiveOperationsCore() throws {
-        let submittedError = drainFrameOutcomes()
-        drainCompletedUploadRanges()
         try drainStrokePreparationResultsCore()
-        if let submittedError {
-            throw PreviouslyPublishedInteractiveFailure(
-                error: submittedError
-            )
+    }
+
+    private func startPaintLifecyclePump() {
+        guard paintLifecycleTask == nil else { return }
+        paintLifecycleTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do {
+                    try self.drainStrokePreparationResultsCore()
+                } catch let error as MetalRendererError {
+                    self.failActiveOperationIfNeeded(error)
+                } catch {
+                    self.failActiveOperationIfNeeded(
+                        .commandFailed(error.localizedDescription)
+                    )
+                }
+                if self.activeStroke == nil,
+                   self.strokeWorkspaceState == .available,
+                   self.paintCommitTask == nil
+                {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+            self.paintLifecycleTask = nil
         }
     }
 
     private func drainStrokePreparationResultsCore() throws {
+        let ownsEventOperation = beginRendererEventOperationIfNeeded()
+        defer {
+            endRendererEventOperationIfNeeded(
+                ownsEventOperation,
+                succeeded: true
+            )
+        }
         guard let bridge = strokePreparationBridge else { return }
         bridge.drainResults(into: &strokePreparationResultScratch)
         #if DEBUG
@@ -3331,16 +2430,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                         throw rendererError(for: capacityFailure)
                     }
                     throw error
-                case .commitBarrierReached:
-                    guard let maximumRetainedBytes =
-                        pendingPreparationCommitRetainedBytes
-                    else {
-                        throw MetalRendererError.invalidStrokeLifecycle
-                    }
-                    pendingPreparationCommitRetainedBytes = nil
-                    try markOffMainStrokeCommitReady(
-                        maximumRetainedBytes: maximumRetainedBytes
-                    )
+                case let .commitBarrierReached(
+                    _,
+                    commitMutation
+                ):
+                    try beginPaintStrokeCommit(commitMutation)
                 case let .cancelled(generation, _):
                     if strokeWorkspaceState == .retiring(generation) {
                         finishStrokeWorkspaceRetirement(
@@ -3391,6 +2485,125 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             #endif
         }
+    }
+
+    private func beginPaintStrokeCommit(
+        _ mutation: StrokePreparedCommitMutation
+    ) throws {
+        guard paintCommitTask == nil,
+              let execution = activeStroke,
+              execution.commitRequested
+        else { throw MetalRendererError.invalidStrokeLifecycle }
+        let parameters = DocumentPaintStrokeCompositeParameters(
+            mode: execution.style.compositeMode,
+            strokeOpacity: execution.style.color.alpha,
+            accumulationLimit:
+                execution.style.program.definition.material
+                    .accumulationLimit,
+            eraserStrength:
+                execution.style.compositeMode == .erase
+                    ? execution.style.eraserStrength : 1
+        )
+        let token = execution.token
+        paintCommitTask = Task { @MainActor [weak self] in
+            guard let self else {
+                if case let .source(source) = mutation {
+                    try? source.cancelUnclaimed()
+                }
+                return
+            }
+            do {
+                let result: DocumentPaintSurfaceApplicationResult
+                switch mutation {
+                case let .source(source):
+                    result = try await self.paintContext.commitStroke(
+                        source,
+                        compositeParameters: parameters
+                    )
+                case .noOp:
+                    guard let capability = self
+                        .activeStrokeTileSurfaceResources?.capability,
+                          capability.isTerminal
+                    else {
+                        throw MetalRendererError.invalidStrokeLifecycle
+                    }
+                    result = DocumentPaintSurfaceApplicationResult(
+                        didPublish: false,
+                        layerID: self.paintContext.activeLayerID,
+                        generation: capability.generation,
+                        historyPair: nil
+                    )
+                }
+                guard let current = self.activeStroke,
+                      current.token == token
+                else { throw MetalRendererError.invalidRendererOperationToken }
+                await self.refreshPaintRevisionResidentBytes()
+                self.finishPaintStrokeCommit(
+                    result,
+                    execution: current
+                )
+            } catch is CancellationError {
+                self.finishPaintStrokeFailure(
+                    token: token,
+                    error: .commandFailed("stroke commit cancelled")
+                )
+            } catch let error as MetalRendererError {
+                self.finishPaintStrokeFailure(token: token, error: error)
+            } catch {
+                self.finishPaintStrokeFailure(
+                    token: token,
+                    error: .commandFailed(error.localizedDescription)
+                )
+            }
+        }
+    }
+
+    private func finishPaintStrokeCommit(
+        _ result: DocumentPaintSurfaceApplicationResult,
+        execution: ActiveStrokeExecution
+    ) {
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        let runtimeEndEvents = endStrokeRuntimeIfPossible()
+        activeStroke = nil
+        activeStrokeTileSurfaceResources = nil
+        activePaintTransientSource = nil
+        paintCommitTask = nil
+        resetLiveState(invalidateStrokeEvents: false)
+        setDocumentGeometryLocked(result.didPublish || documentDomainLocked)
+        stageStrokeRuntimeEvents(runtimeEndEvents)
+        if let pair = result.historyPair {
+            stageRendererEvent(.operationCompleted(.rasterSuccess(
+                RasterMutationReceipt(
+                    token: execution.token,
+                    before: pair.before,
+                    after: pair.after
+                )
+            )))
+        } else {
+            stageRendererEvent(
+                .operationCompleted(.operationSuccess(execution.token))
+            )
+        }
+        invalidatePaintDisplayPreparation()
+    }
+
+    private func finishPaintStrokeFailure(
+        token: RendererOperationToken,
+        error: MetalRendererError
+    ) {
+        let wasIdle = isIdle
+        defer { notifyIdleStateIfChanged(from: wasIdle) }
+        let runtimeEndEvents = endStrokeRuntimeIfPossible()
+        activeStroke = nil
+        activeStrokeTileSurfaceResources = nil
+        activePaintTransientSource = nil
+        paintCommitTask = nil
+        resetLiveState()
+        stageStrokeRuntimeEvents(runtimeEndEvents)
+        report(error)
+        stageRendererEvent(.operationCompleted(.failure(token, error)))
+        invalidatePaintDisplayPreparation()
     }
 
     private func rendererError(
@@ -3456,9 +2669,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         _ batch: StrokePreparedDepositionBatch
     ) throws -> (generation: UInt64, token: UInt64)? {
         guard batch.generation == strokePreparationGeneration,
-              pendingPreparedWorkerFrame == nil,
-              pendingPreparedSurfaceFrame == nil,
-              submittedPreparedWorkerFrame == nil,
               activeStroke != nil
         else {
             throw MetalRendererError.invalidStrokeLifecycle
@@ -3466,54 +2676,27 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let totalInstanceCount = batch.authoritativeInstanceCount
             + batch.predictedInstanceCount
         lastOffMainSurfaceSnapshot = batch.surfaceSnapshot
+        lastOffMainReplayRetention = batch.replayRetention
         lastOffMainPredictedInstanceCount = batch.predictedInstanceCount
-        var replayEpoch: UInt64 = 0
-        if let predictionAdmission = batch.predictionAdmission {
-            replayEpoch = takeReplayEpoch()
-            predictionOverlay.planReplacementInPlace(
-                epoch: replayEpoch,
-                provenance: batch.predictionProvenanceBoundary,
-                admission: predictionAdmission,
-                dirtyRegions: batch.dirtyRegions
-            )
-            replayStroke.beginReplacementEpoch(replayEpoch)
-            for region in batch.dirtyRegions {
-                replayStroke.recordDirtyRegion(region)
-            }
-            needsReplayClear = true
-        } else {
-            for region in batch.dirtyRegions {
-                liveStroke.recordDirtyRegion(region)
-            }
-        }
 
         if let surfaceLease = batch.surfaceLease {
             lastOffMainEncodingRanOnMainThread =
                 surfaceLease.encodingRanOnMainThread
-            if surfaceLease.clearedPredictionSurface,
-               batch.predictionAdmission == nil
-            {
-                replayEpoch = takeReplayEpoch()
-                predictionOverlay.discard(epoch: replayEpoch)
-                replayStroke.beginReplacementEpoch(replayEpoch)
-                needsReplayClear = true
-            }
-            currentPreparedSurfaceLease = surfaceLease
-            guard batch.frameToken == surfaceLease.token else {
+            guard batch.frameToken == surfaceLease.token,
+                  let displayFrame = batch.displayFrame
+            else {
                 throw MetalRendererError.invalidStrokeLifecycle
             }
-            let identity = PreparedWorkerFrameIdentity(
-                generation: batch.generation,
-                token: surfaceLease.token,
-                recordCount: totalInstanceCount
+            let source = try paintContext.adoptTransientDisplayFrame(
+                displayFrame,
+                addressing: paintAddressing
             )
-            pendingPreparedWorkerFrame = identity
-            pendingPreparedSurfaceFrame = PendingPreparedSurfaceFrame(
-                identity: identity,
-                lease: surfaceLease,
-                logicalDabCount: batch.logicalDabs.count,
-                replayEpoch: replayEpoch
-            )
+            activePaintTransientSource = source
+            pendingPaintHarnessDabCount = batch.logicalDabs.count
+            pendingPaintHarnessInstanceCount = totalInstanceCount
+            if let paintDisplayView {
+                schedulePaintDisplayPreparation(in: paintDisplayView)
+            }
             if totalInstanceCount == 0 {
                 lastOffMainZeroWorkLeaseCount += 1
             }
@@ -3526,24 +2709,36 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             throw MetalRendererError.invalidStrokeLifecycle
         }
 
-        let (scheduledHighWater, overflow) =
+        let authoritativeInstanceCount = UInt64(
+            batch.newAuthoritativeInstanceCount
+        )
+        let (scheduledHighWater, scheduledOverflow) =
             scheduledAuthoritativeIdentityHighWater
                 .addingReportingOverflow(
-                    UInt64(batch.authoritativeInstanceCount)
+                    authoritativeInstanceCount
                 )
-        guard !overflow else {
+        let encodedRangeLowerBound =
+            encodedAuthoritativeIdentityHighWater
+        let (encodedHighWater, encodedOverflow) =
+            encodedRangeLowerBound.addingReportingOverflow(
+                authoritativeInstanceCount
+            )
+        guard !scheduledOverflow, !encodedOverflow else {
             throw MetalRendererError.projectedInstanceCapacityExceeded(
                 depositionFrameBudget.maximumPendingAuthoritativeInstances
             )
         }
         scheduledAuthoritativeIdentityHighWater = scheduledHighWater
+        encodedAuthoritativeIdentityHighWater = encodedHighWater
+        lastEncodedAuthoritativeIdentityRange =
+            authoritativeInstanceCount == 0
+            ? nil : encodedRangeLowerBound..<encodedHighWater
         counters.newDabsThisEvent = batch.logicalDabs.count
+        counters.newInstancesThisFrame = totalInstanceCount
         counters.totalDabsThisStroke += batch.logicalDabs.count
         counters.totalInstancesThisStroke += totalInstanceCount
         deferLogicalDabsForPublication(batch.logicalDabs)
         lastOffMainCoordinatorSnapshot = batch.coordinatorSnapshot
-        lastOffMainPredictionProvenanceBoundary =
-            batch.predictionProvenanceBoundary
         if let scheduler = activeStroke?.frozenHarnessScheduler {
             recordBrushLabScheduler(scheduler)
         }
@@ -3555,311 +2750,355 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return nil
     }
 
-    private func acknowledgeSubmittedPreparationFrame(
-        _ frame: PreparedWorkerFrameIdentity?
-    ) throws {
-        guard let frame else { return }
-        guard pendingPreparedWorkerFrame == frame,
-              let bridge = strokePreparationBridge
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        try bridge.acknowledgePreparedFrame(
-            generation: frame.generation,
-            token: frame.token
-        )
-        // Ack transfers the textures back to the actor. They must stop being
-        // readable on Main before the actor is allowed to mutate them again.
-        currentPreparedSurfaceLease = nil
-        pendingPreparedWorkerFrame = nil
-        pendingPreparedSurfaceFrame = nil
-        submittedPreparedWorkerFrame = nil
-    }
-
-    public func completePendingRasterOperation() throws {
-        guard let operation = pendingRasterOperation else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        operation.commandBuffer.waitUntilCompleted()
-        if let error = drainRasterOperationOutcomes() {
-            throw error
-        }
-    }
-
     public func draw(in view: MTKView) {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        defer {
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-            requestAnotherInteractiveFrameIfNeeded(in: view)
-        }
-        _ = drainRasterOperationOutcomes()
-        if drainFrameOutcomes() != nil { return }
-        drainCompletedUploadRanges()
-
-        do {
-            try drainStrokePreparationResultsCore()
-            try prepareCompiledCommitIfReadyCore()
-        } catch let published as PreviouslyPublishedInteractiveFailure {
-            _ = published
-            return
-        } catch let error as MetalRendererError {
-            failActiveOperationIfNeeded(error)
-            return
-        } catch {
-            failActiveOperationIfNeeded(
-                .commandFailed(error.localizedDescription)
-            )
+        paintDisplayView = view
+        guard let submission = preparedPaintDisplaySubmission else {
+            schedulePaintDisplayPreparation(in: view)
             return
         }
-
-        // One Main composite owns the borrowed actor surface at a time. Its
-        // completion outcome returns the lease before another actor mutation
-        // or another reader submission can proceed.
-        guard submittedPreparedWorkerFrame == nil else { return }
-        guard let drawable = view.currentDrawable else {
+        guard submission.specification.outputRegion.width
+                == Int(view.drawableSize.width),
+              submission.specification.outputRegion.height
+                == Int(view.drawableSize.height)
+        else {
+            invalidatePaintDisplayPreparation()
             return
         }
+        guard let drawable = view.currentDrawable else { return }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             failActiveOperationIfNeeded(.commandBufferUnavailable)
             return
         }
-        let targetFramesPerSecond = max(1, view.preferredFramesPerSecond)
-        let runtimeFrameID = beginStrokeRuntimeFrame(
-            at: DispatchTime.now().uptimeNanoseconds,
-            targetFrameDurationNanoseconds:
-                UInt64(1_000_000_000 / targetFramesPerSecond)
-        )
-        #if DEBUG
-        let cpuEncodeStart = CFAbsoluteTimeGetCurrent()
-        #endif
 
-        let uploads: [FrameUpload] = []
-        var nativeEncoding: NativeDepositionFrameEncoding?
-        var rasterCommit: EncodedRasterCommit?
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor =
+            GridCanvasContract.paperClearColor
+
+        preparedPaintDisplaySubmission = nil
         do {
-            let hasEarlierPendingUploads = !completedUploadRanges.isEmpty
-            let encodedLiveClear: Bool
-            let encodedReplayClear: Bool
-            if activeStroke != nil {
-                let encoding = try encodeScheduledDeposition(commandBuffer)
-                nativeEncoding = encoding
-                encodedLiveClear = encoding.encodedLiveClear
-                encodedReplayClear = encoding.encodedReplayClear
-            } else {
-                nativeEncoding = nil
-                encodedLiveClear = false
-                encodedReplayClear = false
-            }
-            let plannedSettledThrough = uploads.last {
-                $0.layer == .settled
-            }?.throughExclusive ?? liveStroke.bakedHighWater
-            let plannedReplayThrough = uploads.last {
-                $0.layer == .replay
-            }?.throughExclusive ?? replayStroke.bakedHighWater
-            let shouldEncodeCommit = activeStroke?.commitRequested == true
-                && activeStroke?.pendingRevisions != nil
-                && plannedSettledThrough == liveStroke.emittedHighWater
-                && plannedReplayThrough == replayStroke.emittedHighWater
-                && !hasEarlierPendingUploads
-                && activeStroke?.pendingTokenBearingFrameCount == 0
-            let hasCurrentNativeDeposition =
-                (nativeEncoding?.instanceCount ?? 0) > 0
-            if shouldEncodeCommit {
-                rasterCommit = try encodeCommit(
-                    commandBuffer,
-                    liveVisible: compositeLiveIsVisible
-                        || !uploads.isEmpty
-                        || hasCurrentNativeDeposition
-                )
-            }
-            try encodeDisplay(
-                into: drawable.texture,
+            try paintContext.encodeDisplaySubmission(
+                submission,
+                target: drawable.texture,
                 commandBuffer: commandBuffer,
-                showGridLines: interactiveGridVisibility,
-                liveVisible: compositeLiveIsVisible
-                    || !uploads.isEmpty
-                    || hasCurrentNativeDeposition
+                renderPassDescriptor: pass
             )
-            _ = try finalizeFrameEncoding(
-                encodedClear: encodedLiveClear,
-                encodedReplayClear: encodedReplayClear,
-                uploads: uploads,
-                nativeEncoding: nativeEncoding,
-                rasterCommit: rasterCommit,
-                commandBuffer: commandBuffer
+            let targetFramesPerSecond = max(
+                1,
+                view.preferredFramesPerSecond
+            )
+            let runtimeFrameID = beginStrokeRuntimeFrame(
+                at: DispatchTime.now().uptimeNanoseconds,
+                targetFrameDurationNanoseconds:
+                    UInt64(1_000_000_000 / targetFramesPerSecond)
             )
             recordStrokeRuntimePreparedFrame(
-                id: runtimeFrameID,
-                encoding: nativeEncoding
+                id: runtimeFrameID
             )
-            let submittedAtNanoseconds =
-                DispatchTime.now().uptimeNanoseconds
+            let submittedAt = DispatchTime.now().uptimeNanoseconds
             recordStrokeRuntimeSubmittedFrame(
                 id: runtimeFrameID,
-                at: submittedAtNanoseconds
+                at: submittedAt
             )
-            if runtimeFrameID != nil {
-                commandBuffer.addCompletedHandler { [weak self] completedBuffer in
-                    guard completedBuffer.status == .completed else { return }
-                    #if targetEnvironment(simulator)
-                    let completedAtNanoseconds =
-                        DispatchTime.now().uptimeNanoseconds
-                    #endif
-                    let gpuStarted = Self.nanoseconds(
-                        completedBuffer.gpuStartTime
-                    )
-                    let gpuFinished = Self.nanoseconds(
-                        completedBuffer.gpuEndTime
-                    )
-                    Task { @MainActor [weak self] in
-                        #if targetEnvironment(simulator)
-                        self?.recordStrokeRuntimeCompletedFrame(
-                            id: runtimeFrameID,
-                            measuredGPUStart: gpuStarted,
-                            measuredGPUEnd: gpuFinished,
-                            submittedAt: submittedAtNanoseconds,
-                            completedAt: completedAtNanoseconds
-                        )
-                        #else
-                        self?.recordStrokeRuntimeGPUFrame(
-                            id: runtimeFrameID,
-                            measuredStart: gpuStarted,
-                            measuredFinish: gpuFinished,
-                            submittedAt: submittedAtNanoseconds
-                        )
-                        #endif
-                    }
-                }
-                #if !targetEnvironment(simulator)
-                drawable.addPresentedHandler { [weak self] presentedDrawable in
-                    let measured = Self.nanoseconds(
-                        presentedDrawable.presentedTime
-                    )
-                    let presentedAt = measured > 0
-                        ? measured
-                        : DispatchTime.now().uptimeNanoseconds
-                    Task { @MainActor [weak self] in
-                        self?.recordStrokeRuntimePresentedFrame(
-                            id: runtimeFrameID,
-                            at: presentedAt
-                        )
-                    }
-                }
-                #endif
-            }
-            #if DEBUG
-            let cpuEncodeMilliseconds = elapsedMilliseconds(
-                since: cpuEncodeStart
-            )
-            let eventToSubmitNanoseconds =
-                takeBrushLabEventToSubmitNanoseconds(
-                    submittedAt: submittedAtNanoseconds
-                )
-            let encodedDabCount =
-                nativeEncoding?.logicalDabCount ?? 0
-            let encodedInstanceCount =
-                nativeEncoding?.instanceCount ?? 0
-            let bufferLeaseCount =
-                nativeEncoding?.uploadBufferCount ?? 0
-            commandBuffer.addCompletedHandler { [weak self] completedBuffer in
-                guard completedBuffer.status == .completed else { return }
-                let completedAtNanoseconds =
-                    DispatchTime.now().uptimeNanoseconds
-                let frameMetrics = GPUFrameMetrics(
-                    cpuEncodeMilliseconds: cpuEncodeMilliseconds,
-                    gpuMilliseconds: max(
-                        0,
-                        (
-                            completedBuffer.gpuEndTime
-                                - completedBuffer.gpuStartTime
-                        ) * 1_000
-                    ),
-                    eventToSubmitNanoseconds:
-                        eventToSubmitNanoseconds,
-                    gpuCompletionNanoseconds:
-                        completedAtNanoseconds >= submittedAtNanoseconds
-                            ? completedAtNanoseconds
-                                - submittedAtNanoseconds
-                            : 0,
-                    encodedDabCount: encodedDabCount,
-                    encodedInstanceCount: encodedInstanceCount,
-                    bufferLeaseCount: bufferLeaseCount
-                )
+            commandBuffer.addCompletedHandler { [weak self] completed in
+                let succeeded = completed.status == .completed
+                let message = completed.error?.localizedDescription
+                let gpuStarted = Self.nanoseconds(completed.gpuStartTime)
+                let gpuFinished = Self.nanoseconds(completed.gpuEndTime)
+                let completedAt = DispatchTime.now().uptimeNanoseconds
                 Task { @MainActor [weak self] in
-                    self?.recordBrushLabCompletedFrame(frameMetrics)
-                    self?.stageRendererEvent(
-                        .interactiveFrameMetrics(frameMetrics)
-                    )
-                }
-            }
-            let fallbackPresentationTimestamp =
-                ProcessInfo.processInfo.systemUptime
-            #if os(macOS)
-            drawable.addPresentedHandler { [weak self] presentedDrawable in
-                let timestamp = Self.interactivePresentationTimestamp(
-                    presentedTime: presentedDrawable.presentedTime,
-                    fallback: fallbackPresentationTimestamp
-                )
-                Task { @MainActor [weak self] in
-                    self?.stageRendererEvent(
-                        .interactiveFramePresented(
-                            timestamp,
-                            targetFramesPerSecond
+                    guard let self else { return }
+                    do {
+                        try await self.paintContext
+                            .retryVisiblePlanRetirementsAndCompletions()
+                        if self.activePaintTransientSource?
+                            .acknowledgementStatus == .fulfilled
+                        {
+                            self.activePaintTransientSource = nil
+                        }
+                    } catch {
+                        self.paintCommandError =
+                            .commandFailed(error.localizedDescription)
+                    }
+                    if let runtimeFrameID {
+                        if succeeded {
+                            #if targetEnvironment(simulator)
+                            self.recordStrokeRuntimeCompletedFrame(
+                                id: runtimeFrameID,
+                                measuredGPUStart: gpuStarted,
+                                measuredGPUEnd: gpuFinished,
+                                submittedAt: submittedAt,
+                                completedAt: completedAt
+                            )
+                            #else
+                            self.recordStrokeRuntimeGPUFrame(
+                                id: runtimeFrameID,
+                                measuredStart: gpuStarted,
+                                measuredFinish: gpuFinished,
+                                submittedAt: submittedAt
+                            )
+                            #endif
+                        } else {
+                            self.discardStrokeRuntimeFrame(runtimeFrameID)
+                        }
+                    }
+                    if !succeeded {
+                        self.failActiveOperationIfNeeded(
+                            .commandFailed(
+                                message ?? "paint display command failed"
+                            )
                         )
-                    )
+                    }
+                    self.startPaintLifecyclePump()
                 }
             }
-            #else
-            stageRendererEvent(
-                .interactiveFramePresented(
-                    fallbackPresentationTimestamp,
-                    targetFramesPerSecond
-                )
-            )
-            #endif
-            #endif
             commandBuffer.present(drawable)
             if activeStroke != nil {
                 counters.renderedFramesThisStroke += 1
             }
             commandBuffer.commit()
         } catch let error as MetalRendererError {
-            if let runtimeFrameID {
-                discardStrokeRuntimeFrame(runtimeFrameID)
-            }
-            if nativeEncoding != nil,
-               commandBuffer.status == .notEnqueued
-            {
-                installPreparedSurfaceTerminalHandler(
-                    for: nativeEncoding,
-                    on: commandBuffer
-                )
-                commandBuffer.commit()
-            }
-            abandon(uploads)
-            abandon(rasterCommit)
+            try? paintContext.cancelDisplaySubmission(submission)
             failActiveOperationIfNeeded(error)
+        } catch {
+            try? paintContext.cancelDisplaySubmission(submission)
+            failActiveOperationIfNeeded(
+                .commandFailed(error.localizedDescription)
+            )
+        }
+    }
+
+    func renderCurrentPaintFrameForHarness(
+        width: Int,
+        height: Int,
+        includeTransient: Bool,
+        showGridLines: Bool? = nil
+    ) async throws -> RenderedFrame? {
+        guard (1...4_096).contains(width),
+              (1...4_096).contains(height)
+        else { throw MetalRendererError.invalidDrawableSize }
+
+        let transient: DocumentPaintTransientDisplaySource?
+        if includeTransient {
+            transient = try await awaitPaintTransientSourceForHarness()
+            if transient == nil { return nil }
+        } else {
+            transient = nil
+        }
+        let outputSize = PixelSize(width: width, height: height)
+        let submission = try await makePaintDisplaySubmission(
+            outputPixelSize: outputSize,
+            transient: transient,
+            showGridLines: showGridLines
+        )
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: DocumentColorPipeline.displayPixelFormat,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .shared
+        descriptor.usage = [.renderTarget, .shaderRead]
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            try? paintContext.cancelDisplaySubmission(submission)
+            throw MetalRendererError.textureAllocationFailed
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            try? paintContext.cancelDisplaySubmission(submission)
+            throw MetalRendererError.commandBufferUnavailable
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor =
+            GridCanvasContract.paperClearColor
+        let measuredSubmission: (
+            completion: (
+                Bool,
+                String?,
+                TimeInterval,
+                TimeInterval,
+                UInt64,
+                UInt64
+            ),
+            cpuPreparationMilliseconds: Double
+        )
+        let runtimeFrameID = beginStrokeRuntimeFrame(
+            at: DispatchTime.now().uptimeNanoseconds,
+            targetFrameDurationNanoseconds: 16_666_667
+        )
+        do {
+            measuredSubmission = try await Self
+                .performMeasuredCPUPreparation(
+                    clock: CFAbsoluteTimeGetCurrent,
+                    preparation: {
+                        try paintContext.encodeDisplaySubmission(
+                            submission,
+                            target: texture,
+                            commandBuffer: commandBuffer,
+                            renderPassDescriptor: pass
+                        )
+                        recordStrokeRuntimePreparedFrame(
+                            id: runtimeFrameID
+                        )
+                    },
+                    waitForCompletion: {
+                        await withCheckedContinuation {
+                            (continuation: CheckedContinuation<(
+                                Bool,
+                                String?,
+                                TimeInterval,
+                                TimeInterval,
+                                UInt64,
+                                UInt64
+                            ), Never>) in
+                            let submittedAtNanoseconds =
+                                DispatchTime.now().uptimeNanoseconds
+                            recordStrokeRuntimeSubmittedFrame(
+                                id: runtimeFrameID,
+                                at: submittedAtNanoseconds
+                            )
+                            commandBuffer.addCompletedHandler { completed in
+                                continuation.resume(returning: (
+                                    completed.status == .completed,
+                                    completed.error?.localizedDescription,
+                                    completed.gpuStartTime,
+                                    completed.gpuEndTime,
+                                    submittedAtNanoseconds,
+                                    DispatchTime.now().uptimeNanoseconds
+                                ))
+                            }
+                            commandBuffer.commit()
+                        }
+                    }
+                )
         } catch {
             if let runtimeFrameID {
                 discardStrokeRuntimeFrame(runtimeFrameID)
             }
-            if nativeEncoding != nil,
-               commandBuffer.status == .notEnqueued
-            {
-                installPreparedSurfaceTerminalHandler(
-                    for: nativeEncoding,
-                    on: commandBuffer
-                )
-                commandBuffer.commit()
+            try? paintContext.cancelDisplaySubmission(submission)
+            throw error
+        }
+        let completion = measuredSubmission.completion
+        try await paintContext.retryVisiblePlanRetirementsAndCompletions()
+        if activePaintTransientSource?.acknowledgementStatus == .fulfilled {
+            activePaintTransientSource = nil
+        }
+        startPaintLifecyclePump()
+        guard completion.0 else {
+            if let runtimeFrameID {
+                discardStrokeRuntimeFrame(runtimeFrameID)
             }
-            abandon(uploads)
-            abandon(rasterCommit)
-            failActiveOperationIfNeeded(
-                .commandFailed(error.localizedDescription)
+            throw MetalRendererError.commandFailed(
+                completion.1 ?? "paint display command failed"
             )
+        }
+        recordStrokeRuntimeCompletedFrame(
+            id: runtimeFrameID,
+            measuredGPUStart: Self.nanoseconds(completion.2),
+            measuredGPUEnd: Self.nanoseconds(completion.3),
+            submittedAt: completion.4,
+            completedAt: completion.5
+        )
+        let encodedDabCount = transient == nil
+            ? 0 : pendingPaintHarnessDabCount
+        let encodedInstanceCount = transient == nil
+            ? 0 : pendingPaintHarnessInstanceCount
+        if transient != nil {
+            pendingPaintHarnessDabCount = 0
+            pendingPaintHarnessInstanceCount = 0
+        }
+        let frameMetrics = metrics(
+            commandBuffer: commandBuffer,
+            cpuMilliseconds: measuredSubmission.cpuPreparationMilliseconds,
+            submittedAtNanoseconds: transient == nil ? 0 : completion.4,
+            completedAtNanoseconds: completion.5,
+            encodedDabCount: encodedDabCount,
+            encodedInstanceCount: encodedInstanceCount,
+            bufferLeaseCount: 0
+        )
+        recordBrushLabCompletedFrame(frameMetrics)
+        return RenderedFrame(texture: texture, metrics: frameMetrics)
+    }
+
+    private func awaitPaintTransientSourceForHarness() async throws
+        -> DocumentPaintTransientDisplaySource?
+    {
+        guard let bridge = strokePreparationBridge else { return nil }
+        let progress = StrokePreparationAsyncProgressRegistration(
+            mailbox: bridge.mailbox
+        )
+        defer { progress.remove() }
+        while true {
+            let observedRevision = progress.currentRevision
+            try drainCompletedInteractiveOperations()
+            if let source = activePaintTransientSource {
+                switch source.acknowledgementStatus {
+                case .available:
+                    return source
+                case .pending:
+                    try await paintContext
+                        .retryVisiblePlanRetirementsAndCompletions()
+                case .fulfilled:
+                    if activePaintTransientSource?.sourceIdentity
+                        == source.sourceIdentity
+                    {
+                        activePaintTransientSource = nil
+                    }
+                case let .failed(error):
+                    throw MetalRendererError.commandFailed(
+                        "transient display acknowledgement failed: \(error)"
+                    )
+                }
+                if source.acknowledgementStatus == .fulfilled,
+                   activePaintTransientSource?.sourceIdentity
+                    == source.sourceIdentity
+                {
+                    activePaintTransientSource = nil
+                }
+            }
+            if bridge.mailbox.snapshot.isQuiescent {
+                return nil
+            }
+            if progress.currentRevision != observedRevision { continue }
+            guard try await progress.waitForProgress(
+                after: observedRevision
+            ) else {
+                let snapshot = bridge.mailbox.snapshot
+                let plan = await paintContext.snapshot().visiblePlan
+                throw MetalRendererError.commandFailed(
+                    "stroke surface preparation exceeded its harness bound "
+                        + "(inputPending: \(snapshot.input.hasPendingInput), "
+                        + "results: \(snapshot.pendingResultCount), "
+                        + "awaitingACK: "
+                        + "\(snapshot.awaitingPreparedFrameSubmission), "
+                        + "awaitingIdentity: "
+                        + "\(String(describing: snapshot.awaitingPreparedFrameGeneration))/"
+                        + "\(String(describing: snapshot.awaitingPreparedFrameToken)), "
+                        + "rendererGeneration: "
+                        + "\(String(describing: strokePreparationGeneration)), "
+                        + "ackQueued/inFlight: "
+                        + "\(snapshot.pendingPreparedFrameAcknowledgement)/"
+                        + "\(snapshot.preparedFrameAcknowledgementIsInFlight), "
+                        + "workerActive: \(snapshot.workerIsProcessing), "
+                        + "sourceACK: "
+                        + "\(String(describing: activePaintTransientSource?.acknowledgementStatus)), "
+                        + "plan: current=\(plan.currentPlanIdentity != nil)/"
+                        + "presentable=\(plan.currentIsPresentable) "
+                        + "prepared=\(plan.preparedPlanCount) "
+                        + "retiring=\(plan.retiringPlanCount) "
+                        + "submission=\(plan.preparedSubmissionCount)/"
+                        + "\(plan.submittedSubmissionCount) completion="
+                        + "\(plan.pendingPlanCompletionCount)/"
+                        + "\(plan.pendingConsumerCompletionCount)/"
+                        + "\(plan.pendingTerminalEventCount) transient="
+                        + "\(plan.transientAcknowledgementOwnedCount)/"
+                        + "\(plan.transientAcknowledgementPendingCount))"
+                )
+            }
         }
     }
 
@@ -3898,7 +3137,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             hasActiveStroke: activeStroke != nil
                 || strokeWorkspaceState != .available,
             isViewportAnimating: false,
-            hasPendingComposite: pendingRasterOperation != nil,
+            hasPendingComposite: paintDisplayPreparationTask != nil,
             isHUDSamplePending: isHUDSamplePending
         ) else {
             return
@@ -3939,14 +3178,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
               let strokeExecution = activeStroke
         else {
             throw MetalRendererError.invalidStrokeLifecycle
-        }
-        if let predictionInvalidationBoundary {
-            precondition(
-                predictionOverlay.canInvalidatePrediction(
-                    from: predictionInvalidationBoundary
-                ),
-                "Prediction provenance changed after authoritative preflight."
-            )
         }
         let dabs = depositionInputScratch.preparedDabs[dabRange]
         let arenaTransaction = try transientDabArena.beginTransaction(
@@ -4144,13 +3375,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         strokePreparationAllocationProbe = probe
     }
 
-    package func advanceStrokePreparationForAllocationHarness() throws {
-        try drainCompletedInteractiveOperations()
-        if pendingPreparedSurfaceFrame != nil {
-            _ = try completeNextPendingInteractiveFrame()
-        }
-    }
-
     package func installStrokePreparationProgressWaiterForHarness()
         -> StrokePreparationProgressRegistration?
     {
@@ -4166,29 +3390,29 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         registration.remove()
     }
 
-    package var hasPendingPreparedStrokeSurfaceForHarness: Bool {
-        pendingPreparedSurfaceFrame != nil
-    }
-
     package var strokePreparationIsQuiescentForAllocationHarness: Bool {
         guard let snapshot = strokePreparationBridge?.mailbox.snapshot else {
             return true
         }
         return snapshot.isQuiescent
-            && pendingPreparedSurfaceFrame == nil
-            && submittedPreparedWorkerFrame == nil
     }
 
     package var offMainStrokeWorkspaceIdentityForTesting: UUID {
-        strokeMetalSurfaceResources.identity
+        guard let resources = activeStrokeTileSurfaceResources else {
+            preconditionFailure("No active sparse stroke workspace")
+        }
+        return resources.identity
     }
 
     package var offMainStrokeWorkspacePixelSizeForTesting: PixelSize {
-        strokeMetalSurfaceResources.pixelSize
+        guard let resources = activeStrokeTileSurfaceResources else {
+            preconditionFailure("No active sparse stroke workspace")
+        }
+        return resources.pixelSize
     }
 
     package var offMainStrokeWorkspaceInstallationCountForTesting: UInt64 {
-        strokeMetalSurfaceInstallationCount
+        activeStrokeTileSurfaceResources == nil ? 0 : 1
     }
 
     package var offMainStrokeWorkspaceIsAvailableForAllocationHarness: Bool {
@@ -4203,6 +3427,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         StrokePrivateSurfaceEncoderSnapshot?
     {
         lastOffMainSurfaceSnapshot
+    }
+
+    var offMainReplayRetentionForHarness: StrokePreparedReplayRetention {
+        lastOffMainReplayRetention
+    }
+
+    func takeEncodedAuthoritativeIdentityRangesForHarness()
+        -> [Range<UInt64>]
+    {
+        defer { lastEncodedAuthoritativeIdentityRange = nil }
+        return lastEncodedAuthoritativeIdentityRange.map { [$0] } ?? []
     }
 
     package func setForceOffMainStrokeCommandFailureForTesting(
@@ -4226,32 +3461,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         precondition(isIdle)
         warmedStrokePreparationBridge
             .setResultOwnershipProbeForTesting(probe)
-    }
-
-    var compatibilityInkCoordinatorSnapshotForTesting:
-        StrokeRenderSnapshot?
-    {
-        lastOffMainCoordinatorSnapshot
-    }
-
-    var compatibilityInkEncodingRanOnMainThreadForTesting: Bool? {
-        lastOffMainEncodingRanOnMainThread
-    }
-
-    var hasPendingOffMainSurfaceLeaseForTesting: Bool {
-        pendingPreparedSurfaceFrame != nil
-    }
-
-    var hasSubmittedOffMainSurfaceLeaseForTesting: Bool {
-        submittedPreparedWorkerFrame != nil
-    }
-
-    var hasCurrentOffMainSurfaceLeaseForTesting: Bool {
-        currentPreparedSurfaceLease != nil
-    }
-
-    var hasPendingRasterOperationForTesting: Bool {
-        pendingRasterOperation != nil
     }
 
     var offMainStrokeWorkspaceIsAvailableForTesting: Bool {
@@ -4340,7 +3549,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         precondition(totalSampleCount >= 2)
         precondition(batchSize > 0)
         precondition(inactivityTimeoutNanoseconds > 0)
-        let generation: UInt64 = 600_000
         let targetFrameNanoseconds = UInt64(1_000_000_000 / 60)
         let firstDecileEnd = totalSampleCount / 10
         let lastDecileStart = totalSampleCount - firstDecileEnd
@@ -4351,9 +3559,23 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         )
         defer { progressRegistration.remove() }
         let initialMailbox = bridge.mailbox.snapshot
-        let initialWorkspaceIdentity = strokeMetalSurfaceResources.identity
-        let initialWorkspaceInstallationCount =
-            strokeMetalSurfaceInstallationCount
+        let capability = try paintContext.beginStrokeSurface()
+        let generation = capability.generation
+        let tileSurfaces = try StrokeTileSurfaceResources(
+            device: device,
+            commandQueue: commandQueue,
+            capability: capability,
+            maximumRecordCount: max(
+                depositionFrameBudget.maximumAuthoritativeInstances,
+                depositionFrameBudget.maximumPredictedInstances
+            ),
+            maximumTileReferenceCount:
+                GridCanvasContract.maximumStrokeTileReferenceCount,
+            pipeline: brushRenderState.resources.depositionPipeline
+        )
+        activeStrokeTileSurfaceResources = tileSurfaces
+        let initialWorkspaceIdentity = tileSurfaces.identity
+        let initialWorkspaceInstallationCount: UInt64 = 1
         let configuration = StrokePreparationConfiguration(
             program: compiledBrush.program,
             nominalDiameter: 12,
@@ -4362,13 +3584,15 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             viewport: viewport,
             tilingStrategy: tilingStrategy,
             metalResourceDescriptor: StrokeMetalResourceDescriptor(
-                surfaces: strokeMetalSurfaceResources,
+                surfaces: tileSurfaces,
                 brush: brushRenderState,
                 frameUniforms: frameUniforms(
                     drawableSize: tileSize,
                     showGridLines: false,
                     liveVisible: true
                 ),
+                radialLayout:
+                    tilingStrategy.compiledSymmetry.domain.finite?.radial.layout,
                 forceCommandFailure: false
             ),
             allocationProbe: allocationProbe
@@ -4560,10 +3784,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             workspaceInitialInstallationCount:
                 initialWorkspaceInstallationCount,
             workspaceInstallationCount:
-                strokeMetalSurfaceInstallationCount,
+                1,
             workspaceIdentityStayedStable:
-                strokeMetalSurfaceResources.identity
-                    == initialWorkspaceIdentity,
+                tileSurfaces.identity == initialWorkspaceIdentity,
             maximumPreparedPayloadBytes:
                 mailbox.maximumPreparedPayloadBytes,
             surface: surface,
@@ -4599,20 +3822,27 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             if !resultScratch.isEmpty {
                 watchdog.recordProgress()
             }
-            var deferredAcknowledgement: (generation: UInt64, token: UInt64)?
+            var deferredDisplayAcknowledgement:
+                StrokePreparedFrameAcknowledgement?
+            var deferredSyntheticAcknowledgement:
+                (generation: UInt64, token: UInt64)?
             for result in resultScratch {
                 switch result {
                 case let .cancelled(cancelledGeneration, _)
                     where cancelledGeneration == generation:
                     return
                 case let .prepared(batch):
-                    if let lease = batch.surfaceLease {
-                        deferredAcknowledgement = (
-                            lease.generation,
-                            lease.token
-                        )
+                    if batch.surfaceLease != nil {
+                        guard let displayFrame = batch.displayFrame else {
+                            throw MetalRendererError.invalidStrokeLifecycle
+                        }
+                        deferredDisplayAcknowledgement =
+                            displayFrame.acknowledgement
                     } else if let token = batch.frameToken {
-                        deferredAcknowledgement = (batch.generation, token)
+                        deferredSyntheticAcknowledgement = (
+                            batch.generation,
+                            token
+                        )
                     }
                 case let .failed(_, failure):
                     throw rendererError(for: failure)
@@ -4621,10 +3851,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 }
             }
             resultScratch.removeAll(keepingCapacity: true)
-            if let deferredAcknowledgement {
+            if let deferredDisplayAcknowledgement {
+                try await deferredDisplayAcknowledgement.fulfill()
+                watchdog.recordProgress()
+            }
+            if let deferredSyntheticAcknowledgement {
                 try bridge.acknowledgePreparedFrame(
-                    generation: deferredAcknowledgement.generation,
-                    token: deferredAcknowledgement.token
+                    generation: deferredSyntheticAcknowledgement.generation,
+                    token: deferredSyntheticAcknowledgement.token
                 )
                 watchdog.recordProgress()
             }
@@ -4674,7 +3908,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             } else {
                 watchdog.recordProgress()
             }
-            var deferredAcknowledgement: (generation: UInt64, token: UInt64)?
+            var deferredDisplayAcknowledgement:
+                StrokePreparedFrameAcknowledgement?
+            var deferredSyntheticAcknowledgement:
+                (generation: UInt64, token: UInt64)?
             for result in resultScratch {
                 switch result {
                 case let .prepared(batch):
@@ -4695,51 +3932,17 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                         {
                             zeroWorkLeaseCount += 1
                         }
-                        guard let commandBuffer = commandQueue
-                            .makeCommandBuffer()
-                        else {
-                            throw MetalRendererError
-                                .commandBufferUnavailable
+                        guard let displayFrame = batch.displayFrame else {
+                            throw MetalRendererError.invalidStrokeLifecycle
                         }
-                        try encodeDisplay(
-                            into: compositeTarget,
-                            commandBuffer: commandBuffer,
-                            showGridLines: false,
-                            liveVisible: true,
-                            liveTexture: lease.authoritativeTexture,
-                            replayTexture: lease.predictionTexture
-                        )
-                        let commandOutcome = await withCheckedContinuation {
-                            continuation in
-                            commandBuffer.addCompletedHandler { completed in
-                                continuation.resume(
-                                    returning:
-                                        OffMainStrokeTraceCommandOutcome(
-                                            succeeded:
-                                                completed.status
-                                                    == .completed
-                                                    && completed.error == nil,
-                                            errorMessage:
-                                                completed.error?
-                                                    .localizedDescription
-                                        )
-                                )
-                            }
-                            commandBuffer.commit()
-                        }
-                        guard commandOutcome.succeeded else {
-                            throw MetalRendererError.commandFailed(
-                                commandOutcome.errorMessage
-                                    ?? "off-main trace composite failed"
-                            )
-                        }
-                        deferredAcknowledgement = (
-                            lease.generation,
-                            lease.token
-                        )
+                        deferredDisplayAcknowledgement =
+                            displayFrame.acknowledgement
                     } else if let token = batch.frameToken {
                         zeroWorkLeaseCount += 1
-                        deferredAcknowledgement = (batch.generation, token)
+                        deferredSyntheticAcknowledgement = (
+                            batch.generation,
+                            token
+                        )
                     }
                 case .predictionWasShed:
                     break
@@ -4763,10 +3966,14 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 }
             }
             resultScratch.removeAll(keepingCapacity: true)
-            if let deferredAcknowledgement {
+            if let deferredDisplayAcknowledgement {
+                try await deferredDisplayAcknowledgement.fulfill()
+                watchdog.recordProgress()
+            }
+            if let deferredSyntheticAcknowledgement {
                 try bridge.acknowledgePreparedFrame(
-                    generation: deferredAcknowledgement.generation,
-                    token: deferredAcknowledgement.token
+                    generation: deferredSyntheticAcknowledgement.generation,
+                    token: deferredSyntheticAcknowledgement.token
                 )
                 watchdog.recordProgress()
             }
@@ -4831,10 +4038,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         RendererEventDispatcher.Diagnostics
     {
         rendererEventDispatcher.diagnostics
-    }
-
-    func drainOneRendererEventTurnForHarness() {
-        rendererEventDispatcher.drainOnePendingTurnForHarness()
     }
 
     #endif
@@ -5510,41 +4713,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             capacityAfter:
                 depositionInputScratch.replayDirtyRegions.capacity
         )
-        let admission = PredictionOverlayAdmission(
+        let admission = PredictionAdmission(
             normalizedSampleCount: min(
                 predictedSampleCount,
-                PredictionOverlay.maximumNormalizedSampleCount
+                PredictionAdmissionLimits.maximumNormalizedSampleCount
             ),
             logicalDabCount: min(
                 predictedDabCount,
-                PredictionOverlay.maximumLogicalDabCount
+                PredictionAdmissionLimits.maximumLogicalDabCount
             ),
             projectedInstanceCount:
                 replacement.acceptedPredictedInstanceCount,
             overload: overload
         )
-        if let predictionInvalidationBoundary,
-           predictionOverlay.hasPrediction(
-                from: predictionInvalidationBoundary
-           ),
-           depositionInputScratch.replayDirtyRegions.isEmpty
-        {
-            precondition(
-                predictionOverlay.invalidatePrediction(
-                    from: predictionInvalidationBoundary,
-                    epoch: epoch
-                ),
-                "Validated prediction provenance must remain current."
-            )
-        } else {
-            predictionOverlay.planReplacementInPlace(
-                epoch: epoch,
-                provenance: predictionProvenance,
-                admission: admission,
-                dirtyRegions:
-                    depositionInputScratch.replayDirtyRegions
-            )
-        }
+        _ = predictionInvalidationBoundary
+        _ = predictionProvenance
+        _ = admission
         replayStroke.beginReplacementEpoch(epoch)
         retainedPredictedCount = 0
         var acceptedRecordCount = 0
@@ -5561,7 +4745,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             acceptedRecordCount += 1
         }
         counters.totalInstancesThisStroke += acceptedRecordCount
-        needsReplayClear = true
         recordBrushLabScheduler(scheduler)
     }
 
@@ -5948,72 +5131,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return texture
     }
 
-    private static func makeRasterResources(
-        device: any MTLDevice,
-        canvasPixelSize: PixelSize? = nil,
-        pixelSize: PixelSize,
-        initialRevision: RasterRevision,
-        forceAllocationFailure: Bool
-    ) throws -> RasterResources {
-        if forceAllocationFailure {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        let canonical = try CanonicalRaster(
-            device: device,
-            pixelSize: pixelSize,
-            initialRevision: initialRevision
-        )
-        let liveTile = try PersistentLiveTile(
-            device: device,
-            pixelSize: pixelSize
-        )
-        let predictionOverlay = try PredictionOverlay(
-            device: device,
-            pixelSize: pixelSize
-        )
-        return RasterResources(
-            canvasPixelSize: canvasPixelSize ?? pixelSize,
-            pixelSize: pixelSize,
-            tileSize: PatternSize(
-                width: Float(pixelSize.width),
-                height: Float(pixelSize.height)
-            ),
-            canonical: canonical,
-            liveTile: liveTile,
-            predictionOverlay: predictionOverlay
-        )
-    }
-
-    private static func makeRadialPageTableTexture(
-        device: any MTLDevice,
-        compiled: CompiledSymmetry
-    ) throws -> any MTLTexture {
-        let layout = compiled.domain.finite?.radial.layout
-        let width = layout?.pageTableSize.width ?? 1
-        let height = layout?.pageTableSize.height ?? 1
-        let values = layout?.pageTable ?? [Int32(0)]
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r32Sint,
-            width: width,
-            height: height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.shaderRead]
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        values.withUnsafeBytes { bytes in
-            texture.replace(
-                region: MTLRegionMake2D(0, 0, width, height),
-                mipmapLevel: 0,
-                withBytes: bytes.baseAddress!,
-                bytesPerRow: width * MemoryLayout<Int32>.stride
-            )
-        }
-        return texture
-    }
-
     private func resizedStrategy(
         canvasPixelSize: PixelSize
     ) throws -> TilingStrategy {
@@ -6059,1874 +5176,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func fullRasterRegions(for size: PixelSize) -> PixelRegionSet {
-        PixelRegionSet(
-            [
-                PixelRect(
-                    minX: 0,
-                    minY: 0,
-                    maxX: size.width,
-                    maxY: size.height
-                )!,
-            ],
-            clippedTo: size
-        )
-    }
-
-    func encodeResizeIntersectionCopy(
-        from source: any MTLTexture,
-        oldPixelSize: PixelSize,
-        to destination: any MTLTexture,
-        newPixelSize: PixelSize,
-        on commandBuffer: any MTLCommandBuffer
-    ) throws {
-        guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
-            throw MetalRendererError.commandFailed(
-                "Metal blit encoder creation failed."
-            )
-        }
-        encoder.label = "Resize Top-Left Intersection Copy"
-        encoder.copy(
-            from: source,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: MTLSize(
-                width: min(oldPixelSize.width, newPixelSize.width),
-                height: min(oldPixelSize.height, newPixelSize.height),
-                depth: 1
-            ),
-            to: destination,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-        )
-        encoder.endEncoding()
-    }
-
-    private func encodeRadialResizeCopy(
-        from source: any MTLTexture,
-        sourceStrategy: TilingStrategy,
-        sourcePageTable: (any MTLTexture)?,
-        to destination: any MTLTexture,
-        destinationStrategy: TilingStrategy,
-        on commandBuffer: any MTLCommandBuffer
-    ) throws {
-        guard let sourcePageTable,
-              let layout = destinationStrategy.compiledSymmetry.domain.finite?
-                .radial.layout
-        else {
-            throw MetalRendererError.invalidSymmetryConfiguration(
-                "Radial resize requires source and destination page layouts."
-            )
-        }
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalRendererError.commandFailed(
-                "Metal compute encoder creation failed."
-            )
-        }
-        encoder.label = "Radial Resize Crop/Expand Copy"
-        encoder.setComputePipelineState(pipelines.radialResizeCopy)
-        encoder.setTexture(
-            source,
-            index: Int(PatternTextureIndexCanonical)
-        )
-        encoder.setTexture(
-            destination,
-            index: Int(PatternTextureIndexLive)
-        )
-        encoder.setTexture(
-            sourcePageTable,
-            index: Int(PatternTextureIndexRadialPageTable)
-        )
-        var sourceUniforms = radialFrameUniforms(
-            strategy: sourceStrategy,
-            storagePixelSize: PixelSize(
-                width: source.width,
-                height: source.height
-            )
-        )
-        var destinationUniforms = radialFrameUniforms(
-            strategy: destinationStrategy,
-            storagePixelSize: PixelSize(
-                width: destination.width,
-                height: destination.height
-            )
-        )
-        encoder.setBytes(
-            &sourceUniforms,
-            length: MemoryLayout<PatternRadialFrameUniforms>.stride,
-            index: Int(PatternBufferIndexRadialFrameUniforms)
-        )
-        encoder.setBytes(
-            &destinationUniforms,
-            length: MemoryLayout<PatternRadialFrameUniforms>.stride,
-            index: Int(
-                PatternBufferIndexRadialResizeDestinationUniforms
-            )
-        )
-        let executionWidth = pipelines.radialResizeCopy.threadExecutionWidth
-        let executionHeight = max(
-            1,
-            pipelines.radialResizeCopy.maxTotalThreadsPerThreadgroup
-                / executionWidth
-        )
-        let threadsPerGroup = MTLSize(
-            width: executionWidth,
-            height: executionHeight,
-            depth: 1
-        )
-        let pageThreads = MTLSize(
-            width: RadialSectorLayout.pageSide,
-            height: RadialSectorLayout.pageSide,
-            depth: 1
-        )
-        for page in layout.residentPages {
-            guard let pageX = Int32(exactly: page.coordinate.x),
-                  let pageY = Int32(exactly: page.coordinate.y),
-                  let slot = UInt32(exactly: page.atlasSlot)
-            else {
-                encoder.endEncoding()
-                throw MetalRendererError.invalidSymmetryConfiguration(
-                    "Radial resize page coordinates exceed the shader ABI."
-                )
-            }
-            var pageUniforms = PatternRadialResizePageUniforms(
-                logicalPageX: pageX,
-                logicalPageY: pageY,
-                destinationSlot: slot,
-                padding: 0
-            )
-            encoder.setBytes(
-                &pageUniforms,
-                length: MemoryLayout<PatternRadialResizePageUniforms>.stride,
-                index: Int(PatternBufferIndexRadialResizePage)
-            )
-            encoder.dispatchThreads(
-                pageThreads,
-                threadsPerThreadgroup: threadsPerGroup
-            )
-        }
-        encoder.endEncoding()
-    }
-
-    private func clearInitialTextures() throws {
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        for texture in [
-            canonical.front,
-            canonical.scratch,
-            liveTile.texture,
-            replayTile.texture,
-        ] {
-            let pass = MTLRenderPassDescriptor()
-            pass.colorAttachments[0].texture = texture
-            pass.colorAttachments[0].loadAction = .clear
-            pass.colorAttachments[0].storeAction = .store
-            pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-            guard let encoder = commandBuffer.makeRenderCommandEncoder(
-                descriptor: pass
-            ) else {
-                throw MetalRendererError.renderEncoderUnavailable
-            }
-            encoder.endEncoding()
-        }
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        guard commandBuffer.status == .completed else {
-            throw MetalRendererError.commandFailed(
-                commandBuffer.error?.localizedDescription
-                    ?? "initial transparent clear failed"
-            )
-        }
-        liveTile.markCleared()
-        predictionOverlay.markCleared(epoch: 0)
-        needsLiveClear = false
-        needsReplayClear = false
-    }
-
-    private func encodeTransparentClear(
-        of texture: any MTLTexture,
-        on commandBuffer: any MTLCommandBuffer,
-        label: String
-    ) throws {
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        encoder.label = label
-        encoder.endEncoding()
-    }
-
-    private func encodeCanonicalFrontCopy(
-        to destination: any MTLTexture,
-        on commandBuffer: any MTLCommandBuffer
-    ) throws {
-        guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
-            throw MetalRendererError.commandFailed(
-                "Metal blit encoder creation failed."
-            )
-        }
-        encoder.label = "Canonical Front To Scratch"
-        encoder.copy(
-            from: canonical.front,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: MTLSize(
-                width: storagePixelSize.width,
-                height: storagePixelSize.height,
-                depth: 1
-            ),
-            to: destination,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-        )
-        encoder.endEncoding()
-    }
-
-    private func encodeLiveClear(
-        _ commandBuffer: any MTLCommandBuffer
-    ) throws {
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = liveTile.texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        encoder.label = "Clear Persistent Live Stroke"
-        encoder.endEncoding()
-    }
-
-    func encodeReplayClear(
-        _ commandBuffer: any MTLCommandBuffer
-    ) throws {
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = replayTile.texture
-        pass.colorAttachments[0].storeAction = .store
-        if replayTile.hasRegionalClearPlan {
-            pass.colorAttachments[0].loadAction = .load
-        } else {
-            pass.colorAttachments[0].loadAction = .clear
-            pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-        }
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        encoder.label = "Clear Replay Live Stroke"
-        if replayTile.hasRegionalClearPlan {
-            encoder.setRenderPipelineState(pipelines.replayClear)
-            var uniforms = frameUniforms(
-                drawableSize: tileSize,
-                showGridLines: false,
-                liveVisible: true
-            )
-            encoder.setVertexBytes(
-                &uniforms,
-                length: MemoryLayout<PatternGridFrameUniforms>.stride,
-                index: Int(PatternBufferIndexGridFrameUniforms)
-            )
-            for rectangle in replayTile.regionalClearRectangles {
-                encoder.setScissorRect(
-                    MTLScissorRect(
-                        x: rectangle.minX,
-                        y: rectangle.minY,
-                        width: rectangle.width,
-                        height: rectangle.height
-                    )
-                )
-                encoder.drawPrimitives(
-                    type: .triangle,
-                    vertexStart: 0,
-                    vertexCount: 3
-                )
-            }
-        }
-        encoder.endEncoding()
-    }
-
-    func clearLiveForHarnessIfNeeded() throws {
-        guard needsLiveClear else {
-            return
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
-        }
-        do {
-            try encodeLiveClear(commandBuffer)
-            commandBuffer.commit()
-            commandBuffer.waitUntilCompleted()
-            try validateHarnessCommand(commandBuffer)
-        } catch let error as MetalRendererError {
-            failActiveOperationIfNeeded(error)
-            throw error
-        }
-        liveTile.markCleared()
-        needsLiveClear = false
-    }
-
-    func encodePendingLiveDabs(
-        _ commandBuffer: any MTLCommandBuffer
-    ) throws -> PendingLiveEncoding {
-        let requiresAtomicReplayReplacement = needsReplayClear
-            && replayStroke.renderEpoch > replayTile.visibleEpoch
-        if requiresAtomicReplayReplacement {
-            return try encodeAtomicReplayReplacement(commandBuffer)
-        }
-
-        var uploads: [FrameUpload] = []
-        uploads.reserveCapacity(GridCanvasContract.inFlightBufferCount)
-        let encodedReplayClear = needsReplayClear
-        do {
-            if encodedReplayClear {
-                try encodeReplayClear(commandBuffer)
-            }
-            try encodePending(
-                liveStroke,
-                layer: .settled,
-                texture: liveTile.texture,
-                commandBuffer: commandBuffer,
-                uploads: &uploads
-            )
-            try encodePending(
-                replayStroke,
-                layer: .replay,
-                texture: replayTile.texture,
-                commandBuffer: commandBuffer,
-                uploads: &uploads
-            )
-            return PendingLiveEncoding(
-                uploads: uploads,
-                encodedReplayClear: encodedReplayClear
-            )
-        } catch {
-            abandon(uploads)
-            throw error
-        }
-    }
-
-    func encodeScheduledDeposition(
-        _ commandBuffer: any MTLCommandBuffer
-    ) throws -> NativeDepositionFrameEncoding {
-        guard let execution = activeStroke else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        if strokePreparationBridge != nil {
-            guard let pending = pendingPreparedSurfaceFrame,
-                  submittedPreparedWorkerFrame == nil
-            else {
-                lastEncodedAuthoritativeIdentityRange = nil
-                return NativeDepositionFrameEncoding(
-                    authoritativeCount: 0,
-                    predictedCount: 0,
-                    logicalDabCount: 0,
-                    uploadBufferCount: 0,
-                    encodedLiveClear: false,
-                    encodedReplayClear: false,
-                    replayEpoch: 0,
-                    encodedAuthoritativeIdentityRange: nil,
-                    preparedWorkerFrame: nil
-                )
-            }
-            let lease = pending.lease
-            try encodePreparedSurfaceSnapshot(
-                lease,
-                commandBuffer: commandBuffer
-            )
-            let encodedAuthoritativeIdentityRange: Range<UInt64>?
-            if lease.authoritativeInstanceCount > 0 {
-                let lowerBound = encodedAuthoritativeIdentityHighWater
-                let (upperBound, overflow) = lowerBound
-                    .addingReportingOverflow(
-                        UInt64(lease.authoritativeInstanceCount)
-                    )
-                precondition(
-                    !overflow
-                        && upperBound
-                            <= scheduledAuthoritativeIdentityHighWater
-                )
-                encodedAuthoritativeIdentityRange = lowerBound..<upperBound
-                encodedAuthoritativeIdentityHighWater = upperBound
-            } else {
-                encodedAuthoritativeIdentityRange = nil
-            }
-            lastEncodedAuthoritativeIdentityRange =
-                encodedAuthoritativeIdentityRange
-            brushLabLastFrameEncodedDabCount = pending.logicalDabCount
-            brushLabLastFrameEncodedInstanceCount =
-                pending.identity.recordCount
-            brushLabStrokeEncodedDabCount = Self.saturatingAdd(
-                brushLabStrokeEncodedDabCount,
-                UInt64(pending.logicalDabCount)
-            )
-            brushLabDepositionTelemetry.recordEncoding(
-                instanceCount: UInt64(pending.identity.recordCount),
-                bufferCount: 1
-            )
-            submittedPreparedWorkerFrame = pending.identity
-            return NativeDepositionFrameEncoding(
-                authoritativeCount: lease.authoritativeInstanceCount,
-                predictedCount: lease.predictedInstanceCount,
-                logicalDabCount: pending.logicalDabCount,
-                uploadBufferCount: pending.identity.recordCount > 0 ? 1 : 0,
-                encodedLiveClear: lease.clearedAuthoritativeSurface,
-                encodedReplayClear: lease.clearedPredictionSurface,
-                replayEpoch: pending.replayEpoch,
-                encodedAuthoritativeIdentityRange:
-                    encodedAuthoritativeIdentityRange,
-                preparedWorkerFrame: pending.identity
-            )
-        }
-        guard let scheduler = execution.frozenHarnessScheduler else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let binding = execution.brush.resources.depositionPipeline
-        let material = execution.brush.resources.depositionMaterial
-
-        // Authoritative work owns the frame whenever it is present. This
-        // keeps a frame to one render target, so preflight and submission are
-        // one atomic encoder transaction and prediction replacement remains
-        // all-or-nothing.
-        let includePrediction = scheduler.authoritativeIsDrained
-        let authoritativeCapacityBefore =
-            depositionInputScratch.authoritativeFrame.capacity
-        let predictedCapacityBefore =
-            depositionInputScratch.predictedFrame.capacity
-        let frame = scheduler.preparedFrame(
-            budget: depositionFrameBudget,
-            includePrediction: includePrediction,
-            authoritativeScratch:
-                &depositionInputScratch.authoritativeFrame,
-            predictedScratch: &depositionInputScratch.predictedFrame
-        )
-        recordScratchAllocationIfNeeded(
-            capacityBefore: authoritativeCapacityBefore,
-            capacityAfter:
-                depositionInputScratch.authoritativeFrame.capacity
-        )
-        recordScratchAllocationIfNeeded(
-            capacityBefore: predictedCapacityBefore,
-            capacityAfter: depositionInputScratch.predictedFrame.capacity
-        )
-        precondition(
-            frame.authoritative.isEmpty || frame.predicted.isEmpty,
-            "A compiled deposition frame must target one live surface."
-        )
-        let records = frame.authoritative.isEmpty
-            ? frame.predicted
-            : frame.authoritative
-        let target = frame.authoritative.isEmpty
-            ? replayTile.texture
-            : liveTile.texture
-
-        guard var encoder = depositionEncoder else {
-            throw MetalRendererError.depositionEncoderUnavailable
-        }
-        encoder.updateFrameUniforms(
-            frameUniforms(
-                drawableSize: tileSize,
-                showGridLines: false,
-                liveVisible: true
-            )
-        )
-        let prepared: PreparedDepositionEncoding?
-        do {
-            prepared = records.isEmpty
-                ? nil
-                : try encoder.preflight(
-                    records: records,
-                    binding: binding,
-                    material: material,
-                    target: target
-                )
-        } catch DepositionEncodingError.uploadBuffersUnavailable
-            where !frame.predicted.isEmpty
-        {
-            lastEncodedAuthoritativeIdentityRange = nil
-            return NativeDepositionFrameEncoding(
-                authoritativeCount: 0,
-                predictedCount: 0,
-                logicalDabCount: 0,
-                uploadBufferCount: 0,
-                encodedLiveClear: false,
-                encodedReplayClear: false,
-                replayEpoch: 0,
-                encodedAuthoritativeIdentityRange: nil,
-                preparedWorkerFrame: nil
-            )
-        } catch {
-            throw rendererError(forDepositionError: error)
-        }
-
-        let encodedLiveClear = needsLiveClear
-        let encodedReplayClear = needsReplayClear
-            && frame.authoritative.isEmpty
-        do {
-            if encodedLiveClear {
-                try encodeLiveClear(commandBuffer)
-            }
-            if encodedReplayClear {
-                try encodeReplayClear(commandBuffer)
-            }
-            if let prepared {
-                _ = try encoder.encode(
-                    prepared,
-                    into: target,
-                    commandBuffer: commandBuffer
-                )
-            }
-        } catch {
-            if let prepared {
-                encoder.abandon(prepared)
-            }
-            throw rendererError(forDepositionError: error)
-        }
-
-        depositionEncoder = encoder
-        scheduler.consume(frame)
-        recordBrushLabScheduler(scheduler)
-        let identityCapacityBefore =
-            depositionInputScratch.encodedLogicalIdentities.capacity
-        depositionInputScratch.encodedLogicalIdentities.removeAll(
-            keepingCapacity: true
-        )
-        for record in records
-        where !depositionInputScratch.encodedLogicalIdentities.contains(
-            record.identity
-        ) {
-            depositionInputScratch.encodedLogicalIdentities.append(
-                record.identity
-            )
-        }
-        recordScratchAllocationIfNeeded(
-            capacityBefore: identityCapacityBefore,
-            capacityAfter:
-                depositionInputScratch.encodedLogicalIdentities.capacity
-        )
-        brushLabLastFrameEncodedDabCount =
-            depositionInputScratch.encodedLogicalIdentities.count
-        brushLabLastFrameEncodedInstanceCount = records.count
-        brushLabStrokeEncodedDabCount = Self.saturatingAdd(
-            brushLabStrokeEncodedDabCount,
-            UInt64(brushLabLastFrameEncodedDabCount)
-        )
-        brushLabDepositionTelemetry.recordEncoding(
-            instanceCount: UInt64(records.count),
-            bufferCount:
-                instancePool.diagnosticSnapshot.currentLeaseCount
-        )
-        let encodedAuthoritativeIdentityRange: Range<UInt64>?
-        if frame.authoritative.isEmpty {
-            encodedAuthoritativeIdentityRange = nil
-        } else {
-            let lowerBound = encodedAuthoritativeIdentityHighWater
-            let (upperBound, overflow) =
-                lowerBound.addingReportingOverflow(
-                    UInt64(frame.authoritative.count)
-                )
-            precondition(
-                !overflow
-                    && upperBound <= scheduledAuthoritativeIdentityHighWater,
-                "Encoded authoritative identity exceeded scheduled high-water."
-            )
-            encodedAuthoritativeIdentityRange = lowerBound..<upperBound
-            encodedAuthoritativeIdentityHighWater = upperBound
-        }
-        lastEncodedAuthoritativeIdentityRange =
-            encodedAuthoritativeIdentityRange
-        let preparedWorkerFrame: PreparedWorkerFrameIdentity?
-        if let pendingPreparedWorkerFrame,
-           !frame.authoritative.isEmpty,
-           pendingPreparedWorkerFrame.recordCount
-            == frame.authoritative.count
-        {
-            preparedWorkerFrame = pendingPreparedWorkerFrame
-        } else {
-            preparedWorkerFrame = nil
-        }
-        return NativeDepositionFrameEncoding(
-            authoritativeCount: frame.authoritative.count,
-            predictedCount: frame.predicted.count,
-            logicalDabCount: brushLabLastFrameEncodedDabCount,
-            uploadBufferCount: prepared?.uploadCount ?? 0,
-            encodedLiveClear: encodedLiveClear,
-            encodedReplayClear: encodedReplayClear,
-            replayEpoch: encodedReplayClear || !frame.predicted.isEmpty
-                ? replayStroke.renderEpoch
-                : 0,
-            encodedAuthoritativeIdentityRange:
-                encodedAuthoritativeIdentityRange,
-            preparedWorkerFrame: preparedWorkerFrame
-        )
-    }
-
-    private func encodePreparedSurfaceSnapshot(
-        _ lease: StrokePreparedSurfaceLease,
-        commandBuffer: any MTLCommandBuffer
-    ) throws {
-        let authoritative = lease.authoritativeTexture
-        let prediction = lease.predictionTexture
-        guard authoritative.width == liveTile.texture.width,
-              authoritative.height == liveTile.texture.height,
-              prediction.width == replayTile.texture.width,
-              prediction.height == replayTile.texture.height,
-              authoritative.pixelFormat == liveTile.texture.pixelFormat,
-              prediction.pixelFormat == replayTile.texture.pixelFormat,
-              let encoder = commandBuffer.makeBlitCommandEncoder()
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let size = MTLSize(
-            width: authoritative.width,
-            height: authoritative.height,
-            depth: 1
-        )
-        encoder.label = "Snapshot Prepared Stroke Surfaces"
-        encoder.copy(
-            from: authoritative,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: size,
-            to: liveTile.texture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-        )
-        encoder.copy(
-            from: prediction,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: size,
-            to: replayTile.texture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-        )
-        encoder.endEncoding()
-    }
-
-    private func rendererError(
-        forDepositionError error: Error
-    ) -> MetalRendererError {
-        if let rendererError = error as? MetalRendererError {
-            return rendererError
-        }
-        guard let encodingError = error as? DepositionEncodingError else {
-            return .commandFailed(error.localizedDescription)
-        }
-        switch encodingError {
-        case .commandBufferUnavailable:
-            return .commandBufferUnavailable
-        case .renderEncoderUnavailable:
-            return .renderEncoderUnavailable
-        case .uploadBuffersUnavailable:
-            return .instanceBufferAllocationFailed
-        case .unsupportedPipelineBackend,
-             .unsupportedPipelineABI,
-             .invalidPipelinePixelFormat,
-             .targetPixelFormatMismatch,
-             .targetSampleCountMismatch,
-             .targetIsNotRenderTarget,
-             .targetChangedAfterPreflight,
-             .missingTexture,
-             .invalidMaterialUniform,
-             .invalidInstance,
-             .foreignPreparation:
-            return .invalidCompiledBrush
-        case .integerOverflow,
-             .invalidCapacity,
-             .recordLimitExceeded,
-             .uploadLimitExceeded,
-             .preparationAlreadyFinalized:
-            return .commandFailed(String(describing: encodingError))
-        }
-    }
-
-    /// Encodes a replay epoch only after reserving enough buffers for both
-    /// chronological prefix promotion and the complete replacement tail.
-    /// Returning an empty, uncleared encoding is an intentional retry signal:
-    /// the previous replay texture remains visible until a later frame can
-    /// reserve the whole atomic group.
-    private func encodeAtomicReplayReplacement(
-        _ commandBuffer: any MTLCommandBuffer
-    ) throws -> PendingLiveEncoding {
-        let settledCount = pendingInstanceCount(in: liveStroke)
-        let replayCount = pendingInstanceCount(in: replayStroke)
-        let capacity = GridCanvasContract.instanceCapacity
-        guard settledCount <= capacity else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                capacity
-            )
-        }
-        guard replayCount <= capacity else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                capacity
-            )
-        }
-
-        let requiredLeaseCount = (settledCount > 0 ? 1 : 0)
-            + (replayCount > 0 ? 1 : 0)
-        guard let leases = instancePool.acquire(count: requiredLeaseCount)
-        else {
-            return PendingLiveEncoding(
-                uploads: [],
-                encodedReplayClear: false
-            )
-        }
-
-        var uploads: [FrameUpload] = []
-        uploads.reserveCapacity(requiredLeaseCount)
-        var leaseIndex = 0
-        do {
-            if settledCount > 0 {
-                try encodeCompletePending(
-                    liveStroke,
-                    layer: .settled,
-                    texture: liveTile.texture,
-                    lease: leases[leaseIndex],
-                    commandBuffer: commandBuffer,
-                    uploads: &uploads
-                )
-                leaseIndex += 1
-            }
-
-            try encodeReplayClear(commandBuffer)
-
-            if replayCount > 0 {
-                try encodeCompletePending(
-                    replayStroke,
-                    layer: .replay,
-                    texture: replayTile.texture,
-                    lease: leases[leaseIndex],
-                    commandBuffer: commandBuffer,
-                    uploads: &uploads
-                )
-            }
-            return PendingLiveEncoding(
-                uploads: uploads,
-                encodedReplayClear: true
-            )
-        } catch {
-            for lease in leases {
-                instancePool.abandon(lease)
-            }
-            throw error
-        }
-    }
-
-    private func pendingInstanceCount(in stroke: LiveStroke) -> Int {
-        stroke.pending.count {
-            $0.identity >= stroke.bakedHighWater
-        }
-    }
-
-    private func encodeCompletePending(
-        _ stroke: LiveStroke,
-        layer: FrameUpload.Layer,
-        texture: any MTLTexture,
-        lease: DabInstanceBufferPool.Lease,
-        commandBuffer: any MTLCommandBuffer,
-        uploads: inout [FrameUpload]
-    ) throws {
-        guard let firstPending = stroke.pending.firstIndex(
-            where: { $0.identity >= stroke.bakedHighWater }
-        ) else {
-            preconditionFailure("Atomic upload was preflighted without dabs")
-        }
-        let chunk = stroke.pending[firstPending...]
-        precondition(chunk.count <= lease.capacity)
-        instancePool.write(chunk, into: lease)
-        try encodeStamp(
-            commandBuffer,
-            lease: lease,
-            count: chunk.count,
-            instances: chunk,
-            texture: texture,
-            layer: layer
-        )
-        let throughExclusive = chunk.last!.identity + 1
-        uploads.append(
-            FrameUpload(
-                lease: lease,
-                identityRange: chunk.first!.identity..<throughExclusive,
-                throughExclusive: throughExclusive,
-                count: chunk.count,
-                layer: layer,
-                replayEpoch: stroke.renderEpoch
-            )
-        )
-    }
-
-    private func encodePending(
-        _ stroke: LiveStroke,
-        layer: FrameUpload.Layer,
-        texture: any MTLTexture,
-        commandBuffer: any MTLCommandBuffer,
-        uploads: inout [FrameUpload]
-    ) throws {
-        guard let firstPending = stroke.pending.firstIndex(
-            where: { $0.identity >= stroke.bakedHighWater }
-        ) else { return }
-        var cursor = firstPending
-        while cursor < stroke.pending.endIndex,
-              uploads.count < GridCanvasContract.inFlightBufferCount
-        {
-            guard let lease = instancePool.acquire() else { break }
-            let end = min(cursor + lease.capacity, stroke.pending.endIndex)
-            let chunk = stroke.pending[cursor..<end]
-            instancePool.write(chunk, into: lease)
-            do {
-                try encodeStamp(
-                    commandBuffer,
-                    lease: lease,
-                    count: chunk.count,
-                    instances: chunk,
-                    texture: texture,
-                    layer: layer
-                )
-            } catch {
-                instancePool.abandon(lease)
-                throw error
-            }
-            let throughExclusive = chunk.last.map { $0.identity + 1 }
-                ?? stroke.bakedHighWater
-            let fromIdentity = chunk.first.map(\.identity) ?? throughExclusive
-            uploads.append(
-                FrameUpload(
-                    lease: lease,
-                    identityRange: fromIdentity..<throughExclusive,
-                    throughExclusive: throughExclusive,
-                    count: chunk.count,
-                    layer: layer,
-                    replayEpoch: stroke.renderEpoch
-                )
-            )
-            cursor = end
-        }
-    }
-
-    private func encodeStamp(
-        _ commandBuffer: any MTLCommandBuffer,
-        lease: DabInstanceBufferPool.Lease,
-        count: Int,
-        instances _: ArraySlice<IdentifiedDab>,
-        texture: any MTLTexture,
-        layer: FrameUpload.Layer
-    ) throws {
-        guard let execution = activeStroke else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        let brush = execution.brush.resources
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = texture
-        pass.colorAttachments[0].loadAction = .load
-        pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        encoder.label = layer == .settled
-            ? "Stamp Persistent Live Dabs"
-            : "Stamp Replay Live Dabs"
-        encoder.setRenderPipelineState(brush.depositionPipeline.state)
-        var uniforms = frameUniforms(
-            drawableSize: tileSize,
-            showGridLines: false,
-            liveVisible: true
-        )
-        encoder.setVertexBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setVertexBuffer(
-            lease.buffer,
-            offset: 0,
-            index: Int(PatternBufferIndexDabInstances)
-        )
-        for slot in brush.depositionMaterial.textures.boundSlots {
-            guard let texture = brush.depositionMaterial.textures[slot] else {
-                throw MetalRendererError.invalidCompiledBrush
-            }
-            encoder.setFragmentTexture(
-                texture,
-                index: slot.rawValue
-            )
-        }
-        var materialUniforms = brush.depositionMaterial.uniforms
-        encoder.setFragmentBytes(
-            &materialUniforms,
-            length: MemoryLayout<PatternDepositionMaterialUniforms>.stride,
-            index: Int(PatternBufferIndexBrushMaterial)
-        )
-        encoder.drawPrimitives(
-            type: .triangle,
-            vertexStart: 0,
-            vertexCount: 6,
-            instanceCount: count
-        )
-        encoder.endEncoding()
-    }
-
-    func encodeCommit(
-        _ commandBuffer: any MTLCommandBuffer,
-        liveVisible: Bool,
-        liveTexture: (any MTLTexture)? = nil,
-        replayTexture: (any MTLTexture)? = nil
-    ) throws -> EncodedRasterCommit {
-        guard
-            let execution = activeStroke,
-            execution.commitRequested,
-            let revisions = execution.pendingRevisions
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-
-        var captureTokens: [RasterRevisionOperationToken] = []
-        do {
-            captureTokens.append(
-                try revisionStore.encodeCapture(
-                    revisions.before,
-                    from: canonical.front,
-                    on: commandBuffer
-                )
-            )
-
-            let pass = MTLRenderPassDescriptor()
-            pass.colorAttachments[0].texture = canonical.scratch
-            pass.colorAttachments[0].loadAction = .dontCare
-            pass.colorAttachments[0].storeAction = .store
-            guard let encoder = commandBuffer.makeRenderCommandEncoder(
-                descriptor: pass
-            ) else {
-                throw MetalRendererError.renderEncoderUnavailable
-            }
-            encoder.label = "Canonical Scratch Commit"
-            encoder.setRenderPipelineState(pipelines.commit)
-            var uniforms = frameUniforms(
-                drawableSize: tileSize,
-                showGridLines: false,
-                liveVisible: liveVisible
-            )
-            encoder.setVertexBytes(
-                &uniforms,
-                length: MemoryLayout<PatternGridFrameUniforms>.stride,
-                index: Int(PatternBufferIndexGridFrameUniforms)
-            )
-            encoder.setFragmentBytes(
-                &uniforms,
-                length: MemoryLayout<PatternGridFrameUniforms>.stride,
-                index: Int(PatternBufferIndexGridFrameUniforms)
-            )
-            var materialUniforms = compositeMaterialUniforms
-            encoder.setFragmentBytes(
-                &materialUniforms,
-                length: MemoryLayout<PatternCompositeUniforms>.stride,
-                index: Int(PatternBufferIndexBrushMaterial)
-            )
-            encoder.setFragmentTexture(
-                canonical.front,
-                index: Int(PatternTextureIndexCanonical)
-            )
-            encoder.setFragmentTexture(
-                liveTexture ?? liveTile.texture,
-                index: Int(PatternTextureIndexLive)
-            )
-            encoder.setFragmentTexture(
-                replayTexture ?? replayTile.texture,
-                index: Int(PatternTextureIndexReplayLive)
-            )
-            encoder.drawPrimitives(
-                type: .triangle,
-                vertexStart: 0,
-                vertexCount: 3
-            )
-            encoder.endEncoding()
-
-            captureTokens.append(
-                try revisionStore.encodeCapture(
-                    revisions.after,
-                    from: canonical.scratch,
-                    on: commandBuffer
-                )
-            )
-            return EncodedRasterCommit(
-                token: execution.token,
-                revisions: revisions,
-                captureTokens: captureTokens
-            )
-        } catch {
-            finalizeCaptureTokens(captureTokens, as: .cancelled)
-            throw error
-        }
-    }
-
-    func encodeDisplay(
-        into texture: any MTLTexture,
-        commandBuffer: any MTLCommandBuffer,
-        showGridLines: Bool,
-        liveVisible: Bool,
-        canonicalTexture: (any MTLTexture)? = nil,
-        documentPixelMapping: Bool = false,
-        transparentBackground: Bool = false,
-        showCanvasBoundary: Bool = true,
-        worldCenterOverride: SIMD2<Float>? = nil,
-        zoomOverride: Float? = nil,
-        liveTexture: (any MTLTexture)? = nil,
-        replayTexture: (any MTLTexture)? = nil
-    ) throws {
-        guard texture.width > 0, texture.height > 0 else {
-            throw MetalRendererError.invalidDrawableSize
-        }
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = transparentBackground
-            ? MTLClearColorMake(0, 0, 0, 0)
-            : MTLClearColor(
-                red: 242.0 / 255.0,
-                green: 244.0 / 255.0,
-                blue: 241.0 / 255.0,
-                alpha: 1
-            )
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        let displayFamily = tilingStrategy.compiledSymmetry.family
-        switch displayFamily {
-        case .rectangular:
-            encoder.label = "Grid Display"
-            encoder.setRenderPipelineState(pipelines.display)
-        case .triangular:
-            encoder.label = "Triangular Grid Display"
-            encoder.setRenderPipelineState(pipelines.triangularDisplay)
-        case .radial:
-            encoder.label = "Radial Finite Display"
-            encoder.setRenderPipelineState(pipelines.radialDisplay)
-        }
-        var uniforms = frameUniforms(
-            drawableSize: PatternSize(
-                width: Float(texture.width),
-                height: Float(texture.height)
-            ),
-            showGridLines: showGridLines,
-            liveVisible: liveVisible
-        )
-        if documentPixelMapping {
-            uniforms.worldCenter = SIMD2(
-                Float(pixelSize.width) * 0.5,
-                Float(pixelSize.height) * 0.5
-            )
-            uniforms.zoom = 1
-        }
-        if let worldCenterOverride {
-            uniforms.worldCenter = worldCenterOverride
-        }
-        if let zoomOverride {
-            uniforms.zoom = zoomOverride
-        }
-        uniforms.showCanvasBoundary = showCanvasBoundary ? 1 : 0
-        encoder.setVertexBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setFragmentBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        var materialUniforms = compositeMaterialUniforms
-        encoder.setFragmentBytes(
-            &materialUniforms,
-            length: MemoryLayout<PatternCompositeUniforms>.stride,
-            index: Int(PatternBufferIndexBrushMaterial)
-        )
-        if displayFamily == .radial {
-            var radialUniforms = radialFrameUniforms()
-            encoder.setFragmentBytes(
-                &radialUniforms,
-                length: MemoryLayout<PatternRadialFrameUniforms>.stride,
-                index: Int(PatternBufferIndexRadialFrameUniforms)
-            )
-            guard let radialPageTableTexture else {
-                throw MetalRendererError.textureAllocationFailed
-            }
-            encoder.setFragmentTexture(
-                radialPageTableTexture,
-                index: Int(PatternTextureIndexRadialPageTable)
-            )
-        }
-        encoder.setFragmentTexture(
-            canonicalTexture ?? canonical.front,
-            index: Int(PatternTextureIndexCanonical)
-        )
-        encoder.setFragmentTexture(
-            liveTexture ?? liveTile.texture,
-            index: Int(PatternTextureIndexLive)
-        )
-        encoder.setFragmentTexture(
-            replayTexture ?? replayTile.texture,
-            index: Int(PatternTextureIndexReplayLive)
-        )
-        encoder.drawPrimitives(
-            type: .triangle,
-            vertexStart: 0,
-            vertexCount: 3
-        )
-        encoder.endEncoding()
-    }
-
-    func finalizeFrameEncoding(
-        encodedClear: Bool,
-        encodedReplayClear: Bool = false,
-        uploads: [FrameUpload],
-        nativeEncoding: NativeDepositionFrameEncoding? = nil,
-        rasterCommit: EncodedRasterCommit?,
-        commandBuffer: any MTLCommandBuffer,
-        forceFailure: Bool = false
-    ) throws -> [DabBufferSubmissionIdentity] {
-        if let rasterCommit {
-            guard
-                var execution = activeStroke,
-                execution.token == rasterCommit.token,
-                execution.commitRequested,
-                execution.pendingRevisions == rasterCommit.revisions
-            else {
-                throw MetalRendererError.invalidStrokeLifecycle
-            }
-            execution.commitRequested = false
-            activeStroke = execution
-        }
-
-        let usesPreparedWorkerSurface =
-            nativeEncoding?.preparedWorkerFrame != nil
-        if encodedClear {
-            if usesPreparedWorkerSurface {
-                offMainLiveVisible = false
-            } else {
-                liveTile.markCleared()
-            }
-            needsLiveClear = false
-        }
-        if encodedReplayClear {
-            if usesPreparedWorkerSurface {
-                offMainReplayVisible = false
-            }
-            predictionOverlay.markCleared(
-                epoch: nativeEncoding?.replayEpoch
-                    ?? replayStroke.renderEpoch
-            )
-            needsReplayClear = false
-        }
-        var uploadSubmissions: [DabBufferSubmissionIdentity] = []
-        uploadSubmissions.reserveCapacity(uploads.count)
-        for upload in uploads {
-            uploadSubmissions.append(
-                instancePool.submit(
-                    upload.lease,
-                    on: commandBuffer
-                )
-            )
-            completedUploadRanges.append(
-                (
-                    signal: upload.lease.signalValue,
-                    throughExclusive: upload.throughExclusive,
-                    layer: upload.layer,
-                    replayEpoch: upload.replayEpoch
-                )
-            )
-            switch upload.layer {
-            case .settled:
-                liveStroke.markEncoded(
-                    throughExclusive: upload.throughExclusive
-                )
-            case .replay:
-                if upload.replayEpoch == replayStroke.renderEpoch {
-                    replayStroke.markEncoded(
-                        throughExclusive: upload.throughExclusive
-                    )
-                }
-            }
-        }
-        counters.newInstancesThisFrame = nativeEncoding?.instanceCount
-            ?? uploads.reduce(0) { $0 + $1.count }
-        if uploads.contains(where: { $0.layer == .settled }) {
-            liveTile.markStamped()
-        }
-        if let epoch = uploads
-            .filter({ $0.layer == .replay })
-            .map(\.replayEpoch)
-            .max()
-        {
-            predictionOverlay.markVisible(epoch: epoch)
-        }
-        if let nativeEncoding {
-            if nativeEncoding.authoritativeCount > 0 {
-                if usesPreparedWorkerSurface {
-                    offMainLiveVisible = true
-                } else {
-                    liveTile.markStamped()
-                }
-            }
-            if nativeEncoding.predictedCount > 0 {
-                if usesPreparedWorkerSurface {
-                    offMainReplayVisible = true
-                }
-                predictionOverlay.markVisible(
-                    epoch: nativeEncoding.replayEpoch
-                )
-            }
-        }
-
-        let submittedOperationToken: RendererOperationToken?
-        if let rasterCommit {
-            submittedOperationToken = rasterCommit.token
-        } else if let execution = activeStroke,
-                  !execution.isCommitSubmitted,
-                  encodedClear || encodedReplayClear || !uploads.isEmpty
-                    || (nativeEncoding?.instanceCount ?? 0) > 0
-        {
-            submittedOperationToken = execution.token
-        } else {
-            submittedOperationToken = nil
-        }
-        if rasterCommit == nil, let submittedOperationToken {
-            guard
-                var execution = activeStroke,
-                execution.token == submittedOperationToken,
-                !execution.isCommitSubmitted
-            else {
-                throw MetalRendererError.invalidStrokeLifecycle
-            }
-            execution.pendingTokenBearingFrameCount += 1
-            activeStroke = execution
-        }
-        let submittedUploads = uploadSubmissions
-        let submittedReplayEpoch = uploads
-            .filter { $0.layer == .replay }
-            .map(\.replayEpoch)
-            .max() ?? 0
-        let submittedCommit = rasterCommit.map {
-            GridRenderCompletionMailbox.RasterCommit(
-                token: $0.token,
-                revisions: $0.revisions,
-                captureTokens: $0.captureTokens
-            )
-        }
-        let submittedPreparedWorkerFrame =
-            nativeEncoding?.preparedWorkerFrame
-        commandBuffer.addCompletedHandler {
-            [
-                completionMailbox,
-                submittedCommit,
-                submittedOperationToken,
-                submittedUploads,
-                submittedReplayEpoch,
-                submittedPreparedWorkerFrame,
-            ] buffer in
-            let completed = buffer.status == .completed && !forceFailure
-            completionMailbox.push(
-                .init(
-                    operationToken: submittedOperationToken,
-                    rasterCommit: submittedCommit,
-                    uploadSubmissions: submittedUploads,
-                    replayEpoch: submittedReplayEpoch,
-                    preparedWorkerFrame:
-                        submittedPreparedWorkerFrame,
-                    succeeded: completed,
-                    errorMessage: forceFailure
-                        ? "injected harness command-buffer failure"
-                        : buffer.error?.localizedDescription
-                )
-            )
-        }
-        return submittedUploads
-    }
-
-    /// A prepared-surface blit may be encoded before later display or commit
-    /// encoding fails. The partial command must reach a terminal GPU state
-    /// before its actor-owned textures are returned. The operation failure is
-    /// reported by the caller; this outcome exists only to retire the exact
-    /// borrowed lease after the partial command terminates.
-    private func installPreparedSurfaceTerminalHandler(
-        for nativeEncoding: NativeDepositionFrameEncoding?,
-        on commandBuffer: any MTLCommandBuffer
-    ) {
-        guard let preparedWorkerFrame =
-                nativeEncoding?.preparedWorkerFrame,
-              submittedPreparedWorkerFrame == preparedWorkerFrame
-        else {
-            return
-        }
-        commandBuffer.addCompletedHandler {
-            [completionMailbox, preparedWorkerFrame] _ in
-            completionMailbox.push(
-                .init(
-                    operationToken: nil,
-                    rasterCommit: nil,
-                    uploadSubmissions: [],
-                    preparedWorkerFrame: preparedWorkerFrame,
-                    succeeded: true,
-                    errorMessage: nil
-                )
-            )
-        }
-    }
-
-    func drainCompletedUploadRanges() {
-        let completedSignal = instancePool.event.signaledValue
-        let completed = completedUploadRanges.filter {
-            $0.signal <= completedSignal
-        }
-        if let greatest = (completed
-            .filter { $0.layer == .settled }
-            .map(\.throughExclusive)
-            .max())
-        {
-            liveStroke.releaseEncodedPrefix(throughExclusive: greatest)
-        }
-        if let greatestReplay = (completed
-            .filter {
-                $0.layer == .replay
-                    && $0.replayEpoch == replayStroke.renderEpoch
-            }
-            .map(\.throughExclusive)
-            .max())
-        {
-            replayStroke.releaseEncodedPrefix(
-                throughExclusive: greatestReplay
-            )
-        }
-        completedUploadRanges.removeAll {
-            $0.signal <= completedSignal
-        }
-    }
-
-    @discardableResult
-    func drainRasterOperationOutcomes() -> MetalRendererError? {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        defer {
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        var latestError: MetalRendererError?
-        for outcome in rasterCompletionMailbox.drain() {
-            if let error = processRasterOperationOutcome(outcome) {
-                latestError = error
-            }
-        }
-        return latestError
-    }
-
-    private func processRasterOperationOutcome(
-        _ outcome: RendererRasterSubmissionOutcome
-    ) -> MetalRendererError? {
-        guard
-            let pendingRasterOperation,
-            pendingRasterOperation.submissionID == outcome.submissionID,
-            pendingRasterOperation.token == outcome.token
-        else {
-            preconditionFailure(
-                "Renderer completed a raster operation it did not accept."
-            )
-        }
-
-        guard outcome.succeeded else {
-            return finalizeRasterOperationFailure(
-                pendingRasterOperation,
-                error: .commandFailed(
-                    outcome.errorMessage ?? "unknown command-buffer error"
-                )
-            )
-        }
-
-        switch pendingRasterOperation {
-        case let .clear(operation):
-            do {
-                for token in operation.captureTokens {
-                    try revisionStore.finalize(token, as: .succeeded)
-                }
-                canonical.acceptScratchCommit()
-                revisionStore.publish(operation.revisions)
-                setDocumentGeometryLocked(false)
-                self.pendingRasterOperation = nil
-                notifyIdleStateIfChanged(from: false)
-                stageRendererEvent(
-                    .operationCompleted(.rasterSuccess(
-                        RasterMutationReceipt(
-                            token: operation.token,
-                            before: operation.revisions.before,
-                            after: operation.revisions.after
-                        )
-                    ))
-                )
-                return nil
-            } catch {
-                let rendererError = (error as? MetalRendererError)
-                    ?? .commandFailed(error.localizedDescription)
-                finalizeCaptureTokens(operation.captureTokens, as: .failed)
-                revisionStore.discard(operation.revisions)
-                self.pendingRasterOperation = nil
-                notifyIdleStateIfChanged(from: false)
-                report(rendererError)
-                stageRendererEvent(
-                    .operationCompleted(
-                        .failure(operation.token, rendererError)
-                    )
-                )
-                return rendererError
-            }
-        case let .restore(operation):
-            do {
-                try revisionStore.finalize(
-                    operation.restoreToken,
-                    as: .succeeded
-                )
-                canonical.acceptScratchCommit()
-                self.pendingRasterOperation = nil
-                notifyIdleStateIfChanged(from: false)
-                stageRendererEvent(
-                    .operationCompleted(.operationSuccess(operation.token))
-                )
-                return nil
-            } catch {
-                let rendererError = (error as? MetalRendererError)
-                    ?? .commandFailed(error.localizedDescription)
-                finalizeRestoreToken(operation.restoreToken, as: .failed)
-                self.pendingRasterOperation = nil
-                notifyIdleStateIfChanged(from: false)
-                report(rendererError)
-                stageRendererEvent(
-                    .operationCompleted(
-                        .failure(operation.token, rendererError)
-                    )
-                )
-                return rendererError
-            }
-        case let .resize(operation):
-            do {
-                for token in operation.captureTokens {
-                    try revisionStore.finalize(token, as: .succeeded)
-                }
-                operation.replacement.resources.canonical
-                    .acceptScratchCommit()
-                revisionStore.publish(operation.revisions)
-                install(operation.replacement)
-                self.pendingRasterOperation = nil
-                notifyIdleStateIfChanged(from: false)
-                stageRendererEvent(
-                    .operationCompleted(.rasterSuccess(
-                        RasterMutationReceipt(
-                            token: operation.token,
-                            before: operation.revisions.before,
-                            after: operation.revisions.after
-                        )
-                    ))
-                )
-                return nil
-            } catch {
-                let rendererError = (error as? MetalRendererError)
-                    ?? .commandFailed(error.localizedDescription)
-                finalizeCaptureTokens(operation.captureTokens, as: .failed)
-                revisionStore.discard(operation.revisions)
-                self.pendingRasterOperation = nil
-                notifyIdleStateIfChanged(from: false)
-                report(rendererError)
-                stageRendererEvent(
-                    .operationCompleted(
-                        .failure(operation.token, rendererError)
-                    )
-                )
-                return rendererError
-            }
-        case let .resizeRestore(operation):
-            do {
-                try revisionStore.finalize(
-                    operation.restoreToken,
-                    as: .succeeded
-                )
-                operation.replacement.resources.canonical
-                    .acceptScratchCommit()
-                install(operation.replacement)
-                self.pendingRasterOperation = nil
-                notifyIdleStateIfChanged(from: false)
-                stageRendererEvent(
-                    .operationCompleted(.operationSuccess(operation.token))
-                )
-                return nil
-            } catch {
-                let rendererError = (error as? MetalRendererError)
-                    ?? .commandFailed(error.localizedDescription)
-                finalizeRestoreToken(operation.restoreToken, as: .failed)
-                self.pendingRasterOperation = nil
-                notifyIdleStateIfChanged(from: false)
-                report(rendererError)
-                stageRendererEvent(
-                    .operationCompleted(
-                        .failure(operation.token, rendererError)
-                    )
-                )
-                return rendererError
-            }
-        }
-    }
-
-    private func finalizeRasterOperationFailure(
-        _ operation: PendingRasterOperation,
-        error: MetalRendererError
-    ) -> MetalRendererError {
-        switch operation {
-        case let .clear(clear):
-            finalizeCaptureTokens(clear.captureTokens, as: .failed)
-            revisionStore.discard(clear.revisions)
-        case let .restore(restore):
-            finalizeRestoreToken(restore.restoreToken, as: .failed)
-        case let .resize(resize):
-            finalizeCaptureTokens(resize.captureTokens, as: .failed)
-            revisionStore.discard(resize.revisions)
-        case let .resizeRestore(restore):
-            finalizeRestoreToken(restore.restoreToken, as: .failed)
-        }
-        pendingRasterOperation = nil
-        notifyIdleStateIfChanged(from: false)
-        report(error)
-        stageRendererEvent(
-            .operationCompleted(.failure(operation.token, error))
-        )
-        return error
-    }
-
-    private func install(_ replacement: PreparedRasterReplacement) {
-        let canvasSizeChanged =
-            replacement.resources.canvasPixelSize != resources.canvasPixelSize
-        replacement.resources.liveTile.markCleared()
-        replacement.resources.predictionOverlay.markCleared(epoch: 0)
-        resources = replacement.resources
-        strokeMetalSurfaceResources =
-            replacement.strokeMetalSurfaceResources
-        strokeMetalSurfaceInstallationCount &+= 1
-        tilingStrategy = replacement.strategy
-        radialPageTableTexture = replacement.radialPageTableTexture
-        needsLiveClear = false
-        needsReplayClear = false
-        if canvasSizeChanged {
-            viewport = ViewportTransform(
-                drawableSize: viewport.drawableSize,
-                worldCenter: WorldPoint(
-                    x: Float(resources.canvasPixelSize.width) * 0.5,
-                    y: Float(resources.canvasPixelSize.height) * 0.5
-                ),
-                zoom: viewport.zoom
-            )
-        }
-    }
-
-    private func finalizeRestoreToken(
-        _ token: RasterRevisionOperationToken,
-        as outcome: RasterRevisionOperationOutcome
-    ) {
-        do {
-            try revisionStore.finalize(token, as: outcome)
-        } catch MetalRendererError.invalidRasterRevisionOperationToken {
-            return
-        } catch {
-            report(
-                (error as? MetalRendererError)
-                    ?? .commandFailed(error.localizedDescription)
-            )
-        }
-    }
-
-    private func takeRasterSubmissionID() -> UInt64 {
-        precondition(
-            nextRasterSubmissionID < UInt64.max,
-            "Renderer raster submission identity space exhausted."
-        )
-        let submissionID = nextRasterSubmissionID
-        nextRasterSubmissionID += 1
-        return submissionID
-    }
-
     private func setDocumentGeometryLocked(_ locked: Bool) {
         documentDomainLocked = locked
         radialGeometryLocked =
             locked
             && tilingStrategy.compiledSymmetry.domain.finite?
                 .radial.layout != nil
-    }
-
-    private func installRasterCompletionHandler(
-        on commandBuffer: any MTLCommandBuffer,
-        submissionID: UInt64,
-        token: RendererOperationToken,
-        forceFailure: Bool
-    ) {
-        commandBuffer.addCompletedHandler {
-            [weak self, rasterCompletionMailbox] buffer in
-            let succeeded = buffer.status == .completed && !forceFailure
-            rasterCompletionMailbox.push(
-                RendererRasterSubmissionOutcome(
-                    submissionID: submissionID,
-                    token: token,
-                    succeeded: succeeded,
-                    errorMessage: forceFailure
-                        ? "injected harness command-buffer failure"
-                        : buffer.error?.localizedDescription
-                )
-            )
-            Task { @MainActor [weak self] in
-                _ = self?.drainRasterOperationOutcomes()
-            }
-        }
-    }
-
-    @discardableResult
-    func drainFrameOutcomes() -> MetalRendererError? {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        defer {
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        var latestError: MetalRendererError?
-        for outcome in completionMailbox.drain() {
-            let error = processFrameOutcome(outcome)
-            if let error {
-                latestError = error
-            }
-        }
-        return latestError
-    }
-
-    func processFrameOutcome(
-        _ outcome: GridRenderCompletionMailbox.Outcome
-    ) -> MetalRendererError? {
-        let ownsEventOperation = beginRendererEventOperationIfNeeded()
-        defer {
-            endRendererEventOperationIfNeeded(
-                ownsEventOperation,
-                succeeded: true
-            )
-        }
-        if !outcome.succeeded {
-            instancePool.reclaimTerminalFailure(
-                outcome.uploadSubmissions
-            )
-        }
-        if let preparedWorkerFrame = outcome.preparedWorkerFrame,
-           pendingPreparedWorkerFrame == preparedWorkerFrame
-        {
-            do {
-                try acknowledgeSubmittedPreparationFrame(
-                    preparedWorkerFrame
-                )
-            } catch {
-                let rendererError = (error as? MetalRendererError)
-                    ?? .commandFailed(error.localizedDescription)
-                if let token = outcome.operationToken {
-                    terminateActiveOperation(
-                        token: token,
-                        error: rendererError
-                    )
-                } else {
-                    report(rendererError)
-                }
-                return rendererError
-            }
-        }
-        let isStaleReplayOutcome = outcome.replayEpoch != 0
-            && outcome.replayEpoch < replayStroke.renderEpoch
-        if isStaleReplayOutcome,
-           outcome.rasterCommit == nil,
-           outcome.succeeded
-        {
-            if let token = outcome.operationToken {
-                finishTokenBearingFrame(token: token)
-            }
-            return nil
-        }
-        guard let commit = outcome.rasterCommit else {
-            if let token = outcome.operationToken {
-                finishTokenBearingFrame(token: token)
-            }
-            guard !outcome.succeeded else { return nil }
-            let error = MetalRendererError.commandFailed(
-                outcome.errorMessage ?? "unknown command-buffer error"
-            )
-            if let token = outcome.operationToken {
-                terminateActiveOperation(token: token, error: error)
-            } else {
-                report(error)
-            }
-            return error
-        }
-
-        if outcome.succeeded {
-            return finalizeRasterCommitSuccess(commit)
-        }
-        return finalizeRasterCommitFailure(
-            commit,
-            message: outcome.errorMessage
-                ?? "unknown command-buffer error"
-        )
-    }
-
-    private func finishTokenBearingFrame(token: RendererOperationToken) {
-        guard
-            var execution = activeStroke,
-            execution.token == token
-        else {
-            return
-        }
-        precondition(
-            execution.pendingTokenBearingFrameCount > 0,
-            "A token-bearing frame outcome drained more than once."
-        )
-        execution.pendingTokenBearingFrameCount -= 1
-        activeStroke = execution
-    }
-
-    private func finalizeRasterCommitSuccess(
-        _ commit: GridRenderCompletionMailbox.RasterCommit
-    ) -> MetalRendererError? {
-        let wasIdle = isIdle
-        defer { notifyIdleStateIfChanged(from: wasIdle) }
-        guard activeStrokeMatchesSubmittedCommit(commit) else {
-            let error = MetalRendererError.invalidRendererOperationToken
-            finalizeCaptureTokens(commit.captureTokens, as: .failed)
-            revisionStore.discard(commit.revisions)
-            let runtimeEndEvents = endStrokeRuntimeIfPossible()
-            activeStroke = nil
-            resetLiveState()
-            stageStrokeRuntimeEvents(runtimeEndEvents)
-            report(error)
-            stageRendererEvent(
-                .operationCompleted(.failure(commit.token, error))
-            )
-            return error
-        }
-
-        do {
-            for token in commit.captureTokens {
-                try revisionStore.finalize(token, as: .succeeded)
-            }
-            canonical.acceptScratchCommit()
-            revisionStore.publish(commit.revisions)
-            setDocumentGeometryLocked(true)
-            let receipt = RasterMutationReceipt(
-                token: commit.token,
-                before: commit.revisions.before,
-                after: commit.revisions.after
-            )
-            let runtimeEndEvents = endStrokeRuntimeIfPossible()
-            activeStroke = nil
-            resetLiveState(invalidateStrokeEvents: false)
-            stageStrokeRuntimeEvents(runtimeEndEvents)
-            stageRendererEvent(.operationCompleted(.rasterSuccess(receipt)))
-            return nil
-        } catch let error as MetalRendererError {
-            finalizeCaptureTokens(commit.captureTokens, as: .failed)
-            discardSubmittedPairIfPossible(commit.revisions)
-            let runtimeEndEvents = endStrokeRuntimeIfPossible()
-            activeStroke = nil
-            resetLiveState()
-            stageStrokeRuntimeEvents(runtimeEndEvents)
-            report(error)
-            stageRendererEvent(
-                .operationCompleted(.failure(commit.token, error))
-            )
-            return error
-        } catch {
-            let rendererError = MetalRendererError.commandFailed(
-                error.localizedDescription
-            )
-            finalizeCaptureTokens(commit.captureTokens, as: .failed)
-            discardSubmittedPairIfPossible(commit.revisions)
-            let runtimeEndEvents = endStrokeRuntimeIfPossible()
-            activeStroke = nil
-            resetLiveState()
-            stageStrokeRuntimeEvents(runtimeEndEvents)
-            report(rendererError)
-            stageRendererEvent(
-                .operationCompleted(
-                    .failure(commit.token, rendererError)
-                )
-            )
-            return rendererError
-        }
-    }
-
-    private func finalizeRasterCommitFailure(
-        _ commit: GridRenderCompletionMailbox.RasterCommit,
-        message: String
-    ) -> MetalRendererError {
-        let error = MetalRendererError.commandFailed(message)
-        finalizeCaptureTokens(commit.captureTokens, as: .failed)
-        if !terminateActiveOperation(token: commit.token, error: error) {
-            revisionStore.discard(commit.revisions)
-        }
-        return error
-    }
-
-    private func activeStrokeMatchesSubmittedCommit(
-        _ commit: GridRenderCompletionMailbox.RasterCommit
-    ) -> Bool {
-        guard let execution = activeStroke else { return false }
-        return execution.token == commit.token
-            && !execution.commitRequested
-            && execution.pendingRevisions == commit.revisions
-    }
-
-    private func finalizeCaptureTokens(
-        _ tokens: [RasterRevisionOperationToken],
-        as outcome: RasterRevisionOperationOutcome
-    ) {
-        for token in tokens {
-            do {
-                try revisionStore.finalize(token, as: outcome)
-            } catch MetalRendererError.invalidRasterRevisionOperationToken {
-                continue
-            } catch {
-                report(
-                    (error as? MetalRendererError)
-                        ?? .commandFailed(error.localizedDescription)
-                )
-            }
-        }
-    }
-
-    private func discardSubmittedPairIfPossible(
-        _ pair: PendingRasterRevisionPair
-    ) {
-        if activeStroke?.pendingRevisions == pair {
-            revisionStore.discard(pair)
-        }
     }
 
     private func resetLiveState(
@@ -7938,30 +5193,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         if !isRetiringStrokeWorkspace {
             strokePreparationBridge = nil
             strokePreparationGeneration = nil
-            pendingPreparedWorkerFrame = nil
-            pendingPreparedSurfaceFrame = nil
-            submittedPreparedWorkerFrame = nil
-            currentPreparedSurfaceLease = nil
         }
         strokePreparationResultScratch.removeAll(keepingCapacity: true)
-        offMainLiveVisible = false
-        offMainReplayVisible = false
-        pendingPreparationCommitRetainedBytes = nil
-        lastOffMainCoordinatorSnapshot = nil
-        lastOffMainPredictionProvenanceBoundary = nil
         predictedStrokeGenerator?.cancel()
         predictedStrokeGenerator = nil
         transientStrokeBuffer?.cancel()
         transientStrokeBuffer = nil
         brushInputDeriver.reset()
         predictedInputDeriver = nil
-        liveTile.hide()
-        predictionOverlay.reset()
-        completedUploadRanges.removeAll(keepingCapacity: true)
         liveStroke.reset()
         replayStroke.reset()
-        needsLiveClear = true
-        needsReplayClear = true
         nextReplayEpoch = 1
         knownStrokeTotalDistance = nil
         if invalidateStrokeEvents {
@@ -7983,37 +5224,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             return true
         case let .borrowed(borrowedGeneration):
             precondition(borrowedGeneration == generation)
-            var cancellationFrameDisposition =
-                StrokePreparationCancellationFrameDisposition
-                    .preserveMainOwnership
-            if submittedPreparedWorkerFrame == nil,
-               let frame = pendingPreparedWorkerFrame
-            {
-                do {
-                    try bridge.acknowledgePreparedFrame(
-                        generation: frame.generation,
-                        token: frame.token
-                    )
-                    pendingPreparedWorkerFrame = nil
-                    pendingPreparedSurfaceFrame = nil
-                    currentPreparedSurfaceLease = nil
-                } catch {
-                    report(
-                        .commandFailed(
-                            "stroke workspace retirement failed: \(error)"
-                        )
-                    )
-                }
-            } else if submittedPreparedWorkerFrame == nil,
-                      pendingPreparedSurfaceFrame == nil,
-                      currentPreparedSurfaceLease == nil
-            {
-                // A result may already have left the mailbox but fail before
-                // Main installs its immutable lease. No GPU command can own
-                // that surface, so cancellation must return it to the actor.
-                cancellationFrameDisposition =
-                    .abandonedBeforeSubmission
-            }
+            let cancellationFrameDisposition:
+                StrokePreparationCancellationFrameDisposition =
+                    activePaintTransientSource == nil
+                        ? .abandonedBeforeSubmission
+                        : .preserveMainOwnership
             do {
                 try bridge.submitCancellation(
                     generation: generation,
@@ -8035,12 +5250,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     private func finishStrokeWorkspaceRetirement(
         generation: UInt64
     ) {
-        guard strokeWorkspaceState == .retiring(generation),
-              submittedPreparedWorkerFrame == nil,
-              pendingPreparedWorkerFrame == nil,
-              pendingPreparedSurfaceFrame == nil,
-              currentPreparedSurfaceLease == nil
-        else {
+        guard strokeWorkspaceState == .retiring(generation) else {
             return
         }
         let wasIdle = isIdle
@@ -8102,17 +5312,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         stageRendererEvent(.idleStateChanged(isIdle))
     }
 
-    func abandon(_ uploads: [FrameUpload]) {
-        for upload in uploads {
-            instancePool.abandon(upload.lease)
-        }
-    }
-
-    func abandon(_ commit: EncodedRasterCommit?) {
-        guard let commit else { return }
-        finalizeCaptureTokens(commit.captureTokens, as: .cancelled)
-    }
-
     @discardableResult
     private func terminateActiveOperation(
         token: RendererOperationToken,
@@ -8131,7 +5330,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         }
         let wasIdle = isIdle
         defer { notifyIdleStateIfChanged(from: wasIdle) }
-        discardPendingRevisionsIfPossible()
         let runtimeEndEvents = endStrokeRuntimeIfPossible()
         activeStroke = nil
         resetLiveState()
@@ -8143,10 +5341,6 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
     func failActiveOperationIfNeeded(_ error: MetalRendererError) {
         guard let execution = activeStroke else {
-            report(error)
-            return
-        }
-        guard !execution.isCommitSubmitted else {
             report(error)
             return
         }
@@ -8191,7 +5385,12 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         encodedAuthoritativeIdentityHighWater = 0
         lastEncodedAuthoritativeIdentityRange = nil
         lastOffMainEncodingRanOnMainThread = nil
+        lastOffMainCoordinatorSnapshot = nil
         lastOffMainSurfaceSnapshot = nil
+        lastOffMainReplayRetention = StrokePreparedReplayRetention(
+            retainedDabCount: 0,
+            visibleProjectedInstanceCount: 0
+        )
         lastOffMainZeroWorkLeaseCount = 0
         lastOffMainPredictedInstanceCount = 0
     }
@@ -8388,7 +5587,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     func prepareStrokeRuntimeFrameForTesting(
         _ identity: StrokeRuntimeFrameIdentity
     ) {
-        recordStrokeRuntimePreparedFrame(id: identity, encoding: nil)
+        recordStrokeRuntimePreparedFrame(id: identity)
     }
 
     func submitStrokeRuntimeFrameForTesting(
@@ -8420,8 +5619,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     #endif
 
     private func recordStrokeRuntimePreparedFrame(
-        id: StrokeRuntimeFrameIdentity?,
-        encoding: NativeDepositionFrameEncoding?
+        id: StrokeRuntimeFrameIdentity?
     ) {
         guard let id,
               id.telemetryGeneration == telemetryEventGeneration,
@@ -8435,13 +5633,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         let replayDelta = strokeRuntimeReplayEpochTracker.consume(
             currentEpoch: currentReplayEpoch
         )
-        let authoritativeReplay = encoding?.predictedCount == 0
-            ? replayDelta : 0
-        let predictedReplay = (encoding?.predictedCount ?? 0) > 0
-            ? replayDelta : 0
+        let authoritativeReplay = replayDelta
+        let predictedReplay: UInt64 = 0
         let residentBytes = UInt64(max(
             0,
-            revisionStore.residentBytes
+            paintRevisionResidentBytesState
                 + (activeDrawBrush?.residentByteCount ?? 0)
                 + (activeEraserBrush?.residentByteCount ?? 0)
         ))
@@ -8451,11 +5647,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 at: DispatchTime.now().uptimeNanoseconds,
                 newLogicalDabCount: UInt64(max(
                     0,
-                    encoding?.logicalDabCount ?? 0
+                    counters.newDabsThisEvent
                 )),
                 newProjectedDabCount: UInt64(max(
                     0,
-                    encoding?.instanceCount ?? 0
+                    counters.newInstancesThisFrame
                 )),
                 authoritativeReplayCount: authoritativeReplay,
                 predictedReplayCount: predictedReplay,
@@ -8677,6 +5873,26 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         return UInt64(value)
     }
 
+    static func performMeasuredCPUPreparation<Completion>(
+        clock: () -> CFAbsoluteTime,
+        preparation: () throws -> Void,
+        waitForCompletion: () async -> Completion
+    ) async rethrows -> (
+        completion: Completion,
+        cpuPreparationMilliseconds: Double
+    ) {
+        let started = clock()
+        try preparation()
+        let cpuPreparationMilliseconds = max(
+            0,
+            (clock() - started) * 1_000
+        )
+        return (
+            await waitForCompletion(),
+            cpuPreparationMilliseconds
+        )
+    }
+
     static func saturatingAdd(
         _ lhs: UInt64,
         _ rhs: UInt64
@@ -8694,7 +5910,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         cpuMilliseconds: Double,
         submittedAtNanoseconds: UInt64 = 0,
         completedAtNanoseconds: UInt64 = 0,
-        nativeEncoding: NativeDepositionFrameEncoding? = nil
+        encodedDabCount: Int = 0,
+        encodedInstanceCount: Int = 0,
+        bufferLeaseCount: Int = 0
     ) -> GPUFrameMetrics {
         let eventToSubmitNanoseconds = submittedAtNanoseconds == 0
             ? 0
@@ -8712,9 +5930,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 completedAtNanoseconds >= submittedAtNanoseconds
                     ? completedAtNanoseconds - submittedAtNanoseconds
                     : 0,
-            encodedDabCount: nativeEncoding?.logicalDabCount ?? 0,
-            encodedInstanceCount: nativeEncoding?.instanceCount ?? 0,
-            bufferLeaseCount: nativeEncoding?.uploadBufferCount ?? 0
+            encodedDabCount: encodedDabCount,
+            encodedInstanceCount: encodedInstanceCount,
+            bufferLeaseCount: bufferLeaseCount
         )
     }
 }

@@ -22,6 +22,102 @@ struct SparseTileSamplingPipelineTests {
                 name: "patternSparseSamplingFallbackFragment"
             ) != nil
         )
+        for name in [
+            "patternSparseRadialSamplingWorkingTier2Fragment",
+            "patternSparseRadialSamplingWorkingFallbackFragment",
+            "patternSparseRadialSamplingDisplayTier2Fragment",
+            "patternSparseRadialSamplingDisplayFallbackFragment",
+            "patternSparseRadialSamplingInterchangeTier2Fragment",
+            "patternSparseRadialSamplingInterchangeFallbackFragment",
+        ] {
+            #expect(library.makeFunction(name: name) != nil)
+        }
+    }
+
+    @Test
+    func currentSparseABIAtMetalBoundaryRemainsExact() {
+        #expect(PatternBufferIndexGridFrameUniforms == 1)
+        #expect(PatternBufferIndexRadialFrameUniforms == 4)
+        #expect(PatternSparseSamplingABIVersion == 1)
+        #expect(SparseSamplingABI.version == 1)
+        #expect(MemoryLayout<PatternSparseSamplingUniforms>.size == 64)
+        #expect(MemoryLayout<PatternSparseSamplingUniforms>.stride == 64)
+        #expect(MemoryLayout<PatternSparsePageTableDescriptor>.size == 32)
+        #expect(MemoryLayout<PatternSparsePageTableDescriptor>.stride == 32)
+        #expect(MemoryLayout<PatternSparseTilePageEntry>.size == 32)
+        #expect(MemoryLayout<PatternSparseTilePageEntry>.stride == 32)
+        #expect(MemoryLayout<PatternGridFrameUniforms>.size == 96)
+        #expect(MemoryLayout<PatternGridFrameUniforms>.stride == 96)
+        #expect(MemoryLayout<PatternRadialFrameUniforms>.size == 64)
+        #expect(MemoryLayout<PatternRadialFrameUniforms>.stride == 64)
+    }
+
+
+    @Test @MainActor
+    func radialPipelineFamilyIsPartOfEveryOutputContractCacheKey() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try makeSparseSamplingLibrary(device: device)
+        let formats = [
+            DocumentColorPipeline.workingPixelFormat,
+            DocumentColorPipeline.displayPixelFormat,
+            DocumentColorPipeline.interchangePixelFormat,
+        ]
+        let backends: [SparseTileSamplingBackend] =
+            device.argumentBuffersSupport == .tier2
+                ? [.tier2ArgumentBuffer, .directFallback]
+                : [.directFallback]
+        for format in formats {
+            for backend in backends {
+                let affine = key(
+                    backend,
+                    pixelFormat: format,
+                    outputMappingKind: .affine
+                )
+                let radial = key(
+                    backend,
+                    pixelFormat: format,
+                    outputMappingKind: .finiteRadial
+                )
+                #expect(affine != radial)
+                let binding = try SparseTileSamplingPipeline.prepare(
+                    device: device,
+                    library: library,
+                    key: radial
+                )
+                #expect(binding.key.outputMappingKind == .finiteRadial)
+            }
+        }
+    }
+
+    @Test @MainActor
+    func gpuPlanRejectsAffineContentPairedWithRadialPipelineBeforeAllocation()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let fixture = try makeSamplingFixture(
+            device: device,
+            roleColors: [.canonical: SIMD4(0.25, 0.5, 0.75, 1)]
+        )
+        let pipeline = try SparseTileSamplingPipeline.prepare(
+            device: device,
+            library: makeSparseSamplingLibrary(device: device),
+            key: key(
+                .directFallback,
+                outputMappingKind: .finiteRadial
+            )
+        )
+        let cache = SparseTileSamplingGPUPlanCache(device: device)
+
+        await #expect(throws: SparseTileSamplingPipelineError.stalePlan) {
+            _ = try await cache.acquire(
+                plan: fixture.planLease,
+                pipeline: pipeline
+            )
+        }
+        let allocations = await cache.allocationSnapshot
+        #expect(allocations.preparedContentCount == 0)
+        #expect(allocations.planMetalBufferAllocationCount == 0)
+        try fixture.planLease.retire()
     }
 
     @Test
@@ -58,6 +154,7 @@ struct SparseTileSamplingPipelineTests {
             capabilities: capabilities
         )
         #expect(fallback.key.backend == .directFallback)
+        #expect(fallback.outputContract == .workingLinearPremultiplied)
         #expect(try fallback.makeArgumentEncoder() == nil)
 
         if capabilities.supportsTier2ArgumentBuffers {
@@ -116,16 +213,25 @@ struct SparseTileSamplingPipelineTests {
         let invalid = try #require(device.makeTexture(
             descriptor: targetDescriptor(usage: [.shaderRead])
         ))
-        #expect(throws: SparseTileSamplingPipelineError.invalidUsage(
-            invalid.usage.rawValue
-        )) {
-            _ = try SparseTileSamplingEncoder.preflightEncode(
-                target: invalid,
+        var prepared: SparseTileSamplingPreparedSubmission? = try
+            SparseTileSamplingEncoder.prepareSubmission(
                 plan: gpuLease,
                 parameters: .identity
             )
+        let queue = try #require(device.makeCommandQueue())
+        let commandBuffer = try #require(queue.makeCommandBuffer())
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = invalid
+        #expect(throws: SparseTileSamplingPipelineError.invalidUsage(
+            invalid.usage.rawValue
+        )) {
+            try prepared?.encode(
+                target: invalid,
+                commandBuffer: commandBuffer,
+                renderPassDescriptor: pass
+            )
         }
-        try gpuLease.complete()
+        prepared = nil
         #expect(fixture.surfaces.allSatisfy {
             $0.backingSnapshot().activeLeaseCount == 0
         })
@@ -623,12 +729,8 @@ struct SparseTileSamplingPipelineTests {
                     pipeline: pipeline
                 )
                 #expect(reused.immutableContentIdentity == cachedIdentity)
-                let target = try #require(device.makeTexture(
-                    descriptor: targetDescriptor(usage: [.renderTarget])
-                ))
-                var prepared: SparseTileSamplingPreparedEncode? = try
-                    SparseTileSamplingEncoder.preflightEncode(
-                        target: target,
+                var prepared: SparseTileSamplingPreparedSubmission? = try
+                    SparseTileSamplingEncoder.prepareSubmission(
                         plan: reused,
                         parameters: .identity
                     )
@@ -644,7 +746,7 @@ struct SparseTileSamplingPipelineTests {
     }
 
     @Test @MainActor
-    func preflightBufferFailuresDoNotConsumeTheGPUPlan() async throws {
+    func preparationBufferFailuresDoNotConsumeTheGPUPlan() async throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let fixture = try makeSamplingFixture(
             device: device,
@@ -658,9 +760,6 @@ struct SparseTileSamplingPipelineTests {
         let lease = try await SparseTileSamplingGPUPlanCache(
             device: device
         ).acquire(plan: fixture.planLease, pipeline: pipeline)
-        let target = try #require(device.makeTexture(
-            descriptor: targetDescriptor(usage: [.renderTarget, .shaderRead])
-        ))
         for phase in [
             SparseTileSamplingFailurePhase.preflightUniformBuffer,
             .preflightMaterialBuffer,
@@ -668,20 +767,18 @@ struct SparseTileSamplingPipelineTests {
             #expect(throws: SparseTileSamplingPipelineError.injectedFailure(
                 phase.rawValue
             )) {
-                _ = try SparseTileSamplingEncoder.preflightEncode(
-                    target: target,
+                _ = try SparseTileSamplingEncoder.prepareSubmission(
                     plan: lease,
                     parameters: .identity,
                     injectedFailure: phase
                 )
             }
         }
-        var prepared: SparseTileSamplingPreparedEncode? = try
-            SparseTileSamplingEncoder.preflightEncode(
-            target: target,
-            plan: lease,
-            parameters: .identity
-        )
+        var prepared: SparseTileSamplingPreparedSubmission? = try
+            SparseTileSamplingEncoder.prepareSubmission(
+                plan: lease,
+                parameters: .identity
+            )
         try fixture.planLease.retire()
         prepared = nil
         #expect(fixture.surfaces[0].backingSnapshot().activeLeaseCount == 0)
@@ -712,15 +809,24 @@ struct SparseTileSamplingPipelineTests {
             device: device
         ).acquire(plan: fixture.planLease, pipeline: pipeline)
         let source = try #require(fixture.planLease.boundTextures.first?.texture)
-        #expect(throws: SparseTileSamplingPipelineError.targetSourceAlias) {
-            _ = try SparseTileSamplingEncoder.preflightEncode(
-                target: source,
+        var prepared: SparseTileSamplingPreparedSubmission? = try
+            SparseTileSamplingEncoder.prepareSubmission(
                 plan: lease,
                 parameters: .identity
             )
+        let queue = try #require(device.makeCommandQueue())
+        let commandBuffer = try #require(queue.makeCommandBuffer())
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = source
+        #expect(throws: SparseTileSamplingPipelineError.targetSourceAlias) {
+            try prepared?.encode(
+                target: source,
+                commandBuffer: commandBuffer,
+                renderPassDescriptor: pass
+            )
         }
         try fixture.planLease.retire()
-        try lease.complete()
+        prepared = nil
         #expect(fixture.surfaces[0].backingSnapshot().activeLeaseCount == 0)
     }
 
@@ -905,6 +1011,37 @@ struct SparseTileSamplingPipelineTests {
             )
             #expect(binding.key.outputPixelFormatRawValue
                 == MTLPixelFormat.bgra8Unorm_srgb.rawValue)
+            #expect(binding.outputContract == .displayOpaqueSRGB)
+        }
+    }
+
+    @Test @MainActor
+    func preparationAcceptsTransparentInterchangeDedicatedEntryPoints()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let library = try makeSparseSamplingLibrary(device: device)
+        #expect(library.makeFunction(
+            name: "patternSparseSamplingInterchangeTier2Fragment"
+        ) != nil)
+        #expect(library.makeFunction(
+            name: "patternSparseSamplingInterchangeFallbackFragment"
+        ) != nil)
+        for backend in availableBackends(device) {
+            let binding = try SparseTileSamplingPipeline.prepare(
+                device: device,
+                library: library,
+                key: key(backend, pixelFormat: .bgra8Unorm)
+            )
+            #expect(binding.key.outputPixelFormatRawValue
+                == DocumentColorPipeline.interchangePixelFormat.rawValue)
+            #expect(binding.outputContract
+                == .interchangeEncodedPremultiplied)
+            if backend == .tier2ArgumentBuffer {
+                #expect(try binding.makeArgumentEncoder() != nil)
+            } else {
+                #expect(try binding.makeArgumentEncoder() == nil)
+            }
         }
     }
 
@@ -930,6 +1067,227 @@ struct SparseTileSamplingPipelineTests {
                 #expect(abs(Int(actual[channel]) - Int(expected[channel])) <= 1)
             }
         }
+    }
+
+    @Test @MainActor
+    func transparentInterchangeMatchesHalfQuantizedEncodedPremultipliedOracle()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let colors: [SIMD4<Float>] = [
+            .zero,
+            SIMD4(0.375, 0.125, 0.03125, 0.5),
+            SIMD4(0.8, 0.2, 0.05, 1),
+            SIMD4(0.001, 0.0005, 0.00025, 0.5),
+        ]
+        for color in colors {
+            let expected = expectedInterchangeBytes(color)
+            if color.w == 0.5, color.x == 0.375 {
+                #expect(expected == [35, 68, 112, 128])
+                #expect(expected != [8, 32, 96, 128])
+                #expect(expected != [71, 137, 225, 128])
+            }
+            var fallback: [UInt8]?
+            for backend in availableBackends(device) {
+                let actual = try await renderTransparentInterchange(
+                    device: device,
+                    backend: backend,
+                    roleTiles: [
+                        .canonical: [.init(x: 0, y: 0): color],
+                    ],
+                    width: 1,
+                    height: 1
+                )
+                for channel in 0..<4 {
+                    #expect(
+                        abs(Int(actual[channel]) - Int(expected[channel])) <= 1
+                    )
+                }
+                if let fallback {
+                    #expect(actual == fallback)
+                } else {
+                    fallback = actual
+                }
+            }
+        }
+    }
+
+    @Test @MainActor
+    func transparentInterchangeOverwritesSentinelWithMissingTileZero()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        for backend in availableBackends(device) {
+            let bytes = try await renderTransparentInterchange(
+                device: device,
+                backend: backend,
+                roleTiles: [.canonical: [:]],
+                width: 3,
+                height: 2,
+                clearColor: MTLClearColorMake(0.25, 0.5, 0.75, 1)
+            )
+            #expect(bytes == Array(repeating: 0, count: 3 * 2 * 4))
+        }
+    }
+
+    @Test @MainActor
+    func transparentInterchangeRequiresStoredNoLoadPassAndBoundedClear()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let fixture = try makeSamplingFixture(
+            device: device,
+            roleColors: [.canonical: SIMD4(0.25, 0.125, 0, 0.5)]
+        )
+        let pipeline = try SparseTileSamplingPipeline.prepare(
+            device: device,
+            library: makeSparseSamplingLibrary(device: device),
+            key: key(.directFallback, pixelFormat: .bgra8Unorm)
+        )
+        let lease = try await SparseTileSamplingGPUPlanCache(
+            device: device
+        ).acquire(plan: fixture.planLease, pipeline: pipeline)
+        let prepared = try SparseTileSamplingEncoder.prepareSubmission(
+            plan: lease,
+            parameters: .identity
+        )
+        try fixture.planLease.retire()
+        let target = try #require(device.makeTexture(
+            descriptor: targetDescriptor(
+                pixelFormat: .bgra8Unorm,
+                usage: [.renderTarget, .shaderRead]
+            )
+        ))
+        func pass(
+            load: MTLLoadAction,
+            store: MTLStoreAction = .store,
+            clear: MTLClearColor = MTLClearColorMake(0, 0, 0, 0)
+        ) -> MTLRenderPassDescriptor {
+            let result = MTLRenderPassDescriptor()
+            result.colorAttachments[0].texture = target
+            result.colorAttachments[0].loadAction = load
+            result.colorAttachments[0].storeAction = store
+            result.colorAttachments[0].clearColor = clear
+            return result
+        }
+        let queue = try #require(device.makeCommandQueue())
+        let invalid: [MTLRenderPassDescriptor] = [
+            pass(load: .load),
+            pass(load: .dontCare, store: .dontCare),
+            pass(
+                load: .clear,
+                clear: MTLClearColorMake(-0.01, 0, 0, 0)
+            ),
+            pass(
+                load: .clear,
+                clear: MTLClearColorMake(0, 0, 0, .nan)
+            ),
+        ]
+        for descriptor in invalid {
+            let command = try #require(queue.makeCommandBuffer())
+            #expect(throws: SparseTileSamplingPipelineError.invalidTarget(
+                "render pass transparent interchange contract"
+            )) {
+                try prepared.encode(
+                    target: target,
+                    commandBuffer: command,
+                    renderPassDescriptor: descriptor
+                )
+            }
+        }
+
+        let command = try #require(queue.makeCommandBuffer())
+        try prepared.encode(
+            target: target,
+            commandBuffer: command,
+            renderPassDescriptor: pass(load: .dontCare)
+        )
+        await withCheckedContinuation { continuation in
+            command.addCompletedHandler { _ in continuation.resume() }
+            command.commit()
+        }
+        #expect(command.status == .completed)
+        #expect(command.error == nil)
+    }
+
+    @Test @MainActor
+    func workingTransparentAndDisplayOpaquePassContractsStayDistinct()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let transparent = try await renderSinglePixel(
+            device: device,
+            backend: .directFallback,
+            roleColors: [.canonical: .zero]
+        )
+        expectClose(transparent, .zero)
+
+        let fixture = try makeSamplingFixture(
+            device: device,
+            roleColors: [.canonical: SIMD4(0.25, 0.125, 0, 0.5)]
+        )
+        let pipeline = try SparseTileSamplingPipeline.prepare(
+            device: device,
+            library: makeSparseSamplingLibrary(device: device),
+            key: key(.directFallback, pixelFormat: .bgra8Unorm_srgb)
+        )
+        let lease = try await SparseTileSamplingGPUPlanCache(
+            device: device
+        ).acquire(plan: fixture.planLease, pipeline: pipeline)
+        let prepared = try SparseTileSamplingEncoder.prepareSubmission(
+            plan: lease,
+            parameters: .identity
+        )
+        try fixture.planLease.retire()
+        let target = try #require(device.makeTexture(
+            descriptor: targetDescriptor(
+                pixelFormat: .bgra8Unorm_srgb,
+                usage: [.renderTarget, .shaderRead]
+            )
+        ))
+        let queue = try #require(device.makeCommandQueue())
+        let command = try #require(queue.makeCommandBuffer())
+        func pass(
+            load: MTLLoadAction = .clear,
+            store: MTLStoreAction = .store,
+            alpha: Double = 1
+        ) -> MTLRenderPassDescriptor {
+            let result = MTLRenderPassDescriptor()
+            result.colorAttachments[0].texture = target
+            result.colorAttachments[0].loadAction = load
+            result.colorAttachments[0].storeAction = store
+            result.colorAttachments[0].clearColor = MTLClearColorMake(
+                0, 0, 0, alpha
+            )
+            return result
+        }
+        for invalid in [
+            pass(load: .load),
+            pass(load: .dontCare),
+            pass(store: .dontCare),
+            pass(alpha: 0),
+        ] {
+            #expect(throws: SparseTileSamplingPipelineError.invalidTarget(
+                "render pass opaque display contract"
+            )) {
+                try prepared.encode(
+                    target: target,
+                    commandBuffer: command,
+                    renderPassDescriptor: invalid
+                )
+            }
+        }
+        try prepared.encode(
+            target: target,
+            commandBuffer: command,
+            renderPassDescriptor: pass()
+        )
+        await withCheckedContinuation { continuation in
+            command.addCompletedHandler { _ in continuation.resume() }
+            command.commit()
+        }
+        #expect(command.status == .completed)
+        #expect(fixture.surfaces[0].backingSnapshot().activeLeaseCount == 0)
     }
 
     @Test @MainActor
@@ -1057,6 +1415,204 @@ struct SparseTileSamplingPipelineTests {
     }
 
     @Test @MainActor
+    func realMetalFMAAtBoundaryKeepsTheContractedLowerNeighborResident()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let tileSide = PaintTileDescriptor.side
+        let size = PixelSize(width: 8 * tileSide, height: tileSide)
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(1_783.2158, 0),
+            sourceStep: SIMD2(-17.014889, 1)
+        )
+        let lowerContribution: Float = 0.00012207031
+        let fixture = try makeSamplingFixture(
+            device: device,
+            roleTiles: [.canonical: [
+                .init(x: 5, y: 0): SIMD4(1, 0, 0, 1),
+                .init(x: 6, y: 0): .zero,
+            ]],
+            pixelSize: size,
+            addressing: .finite(size),
+            outputRegion: try SparseTileOutputRegion(
+                minX: 0, minY: 0, maxX: 15, maxY: 1
+            ),
+            outputToSourceTransform: transform
+        )
+        #expect(fixture.planLease.content.bindingRecords
+            .map(\.reference.coordinate) == [
+                .init(x: 5, y: 0), .init(x: 6, y: 0),
+            ])
+
+        let library = try makeSparseSamplingLibrary(device: device)
+        for backend in availableBackends(device) {
+            let gpuLease = try await SparseTileSamplingGPUPlanCache(
+                device: device
+            ).acquire(
+                plan: fixture.planLease,
+                pipeline: SparseTileSamplingPipeline.prepare(
+                    device: device,
+                    library: library,
+                    key: key(backend)
+                )
+            )
+            let bits = try await renderPlan(
+                device: device,
+                plan: gpuLease,
+                width: 15,
+                height: 1,
+                parameters: SparseTileSamplingEncodeParameters(
+                    outputToSourceTransform: transform,
+                    compositeMode: PatternCompositeWireDraw,
+                    liveVisible: true,
+                    strokeOpacity: 1,
+                    accumulationLimit: 1,
+                    eraserStrength: 1
+                )
+            )
+            expectClose(
+                readPixel(bits, x: 14, width: 15),
+                SIMD4(lowerContribution, 0, 0, lowerContribution),
+                tolerance: 0.00002
+            )
+        }
+        try fixture.planLease.retire()
+        #expect(fixture.surfaces[0].backingSnapshot().activeLeaseCount == 0)
+    }
+
+    @Test @MainActor
+    func realMetalFastMathReassociationKeepsShiftedOriginNeighborResident()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let tileSide = PaintTileDescriptor.side
+        let pageCount = 39_135
+        let size = PixelSize(
+            width: pageCount * tileSide,
+            height: tileSide
+        )
+        // At the first pixel center, the written shader expression may legally
+        // become `(origin - 0.5) + center * step` under Metal fast math:
+        //
+        //   `(origin + center * step) - 0.5` -> page 39_134
+        //   `(origin - 0.5) + center * step` -> page 39_133
+        //
+        // The host plan must bind both pages even though the unfused and FMA
+        // evaluations of the original grouping agree.
+        let transform = SparseTileOutputToSourceTransform(
+            sourceOffset: SIMD2(338_030.75, 0),
+            sourceStep: SIMD2(19_360_546, 1)
+        )
+        let expected = SIMD4<Float>(1, 0, 0, 1)
+        let fixture = try makeSamplingFixture(
+            device: device,
+            roleTiles: [.canonical: [
+                .init(x: 39_133, y: 0): expected,
+                .init(x: 39_134, y: 0): .zero,
+            ]],
+            pixelSize: size,
+            addressing: .finite(size),
+            outputRegion: try SparseTileOutputRegion(
+                minX: 0, minY: 0, maxX: 1, maxY: 1
+            ),
+            outputToSourceTransform: transform,
+            planLimits: .fastMathReassociationTestDefaults
+        )
+
+        let library = try makeSparseSamplingLibrary(device: device)
+        for backend in availableBackends(device) {
+            let gpuLease = try await SparseTileSamplingGPUPlanCache(
+                device: device
+            ).acquire(
+                plan: fixture.planLease,
+                pipeline: SparseTileSamplingPipeline.prepare(
+                    device: device,
+                    library: library,
+                    key: key(backend)
+                )
+            )
+            let bits = try await renderPlan(
+                device: device,
+                plan: gpuLease,
+                width: 1,
+                height: 1,
+                parameters: SparseTileSamplingEncodeParameters(
+                    outputToSourceTransform: transform,
+                    compositeMode: PatternCompositeWireDraw,
+                    liveVisible: true,
+                    strokeOpacity: 1,
+                    accumulationLimit: 1,
+                    eraserStrength: 1
+                )
+            )
+            expectClose(readPixel(bits, x: 0, width: 1), expected)
+        }
+        try fixture.planLease.retire()
+        #expect(fixture.surfaces[0].backingSnapshot().activeLeaseCount == 0)
+    }
+
+    @Test @MainActor
+    func realMetalLargeNonzeroIdentityKeepsFloatRoundedNeighborResident()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let tileSide = PaintTileDescriptor.side
+        let outputOrigin = 33_554_432
+        let nextPage = 131_073
+        let size = PixelSize(
+            width: (nextPage + 1) * tileSide,
+            height: tileSide
+        )
+        let expected = SIMD4<Float>(1, 0, 0, 1)
+        let fixture = try makeSamplingFixture(
+            device: device,
+            roleTiles: [.canonical: [
+                .init(x: nextPage - 1, y: 0): .zero,
+                .init(x: nextPage, y: 0): expected,
+            ]],
+            pixelSize: size,
+            addressing: .finite(size),
+            outputRegion: try SparseTileOutputRegion(
+                minX: outputOrigin,
+                minY: 0,
+                maxX: outputOrigin + 255,
+                maxY: 1
+            ),
+            planLimits: .largeIdentityTestDefaults
+        )
+        #expect(fixture.planLease.content.bindingRecords
+            .map(\.reference.coordinate) == [
+                .init(x: nextPage - 1, y: 0),
+                .init(x: nextPage, y: 0),
+            ])
+
+        let library = try makeSparseSamplingLibrary(device: device)
+        for backend in availableBackends(device) {
+            let gpuLease = try await SparseTileSamplingGPUPlanCache(
+                device: device
+            ).acquire(
+                plan: fixture.planLease,
+                pipeline: SparseTileSamplingPipeline.prepare(
+                    device: device,
+                    library: library,
+                    key: key(backend)
+                )
+            )
+            let bits = try await renderPlan(
+                device: device,
+                plan: gpuLease,
+                width: 255,
+                height: 1,
+                parameters: .identity
+            )
+            expectClose(readPixel(bits, x: 0, width: 255), .zero)
+            expectClose(readPixel(bits, x: 254, width: 255), expected)
+        }
+        try fixture.planLease.retire()
+        #expect(fixture.surfaces[0].backingSnapshot().activeLeaseCount == 0)
+    }
+
+    @Test @MainActor
     func transformedNegativePeriodicAndSignedRadialPlansKeepCompleteHalos()
         async throws
     {
@@ -1139,12 +1695,8 @@ struct SparseTileSamplingPipelineTests {
         let lease = try await SparseTileSamplingGPUPlanCache(
             device: device
         ).acquire(plan: fixture.planLease, pipeline: pipeline)
-        let target = try #require(device.makeTexture(
-            descriptor: targetDescriptor(usage: [.renderTarget])
-        ))
         #expect(throws: SparseTileSamplingPipelineError.incompleteHalo) {
-            _ = try SparseTileSamplingEncoder.preflightEncode(
-                target: target,
+            _ = try SparseTileSamplingEncoder.prepareSubmission(
                 plan: lease,
                 parameters: .identity
             )
@@ -1187,16 +1739,13 @@ struct SparseTileSamplingPipelineTests {
             plan: fixture.planLease,
             pipeline: pipeline
         )
-        let target = try #require(device.makeTexture(
-            descriptor: targetDescriptor(usage: [.renderTarget])
-        ))
-        var firstPrepared: SparseTileSamplingPreparedEncode? = try
-            SparseTileSamplingEncoder.preflightEncode(
-                target: target, plan: first, parameters: .identity
+        var firstPrepared: SparseTileSamplingPreparedSubmission? = try
+            SparseTileSamplingEncoder.prepareSubmission(
+                plan: first, parameters: .identity
             )
-        var secondPrepared: SparseTileSamplingPreparedEncode? = try
-            SparseTileSamplingEncoder.preflightEncode(
-                target: target, plan: second, parameters: .identity
+        var secondPrepared: SparseTileSamplingPreparedSubmission? = try
+            SparseTileSamplingEncoder.prepareSubmission(
+                plan: second, parameters: .identity
             )
         #expect(first.uploadRingSnapshot == SparseTileSamplingUploadRingSnapshot(
             capacity: 2,
@@ -1209,16 +1758,16 @@ struct SparseTileSamplingPipelineTests {
             required: 3,
             maximum: 2
         )) {
-            _ = try SparseTileSamplingEncoder.preflightEncode(
-                target: target, plan: third, parameters: .identity
+            _ = try SparseTileSamplingEncoder.prepareSubmission(
+                plan: third, parameters: .identity
             )
         }
 
         firstPrepared = nil
         #expect(first.uploadRingSnapshot.activeSlotCount == 1)
-        var thirdPrepared: SparseTileSamplingPreparedEncode? = try
-            SparseTileSamplingEncoder.preflightEncode(
-                target: target, plan: third, parameters: .identity
+        var thirdPrepared: SparseTileSamplingPreparedSubmission? = try
+            SparseTileSamplingEncoder.prepareSubmission(
+                plan: third, parameters: .identity
             )
         #expect(first.uploadRingSnapshot.activeSlotCount == 2)
         secondPrepared = nil
@@ -1229,9 +1778,8 @@ struct SparseTileSamplingPipelineTests {
                 plan: fixture.planLease,
                 pipeline: pipeline
             )
-            var warmed: SparseTileSamplingPreparedEncode? = try
-                SparseTileSamplingEncoder.preflightEncode(
-                    target: target,
+            var warmed: SparseTileSamplingPreparedSubmission? = try
+                SparseTileSamplingEncoder.prepareSubmission(
                     plan: warmedLease,
                     parameters: .identity
                 )
@@ -1269,7 +1817,7 @@ struct SparseTileSamplingPipelineTests {
     }
 
     @Test @MainActor
-    func gpuLeaseAllowsExactlyOneSuccessfulPreflight() async throws {
+    func gpuLeaseAllowsExactlyOneSuccessfulPreparation() async throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let fixture = try makeSamplingFixture(
             device: device,
@@ -1283,19 +1831,14 @@ struct SparseTileSamplingPipelineTests {
         let lease = try await SparseTileSamplingGPUPlanCache(
             device: device
         ).acquire(plan: fixture.planLease, pipeline: pipeline)
-        let target = try #require(device.makeTexture(
-            descriptor: targetDescriptor(usage: [.renderTarget])
-        ))
-        var prepared: SparseTileSamplingPreparedEncode? = try
-            SparseTileSamplingEncoder.preflightEncode(
-                target: target,
+        var prepared: SparseTileSamplingPreparedSubmission? = try
+            SparseTileSamplingEncoder.prepareSubmission(
                 plan: lease,
                 parameters: .identity
             )
 
         #expect(throws: SparseTileSamplingPipelineError.alreadyConsumed) {
-            _ = try SparseTileSamplingEncoder.preflightEncode(
-                target: target,
+            _ = try SparseTileSamplingEncoder.prepareSubmission(
                 plan: lease,
                 parameters: .identity
             )
@@ -1309,7 +1852,7 @@ struct SparseTileSamplingPipelineTests {
     }
 
     @Test @MainActor
-    func externalCompletionIsRejectedAfterPreflightTransfersOwnership()
+    func externalCompletionIsRejectedAfterPreparationTransfersOwnership()
         async throws
     {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
@@ -1325,12 +1868,8 @@ struct SparseTileSamplingPipelineTests {
         let lease = try await SparseTileSamplingGPUPlanCache(
             device: device
         ).acquire(plan: fixture.planLease, pipeline: pipeline)
-        let target = try #require(device.makeTexture(
-            descriptor: targetDescriptor(usage: [.renderTarget])
-        ))
-        var prepared: SparseTileSamplingPreparedEncode? = try
-            SparseTileSamplingEncoder.preflightEncode(
-                target: target,
+        var prepared: SparseTileSamplingPreparedSubmission? = try
+            SparseTileSamplingEncoder.prepareSubmission(
                 plan: lease,
                 parameters: .identity
             )
@@ -1347,7 +1886,7 @@ struct SparseTileSamplingPipelineTests {
     }
 
     @Test @MainActor
-    func preparedEncodesAreOneShotAndTerminalCommandsMayCompleteOutOfOrder()
+    func preparedSubmissionsAreOneShotAndTerminalCommandsMayCompleteOutOfOrder()
         async throws
     {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
@@ -1376,13 +1915,11 @@ struct SparseTileSamplingPipelineTests {
                 )
             ))
         }
-        let firstPrepared = try SparseTileSamplingEncoder.preflightEncode(
-            target: targets[0],
+        let firstPrepared = try SparseTileSamplingEncoder.prepareSubmission(
             plan: firstLease,
             parameters: .identity
         )
-        let secondPrepared = try SparseTileSamplingEncoder.preflightEncode(
-            target: targets[1],
+        let secondPrepared = try SparseTileSamplingEncoder.prepareSubmission(
             plan: secondLease,
             parameters: .identity
         )
@@ -1402,16 +1939,19 @@ struct SparseTileSamplingPipelineTests {
         secondPass.colorAttachments[0].loadAction = .clear
         secondPass.colorAttachments[0].storeAction = .store
         try firstPrepared.encode(
+            target: targets[0],
             commandBuffer: firstCommand,
             renderPassDescriptor: firstPass
         )
         try secondPrepared.encode(
+            target: targets[1],
             commandBuffer: secondCommand,
             renderPassDescriptor: secondPass
         )
         let rejectedCommand = try #require(queue.makeCommandBuffer())
         #expect(throws: SparseTileSamplingPipelineError.alreadyConsumed) {
             try firstPrepared.encode(
+                target: targets[0],
                 commandBuffer: rejectedCommand,
                 renderPassDescriptor: firstPass
             )
@@ -1444,11 +1984,11 @@ struct SparseTileSamplingPipelineTests {
             device: device,
             roleColors: [.canonical: SIMD4(0.25, 0.5, 0.75, 1)],
             planCache: SparseTileSamplingPlanCache(
-                returnLease: { surface, lease in
+                returnLease: { lease in
                     if failure.consumeFailure() {
                         throw PipelineTestError.injected
                     }
-                    try surface.returnLease(lease)
+                    try lease.returnLease()
                 }
             )
         )
@@ -1465,9 +2005,8 @@ struct SparseTileSamplingPipelineTests {
         let target = try #require(device.makeTexture(
             descriptor: targetDescriptor(usage: [.renderTarget, .shaderRead])
         ))
-        var abandoned: SparseTileSamplingPreparedEncode? = try
-            SparseTileSamplingEncoder.preflightEncode(
-                target: target,
+        var abandoned: SparseTileSamplingPreparedSubmission? = try
+            SparseTileSamplingEncoder.prepareSubmission(
                 plan: abandonedLease,
                 parameters: .identity
             )
@@ -1489,8 +2028,7 @@ struct SparseTileSamplingPipelineTests {
             plan: reusableFixture.planLease,
             pipeline: pipeline
         )
-        let prepared = try SparseTileSamplingEncoder.preflightEncode(
-            target: target,
+        let prepared = try SparseTileSamplingEncoder.prepareSubmission(
             plan: reusableLease,
             parameters: .identity
         )
@@ -1502,6 +2040,7 @@ struct SparseTileSamplingPipelineTests {
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         try prepared.encode(
+            target: target,
             commandBuffer: command,
             renderPassDescriptor: pass
         )
@@ -1518,7 +2057,7 @@ struct SparseTileSamplingPipelineTests {
     }
 
     @Test @MainActor
-    func preparedEncodeCannotSubstituteAnotherRenderTarget() async throws {
+    func preparedSubmissionRejectsMismatchedRenderPassTarget() async throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let expected = SIMD4<Float>(0.25, 0.5, 0.75, 1)
         let fixture = try makeSamplingFixture(
@@ -1543,8 +2082,7 @@ struct SparseTileSamplingPipelineTests {
                 usage: [.renderTarget, .shaderRead]
             )
         ))
-        let prepared = try SparseTileSamplingEncoder.preflightEncode(
-            target: targetA,
+        let prepared = try SparseTileSamplingEncoder.prepareSubmission(
             plan: lease,
             parameters: .identity
         )
@@ -1557,15 +2095,17 @@ struct SparseTileSamplingPipelineTests {
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
         #expect(throws: SparseTileSamplingPipelineError.invalidTarget(
-            "render pass does not own the preflight target"
+            "render pass attachment"
         )) {
             try prepared.encode(
+                target: targetA,
                 commandBuffer: commandBuffer,
                 renderPassDescriptor: pass
             )
         }
         pass.colorAttachments[0].texture = targetA
         try prepared.encode(
+            target: targetA,
             commandBuffer: commandBuffer,
             renderPassDescriptor: pass
         )
@@ -1580,15 +2120,141 @@ struct SparseTileSamplingPipelineTests {
     }
 
     @Test @MainActor
+    func preparedSubmissionValidatesTargetsBeforeConsumptionAndRemainsRetryable()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let expected = SIMD4<Float>(0.25, 0.5, 0.75, 1)
+        let fixture = try makeSamplingFixture(
+            device: device,
+            roleColors: [.canonical: expected]
+        )
+        let pipeline = try SparseTileSamplingPipeline.prepare(
+            device: device,
+            library: makeSparseSamplingLibrary(device: device),
+            key: key(.directFallback)
+        )
+        let lease = try await SparseTileSamplingGPUPlanCache(
+            device: device
+        ).acquire(plan: fixture.planLease, pipeline: pipeline)
+        let prepared = try SparseTileSamplingEncoder.prepareSubmission(
+            plan: lease,
+            parameters: .identity
+        )
+        let correct = try #require(device.makeTexture(
+            descriptor: targetDescriptor(
+                usage: [.renderTarget, .shaderRead]
+            )
+        ))
+        let wrongFormat = try #require(device.makeTexture(
+            descriptor: targetDescriptor(
+                pixelFormat: .bgra8Unorm_srgb,
+                usage: [.renderTarget]
+            )
+        ))
+        let wrongSize = try #require(device.makeTexture(
+            descriptor: targetDescriptor(
+                width: 2,
+                usage: [.renderTarget]
+            )
+        ))
+        let wrongUsage = try #require(device.makeTexture(
+            descriptor: targetDescriptor(usage: [.shaderRead])
+        ))
+        let wrongTypeDescriptor = targetDescriptor(usage: [.renderTarget])
+        wrongTypeDescriptor.textureType = .type2DArray
+        wrongTypeDescriptor.arrayLength = 2
+        let wrongType = try #require(device.makeTexture(
+            descriptor: wrongTypeDescriptor
+        ))
+        var invalidTargets = [wrongFormat, wrongSize, wrongUsage, wrongType]
+        if device.supportsTextureSampleCount(4) {
+            let wrongSampleDescriptor = MTLTextureDescriptor()
+            wrongSampleDescriptor.textureType = .type2DMultisample
+            wrongSampleDescriptor.pixelFormat = .rgba16Float
+            wrongSampleDescriptor.width = 1
+            wrongSampleDescriptor.height = 1
+            wrongSampleDescriptor.sampleCount = 4
+            wrongSampleDescriptor.storageMode = .private
+            wrongSampleDescriptor.usage = [.renderTarget]
+            invalidTargets.append(try #require(device.makeTexture(
+                descriptor: wrongSampleDescriptor
+            )))
+        }
+        let queue = try #require(device.makeCommandQueue())
+        let commandBuffer = try #require(queue.makeCommandBuffer())
+
+        for invalid in invalidTargets {
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = invalid
+            #expect(throws: (any Error).self) {
+                try prepared.encode(
+                    target: invalid,
+                    commandBuffer: commandBuffer,
+                    renderPassDescriptor: pass
+                )
+            }
+        }
+
+        let foreignPass = MTLRenderPassDescriptor()
+        foreignPass.colorAttachments[0].texture = wrongFormat
+        #expect(throws: SparseTileSamplingPipelineError.invalidTarget(
+            "render pass attachment"
+        )) {
+            try prepared.encode(
+                target: correct,
+                commandBuffer: commandBuffer,
+                renderPassDescriptor: foreignPass
+            )
+        }
+
+        let wrongSubresourcePass = MTLRenderPassDescriptor()
+        wrongSubresourcePass.colorAttachments[0].texture = correct
+        wrongSubresourcePass.colorAttachments[0].level = 1
+        #expect(throws: SparseTileSamplingPipelineError.invalidTarget(
+            "render pass attachment"
+        )) {
+            try prepared.encode(
+                target: correct,
+                commandBuffer: commandBuffer,
+                renderPassDescriptor: wrongSubresourcePass
+            )
+        }
+
+        let correctPass = MTLRenderPassDescriptor()
+        correctPass.colorAttachments[0].texture = correct
+        correctPass.colorAttachments[0].loadAction = .clear
+        correctPass.colorAttachments[0].storeAction = .store
+        try fixture.planLease.retire()
+        try prepared.encode(
+            target: correct,
+            commandBuffer: commandBuffer,
+            renderPassDescriptor: correctPass
+        )
+        await withCheckedContinuation { continuation in
+            commandBuffer.addCompletedHandler { _ in continuation.resume() }
+            commandBuffer.commit()
+        }
+        expectClose(readSinglePixel(correct), expected)
+        #expect(throws: SparseTileSamplingPipelineError.alreadyConsumed) {
+            try prepared.encode(
+                target: correct,
+                commandBuffer: commandBuffer,
+                renderPassDescriptor: correctPass
+            )
+        }
+    }
+
+    @Test @MainActor
     func commandCompletionReturnsUploadSlotAndReportsPlanReturnFailure()
         async throws
     {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let failure = OneShotLeaseReturnFailure()
         let p3Cache = SparseTileSamplingPlanCache(
-            returnLease: { surface, lease in
+            returnLease: { lease in
                 if failure.consumeFailure() { throw PipelineTestError.injected }
-                try surface.returnLease(lease)
+                try lease.returnLease()
             }
         )
         let fixture = try makeSamplingFixture(
@@ -1609,8 +2275,7 @@ struct SparseTileSamplingPipelineTests {
                 usage: [.renderTarget, .shaderRead]
             )
         ))
-        let prepared = try SparseTileSamplingEncoder.preflightEncode(
-            target: target,
+        let prepared = try SparseTileSamplingEncoder.prepareSubmission(
             plan: lease,
             parameters: .identity
         )
@@ -1623,6 +2288,7 @@ struct SparseTileSamplingPipelineTests {
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         try prepared.encode(
+            target: target,
             commandBuffer: commandBuffer,
             renderPassDescriptor: pass
         )
@@ -1641,6 +2307,124 @@ struct SparseTileSamplingPipelineTests {
         #expect(lease.completionMailbox.retryPendingPlanCompletions() == 0)
         #expect(fixture.surfaces[0].backingSnapshot().activeLeaseCount == 0)
         #expect(lease.completionMailbox.snapshot.pendingPlanCompletionCount == 0)
+    }
+
+    @Test @MainActor
+    func terminalRecordAlwaysFiresOnceBeforeDelayedAuthenticatedReturn()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let failure = OneShotLeaseReturnFailure()
+        let p3Cache = SparseTileSamplingPlanCache(
+            returnLease: { lease in
+                if failure.consumeFailure() { throw PipelineTestError.injected }
+                try lease.returnLease()
+            }
+        )
+        let fixture = try makeSamplingFixture(
+            device: device,
+            roleColors: [.canonical: SIMD4(0.25, 0.5, 0.75, 1)],
+            planCache: p3Cache
+        )
+        let pipeline = try SparseTileSamplingPipeline.prepare(
+            device: device,
+            library: makeSparseSamplingLibrary(device: device),
+            key: key(.directFallback)
+        )
+        let lease = try await SparseTileSamplingGPUPlanCache(
+            device: device
+        ).acquire(plan: fixture.planLease, pipeline: pipeline)
+        let prepared = try SparseTileSamplingEncoder.prepareSubmission(
+            plan: lease,
+            parameters: .identity
+        )
+        try fixture.planLease.retire()
+        let target = try #require(device.makeTexture(
+            descriptor: targetDescriptor(usage: [.renderTarget])
+        ))
+        let queue = try #require(device.makeCommandQueue())
+        let command = try #require(queue.makeCommandBuffer())
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        let probe = SparseTerminalRecordProbe()
+        try prepared.encode(
+            target: target,
+            commandBuffer: command,
+            renderPassDescriptor: pass,
+            afterResourcesReturned: { receipt, succeeded in
+                probe.recordReturn(receipt, succeeded: succeeded)
+            },
+            afterTerminalRecorded: { record in
+                probe.recordTerminal(record)
+            }
+        )
+        await withCheckedContinuation { continuation in
+            command.addCompletedHandler { _ in continuation.resume() }
+            command.commit()
+        }
+
+        #expect(probe.terminals == [SparseTileSamplingTerminalRecord(
+            kind: .command(succeeded: true),
+            resourcesReturned: false
+        )])
+        #expect(probe.returnCount == 0)
+        #expect(lease.completionMailbox.retryPendingPlanCompletions() == 0)
+        #expect(probe.terminals.count == 1)
+        #expect(probe.returnCount == 1)
+        #expect(probe.lastReturnSucceeded == true)
+    }
+
+    @Test @MainActor
+    func abandonmentTerminalRecordPrecedesDelayedAuthenticatedReturn()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let fixture = try makeSamplingFixture(
+            device: device,
+            roleColors: [.canonical: SIMD4(0.25, 0.5, 0.75, 1)]
+        )
+        let pipeline = try SparseTileSamplingPipeline.prepare(
+            device: device,
+            library: makeSparseSamplingLibrary(device: device),
+            key: key(.directFallback)
+        )
+        let cache = SparseTileSamplingGPUPlanCache(
+            device: device,
+            preparedAbandonmentFailureInjector:
+                SparseTileSamplingPreparedAbandonmentFailureInjector(
+                    failures: 1
+                )
+        )
+        let lease = try await cache.acquire(
+            plan: fixture.planLease,
+            pipeline: pipeline
+        )
+        let prepared = try SparseTileSamplingEncoder.prepareSubmission(
+            plan: lease,
+            parameters: .identity
+        )
+        try fixture.planLease.retire()
+        let probe = SparseTerminalRecordProbe()
+        prepared.abandon(
+            afterResourcesReturned: { receipt in
+                probe.recordReturn(receipt, succeeded: true)
+            },
+            afterTerminalRecorded: { record in
+                probe.recordTerminal(record)
+            }
+        )
+
+        #expect(probe.terminals == [SparseTileSamplingTerminalRecord(
+            kind: .abandoned,
+            resourcesReturned: false
+        )])
+        #expect(probe.returnCount == 0)
+        #expect(lease.completionMailbox.snapshot.pendingPlanCompletionCount == 1)
+        #expect(lease.completionMailbox.retryPendingPlanCompletions() == 0)
+        #expect(probe.terminals.count == 1)
+        #expect(probe.returnCount == 1)
     }
 
     @Test
@@ -1721,9 +2505,9 @@ struct SparseTileSamplingPipelineTests {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let failure = CountedLeaseReturnFailure(remainingFailures: 1)
         let p3Cache = SparseTileSamplingPlanCache(
-            returnLease: { surface, lease in
+            returnLease: { lease in
                 if failure.consumeFailure() { throw PipelineTestError.injected }
-                try surface.returnLease(lease)
+                try lease.returnLease()
             }
         )
         let fixture = try makeSamplingFixture(
@@ -1757,9 +2541,9 @@ struct SparseTileSamplingPipelineTests {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let failure = CountedLeaseReturnFailure(remainingFailures: 1)
         let p3Cache = SparseTileSamplingPlanCache(
-            returnLease: { surface, lease in
+            returnLease: { lease in
                 if failure.consumeFailure() { throw PipelineTestError.injected }
-                try surface.returnLease(lease)
+                try lease.returnLease()
             }
         )
         let fixture = try makeSamplingFixture(
@@ -2075,8 +2859,7 @@ struct SparseTileSamplingPipelineTests {
         let target = try #require(device.makeTexture(
             descriptor: targetDescriptor(usage: [.renderTarget, .shaderRead])
         ))
-        let prepared = try SparseTileSamplingEncoder.preflightEncode(
-            target: target,
+        let prepared = try SparseTileSamplingEncoder.prepareSubmission(
             plan: leases[0],
             parameters: .identity
         )
@@ -2090,6 +2873,7 @@ struct SparseTileSamplingPipelineTests {
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         try prepared.encode(
+            target: target,
             commandBuffer: commandBuffer,
             renderPassDescriptor: pass
         )
@@ -2257,14 +3041,14 @@ struct SparseTileSamplingPipelineTests {
         #expect(pipeline.components(separatedBy: "drawPrimitives(").count - 1 == 2)
         #expect(!pipeline.contains("for tile in"))
         #expect(!pipeline.contains("for entry in"))
-        let preflight = try #require(pipeline.range(
-            of: "static func preflightEncode("
+        let preparation = try #require(pipeline.range(
+            of: "static func prepareSubmission("
         )).lowerBound
         let helperBoundary = try #require(pipeline.range(
             of: "private func roleWire("
         )).lowerBound
-        let preflightSource = String(pipeline[preflight..<helperBoundary])
-        #expect(!preflightSource.contains("makeBuffer("))
+        let preparationSource = String(pipeline[preparation..<helperBoundary])
+        #expect(!preparationSource.contains("makeBuffer("))
         #expect(!pipeline.contains("try? retainedPlan.complete()"))
     }
 }
@@ -2377,7 +3161,7 @@ private func makePipelineRequest(
         request: try SparseTileSourceRequest(
             contentKey: contentKey,
             addressing: .finite(size),
-            surface: surface,
+            provider: surface.makeExactReferenceProvider(),
             changedCoordinates: [.init(x: 0, y: 0)],
             disposition: .fullSnapshot
         )
@@ -2407,8 +3191,7 @@ private func renderSinglePixel(
     let target = try #require(device.makeTexture(
         descriptor: targetDescriptor(usage: [.renderTarget, .shaderRead])
     ))
-    let prepared = try SparseTileSamplingEncoder.preflightEncode(
-        target: target,
+    let prepared = try SparseTileSamplingEncoder.prepareSubmission(
         plan: gpuLease,
         parameters: parameters
     )
@@ -2420,6 +3203,7 @@ private func renderSinglePixel(
     pass.colorAttachments[0].storeAction = .store
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
     try prepared.encode(
+        target: target,
         commandBuffer: commandBuffer,
         renderPassDescriptor: pass
     )
@@ -2488,8 +3272,7 @@ private func renderSample(
         accumulationLimit: 1,
         eraserStrength: 1
     )
-    let prepared = try SparseTileSamplingEncoder.preflightEncode(
-        target: target,
+    let prepared = try SparseTileSamplingEncoder.prepareSubmission(
         plan: gpuLease,
         parameters: resolvedParameters
     )
@@ -2501,6 +3284,7 @@ private func renderSample(
     pass.colorAttachments[0].storeAction = .store
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
     try prepared.encode(
+        target: target,
         commandBuffer: commandBuffer,
         renderPassDescriptor: pass
     )
@@ -2588,8 +3372,7 @@ private func renderOpaqueDisplaySinglePixel(
             usage: [.renderTarget, .shaderRead]
         )
     ))
-    let prepared = try SparseTileSamplingEncoder.preflightEncode(
-        target: target,
+    let prepared = try SparseTileSamplingEncoder.prepareSubmission(
         plan: lease,
         parameters: .identity
     )
@@ -2602,6 +3385,7 @@ private func renderOpaqueDisplaySinglePixel(
     pass.colorAttachments[0].storeAction = .store
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
     try prepared.encode(
+        target: target,
         commandBuffer: commandBuffer,
         renderPassDescriptor: pass
     )
@@ -2620,6 +3404,99 @@ private func renderOpaqueDisplaySinglePixel(
         mipmapLevel: 0
     )
     return bytes
+}
+
+@MainActor
+private func renderTransparentInterchange(
+    device: any MTLDevice,
+    backend: SparseTileSamplingBackend,
+    roleTiles: [
+        SparseTileSampleRole: [PaintTileCoordinate: SIMD4<Float>]
+    ],
+    width: Int,
+    height: Int,
+    clearColor: MTLClearColor = MTLClearColorMake(0, 0, 0, 0)
+) async throws -> [UInt8] {
+    let sourceSize = PixelSize(width: 256, height: 256)
+    let outputRegion = try SparseTileOutputRegion(
+        minX: 0, minY: 0, maxX: width, maxY: height
+    )
+    let fixture = try makeSamplingFixture(
+        device: device,
+        roleTiles: roleTiles,
+        pixelSize: sourceSize,
+        addressing: .finite(sourceSize),
+        outputRegion: outputRegion
+    )
+    let pipeline = try SparseTileSamplingPipeline.prepare(
+        device: device,
+        library: makeSparseSamplingLibrary(device: device),
+        key: key(backend, pixelFormat: .bgra8Unorm)
+    )
+    let lease = try await SparseTileSamplingGPUPlanCache(
+        device: device
+    ).acquire(plan: fixture.planLease, pipeline: pipeline)
+    let prepared = try SparseTileSamplingEncoder.prepareSubmission(
+        plan: lease,
+        parameters: .identity
+    )
+    try fixture.planLease.retire()
+    let target = try #require(device.makeTexture(
+        descriptor: targetDescriptor(
+            width: width,
+            height: height,
+            pixelFormat: .bgra8Unorm,
+            usage: [.renderTarget, .shaderRead]
+        )
+    ))
+    let queue = try #require(device.makeCommandQueue())
+    let commandBuffer = try #require(queue.makeCommandBuffer())
+    let pass = MTLRenderPassDescriptor()
+    pass.colorAttachments[0].texture = target
+    pass.colorAttachments[0].loadAction = .clear
+    pass.colorAttachments[0].storeAction = .store
+    pass.colorAttachments[0].clearColor = clearColor
+    try prepared.encode(
+        target: target,
+        commandBuffer: commandBuffer,
+        renderPassDescriptor: pass
+    )
+    await withCheckedContinuation { continuation in
+        commandBuffer.addCompletedHandler { _ in continuation.resume() }
+        commandBuffer.commit()
+    }
+    #expect(commandBuffer.status == .completed)
+    #expect(commandBuffer.error == nil)
+    #expect(fixture.surfaces.allSatisfy {
+        $0.backingSnapshot().activeLeaseCount == 0
+    })
+    var bytes = [UInt8](repeating: 0, count: width * height * 4)
+    target.getBytes(
+        &bytes,
+        bytesPerRow: width * 4,
+        from: MTLRegionMake2D(0, 0, width, height),
+        mipmapLevel: 0
+    )
+    return bytes
+}
+
+private func expectedInterchangeBytes(_ source: SIMD4<Float>) -> [UInt8] {
+    let value = SIMD4<Float>(
+        Float(Float16(source.x)),
+        Float(Float16(source.y)),
+        Float(Float16(source.z)),
+        Float(Float16(source.w))
+    )
+    guard let color = LinearPremultipliedColor(
+        red: value.x,
+        green: value.y,
+        blue: value.z,
+        alpha: value.w
+    ) else {
+        preconditionFailure("test fixture must remain premultiplied")
+    }
+    let pixel = DocumentColorPipeline.exportEncodedPremultipliedBGRA8(color)
+    return [pixel.blue, pixel.green, pixel.red, pixel.alpha]
 }
 
 private func makeSamplingFixture(
@@ -2650,7 +3527,8 @@ private func makeSamplingFixture(
     addressing: SparseTileAddressing,
     outputRegion: SparseTileOutputRegion,
     outputToSourceTransform: SparseTileOutputToSourceTransform = .identity,
-    planCache: SparseTileSamplingPlanCache = SparseTileSamplingPlanCache()
+    planCache: SparseTileSamplingPlanCache = SparseTileSamplingPlanCache(),
+    planLimits: SparseTilePlanLimits = .pipelineTestDefaults
 ) throws -> SparseSamplingFixture {
     let layerID = UUID()
     var requests: [SparseTileSourceRequest] = []
@@ -2689,7 +3567,7 @@ private func makeSamplingFixture(
         requests.append(try SparseTileSourceRequest(
             contentKey: contentKey,
             addressing: addressing,
-            surface: surface,
+            provider: surface.makeExactReferenceProvider(),
             changedCoordinates: coordinates,
             disposition: .fullSnapshot
         ))
@@ -2709,7 +3587,7 @@ private func makeSamplingFixture(
         key: key,
         sources: requests,
         outputRegion: outputRegion,
-        limits: .pipelineTestDefaults
+        limits: planLimits
     )
     return SparseSamplingFixture(surfaces: surfaces, planLease: planLease)
 }
@@ -2772,6 +3650,28 @@ private extension SparseTilePlanLimits {
         maximumBindingSlots: 512,
         maximumBindingChunks: 16,
         maximumBindingBytes: 512 * 64,
+        maximumTexturesPerBatch: 16,
+        maximumBatchCount: 64
+    )
+
+    static let fastMathReassociationTestDefaults = SparseTilePlanLimits(
+        maximumPageEntries: 40_000,
+        maximumPageChunks: 1_024,
+        maximumPageTableBytes: 40_000 * 32,
+        maximumBindingSlots: 8,
+        maximumBindingChunks: 8,
+        maximumBindingBytes: 8 * 64,
+        maximumTexturesPerBatch: 16,
+        maximumBatchCount: 64
+    )
+
+    static let largeIdentityTestDefaults = SparseTilePlanLimits(
+        maximumPageEntries: 131_074,
+        maximumPageChunks: 4_096,
+        maximumPageTableBytes: 131_074 * 32,
+        maximumBindingSlots: 8,
+        maximumBindingChunks: 8,
+        maximumBindingBytes: 8 * 64,
         maximumTexturesPerBatch: 16,
         maximumBatchCount: 64
     )
@@ -2857,8 +3757,7 @@ private func renderPlan(
             usage: [.renderTarget, .shaderRead]
         )
     ))
-    let prepared = try SparseTileSamplingEncoder.preflightEncode(
-        target: target,
+    let prepared = try SparseTileSamplingEncoder.prepareSubmission(
         plan: plan,
         parameters: parameters
     )
@@ -2870,6 +3769,7 @@ private func renderPlan(
     pass.colorAttachments[0].storeAction = .store
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
     try prepared.encode(
+        target: target,
         commandBuffer: commandBuffer,
         renderPassDescriptor: pass
     )
@@ -2930,17 +3830,59 @@ private func expectClose(
     }
 }
 
+private final class SparseTerminalRecordProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedTerminals: [SparseTileSamplingTerminalRecord] = []
+    private var storedReturns: [(SparseTileSamplingResourceReturnReceipt, Bool)]
+        = []
+
+    func recordTerminal(_ record: SparseTileSamplingTerminalRecord) {
+        lock.lock()
+        storedTerminals.append(record)
+        lock.unlock()
+    }
+
+    func recordReturn(
+        _ receipt: SparseTileSamplingResourceReturnReceipt,
+        succeeded: Bool
+    ) {
+        lock.lock()
+        storedReturns.append((receipt, succeeded))
+        lock.unlock()
+    }
+
+    var terminals: [SparseTileSamplingTerminalRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedTerminals
+    }
+
+    var returnCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedReturns.count
+    }
+
+    var lastReturnSucceeded: Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedReturns.last?.1
+    }
+}
+
 private func key(
     _ backend: SparseTileSamplingBackend,
     pixelFormat: MTLPixelFormat = .rgba16Float,
     sampleCount: Int = 1,
-    abiVersion: UInt16 = SparseSamplingABI.version
+    abiVersion: UInt16 = SparseSamplingABI.version,
+    outputMappingKind: SparseTileSamplingOutputMappingKind = .affine
 ) -> SparseTileSamplingPipelineKey {
     SparseTileSamplingPipelineKey(
         backend: backend,
         outputPixelFormatRawValue: pixelFormat.rawValue,
         sampleCount: sampleCount,
-        abiVersion: abiVersion
+        abiVersion: abiVersion,
+        outputMappingKind: outputMappingKind
     )
 }
 

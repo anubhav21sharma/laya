@@ -76,7 +76,7 @@ public struct LayerRemoval: Equatable, Sendable {
 
 public struct LayerStack: Equatable, Sendable {
     public static let maximumLayerCount = 8
-    public static let compatibilityLayerID = UUID(
+    public static let initialLayerID = UUID(
         uuidString: "00000000-0000-0000-0000-000000000001"
     )!
 
@@ -104,9 +104,9 @@ public struct LayerStack: Equatable, Sendable {
         self.activeLayerID = activeLayerID
     }
 
-    public static func compatibilityDefault() -> LayerStack {
+    public static func initial() -> LayerStack {
         let descriptor = try! LayerDescriptor(
-            id: compatibilityLayerID,
+            id: initialLayerID,
             name: "Layer 1"
         )
         return try! LayerStack(

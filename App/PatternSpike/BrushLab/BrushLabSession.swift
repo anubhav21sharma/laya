@@ -884,7 +884,7 @@ final class BrushLabSession {
         guard controller.renderer.isIdle else {
             throw BrushLabEvidenceError.rendererBusy
         }
-        let snapshot = try controller.renderer.captureCommittedDocument()
+        let snapshot = try await controller.renderer.captureCommittedDocument()
         let canvasHash = Self.canvasHash(snapshot)
         let traceHash = try Self.traceHash(
             input: inputRecords,
@@ -955,7 +955,7 @@ final class BrushLabSession {
             card: card
         )
         if nextProfessionalPassIndex == card.passes.count {
-            completedReplay = try completeProfessionalReplay(card: card)
+            completedReplay = try await completeProfessionalReplay(card: card)
         }
         return record
     }
@@ -978,7 +978,7 @@ final class BrushLabSession {
         for pass in card.passes {
             _ = try await executeProfessionalPass(pass, card: card)
         }
-        let replay = try completeProfessionalReplay(card: card)
+        let replay = try await completeProfessionalReplay(card: card)
         completedReplay = replay
         return replay
     }
@@ -1052,11 +1052,11 @@ final class BrushLabSession {
 
     private func completeProfessionalReplay(
         card: BrushLabProfessionalManualCard
-    ) throws -> BrushLabCompletedReplay {
+    ) async throws -> BrushLabCompletedReplay {
         guard controller.renderer.isIdle else {
             throw BrushLabEvidenceError.rendererBusy
         }
-        let snapshot = try controller.renderer.captureCommittedDocument()
+        let snapshot = try await controller.renderer.captureCommittedDocument()
         let canvasHash = Self.canvasHash(snapshot)
         let traceHash = try Self.traceHash(
             input: inputRecords,
@@ -1193,7 +1193,7 @@ final class BrushLabSession {
             brush = drawBrush
             composite = .draw
             expectedTool = .draw
-        case .retainedStageFourEraser:
+        case .nativeEraser:
             brush = eraserBrush
             composite = .erase
             expectedTool = .erase
@@ -1348,7 +1348,7 @@ final class BrushLabSession {
         depositionMetrics = metrics
     }
 
-    func makeEvidenceData() throws -> Data {
+    func makeEvidenceData() async throws -> Data {
         guard let package,
               let packageContentHash
         else {
@@ -1357,7 +1357,7 @@ final class BrushLabSession {
         guard controller.renderer.isIdle else {
             throw BrushLabEvidenceError.rendererBusy
         }
-        let snapshot = try controller.renderer.captureCommittedDocument()
+        let snapshot = try await controller.renderer.captureCommittedDocument()
         let bundle = BrushLabEvidenceBundle(
             package: .init(
                 contentHash: packageContentHash,

@@ -13,7 +13,7 @@ struct DepositionPipelineLibraryTests {
         let baseline = key()
         let variants = [
             key(abiVersion: DepositionABI.version + 1),
-            key(pixelFormat: .rgba16Float),
+            key(pixelFormat: .bgra8Unorm),
             key(sampleCount: 4),
             key(accumulation: .uniformGlaze),
             key(edgeTreatment: .dryBreakup),
@@ -93,28 +93,32 @@ struct DepositionPipelineLibraryTests {
     }
 
     @Test
-    func tilePreparationDerivesAndCachesRGBA16FloatBinding() async throws {
+    func bgraRejectionCannotChangePreparedCacheOrStartCompilation() async throws {
         guard let context = try makeContext() else { return }
-        let compiledKey = key(pixelFormat: .bgra8Unorm)
+        let working = key()
+        let ready = try await context.pipelines.prepare(for: working)
+        let prepareCount = context.pipelines.debugPrepareCallCount
+        let invalid = key(pixelFormat: .bgra8Unorm)
 
-        let first = try await context.pipelines.prepareRGBA16Float(
-            matching: compiledKey
-        )
-        let second = try await context.pipelines.prepareRGBA16Float(
-            matching: compiledKey
-        )
+        await #expect(
+            throws: DepositionPipelineLibraryError.invalidPixelFormat(
+                MTLPixelFormat.bgra8Unorm.rawValue
+            )
+        ) {
+            _ = try await context.pipelines.prepare(for: invalid)
+        }
 
-        #expect(first === second)
-        #expect(first.key.brush == compiledKey.brush)
-        #expect(first.key.abiVersion == compiledKey.abiVersion)
-        #expect(first.key.sampleCount == compiledKey.sampleCount)
-        #expect(first.key.colorPixelFormatRawValue
-            == MTLPixelFormat.rgba16Float.rawValue)
+        #expect(context.pipelines.debugPreparedPipelineCount == 1)
+        #expect(context.pipelines.debugPrepareCallCount == prepareCount)
+        #expect(try context.pipelines.preparedBinding(for: working) === ready)
+        #expect(throws: DepositionPipelineLibraryError.notPrepared(invalid)) {
+            _ = try context.pipelines.preparedBinding(for: invalid)
+        }
     }
 
     private func key(
         abiVersion: UInt16 = DepositionABI.version,
-        pixelFormat: MTLPixelFormat = .bgra8Unorm,
+        pixelFormat: MTLPixelFormat = .rgba16Float,
         sampleCount: Int = 1,
         accumulation: BrushAccumulationMode = .flow,
         edgeTreatment: BrushEdgeTreatment = .none,

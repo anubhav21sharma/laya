@@ -963,7 +963,7 @@ func brushInputBatchPolicyIsStableAndKeepsLifecycleOffEarlierSamples() {
     let submittedPredictions = Array(0..<100_000)
     let predictionBatch = BrushInputBatchPolicy.predictionBatch(
         submittedPredictions,
-        maximumCount: PredictionOverlay.maximumNormalizedSampleCount
+        maximumCount: PredictionAdmissionLimits.maximumNormalizedSampleCount
     )
     var trackingCallCount = 0
     for _ in predictionBatch.admitted {

@@ -666,8 +666,8 @@ public final class BrushCompiler {
             brush: pipelineKey,
             abiVersion: DepositionABI.version,
             colorPixelFormatRawValue:
-                GridPipelineLibrary.colorPixelFormat.rawValue,
-            sampleCount: GridPipelineLibrary.sampleCount
+                DocumentColorPipeline.workingPixelFormat.rawValue,
+            sampleCount: DocumentColorPipeline.renderSampleCount
         )
         let depositionPipeline: DepositionPipelineBinding
         do {

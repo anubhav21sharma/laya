@@ -10,7 +10,7 @@ struct PatternProjectBridgeTests {
     @Test
     @MainActor
     func rendererPackageAndFreshRendererRoundTripCommittedPixels()
-        throws
+        async throws
     {
         guard let (device, library) = try bridgeTestMetal() else {
             return
@@ -26,7 +26,7 @@ struct PatternProjectBridgeTests {
             )
         )
         let bytes = bridgeOpaqueBytes(size, salt: 17)
-        try renderer.replaceCanonicalPixelsForHarness(bytes)
+        try await bridgeInstallSingleRaster(bytes, into: renderer)
         renderer.restoreSavedViewport(
             worldCenter: WorldPoint(x: 41, y: 27),
             zoom: 2
@@ -42,7 +42,7 @@ struct PatternProjectBridgeTests {
             createdAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
 
-        let captured = try PatternProjectBridge.capture(
+        let captured = try await PatternProjectBridge.capture(
             renderer: renderer,
             identity: identity,
             appVersion: "0.1.0",
@@ -56,11 +56,11 @@ struct PatternProjectBridgeTests {
         let snapshot = try PatternProjectBridge.committedSnapshot(
             from: decoded
         )
-        let restored = try GridRenderer(
+        let restored = try await bridgeRestoredRenderer(
             device: device,
             library: library,
             drawableSize: PatternSize(width: 160, height: 120),
-            committedSnapshot: snapshot
+            snapshot: snapshot
         )
         restored.restoreSavedViewport(
             worldCenter: WorldPoint(
@@ -70,7 +70,7 @@ struct PatternProjectBridgeTests {
             zoom: decoded.metadata.metadata.viewport.scale
         )
 
-        #expect(try restored.captureCommittedDocument() == snapshot)
+        #expect(try await restored.captureCommittedDocument() == snapshot)
         #expect(restored.viewport.worldCenter == WorldPoint(x: 41, y: 27))
         #expect(restored.viewport.zoom == 2)
         #expect(try PatternProjectBridge.identity(from: decoded) == identity)
@@ -78,7 +78,7 @@ struct PatternProjectBridgeTests {
 
     @Test
     @MainActor
-    func importedRendererKeepsBrushRuntimeAndCanDraw() throws {
+    func importedRendererKeepsBrushRuntimeAndCanDraw() async throws {
         guard let (device, library) = try bridgeTestMetal() else {
             return
         }
@@ -102,12 +102,12 @@ struct PatternProjectBridgeTests {
         source.model.confirmBrushDiameter(32)
         source.handleGridVisibility(true)
 
-        let importedRenderer = try GridRenderer(
+        let importedRenderer = try await bridgeRestoredRenderer(
             device: device,
             library: library,
             drawableSize: PatternSize(width: 160, height: 120),
-            committedSnapshot:
-                sourceRenderer.captureCommittedDocument()
+            snapshot:
+                try await sourceRenderer.captureCommittedDocument()
         )
         #expect(importedRenderer.preparedBrush(for: .draw) == nil)
         #expect(importedRenderer.preparedBrush(for: .erase) == nil)
@@ -134,8 +134,8 @@ struct PatternProjectBridgeTests {
                 phase: .ended
             ),
         ])
-        _ = try importedRenderer.completePendingInteractiveStroke()
-        try importedRenderer.drainStrokeWorkspaceRetirementForHarness()
+        try await importedRenderer
+            .completePendingInteractiveStrokeAndAwaitIdle()
 
         #expect(importedRenderer.isIdle)
         #expect(imported.model.canUndo)
@@ -145,7 +145,7 @@ struct PatternProjectBridgeTests {
     @Test
     @MainActor
     func transparentButLogicallyEditedPeriodicProjectStaysLocked()
-        throws
+        async throws
     {
         guard let (device, library) = try bridgeTestMetal() else {
             return
@@ -168,7 +168,7 @@ struct PatternProjectBridgeTests {
             createdAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
 
-        let captured = try PatternProjectBridge.capture(
+        let captured = try await PatternProjectBridge.capture(
             renderer: renderer,
             identity: identity,
             appVersion: "0.1.0",
@@ -180,11 +180,11 @@ struct PatternProjectBridgeTests {
                 rastersByPath: captured.rastersByPath
             )
         )
-        let restored = try GridRenderer(
+        let restored = try await bridgeRestoredRenderer(
             device: device,
             library: library,
             drawableSize: PatternSize(width: 64, height: 64),
-            committedSnapshot: try PatternProjectBridge.committedSnapshot(
+            snapshot: try PatternProjectBridge.committedSnapshot(
                 from: decoded
             )
         )
@@ -196,7 +196,7 @@ struct PatternProjectBridgeTests {
     @Test
     @MainActor
     func schemaThreeUnlockedProjectRejectsNonzeroCommittedPixels()
-        throws
+        async throws
     {
         guard let (device, library) = try bridgeTestMetal() else {
             return
@@ -211,10 +211,11 @@ struct PatternProjectBridgeTests {
                 tiling: .grid
             )
         )
-        try renderer.replaceCanonicalPixelsForHarness(
-            bridgeOpaqueBytes(size, salt: 31)
+        try await bridgeInstallSingleRaster(
+            bridgeOpaqueBytes(size, salt: 31),
+            into: renderer
         )
-        let captured = try PatternProjectBridge.capture(
+        let captured = try await PatternProjectBridge.capture(
             renderer: renderer,
             identity: .new(),
             appVersion: "0.1.0"
@@ -249,7 +250,7 @@ struct PatternProjectBridgeTests {
     @Test
     @MainActor
     func radialBridgeUsesLogicalPageCoordinatesAndPreservesLock()
-        throws
+        async throws
     {
         guard let (device, library) = try bridgeTestMetal() else {
             return
@@ -286,11 +287,11 @@ struct PatternProjectBridgeTests {
                 ),
             ])
         )
-        let renderer = try GridRenderer(
+        let renderer = try await bridgeRestoredRenderer(
             device: device,
             library: library,
             drawableSize: PatternSize(width: 64, height: 64),
-            committedSnapshot: initial
+            snapshot: initial
         )
         let identity = PatternProjectIdentity(
             documentID: UUID(),
@@ -299,7 +300,7 @@ struct PatternProjectBridgeTests {
             createdAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
 
-        let captured = try PatternProjectBridge.capture(
+        let captured = try await PatternProjectBridge.capture(
             renderer: renderer,
             identity: identity,
             appVersion: "0.1.0",
@@ -318,6 +319,40 @@ struct PatternProjectBridgeTests {
         #expect(restored == initial)
         #expect(decoded.metadata.metadata.radialGeometryLocked)
     }
+}
+
+@MainActor
+private func bridgeRestoredRenderer(
+    device: any MTLDevice,
+    library: any MTLLibrary,
+    drawableSize: PatternSize,
+    snapshot: CommittedDocumentSnapshot
+) async throws -> GridRenderer {
+    let renderer = try GridRenderer(
+        device: device,
+        library: library,
+        drawableSize: drawableSize,
+        configuration: try TilingCanvasConfiguration(
+            pixelSize: snapshot.canvasSize,
+            documentConfiguration: snapshot.documentConfiguration
+        )
+    )
+    try await renderer.restoreCommittedDocument(snapshot)
+    return renderer
+}
+
+@MainActor
+private func bridgeInstallSingleRaster(
+    _ bytes: [UInt8],
+    into renderer: GridRenderer
+) async throws {
+    try await renderer.restoreCommittedDocument(CommittedDocumentSnapshot(
+        canvasSize: renderer.pixelSize,
+        documentConfiguration: renderer.documentConfiguration,
+        documentDomainLocked: bytes.contains { $0 != 0 },
+        radialGeometryLocked: false,
+        storage: .singleRaster(bgra8PremultipliedBytes: bytes)
+    ))
 }
 
 @MainActor

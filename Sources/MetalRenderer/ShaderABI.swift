@@ -74,21 +74,6 @@ public enum ShaderABI {
             && MemoryLayout<PatternRadialFrameUniforms>.offset(
                 of: \.atlasSize
             ) == 56
-            && MemoryLayout<PatternRadialResizePageUniforms>.size == 16
-            && MemoryLayout<PatternRadialResizePageUniforms>.stride == 16
-            && MemoryLayout<PatternRadialResizePageUniforms>.alignment == 4
-            && MemoryLayout<PatternRadialResizePageUniforms>.offset(
-                of: \.logicalPageX
-            ) == 0
-            && MemoryLayout<PatternRadialResizePageUniforms>.offset(
-                of: \.logicalPageY
-            ) == 4
-            && MemoryLayout<PatternRadialResizePageUniforms>.offset(
-                of: \.destinationSlot
-            ) == 8
-            && MemoryLayout<PatternRadialResizePageUniforms>.offset(
-                of: \.padding
-            ) == 12
             && MemoryLayout<PatternClipHalfPlane>.size == 16
             && MemoryLayout<PatternClipHalfPlane>.stride == 16
             && MemoryLayout<PatternClipHalfPlane>.alignment == 8
@@ -166,7 +151,7 @@ public enum ShaderABI {
                 == 72
             && PatternDocumentPaintMutationUniformsOffsetSourceByteOffset()
                 == 76
-            && PatternDocumentPaintMutationABIVersion == 1
+            && PatternDocumentPaintMutationABIVersion == 2
     }
 
     private static var depositionStampInstanceIsValid: Bool {

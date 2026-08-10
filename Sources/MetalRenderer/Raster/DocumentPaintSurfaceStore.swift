@@ -31,6 +31,7 @@ public enum DocumentPaintSurfaceStoreError: Error, Equatable, Sendable {
     case preparedCandidateRequiresExplicitCancellation
     case namespaceIdentityOverflow
     case transferByteCapacityOverflow
+    case visibleCaptureContention(maximumAttempts: Int)
 }
 
 public struct DocumentPaintGeometry: Equatable, Sendable {
@@ -89,6 +90,945 @@ public struct DocumentPaintSurfaceNamespace: Hashable, Sendable {
     let token: UInt64
 }
 
+final class StrokeTileSurfaceNamespaceOwnership: @unchecked Sendable {
+    private enum State { case issued, claimed, finished }
+
+    let retirementToken: UInt64
+    private let lock = NSLock()
+    private var state: State = .issued
+    private let finishHandler: @Sendable (UInt64) -> Void
+
+    init(
+        retirementToken: UInt64,
+        onFinished: @escaping @Sendable (UInt64) -> Void
+    ) {
+        self.retirementToken = retirementToken
+        finishHandler = onFinished
+    }
+
+    var isOutstanding: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return state != .finished
+    }
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard state == .issued else { return false }
+        state = .claimed
+        return true
+    }
+
+    func cancelIfUnclaimed() {
+        finish(allowIssued: true, allowClaimed: false)
+    }
+
+    func abortClaimedInitialization() {
+        finish(allowIssued: false, allowClaimed: true)
+    }
+
+    func retire() {
+        finish(allowIssued: true, allowClaimed: true)
+    }
+
+    private func finish(allowIssued: Bool, allowClaimed: Bool) {
+        lock.lock()
+        let shouldFinish: Bool
+        switch state {
+        case .issued:
+            shouldFinish = allowIssued
+        case .claimed:
+            shouldFinish = allowClaimed
+        case .finished:
+            shouldFinish = false
+        }
+        if shouldFinish { state = .finished }
+        lock.unlock()
+        if shouldFinish { finishHandler(retirementToken) }
+    }
+
+    deinit { retire() }
+}
+
+struct StrokeTileSurfaceNamespaceLease: Sendable {
+    let authoritative: DocumentPaintSurfaceNamespace
+    let prediction: DocumentPaintSurfaceNamespace
+    let retirementToken: UInt64
+    let isStandaloneTestOnly: Bool
+    let ownership: StrokeTileSurfaceNamespaceOwnership
+    private let authenticationHandler:
+        @Sendable (StrokeTileSurfaceNamespaceLease) -> Bool
+
+    private init(
+        authoritative: DocumentPaintSurfaceNamespace,
+        prediction: DocumentPaintSurfaceNamespace,
+        retirementToken: UInt64,
+        isStandaloneTestOnly: Bool,
+        ownership: StrokeTileSurfaceNamespaceOwnership,
+        authenticate: @escaping @Sendable
+            (StrokeTileSurfaceNamespaceLease) -> Bool
+    ) {
+        self.authoritative = authoritative
+        self.prediction = prediction
+        self.retirementToken = retirementToken
+        self.isStandaloneTestOnly = isStandaloneTestOnly
+        self.ownership = ownership
+        authenticationHandler = authenticate
+    }
+
+    var authoritativeSurfaceID: UUID { authoritative.surfaceID }
+    var predictionSurfaceID: UUID { prediction.surfaceID }
+    var storeIdentity: PaintTileStoreIdentity { authoritative.storeIdentity }
+    var layerID: UUID { authoritative.layerID }
+    var generation: UInt64 { authoritative.generation }
+
+    static func registryIssued(
+        authoritative: DocumentPaintSurfaceNamespace,
+        prediction: DocumentPaintSurfaceNamespace,
+        retirementToken: UInt64,
+        authenticate: @escaping @Sendable
+            (StrokeTileSurfaceNamespaceLease) -> Bool,
+        onRetired: @escaping @Sendable (UInt64) -> Void
+    ) -> Self {
+        let ownership = StrokeTileSurfaceNamespaceOwnership(
+            retirementToken: retirementToken,
+            onFinished: onRetired
+        )
+        return Self(
+            authoritative: authoritative,
+            prediction: prediction,
+            retirementToken: retirementToken,
+            isStandaloneTestOnly: false,
+            ownership: ownership,
+            authenticate: authenticate
+        )
+    }
+
+    func isAuthenticated(
+        storeIdentity: PaintTileStoreIdentity,
+        layerID: UUID,
+        generation: UInt64
+    ) -> Bool {
+        authoritative.storeIdentity == prediction.storeIdentity
+            && authoritative.layerID == prediction.layerID
+            && authoritative.generation == prediction.generation
+            && authoritative.role == .authoritative
+            && prediction.role == .prediction
+            && authoritative.storeIdentity == storeIdentity
+            && authoritative.layerID == layerID
+            && authoritative.generation == generation
+            && ownership.isOutstanding
+            && authenticationHandler(self)
+    }
+
+    func claimForResources() -> Bool { ownership.claim() }
+    func abortClaimedInitialization() {
+        ownership.abortClaimedInitialization()
+    }
+    func reportRetired() { ownership.retire() }
+    func cancel() { ownership.cancelIfUnclaimed() }
+
+    #if DEBUG
+    static func testing(generation: UInt64) -> Self {
+        let storeIdentity = PaintTileStoreIdentity()
+        let layerID = UUID()
+        let token = generation
+        let ownership = StrokeTileSurfaceNamespaceOwnership(
+            retirementToken: token,
+            onFinished: { _ in }
+        )
+        return Self(
+            authoritative: DocumentPaintSurfaceNamespace(
+                storeIdentity: storeIdentity,
+                surfaceID: UUID(),
+                layerID: layerID,
+                generation: generation,
+                role: .authoritative,
+                token: token
+            ),
+            prediction: DocumentPaintSurfaceNamespace(
+                storeIdentity: storeIdentity,
+                surfaceID: UUID(),
+                layerID: layerID,
+                generation: generation,
+                role: .prediction,
+                token: token
+            ),
+            retirementToken: token,
+            isStandaloneTestOnly: true,
+            ownership: ownership,
+            authenticate: { $0.generation == generation }
+        )
+    }
+
+    static func testing(
+        storeIdentity: PaintTileStoreIdentity,
+        layerID: UUID,
+        generation: UInt64,
+        authoritativeSurfaceID: UUID = UUID(),
+        predictionSurfaceID: UUID = UUID(),
+        retirementToken: UInt64 = 0,
+        onRetired: @escaping @Sendable (UInt64) -> Void = { _ in }
+    ) -> Self {
+        let ownership = StrokeTileSurfaceNamespaceOwnership(
+            retirementToken: retirementToken,
+            onFinished: onRetired
+        )
+        return Self(
+            authoritative: DocumentPaintSurfaceNamespace(
+                storeIdentity: storeIdentity,
+                surfaceID: authoritativeSurfaceID,
+                layerID: layerID,
+                generation: generation,
+                role: .authoritative,
+                token: retirementToken
+            ),
+            prediction: DocumentPaintSurfaceNamespace(
+                storeIdentity: storeIdentity,
+                surfaceID: predictionSurfaceID,
+                layerID: layerID,
+                generation: generation,
+                role: .prediction,
+                token: retirementToken
+            ),
+            retirementToken: retirementToken,
+            isStandaloneTestOnly: true,
+            ownership: ownership,
+            authenticate: { _ in true }
+        )
+    }
+    #endif
+}
+
+enum DocumentPaintStrokeSurfaceError: Error, Equatable, Sendable {
+    case store(PaintTileStoreError)
+    case surface(TiledRasterSurfaceError)
+    case unexpected(String)
+    case foreignCapability
+    case staleCapability
+    case alreadyTerminal
+    case alreadyClaimed
+    case wrongTransaction
+    case outstandingFrame
+    case emptyCommitMutation
+    case invalidLifecycle
+
+    static func wrapping(_ error: Error) -> Self {
+        if let error = error as? Self { return error }
+        if let error = error as? PaintTileStoreError { return .store(error) }
+        if let error = error as? TiledRasterSurfaceError {
+            return .surface(error)
+        }
+        return .unexpected(String(describing: error))
+    }
+}
+
+enum DocumentPaintStrokeSurfaceRole: UInt8, Sendable {
+    case authoritative
+    case prediction
+}
+
+struct DocumentPaintStrokeFrameReservation: Sendable {
+    fileprivate let capabilityToken: UUID
+    let reservationToken: UUID
+    let role: DocumentPaintStrokeSurfaceRole
+    fileprivate let lease: PaintTileLease
+    var bindings: [PaintTileBinding] { lease.bindings }
+}
+
+struct DocumentPaintStrokeProvisionalBinding: @unchecked Sendable {
+    let identity: PaintTileIdentity
+    let descriptor: PaintTileDescriptor
+    let sourceTexture: any MTLTexture
+    let candidateTexture: any MTLTexture
+    let sourceIsKnownClear: Bool
+}
+
+struct DocumentPaintStrokeProvisionalReservation: Sendable {
+    fileprivate let capabilityToken: UUID
+    fileprivate let reservationToken: UUID
+    fileprivate let frameReservationToken: UUID
+    let bindings: [DocumentPaintStrokeProvisionalBinding]
+}
+
+enum StrokePreparedCommitMutationCompletion: Sendable {
+    case consumed
+    case aborted
+    case cancelled
+}
+
+/// Affine terminal source. Copies share capability-owned state and contain no
+/// raw store lease, mutable surface, or encoder owner.
+struct StrokePreparedCommitTileSources: @unchecked Sendable {
+    let coordinate: PaintTileCoordinate
+    let authoritative: PaintTileBinding?
+    let prediction: PaintTileBinding?
+}
+
+struct StrokePreparedCommitMutationSource: Sendable {
+    let contextIdentity: UUID
+    let storeIdentity: PaintTileStoreIdentity
+    let layerID: UUID
+    let generation: UInt64
+    let pixelSize: PixelSize
+    let radialLayout: RadialSectorLayout?
+    let coordinates: [PaintTileCoordinate]
+    fileprivate let capability: DocumentPaintStrokeSurfaceCapability
+    let sourceToken: UUID
+
+    func claim(
+        transactionID: UUID
+    ) throws -> [StrokePreparedCommitTileSources] {
+        try capability.claimCommitSource(
+            sourceToken: sourceToken,
+            transactionID: transactionID
+        )
+    }
+
+    func complete(
+        transactionID: UUID,
+        as completion: StrokePreparedCommitMutationCompletion
+    ) throws {
+        try capability.completeCommitSource(
+            sourceToken: sourceToken,
+            transactionID: transactionID,
+            completion: completion
+        )
+    }
+
+    func cancelUnclaimed() throws {
+        try capability.cancelUnclaimedCommitSource(
+            sourceToken: sourceToken
+        )
+    }
+
+}
+
+/// Document-issued authority for one transient stroke namespace. The raw tile
+/// store and role surfaces remain confined to the raster owner; StrokeRuntime
+/// receives operation-shaped methods as the sparse path is activated.
+final class DocumentPaintStrokeSurfaceCapability: @unchecked Sendable {
+    fileprivate enum State: Equatable {
+        case active
+        case sourceIssued(UUID)
+        case terminal
+    }
+
+    private final class TerminalSourceRecord {
+        let token: UUID
+        let coordinates: [PaintTileCoordinate]
+        var authoritativeLease: PaintTileLease?
+        var predictionLease: PaintTileLease?
+        var transactionID: UUID?
+
+        init(
+            token: UUID,
+            coordinates: [PaintTileCoordinate],
+            authoritativeLease: PaintTileLease?,
+            predictionLease: PaintTileLease?
+        ) {
+            self.token = token
+            self.coordinates = coordinates
+            self.authoritativeLease = authoritativeLease
+            self.predictionLease = predictionLease
+        }
+    }
+
+    let ownerIdentity: UUID
+    let capabilityToken: UUID
+    fileprivate let namespaceLease: StrokeTileSurfaceNamespaceLease
+    fileprivate let store: PaintTileStore
+    fileprivate let authoritative: TiledRasterSurface
+    fileprivate let prediction: TiledRasterSurface
+    private let lock = NSLock()
+    private var state: State = .active
+    private var frameReservations: [UUID: PaintTileLease] = [:]
+    private var provisionalReservations:
+        [UUID: PaintTileProvisionalReservation] = [:]
+    private var terminalSource: TerminalSourceRecord?
+    private let terminalHandler: @Sendable (UUID) -> Void
+
+    let storeIdentity: PaintTileStoreIdentity
+    let layerID: UUID
+    let generation: UInt64
+    let pixelSize: PixelSize
+    let radialLayout: RadialSectorLayout?
+    var authoritativeSurfaceID: UUID { authoritative.surfaceID }
+    var predictionSurfaceID: UUID { prediction.surfaceID }
+
+    var snapshot: StrokeTileSurfaceResourceSnapshot {
+        let raw = store.snapshot()
+        let ownedLeaseCount = withLock {
+            frameReservations.count
+                + (terminalSource?.authoritativeLease == nil ? 0 : 1)
+                + (terminalSource?.predictionLease == nil ? 0 : 1)
+        }
+        let matching = raw.entries.filter {
+            $0.identity.layerID == layerID && $0.generation == generation
+                && ($0.surfaceID == authoritative.surfaceID
+                    || $0.surfaceID == prediction.surfaceID)
+        }
+        return StrokeTileSurfaceResourceSnapshot(
+            residentTileCount: matching.filter(\.isResident).count,
+            activeLeaseCount: ownedLeaseCount,
+            residentByteCount: matching.reduce(into: 0) {
+                if $1.isResident {
+                    $0 += PaintTileDescriptor.residentByteCount
+                }
+            },
+            fullCanvasTextureCount: 0
+        )
+    }
+
+    fileprivate init(
+        ownerIdentity: UUID,
+        capabilityToken: UUID,
+        namespaceLease: StrokeTileSurfaceNamespaceLease,
+        store: PaintTileStore,
+        geometry: DocumentPaintGeometry,
+        onTerminal: @escaping @Sendable (UUID) -> Void
+    ) throws {
+        #if DEBUG
+        let permitsStandalone = namespaceLease.isStandaloneTestOnly
+        #else
+        let permitsStandalone = false
+        #endif
+        guard namespaceLease.isAuthenticated(
+            storeIdentity: store.identity,
+            layerID: namespaceLease.layerID,
+            generation: namespaceLease.generation
+        ) || permitsStandalone,
+        namespaceLease.authoritativeSurfaceID
+            != namespaceLease.predictionSurfaceID
+        else {
+            throw DocumentPaintStrokeSurfaceError.invalidLifecycle
+        }
+        guard namespaceLease.claimForResources() else {
+            throw DocumentPaintStrokeSurfaceError.invalidLifecycle
+        }
+        var succeeded = false
+        defer {
+            if !succeeded { namespaceLease.abortClaimedInitialization() }
+        }
+        self.ownerIdentity = ownerIdentity
+        self.capabilityToken = capabilityToken
+        self.namespaceLease = namespaceLease
+        self.store = store
+        storeIdentity = store.identity
+        layerID = namespaceLease.layerID
+        generation = namespaceLease.generation
+        pixelSize = geometry.storagePixelSize
+        radialLayout = geometry.radialLayout
+        authoritative = TiledRasterSurface(
+            store: store,
+            layerID: namespaceLease.layerID,
+            pixelSize: geometry.storagePixelSize,
+            surfaceID: namespaceLease.authoritativeSurfaceID,
+            generation: namespaceLease.generation
+        )
+        prediction = TiledRasterSurface(
+            store: store,
+            layerID: namespaceLease.layerID,
+            pixelSize: geometry.storagePixelSize,
+            surfaceID: namespaceLease.predictionSurfaceID,
+            generation: namespaceLease.generation
+        )
+        terminalHandler = onTerminal
+        succeeded = true
+    }
+
+    deinit {
+        try? cancel(expectedOwnerIdentity: ownerIdentity)
+    }
+
+    #if DEBUG
+    var testingStoreSnapshot: PaintTileStoreSnapshot { store.snapshot() }
+    var testingStoreObject: AnyObject { store }
+    var testingNamespaceIsOutstanding: Bool {
+        namespaceLease.ownership.isOutstanding
+    }
+    var testingAuthoritativeSurfaceID: UUID { authoritative.surfaceID }
+    var testingPredictionSurfaceID: UUID { prediction.surfaceID }
+
+    func testingMarkDirty(
+        _ frame: DocumentPaintStrokeFrameReservation
+    ) throws {
+        try withLock {
+            let lease = try validatedFrame(frame)
+            let surface = frame.role == .authoritative
+                ? authoritative : prediction
+            try surface.markDirty(lease)
+            frameReservations[frame.reservationToken] = lease
+        }
+    }
+
+    static func testing(
+        store: PaintTileStore,
+        layerID: UUID,
+        pixelSize: PixelSize,
+        generation: UInt64,
+        radialLayout: RadialSectorLayout? = nil,
+        ownerIdentity: UUID = UUID(),
+        onTerminal: @escaping @Sendable (UUID) -> Void = { _ in }
+    ) throws -> DocumentPaintStrokeSurfaceCapability {
+        try testing(
+            store: store,
+            pixelSize: pixelSize,
+            generation: generation,
+            radialLayout: radialLayout,
+            ownerIdentity: ownerIdentity,
+            namespaceLease: StrokeTileSurfaceNamespaceLease.testing(
+            storeIdentity: store.identity,
+            layerID: layerID,
+            generation: generation
+            ),
+            onTerminal: onTerminal
+        )
+    }
+
+    static func testing(
+        store: PaintTileStore,
+        pixelSize: PixelSize,
+        generation: UInt64,
+        radialLayout: RadialSectorLayout? = nil,
+        ownerIdentity: UUID = UUID(),
+        namespaceLease: StrokeTileSurfaceNamespaceLease,
+        onTerminal: @escaping @Sendable (UUID) -> Void = { _ in }
+    ) throws -> DocumentPaintStrokeSurfaceCapability {
+        return try DocumentPaintStrokeSurfaceCapability(
+            ownerIdentity: ownerIdentity,
+            capabilityToken: UUID(),
+            namespaceLease: namespaceLease,
+            store: store,
+            geometry: DocumentPaintGeometry(
+                documentPixelSize: pixelSize,
+                storagePixelSize: pixelSize,
+                radialLayout: radialLayout
+            ),
+            onTerminal: onTerminal
+        )
+    }
+    #endif
+
+    func reserveStrokeTiles(
+        role: DocumentPaintStrokeSurfaceRole,
+        coordinates: [PaintTileCoordinate],
+        pinReasons: [PaintTilePinReason],
+        workspace: PaintTileStrokeLeaseWorkspace,
+        failureInjection: PaintTileAllocationFailureInjection?
+    ) throws -> DocumentPaintStrokeFrameReservation {
+        try withLock {
+            guard state == .active else {
+                throw DocumentPaintStrokeSurfaceError.invalidLifecycle
+            }
+            let surface = role == .authoritative
+                ? authoritative : prediction
+            let lease = try surface.reserveSortedUniqueStrokeTiles(
+                at: coordinates,
+                pinReasons: pinReasons,
+                workspace: workspace,
+                failureInjection: failureInjection
+            )
+            let token = UUID()
+            frameReservations[token] = lease
+            return Self.frameReservation(
+                capabilityToken: capabilityToken,
+                token: token,
+                role: role,
+                lease: lease
+            )
+        }
+    }
+
+    func makeProvisionalBindings(
+        frame: DocumentPaintStrokeFrameReservation,
+        coordinates: [PaintTileCoordinate],
+        workspace: PaintTileProvisionalWorkspace
+    ) throws -> DocumentPaintStrokeProvisionalReservation {
+        try withLock {
+            let lease = try validatedFrame(frame)
+            let surface = frame.role == .authoritative
+                ? authoritative : prediction
+            let raw = try surface.makeProvisionalBindings(
+                for: lease,
+                coordinates: coordinates,
+                workspace: workspace
+            )
+            let token = UUID()
+            provisionalReservations[token] = raw
+            return Self.provisionalReservation(
+                capabilityToken: capabilityToken,
+                token: token,
+                frameToken: frame.reservationToken,
+                reservation: raw
+            )
+        }
+    }
+
+    func commitProvisionalBindings(
+        _ provisional: DocumentPaintStrokeProvisionalReservation,
+        frame: DocumentPaintStrokeFrameReservation,
+        modifiedCoordinates: [PaintTileCoordinate],
+        knownClearCoordinates: [PaintTileCoordinate]
+    ) throws -> DocumentPaintStrokeFrameReservation {
+        try withLock {
+            let lease = try validatedFrame(frame)
+            let raw = try validatedProvisional(provisional, frame: frame)
+            let surface = frame.role == .authoritative
+                ? authoritative : prediction
+            let committed = try surface.commitProvisionalBindings(
+                raw,
+                for: lease,
+                modifiedCoordinates: modifiedCoordinates,
+                knownClearCoordinates: knownClearCoordinates
+            )
+            frameReservations[frame.reservationToken] = committed
+            return Self.frameReservation(
+                capabilityToken: capabilityToken,
+                token: frame.reservationToken,
+                role: frame.role,
+                lease: committed
+            )
+        }
+    }
+
+    func cancelProvisionalBindings(
+        _ provisional: DocumentPaintStrokeProvisionalReservation
+    ) throws {
+        try withLock {
+            guard provisional.capabilityToken == capabilityToken,
+                  let raw = provisionalReservations[
+                    provisional.reservationToken
+                  ],
+                  let frame = frameReservations[
+                    provisional.frameReservationToken
+                  ]
+            else { throw DocumentPaintStrokeSurfaceError.staleCapability }
+            let surface = frame.surfaceID == authoritative.surfaceID
+                ? authoritative : prediction
+            try surface.cancelProvisionalBindings(raw)
+            provisionalReservations.removeValue(
+                forKey: provisional.reservationToken
+            )
+        }
+    }
+
+    func completeProvisionalBindings(
+        _ provisional: DocumentPaintStrokeProvisionalReservation
+    ) throws {
+        try withLock {
+            guard provisional.capabilityToken == capabilityToken,
+                  let raw = provisionalReservations.removeValue(
+                    forKey: provisional.reservationToken
+                  ),
+                  let frame = frameReservations[
+                    provisional.frameReservationToken
+                  ]
+            else { throw DocumentPaintStrokeSurfaceError.staleCapability }
+            let surface = frame.surfaceID == authoritative.surfaceID
+                ? authoritative : prediction
+            surface.completeProvisionalBindings(raw)
+        }
+    }
+
+    func releaseFrameReservations(
+        authoritative authoritativeFrame:
+            DocumentPaintStrokeFrameReservation?,
+        prediction predictionFrame: DocumentPaintStrokeFrameReservation?
+    ) throws {
+        try withLock {
+            let authoritativeLease = try authoritativeFrame.map(validatedFrame)
+            let predictionLease = try predictionFrame.map(validatedFrame)
+            try store.releaseAtomically(
+                authoritative: authoritativeLease,
+                authoritativeSurfaceID: authoritative.surfaceID,
+                authoritativeGeneration: generation,
+                prediction: predictionLease,
+                predictionSurfaceID: prediction.surfaceID,
+                predictionGeneration: generation
+            )
+            if let authoritativeFrame {
+                frameReservations.removeValue(
+                    forKey: authoritativeFrame.reservationToken
+                )
+            }
+            if let predictionFrame {
+                frameReservations.removeValue(
+                    forKey: predictionFrame.reservationToken
+                )
+            }
+        }
+    }
+
+    func issueCommitMutationSource() throws
+        -> StrokePreparedCommitMutationSource?
+    {
+        try withLock {
+            guard state == .active,
+                  frameReservations.isEmpty,
+                  provisionalReservations.isEmpty
+            else { throw DocumentPaintStrokeSurfaceError.outstandingFrame }
+            let authoritativeCoordinates = authoritative.references
+                .map(\.coordinate)
+            let predictionCoordinates = prediction.references
+                .map(\.coordinate)
+            let coordinates = Array(
+                Set(authoritativeCoordinates + predictionCoordinates)
+            ).sorted()
+            guard !coordinates.isEmpty else {
+                try retireSurfacesAndFinish()
+                return nil
+            }
+            var authoritativeLease: PaintTileLease?
+            var predictionLease: PaintTileLease?
+            do {
+                if !authoritativeCoordinates.isEmpty {
+                    authoritativeLease = try authoritative
+                        .leaseExistingTiles(
+                            at: authoritativeCoordinates,
+                            pinReasons: [.inFlight]
+                        )
+                }
+                if !predictionCoordinates.isEmpty {
+                    predictionLease = try prediction.leaseExistingTiles(
+                        at: predictionCoordinates,
+                        pinReasons: [.inFlight]
+                    )
+                }
+            } catch {
+                if let authoritativeLease {
+                    try authoritative.returnLease(authoritativeLease)
+                }
+                throw error
+            }
+            let token = UUID()
+            terminalSource = TerminalSourceRecord(
+                token: token,
+                coordinates: coordinates,
+                authoritativeLease: authoritativeLease,
+                predictionLease: predictionLease
+            )
+            state = .sourceIssued(token)
+            return StrokePreparedCommitMutationSource(
+                contextIdentity: ownerIdentity,
+                storeIdentity: storeIdentity,
+                layerID: layerID,
+                generation: generation,
+                pixelSize: pixelSize,
+                radialLayout: radialLayout,
+                coordinates: coordinates,
+                capability: self,
+                sourceToken: token
+            )
+        }
+    }
+
+    fileprivate func claimCommitSource(
+        sourceToken: UUID,
+        transactionID: UUID
+    ) throws -> [StrokePreparedCommitTileSources] {
+        try withLock {
+            guard state == .sourceIssued(sourceToken),
+                  let source = terminalSource,
+                  source.token == sourceToken
+            else { throw DocumentPaintStrokeSurfaceError.staleCapability }
+            guard source.transactionID == nil else {
+                throw DocumentPaintStrokeSurfaceError.alreadyClaimed
+            }
+            source.transactionID = transactionID
+            let authoritative = Dictionary(
+                uniqueKeysWithValues:
+                    (source.authoritativeLease?.bindings ?? []).map {
+                        ($0.descriptor.coordinate, $0)
+                    }
+            )
+            let prediction = Dictionary(
+                uniqueKeysWithValues:
+                    (source.predictionLease?.bindings ?? []).map {
+                        ($0.descriptor.coordinate, $0)
+                    }
+            )
+            return source.coordinates.map { coordinate in
+                StrokePreparedCommitTileSources(
+                    coordinate: coordinate,
+                    authoritative: authoritative[coordinate],
+                    prediction: prediction[coordinate]
+                )
+            }
+        }
+    }
+
+    fileprivate func completeCommitSource(
+        sourceToken: UUID,
+        transactionID: UUID,
+        completion: StrokePreparedCommitMutationCompletion
+    ) throws {
+        try withLock {
+            guard state == .sourceIssued(sourceToken),
+                  let source = terminalSource,
+                  source.token == sourceToken
+            else { throw DocumentPaintStrokeSurfaceError.staleCapability }
+            guard source.transactionID == transactionID else {
+                throw DocumentPaintStrokeSurfaceError.wrongTransaction
+            }
+            _ = completion
+            try finishTerminalSource(source)
+        }
+    }
+
+    fileprivate func cancelUnclaimedCommitSource(
+        sourceToken: UUID
+    ) throws {
+        try withLock {
+            guard state == .sourceIssued(sourceToken),
+                  let source = terminalSource,
+                  source.token == sourceToken
+            else { throw DocumentPaintStrokeSurfaceError.staleCapability }
+            guard source.transactionID == nil else {
+                throw DocumentPaintStrokeSurfaceError.alreadyClaimed
+            }
+            try finishTerminalSource(source)
+        }
+    }
+
+    func cancel(expectedOwnerIdentity: UUID) throws {
+        guard ownerIdentity == expectedOwnerIdentity else {
+            throw DocumentPaintStrokeSurfaceError.foreignCapability
+        }
+        try withLock {
+            if case .sourceIssued = state {
+                guard let source = terminalSource,
+                      source.transactionID == nil
+                else { throw DocumentPaintStrokeSurfaceError.alreadyClaimed }
+                try finishTerminalSource(source)
+                return
+            }
+            guard state == .active else {
+                throw DocumentPaintStrokeSurfaceError.alreadyTerminal
+            }
+            guard frameReservations.isEmpty,
+                  provisionalReservations.isEmpty
+            else { throw DocumentPaintStrokeSurfaceError.outstandingFrame }
+            try retireSurfacesAndFinish()
+        }
+    }
+
+    var isTerminal: Bool { withLock { state == .terminal } }
+
+    func makeSparseTransientSource(
+        changedRole: StrokePrivateSurfaceLayer,
+        changedCoordinates: [PaintTileCoordinate],
+        addressing: SparseTileAddressing,
+        disposition: SparseTileSourceDisposition = .delta
+    ) throws -> [SparseTileSourceRequest] {
+        try SparseTileAcceptedSourceAdapter.transient(
+            layerID: layerID,
+            authoritative: authoritative,
+            prediction: prediction,
+            changedRole: changedRole,
+            changedCoordinates: changedCoordinates,
+            addressing: addressing,
+            disposition: disposition
+        )
+    }
+
+    private func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
+    }
+
+    private func validatedFrame(
+        _ frame: DocumentPaintStrokeFrameReservation
+    ) throws -> PaintTileLease {
+        guard frame.capabilityToken == capabilityToken,
+              let lease = frameReservations[frame.reservationToken]
+        else { throw DocumentPaintStrokeSurfaceError.staleCapability }
+        return lease
+    }
+
+    private func validatedProvisional(
+        _ provisional: DocumentPaintStrokeProvisionalReservation,
+        frame: DocumentPaintStrokeFrameReservation
+    ) throws -> PaintTileProvisionalReservation {
+        guard provisional.capabilityToken == capabilityToken,
+              provisional.frameReservationToken == frame.reservationToken,
+              let raw = provisionalReservations[provisional.reservationToken]
+        else { throw DocumentPaintStrokeSurfaceError.staleCapability }
+        return raw
+    }
+
+    private func finishTerminalSource(
+        _ source: TerminalSourceRecord
+    ) throws {
+        if source.authoritativeLease != nil || source.predictionLease != nil {
+            try store.releaseAtomically(
+                authoritative: source.authoritativeLease,
+                authoritativeSurfaceID: authoritative.surfaceID,
+                authoritativeGeneration: generation,
+                prediction: source.predictionLease,
+                predictionSurfaceID: prediction.surfaceID,
+                predictionGeneration: generation
+            )
+            source.authoritativeLease = nil
+            source.predictionLease = nil
+        }
+        try retireSurfacesAndFinish()
+        terminalSource = nil
+    }
+
+    private func retireSurfacesAndFinish() throws {
+        try store.retireAtomically(
+            authoritativeSurfaceID: authoritative.surfaceID,
+            predictionSurfaceID: prediction.surfaceID,
+            generation: generation
+        )
+        state = .terminal
+        namespaceLease.reportRetired()
+        terminalHandler(capabilityToken)
+    }
+
+    private static func frameReservation(
+        capabilityToken: UUID,
+        token: UUID,
+        role: DocumentPaintStrokeSurfaceRole,
+        lease: PaintTileLease
+    ) -> DocumentPaintStrokeFrameReservation {
+        DocumentPaintStrokeFrameReservation(
+            capabilityToken: capabilityToken,
+            reservationToken: token,
+            role: role,
+            lease: lease
+        )
+    }
+
+    private static func provisionalReservation(
+        capabilityToken: UUID,
+        token: UUID,
+        frameToken: UUID,
+        reservation: PaintTileProvisionalReservation
+    ) -> DocumentPaintStrokeProvisionalReservation {
+        var bindings: [DocumentPaintStrokeProvisionalBinding] = []
+        bindings.reserveCapacity(reservation.count)
+        reservation.forEach {
+            bindings.append(DocumentPaintStrokeProvisionalBinding(
+                identity: $0.identity,
+                descriptor: $0.descriptor,
+                sourceTexture: $0.sourceTexture,
+                candidateTexture: $0.candidateTexture,
+                sourceIsKnownClear: $0.sourceIsKnownClear
+            ))
+        }
+        return DocumentPaintStrokeProvisionalReservation(
+            capabilityToken: capabilityToken,
+            reservationToken: token,
+            frameReservationToken: frameToken,
+            bindings: bindings
+        )
+    }
+}
+
 public struct DocumentPaintLayerBinding: Sendable {
     public let layerID: UUID
     public let generation: UInt64
@@ -112,16 +1052,81 @@ public struct DocumentPaintSurfaceStoreSnapshot: Equatable, Sendable {
     public let preparedCandidateCount: Int
 }
 
+/// One canonical visible-source snapshot whose logical key, full fingerprint,
+/// selected entitlement, and exact retention all originate from the same
+/// immutable registry epoch.
+struct DocumentPaintCanonicalVisibleSourceCapture: @unchecked Sendable {
+    let key: SparseTileSamplingPlanKey
+    let outputRegion: SparseTileOutputRegion
+    let sourceBatch: SparseTileOwnedSourceBatch
+}
+
+/// Frozen transient providers plus the exact registry-issued capability that
+/// authorizes them. The registry derives the canonical source and plan key;
+/// callers cannot splice an arbitrary canonical epoch into the union.
+struct DocumentPaintTransientVisibleSourceDescriptor: @unchecked Sendable {
+    fileprivate let capability: DocumentPaintStrokeSurfaceCapability
+    let sources: [SparseTileSourceRequest]
+
+    init(
+        capability: DocumentPaintStrokeSurfaceCapability,
+        changedRole: StrokePrivateSurfaceLayer,
+        changedCoordinates: [PaintTileCoordinate],
+        addressing: SparseTileAddressing,
+        disposition: SparseTileSourceDisposition
+    ) throws {
+        self.capability = capability
+        sources = try capability.makeSparseTransientSource(
+            changedRole: changedRole,
+            changedCoordinates: changedCoordinates,
+            addressing: addressing,
+            disposition: disposition
+        )
+    }
+}
+
 fileprivate struct DocumentPaintLayerState: Sendable {
     let logicalSurfaceID: UUID
     let revision: RasterRevision
     let references: [PaintTileReference]
 }
 
+/// One immutable, coherently published document registry state. Readers copy
+/// this single reference under the registry lock, so generation, geometry,
+/// layer order, and layer contents can never originate from different commits.
+private final class DocumentPaintSurfaceEpoch: @unchecked Sendable {
+    let generation: UInt64
+    let geometry: DocumentPaintGeometry
+    let orderedLayerIDs: [UUID]
+    let layerStates: [UUID: DocumentPaintLayerState]
+
+    init(
+        generation: UInt64,
+        geometry: DocumentPaintGeometry,
+        orderedLayerIDs: [UUID],
+        layerStates: [UUID: DocumentPaintLayerState]
+    ) {
+        self.generation = generation
+        self.geometry = geometry
+        self.orderedLayerIDs = orderedLayerIDs
+        self.layerStates = layerStates
+    }
+}
+
+#if DEBUG
+enum DocumentPaintSurfaceEpochTestingPoint: Sendable {
+    case snapshotCaptured
+    case strokeAuthorityCaptured
+    case stableSnapshotCaptured
+    case beforePublication
+}
+#endif
+
 fileprivate struct DocumentPaintSurfaceCandidateBase: Sendable {
     let registryIdentity: UUID
     let generation: UInt64
     let geometry: DocumentPaintGeometry
+    let orderedLayerIDs: [UUID]
     let layers: [UUID: DocumentPaintLayerState]
 }
 
@@ -213,25 +1218,211 @@ public final class DocumentPaintSurfaceCandidate: @unchecked Sendable {
 
 public final class DocumentPaintPreparedCommit: @unchecked Sendable {
     fileprivate let candidate: DocumentPaintSurfaceCandidate
+    fileprivate let nextEpoch: DocumentPaintSurfaceEpoch
     fileprivate let replacedRetirement: PaintTilePreparedRetirement
     fileprivate let candidateRetirement: PaintTilePreparedRetirement
 
     fileprivate init(
         candidate: DocumentPaintSurfaceCandidate,
+        nextEpoch: DocumentPaintSurfaceEpoch,
         replacedRetirement: PaintTilePreparedRetirement,
         candidateRetirement: PaintTilePreparedRetirement
     ) {
         self.candidate = candidate
+        self.nextEpoch = nextEpoch
         self.replacedRetirement = replacedRetirement
         self.candidateRetirement = candidateRetirement
+    }
+
+    #if DEBUG
+    var testingEpochIdentity: ObjectIdentifier {
+        ObjectIdentifier(nextEpoch)
+    }
+    #endif
+}
+
+/// A committed-collection plan is created only while the registry owns the
+/// current epoch lock. Its construction is file-private so no caller can pair
+/// descriptors derived from one geometry with another retained root.
+fileprivate struct DocumentPaintStableCommittedCollectionPlan: Sendable {
+    struct RadialPage: Sendable {
+        let coordinate: RadialPageCoordinate
+        let descriptor: DocumentPaintTightBGRA8Descriptor
+    }
+
+    enum Storage: Sendable {
+        case single(DocumentPaintTightBGRA8Descriptor)
+        case radialPages([RadialPage])
+    }
+
+    let storage: Storage
+
+    init(
+        addressing: SparseTileAddressing,
+        geometry: DocumentPaintGeometry,
+        rendererLimits: DocumentPaintStableSnapshotRendererLimits
+    ) throws {
+        switch addressing {
+        case let .finite(size):
+            guard geometry.radialLayout == nil,
+                  size == geometry.storagePixelSize
+            else { throw SparseTileSamplingPlanError.inconsistentAddressing }
+            storage = .single(try Self.descriptor(
+                for: geometry.storagePixelSize,
+                limits: rendererLimits
+            ))
+        case let .periodic(period):
+            guard geometry.radialLayout == nil,
+                  period == geometry.storagePixelSize
+            else { throw SparseTileSamplingPlanError.inconsistentAddressing }
+            storage = .single(try Self.descriptor(
+                for: geometry.storagePixelSize,
+                limits: rendererLimits
+            ))
+        case let .radial(layout):
+            guard geometry.radialLayout == layout,
+                  geometry.storagePixelSize == layout.atlasPixelSize
+            else { throw SparseTileSamplingPlanError.inconsistentAddressing }
+            storage = .radialPages(try layout.residentPages
+                .map(\.coordinate)
+                .sorted()
+                .map {
+                    let descriptor = try DocumentPaintTightBGRA8Descriptor(
+                        outputRegion: try Self.logicalPageRegion($0),
+                        maximumByteCount: rendererLimits.maximumOutputBytes
+                    )
+                    try DocumentPaintStableSnapshotChunkPlanner
+                        .validateOutput(
+                            descriptor.outputRegion,
+                            limits: rendererLimits
+                        )
+                    return RadialPage(
+                        coordinate: $0,
+                        descriptor: descriptor
+                    )
+                })
+        }
+    }
+
+    private static func descriptor(
+        for size: PixelSize,
+        limits: DocumentPaintStableSnapshotRendererLimits
+    ) throws -> DocumentPaintTightBGRA8Descriptor {
+        let descriptor = try DocumentPaintTightBGRA8Descriptor(
+            outputRegion: try SparseTileOutputRegion(
+                minX: 0,
+                minY: 0,
+                maxX: size.width,
+                maxY: size.height
+            ),
+            maximumByteCount: limits.maximumOutputBytes
+        )
+        try DocumentPaintStableSnapshotChunkPlanner.validateOutput(
+            descriptor.outputRegion,
+            limits: limits
+        )
+        return descriptor
+    }
+
+    private static func logicalPageRegion(
+        _ coordinate: RadialPageCoordinate
+    ) throws -> SparseTileOutputRegion {
+        let side = RadialSectorLayout.pageSide
+        let (minX, xOverflow) = coordinate.x
+            .multipliedReportingOverflow(by: side)
+        let (minY, yOverflow) = coordinate.y
+            .multipliedReportingOverflow(by: side)
+        let (maxX, maxXOverflow) = minX.addingReportingOverflow(side)
+        let (maxY, maxYOverflow) = minY.addingReportingOverflow(side)
+        guard !xOverflow, !yOverflow, !maxXOverflow, !maxYOverflow else {
+            throw DocumentPaintStableCollectionError.arithmeticOverflow
+        }
+        return try SparseTileOutputRegion(
+            minX: minX,
+            minY: minY,
+            maxX: maxX,
+            maxY: maxY
+        )
+    }
+}
+
+/// The only authority accepted by committed collection. The registry binds
+/// the immutable root and its geometry-derived plan in one locked operation;
+/// callers can close the owner but cannot construct or separate its parts.
+final class DocumentPaintStableCommittedCapture: @unchecked Sendable {
+    fileprivate let snapshot: DocumentPaintStableCanonicalSnapshot
+    fileprivate let plan: DocumentPaintStableCommittedCollectionPlan
+
+    fileprivate init(
+        snapshot: DocumentPaintStableCanonicalSnapshot,
+        plan: DocumentPaintStableCommittedCollectionPlan
+    ) {
+        self.snapshot = snapshot
+        self.plan = plan
+    }
+
+    var activeChildSelectionCount: Int {
+        snapshot.activeChildSelectionCount
+    }
+
+    func close() { snapshot.close() }
+
+    deinit { close() }
+}
+
+extension DocumentPaintStableCollectionEngine {
+    static func collectCommitted(
+        _ capture: DocumentPaintStableCommittedCapture,
+        renderer: DocumentPaintStableSnapshotRenderer,
+        outputGeometryRevision: UInt64
+    ) async throws -> DocumentPaintStableCommittedCollection {
+        let snapshot = capture.snapshot
+        let storage: DocumentPaintStableCommittedStorage
+        switch capture.plan.storage {
+        case let .single(descriptor):
+            storage = .singleRaster(try await collect(
+                snapshot: snapshot,
+                renderer: renderer,
+                descriptor: descriptor,
+                outputGeometryRevision: outputGeometryRevision,
+                outputMapping: .affine(.identity)
+            ))
+        case let .radialPages(plannedPages):
+            var pages: [DocumentPaintStableCommittedRadialPage] = []
+            pages.reserveCapacity(plannedPages.count)
+            for page in plannedPages {
+                try Task.checkCancellation()
+                let image = try await collect(
+                    snapshot: snapshot,
+                    renderer: renderer,
+                    descriptor: page.descriptor,
+                    outputGeometryRevision: outputGeometryRevision,
+                    outputMapping: .affine(.identity)
+                )
+                if image.bgra8PremultipliedBytes.contains(where: { $0 != 0 }) {
+                    pages.append(DocumentPaintStableCommittedRadialPage(
+                        coordinate: page.coordinate,
+                        image: image
+                    ))
+                }
+            }
+            storage = .radialPages(pages)
+        }
+        return DocumentPaintStableCommittedCollection(
+            documentGeneration: snapshot.documentGeneration,
+            documentPixelSize: snapshot.geometry.documentPixelSize,
+            storagePixelSize: snapshot.geometry.storagePixelSize,
+            storage: storage
+        )
     }
 }
 
 /// One document-wide sparse surface registry. It is the sole owner of the
 /// physical PaintTileStore used by canonical, transient, and future layered
-/// surfaces; this prerequisite remains production-inert until Task 6's atomic
-/// activation commit.
+/// surfaces.
 public final class DocumentPaintSurfaceStore: @unchecked Sendable {
+    static let maximumVisibleCaptureAttempts = 3
+
     private final class NamespaceRecord {
         let layerID: UUID
         let generation: UInt64
@@ -265,19 +1456,28 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
 
     private let identity = UUID()
     private let lock = NSLock()
-    private var currentGeneration: UInt64
-    private var currentGeometry: DocumentPaintGeometry
-    private let orderedLayerIDs: [UUID]
-    private var activeLayers: [UUID: DocumentPaintLayerState]
+    private var currentEpoch: DocumentPaintSurfaceEpoch
     private var preparedCandidateIdentity: ObjectIdentifier?
     private var nextNamespaceToken: UInt64 = 0
     private var namespaceRecords: [UInt64: NamespaceRecord] = [:]
+
+    #if DEBUG
+    /// Synchronization-only seam for deterministic publication race tests.
+    /// Hooks run while the registry lock is held and must not call the store.
+    var testingEpochHook:
+        (@Sendable (DocumentPaintSurfaceEpochTestingPoint) -> Void)?
+    /// Runs after pure Phase-A selection and before the epoch identity recheck.
+    /// Unlike `testingEpochHook`, this seam deliberately runs without the
+    /// registry lock so tests can publish a replacement epoch synchronously.
+    var testingVisibleSelectionCompleted: (@Sendable () -> Void)?
+    #endif
 
     let sharedTileStore: PaintTileStore
 
     public convenience init(
         device: any MTLDevice,
         byteBudget: Int,
+        snapshotPayloadLiabilityByteBudget: Int? = nil,
         geometry: DocumentPaintGeometry,
         layerIDs: [UUID],
         generation: UInt64 = 0
@@ -292,6 +1492,8 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         try self.init(
             device: device,
             byteBudget: byteBudget,
+            snapshotPayloadLiabilityByteBudget:
+                snapshotPayloadLiabilityByteBudget,
             transferByteCapacity: transferByteCapacity,
             geometry: geometry,
             layerIDs: layerIDs,
@@ -302,6 +1504,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
     public init(
         device: any MTLDevice,
         byteBudget: Int,
+        snapshotPayloadLiabilityByteBudget: Int? = nil,
         transferByteCapacity: Int,
         geometry: DocumentPaintGeometry,
         layerIDs: [UUID],
@@ -332,12 +1535,16 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         sharedTileStore = PaintTileStore(
             device: device,
             byteBudget: byteBudget,
-            transferByteCapacity: transferByteCapacity
+            transferByteCapacity: transferByteCapacity,
+            snapshotPayloadLiabilityByteBudget:
+                snapshotPayloadLiabilityByteBudget
         )
-        currentGeometry = geometry
-        currentGeneration = generation
-        orderedLayerIDs = layerIDs
-        activeLayers = states
+        currentEpoch = DocumentPaintSurfaceEpoch(
+            generation: generation,
+            geometry: geometry,
+            orderedLayerIDs: layerIDs,
+            layerStates: states
+        )
         nextNamespaceToken = initialNamespaceToken
     }
 
@@ -345,21 +1552,421 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         sharedTileStore.identity
     }
 
-    public var generation: UInt64 { withLock { currentGeneration } }
-    public var geometry: DocumentPaintGeometry { withLock { currentGeometry } }
-    public var layerIDs: [UUID] { orderedLayerIDs }
+    public var generation: UInt64 { withLock { currentEpoch.generation } }
+    public var geometry: DocumentPaintGeometry { withLock { currentEpoch.geometry } }
+    public var layerIDs: [UUID] { withLock { currentEpoch.orderedLayerIDs } }
+
+    #if DEBUG
+    var testingCurrentEpochIdentity: ObjectIdentifier {
+        withLock { ObjectIdentifier(currentEpoch) }
+    }
+    #endif
 
     public func binding(for layerID: UUID) throws -> DocumentPaintLayerBinding {
         try withLock {
-            guard let state = activeLayers[layerID] else {
+            let epoch = currentEpoch
+            guard let state = epoch.layerStates[layerID] else {
                 throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
             }
             return try makeBinding(
                 for: layerID,
                 state: state,
-                geometry: currentGeometry,
-                generation: currentGeneration
+                geometry: epoch.geometry,
+                generation: epoch.generation
             )
+        }
+    }
+
+    /// Captures one complete canonical layer from exactly one immutable epoch.
+    /// Root retention is installed while holding registry -> tile-store locks,
+    /// the same order used by publication, so retirement cannot cross capture.
+    func captureStableCanonicalSnapshot(
+        layerID: UUID,
+        addressing: SparseTileAddressing,
+        addressingRevision: UInt64,
+        outputMapping: SparseTileSamplingOutputMapping? = nil,
+        limits: DocumentPaintStableCanonicalSnapshotLimits = .documentProduction
+    ) throws -> DocumentPaintStableCanonicalSnapshot {
+        try withLock {
+            let epoch = currentEpoch
+            guard let state = epoch.layerStates[layerID] else {
+                throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+            }
+            try Self.validateVisibleAddressing(
+                addressing,
+                geometry: epoch.geometry
+            )
+            if let outputMapping {
+                try Self.validateStableOutputMapping(
+                    outputMapping,
+                    addressing: addressing,
+                    geometry: epoch.geometry
+                )
+            }
+            #if DEBUG
+            testingEpochHook?(.stableSnapshotCaptured)
+            #endif
+            return try makeStableCanonicalSnapshot(
+                epoch: epoch,
+                layerID: layerID,
+                state: state,
+                addressing: addressing,
+                addressingRevision: addressingRevision,
+                limits: limits
+            )
+        }
+    }
+
+    /// Creates the storage plan and retains its exact canonical root from the
+    /// same immutable epoch while holding the registry lock. Plan and output
+    /// limits fail before exact-reference retention is published.
+    func captureStableCommittedCollection(
+        layerID: UUID,
+        addressing: SparseTileAddressing,
+        addressingRevision: UInt64,
+        rendererLimits: DocumentPaintStableSnapshotRendererLimits,
+        snapshotLimits: DocumentPaintStableCanonicalSnapshotLimits =
+            .documentProduction
+    ) throws -> DocumentPaintStableCommittedCapture {
+        try withLock {
+            let epoch = currentEpoch
+            guard let state = epoch.layerStates[layerID] else {
+                throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+            }
+            let plan = try DocumentPaintStableCommittedCollectionPlan(
+                addressing: addressing,
+                geometry: epoch.geometry,
+                rendererLimits: rendererLimits
+            )
+            #if DEBUG
+            testingEpochHook?(.stableSnapshotCaptured)
+            #endif
+            let snapshot = try makeStableCanonicalSnapshot(
+                epoch: epoch,
+                layerID: layerID,
+                state: state,
+                addressing: addressing,
+                addressingRevision: addressingRevision,
+                limits: snapshotLimits
+            )
+            return DocumentPaintStableCommittedCapture(
+                snapshot: snapshot,
+                plan: plan
+            )
+        }
+    }
+
+    /// Requires an addressing request already validated against `epoch`.
+    /// Callers hold the registry lock across this exact-retention publication.
+    private func makeStableCanonicalSnapshot(
+        epoch: DocumentPaintSurfaceEpoch,
+        layerID: UUID,
+        state: DocumentPaintLayerState,
+        addressing: SparseTileAddressing,
+        addressingRevision: UInt64,
+        limits: DocumentPaintStableCanonicalSnapshotLimits
+    ) throws -> DocumentPaintStableCanonicalSnapshot {
+        let binding = try makeBinding(
+            for: layerID,
+            state: state,
+            geometry: epoch.geometry,
+            generation: epoch.generation
+        )
+        let source = try SparseTileAcceptedSourceAdapter.canonical(
+            binding,
+            addressing: addressing
+        )
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: [source.provider]
+        )
+        return DocumentPaintStableCanonicalSnapshot(
+            documentGeneration: epoch.generation,
+            geometry: epoch.geometry,
+            layerID: layerID,
+            revision: state.revision,
+            addressing: addressing,
+            addressingRevision: addressingRevision,
+            source: source,
+            capture: capture,
+            maximumReferenceCountFromStoreBudget:
+                sharedTileStore.byteBudget
+                    / PaintTileDescriptor.residentByteCount,
+            limits: limits
+        )
+    }
+
+    /// Selects and retains the current canonical visible source without any
+    /// caller-supplied generation or content identity.
+    ///
+    /// Phase A copies one immutable epoch under the registry lock, then performs
+    /// the pure viewport/halo selection outside all locks. Phase B reacquires
+    /// the registry lock, retries only when the epoch reference changed, and
+    /// installs exact retention while holding registry -> PaintTileStore locks.
+    /// That ordering prevents publication retirement from crossing the exact
+    /// capture boundary.
+    func captureCanonicalVisibleSources(
+        layerID: UUID,
+        addressing: SparseTileAddressing,
+        addressingRevision: UInt64,
+        outputRegion: SparseTileOutputRegion,
+        outputGeometryRevision: UInt64,
+        outputMapping: SparseTileSamplingOutputMapping = .affine(.identity)
+    ) throws -> DocumentPaintCanonicalVisibleSourceCapture {
+        for _ in 0..<Self.maximumVisibleCaptureAttempts {
+            let attempt = try withLock { () throws -> (
+                epoch: DocumentPaintSurfaceEpoch,
+                state: DocumentPaintLayerState,
+                hook: (@Sendable () -> Void)?
+            ) in
+                let epoch = currentEpoch
+                guard let state = epoch.layerStates[layerID] else {
+                    throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+                }
+                #if DEBUG
+                let hook = testingVisibleSelectionCompleted
+                #else
+                let hook: (@Sendable () -> Void)? = nil
+                #endif
+                return (epoch, state, hook)
+            }
+            let binding = try makeBinding(
+                for: layerID,
+                state: attempt.state,
+                geometry: attempt.epoch.geometry,
+                generation: attempt.epoch.generation
+            )
+            try Self.validateVisibleAddressing(
+                addressing,
+                geometry: attempt.epoch.geometry
+            )
+            let source = try SparseTileAcceptedSourceAdapter.canonical(
+                binding,
+                addressing: addressing
+            )
+            let key = SparseTileSamplingPlanKey(
+                documentGeneration: attempt.epoch.generation,
+                orderedLayers: [SparseTileLayerContentKey(
+                    layerID: layerID,
+                    roles: [source.contentKey]
+                )],
+                addressingRevision: addressingRevision,
+                outputGeometryRevision: outputGeometryRevision,
+                outputMapping: outputMapping
+            )
+            let selection = try SparseTileOwnedSourceBatch.selecting(
+                sources: [source],
+                key: key,
+                outputRegion: outputRegion
+            )
+            attempt.hook?()
+
+            let batch: SparseTileOwnedSourceBatch? = try withLock {
+                guard currentEpoch === attempt.epoch else { return nil }
+                return try SparseTileOwnedSourceBatch.capturing(selection)
+            }
+            guard let batch else { continue }
+            return DocumentPaintCanonicalVisibleSourceCapture(
+                key: key,
+                outputRegion: outputRegion,
+                sourceBatch: batch
+            )
+        }
+        throw DocumentPaintSurfaceStoreError.visibleCaptureContention(
+            maximumAttempts: Self.maximumVisibleCaptureAttempts
+        )
+    }
+
+    /// Captures one coherent canonical + authoritative + prediction union.
+    /// Capability/provider freezing happens before this call. Registry state is
+    /// consulted only under its lock; no capability or ownership lock is taken
+    /// while the registry lock is held.
+    func captureTransientVisibleSources(
+        layerID: UUID,
+        descriptor: DocumentPaintTransientVisibleSourceDescriptor,
+        addressing: SparseTileAddressing,
+        addressingRevision: UInt64,
+        outputRegion: SparseTileOutputRegion,
+        outputGeometryRevision: UInt64,
+        outputMapping: SparseTileSamplingOutputMapping = .affine(.identity)
+    ) throws -> DocumentPaintCanonicalVisibleSourceCapture {
+        let capability = descriptor.capability
+        let lease = capability.namespaceLease
+        for _ in 0..<Self.maximumVisibleCaptureAttempts {
+            let attempt = try withLock { () throws -> (
+                epoch: DocumentPaintSurfaceEpoch,
+                state: DocumentPaintLayerState,
+                namespaceToken: UInt64,
+                hook: (@Sendable () -> Void)?
+            ) in
+                let epoch = currentEpoch
+                guard let state = epoch.layerStates[layerID] else {
+                    throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+                }
+                try validateTransientDescriptorLocked(
+                    descriptor,
+                    lease: lease,
+                    layerID: layerID,
+                    epoch: epoch,
+                    addressing: addressing
+                )
+                try Self.validateVisibleAddressing(
+                    addressing,
+                    geometry: epoch.geometry
+                )
+                #if DEBUG
+                let hook = testingVisibleSelectionCompleted
+                #else
+                let hook: (@Sendable () -> Void)? = nil
+                #endif
+                return (epoch, state, lease.retirementToken, hook)
+            }
+            let binding = try makeBinding(
+                for: layerID,
+                state: attempt.state,
+                geometry: attempt.epoch.geometry,
+                generation: attempt.epoch.generation
+            )
+            let canonical = try SparseTileAcceptedSourceAdapter.canonical(
+                binding,
+                addressing: addressing
+            )
+            let sources = [canonical] + descriptor.sources
+            let key = SparseTileSamplingPlanKey(
+                documentGeneration: attempt.epoch.generation,
+                orderedLayers: [SparseTileLayerContentKey(
+                    layerID: layerID,
+                    roles: sources.map(\.contentKey)
+                )],
+                addressingRevision: addressingRevision,
+                outputGeometryRevision: outputGeometryRevision,
+                outputMapping: outputMapping
+            )
+            let selection = try SparseTileOwnedSourceBatch.selecting(
+                sources: sources,
+                key: key,
+                outputRegion: outputRegion
+            )
+            attempt.hook?()
+
+            let batch: SparseTileOwnedSourceBatch? = try withLock {
+                guard currentEpoch === attempt.epoch else { return nil }
+                try validateTransientDescriptorLocked(
+                    descriptor,
+                    lease: lease,
+                    layerID: layerID,
+                    epoch: attempt.epoch,
+                    addressing: addressing
+                )
+                guard lease.retirementToken == attempt.namespaceToken else {
+                    throw DocumentPaintStrokeSurfaceError.staleCapability
+                }
+                return try SparseTileOwnedSourceBatch.capturing(selection)
+            }
+            guard let batch else { continue }
+            return DocumentPaintCanonicalVisibleSourceCapture(
+                key: key,
+                outputRegion: outputRegion,
+                sourceBatch: batch
+            )
+        }
+        throw DocumentPaintSurfaceStoreError.visibleCaptureContention(
+            maximumAttempts: Self.maximumVisibleCaptureAttempts
+        )
+    }
+
+    /// Requires the registry lock. Deliberately compares only immutable
+    /// capability/lease fields and registry record identity: it never calls
+    /// capability state or namespace ownership methods while this lock is held.
+    private func validateTransientDescriptorLocked(
+        _ descriptor: DocumentPaintTransientVisibleSourceDescriptor,
+        lease: StrokeTileSurfaceNamespaceLease,
+        layerID: UUID,
+        epoch: DocumentPaintSurfaceEpoch,
+        addressing: SparseTileAddressing
+    ) throws {
+        let capability = descriptor.capability
+        guard capability.storeIdentity == sharedTileStore.identity,
+              capability.layerID == layerID,
+              capability.generation == epoch.generation,
+              capability.pixelSize == epoch.geometry.storagePixelSize,
+              capability.radialLayout == epoch.geometry.radialLayout,
+              lease.storeIdentity == sharedTileStore.identity,
+              lease.layerID == layerID,
+              lease.generation == epoch.generation,
+              let record = namespaceRecords[lease.retirementToken],
+              record.ownership === lease.ownership,
+              record.layerID == layerID,
+              record.generation == epoch.generation,
+              record.authoritativeSurfaceID
+                == capability.authoritativeSurfaceID,
+              record.predictionSurfaceID == capability.predictionSurfaceID,
+              descriptor.sources.map(\.role)
+                == [.authoritative, .prediction]
+        else { throw DocumentPaintStrokeSurfaceError.staleCapability }
+
+        for (source, expectedSurfaceID) in zip(
+            descriptor.sources,
+            [capability.authoritativeSurfaceID, capability.predictionSurfaceID]
+        ) {
+            guard source.provider.storeIdentity == sharedTileStore.identity,
+                  source.addressing == addressing,
+                  source.layerID == layerID,
+                  source.provider.generation == epoch.generation,
+                  source.provider.pixelSize == epoch.geometry.storagePixelSize,
+                  source.provider.surfaceID == expectedSurfaceID,
+                  source.contentKey.surfaceIdentity == expectedSurfaceID,
+                  source.contentKey.contentRevision
+                    == source.provider.revision.rawValue,
+                  source.contentKey.bindingChunkRevision
+                    == source.provider.revision.rawValue
+            else { throw DocumentPaintStrokeSurfaceError.staleCapability }
+        }
+    }
+
+    private static func validateVisibleAddressing(
+        _ addressing: SparseTileAddressing,
+        geometry: DocumentPaintGeometry
+    ) throws {
+        switch addressing {
+        case let .finite(size):
+            guard geometry.radialLayout == nil,
+                  size == geometry.storagePixelSize
+            else { throw SparseTileSamplingPlanError.inconsistentAddressing }
+        case let .periodic(period):
+            guard geometry.radialLayout == nil,
+                  period == geometry.storagePixelSize
+            else { throw SparseTileSamplingPlanError.inconsistentAddressing }
+        case let .radial(layout):
+            guard geometry.radialLayout == layout,
+                  geometry.storagePixelSize == layout.atlasPixelSize
+            else { throw SparseTileSamplingPlanError.inconsistentAddressing }
+        }
+    }
+
+    private static func validateStableOutputMapping(
+        _ outputMapping: SparseTileSamplingOutputMapping,
+        addressing: SparseTileAddressing,
+        geometry: DocumentPaintGeometry
+    ) throws {
+        switch outputMapping {
+        case let .affine(transform):
+            guard transform.sourceOffset.x.isFinite,
+                  transform.sourceOffset.y.isFinite,
+                  transform.sourceStep.x.isFinite,
+                  transform.sourceStep.y.isFinite
+            else {
+                throw DocumentPaintStableSnapshotRendererError.invalidRequest
+            }
+        case let .finiteRadial(mapping):
+            guard case let .radial(layout) = addressing,
+                  layout == mapping.layout,
+                  geometry.radialLayout == mapping.layout,
+                  geometry.documentPixelSize == mapping.strategy.canvasSize,
+                  mapping.outputToWorldTransform.sourceOffset.x.isFinite,
+                  mapping.outputToWorldTransform.sourceOffset.y.isFinite,
+                  mapping.outputToWorldTransform.sourceStep.x.isFinite,
+                  mapping.outputToWorldTransform.sourceStep.y.isFinite
+            else { throw SparseTileSamplingPlanError.inconsistentAddressing }
         }
     }
 
@@ -367,14 +1974,16 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         for layerID: UUID
     ) throws -> DocumentPaintSurfaceMutationBaseSnapshot {
         try withLock {
-            guard let state = activeLayers[layerID] else {
+            let epoch = currentEpoch
+            guard let state = epoch.layerStates[layerID] else {
                 throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
             }
             let candidateBase = DocumentPaintSurfaceCandidateBase(
                 registryIdentity: identity,
-                generation: currentGeneration,
-                geometry: currentGeometry,
-                layers: activeLayers
+                generation: epoch.generation,
+                geometry: epoch.geometry,
+                orderedLayerIDs: epoch.orderedLayerIDs,
+                layers: epoch.layerStates
             )
             return DocumentPaintSurfaceMutationBaseSnapshot(
                 generation: candidateBase.generation,
@@ -397,11 +2006,13 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         failureInjection: PaintTileAllocationFailureInjection? = nil
     ) throws -> DocumentPaintSurfaceCandidate {
         let base = withLock {
-            DocumentPaintSurfaceCandidateBase(
+            let epoch = currentEpoch
+            return DocumentPaintSurfaceCandidateBase(
                 registryIdentity: identity,
-                generation: currentGeneration,
-                geometry: currentGeometry,
-                layers: activeLayers
+                generation: epoch.generation,
+                geometry: epoch.geometry,
+                orderedLayerIDs: epoch.orderedLayerIDs,
+                layers: epoch.layerStates
             )
         }
         return try makeCandidate(
@@ -458,7 +2069,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         var ownedNamespaces: [DocumentPaintSurfaceNamespace] = []
 
         do {
-            for layerID in orderedLayerIDs {
+            for layerID in base.orderedLayerIDs {
                 let dirty = try Self.sortedUnique(
                     dirtyCoordinatesByLayer[layerID] ?? []
                 )
@@ -550,7 +2161,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             registryIdentity: identity,
             store: sharedTileStore,
             geometry: candidateGeometry,
-            orderedLayerIDs: orderedLayerIDs,
+            orderedLayerIDs: base.orderedLayerIDs,
             baseGeneration: base.generation,
             generation: candidateGeneration,
             layerStates: candidateLayers,
@@ -603,9 +2214,10 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                     candidate.ownedReferencesStorage
                 )
             }
-            guard candidate.baseGeneration == currentGeneration else {
+            let current = currentEpoch
+            guard candidate.baseGeneration == current.generation else {
                 throw DocumentPaintSurfaceStoreError.staleCandidate(
-                    expectedGeneration: currentGeneration,
+                    expectedGeneration: current.generation,
                     actualGeneration: candidate.baseGeneration
                 )
             }
@@ -613,7 +2225,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                 throw DocumentPaintSurfaceStoreError.ambiguousPreparedCandidate
             }
             let retained = Set(candidateSnapshot.layers.values.flatMap(\.references))
-            let replaced = activeLayers.values
+            let replaced = current.layerStates.values
                 .flatMap(\.references)
                 .filter { !retained.contains($0) }
                 .sorted()
@@ -629,8 +2241,15 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                 sharedTileStore.cancelRetirement(replacedRetirement)
                 throw error
             }
+            let nextEpoch = DocumentPaintSurfaceEpoch(
+                generation: candidate.generation,
+                geometry: candidate.geometry,
+                orderedLayerIDs: candidate.orderedLayerIDs,
+                layerStates: candidateSnapshot.layers
+            )
             let prepared = DocumentPaintPreparedCommit(
                 candidate: candidate,
+                nextEpoch: nextEpoch,
                 replacedRetirement: replacedRetirement,
                 candidateRetirement: candidateRetirement
             )
@@ -740,12 +2359,13 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             guard candidate.registryIdentity == identity,
                   candidate.store === sharedTileStore
             else { throw DocumentPaintSurfaceStoreError.foreignCandidate }
-            guard activeLayers[layerID] != nil else {
+            let current = currentEpoch
+            guard current.layerStates[layerID] != nil else {
                 throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
             }
-            guard candidate.baseGeneration == currentGeneration else {
+            guard candidate.baseGeneration == current.generation else {
                 throw DocumentPaintSurfaceStoreError.staleCandidate(
-                    expectedGeneration: currentGeneration,
+                    expectedGeneration: current.generation,
                     actualGeneration: candidate.baseGeneration
                 )
             }
@@ -797,12 +2417,16 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
     public func snapshot() -> DocumentPaintSurfaceStoreSnapshot {
         withLock {
             sweepAbandonedNamespacesLocked()
+            let epoch = currentEpoch
+            #if DEBUG
+            testingEpochHook?(.snapshotCaptured)
+            #endif
             let tileSnapshot = sharedTileStore.snapshot()
             return DocumentPaintSurfaceStoreSnapshot(
-                generation: currentGeneration,
-                geometry: currentGeometry,
-                layers: orderedLayerIDs.compactMap { layerID in
-                    activeLayers[layerID].map {
+                generation: epoch.generation,
+                geometry: epoch.geometry,
+                layers: epoch.orderedLayerIDs.compactMap { layerID in
+                    epoch.layerStates[layerID].map {
                         .init(layerID: layerID, references: $0.references)
                     }
                 },
@@ -816,68 +2440,132 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         }
     }
 
-    func issueStrokeNamespace(
+    /// Issues authority for the current epoch only. The generation is selected
+    /// by the registry under the same lock that validates layer membership.
+    func issueCurrentStrokeNamespace(
+        layerID: UUID
+    ) throws -> StrokeTileSurfaceNamespaceLease {
+        try withLock {
+            let epoch = currentEpoch
+            guard epoch.layerStates[layerID] != nil else {
+                throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+            }
+            return try issueStrokeNamespaceLocked(
+                layerID: layerID,
+                generation: epoch.generation
+            )
+        }
+    }
+
+    /// Captures namespace generation and geometry from one current epoch under
+    /// one registry lock; capability construction intentionally happens after
+    /// releasing that lock.
+    func issueCurrentStrokeSurfaceCapability(
+        layerID: UUID,
+        ownerIdentity: UUID,
+        onTerminal: @escaping @Sendable (UUID) -> Void
+    ) throws -> DocumentPaintStrokeSurfaceCapability {
+        let authority = try withLock {
+            try captureStrokeSurfaceAuthorityLocked(
+                layerID: layerID
+            )
+        }
+        return try makeStrokeSurfaceCapability(
+            lease: authority.lease,
+            geometry: authority.geometry,
+            ownerIdentity: ownerIdentity,
+            onTerminal: onTerminal
+        )
+    }
+
+    private func makeStrokeSurfaceCapability(
+        lease: StrokeTileSurfaceNamespaceLease,
+        geometry: DocumentPaintGeometry,
+        ownerIdentity: UUID,
+        onTerminal: @escaping @Sendable (UUID) -> Void
+    ) throws -> DocumentPaintStrokeSurfaceCapability {
+        do {
+            return try DocumentPaintStrokeSurfaceCapability(
+                ownerIdentity: ownerIdentity,
+                capabilityToken: UUID(),
+                namespaceLease: lease,
+                store: sharedTileStore,
+                geometry: geometry,
+                onTerminal: onTerminal
+            )
+        } catch {
+            lease.cancel()
+            throw error
+        }
+    }
+
+    private func captureStrokeSurfaceAuthorityLocked(
+        layerID: UUID
+    ) throws -> (
+        geometry: DocumentPaintGeometry,
+        lease: StrokeTileSurfaceNamespaceLease
+    ) {
+        let epoch = currentEpoch
+        #if DEBUG
+        testingEpochHook?(.strokeAuthorityCaptured)
+        #endif
+        guard epoch.layerStates[layerID] != nil else {
+            throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
+        }
+        return (
+            epoch.geometry,
+            try issueStrokeNamespaceLocked(
+                layerID: layerID,
+                generation: epoch.generation
+            )
+        )
+    }
+
+    /// Requires `lock` to be held and a current-epoch layer to be validated.
+    private func issueStrokeNamespaceLocked(
         layerID: UUID,
         generation: UInt64
     ) throws -> StrokeTileSurfaceNamespaceLease {
-        try withLock {
-            guard activeLayers[layerID] != nil else {
-                throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
-            }
-            guard generation == currentGeneration else {
-                throw DocumentPaintSurfaceStoreError.staleGeneration(
-                    expected: currentGeneration,
-                    actual: generation
-                )
-            }
-            let (token, overflow) = nextNamespaceToken
-                .addingReportingOverflow(1)
-            guard !overflow else {
-                throw DocumentPaintSurfaceStoreError.namespaceIdentityOverflow
-            }
-            let authoritative = DocumentPaintSurfaceNamespace(
-                storeIdentity: sharedTileStore.identity,
-                surfaceID: Self.surfaceID(
-                    role: .authoritative,
-                    token: token
-                ),
-                layerID: layerID,
-                generation: generation,
-                role: .authoritative,
-                token: token
-            )
-            let prediction = DocumentPaintSurfaceNamespace(
-                storeIdentity: sharedTileStore.identity,
-                surfaceID: Self.surfaceID(
-                    role: .prediction,
-                    token: token
-                ),
-                layerID: layerID,
-                generation: generation,
-                role: .prediction,
-                token: token
-            )
-            let lease = StrokeTileSurfaceNamespaceLease.registryIssued(
-                authoritative: authoritative,
-                prediction: prediction,
-                retirementToken: token,
-                authenticate: { [weak self] lease in
-                    self?.authenticate(lease) == true
-                },
-                onRetired: { [weak self] value in
-                    self?.retireNamespace(token: value)
-                }
-            )
-            namespaceRecords[token] = NamespaceRecord(
-                layerID: layerID,
-                generation: generation,
-                authoritativeSurfaceID: authoritative.surfaceID,
-                predictionSurfaceID: prediction.surfaceID,
-                ownership: lease.ownership
-            )
-            nextNamespaceToken = token
-            return lease
+        let (token, overflow) = nextNamespaceToken.addingReportingOverflow(1)
+        guard !overflow else {
+            throw DocumentPaintSurfaceStoreError.namespaceIdentityOverflow
         }
+        let authoritative = DocumentPaintSurfaceNamespace(
+            storeIdentity: sharedTileStore.identity,
+            surfaceID: Self.surfaceID(role: .authoritative, token: token),
+            layerID: layerID,
+            generation: generation,
+            role: .authoritative,
+            token: token
+        )
+        let prediction = DocumentPaintSurfaceNamespace(
+            storeIdentity: sharedTileStore.identity,
+            surfaceID: Self.surfaceID(role: .prediction, token: token),
+            layerID: layerID,
+            generation: generation,
+            role: .prediction,
+            token: token
+        )
+        let lease = StrokeTileSurfaceNamespaceLease.registryIssued(
+            authoritative: authoritative,
+            prediction: prediction,
+            retirementToken: token,
+            authenticate: { [weak self] lease in
+                self?.authenticate(lease) == true
+            },
+            onRetired: { [weak self] value in
+                self?.retireNamespace(token: value)
+            }
+        )
+        namespaceRecords[token] = NamespaceRecord(
+            layerID: layerID,
+            generation: generation,
+            authoritativeSurfaceID: authoritative.surfaceID,
+            predictionSurfaceID: prediction.surfaceID,
+            ownership: lease.ownership
+        )
+        nextNamespaceToken = token
+        return lease
     }
 
     private func authenticate(_ lease: StrokeTileSurfaceNamespaceLease) -> Bool {
@@ -909,12 +2597,13 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         expectedActiveGeneration: UInt64
     ) throws -> DocumentPaintSurfaceNamespace {
         try withLock {
-            guard activeLayers[layerID] != nil else {
+            let epoch = currentEpoch
+            guard epoch.layerStates[layerID] != nil else {
                 throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
             }
-            guard currentGeneration == expectedActiveGeneration else {
+            guard epoch.generation == expectedActiveGeneration else {
                 throw DocumentPaintSurfaceStoreError.staleGeneration(
-                    expected: currentGeneration,
+                    expected: epoch.generation,
                     actual: expectedActiveGeneration
                 )
             }
@@ -965,12 +2654,13 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         _ prepared: DocumentPaintPreparedCommit
     ) {
         let candidate = prepared.candidate
+        // This is the sole logical publication point. Everything describing
+        // the registry changes with one immutable epoch-reference assignment.
+        #if DEBUG
+        testingEpochHook?(.beforePublication)
+        #endif
+        currentEpoch = prepared.nextEpoch
         candidate.withLock {
-            // The logical publication is guaranteed first. Retirement work is
-            // nonthrowing but may mutate hash tables, so it follows the swap.
-            activeLayers = candidate.layerStatesStorage
-            currentGeneration = candidate.generation
-            currentGeometry = candidate.geometry
             candidate.state = .consumed
             candidate.preparedCommit = nil
         }

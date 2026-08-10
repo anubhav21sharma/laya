@@ -98,9 +98,11 @@ therefore uses the following protocol:
 1. Replan the stage just in time from the current code and approved specs.
 2. Split pure semantic components from schema ownership and production wiring.
 3. Keep one schema owner and enumerate every lifecycle transition before edits.
-4. Use focused red/green tests per task and production-path metamorphic tests at
-   each integration seam.
-5. Independently review each task before the next shared hotspot is changed.
+4. Use focused red/green tests while implementing. Run production-path
+   functional and performance tests at meaningful vertical-slice boundaries,
+   not after every internal edit.
+5. Review meaningful task or slice boundaries once their focused evidence is
+   complete. Do not restart broad review cycles after minor follow-up edits.
 6. Add allocation/bounded-work evidence in the task that creates a hot path.
 7. Finish with a clustered stage acceptance covering correctness, lifecycle,
    production routes, sustained performance, failure recovery, and fresh review.
@@ -111,11 +113,36 @@ Stage C's expanded protocol and executable steps are defined in
 [`2026-08-02-stage-c-physical-input-dynamics.md`](2026-08-02-stage-c-physical-input-dynamics.md).
 Stages D through G receive equivalent just-in-time preflights before execution.
 
+## Native Current-Only And Boundary-Validation Amendment
+
+The project owner removed every Laya-native backward-compatibility requirement
+on 2026-08-10. The binding design and dependency-ordered deletion plan are
+[`2026-08-10-native-current-only-validation-design.md`](../specs/2026-08-10-native-current-only-validation-design.md)
+and
+[`2026-08-10-native-current-only-cleanup.md`](2026-08-10-native-current-only-cleanup.md).
+They override conflicting native migration, alias, legacy execution, and
+compatibility-test requirements below.
+
+- Laya-native projects, brushes, packages, renderer/harness formats, and other
+  pre-release schemas accept exactly the current version. Older and future
+  versions fail clearly; no native migration adapters are added or retained.
+- External imports such as Procreate remain product features. Their untrusted
+  parsers stay defensive and emit the current trusted Laya-native model.
+- Validate strongly at untrusted file/import, checked arithmetic/memory/Metal,
+  transactional publication, and GPU/resource-ownership boundaries. Internal
+  layers consume validated immutable types or unforgeable capabilities instead
+  of repeating the same checks.
+- Remove brittle source-text gates, implausible-state hooks, duplicate invariant
+  tests, and compatibility cleanup machinery after stronger construction and
+  ownership guarantees supersede them. Functional correctness, visual quality,
+  performance, cancellation safety, data integrity, and leak-free ownership
+  remain non-negotiable.
+
 ## Locked Technical Decisions
 
-1. **Authoritative deposition is append-only.** `replayTail` survives only as
-   an isolated legacy/special-correction compatibility mode and cannot be used
-   by the rebuilt four professional dry brushes.
+1. **Authoritative deposition is append-only.** Retained-tail work exists only
+   as an explicitly typed, bounded current correction/prediction mechanism. It
+   is not a persisted legacy mode and cannot select an old execution path.
 2. **Prediction is a separate surface.** Clearing or replacing it cannot touch
    authoritative live paint.
 3. **The main actor is a facade.** Stroke generation, projection, dirty-tile
@@ -129,8 +156,9 @@ Stages D through G receive equivalent just-in-time preflights before execution.
 5. **High precision is tile-backed.** A 256 x 256 sparse tile is the allocation
    unit. Full-canvas RGBA16F textures per layer are forbidden. Residency is
    byte-budgeted, measured, and independent of document dimensions.
-6. **Dynamics are ordered programs.** Schema-v2 outputs accept up to four
-   ordered sensor terms. Schema-v1 mappings compile through an exact adapter.
+6. **Dynamics are ordered programs.** The exact current native definition
+   schema accepts up to four ordered sensor terms. Older native schemas fail
+   activation; foreign converters emit the current program directly.
 7. **Speed safety and artistic normalization are different.** The 100,000
    world-unit ceiling remains validation protection; it is never the default
    artistic full-scale speed.
@@ -431,11 +459,11 @@ session yields attributable performance logs.
 - Modify: `Tests/PatternEngineTests/BrushDynamicsEngineTests.swift`
 - Create: `Tests/PatternEngineTests/BrushTerminationEvaluatorTests.swift`
 
-**Behavior:** Schema-v2 dry brushes use `.cap`, `.pressureRelease(maximumWorldLength:)`,
+**Behavior:** Current-schema dry brushes use `.cap`, `.pressureRelease(maximumWorldLength:)`,
 or `.boundedCorrection(maximumSamples:maximumWorldLength:maximumDabs:)`.
 `.cap` and `.pressureRelease` never reevaluate an already deposited ordinal.
-Legacy schema-v1 end taper compiles only through the compatibility adapter and
-cannot be selected by a rebuilt professional definition.
+Obsolete native termination encodings are rejected and cannot select an old
+renderer path.
 
 - [ ] Add red tests asserting pointer-up cannot change body dabs, endpoint
   retreat is at most 1 logical pixel for `.cap`, and correction limits reject
@@ -444,8 +472,9 @@ cannot be selected by a rebuilt professional definition.
   `BrushTerminationProgram`.
 - [ ] Delete the product-path call that reevaluates the complete stroke after
   total length becomes known.
-- [ ] Keep schema-v1 decode compatibility behind a named legacy adapter and
-  characterize its old pixels.
+- [ ] Record the required producer inventory and typed old-version rejection;
+  physical native-v1 deletion occurs at Task 14A after Stage D so it does not
+  overlap the atomic renderer cutover.
 - [ ] Run `swift test --filter 'Brush(Definition|DynamicsEngine|TerminationEvaluator)Tests'`.
 - [ ] Commit as `fix(brush): make stroke termination causal`.
 
@@ -475,8 +504,9 @@ renderable copy of the completed dab body.
 - [ ] Extract a sendable immutable `CompiledBrushRenderState` from the
   main-actor `CompiledBrush`; isolate immutable Metal references in one audited
   `@unchecked Sendable` resource holder if the SDK lacks conformances.
-- [ ] Route one compatibility ink brush through the coordinator while retaining
-  the old path behind a debug-only A/B switch.
+- [ ] Route one current native ink brush through the coordinator. Use any
+  temporary A/B oracle only within the cutover test, then delete the old path
+  and selector in the same accepted slice.
 - [ ] Remove ordinary actual-input calls to `rebuildReplayLayer` and equivalent
   retained-body encoding.
 - [ ] Run `swift test --filter 'StrokeRenderCoordinatorTests|TransientStrokeBufferTests|DepositionMetamorphicTests'`.
@@ -560,14 +590,14 @@ Accepted on 2026-08-02. See
 
 ## Stage C — Make Input, Dynamics, Direction, And Spacing Physically Coherent
 
-The original four tasks were too broad and left schema migration, filter math,
-corner semantics, candidate ordering, scheduler resumption, and compatibility
-under-specified. They are superseded by the C0 baseline freeze plus thirteen
+The original four tasks were too broad and left schema ownership, filter math,
+corner semantics, candidate ordering, and scheduler resumption under-specified.
+They are superseded by the C0 baseline freeze plus thirteen
 sequential implementation/acceptance tasks in
 [`2026-08-02-stage-c-physical-input-dynamics.md`](2026-08-02-stage-c-physical-input-dynamics.md).
 
-**Stage C exit:** C13 proves exact v1 preservation; deterministic schema-v2
-speed, sensor, stabilization, direction, corner, time, and footprint semantics;
+**Stage C exit:** C13 proved deterministic current-schema speed, sensor,
+stabilization, direction, corner, time, and footprint semantics;
 production scheduler lifecycle correctness; bounded work and allocations; a
 10-minute sustained trace; the broad regression baseline; and a fresh review
 with no unresolved Critical or Important issue.
@@ -680,8 +710,9 @@ encoded-sRGB interchange/export format.
 - [ ] Add pure model tests for add/delete/reorder/visibility/opacity/lock and
   active-layer fallback.
 - [ ] Add independent CPU/GPU blend differentials and transparent-edge tests.
-- [ ] Add project v1 import into a single v2 layer and deterministic v2 archive
-  round trips.
+- [ ] Add deterministic current-project schema-4 round trips and prove native
+  schemas 1, 2, 3, and unknown future versions fail typed before payload reads
+  or renderer allocation. Do not add a native migration path.
 - [ ] Add a 2048 x 2048 eight-layer residency test and fail if live GPU tile
   bytes exceed the configured budget.
 - [ ] Verify undo/redo targets the original layer ID after reorder.
@@ -692,11 +723,29 @@ encoded-sRGB interchange/export format.
 references, high precision no longer requires full-canvas per-layer textures,
 and eight-layer composition respects memory, history, export, and ordering.
 
+### Task 14A: Hard-Cut Native Brushes To Current Schema 2
+
+After Stage D acceptance and before Stage E, execute the dependency-ordered
+cutover in
+[`task-14a-current-native-brush-cutover-brief.md`](../../../.superpowers/sdd/2026-08-01-brush-engine-corrective-program/task-14a-current-native-brush-cutover-brief.md).
+Migrate every native producer, external-import mapper output, harness, and test
+factory to definition schema 2/package-manifest schema 2 first. Then delete
+native v1 DTOs, adapters, hashes, compiler/runtime/stabilizer/whole-stroke
+branches, retired aliases, compatibility fixtures/tests, repeated validation,
+and post-deletion source scanners. Procreate/Synthetic parsers and genuine
+resource/capability/ownership boundaries remain.
+
+Task 14A finishes with one current-route functional/performance gate and one
+scoped review. Task 15 may not begin before it is green.
+
 ---
 
 ## Stage E — Make Tip Resources And Backends Explicit
 
 ### Task 15: Compile Tip Support, Mips, And Reusable Procedural Masks
+
+**Dependency:** Task 14A is complete; all native brush inputs are trusted exact
+definition schema 2/package-manifest schema 2 values.
 
 **Files:**
 
@@ -767,7 +816,10 @@ path does not read texture bytes or allocate per pointer move.
 It maps `(BrushBackendKind, schemaVersion)` to a compiler and encoder family.
 Unknown kinds or versions fail package activation with a typed diagnostic.
 No runtime library loading, class-name lookup, or executable package code is
-allowed. Preset catalog aliases are data migration and remain separate.
+allowed. Retired native catalog aliases fail explicitly; only current IDs
+resolve.
+During Task 17 it registers only exact native definition schema 2; Task 18
+atomically replaces that registration with schema 3.
 
 - [ ] Add duplicate, unknown, version mismatch, deterministic-order, and
   backend-capability tests.
@@ -799,12 +851,15 @@ components. Each component retains independent coverage, placement, dynamics,
 color, material, taper, resources, and deterministic random namespace. This is
 different from the existing `dualShape` and `dualGrain` layers, which combine
 resources inside one dab and cannot represent independent sub-brush spacing or
-size. Schema version 2 remains the ordered multi-sensor format introduced by
-Task 9; version-1 and version-2 definitions decode as a single canonical
-component.
+size. Schema version 3 becomes the sole accepted native definition version in
+the same cutover; older native definitions fail instead of being adapted.
+The native package manifest remains exact current schema 2 because its wire
+layout does not change; the package validates that its definition payload is
+schema 3. Tasks 15 through 17 are prerequisites for this cutover.
 
-- [ ] Add schema-v1/v2 migration and prove established single-component package,
-  digest, dynamics, and raster anchors remain compatible.
+- [ ] Migrate every in-tree producer to schema 3, delete schema-v1/v2
+  decode/compile/hash branches, and prove current single-component and composite
+  semantic/raster anchors plus typed old-version rejection.
 - [ ] Drive component generators from the same authoritative input stream while
   preserving independent resampling and append-only output; never replay the
   retained stroke to produce the secondary component.
@@ -1008,8 +1063,9 @@ resource decoding, evidence generation, or frame-budget policy.
   product code.
 - [ ] Prove compile-time ownership by keeping `PatternEngine` independent and
   `MetalRendererDiagnostics -> MetalRenderer` one-way.
-- [ ] Run `swift test` and inspect `GridRenderer` for any remaining loop over a
-  completed live stroke during input or frame draw.
+- [ ] Run `swift test` and a production trace that proves input/frame CPU work is
+  independent of completed-stroke length and no completed-stroke replay loop is
+  reachable.
 - [ ] Commit as `refactor(render): finish stroke runtime split`.
 
 ### Task 25: Run The Cross-Family Functional Matrix
@@ -1182,7 +1238,7 @@ requires the final manual cards to pass. The criteria are:
 - [ ] Every stage has a runnable exit gate and a small commit boundary.
 - [ ] No task contains unfinished implementation markers, stub code, or a
   fabricated physical result.
-- [ ] A final reviewer checks schema-v1 compatibility, v2 dynamics migration,
-  v3 composite semantic hashing, PatternFile migration, strict concurrency,
-  color transfer count, memory budget, and product status language before
-  execution begins.
+- [ ] A final reviewer checks current-only native definition/package/hash and
+  PatternFile enforcement, typed old/future-version rejection, preservation of
+  external-import provenance/semantic refusal, strict concurrency, color
+  transfer count, memory budget, and product status language before execution.

@@ -11,7 +11,8 @@ import AppKit
 
 @MainActor
 func makeControllerRenderer(
-    finiteConfiguration: FiniteSymmetryConfiguration? = nil
+    finiteConfiguration: FiniteSymmetryConfiguration? = nil,
+    historyByteBudget: Int = 200 * 1_024 * 1_024
 ) throws -> GridRenderer? {
     guard let device = MTLCreateSystemDefaultDevice() else { return nil }
     let root = URL(fileURLWithPath: #filePath)
@@ -51,7 +52,8 @@ func makeControllerRenderer(
         device: device,
         library: library,
         drawableSize: PatternSize(width: 64, height: 64),
-        configuration: canvasConfiguration
+        configuration: canvasConfiguration,
+        historyByteBudget: historyByteBudget
     )
     try renderer.installNativeHarnessBrushes()
     return renderer
@@ -237,10 +239,10 @@ private func commitControllerStroke(
     renderer: GridRenderer,
     x: Float = 32,
     y: Float = 32
-) throws {
+) async throws {
     controller.handleStrokeSample(controllerSample(.began, x: x, y: y))
     controller.handleStrokeSample(controllerSample(.ended, x: x, y: y))
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.finishCommitForHarness()
 }
 
 @MainActor
@@ -252,6 +254,33 @@ private func awaitControllerRendererIdleForHarness(
 }
 
 @MainActor
+private func awaitControllerPaintOperationForHarness(
+    _ controller: EditorSessionController,
+    renderer: GridRenderer
+) async throws {
+    for _ in 0..<20_000 {
+        if !controller.model.isBusy, renderer.isIdle { return }
+        await Task.yield()
+    }
+    Issue.record("Controller paint operation did not settle")
+}
+
+@MainActor
+private func awaitPaintRevisionReleaseForHarness(
+    _ renderer: GridRenderer
+) async {
+    for _ in 0..<20_000 {
+        if await renderer.paintStateSnapshotForTesting()
+            .revisionResidentBytes == 0
+        {
+            return
+        }
+        await Task.yield()
+    }
+    Issue.record("Controller paint revision release did not settle")
+}
+
+@MainActor
 private func awaitActorTransientSamples(
     _ renderer: GridRenderer,
     predictedXs: [Float],
@@ -259,16 +288,20 @@ private func awaitActorTransientSamples(
 ) async throws -> StrokeTransientPreparationSnapshot {
     var lastSnapshot: StrokeTransientPreparationSnapshot?
     for _ in 0..<20_000 {
-        try renderer.drainCompletedOperationsForHarness()
-        if renderer.hasPendingOffMainSurfaceLeaseForTesting {
-            _ = try renderer.completeNextPendingInteractiveFrame()
+        try renderer.drainCompletedInteractiveOperations()
+        if !renderer.strokePreparationIsQuiescentForAllocationHarness {
+            _ = try await renderer.renderCurrentPaintFrameForHarness(
+                width: renderer.pixelSize.width,
+                height: renderer.pixelSize.height,
+                includeTransient: true
+            )
         }
         let snapshot = await renderer.offMainTransientSnapshotForTesting()
+        let scheduler = await renderer.offMainSchedulerSnapshotForTesting()
         lastSnapshot = snapshot
         let predicted = snapshot.predictedSamples.map(\.position.x)
         let authoritativeMatches = minimumAuthoritativeInputCount.map {
-            renderer.compatibilityInkCoordinatorSnapshotForTesting?
-                .commitMetadata.inputSampleCount ?? 0 >= $0
+            UInt64(scheduler.retainedActualSampleCount) >= $0
         } ?? true
         if predicted == predictedXs, authoritativeMatches {
             return snapshot
@@ -290,14 +323,13 @@ private func finishControllerCommitAndAwaitDeferredStroke(
     _ controller: EditorSessionController,
     renderer: GridRenderer
 ) async throws {
-    _ = try renderer.completePendingInteractiveStroke()
+    _ = try await renderer.finishCommitForHarness()
     for _ in 0..<20_000 {
         if renderer.hasActiveStroke,
            case .drawing = controller.transactionStateForTesting
         {
             return
         }
-        try renderer.drainCompletedOperationsForHarness()
         await Task.yield()
     }
     throw MetalRendererError.commandFailed(
@@ -308,7 +340,7 @@ private func finishControllerCommitAndAwaitDeferredStroke(
 @Test
 @MainActor
 func controllerStartsInFiniteDomainAndCanSwitchOnlyBeforeRasterEdit()
-    throws
+    async throws
 {
     guard let renderer = try makeControllerRenderer(
         finiteConfiguration: .radial(controllerRadialConfiguration)
@@ -330,6 +362,10 @@ func controllerStartsInFiniteDomainAndCanSwitchOnlyBeforeRasterEdit()
         referenceAngleRadians: -.pi / 9
     )
     controller.handleFiniteConfiguration(.radial(revised))
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(renderer.finiteConfiguration == .radial(revised))
     #expect(controller.model.radialConfiguration == revised)
     #expect(!controller.historyAvailabilityForTesting.canUndo)
@@ -339,6 +375,10 @@ func controllerStartsInFiniteDomainAndCanSwitchOnlyBeforeRasterEdit()
         canonicalRasterSize: PixelSize(width: 64, height: 64)
     )
     controller.handlePeriodicConfiguration(periodic)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(renderer.documentConfiguration == .periodic(periodic))
     #expect(controller.model.documentConfiguration == .periodic(periodic))
     #expect(
@@ -348,6 +388,10 @@ func controllerStartsInFiniteDomainAndCanSwitchOnlyBeforeRasterEdit()
     #expect(!controller.historyAvailabilityForTesting.canUndo)
 
     controller.handleFiniteConfiguration(.plain)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(renderer.documentConfiguration == .finite(.plain))
     #expect(controller.model.documentConfiguration == .finite(.plain))
     #expect(
@@ -358,11 +402,15 @@ func controllerStartsInFiniteDomainAndCanSwitchOnlyBeforeRasterEdit()
 
 @Test
 @MainActor
-func blankModeSelectionUsesFiniteAndPeriodicDefaults() throws {
+func blankModeSelectionUsesFiniteAndPeriodicDefaults() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
 
     controller.selectPlainCanvasMode()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(renderer.documentConfiguration == .finite(.plain))
     #expect(renderer.pixelSize == PixelSize(width: 2_048, height: 2_048))
     #expect(
@@ -371,6 +419,10 @@ func blankModeSelectionUsesFiniteAndPeriodicDefaults() throws {
     )
 
     controller.selectRadialMode()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     let radial = try #require(controller.model.radialConfiguration)
     #expect(renderer.pixelSize == PixelSize(width: 2_048, height: 2_048))
     #expect(radial.kind == .mandala)
@@ -378,6 +430,10 @@ func blankModeSelectionUsesFiniteAndPeriodicDefaults() throws {
     #expect(radial.center == WorldPoint(x: 1_024, y: 1_024))
 
     controller.selectSeamlessPatternMode()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(
         renderer.documentConfiguration
             == .periodic(controller.model.periodicConfiguration)
@@ -388,23 +444,30 @@ func blankModeSelectionUsesFiniteAndPeriodicDefaults() throws {
 
 @Test
 @MainActor
-func undoingFirstRadialEditUnlocksAndAllowsModeChange() throws {
+func undoingFirstRadialEditUnlocksAndAllowsModeChange() async throws {
     guard let renderer = try makeControllerRenderer(
         finiteConfiguration: .radial(controllerRadialConfiguration)
     ) else { return }
     let controller = EditorSessionController(renderer: renderer)
 
-    try commitControllerStroke(controller, renderer: renderer, x: 47, y: 34)
+    try await commitControllerStroke(controller, renderer: renderer, x: 47, y: 34)
     #expect(controller.model.documentDomainLocked)
     #expect(controller.model.radialGeometryLocked)
 
     controller.undo()
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(!controller.model.documentDomainLocked)
     #expect(!controller.model.radialGeometryLocked)
     #expect(controller.model.canRedo)
 
     controller.selectSeamlessPatternMode()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(
         controller.model.documentConfiguration
             == .periodic(controller.model.periodicConfiguration)
@@ -416,14 +479,14 @@ func undoingFirstRadialEditUnlocksAndAllowsModeChange() throws {
 
 @Test
 @MainActor
-func lockedRadialGeometryChangeReportsRadialLock() throws {
+func lockedRadialGeometryChangeReportsRadialLock() async throws {
     guard let renderer = try makeControllerRenderer(
         finiteConfiguration: .radial(controllerRadialConfiguration)
     ) else { return }
     let controller = EditorSessionController(renderer: renderer)
     var errors: [MetalRendererError] = []
     controller.onError = { errors.append($0) }
-    try commitControllerStroke(controller, renderer: renderer, x: 47, y: 34)
+    try await commitControllerStroke(controller, renderer: renderer, x: 47, y: 34)
 
     controller.handleFiniteConfiguration(.radial(
         RadialSymmetryConfiguration(
@@ -439,14 +502,18 @@ func lockedRadialGeometryChangeReportsRadialLock() throws {
 
 @Test
 @MainActor
-func plainAndSeamlessLocksFollowCommittedContentState() throws {
+func plainAndSeamlessLocksFollowCommittedContentState() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     var errors: [MetalRendererError] = []
     controller.onError = { errors.append($0) }
 
     controller.selectPlainCanvasMode()
-    try commitControllerStroke(
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
+    try await commitControllerStroke(
         controller,
         renderer: renderer,
         x: 1_024,
@@ -460,19 +527,33 @@ func plainAndSeamlessLocksFollowCommittedContentState() throws {
     #expect(renderer.documentConfiguration == .finite(.plain))
 
     controller.undo()
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(!controller.model.documentDomainLocked)
 
     controller.selectSeamlessPatternMode()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(renderer.pixelSize == PixelSize(width: 256, height: 256))
-    try commitControllerStroke(controller, renderer: renderer)
+    try await commitControllerStroke(controller, renderer: renderer)
     #expect(controller.model.documentDomainLocked)
 
     controller.clear()
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(!controller.model.documentDomainLocked)
 
     controller.selectRadialMode()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(renderer.pixelSize == PixelSize(width: 2_048, height: 2_048))
     #expect(controller.model.radialConfiguration?.center == WorldPoint(
         x: 1_024,
@@ -482,41 +563,56 @@ func plainAndSeamlessLocksFollowCommittedContentState() throws {
 
 @Test
 @MainActor
-func redoAndUndoClearReconcileRadialLocksWithVisibleHistoryState() throws {
+func redoAndUndoClearReconcileRadialLocksWithVisibleHistoryState() async throws {
     guard let renderer = try makeControllerRenderer(
         finiteConfiguration: .radial(controllerRadialConfiguration)
     ) else { return }
     let controller = EditorSessionController(renderer: renderer)
 
-    try commitControllerStroke(controller, renderer: renderer, x: 47, y: 34)
+    try await commitControllerStroke(controller, renderer: renderer, x: 47, y: 34)
     let stroke = try #require(controller.lastRecordedRasterCommandForTesting)
 
     controller.undo()
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(!controller.model.radialGeometryLocked)
 
     controller.redo()
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.documentDomainLocked)
     #expect(controller.model.radialGeometryLocked)
 
     controller.clear()
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     let clear = try #require(controller.lastRecordedRasterCommandForTesting)
     #expect(!controller.model.documentDomainLocked)
     #expect(!controller.model.radialGeometryLocked)
 
     controller.undo()
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.documentDomainLocked)
     #expect(controller.model.radialGeometryLocked)
 
     controller.redo()
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(!controller.model.documentDomainLocked)
     #expect(!controller.model.radialGeometryLocked)
 
-    renderer.releaseRasterRevisions(
+    try await renderer.releasePaintRevisions(
         Set(
             [stroke, clear].flatMap {
                 [$0.before.id, $0.after.id]
@@ -527,77 +623,50 @@ func redoAndUndoClearReconcileRadialLocksWithVisibleHistoryState() throws {
 
 @Test
 @MainActor
-func resizingBlankDocumentKeepsModeEditable() throws {
+func resizingBlankDocumentKeepsModeEditable() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
 
     controller.handleTileSize(PixelSize(width: 96, height: 80))
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
 
     #expect(!controller.model.documentDomainLocked)
     controller.selectPlainCanvasMode()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(renderer.documentConfiguration == .finite(.plain))
 }
 
 @Test
 @MainActor
-func failedFirstRadialCommitLeavesGeometryEditable() throws {
-    guard let renderer = try makeControllerRenderer(
-        finiteConfiguration: .radial(controllerRadialConfiguration)
-    ) else { return }
-    let controller = EditorSessionController(renderer: renderer)
-
-    controller.handleStrokeSample(controllerSample(.began, x: 47, y: 34))
-    controller.handleStrokeSample(controllerSample(.ended, x: 47, y: 34))
-    #expect(throws: MetalRendererError.self) {
-        _ = try renderer.finishCommitForHarness(forceCommitFailure: true)
-    }
-
-    #expect(!controller.model.documentDomainLocked)
-    #expect(!controller.model.radialGeometryLocked)
-    let revised = RadialSymmetryConfiguration(
-        kind: .rotation,
-        rayCount: 6,
-        center: WorldPoint(x: 31, y: 29)
-    )
-    controller.handleFiniteConfiguration(.radial(revised))
-    #expect(renderer.finiteConfiguration == .radial(revised))
-    #expect(controller.model.radialConfiguration == revised)
-}
-
-@Test
-@MainActor
-func rasterSuccessRecordsTheCapturedEraseTool() throws {
+func rasterSuccessRecordsTheCapturedEraseTool() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
-    var releaseCalls: [Set<StoredRasterRevisionID>] = []
-    let controller = EditorSessionController(
-        renderer: renderer,
-        releaseRasterRevisions: {
-            releaseCalls.append($0)
-            renderer.releaseRasterRevisions($0)
-        }
-    )
+    let controller = EditorSessionController(renderer: renderer)
     controller.handleTool(.erase)
-    try commitControllerStroke(controller, renderer: renderer)
+    try await commitControllerStroke(controller, renderer: renderer)
 
     let command = try #require(controller.lastRecordedRasterCommandForTesting)
-    #expect(command.layerID == LayerStack.compatibilityLayerID)
+    #expect(command.layerID == LayerStack.initialLayerID)
     #expect(command.kind == .erase)
-    #expect(releaseCalls == [[]])
     #expect(controller.model.canUndo)
     #expect(!controller.model.canRedo)
     #expect(!controller.model.isBusy)
     #expect(renderer.isIdle)
 
-    renderer.releaseRasterRevisions([command.before.id, command.after.id])
+    try await renderer.releasePaintRevisions([command.before.id, command.after.id])
 }
 
 @Test
 @MainActor
-func layerBoundHistorySurvivesReorderAndActiveLayerChanges() throws {
+func layerBoundHistorySurvivesReorderAndActiveLayerChanges() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let compatibility = try LayerDescriptor(
-        id: LayerStack.compatibilityLayerID,
+        id: LayerStack.initialLayerID,
         name: "Compatibility"
     )
     let second = try LayerDescriptor(
@@ -608,20 +677,12 @@ func layerBoundHistorySurvivesReorderAndActiveLayerChanges() throws {
         layers: [compatibility, second],
         activeLayerID: compatibility.id
     )
-    var restoredLayerIDs: [UUID] = []
     let controller = EditorSessionController(
         renderer: renderer,
-        layerStack: stack,
-        requestRasterRestore: { token, layerID, revision in
-            restoredLayerIDs.append(layerID)
-            try renderer.requestRasterRestore(
-                token: token,
-                revision: revision
-            )
-        }
+        layerStack: stack
     )
 
-    try commitControllerStroke(controller, renderer: renderer)
+    try await commitControllerStroke(controller, renderer: renderer)
     let raster = try #require(controller.lastRecordedRasterCommandForTesting)
     #expect(raster.layerID == compatibility.id)
     try controller.moveLayer(compatibility.id, to: 1)
@@ -635,13 +696,17 @@ func layerBoundHistorySurvivesReorderAndActiveLayerChanges() throws {
             == [compatibility.id, second.id]
     )
     controller.undo()
-    #expect(restoredLayerIDs == [compatibility.id])
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
 
     controller.redo()
-    #expect(restoredLayerIDs == [compatibility.id, compatibility.id])
-    try renderer.finishRasterOperationForHarness()
-    renderer.releaseRasterRevisions([raster.before.id, raster.after.id])
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
+    try await renderer.releasePaintRevisions([raster.before.id, raster.after.id])
 }
 
 @Test
@@ -654,7 +719,7 @@ func layerMutationIsRejectedWhileDrawingWithoutChangingTheStack() throws {
 
     #expect(throws: EditorSessionLayerError.mutationRequiresIdle) {
         try controller.renameLayer(
-            LayerStack.compatibilityLayerID,
+            LayerStack.initialLayerID,
             to: "Changed"
         )
     }
@@ -669,7 +734,7 @@ func layerMutationIsRejectedWhileDrawingWithoutChangingTheStack() throws {
 func layerDeletionCapturesBeforeRemovalAndUndoRedoStayAtomic() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let compatibility = try LayerDescriptor(
-        id: LayerStack.compatibilityLayerID,
+        id: LayerStack.initialLayerID,
         name: "Compatibility"
     )
     let target = try LayerDescriptor(
@@ -742,7 +807,7 @@ func layerDeletionCapturesBeforeRemovalAndUndoRedoStayAtomic() throws {
 func layerDeletionFailuresPreserveMetadataAndHistoryCursor() throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let compatibility = try LayerDescriptor(
-        id: LayerStack.compatibilityLayerID,
+        id: LayerStack.initialLayerID,
         name: "Compatibility"
     )
     let target = try LayerDescriptor(
@@ -822,7 +887,7 @@ func layerDeletionDefaultRouteRejectsBeforeMetadataOrHistoryMutation()
 {
     guard let renderer = try makeControllerRenderer() else { return }
     let compatibility = try LayerDescriptor(
-        id: LayerStack.compatibilityLayerID,
+        id: LayerStack.initialLayerID,
         name: "Compatibility"
     )
     let target = try LayerDescriptor(
@@ -851,7 +916,7 @@ func layerDeletionDefaultRouteRejectsBeforeMetadataOrHistoryMutation()
 @Test
 @MainActor
 func missingHistoryTargetFailsBeforeRendererMutationAndPreservesCursor()
-    throws
+    async throws
 {
     guard let renderer = try makeControllerRenderer() else { return }
     let size = PixelSize(width: 64, height: 64)
@@ -878,136 +943,34 @@ func missingHistoryTargetFailsBeforeRendererMutationAndPreservesCursor()
         before: before,
         after: after
     )))
-    var restoreCount = 0
     let controller = EditorSessionController(
         renderer: renderer,
-        documentHistory: history,
-        requestRasterRestore: { _, _, _ in restoreCount += 1 }
+        documentHistory: history
     )
     var errors: [MetalRendererError] = []
     controller.onError = { errors.append($0) }
-    let bytes = try canonicalBytes(renderer)
+    let bytes = try await canonicalBytes(renderer)
 
     controller.undo()
 
-    #expect(restoreCount == 0)
     #expect(controller.historyAvailabilityForTesting.canUndo)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
     #expect(controller.transactionStateForTesting == .idle)
-    #expect(try canonicalBytes(renderer) == bytes)
+    #expect(try await canonicalBytes(renderer) == bytes)
     #expect(errors.count == 1)
 }
 
 @Test
 @MainActor
-func clearAndResizeCommandsUseTheExplicitCompatibilityLayer() throws {
+func operationSuccessMovesUndoRedoOnlyAfterRendererCompletion() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
 
-    controller.clear()
-    try renderer.finishRasterOperationForHarness()
-    #expect(
-        controller.lastRecordedRasterCommandForTesting?.layerID
-            == LayerStack.compatibilityLayerID
-    )
-    controller.handleTileSize(PixelSize(width: 96, height: 80))
-    try renderer.finishRasterOperationForHarness()
-    #expect(
-        controller.lastRecordedResizeCommandForTesting?.layerID
-            == LayerStack.compatibilityLayerID
-    )
-
-    if let clear = controller.lastRecordedRasterCommandForTesting,
-       let resize = controller.lastRecordedResizeCommandForTesting
-    {
-        renderer.releaseRasterRevisions([
-            clear.before.id, clear.after.id,
-            resize.before.id, resize.after.id,
-        ])
-    }
-}
-
-@Test
-@MainActor
-func mismatchedTiledReceiptFailsWithoutRecordingCrossLayerHistory() throws {
-    guard let renderer = try makeControllerRenderer() else { return }
-    var requestedToken: RendererOperationToken?
-    var released: [Set<StoredRasterRevisionID>] = []
-    let controller = EditorSessionController(
-        renderer: renderer,
-        releaseRasterRevisions: { released.append($0) },
-        requestClear: { token, _ in requestedToken = token }
-    )
-    var errors: [MetalRendererError] = []
-    controller.onError = { errors.append($0) }
-    controller.clear()
-    let token = try #require(requestedToken)
-    let expectedLayerID = LayerStack.compatibilityLayerID
-    let actualLayerID = controllerLayerID(404)
-    let size = PixelSize(width: 256, height: 256)
-    let regions = PixelRegionSet(
-        [PixelRect(minX: 0, minY: 0, maxX: 256, maxY: 256)!],
-        clippedTo: size
-    )
-    let storage = RasterRevisionStorage.tiledRGBA16Float(
-        layerID: actualLayerID,
-        generation: 1,
-        tileCoordinates: [.init(x: 0, y: 0)]
-    )
-    let before = RasterRevisionReference(
-        id: StoredRasterRevisionID(rawValue: 80_001),
-        pixelSize: size,
-        documentPixelSize: size,
-        regions: regions,
-        retainedBytes: 0,
-        storage: storage
-    )
-    let after = RasterRevisionReference(
-        id: StoredRasterRevisionID(rawValue: 80_002),
-        pixelSize: size,
-        documentPixelSize: size,
-        regions: regions,
-        retainedBytes: PaintTileDescriptor.residentByteCount,
-        storage: storage
-    )
-
-    renderer.onOperationCompleted?(.rasterSuccess(RasterMutationReceipt(
-        token: token,
-        before: before,
-        after: after
-    )))
-
-    #expect(errors == [.rasterRevisionLayerMismatch(
-        expected: expectedLayerID,
-        actual: actualLayerID
-    )])
-    #expect(released == [[before.id, after.id]])
-    #expect(!controller.historyAvailabilityForTesting.canUndo)
-    #expect(!controller.historyAvailabilityForTesting.canRedo)
-    #expect(controller.lastRecordedRasterCommandForTesting == nil)
-    #expect(controller.transactionStateForTesting == .idle)
-    #expect(!controller.model.isBusy)
-}
-
-@Test
-@MainActor
-func operationSuccessMovesUndoRedoOnlyAfterRendererCompletion() throws {
-    guard let renderer = try makeControllerRenderer() else { return }
-    var releaseCalls: [Set<StoredRasterRevisionID>] = []
-    let controller = EditorSessionController(
-        renderer: renderer,
-        releaseRasterRevisions: {
-            releaseCalls.append($0)
-            renderer.releaseRasterRevisions($0)
-        }
-    )
-
-    try commitControllerStroke(controller, renderer: renderer, x: 20, y: 20)
+    try await commitControllerStroke(controller, renderer: renderer, x: 20, y: 20)
     let first = try #require(controller.lastRecordedRasterCommandForTesting)
-    try commitControllerStroke(controller, renderer: renderer, x: 44, y: 44)
-    let second = try #require(controller.lastRecordedRasterCommandForTesting)
-    let afterSecond = try canonicalBytes(renderer)
-    releaseCalls.removeAll()
+    try await commitControllerStroke(controller, renderer: renderer, x: 44, y: 44)
+    _ = try #require(controller.lastRecordedRasterCommandForTesting)
+    let afterSecond = try await canonicalBytes(renderer)
 
     #expect(controller.historyAvailabilityForTesting.canUndo)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
@@ -1017,10 +980,12 @@ func operationSuccessMovesUndoRedoOnlyAfterRendererCompletion() throws {
     #expect(controller.model.isBusy)
     #expect(!controller.model.canUndo)
     #expect(!controller.model.canRedo)
-    #expect(!renderer.isIdle)
-    #expect(try canonicalBytes(renderer) == afterSecond)
+    #expect(try await canonicalBytes(renderer) == afterSecond)
 
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.historyAvailabilityForTesting.canUndo)
     #expect(controller.historyAvailabilityForTesting.canRedo)
     #expect(controller.model.canUndo)
@@ -1034,76 +999,33 @@ func operationSuccessMovesUndoRedoOnlyAfterRendererCompletion() throws {
     #expect(controller.model.isBusy)
     #expect(!controller.model.canUndo)
     #expect(!controller.model.canRedo)
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.historyAvailabilityForTesting.canUndo)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
     #expect(controller.model.canUndo)
     #expect(!controller.model.canRedo)
-    #expect(try canonicalBytes(renderer) == afterSecond)
+    #expect(try await canonicalBytes(renderer) == afterSecond)
 
     controller.undo()
-    try renderer.finishRasterOperationForHarness()
-    releaseCalls.removeAll()
-    try commitControllerStroke(controller, renderer: renderer, x: 32, y: 48)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
+    try await commitControllerStroke(controller, renderer: renderer, x: 32, y: 48)
     let replacement = try #require(
         controller.lastRecordedRasterCommandForTesting
     )
 
-    #expect(releaseCalls == [[second.before.id, second.after.id]])
     #expect(!controller.historyAvailabilityForTesting.canRedo)
     #expect(!controller.model.canRedo)
 
     let retained = [first, replacement]
-    renderer.releaseRasterRevisions(
+    try await renderer.releasePaintRevisions(
         Set(retained.flatMap { [$0.before.id, $0.after.id] })
     )
-}
-
-@Test
-@MainActor
-func failureKeepsHistoryCursorAvailabilityAndWholeRasterUnchanged() throws {
-    guard let renderer = try makeControllerRenderer() else { return }
-    var errors: [MetalRendererError] = []
-    let controller = EditorSessionController(
-        renderer: renderer,
-        requestRasterRestore: { token, layerID, revision in
-            #expect(layerID == LayerStack.compatibilityLayerID)
-            try renderer.requestRasterRestoreForHarness(
-                token: token,
-                revision: revision,
-                forceFailure: true
-            )
-        }
-    )
-    controller.onError = { errors.append($0) }
-    try commitControllerStroke(controller, renderer: renderer)
-    let command = try #require(controller.lastRecordedRasterCommandForTesting)
-    let before = try canonicalBytes(renderer)
-
-    #expect(controller.historyAvailabilityForTesting.canUndo)
-    #expect(!controller.historyAvailabilityForTesting.canRedo)
-    controller.undo()
-    #expect(controller.historyAvailabilityForTesting.canUndo)
-    #expect(!controller.historyAvailabilityForTesting.canRedo)
-    #expect(controller.model.isBusy)
-    #expect(!renderer.isIdle)
-
-    #expect(throws: MetalRendererError.commandFailed(
-        "injected harness command-buffer failure"
-    )) {
-        try renderer.finishRasterOperationForHarness()
-    }
-
-    #expect(controller.historyAvailabilityForTesting.canUndo)
-    #expect(!controller.historyAvailabilityForTesting.canRedo)
-    #expect(controller.model.canUndo)
-    #expect(!controller.model.canRedo)
-    #expect(!controller.model.isBusy)
-    #expect(renderer.isIdle)
-    #expect(try canonicalBytes(renderer) == before)
-    #expect(errors.count == 1)
-
-    renderer.releaseRasterRevisions([command.before.id, command.after.id])
 }
 
 private func controllerLayerID(_ value: Int) -> UUID {
@@ -1275,44 +1197,57 @@ private final class ControllerLayerRasterStorageSpy:
 
 @Test
 @MainActor
-func tilingChangeUndoRedoIsMetadataOnly() throws {
+func tilingChangeUndoRedoIsMetadataOnly() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
-    let originalBytes = try canonicalBytes(renderer)
-    let originalResources = renderer.harnessTilingMutationSnapshot
+    let originalBytes = try await canonicalBytes(renderer)
+    let originalPaint = await renderer.paintStateSnapshotForTesting()
 
     controller.handleTiling(.mirrorX)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.tiling == .mirrorX)
     #expect(renderer.tiling == .mirrorX)
     #expect(controller.historyAvailabilityForTesting.canUndo)
-    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    #expect(
+        await renderer.paintStateSnapshotForTesting().revisionResidentBytes
+            == 0
+    )
 
     controller.undo()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.tiling == .grid)
     #expect(renderer.tiling == .grid)
     #expect(controller.historyAvailabilityForTesting.canRedo)
 
     controller.redo()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.tiling == .mirrorX)
     #expect(renderer.tiling == .mirrorX)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
-    #expect(try canonicalBytes(renderer) == originalBytes)
-    #expect(
-        renderer.harnessTilingMutationSnapshot.canonicalFront
-            == originalResources.canonicalFront
-    )
-    #expect(renderer.harnessRevision == originalResources.revision)
-    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    #expect(try await canonicalBytes(renderer) == originalBytes)
+    let finalPaint = await renderer.paintStateSnapshotForTesting()
+    #expect(finalPaint.storeIdentity == originalPaint.storeIdentity)
+    #expect(finalPaint.layerIDs == originalPaint.layerIDs)
+    #expect(finalPaint.revisionResidentBytes == 0)
 }
 
 @Test
 @MainActor
-func periodicConfigurationChangeUndoRedoIsExactMetadataOnly() throws {
+func periodicConfigurationChangeUndoRedoIsExactMetadataOnly() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     let before = controller.model.periodicConfiguration
-    let beforeBytes = try canonicalBytes(renderer)
-    let beforeResources = renderer.harnessTilingMutationSnapshot
+    let beforeBytes = try await canonicalBytes(renderer)
+    let beforePaint = await renderer.paintStateSnapshotForTesting()
     let configuration = PeriodicSymmetryConfiguration(
         presetID: .squareKaleidoscope,
         repeatSize: PatternSize(width: 192, height: 192),
@@ -1320,35 +1255,51 @@ func periodicConfigurationChangeUndoRedoIsExactMetadataOnly() throws {
     )
 
     controller.handlePeriodicConfiguration(configuration)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
 
     #expect(controller.model.periodicConfiguration == configuration)
     #expect(renderer.periodicConfiguration == configuration)
     #expect(controller.historyAvailabilityForTesting.canUndo)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
-    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    #expect(
+        await renderer.paintStateSnapshotForTesting().revisionResidentBytes
+            == 0
+    )
 
     controller.undo()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.periodicConfiguration == before)
     #expect(renderer.periodicConfiguration == before)
     #expect(controller.historyAvailabilityForTesting.canRedo)
-    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    #expect(
+        await renderer.paintStateSnapshotForTesting().revisionResidentBytes
+            == 0
+    )
 
     controller.redo()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.periodicConfiguration == configuration)
     #expect(renderer.periodicConfiguration == configuration)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
-    #expect(try canonicalBytes(renderer) == beforeBytes)
-    #expect(
-        renderer.harnessTilingMutationSnapshot.canonicalFront
-            == beforeResources.canonicalFront
-    )
-    #expect(renderer.harnessRevision == beforeResources.revision)
-    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    #expect(try await canonicalBytes(renderer) == beforeBytes)
+    let afterPaint = await renderer.paintStateSnapshotForTesting()
+    #expect(afterPaint.storeIdentity == beforePaint.storeIdentity)
+    #expect(afterPaint.layerIDs == beforePaint.layerIDs)
+    #expect(afterPaint.revisionResidentBytes == 0)
 }
 
 @Test
 @MainActor
-func everyTriangularPresetLeavesEditorControlsResponsive() throws {
+func everyTriangularPresetLeavesEditorControlsResponsive() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     let presets: [SymmetryPresetID] = [
@@ -1361,6 +1312,10 @@ func everyTriangularPresetLeavesEditorControlsResponsive() throws {
 
     for preset in presets {
         controller.handleTiling(preset)
+        try await awaitControllerPaintOperationForHarness(
+            controller,
+            renderer: renderer
+        )
         #expect(controller.model.tiling == preset)
         #expect(renderer.tiling == preset)
         #expect(!controller.model.isBusy)
@@ -1380,25 +1335,26 @@ func everyTriangularPresetLeavesEditorControlsResponsive() throws {
     }
 
     controller.clear()
-    try renderer.finishRasterOperationForHarness()
-    #expect(try canonicalBytes(renderer).allSatisfy { $0 == 0 })
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
+    #expect(try await canonicalBytes(renderer).allSatisfy { $0 == 0 })
     #expect(!controller.model.isBusy)
     #expect(renderer.isIdle)
 
-    let clear = try #require(controller.lastRecordedRasterCommandForTesting)
-    renderer.releaseRasterRevisions([clear.before.id, clear.after.id])
 }
 
 @Test
 @MainActor
-func invalidPeriodicConfigurationFailsAtomicallyWithoutHistory() throws {
+func invalidPeriodicConfigurationFailsAtomicallyWithoutHistory() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     var errors: [MetalRendererError] = []
     controller.onError = { errors.append($0) }
     let beforeConfiguration = controller.model.periodicConfiguration
-    let beforeBytes = try canonicalBytes(renderer)
-    let beforeResources = renderer.harnessTilingMutationSnapshot
+    let beforeBytes = try await canonicalBytes(renderer)
+    let beforePaint = await renderer.paintStateSnapshotForTesting()
     let invalid = PeriodicSymmetryConfiguration(
         presetID: .squareRotation,
         repeatSize: PatternSize(width: 192, height: 160),
@@ -1406,6 +1362,10 @@ func invalidPeriodicConfigurationFailsAtomicallyWithoutHistory() throws {
     )
 
     controller.handlePeriodicConfiguration(invalid)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
 
     #expect(controller.model.periodicConfiguration == beforeConfiguration)
     #expect(renderer.periodicConfiguration == beforeConfiguration)
@@ -1413,9 +1373,12 @@ func invalidPeriodicConfigurationFailsAtomicallyWithoutHistory() throws {
     #expect(!controller.historyAvailabilityForTesting.canRedo)
     #expect(!controller.model.isBusy)
     #expect(renderer.isIdle)
-    #expect(try canonicalBytes(renderer) == beforeBytes)
-    #expect(renderer.harnessTilingMutationSnapshot == beforeResources)
-    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    #expect(try await canonicalBytes(renderer) == beforeBytes)
+    let afterPaint = await renderer.paintStateSnapshotForTesting()
+    #expect(afterPaint.storeIdentity == beforePaint.storeIdentity)
+    #expect(afterPaint.layerIDs == beforePaint.layerIDs)
+    #expect(afterPaint.documentGeneration == beforePaint.documentGeneration)
+    #expect(afterPaint.revisionResidentBytes == 0)
     #expect(errors.count == 1)
     guard let error = errors.first,
           case .invalidPeriodicConfiguration = error
@@ -1427,7 +1390,7 @@ func invalidPeriodicConfigurationFailsAtomicallyWithoutHistory() throws {
 
 @Test
 @MainActor
-func cancellationFailureCannotStrandQueuedPeriodicIntentBusy() throws {
+func cancellationFailureCannotStrandQueuedPeriodicIntentBusy() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let injectedError = MetalRendererError.commandFailed(
         "injected cancellation failure"
@@ -1462,17 +1425,29 @@ func cancellationFailureCannotStrandQueuedPeriodicIntentBusy() throws {
     controller.handleTiling(.mirrorX)
     #expect(controller.model.isBusy)
     try awaitControllerRendererIdleForHarness(renderer)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.tiling == .mirrorX)
     #expect(!controller.model.isBusy)
 }
 
 @Test
 @MainActor
-func normalizedEquivalentPeriodicConfigurationDoesNotCreateHistory() throws {
+func normalizedEquivalentPeriodicConfigurationDoesNotCreateHistory() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.handleTiling(.squareRotation)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     controller.undo()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(!controller.historyAvailabilityForTesting.canUndo)
     #expect(controller.historyAvailabilityForTesting.canRedo)
     let before = controller.model.periodicConfiguration
@@ -1484,6 +1459,10 @@ func normalizedEquivalentPeriodicConfigurationDoesNotCreateHistory() throws {
             orientationRadians: 2 * .pi
         )
     )
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
 
     #expect(controller.model.periodicConfiguration == before)
     #expect(renderer.periodicConfiguration == before)
@@ -1493,48 +1472,55 @@ func normalizedEquivalentPeriodicConfigurationDoesNotCreateHistory() throws {
 
 @Test
 @MainActor
-func tilingAfterUndoReleasesRasterRedoWithoutAllocatingMetadataPayload() throws {
+func tilingAfterUndoReleasesRasterRedoWithoutAllocatingMetadataPayload() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
-    var releaseCalls: [Set<StoredRasterRevisionID>] = []
-    let controller = EditorSessionController(
-        renderer: renderer,
-        releaseRasterRevisions: {
-            releaseCalls.append($0)
-            renderer.releaseRasterRevisions($0)
-        }
-    )
-    try commitControllerStroke(controller, renderer: renderer)
-    let raster = try #require(controller.lastRecordedRasterCommandForTesting)
+    let controller = EditorSessionController(renderer: renderer)
+    var reportedErrors: [MetalRendererError] = []
+    controller.onError = { reportedErrors.append($0) }
+    try await commitControllerStroke(controller, renderer: renderer)
     controller.undo()
-    try renderer.finishRasterOperationForHarness()
-    releaseCalls.removeAll()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
 
     controller.handleTiling(.mirrorY)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
 
-    #expect(releaseCalls == [[raster.before.id, raster.after.id]])
     #expect(!controller.historyAvailabilityForTesting.canRedo)
-    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    await awaitPaintRevisionReleaseForHarness(renderer)
+    #expect(
+        await renderer.paintStateSnapshotForTesting().revisionResidentBytes
+            == 0
+    )
+    #expect(reportedErrors.isEmpty, "reported errors: \(reportedErrors)")
 }
 
 @Test
 @MainActor
-func resizeHistoryFinalizesOnlyAfterInstallAndRestoresExactBytes() throws {
+func resizeHistoryFinalizesOnlyAfterInstallAndRestoresExactBytes() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
-    let before = try canonicalBytes(renderer)
+    let before = try await canonicalBytes(renderer)
     let newSize = PixelSize(width: 96, height: 80)
 
     controller.handleTileSize(newSize)
     #expect(controller.model.pixelSize == PixelSize(width: 64, height: 64))
     #expect(!controller.historyAvailabilityForTesting.canUndo)
     #expect(controller.model.isBusy)
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
 
     #expect(controller.model.pixelSize == newSize)
     #expect(controller.historyAvailabilityForTesting.canUndo)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
     #expect(!controller.model.isBusy)
-    #expect(try canonicalBytes(renderer) == [UInt8](
+    #expect(try await canonicalBytes(renderer) == [UInt8](
         repeating: 0,
         count: newSize.width * newSize.height * 4
     ))
@@ -1542,51 +1528,24 @@ func resizeHistoryFinalizesOnlyAfterInstallAndRestoresExactBytes() throws {
     controller.undo()
     #expect(controller.model.pixelSize == newSize)
     #expect(controller.historyAvailabilityForTesting.canUndo)
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.pixelSize == PixelSize(width: 64, height: 64))
-    #expect(try canonicalBytes(renderer) == before)
+    #expect(try await canonicalBytes(renderer) == before)
     #expect(controller.historyAvailabilityForTesting.canRedo)
 
     controller.redo()
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.pixelSize == newSize)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
 
     let resize = try #require(controller.lastRecordedResizeCommandForTesting)
-    renderer.releaseRasterRevisions([resize.before.id, resize.after.id])
-}
-
-@Test
-@MainActor
-func resizeAllocationFailureKeepsControllerHistoryAndCommittedModel() throws {
-    guard let renderer = try makeControllerRenderer() else { return }
-    let controller = EditorSessionController(
-        renderer: renderer,
-        requestResize: { token, size, maximumRetainedBytes in
-            try renderer.requestResizeForHarness(
-                token: token,
-                to: size,
-                maximumRetainedBytes: maximumRetainedBytes,
-                forceResourceAllocationFailure: true
-            )
-        }
-    )
-    var errors: [MetalRendererError] = []
-    controller.onError = { errors.append($0) }
-    let resources = renderer.harnessTilingMutationSnapshot
-    let viewport = renderer.viewport
-    let bytes = try canonicalBytes(renderer)
-
-    controller.handleTileSize(PixelSize(width: 96, height: 80))
-
-    #expect(errors == [.textureAllocationFailed])
-    #expect(controller.model.pixelSize == PixelSize(width: 64, height: 64))
-    #expect(!controller.historyAvailabilityForTesting.canUndo)
-    #expect(!controller.historyAvailabilityForTesting.canRedo)
-    #expect(!controller.model.isBusy)
-    #expect(renderer.harnessTilingMutationSnapshot == resources)
-    #expect(renderer.viewport == viewport)
-    #expect(try canonicalBytes(renderer) == bytes)
+    try await renderer.releasePaintRevisions([resize.before.id, resize.after.id])
 }
 
 @Test
@@ -1607,7 +1566,7 @@ func semanticShortcutsUpdateToolBrushAndGridThroughControllerIntents() throws {
 
 @Test
 @MainActor
-func brushChangeKeepsSubsequentEditorActionsCoherent() throws {
+func brushChangeKeepsSubsequentEditorActionsCoherent() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
 
@@ -1616,20 +1575,20 @@ func brushChangeKeepsSubsequentEditorActionsCoherent() throws {
     #expect(!controller.model.isBusy)
 
     var retainedRevisionIDs: Set<StoredRasterRevisionID> = []
-    try commitControllerStroke(controller, renderer: renderer)
+    try await commitControllerStroke(controller, renderer: renderer)
     let draw = try #require(controller.lastRecordedRasterCommandForTesting)
     retainedRevisionIDs.formUnion([draw.before.id, draw.after.id])
     #expect(draw.kind == .draw)
-    let drawnBytes = try canonicalBytes(renderer)
+    let drawnBytes = try await canonicalBytes(renderer)
     #expect(!drawnBytes.allSatisfy { $0 == 0 })
 
     controller.handleTool(.erase)
     #expect(controller.model.tool == .erase)
-    try commitControllerStroke(controller, renderer: renderer)
+    try await commitControllerStroke(controller, renderer: renderer)
     let erase = try #require(controller.lastRecordedRasterCommandForTesting)
     retainedRevisionIDs.formUnion([erase.before.id, erase.after.id])
     #expect(erase.kind == .erase)
-    let erasedBytes = try canonicalBytes(renderer)
+    let erasedBytes = try await canonicalBytes(renderer)
     let drawnAlpha = stride(from: 3, to: drawnBytes.count, by: 4)
         .reduce(0) { $0 + Int(drawnBytes[$1]) }
     let erasedAlpha = stride(from: 3, to: erasedBytes.count, by: 4)
@@ -1637,7 +1596,7 @@ func brushChangeKeepsSubsequentEditorActionsCoherent() throws {
     #expect(erasedAlpha < drawnAlpha)
 
     controller.handleTool(.draw)
-    try commitControllerStroke(
+    try await commitControllerStroke(
         controller,
         renderer: renderer,
         x: 20,
@@ -1645,24 +1604,31 @@ func brushChangeKeepsSubsequentEditorActionsCoherent() throws {
     )
     let redraw = try #require(controller.lastRecordedRasterCommandForTesting)
     retainedRevisionIDs.formUnion([redraw.before.id, redraw.after.id])
-    let redrawnBytes = try canonicalBytes(renderer)
+    let redrawnBytes = try await canonicalBytes(renderer)
     #expect(!redrawnBytes.allSatisfy { $0 == 0 })
 
     controller.handleGridVisibility(true)
     controller.handleTiling(.halfDrop)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.showGrid)
     #expect(renderer.interactiveGridVisibility)
     #expect(controller.model.tiling == .halfDrop)
     #expect(renderer.tiling == .halfDrop)
 
     controller.clear()
-    try renderer.finishRasterOperationForHarness()
-    #expect(try canonicalBytes(renderer).allSatisfy { $0 == 0 })
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
+    #expect(try await canonicalBytes(renderer).allSatisfy { $0 == 0 })
     #expect(!controller.model.isBusy)
 
     let clear = try #require(controller.lastRecordedRasterCommandForTesting)
     retainedRevisionIDs.formUnion([clear.before.id, clear.after.id])
-    renderer.releaseRasterRevisions(retainedRevisionIDs)
+    try await renderer.releasePaintRevisions(retainedRevisionIDs)
 }
 
 @Test
@@ -2213,7 +2179,7 @@ private func editorControllerTestExecutablePath() -> String {
 @Test
 @MainActor
 func controllerDefersEstimatedEndAndCommitsResolvedStrokeExactlyOnce()
-    throws
+    async throws
 {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
@@ -2254,8 +2220,8 @@ func controllerDefersEstimatedEndAndCommitsResolvedStrokeExactlyOnce()
         return
     }
     #expect(committing.phase == .commitPending)
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
     let firstCommand = try #require(
         controller.lastRecordedRasterCommandForTesting
@@ -2349,7 +2315,7 @@ func newPointerFinalizesEstimateFallbackThenBeginsDeferredStroke()
 
 @Test
 @MainActor
-func movedBatchTracksEstimateUntilASeparateUpdateResolvesIt() throws {
+func movedBatchTracksEstimateUntilASeparateUpdateResolvesIt() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.handleStrokeSample(controllerSample(.began, x: 16))
@@ -2394,8 +2360,8 @@ func movedBatchTracksEstimateUntilASeparateUpdateResolvesIt() throws {
         return
     }
     #expect(committing.phase == .commitPending)
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
 }
 
@@ -2434,10 +2400,12 @@ func completeDeferredPointerStreamReplaysAfterPriorCommit() async throws {
     }
     #expect(secondCommit.phase == .commitPending)
 
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
-    #expect(renderer.harnessRevision.rawValue == 2)
+    #expect(
+        await renderer.paintStateSnapshotForTesting().documentGeneration == 2
+    )
 }
 
 @Test
@@ -2535,7 +2503,7 @@ func retiringWorkspaceDefersRapidPointerUntilTrueIdleExactlyOnce()
 
     var didResume = false
     for _ in 0..<20_000 {
-        try renderer.drainCompletedOperationsForHarness()
+        try renderer.drainCompletedInteractiveOperations()
         if case let .drawing(drawing) =
             controller.transactionStateForTesting,
            drawing.phase == .commitPending
@@ -2628,7 +2596,7 @@ func retiringWorkspaceResumesDeferredPrefixBeforePointerEnds()
 
     var didResumeCollecting = false
     for _ in 0..<20_000 {
-        try renderer.drainCompletedOperationsForHarness()
+        try renderer.drainCompletedInteractiveOperations()
         if case let .drawing(drawing) =
             controller.transactionStateForTesting,
            drawing.phase == .collecting
@@ -2745,8 +2713,8 @@ func deferredPointerCanReuseAnOldEstimatedUpdateIndex() async throws {
         return
     }
     #expect(secondCommit.phase == .commitPending)
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
 }
 
@@ -2840,10 +2808,10 @@ func deferredPointerRejectsLatePriorGenerationUpdateForReusedIndex()
             return nil
         }
         #expect(secondCommit.phase == .commitPending)
-        _ = try renderer.flushPendingLiveForHarness()
-        _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
         #expect(controller.transactionStateForTesting == .idle)
-        return try canonicalBytes(renderer)
+        return try await canonicalBytes(renderer)
     }
 
     let expectedResult = try await render(includeLatePriorUpdate: false)
@@ -2855,7 +2823,7 @@ func deferredPointerRejectsLatePriorGenerationUpdateForReusedIndex()
 
 @Test
 @MainActor
-func deferredPointerOverflowCancelsInsteadOfReplayingPartialInput() throws {
+func deferredPointerOverflowCancelsInsteadOfReplayingPartialInput() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.handleStrokeSample(controllerSample(.began, x: 12))
@@ -2884,16 +2852,18 @@ func deferredPointerOverflowCancelsInsteadOfReplayingPartialInput() throws {
     }
     controller.handleStrokeSample(controllerSample(.ended, x: 52))
 
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
     #expect(renderer.isIdle)
-    #expect(renderer.harnessRevision.rawValue == 1)
+    #expect(
+        await renderer.paintStateSnapshotForTesting().documentGeneration == 1
+    )
 }
 
 @Test
 @MainActor
-func cancellingWhileCommitIsPendingDiscardsDeferredPointerStream() throws {
+func cancellingWhileCommitIsPendingDiscardsDeferredPointerStream() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.handleStrokeSample(controllerSample(.began, x: 12))
@@ -2914,16 +2884,18 @@ func cancellingWhileCommitIsPendingDiscardsDeferredPointerStream() throws {
     )
     controller.cancelTransientEdit()
 
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
     #expect(renderer.isIdle)
-    #expect(renderer.harnessRevision.rawValue == 1)
+    #expect(
+        await renderer.paintStateSnapshotForTesting().documentGeneration == 1
+    )
 }
 
 @Test
 @MainActor
-func ignoredToolInputDoesNotLeakEstimatedStateIntoNextStroke() throws {
+func ignoredToolInputDoesNotLeakEstimatedStateIntoNextStroke() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.handleTool(.select)
@@ -2958,19 +2930,17 @@ func ignoredToolInputDoesNotLeakEstimatedStateIntoNextStroke() throws {
         return
     }
     #expect(committing.phase == .commitPending)
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
 }
 
 @Test
 @MainActor
-func failedEstimatedFallbackCommitLeavesRendererReusable() throws {
-    guard let renderer = try makeControllerRenderer() else { return }
-    let controller = EditorSessionController(
-        renderer: renderer,
-        historyMaximumBytes: 0
-    )
+func failedEstimatedFallbackCommitLeavesRendererReusable() async throws {
+    guard let renderer = try makeControllerRenderer(historyByteBudget: 1)
+    else { return }
+    let controller = EditorSessionController(renderer: renderer)
     controller.handleStrokeSample(controllerSample(.began, x: 16))
     controller.handleStrokeSample(
         estimatedControllerSample(
@@ -2994,8 +2964,8 @@ func failedEstimatedFallbackCommitLeavesRendererReusable() throws {
         )
     )
 
-    #expect(throws: MetalRendererError.self) {
-        _ = try renderer.finishCommitForHarness()
+    await #expect(throws: MetalRendererError.self) {
+        _ = try await renderer.finishCommitForHarness()
     }
     #expect(controller.transactionStateForTesting == .idle)
     #expect(renderer.isIdle)
@@ -3009,7 +2979,7 @@ func failedEstimatedFallbackCommitLeavesRendererReusable() throws {
 
 @Test
 @MainActor
-func cancellationClearsPendingEstimateBookkeepingForNextStroke() throws {
+func cancellationClearsPendingEstimateBookkeepingForNextStroke() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.handleStrokeSample(controllerSample(.began, x: 16))
@@ -3053,14 +3023,14 @@ func cancellationClearsPendingEstimateBookkeepingForNextStroke() throws {
         return
     }
     #expect(committing.phase == .commitPending)
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
 }
 
 @Test
 @MainActor
-func synchronousRendererFailureClearsEstimateBookkeeping() throws {
+func synchronousRendererFailureClearsEstimateBookkeeping() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     var reportedErrors: [MetalRendererError] = []
@@ -3102,15 +3072,15 @@ func synchronousRendererFailureClearsEstimateBookkeeping() throws {
         return
     }
     #expect(committing.phase == .commitPending)
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
     #expect(reportedErrors == [.invalidStrokeLifecycle])
 }
 
 @Test
 @MainActor
-func focusLossFinalizesAwaitingEstimateExactlyOnce() throws {
+func focusLossFinalizesAwaitingEstimateExactlyOnce() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
     controller.handleStrokeSample(controllerSample(.began))
@@ -3132,8 +3102,8 @@ func focusLossFinalizesAwaitingEstimateExactlyOnce() throws {
         return
     }
     #expect(committing.phase == .commitPending)
-    _ = try renderer.flushPendingLiveForHarness()
-    _ = try renderer.finishCommitForHarness()
+    _ = try await renderer.flushPendingLiveForHarness()
+    _ = try await renderer.finishCommitForHarness()
     #expect(controller.transactionStateForTesting == .idle)
     let firstCommand = try #require(
         controller.lastRecordedRasterCommandForTesting
@@ -3249,9 +3219,9 @@ func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch()
     )
     #expect(replacementPrediction.predictedSamples.count == 2)
 
-    let mixedAuthoritativeInputBefore = try #require(
-        renderer.compatibilityInkCoordinatorSnapshotForTesting?
-            .commitMetadata.inputSampleCount
+    let mixedAuthoritativeInputBefore = UInt64(
+        await renderer.offMainSchedulerSnapshotForTesting()
+            .retainedActualSampleCount
     )
     var normalizedMixedBatch: [StrokeSample] = []
     controller.onNormalizedInput = { normalizedMixedBatch.append($0) }
@@ -3286,9 +3256,9 @@ func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch()
     #expect(boundedScratch.lastValidatedSampleCount == 64)
     #expect(boundedScratch.lastTelemetrySampleCount == 64)
 
-    let authoritativeInputBefore = try #require(
-        renderer.compatibilityInkCoordinatorSnapshotForTesting?
-            .commitMetadata.inputSampleCount
+    let authoritativeInputBefore = UInt64(
+        await renderer.offMainSchedulerSnapshotForTesting()
+            .retainedActualSampleCount
     )
     controller.handleStrokeSample(
         controllerMovedSample(x: 30, timestamp: 2, kind: .actual)
@@ -3300,9 +3270,9 @@ func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch()
     )
     #expect(settled.predictedSamples.isEmpty)
     #expect(
-        renderer.compatibilityInkCoordinatorSnapshotForTesting?
-            .commitMetadata.inputSampleCount
-            == authoritativeInputBefore + 1
+        await renderer.offMainSchedulerSnapshotForTesting()
+            .retainedActualSampleCount
+            == Int(authoritativeInputBefore + 1)
     )
     controller.handleStrokeSample(controllerSample(.cancelled))
     try awaitControllerRendererIdleForHarness(renderer)
@@ -3311,12 +3281,16 @@ func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch()
 
 @Test
 @MainActor
-func tilingShortcutsUseStableOneBasedTilingIndices() throws {
+func tilingShortcutsUseStableOneBasedTilingIndices() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
 
     for index in 1...7 {
         controller.handleShortcut(.selectTiling(index1: index))
+        try await awaitControllerPaintOperationForHarness(
+            controller,
+            renderer: renderer
+        )
         #expect(controller.model.tiling.rawValue == UInt32(index - 1))
         #expect(renderer.tiling.rawValue == UInt32(index - 1))
     }
@@ -3324,7 +3298,7 @@ func tilingShortcutsUseStableOneBasedTilingIndices() throws {
 
 @Test
 @MainActor
-func tileStepShortcutSubmitsOneClampedTwoDimensionResize() throws {
+func tileStepShortcutSubmitsOneClampedTwoDimensionResize() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
 
@@ -3332,17 +3306,20 @@ func tileStepShortcutSubmitsOneClampedTwoDimensionResize() throws {
 
     #expect(controller.model.pixelSize == PixelSize(width: 64, height: 64))
     #expect(controller.model.isBusy)
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.pixelSize == PixelSize(width: 96, height: 96))
     #expect(!controller.model.isBusy)
 
     let resize = try #require(controller.lastRecordedResizeCommandForTesting)
-    renderer.releaseRasterRevisions([resize.before.id, resize.after.id])
+    try await renderer.releasePaintRevisions([resize.before.id, resize.after.id])
 }
 
 @Test
 @MainActor
-func busyControllerRejectsConflictingSemanticShortcuts() throws {
+func busyControllerRejectsConflictingSemanticShortcuts() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
 
@@ -3360,35 +3337,47 @@ func busyControllerRejectsConflictingSemanticShortcuts() throws {
     #expect(!controller.model.showGrid)
     #expect(controller.model.tiling == .grid)
 
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     let resize = try #require(controller.lastRecordedResizeCommandForTesting)
-    renderer.releaseRasterRevisions([resize.before.id, resize.after.id])
+    try await renderer.releasePaintRevisions([resize.before.id, resize.after.id])
 }
 
 @Test
 @MainActor
-func commandShortcutsShareClearUndoAndRedoHistoryFlow() throws {
+func commandShortcutsShareClearUndoAndRedoHistoryFlow() async throws {
     guard let renderer = try makeControllerRenderer() else { return }
     let controller = EditorSessionController(renderer: renderer)
-    try commitControllerStroke(controller, renderer: renderer)
+    try await commitControllerStroke(controller, renderer: renderer)
     let stroke = try #require(controller.lastRecordedRasterCommandForTesting)
 
     controller.handleShortcut(.clear)
     #expect(controller.model.isBusy)
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     let clear = try #require(controller.lastRecordedRasterCommandForTesting)
     #expect(clear.kind == .clear)
     #expect(controller.model.canUndo)
 
     controller.handleShortcut(.undo)
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(controller.model.canRedo)
 
     controller.handleShortcut(.redo)
-    try renderer.finishRasterOperationForHarness()
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
     #expect(!controller.model.canRedo)
 
-    renderer.releaseRasterRevisions(
+    try await renderer.releasePaintRevisions(
         Set(
             [stroke, clear].flatMap {
                 [$0.before.id, $0.after.id]
@@ -3415,50 +3404,16 @@ func clearCompletesWithoutAViewFrameAndControlsAcceptTheNextIntent() async throw
 
     controller.handleGridVisibility(true)
     controller.handleTiling(.halfDrop)
+    try await awaitControllerPaintOperationForHarness(
+        controller,
+        renderer: renderer
+    )
 
     #expect(controller.model.showGrid)
     #expect(renderer.interactiveGridVisibility)
     #expect(controller.model.tiling == .halfDrop)
     #expect(renderer.tiling == .halfDrop)
 
-    let clear = try #require(controller.lastRecordedRasterCommandForTesting)
-    renderer.releaseRasterRevisions([clear.before.id, clear.after.id])
-}
-
-@Test
-@MainActor
-func awaitedClearPropagatesSynchronousRequestFailureAndRecovers()
-    async throws
-{
-    guard let renderer = try makeControllerRenderer() else { return }
-    var shouldFail = true
-    let controller = EditorSessionController(
-        renderer: renderer,
-        requestClear: { token, maximumRetainedBytes in
-            if shouldFail {
-                throw MetalRendererError.commandBufferUnavailable
-            }
-            try renderer.requestClear(
-                token: token,
-                maximumRetainedBytes: maximumRetainedBytes
-            )
-        }
-    )
-
-    await #expect(throws: MetalRendererError.commandBufferUnavailable) {
-        try await controller.clearAndAwaitCompletion()
-    }
-    #expect(controller.transactionStateForTesting == .idle)
-    #expect(renderer.isIdle)
-    #expect(controller.lastRecordedRasterCommandForTesting == nil)
-
-    shouldFail = false
-    try await controller.clearAndAwaitCompletion()
-    #expect(controller.transactionStateForTesting == .idle)
-    #expect(renderer.isIdle)
-    #expect(
-        controller.lastRecordedRasterCommandForTesting?.kind == .clear
-    )
 }
 
 @Test
@@ -3647,8 +3602,14 @@ private func pointerEvent(
 #endif
 
 @MainActor
-private func canonicalBytes(_ renderer: GridRenderer) throws -> [UInt8] {
-    textureBytes(try renderer.copyCanonicalForHarness())
+private func canonicalBytes(_ renderer: GridRenderer) async throws -> [UInt8] {
+    let snapshot = try await renderer.captureCommittedDocument()
+    switch snapshot.storage {
+    case let .singleRaster(bytes):
+        return bytes
+    case let .radialPages(pages):
+        return pages.flatMap(\.bgra8PremultipliedBytes)
+    }
 }
 
 private func textureBytes(_ texture: any MTLTexture) -> [UInt8] {

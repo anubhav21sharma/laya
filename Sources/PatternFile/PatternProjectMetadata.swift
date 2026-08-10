@@ -2,9 +2,6 @@ import Foundation
 import PatternEngine
 
 public enum PatternProjectFormat {
-    public static let legacySchemaVersion = 1
-    public static let previousSchemaVersion = 2
-    public static let layeredSchemaVersion = 3
     public static let currentSchemaVersion = 4
     public static let canonicalSurfaceLayoutVersion = 1
     public static let radialSurfaceLayoutVersion = 1
@@ -78,15 +75,18 @@ public struct PatternProjectRadialSurface: Equatable, Sendable {
 public struct PatternProjectPaintTileSurface: Equatable, Sendable {
     public let manifestFile: String
     public let pixelSize: PixelSize
+    public let rasterRevision: UInt64
     public let tiles: [PatternPaintTileRecord]
 
     public init(
         manifestFile: String,
         pixelSize: PixelSize,
+        rasterRevision: UInt64,
         tiles: [PatternPaintTileRecord]
     ) {
         self.manifestFile = manifestFile
         self.pixelSize = pixelSize
+        self.rasterRevision = rasterRevision
         self.tiles = tiles
     }
 }
@@ -157,7 +157,7 @@ public struct PatternProjectMetadata: Equatable, Sendable {
         canvasSize: PixelSize,
         viewport: PatternProjectViewport,
         documentConfiguration: SymmetryDocumentConfiguration,
-        documentDomainLocked: Bool? = nil,
+        documentDomainLocked: Bool,
         radialGeometryLocked: Bool,
         activeLayerID: UUID,
         layers: [PatternProjectLayer]
@@ -171,7 +171,6 @@ public struct PatternProjectMetadata: Equatable, Sendable {
         self.viewport = viewport
         self.documentConfiguration = documentConfiguration
         self.documentDomainLocked = documentDomainLocked
-            ?? radialGeometryLocked
         self.radialGeometryLocked = radialGeometryLocked
         self.activeLayerID = activeLayerID
         self.layers = layers
@@ -179,20 +178,13 @@ public struct PatternProjectMetadata: Equatable, Sendable {
 }
 
 public struct ValidatedPatternProjectMetadata: Equatable, Sendable {
-    public let sourceSchemaVersion: Int
     public let metadata: PatternProjectMetadata
     public let compiledSymmetry: CompiledSymmetry
 
-    public var wasMigrated: Bool {
-        sourceSchemaVersion != PatternProjectFormat.currentSchemaVersion
-    }
-
     init(
-        sourceSchemaVersion: Int,
         metadata: PatternProjectMetadata,
         compiledSymmetry: CompiledSymmetry
     ) {
-        self.sourceSchemaVersion = sourceSchemaVersion
         self.metadata = metadata
         self.compiledSymmetry = compiledSymmetry
     }
@@ -232,7 +224,6 @@ public enum PatternProjectLoadError:
     case resourcePathCollision(String)
     case unknownDomain(UInt32)
     case unknownPreset(UInt32)
-    case legacyPresetUnsupported(UInt32)
     case invalidCanvasSize(width: Int, height: Int)
     case invalidTimestamp
     case invalidViewport
@@ -275,8 +266,6 @@ public enum PatternProjectLoadError:
             "Project domain \(rawValue) is unknown."
         case let .unknownPreset(rawValue):
             "Symmetry preset \(rawValue) is unknown."
-        case let .legacyPresetUnsupported(rawValue):
-            "Legacy symmetry preset \(rawValue) is unsupported."
         case let .invalidCanvasSize(width, height):
             "Canvas size \(width)x\(height) is invalid."
         case .invalidTimestamp:

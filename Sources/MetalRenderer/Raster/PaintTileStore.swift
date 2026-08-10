@@ -50,6 +50,79 @@ public enum PaintTileStoreError: Error, Equatable, Sendable {
     case staleTileReference
     case retirementAlreadyPrepared
     case retirementIdentityOverflow
+    case snapshotRetentionTokenIdentityOverflow
+    case invalidSnapshotRetentionToken
+    case snapshotRetentionCountOverflow(PaintTileID)
+    case snapshotRetentionArithmeticOverflow(
+        PaintTileSnapshotRetentionLimit
+    )
+    case snapshotRetentionLimitExceeded(
+        limit: PaintTileSnapshotRetentionLimit,
+        required: Int,
+        maximum: Int
+    )
+}
+
+public enum PaintTileSnapshotRetentionLimit: Equatable, Sendable {
+    case activeTokens
+    case referencesPerToken
+    case aggregateReferences
+    case indexEntries
+    case metadataBytes
+    case payloadDebtBytes
+}
+
+public struct PaintTileSnapshotRetentionLimits: Equatable, Sendable {
+    public let maximumActiveTokenCount: Int
+    public let maximumReferencesPerToken: Int
+    public let maximumAggregateReferenceCount: Int
+    public let maximumIndexEntryCount: Int
+    public let maximumMetadataBytes: Int
+    public let maximumPayloadDebtBytes: Int
+
+    public init(
+        maximumActiveTokenCount: Int,
+        maximumReferencesPerToken: Int,
+        maximumAggregateReferenceCount: Int,
+        maximumIndexEntryCount: Int,
+        maximumMetadataBytes: Int,
+        maximumPayloadDebtBytes: Int
+    ) {
+        precondition(maximumActiveTokenCount >= 0)
+        precondition(maximumReferencesPerToken >= 0)
+        precondition(maximumAggregateReferenceCount >= 0)
+        precondition(maximumIndexEntryCount >= 0)
+        precondition(maximumMetadataBytes >= 0)
+        precondition(maximumPayloadDebtBytes >= 0)
+        self.maximumActiveTokenCount = maximumActiveTokenCount
+        self.maximumReferencesPerToken = maximumReferencesPerToken
+        self.maximumAggregateReferenceCount = maximumAggregateReferenceCount
+        self.maximumIndexEntryCount = maximumIndexEntryCount
+        self.maximumMetadataBytes = maximumMetadataBytes
+        self.maximumPayloadDebtBytes = maximumPayloadDebtBytes
+    }
+
+    public static func productionDefault(
+        byteBudget: Int,
+        snapshotPayloadLiabilityByteBudget: Int? = nil
+    ) -> PaintTileSnapshotRetentionLimits {
+        precondition(byteBudget > 0)
+        let liabilityBudget = snapshotPayloadLiabilityByteBudget ?? byteBudget
+        precondition(liabilityBudget >= 0)
+        return PaintTileSnapshotRetentionLimits(
+            maximumActiveTokenCount: 256,
+            maximumReferencesPerToken: 65_536,
+            maximumAggregateReferenceCount: 262_144,
+            maximumIndexEntryCount: 1_048_576,
+            maximumMetadataBytes: 64 * 1_024 * 1_024,
+            // Every uniquely retained physical record remains a full-tile
+            // payload liability regardless of its current resident/backing
+            // representation. The legacy "payload debt" API name is retained
+            // for source compatibility; callers may budget liability
+            // independently from GPU residency.
+            maximumPayloadDebtBytes: liabilityBudget
+        )
+    }
 }
 
 /// Opaque ownership identity for one physical tile store. References and
@@ -125,6 +198,58 @@ public final class PaintTilePreparedRetirement: @unchecked Sendable {
     }
 }
 
+/// Opaque, explicitly closed capability retaining exact physical tile
+/// identities for immutable snapshot readers. Dropping the object is a
+/// diagnostic only; it never changes store ownership.
+final class PaintTileSnapshotToken: @unchecked Sendable {
+    fileprivate let storeIdentity: PaintTileStoreIdentity
+    fileprivate let token: UInt64
+    private let stateLock = NSLock()
+    private var closed = false
+    private let closeAction: @Sendable (
+        PaintTileSnapshotToken
+    ) -> Void
+    private let deinitDiagnostic: @Sendable (UInt64) -> Void
+
+    fileprivate init(
+        storeIdentity: PaintTileStoreIdentity,
+        token: UInt64,
+        closeAction: @escaping @Sendable (
+            PaintTileSnapshotToken
+        ) -> Void,
+        deinitDiagnostic: @escaping @Sendable (UInt64) -> Void
+    ) {
+        self.storeIdentity = storeIdentity
+        self.token = token
+        self.closeAction = closeAction
+        self.deinitDiagnostic = deinitDiagnostic
+    }
+
+    fileprivate var isClosed: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return closed
+    }
+
+    func close() {
+        stateLock.lock()
+        guard !closed else {
+            stateLock.unlock()
+            return
+        }
+        closed = true
+        stateLock.unlock()
+        closeAction(self)
+    }
+
+    deinit {
+        stateLock.lock()
+        let leaked = !closed
+        stateLock.unlock()
+        if leaked { deinitDiagnostic(token) }
+    }
+}
+
 public struct PaintTileLeaseID: RawRepresentable, Hashable, Sendable {
     public let rawValue: UInt64
 
@@ -145,51 +270,65 @@ public struct PaintTileBinding: @unchecked Sendable {
 /// one-frame backpressure invariant is active.
 final class PaintTileStrokeLeaseWorkspace: @unchecked Sendable {
     let maximumBindingCount: Int
-    fileprivate var bindings: [PaintTileBinding] = []
     fileprivate var identities: [PaintTileIdentity] = []
+    fileprivate var descriptors: [PaintTileDescriptor] = []
+    fileprivate var textures: [any MTLTexture] = []
     fileprivate var isOutstanding = false
-    var retainedBindingCount: Int { bindings.count }
+    var retainedBindingCount: Int { identities.count }
 
     init(maximumBindingCount: Int) {
         precondition(maximumBindingCount > 0)
         self.maximumBindingCount = maximumBindingCount
-        bindings.reserveCapacity(maximumBindingCount)
         identities.reserveCapacity(maximumBindingCount)
+        descriptors.reserveCapacity(maximumBindingCount)
+        textures.reserveCapacity(maximumBindingCount)
     }
 
     fileprivate func prepareForReservation() throws {
         guard !isOutstanding else {
             throw PaintTileStoreError.leaseBindingMismatch
         }
-        bindings.removeAll(keepingCapacity: true)
         identities.removeAll(keepingCapacity: true)
+        descriptors.removeAll(keepingCapacity: true)
+        textures.removeAll(keepingCapacity: true)
     }
 
     func abandonReservation() {
-        bindings.removeAll(keepingCapacity: true)
         identities.removeAll(keepingCapacity: true)
+        descriptors.removeAll(keepingCapacity: true)
+        textures.removeAll(keepingCapacity: true)
         isOutstanding = false
     }
 
     fileprivate func completeReturn() {
         precondition(isOutstanding)
-        bindings.removeAll(keepingCapacity: true)
         identities.removeAll(keepingCapacity: true)
+        descriptors.removeAll(keepingCapacity: true)
+        textures.removeAll(keepingCapacity: true)
         isOutstanding = false
+    }
+
+    fileprivate func binding(at index: Int) -> PaintTileBinding {
+        PaintTileBinding(
+            identity: identities[index],
+            descriptor: descriptors[index],
+            texture: textures[index]
+        )
+    }
+
+    fileprivate func bindingSnapshot() -> [PaintTileBinding] {
+        identities.indices.map { binding(at: $0) }
     }
 
     fileprivate func installCommittedCandidates(
         from provisional: PaintTileProvisionalReservation
     ) {
-        precondition(isOutstanding && bindings.count == provisional.count)
+        precondition(isOutstanding && identities.count == provisional.count)
         for index in 0..<provisional.count {
             let candidate = provisional[index]
-            precondition(bindings[index].identity == candidate.identity)
-            bindings[index] = PaintTileBinding(
-                identity: candidate.identity,
-                descriptor: candidate.descriptor,
-                texture: candidate.candidateTexture
-            )
+            precondition(identities[index] == candidate.identity)
+            precondition(descriptors[index] == candidate.descriptor)
+            textures[index] = candidate.candidateTexture
         }
     }
 }
@@ -305,7 +444,7 @@ public struct PaintTileLease: @unchecked Sendable {
 
     public var pinReasons: [PaintTilePinReason] { ownedPinReasons }
     public var bindings: [PaintTileBinding] {
-        strokeWorkspace?.bindings ?? ownedBindings
+        strokeWorkspace?.bindingSnapshot() ?? ownedBindings
     }
 
     init(
@@ -348,6 +487,13 @@ public struct PaintTileLease: @unchecked Sendable {
 
     fileprivate var retainedBindingCount: Int {
         strokeWorkspace?.retainedBindingCount ?? ownedBindings.count
+    }
+
+    fileprivate func retainedBinding(at index: Int) -> PaintTileBinding {
+        if let strokeWorkspace {
+            return strokeWorkspace.binding(at: index)
+        }
+        return ownedBindings[index]
     }
 
     fileprivate func installingCommittedCandidates(
@@ -472,6 +618,7 @@ public struct PaintTileStoreEntrySnapshot: Equatable, Sendable {
     public let backing: PaintTileBackingSnapshot
     public let lastUseEpoch: UInt64?
     public let pinCounts: [PaintTilePinReason: Int]
+    public let snapshotRetainCount: UInt32
 }
 
 public struct PaintTileStoreSnapshot: Equatable, Sendable {
@@ -487,6 +634,13 @@ public struct PaintTileStoreSnapshot: Equatable, Sendable {
     public let provisionalByteCount: Int
     public let preparedRetirementCount: Int
     public let pendingRetirementCount: Int
+    public let tileIndexEntryCount: Int
+    public let activeSnapshotTokenCount: Int
+    public let aggregateSnapshotReferenceCount: Int
+    public let snapshotMetadataByteCount: Int
+    /// Conservative retained-payload liability. The legacy debt name remains
+    /// public for compatibility; backing does not reduce this count.
+    public let snapshotPayloadDebtByteCount: Int
     public let entries: [PaintTileStoreEntrySnapshot]
     public let leastRecentlyUsedOrder: [PaintTileIdentity]
     public let lastTransferAccounting: PaintTileTransferAccounting?
@@ -544,19 +698,44 @@ public final class PaintTileStore: @unchecked Sendable {
         let coordinate: PaintTileCoordinate
     }
 
+    private struct SnapshotRetentionRecord {
+        let capabilityIdentity: ObjectIdentifier
+        /// The sole retained-member payload. IDs are globally unique within
+        /// this store and sorted so authorization is logarithmic without a
+        /// second Set/Dictionary allocation.
+        let sortedTileIDs: [PaintTileID]
+        let metadataBytes: Int
+    }
+
+    /// Exact static-value strides plus a conservative allowance for heap
+    /// headers, Dictionary buckets, the token object, lock, and closures. The
+    /// variable payload below is exact because the store retains only tile
+    /// IDs; full frozen references belong to the later snapshot provider.
+    private static let snapshotRetentionHeapOverheadAllowanceBytes = 256
+    static let snapshotRetentionFixedMetadataBytes =
+        snapshotRetentionHeapOverheadAllowanceBytes
+        + MemoryLayout<UInt64>.stride
+        + MemoryLayout<SnapshotRetentionRecord>.stride
+        + MemoryLayout<PaintTileSnapshotToken>.stride
+    static let snapshotRetentionReferenceMetadataBytes =
+        MemoryLayout<PaintTileID>.stride
+
     private final class RecordStorage {
         var texture: (any MTLTexture)?
         var backing: PaintTileBackingSnapshot?
         var isStrokeActive: Bool
+        var snapshotRetainCount: UInt32
 
         init(
             texture: (any MTLTexture)?,
             backing: PaintTileBackingSnapshot?,
-            isStrokeActive: Bool = false
+            isStrokeActive: Bool = false,
+            snapshotRetainCount: UInt32 = 0
         ) {
             self.texture = texture
             self.backing = backing
             self.isStrokeActive = isStrokeActive
+            self.snapshotRetainCount = snapshotRetainCount
         }
     }
 
@@ -573,14 +752,16 @@ public final class PaintTileStore: @unchecked Sendable {
             descriptor: PaintTileDescriptor,
             texture: (any MTLTexture)?,
             backing: PaintTileBackingSnapshot?,
-            isStrokeActive: Bool = false
+            isStrokeActive: Bool = false,
+            snapshotRetainCount: UInt32 = 0
         ) {
             self.identity = identity
             self.descriptor = descriptor
             storage = RecordStorage(
                 texture: texture,
                 backing: backing,
-                isStrokeActive: isStrokeActive
+                isStrokeActive: isStrokeActive,
+                snapshotRetainCount: snapshotRetainCount
             )
         }
 
@@ -590,7 +771,8 @@ public final class PaintTileStore: @unchecked Sendable {
                 descriptor: descriptor,
                 texture: texture,
                 backing: backing,
-                isStrokeActive: storage.isStrokeActive
+                isStrokeActive: storage.isStrokeActive,
+                snapshotRetainCount: storage.snapshotRetainCount
             )
         }
     }
@@ -615,16 +797,17 @@ public final class PaintTileStore: @unchecked Sendable {
             }
         }
 
-        func elementsEqual(_ bindings: [PaintTileBinding]) -> Bool {
-            guard count == bindings.count else { return false }
+        func elementsEqual(_ lease: PaintTileLease) -> Bool {
+            guard count == lease.retainedBindingCount else { return false }
             switch self {
             case let .owned(identities):
-                return zip(identities, bindings).allSatisfy {
-                    $0 == $1.identity
+                return identities.indices.allSatisfy {
+                    identities[$0] == lease.retainedBinding(at: $0).identity
                 }
             case let .strokeWorkspace(workspace):
-                return zip(workspace.identities, bindings).allSatisfy {
-                    $0 == $1.identity
+                return workspace.identities.indices.allSatisfy {
+                    workspace.identities[$0]
+                        == lease.retainedBinding(at: $0).identity
                 }
             }
         }
@@ -682,6 +865,7 @@ public final class PaintTileStore: @unchecked Sendable {
     private let lock = NSLock()
     private var residency: PaintTileResidency
     private var records: [Key: Record] = [:]
+    private var tileKeyByID: [PaintTileID: Key] = [:]
     private var leases: [PaintTileLeaseID: LeaseRecord] = [:]
     private var nextTileID: UInt64 = 0
     private var nextLeaseID: UInt64 = 0
@@ -700,9 +884,29 @@ public final class PaintTileStore: @unchecked Sendable {
     private var preparedRetirements: [UInt64: PreparedRetirementState] = [:]
     private var preparedRetirementKeys: Set<Key> = []
     private var pendingRetirementKeys: Set<Key> = []
+    private var namespaceRetirementKeys: [Key] = []
+    private var nextSnapshotRetentionTokenID: UInt64 = 0
+    private var snapshotRetentions:
+        [UInt64: SnapshotRetentionRecord] = [:]
+    private var aggregateSnapshotReferenceCount = 0
+    private var snapshotMetadataByteCount = 0
+    private var snapshotRetainedPayloadLiabilityByteCount = 0
+    private let snapshotRetentionLimits: PaintTileSnapshotRetentionLimits
+    private let snapshotTokenDeinitDiagnostic: @Sendable (UInt64) -> Void
+    private let snapshotRetainCountMaximum: UInt32
     private let provisionalTextureDescriptor: MTLTextureDescriptor
 
-    public convenience init(device: any MTLDevice, byteBudget: Int) {
+    #if DEBUG
+    var testingSnapshotPayloadLiabilityByteBudget: Int {
+        snapshotRetentionLimits.maximumPayloadDebtBytes
+    }
+    #endif
+
+    public convenience init(
+        device: any MTLDevice,
+        byteBudget: Int,
+        snapshotPayloadLiabilityByteBudget: Int? = nil
+    ) {
         // Preserve the established 3x transfer headroom and add only the one
         // tile-sized shared allocation that this store may retain.
         let (transferHeadroom, multiplicationOverflow) = byteBudget
@@ -713,20 +917,66 @@ public final class PaintTileStore: @unchecked Sendable {
         self.init(
             device: device,
             byteBudget: byteBudget,
-            transferByteCapacity: capacity
+            transferByteCapacity: capacity,
+            snapshotPayloadLiabilityByteBudget:
+                snapshotPayloadLiabilityByteBudget
         )
     }
 
-    public init(
+    public convenience init(
         device: any MTLDevice,
         byteBudget: Int,
-        transferByteCapacity: Int
+        transferByteCapacity: Int,
+        snapshotPayloadLiabilityByteBudget: Int? = nil
+    ) {
+        self.init(
+            device: device,
+            byteBudget: byteBudget,
+            transferByteCapacity: transferByteCapacity,
+            snapshotRetentionLimits: .productionDefault(
+                byteBudget: byteBudget,
+                snapshotPayloadLiabilityByteBudget:
+                    snapshotPayloadLiabilityByteBudget
+            )
+        )
+    }
+
+    public convenience init(
+        device: any MTLDevice,
+        byteBudget: Int,
+        transferByteCapacity: Int,
+        snapshotRetentionLimits: PaintTileSnapshotRetentionLimits
+    ) {
+        self.init(
+            device: device,
+            byteBudget: byteBudget,
+            transferByteCapacity: transferByteCapacity,
+            snapshotRetentionLimits: snapshotRetentionLimits,
+            snapshotTokenDeinitDiagnostic: { _ in }
+        )
+    }
+
+    init(
+        device: any MTLDevice,
+        byteBudget: Int,
+        transferByteCapacity: Int,
+        snapshotRetentionLimits: PaintTileSnapshotRetentionLimits,
+        snapshotTokenDeinitDiagnostic: @escaping @Sendable (UInt64) -> Void,
+        initialSnapshotRetentionTokenID: UInt64 = 0,
+        snapshotRetainCountMaximum: UInt32 = UInt32.max
     ) {
         precondition(byteBudget > 0)
         precondition(transferByteCapacity > 0)
         self.device = device
         self.transferByteCapacity = transferByteCapacity
+        self.snapshotRetentionLimits = snapshotRetentionLimits
+        self.snapshotTokenDeinitDiagnostic = snapshotTokenDeinitDiagnostic
+        nextSnapshotRetentionTokenID = initialSnapshotRetentionTokenID
+        self.snapshotRetainCountMaximum = snapshotRetainCountMaximum
         residency = PaintTileResidency(byteBudget: byteBudget)
+        namespaceRetirementKeys.reserveCapacity(
+            max(1, byteBudget / PaintTileDescriptor.residentByteCount)
+        )
         provisionalTextureDescriptor = MTLTextureDescriptor
             .texture2DDescriptor(
                 pixelFormat: PaintTileDescriptor.pixelFormat,
@@ -774,15 +1024,48 @@ public final class PaintTileStore: @unchecked Sendable {
         generation: UInt64
     ) throws -> [PaintTileReference] {
         withLock {
-            records.compactMap { key, record -> PaintTileReference? in
-                guard key.surfaceID == surfaceID,
-                      key.layerID == layerID,
-                      key.generation == generation
-                else { return nil }
-                return reference(key: key, record: record)
-            }
-            .sorted()
+            referencesLocked(
+                surfaceID: surfaceID,
+                layerID: layerID,
+                generation: generation,
+                omittingKnownClear: false
+            )
         }
+    }
+
+    /// Exact sampling providers omit physical records whose semantic value is
+    /// known transparent. Such records may remain pinned until frame ACK, but
+    /// their later physical removal must not change visible source identity.
+    func samplingReferences(
+        surfaceID: UUID,
+        layerID: UUID,
+        generation: UInt64
+    ) -> [PaintTileReference] {
+        withLock {
+            referencesLocked(
+                surfaceID: surfaceID,
+                layerID: layerID,
+                generation: generation,
+                omittingKnownClear: true
+            )
+        }
+    }
+
+    private func referencesLocked(
+        surfaceID: UUID,
+        layerID: UUID,
+        generation: UInt64,
+        omittingKnownClear: Bool
+    ) -> [PaintTileReference] {
+        records.compactMap { key, record -> PaintTileReference? in
+            guard key.surfaceID == surfaceID,
+                  key.layerID == layerID,
+                  key.generation == generation,
+                  !omittingKnownClear || record.backing != .knownClear
+            else { return nil }
+            return reference(key: key, record: record)
+        }
+        .sorted()
     }
 
     /// Resolves metadata for an exact, sorted reference set under one store
@@ -822,11 +1105,233 @@ public final class PaintTileStore: @unchecked Sendable {
         }
     }
 
+    /// Retains one exact, sorted set across every referenced physical
+    /// namespace. Capture may overlap a prepared-retirement barrier, but a
+    /// retirement that is already pending has passed the capture boundary and
+    /// is rejected.
+    func retainSnapshotReferences(
+        _ references: [PaintTileReference]
+    ) throws -> PaintTileSnapshotToken {
+        try withLock {
+            let (tokenID, tokenOverflow) = nextSnapshotRetentionTokenID
+                .addingReportingOverflow(1)
+            guard !tokenOverflow else {
+                throw PaintTileStoreError
+                    .snapshotRetentionTokenIdentityOverflow
+            }
+            let nextActiveCount = try checkedSnapshotSum(
+                snapshotRetentions.count,
+                1,
+                limit: .activeTokens
+            )
+            try enforceSnapshotLimit(
+                nextActiveCount,
+                maximum: snapshotRetentionLimits.maximumActiveTokenCount,
+                limit: .activeTokens
+            )
+            try enforceSnapshotLimit(
+                references.count,
+                maximum: snapshotRetentionLimits.maximumReferencesPerToken,
+                limit: .referencesPerToken
+            )
+            let nextAggregate = try checkedSnapshotSum(
+                aggregateSnapshotReferenceCount,
+                references.count,
+                limit: .aggregateReferences
+            )
+            try enforceSnapshotLimit(
+                nextAggregate,
+                maximum: snapshotRetentionLimits
+                    .maximumAggregateReferenceCount,
+                limit: .aggregateReferences
+            )
+            let referenceMetadataBytes = try checkedSnapshotProduct(
+                references.count,
+                Self.snapshotRetentionReferenceMetadataBytes,
+                limit: .metadataBytes
+            )
+            let tokenMetadataBytes = try checkedSnapshotSum(
+                Self.snapshotRetentionFixedMetadataBytes,
+                referenceMetadataBytes,
+                limit: .metadataBytes
+            )
+            let nextMetadataBytes = try checkedSnapshotSum(
+                snapshotMetadataByteCount,
+                tokenMetadataBytes,
+                limit: .metadataBytes
+            )
+            try enforceSnapshotLimit(
+                nextMetadataBytes,
+                maximum: snapshotRetentionLimits.maximumMetadataBytes,
+                limit: .metadataBytes
+            )
+
+            var keys: [Key] = []
+            var tileIDs: [PaintTileID] = []
+            keys.reserveCapacity(references.count)
+            tileIDs.reserveCapacity(references.count)
+            var uniqueRetainCount = 0
+            for index in references.indices {
+                let value = references[index]
+                guard value.storeIdentity == identity else {
+                    throw PaintTileStoreError.foreignStoreReference
+                }
+                if index > references.startIndex {
+                    if references[index - 1] == value {
+                        throw PaintTileStoreError.duplicateReference
+                    }
+                    guard references[index - 1] < value else {
+                        throw PaintTileStoreError.unsortedReference
+                    }
+                }
+                let key = Key(
+                    surfaceID: value.physicalSurfaceID,
+                    layerID: value.layerID,
+                    generation: value.physicalGeneration,
+                    coordinate: value.coordinate
+                )
+                guard !pendingRetirementKeys.contains(key),
+                      tileKeyByID[value.identity.tileID] == key,
+                      let record = records[key],
+                      reference(key: key, record: record) == value
+                else { throw PaintTileStoreError.staleTileReference }
+                guard record.storage.snapshotRetainCount
+                        < snapshotRetainCountMaximum
+                else {
+                    throw PaintTileStoreError.snapshotRetentionCountOverflow(
+                        value.identity.tileID
+                    )
+                }
+                if record.storage.snapshotRetainCount == 0 {
+                    uniqueRetainCount += 1
+                }
+                keys.append(key)
+                tileIDs.append(value.identity.tileID)
+            }
+            tileIDs.sort()
+            let addedPayloadDebt = try checkedSnapshotProduct(
+                uniqueRetainCount,
+                PaintTileDescriptor.residentByteCount,
+                limit: .payloadDebtBytes
+            )
+            let nextPayloadDebt = try checkedSnapshotSum(
+                snapshotRetainedPayloadLiabilityByteCount,
+                addedPayloadDebt,
+                limit: .payloadDebtBytes
+            )
+            try enforceSnapshotLimit(
+                nextPayloadDebt,
+                maximum: snapshotRetentionLimits.maximumPayloadDebtBytes,
+                limit: .payloadDebtBytes
+            )
+
+            let token = PaintTileSnapshotToken(
+                storeIdentity: identity,
+                token: tokenID,
+                closeAction: { [weak self] token in
+                    self?.closeSnapshotRetention(token)
+                },
+                deinitDiagnostic: snapshotTokenDeinitDiagnostic
+            )
+            for key in keys {
+                records[key]!.storage.snapshotRetainCount += 1
+            }
+            nextSnapshotRetentionTokenID = tokenID
+            aggregateSnapshotReferenceCount = nextAggregate
+            snapshotMetadataByteCount = nextMetadataBytes
+            snapshotRetainedPayloadLiabilityByteCount = nextPayloadDebt
+            snapshotRetentions[tokenID] = SnapshotRetentionRecord(
+                capabilityIdentity: ObjectIdentifier(token),
+                sortedTileIDs: tileIDs,
+                metadataBytes: tokenMetadataBytes
+            )
+            return token
+        }
+    }
+
+    private func closeSnapshotRetention(
+        _ token: PaintTileSnapshotToken
+    ) {
+        guard token.storeIdentity == identity else { return }
+        withLock {
+            guard let retained = snapshotRetentions[token.token],
+                  retained.capabilityIdentity == ObjectIdentifier(token)
+            else { return }
+            snapshotRetentions.removeValue(forKey: token.token)
+            precondition(
+                aggregateSnapshotReferenceCount
+                    >= retained.sortedTileIDs.count
+                    && snapshotMetadataByteCount >= retained.metadataBytes
+            )
+            aggregateSnapshotReferenceCount -= retained.sortedTileIDs.count
+            snapshotMetadataByteCount -= retained.metadataBytes
+            for tileID in retained.sortedTileIDs {
+                guard let key = tileKeyByID[tileID],
+                      let record = records[key],
+                      record.identity.tileID == tileID,
+                      record.storage.snapshotRetainCount > 0
+                else { preconditionFailure("Retained tile index drift") }
+                record.storage.snapshotRetainCount -= 1
+                if record.storage.snapshotRetainCount == 0 {
+                    precondition(
+                        snapshotRetainedPayloadLiabilityByteCount
+                            >= PaintTileDescriptor.residentByteCount
+                    )
+                    snapshotRetainedPayloadLiabilityByteCount -=
+                        PaintTileDescriptor.residentByteCount
+                    if pendingRetirementKeys.contains(key) {
+                        _ = removeRecordIfEligible(for: key)
+                    } else if !preparedRetirementKeys.contains(key),
+                              record.backing == .knownClear
+                    {
+                        _ = removeRecordIfEligible(for: key)
+                    }
+                }
+            }
+        }
+    }
+
     /// Atomically pins exact entries that may belong to different physical
     /// surface namespaces. No entry is created and every reference is
     /// validated before residency or lease bookkeeping changes.
     public func reserveReferences(
         _ references: [PaintTileReference],
+        leaseSurfaceID: UUID,
+        leaseLayerID: UUID,
+        leaseGeneration: UInt64,
+        pinReasons: [PaintTilePinReason]
+    ) throws -> PaintTileLease {
+        try reserveReferencesImpl(
+            references,
+            token: nil,
+            leaseSurfaceID: leaseSurfaceID,
+            leaseLayerID: leaseLayerID,
+            leaseGeneration: leaseGeneration,
+            pinReasons: pinReasons
+        )
+    }
+
+    func reserveRetainedReferences(
+        _ references: [PaintTileReference],
+        token: PaintTileSnapshotToken,
+        leaseSurfaceID: UUID,
+        leaseLayerID: UUID,
+        leaseGeneration: UInt64,
+        pinReasons: [PaintTilePinReason]
+    ) throws -> PaintTileLease {
+        try reserveReferencesImpl(
+            references,
+            token: token,
+            leaseSurfaceID: leaseSurfaceID,
+            leaseLayerID: leaseLayerID,
+            leaseGeneration: leaseGeneration,
+            pinReasons: pinReasons
+        )
+    }
+
+    private func reserveReferencesImpl(
+        _ references: [PaintTileReference],
+        token: PaintTileSnapshotToken?,
         leaseSurfaceID: UUID,
         leaseLayerID: UUID,
         leaseGeneration: UInt64,
@@ -860,6 +1365,19 @@ public final class PaintTileStore: @unchecked Sendable {
         }
 
         return try withLock {
+            let retainedRecord: SnapshotRetentionRecord?
+            if let token {
+                guard token.storeIdentity == identity,
+                      !token.isClosed,
+                      let retained = snapshotRetentions[token.token],
+                      retained.capabilityIdentity == ObjectIdentifier(token)
+                else {
+                    throw PaintTileStoreError.invalidSnapshotRetentionToken
+                }
+                retainedRecord = retained
+            } else {
+                retainedRecord = nil
+            }
             let requested: [(Key, Record)] = try references.map { reference in
                 let key = Key(
                     surfaceID: reference.physicalSurfaceID,
@@ -867,11 +1385,28 @@ public final class PaintTileStore: @unchecked Sendable {
                     generation: reference.physicalGeneration,
                     coordinate: reference.coordinate
                 )
-                guard !pendingRetirementKeys.contains(key),
-                      !preparedRetirementKeys.contains(key),
+                let retirementAllowsReserve = retainedRecord != nil
+                    || (!pendingRetirementKeys.contains(key)
+                        && !preparedRetirementKeys.contains(key))
+                let tokenAllowsReserve: Bool
+                if let retainedRecord {
+                    tokenAllowsReserve = Self.snapshotRetentionContains(
+                        reference.identity.tileID,
+                        in: retainedRecord.sortedTileIDs
+                    )
+                } else {
+                    tokenAllowsReserve = true
+                }
+                guard retirementAllowsReserve,
+                      tokenAllowsReserve,
+                      tileKeyByID[reference.identity.tileID] == key,
                       let record = records[key],
                       self.reference(key: key, record: record) == reference
                 else {
+                    if retainedRecord != nil {
+                        throw PaintTileStoreError
+                            .invalidSnapshotRetentionToken
+                    }
                     throw PaintTileStoreError.staleTileReference
                 }
                 return (key, record)
@@ -1073,10 +1608,8 @@ public final class PaintTileStore: @unchecked Sendable {
             else { return }
             for key in keys {
                 preparedRetirementKeys.remove(key)
-                if let record = records[key], residency.isPinned(record.identity) {
+                if !removeRecordIfEligible(for: key), records[key] != nil {
                     pendingRetirementKeys.insert(key)
-                } else {
-                    removeRecord(for: key)
                 }
             }
             preparedRetirements.removeValue(forKey: plan.token)
@@ -1088,7 +1621,12 @@ public final class PaintTileStore: @unchecked Sendable {
         withLock {
             guard case let .prepared(keys)? = preparedRetirements[plan.token]
             else { return }
-            for key in keys { preparedRetirementKeys.remove(key) }
+            for key in keys {
+                preparedRetirementKeys.remove(key)
+                if records[key]?.backing == .knownClear {
+                    _ = removeRecordIfEligible(for: key)
+                }
+            }
             preparedRetirements.removeValue(forKey: plan.token)
         }
     }
@@ -1130,6 +1668,13 @@ public final class PaintTileStore: @unchecked Sendable {
                 provisionalByteCount: provisionalByteCount,
                 preparedRetirementCount: preparedRetirements.count,
                 pendingRetirementCount: pendingRetirementKeys.count,
+                tileIndexEntryCount: tileKeyByID.count,
+                activeSnapshotTokenCount: snapshotRetentions.count,
+                aggregateSnapshotReferenceCount:
+                    aggregateSnapshotReferenceCount,
+                snapshotMetadataByteCount: snapshotMetadataByteCount,
+                snapshotPayloadDebtByteCount:
+                    snapshotRetainedPayloadLiabilityByteCount,
                 entries: entrySnapshots,
                 leastRecentlyUsedOrder: residency.leastRecentlyUsedOrder,
                 lastTransferAccounting: lastTransferAccounting
@@ -1150,7 +1695,8 @@ public final class PaintTileStore: @unchecked Sendable {
             isResident: record.texture != nil,
             backing: record.backing ?? .residentOnly,
             lastUseEpoch: entry?.lastUseEpoch,
-            pinCounts: entry?.pinCounts.dictionary ?? [:]
+            pinCounts: entry?.pinCounts.dictionary ?? [:],
+            snapshotRetainCount: record.storage.snapshotRetainCount
         )
     }
 
@@ -1331,6 +1877,19 @@ public final class PaintTileStore: @unchecked Sendable {
                     ))
                 }
             }
+            let newRecordCount = requested.reduce(into: 0) {
+                if records[$1.0] == nil { $0 += 1 }
+            }
+            let nextIndexEntryCount = try checkedSnapshotSum(
+                tileKeyByID.count,
+                newRecordCount,
+                limit: .indexEntries
+            )
+            try enforceSnapshotLimit(
+                nextIndexEntryCount,
+                maximum: snapshotRetentionLimits.maximumIndexEntryCount,
+                limit: .indexEntries
+            )
             try preflightCapacity(
                 requestedIdentities: requested.map(\.1),
                 residency: stagedResidency
@@ -1423,6 +1982,7 @@ public final class PaintTileStore: @unchecked Sendable {
             let nextStateRevision = try advancedStateRevision()
 
             var stagedRecords = Self.cloneRecords(records)
+            var stagedTileKeyByID = tileKeyByID
             for identity in evicted {
                 guard let key = stagedRecords.first(where: {
                     $0.value.identity == identity
@@ -1440,6 +2000,12 @@ public final class PaintTileStore: @unchecked Sendable {
                         texture: allocation.texture,
                         backing: .knownClear
                     )
+                    guard stagedTileKeyByID.updateValue(
+                        allocation.key,
+                        forKey: allocation.identity.tileID
+                    ) == nil else {
+                        preconditionFailure("Duplicate paint tile identity")
+                    }
                 } else {
                     stagedRecords[allocation.key]?.storage.texture = allocation.texture
                     switch allocation.sourceBacking {
@@ -1477,6 +2043,7 @@ public final class PaintTileStore: @unchecked Sendable {
             )
 
             records = stagedRecords
+            tileKeyByID = stagedTileKeyByID
             residency = stagedResidency
             leases = stagedLeases
             nextTileID = stagedNextTileID
@@ -1552,7 +2119,7 @@ public final class PaintTileStore: @unchecked Sendable {
             return existing
         }
         workspace.abandonReservation()
-        return try reserveSortedUnique(
+        let coldLease = try reserveSortedUnique(
             surfaceID: surfaceID,
             layerID: layerID,
             generation: generation,
@@ -1561,6 +2128,58 @@ public final class PaintTileStore: @unchecked Sendable {
             pinReasons: pinReasons,
             failureInjection: failureInjection
         )
+        return try adoptStrokeWorkspace(
+            workspace,
+            for: coldLease,
+            surfaceID: surfaceID,
+            currentGeneration: generation
+        )
+    }
+
+    /// Transfers a cold transactional stroke reservation into the bounded
+    /// workspace before publication. The ordinary reserve path must build an
+    /// owned result while allocating missing Metal tiles, but retaining that
+    /// value array through commit would force copy-on-write when candidate
+    /// textures replace its entries. Stroke callers instead keep one mutable,
+    /// pre-reserved owner for both cold and warm reservations.
+    private func adoptStrokeWorkspace(
+        _ workspace: PaintTileStrokeLeaseWorkspace,
+        for lease: PaintTileLease,
+        surfaceID: UUID,
+        currentGeneration: UInt64
+    ) throws -> PaintTileLease {
+        try withLock {
+            let record = try validate(
+                lease,
+                surfaceID: surfaceID,
+                currentGeneration: currentGeneration
+            )
+            precondition(record.mixedNamespaceKeys == nil)
+            try workspace.prepareForReservation()
+            for index in 0..<lease.retainedBindingCount {
+                let binding = lease.retainedBinding(at: index)
+                workspace.identities.append(binding.identity)
+                workspace.descriptors.append(binding.descriptor)
+                workspace.textures.append(binding.texture)
+            }
+            workspace.isOutstanding = true
+            leases[lease.id] = LeaseRecord(
+                surfaceID: record.surfaceID,
+                generation: record.generation,
+                identityStorage: .strokeWorkspace(workspace),
+                mixedNamespaceKeys: nil,
+                pinReasons: record.pinReasons
+            )
+            return PaintTileLease(
+                id: lease.id,
+                surfaceID: lease.surfaceID,
+                layerID: lease.layerID,
+                generation: lease.generation,
+                storeIdentity: lease.storeIdentity,
+                pinReasons: lease.pinReasons,
+                strokeWorkspace: workspace
+            )
+        }
     }
 
     /// Hot path for a warmed stroke footprint. Every requested record and
@@ -1657,11 +2276,8 @@ public final class PaintTileStore: @unchecked Sendable {
                 return nil
             }
             workspace.identities.append(record.identity)
-            workspace.bindings.append(PaintTileBinding(
-                identity: record.identity,
-                descriptor: record.descriptor,
-                texture: texture
-            ))
+            workspace.descriptors.append(record.descriptor)
+            workspace.textures.append(texture)
         }
         let (leaseRawID, leaseOverflow) = nextLeaseID
             .addingReportingOverflow(1)
@@ -1897,14 +2513,15 @@ public final class PaintTileStore: @unchecked Sendable {
             var newActivePinCount = 0
             for candidateIndex in 0..<provisional.count {
                 let candidate = provisional[candidateIndex]
-                while leaseIndex < lease.bindings.count,
-                      lease.bindings[leaseIndex].descriptor.coordinate
+                while leaseIndex < lease.retainedBindingCount,
+                      lease.retainedBinding(at: leaseIndex)
+                        .descriptor.coordinate
                         < candidate.descriptor.coordinate
                 {
                     leaseIndex += 1
                 }
-                guard leaseIndex < lease.bindings.count,
-                      lease.bindings[leaseIndex].identity
+                guard leaseIndex < lease.retainedBindingCount,
+                      lease.retainedBinding(at: leaseIndex).identity
                         == candidate.identity,
                       let current = records[Key(
                           surfaceID: surfaceID,
@@ -2280,11 +2897,11 @@ public final class PaintTileStore: @unchecked Sendable {
             }
             identityIndex += 1
             guard !residency.isPinned(identity) else { return }
-            if pendingRetirementKeys.remove(key) != nil {
-                removeRecord(for: key)
+            if pendingRetirementKeys.contains(key) {
+                _ = removeRecordIfEligible(for: key)
             } else if !preparedRetirementKeys.contains(key),
                       records[key]?.backing == .knownClear {
-                removeRecord(for: key)
+                _ = removeRecordIfEligible(for: key)
             }
         }
     }
@@ -2377,18 +2994,26 @@ public final class PaintTileStore: @unchecked Sendable {
             }) else {
                 throw PaintTileStoreError.retirementAlreadyPrepared
             }
-            guard var matchingKey = records.first(where: {
-                $0.key.surfaceID == surfaceID
-                    && $0.key.generation == generation
-            })?.key else { return }
+            namespaceRetirementKeys.removeAll(keepingCapacity: true)
+            defer {
+                namespaceRetirementKeys.removeAll(keepingCapacity: true)
+            }
+            for key in records.keys
+            where key.surfaceID == surfaceID && key.generation == generation {
+                namespaceRetirementKeys.append(key)
+            }
+            guard !namespaceRetirementKeys.isEmpty else { return }
+            try preflightStrokeActiveRetirement(
+                for: namespaceRetirementKeys
+            )
             let nextRevision = try advancedStateRevision()
-            while true {
-                removeRecord(for: matchingKey)
-                guard let nextKey = records.first(where: {
-                    $0.key.surfaceID == surfaceID
-                        && $0.key.generation == generation
-                })?.key else { break }
-                matchingKey = nextKey
+            try clearStrokeActivePinsPreflighted(
+                for: namespaceRetirementKeys
+            )
+            for key in namespaceRetirementKeys {
+                if !removeRecordIfEligible(for: key), records[key] != nil {
+                    pendingRetirementKeys.insert(key)
+                }
             }
             stateRevision = nextRevision
         }
@@ -2464,21 +3089,60 @@ public final class PaintTileStore: @unchecked Sendable {
             }) else {
                 throw PaintTileStoreError.retirementAlreadyPrepared
             }
-            let hasMatchingRecord = records.keys.contains {
-                $0.generation == generation
-                    && ($0.surfaceID == authoritativeSurfaceID
-                        || $0.surfaceID == predictionSurfaceID)
+            namespaceRetirementKeys.removeAll(keepingCapacity: true)
+            defer {
+                namespaceRetirementKeys.removeAll(keepingCapacity: true)
             }
-            guard hasMatchingRecord else { return }
+            for key in records.keys
+            where key.generation == generation
+                && (key.surfaceID == authoritativeSurfaceID
+                    || key.surfaceID == predictionSurfaceID)
+            {
+                namespaceRetirementKeys.append(key)
+            }
+            guard !namespaceRetirementKeys.isEmpty else { return }
+            try preflightStrokeActiveRetirement(
+                for: namespaceRetirementKeys
+            )
             let nextRevision = try advancedStateRevision()
-            while let key = records.first(where: {
-                $0.key.generation == generation
-                    && ($0.key.surfaceID == authoritativeSurfaceID
-                        || $0.key.surfaceID == predictionSurfaceID)
-            })?.key {
-                removeRecord(for: key)
+            try clearStrokeActivePinsPreflighted(
+                for: namespaceRetirementKeys
+            )
+            for key in namespaceRetirementKeys {
+                if !removeRecordIfEligible(for: key), records[key] != nil {
+                    pendingRetirementKeys.insert(key)
+                }
             }
             stateRevision = nextRevision
+        }
+    }
+
+    /// Stroke publication owns one persistent `.active` pin per modified
+    /// physical tile. Namespace retirement is the terminal owner of those
+    /// pins, so validate the complete set before mutating either surface.
+    private func preflightStrokeActiveRetirement(
+        for keys: [Key]
+    ) throws {
+        for key in keys {
+            guard let record = records[key], record.storage.isStrokeActive
+            else { continue }
+            guard residency.pinCount(record.identity, reason: .active) == 1
+            else {
+                throw PaintTileResidencyError.unbalancedUnpin(reason: .active)
+            }
+        }
+    }
+
+    /// Applies the already-preflighted terminal ownership transfer. The store
+    /// lock prevents pin state from changing between preflight and mutation.
+    private func clearStrokeActivePinsPreflighted(
+        for keys: [Key]
+    ) throws {
+        for key in keys {
+            guard let record = records[key], record.storage.isStrokeActive
+            else { continue }
+            try residency.unpin(record.identity, reason: .active)
+            record.storage.isStrokeActive = false
         }
     }
 
@@ -2529,7 +3193,7 @@ public final class PaintTileStore: @unchecked Sendable {
         }
         guard record.surfaceID == surfaceID,
               record.generation == currentGeneration,
-              record.identityStorage.elementsEqual(lease.bindings),
+              record.identityStorage.elementsEqual(lease),
               record.pinReasons == lease.pinReasons
         else {
             throw PaintTileStoreError.leaseBindingMismatch
@@ -2548,12 +3212,100 @@ public final class PaintTileStore: @unchecked Sendable {
         )
     }
 
-    private func removeRecord(for key: Key) {
-        if let record = records.removeValue(forKey: key) {
-            residency.remove(record.identity)
-        }
+    /// The sole physical-record deletion primitive. Retirement intent and the
+    /// prepared barrier are managed by callers; deletion itself is possible
+    /// only after both lease pins and snapshot ownership reach zero.
+    @discardableResult
+    private func removeRecordIfEligible(for key: Key) -> Bool {
+        guard let record = records[key],
+              !residency.isPinned(record.identity),
+              record.storage.snapshotRetainCount == 0
+        else { return false }
+        records.removeValue(forKey: key)
+        guard tileKeyByID.removeValue(forKey: record.identity.tileID) == key
+        else { preconditionFailure("Paint tile identity index drift") }
+        residency.remove(record.identity)
         pendingRetirementKeys.remove(key)
-        preparedRetirementKeys.remove(key)
+        return true
+    }
+
+    /// Binary-searches the compact authoritative membership payload. The
+    /// counted overload is a lock-free structural test seam: each count is
+    /// one inspected candidate, so a maximum-size token can prove O(log R)
+    /// admission without timing a contended store lock.
+    static func snapshotRetentionContains(
+        _ tileID: PaintTileID,
+        in sortedTileIDs: [PaintTileID]
+    ) -> Bool {
+        var ignoredProbeCount = 0
+        return snapshotRetentionContains(
+            tileID,
+            in: sortedTileIDs,
+            comparisonCount: &ignoredProbeCount
+        )
+    }
+
+    static func snapshotRetentionContains(
+        _ tileID: PaintTileID,
+        in sortedTileIDs: [PaintTileID],
+        comparisonCount: inout Int
+    ) -> Bool {
+        var lowerBound = 0
+        var upperBound = sortedTileIDs.count
+        while lowerBound < upperBound {
+            let middle = lowerBound + (upperBound - lowerBound) / 2
+            comparisonCount += 1
+            let candidate = sortedTileIDs[middle]
+            if candidate == tileID { return true }
+            if candidate < tileID {
+                lowerBound = middle + 1
+            } else {
+                upperBound = middle
+            }
+        }
+        return false
+    }
+
+    private func checkedSnapshotSum(
+        _ lhs: Int,
+        _ rhs: Int,
+        limit: PaintTileSnapshotRetentionLimit
+    ) throws -> Int {
+        let (result, overflow) = lhs.addingReportingOverflow(rhs)
+        guard !overflow else {
+            throw PaintTileStoreError.snapshotRetentionArithmeticOverflow(
+                limit
+            )
+        }
+        return result
+    }
+
+    private func checkedSnapshotProduct(
+        _ lhs: Int,
+        _ rhs: Int,
+        limit: PaintTileSnapshotRetentionLimit
+    ) throws -> Int {
+        let (result, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard !overflow else {
+            throw PaintTileStoreError.snapshotRetentionArithmeticOverflow(
+                limit
+            )
+        }
+        return result
+    }
+
+    private func enforceSnapshotLimit(
+        _ required: Int,
+        maximum: Int,
+        limit: PaintTileSnapshotRetentionLimit
+    ) throws {
+        guard required <= maximum else {
+            throw PaintTileStoreError.snapshotRetentionLimitExceeded(
+                limit: limit,
+                required: required,
+                maximum: maximum
+            )
+        }
     }
 
     private func preflightCapacity(

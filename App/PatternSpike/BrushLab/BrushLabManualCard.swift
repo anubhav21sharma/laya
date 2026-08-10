@@ -606,7 +606,7 @@ enum BrushLabProfessionalBrushRole:
     String, Codable, Hashable, Sendable
 {
     case professionalDraw
-    case retainedStageFourEraser
+    case nativeEraser
 }
 
 enum BrushLabProfessionalInputSource: String, Codable, Sendable {
@@ -1012,7 +1012,7 @@ struct BrushLabProfessionalManualCard: Codable, Equatable, Sendable {
         )
         let eraserPass = BrushLabProfessionalManualPass(
             passIndex: 1,
-            role: .retainedStageFourEraser,
+            role: .nativeEraser,
             tool: .erase,
             brushID: EditorBrushCatalog.eraser.id.rawValue,
             nominalDiameter: 20,

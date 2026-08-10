@@ -26,6 +26,37 @@ private func packageRoot() -> URL {
 }
 
 @Test
+func depositionSupportProjectionOwnsTheShaderAntialiasFringe() throws {
+    let radius: Float = 1.645_248
+    let support = TilingProjection.depositionSupportLocalBounds(
+        radius: radius
+    )
+    let strategy = try TilingStrategy(
+        finiteConfiguration: .plain,
+        canvasSize: PixelSize(width: 128, height: 128)
+    )
+    let fragments = TilingProjection.fragments(
+        for: StampFootprint(
+            brushToWorld: Affine2D(
+                xAxis: SIMD2(radius, 0),
+                yAxis: SIMD2(0, radius),
+                translation: SIMD2(64, 64)
+            ),
+            localBounds: support,
+            coverageSymmetry: .oriented
+        ),
+        using: strategy
+    )
+    let fringePoint = SIMD2<Float>(0.206_656, -1.017_424)
+
+    #expect(fringePoint.y < -1)
+    #expect(fringePoint.y >= support.minimum.y)
+    #expect(fragments.contains {
+        $0.brushClip.contains(fringePoint, tolerance: 0)
+    })
+}
+
+@Test
 func reusableProjectionMatchesCompatibilityPathWithoutStorageAcquisition() {
     let footprint = StampFootprint(
         brushToWorld: Affine2D(

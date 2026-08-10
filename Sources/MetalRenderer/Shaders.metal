@@ -750,234 +750,6 @@ fragment float4 patternDiagnosticFootprintFragment(
     }
 }
 
-static float patternPositiveFold(float coordinate, float extent) {
-    const float remainder = fmod(coordinate, extent);
-    if (remainder == 0.0) {
-        return 0.0;
-    }
-    if (remainder < 0.0) {
-        return min(
-            remainder + extent,
-            nextafter(extent, 0.0)
-        );
-    }
-    return remainder;
-}
-
-static float2 patternPositiveFold(float2 world, float2 tileSize) {
-    return float2(
-        patternPositiveFold(world.x, tileSize.x),
-        patternPositiveFold(world.y, tileSize.y)
-    );
-}
-
-struct PatternDisplayMapping {
-    float2 canonicalPixel;
-    float2 phasedCellLocal;
-    bool valid;
-};
-
-static PatternDisplayMapping patternDisplayMapping(
-    float2 world,
-    float2 tileSize,
-    float2 repeatSize,
-    float2 latticeXAxis,
-    float2 latticeYAxis,
-    float2 latticeTranslation,
-    uint symmetryFamily,
-    uint tilingKind
-) {
-    if (symmetryFamily != PatternSymmetryFamilyWireRectangular) {
-        return {float2(0.0), float2(0.0), false};
-    }
-
-    const float2 lattice =
-        latticeXAxis * world.x
-        + latticeYAxis * world.y
-        + latticeTranslation;
-
-    switch (tilingKind) {
-    case PatternTilingWireHalfDrop: {
-        if (all(repeatSize == tileSize)) {
-            const int column = int(floor(world.x / tileSize.x));
-            const float phaseY = (column & 1) * tileSize.y * 0.5;
-            const float2 folded = patternPositiveFold(
-                float2(world.x, world.y - phaseY),
-                tileSize
-            );
-            return {folded, folded, true};
-        }
-        const int column = int(floor(lattice.x));
-        const float phaseY = (column & 1) * 0.5;
-        const float2 foldedUnit = patternPositiveFold(
-            float2(lattice.x, lattice.y - phaseY),
-            float2(1.0)
-        );
-        return {
-            foldedUnit * tileSize,
-            foldedUnit * repeatSize,
-            true
-        };
-    }
-    case PatternTilingWireBrick: {
-        if (all(repeatSize == tileSize)) {
-            const int row = int(floor(world.y / tileSize.y));
-            const float phaseX = (row & 1) * tileSize.x * 0.5;
-            const float2 folded = patternPositiveFold(
-                float2(world.x - phaseX, world.y),
-                tileSize
-            );
-            return {folded, folded, true};
-        }
-        const int row = int(floor(lattice.y));
-        const float phaseX = (row & 1) * 0.5;
-        const float2 foldedUnit = patternPositiveFold(
-            float2(lattice.x - phaseX, lattice.y),
-            float2(1.0)
-        );
-        return {
-            foldedUnit * tileSize,
-            foldedUnit * repeatSize,
-            true
-        };
-    }
-    case PatternTilingWireMirrorX:
-    case PatternTilingWireMirrorY:
-    case PatternTilingWireMirrorXY: {
-        if (all(repeatSize == tileSize)) {
-            const int column = int(floor(world.x / tileSize.x));
-            const int row = int(floor(world.y / tileSize.y));
-            const float2 local = patternPositiveFold(world, tileSize);
-            const bool reflectsX =
-                (
-                    tilingKind == PatternTilingWireMirrorX
-                    || tilingKind == PatternTilingWireMirrorXY
-                )
-                && (column & 1) != 0;
-            const bool reflectsY =
-                (
-                    tilingKind == PatternTilingWireMirrorY
-                    || tilingKind == PatternTilingWireMirrorXY
-                )
-                && (row & 1) != 0;
-            const float2 canonical = float2(
-                reflectsX
-                    ? patternPositiveFold(
-                        tileSize.x - local.x,
-                        tileSize.x
-                    )
-                    : local.x,
-                reflectsY
-                    ? patternPositiveFold(
-                        tileSize.y - local.y,
-                        tileSize.y
-                    )
-                    : local.y
-            );
-            return {canonical, local, true};
-        }
-        const int column = int(floor(lattice.x));
-        const int row = int(floor(lattice.y));
-        const float2 localUnit = patternPositiveFold(
-            lattice,
-            float2(1.0)
-        );
-        const bool reflectsX =
-            (
-                tilingKind == PatternTilingWireMirrorX
-                || tilingKind == PatternTilingWireMirrorXY
-            )
-            && (column & 1) != 0;
-        const bool reflectsY =
-            (
-                tilingKind == PatternTilingWireMirrorY
-                || tilingKind == PatternTilingWireMirrorXY
-            )
-            && (row & 1) != 0;
-        const float2 canonicalUnit = float2(
-            reflectsX
-                ? patternPositiveFold(1.0 - localUnit.x, 1.0)
-                : localUnit.x,
-            reflectsY
-                ? patternPositiveFold(1.0 - localUnit.y, 1.0)
-                : localUnit.y
-        );
-        return {
-            canonicalUnit * tileSize,
-            localUnit * repeatSize,
-            true
-        };
-    }
-    case PatternTilingWireRotational:
-    case PatternTilingWireGrid: {
-        if (all(repeatSize == tileSize)) {
-            const float2 folded = patternPositiveFold(world, tileSize);
-            return {folded, folded, true};
-        }
-        const float2 foldedUnit = patternPositiveFold(
-            lattice,
-            float2(1.0)
-        );
-        return {
-            foldedUnit * tileSize,
-            foldedUnit * repeatSize,
-            true
-        };
-    }
-    case PatternTilingWireSquareRotation:
-    case PatternTilingWireSquareKaleidoscope: {
-        const float2 foldedUnit = patternPositiveFold(
-            lattice,
-            float2(1.0)
-        );
-        return {
-            foldedUnit * tileSize,
-            foldedUnit * repeatSize,
-            true
-        };
-    }
-    default:
-        return {float2(0.0), float2(0.0), false};
-    }
-}
-
-static PatternDisplayMapping patternTriangularDisplayMapping(
-    float2 world,
-    float2 tileSize,
-    float2 repeatSize,
-    float2 latticeXAxis,
-    float2 latticeYAxis,
-    float2 latticeTranslation,
-    uint symmetryFamily,
-    uint tilingKind
-) {
-    if (symmetryFamily != PatternSymmetryFamilyWireTriangular) {
-        return {float2(0.0), float2(0.0), false};
-    }
-    switch (tilingKind) {
-    case PatternTilingWireHexagons:
-    case PatternTilingWireRotation3:
-    case PatternTilingWireRotation6:
-    case PatternTilingWireKaleidoscope60:
-    case PatternTilingWireKaleidoscope30: {
-        const float2 lattice =
-            latticeXAxis * world.x
-            + latticeYAxis * world.y
-            + latticeTranslation;
-        const float2 foldedUnit = patternPositiveFold(
-            lattice,
-            float2(1.0)
-        );
-        return {
-            foldedUnit * tileSize,
-            foldedUnit * repeatSize,
-            true
-        };
-    }
-    default:
-        return {float2(0.0), float2(0.0), false};
-    }
-}
 
 static float4 patternSourceOver(float4 source, float4 destination) {
     return source + destination * (1.0 - source.a);
@@ -1011,528 +783,14 @@ static float4 patternCompositeLive(
     return patternSourceOver(live, canonical);
 }
 
-static uint patternWrappedTexelIndex(int index, uint size) {
-    const int signedSize = int(size);
-    const int remainder = index % signedSize;
-    return uint(remainder < 0 ? remainder + signedSize : remainder);
-}
 
-static uint2 patternWrappedTexel(
-    int2 texel,
-    uint2 textureSize
-) {
-    return uint2(
-        patternWrappedTexelIndex(texel.x, textureSize.x),
-        patternWrappedTexelIndex(texel.y, textureSize.y)
-    );
-}
-
-static bool patternRadialAtlasTexel(
-    int2 logicalTexel,
-    constant PatternRadialFrameUniforms& radial,
-    texture2d<int, access::read> pageTable,
-    thread uint2& atlasTexel
-);
 
 static bool patternRadialOrbitIntersectsCanvas(
     float2 logicalPoint,
     constant PatternRadialFrameUniforms& radial
 );
 
-fragment float4 patternClearFragment(
-    PatternFullscreenOut input [[stage_in]]
-) {
-    return float4(0.0);
-}
 
- static float4 patternCompositeThenBilinearSample(
-    texture2d<float> canonical,
-    texture2d<float> settledLive,
-    texture2d<float> replayLive,
-    float2 canonicalPixel,
-    uint compositeMode,
-    uint liveVisible,
-    float strokeOpacity,
-    float accumulationLimit,
-    float eraserStrength
-) {
-    const float2 samplePosition = canonicalPixel - 0.5;
-    const int2 lower = int2(floor(samplePosition));
-    const float2 blend = fract(samplePosition);
-    const uint2 textureSize = uint2(
-        canonical.get_width(),
-        canonical.get_height()
-    );
-    const uint2 texel00 = patternWrappedTexel(lower, textureSize);
-    const uint2 texel10 = patternWrappedTexel(
-        lower + int2(1, 0),
-        textureSize
-    );
-    const uint2 texel01 = patternWrappedTexel(
-        lower + int2(0, 1),
-        textureSize
-    );
-    const uint2 texel11 = patternWrappedTexel(
-        lower + int2(1, 1),
-        textureSize
-    );
-    const float4 live00 = liveVisible == 0
-        ? float4(0.0)
-        : settledLive.read(texel00);
-    const float4 live10 = liveVisible == 0
-        ? float4(0.0)
-        : settledLive.read(texel10);
-    const float4 live01 = liveVisible == 0
-        ? float4(0.0)
-        : settledLive.read(texel01);
-    const float4 live11 = liveVisible == 0
-        ? float4(0.0)
-        : settledLive.read(texel11);
-    const float4 replay00 = liveVisible == 0
-        ? float4(0.0)
-        : replayLive.read(texel00);
-    const float4 replay10 = liveVisible == 0
-        ? float4(0.0)
-        : replayLive.read(texel10);
-    const float4 replay01 = liveVisible == 0
-        ? float4(0.0)
-        : replayLive.read(texel01);
-    const float4 replay11 = liveVisible == 0
-        ? float4(0.0)
-        : replayLive.read(texel11);
-    const float4 composite00 = patternCompositeLive(
-        live00,
-        replay00,
-        canonical.read(texel00),
-        compositeMode,
-        strokeOpacity,
-        accumulationLimit,
-        eraserStrength
-    );
-    const float4 composite10 = patternCompositeLive(
-        live10,
-        replay10,
-        canonical.read(texel10),
-        compositeMode,
-        strokeOpacity,
-        accumulationLimit,
-        eraserStrength
-    );
-    const float4 composite01 = patternCompositeLive(
-        live01,
-        replay01,
-        canonical.read(texel01),
-        compositeMode,
-        strokeOpacity,
-        accumulationLimit,
-        eraserStrength
-    );
-    const float4 composite11 = patternCompositeLive(
-        live11,
-        replay11,
-        canonical.read(texel11),
-        compositeMode,
-        strokeOpacity,
-        accumulationLimit,
-        eraserStrength
-    );
-    return mix(
-        mix(composite00, composite10, blend.x),
-        mix(composite01, composite11, blend.x),
-        blend.y
-    );
-}
-
-static float4 patternWrappedBilinearCanonicalSample(
-    texture2d<float> canonical,
-    float2 canonicalPixel
-) {
-    const float2 samplePosition = canonicalPixel - 0.5;
-    const int2 lower = int2(floor(samplePosition));
-    const float2 blend = fract(samplePosition);
-    const uint2 textureSize = uint2(
-        canonical.get_width(),
-        canonical.get_height()
-    );
-    const float4 value00 = canonical.read(
-        patternWrappedTexel(lower, textureSize)
-    );
-    const float4 value10 = canonical.read(
-        patternWrappedTexel(lower + int2(1, 0), textureSize)
-    );
-    const float4 value01 = canonical.read(
-        patternWrappedTexel(lower + int2(0, 1), textureSize)
-    );
-    const float4 value11 = canonical.read(
-        patternWrappedTexel(lower + int2(1, 1), textureSize)
-    );
-    return mix(
-        mix(value00, value10, blend.x),
-        mix(value01, value11, blend.x),
-        blend.y
-    );
-}
-
-fragment float4 patternPeriodicRepeatExportFragment(
-    PatternFullscreenOut input [[stage_in]],
-    constant PatternGridFrameUniforms& frame
-        [[buffer(PatternBufferIndexGridFrameUniforms)]],
-    texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]]
-) {
-    const float2 canonicalPixel =
-        input.screenPixel / frame.drawableSize * frame.tileSize;
-    return patternWrappedBilinearCanonicalSample(
-        canonical,
-        canonicalPixel
-    );
-}
-
-static float patternDistanceToNearestInteger(float value) {
-    const float folded = fract(value);
-    return min(folded, 1.0 - folded);
-}
-
-static float2 patternTriangularAxial(
-    float2 local,
-    float spacing
-) {
-    const float inverseSqrtThree = 0.57735026919;
-    const float row = 2.0 * local.y * inverseSqrtThree / spacing;
-    return float2(local.x / spacing - row * 0.5, row);
-}
-
-static float patternTriangularEdgeDistance(
-    float2 local,
-    float spacing
-) {
-    const float2 axial = patternTriangularAxial(local, spacing);
-    const float altitude = 0.86602540378 * spacing;
-    return min(
-        min(
-            patternDistanceToNearestInteger(axial.x),
-            patternDistanceToNearestInteger(axial.y)
-        ),
-        patternDistanceToNearestInteger(axial.x + axial.y)
-    ) * altitude;
-}
-
-static float2 patternNearestTriangularLatticePoint(
-    float2 local,
-    float spacing
-) {
-    const float2 axial = patternTriangularAxial(local, spacing);
-    float cubeX = round(axial.x);
-    float cubeZ = round(axial.y);
-    float cubeY = round(-axial.x - axial.y);
-    const float differenceX = abs(cubeX - axial.x);
-    const float differenceZ = abs(cubeZ - axial.y);
-    const float differenceY = abs(cubeY + axial.x + axial.y);
-    if (differenceX > differenceY && differenceX > differenceZ) {
-        cubeX = -cubeY - cubeZ;
-    } else if (differenceY > differenceZ) {
-        cubeY = -cubeX - cubeZ;
-    } else {
-        cubeZ = -cubeX - cubeY;
-    }
-    return float2(
-        (cubeX + cubeZ * 0.5) * spacing,
-        cubeZ * 0.86602540378 * spacing
-    );
-}
-
-static float patternHexagonEdgeDistance(
-    float2 local,
-    float spacing
-) {
-    const float2 relative = local
-        - patternNearestTriangularLatticePoint(local, spacing);
-    const float apothem = spacing * 0.5;
-    const float first = apothem - abs(relative.x);
-    const float second = apothem - abs(
-        dot(relative, float2(0.5, 0.86602540378))
-    );
-    const float third = apothem - abs(
-        dot(relative, float2(-0.5, 0.86602540378))
-    );
-    return max(min(first, min(second, third)), 0.0);
-}
-
-static float patternGuideRingDistance(
-    float2 local,
-    float2 repeatSize,
-    float2 normalizedCenter,
-    float zoom,
-    float radius
-) {
-    return abs(
-        length(local - normalizedCenter * repeatSize) * zoom - radius
-    );
-}
-
-static float patternTriangularCenterDistance(
-    float2 local,
-    float2 repeatSize,
-    uint guideKind,
-    float zoom
-) {
-    float distance = INFINITY;
-    if (
-        guideKind == PatternGuideWireTriangularRotation3
-        || guideKind == PatternGuideWireTriangularKaleidoscope60
-        || guideKind == PatternGuideWireTriangularRotation6
-        || guideKind == PatternGuideWireTriangularKaleidoscope30
-    ) {
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.0, 0.0), zoom, 4.0
-        ));
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.5, 1.0 / 6.0), zoom, 3.0
-        ));
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.0, 1.0 / 3.0), zoom, 3.0
-        ));
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.5, 0.5), zoom, 4.0
-        ));
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.0, 2.0 / 3.0), zoom, 3.0
-        ));
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.5, 5.0 / 6.0), zoom, 3.0
-        ));
-    }
-    if (
-        guideKind == PatternGuideWireTriangularRotation6
-        || guideKind == PatternGuideWireTriangularKaleidoscope30
-    ) {
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.5, 0.0), zoom, 2.5
-        ));
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.25, 0.25), zoom, 2.5
-        ));
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.75, 0.25), zoom, 2.5
-        ));
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.0, 0.5), zoom, 2.5
-        ));
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.25, 0.75), zoom, 2.5
-        ));
-        distance = min(distance, patternGuideRingDistance(
-            local, repeatSize, float2(0.75, 0.75), zoom, 2.5
-        ));
-    }
-    return distance;
-}
-
-static float4 patternGridOverlay(
-    float4 color,
-    PatternDisplayMapping mapping,
-    constant PatternGridFrameUniforms& frame
-) {
-    if (frame.showGridLines != 0) {
-        const float2 edgeDistance = min(
-            mapping.phasedCellLocal,
-            frame.repeatSize - mapping.phasedCellLocal
-        );
-        float guideDistance = min(edgeDistance.x, edgeDistance.y)
-            * frame.zoom;
-        const float2 centerRelative =
-            mapping.phasedCellLocal - frame.repeatSize * 0.5;
-        if (
-            frame.guideKind == PatternGuideWireSquareRotation
-            || frame.guideKind == PatternGuideWireSquareKaleidoscope
-        ) {
-            const float cornerRingDistance = abs(
-                length(edgeDistance) * frame.zoom - 4.0
-            );
-            const float centerRingDistance = abs(
-                length(centerRelative) * frame.zoom - 4.0
-            );
-            const float edgeCenterRingDistance = abs(
-                min(
-                    length(float2(abs(centerRelative.x), edgeDistance.y)),
-                    length(float2(edgeDistance.x, abs(centerRelative.y)))
-                ) * frame.zoom - 3.0
-            );
-            guideDistance = min(
-                guideDistance,
-                min(
-                    cornerRingDistance,
-                    min(centerRingDistance, edgeCenterRingDistance)
-                )
-            );
-        }
-        if (
-            frame.guideKind == PatternGuideWireSquareKaleidoscope
-        ) {
-            const float inverseSquareRootTwo = 0.70710678118;
-            const float mirrorDistance = min(
-                min(abs(centerRelative.x), abs(centerRelative.y)),
-                min(
-                    abs(centerRelative.x - centerRelative.y)
-                        * inverseSquareRootTwo,
-                    abs(centerRelative.x + centerRelative.y)
-                        * inverseSquareRootTwo
-                )
-            ) * frame.zoom;
-            guideDistance = min(guideDistance, mirrorDistance);
-        }
-        const float coverage = 1.0 - smoothstep(
-            frame.gridLineWidth,
-            frame.gridLineWidth + 1.0,
-            guideDistance
-        );
-        const float alpha = 0.22 * coverage;
-        const float4 grid = float4(
-            float3(0.18, 0.20, 0.19) * alpha,
-            alpha
-        );
-        return patternSourceOver(grid, color);
-    }
-    return color;
-}
-
-static float4 patternTriangularGridOverlay(
-    float4 color,
-    PatternDisplayMapping mapping,
-    constant PatternGridFrameUniforms& frame
-) {
-    if (frame.showGridLines != 0) {
-        const float2 edgeDistance = min(
-            mapping.phasedCellLocal,
-            frame.repeatSize - mapping.phasedCellLocal
-        );
-        float guideDistance = min(edgeDistance.x, edgeDistance.y)
-            * frame.zoom;
-        const float spacing = frame.repeatSize.x;
-        const float triangularDistance = patternTriangularEdgeDistance(
-            mapping.phasedCellLocal,
-            spacing
-        ) * frame.zoom;
-        const float hexagonDistance = patternHexagonEdgeDistance(
-            mapping.phasedCellLocal,
-            spacing
-        ) * frame.zoom;
-        if (frame.guideKind == PatternGuideWireHexagons) {
-            guideDistance = min(guideDistance, hexagonDistance);
-        } else if (
-            frame.guideKind == PatternGuideWireTriangularKaleidoscope30
-        ) {
-            guideDistance = min(
-                guideDistance,
-                min(triangularDistance, hexagonDistance)
-            );
-        } else {
-            guideDistance = min(guideDistance, triangularDistance);
-        }
-        guideDistance = min(
-            guideDistance,
-            patternTriangularCenterDistance(
-                mapping.phasedCellLocal,
-                frame.repeatSize,
-                frame.guideKind,
-                frame.zoom
-            )
-        );
-        const float coverage = 1.0 - smoothstep(
-            frame.gridLineWidth,
-            frame.gridLineWidth + 1.0,
-            guideDistance
-        );
-        const float alpha = 0.22 * coverage;
-        const float4 grid = float4(
-            float3(0.18, 0.20, 0.19) * alpha,
-            alpha
-        );
-        return patternSourceOver(grid, color);
-    }
-    return color;
-}
-
-fragment float4 patternGridFragment(
-    PatternFullscreenOut input [[stage_in]],
-    constant PatternGridFrameUniforms& frame
-        [[buffer(PatternBufferIndexGridFrameUniforms)]],
-    constant PatternCompositeUniforms& material
-        [[buffer(PatternBufferIndexBrushMaterial)]],
-    texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]],
-    texture2d<float> live [[texture(PatternTextureIndexLive)]],
-    texture2d<float> replayLive [[texture(PatternTextureIndexReplayLive)]]
-) {
-    const float2 screenCenter = frame.drawableSize * 0.5;
-    const float2 world = (input.screenPixel - screenCenter) / frame.zoom
-        + frame.worldCenter;
-    const PatternDisplayMapping mapping = patternDisplayMapping(
-        world,
-        frame.tileSize,
-        frame.repeatSize,
-        frame.latticeXAxis,
-        frame.latticeYAxis,
-        frame.latticeTranslation,
-        frame.symmetryFamily,
-        frame.tilingKind
-    );
-    if (!mapping.valid) {
-        return float4(1.0, 0.0, 1.0, 1.0);
-    }
-    float4 result = patternCompositeThenBilinearSample(
-        canonical,
-        live,
-        replayLive,
-        mapping.canonicalPixel,
-        frame.compositeMode,
-        frame.liveVisible,
-        material.parameters.x,
-        material.parameters.y,
-        material.parameters.z
-    );
-
-    return patternGridOverlay(result, mapping, frame);
-}
-
-fragment float4 patternTriangularGridFragment(
-    PatternFullscreenOut input [[stage_in]],
-    constant PatternGridFrameUniforms& frame
-        [[buffer(PatternBufferIndexGridFrameUniforms)]],
-    constant PatternCompositeUniforms& material
-        [[buffer(PatternBufferIndexBrushMaterial)]],
-    texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]],
-    texture2d<float> live [[texture(PatternTextureIndexLive)]],
-    texture2d<float> replayLive [[texture(PatternTextureIndexReplayLive)]]
-) {
-    const float2 screenCenter = frame.drawableSize * 0.5;
-    const float2 world = (input.screenPixel - screenCenter) / frame.zoom
-        + frame.worldCenter;
-    const PatternDisplayMapping mapping = patternTriangularDisplayMapping(
-        world,
-        frame.tileSize,
-        frame.repeatSize,
-        frame.latticeXAxis,
-        frame.latticeYAxis,
-        frame.latticeTranslation,
-        frame.symmetryFamily,
-        frame.tilingKind
-    );
-    if (!mapping.valid) {
-        return float4(1.0, 0.0, 1.0, 1.0);
-    }
-    float4 result = patternCompositeThenBilinearSample(
-        canonical,
-        live,
-        replayLive,
-        mapping.canonicalPixel,
-        frame.compositeMode,
-        frame.liveVisible,
-        material.parameters.x,
-        material.parameters.y,
-        material.parameters.z
-    );
-
-    return patternTriangularGridOverlay(result, mapping, frame);
-}
 
 struct PatternRadialMapping {
     float2 logicalPixel;
@@ -1578,6 +836,9 @@ static PatternRadialMapping patternRadialMapping(
     if (radial.dihedral != 0 && (sector & 1u) != 0) {
         localAngle = radial.sectorAngle - localAngle;
     }
+    if (localAngle == radial.sectorAngle) {
+        localAngle = nextafter(radial.sectorAngle, 0.0);
+    }
     return {
         radius * float2(cos(localAngle), sin(localAngle)),
         radius,
@@ -1586,33 +847,6 @@ static PatternRadialMapping patternRadialMapping(
     };
 }
 
-static bool patternRadialAtlasTexel(
-    int2 logicalTexel,
-    constant PatternRadialFrameUniforms& radial,
-    texture2d<int, access::read> pageTable,
-    thread uint2& atlasTexel
-) {
-    const int side = int(radial.pageSide);
-    const int2 page = int2(floor(float2(logicalTexel) / float(side)));
-    const int2 table = page - int2(radial.pageOrigin);
-    if (
-        any(table < int2(0))
-        || any(table >= int2(radial.pageTableSize))
-    ) {
-        return false;
-    }
-    const int slot = pageTable.read(uint2(table)).x;
-    if (slot < 0) {
-        return false;
-    }
-    const int2 local = logicalTexel - page * side;
-    const int2 atlasPage = int2(
-        slot % int(radial.atlasColumns),
-        slot / int(radial.atlasColumns)
-    );
-    atlasTexel = uint2(atlasPage * side + local);
-    return true;
-}
 
 static bool patternRadialOrbitIntersectsCanvas(
     float2 logicalPoint,
@@ -1664,302 +898,8 @@ static bool patternRadialOrbitIntersectsCanvas(
     return false;
 }
 
-kernel void patternRadialResizeCopy(
-    texture2d<float, access::read> source
-        [[texture(PatternTextureIndexCanonical)]],
-    texture2d<float, access::write> destination
-        [[texture(PatternTextureIndexLive)]],
-    texture2d<int, access::read> sourcePageTable
-        [[texture(PatternTextureIndexRadialPageTable)]],
-    constant PatternRadialFrameUniforms& sourceRadial
-        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
-    constant PatternRadialFrameUniforms& destinationRadial
-        [[buffer(PatternBufferIndexRadialResizeDestinationUniforms)]],
-    constant PatternRadialResizePageUniforms& page
-        [[buffer(PatternBufferIndexRadialResizePage)]],
-    uint2 localTexel [[thread_position_in_grid]]
-) {
-    const uint side = destinationRadial.pageSide;
-    if (localTexel.x >= side || localTexel.y >= side) {
-        return;
-    }
-    const int2 logicalTexel = int2(
-        page.logicalPageX * int(side) + int(localTexel.x),
-        page.logicalPageY * int(side) + int(localTexel.y)
-    );
-    const float2 logicalPoint = float2(logicalTexel) + 0.5;
-    const uint2 destinationPage = uint2(
-        page.destinationSlot % destinationRadial.atlasColumns,
-        page.destinationSlot / destinationRadial.atlasColumns
-    );
-    const uint2 destinationTexel = destinationPage * side + localTexel;
-    uint2 sourceTexel;
-    if (
-        patternRadialOrbitIntersectsCanvas(
-            logicalPoint,
-            destinationRadial
-        )
-        && patternRadialAtlasTexel(
-            logicalTexel,
-            sourceRadial,
-            sourcePageTable,
-            sourceTexel
-        )
-    ) {
-        destination.write(source.read(sourceTexel), destinationTexel);
-    } else {
-        destination.write(float4(0.0), destinationTexel);
-    }
-}
 
-static float4 patternRadialCompositeTexel(
-    texture2d<float> canonical,
-    texture2d<float> settledLive,
-    texture2d<float> replayLive,
-    texture2d<int, access::read> pageTable,
-    int2 logicalTexel,
-    constant PatternGridFrameUniforms& frame,
-    constant PatternRadialFrameUniforms& radial,
-    constant PatternCompositeUniforms& material
-) {
-    uint2 atlasTexel;
-    if (!patternRadialAtlasTexel(
-        logicalTexel,
-        radial,
-        pageTable,
-        atlasTexel
-    )) {
-        return float4(0.0);
-    }
-    const float4 settled = frame.liveVisible == 0
-        ? float4(0.0)
-        : settledLive.read(atlasTexel);
-    const float4 replay = frame.liveVisible == 0
-        ? float4(0.0)
-        : replayLive.read(atlasTexel);
-    return patternCompositeLive(
-        settled,
-        replay,
-        canonical.read(atlasTexel),
-        frame.compositeMode,
-        material.parameters.x,
-        material.parameters.y,
-        material.parameters.z
-    );
-}
-
-static float4 patternRadialBilinearComposite(
-    texture2d<float> canonical,
-    texture2d<float> settledLive,
-    texture2d<float> replayLive,
-    texture2d<int, access::read> pageTable,
-    float2 logicalPixel,
-    constant PatternGridFrameUniforms& frame,
-    constant PatternRadialFrameUniforms& radial,
-    constant PatternCompositeUniforms& material
-) {
-    const float2 samplePosition = logicalPixel - 0.5;
-    const int2 lower = int2(floor(samplePosition));
-    const float2 blend = fract(samplePosition);
-    const float4 value00 = patternRadialCompositeTexel(
-        canonical, settledLive, replayLive, pageTable, lower,
-        frame, radial, material
-    );
-    const float4 value10 = patternRadialCompositeTexel(
-        canonical, settledLive, replayLive, pageTable,
-        lower + int2(1, 0), frame, radial, material
-    );
-    const float4 value01 = patternRadialCompositeTexel(
-        canonical, settledLive, replayLive, pageTable,
-        lower + int2(0, 1), frame, radial, material
-    );
-    const float4 value11 = patternRadialCompositeTexel(
-        canonical, settledLive, replayLive, pageTable,
-        lower + int2(1, 1), frame, radial, material
-    );
-    return mix(
-        mix(value00, value10, blend.x),
-        mix(value01, value11, blend.x),
-        blend.y
-    );
-}
-
-static float4 patternRadialGuideOverlay(
-    float4 color,
-    PatternRadialMapping mapping,
-    constant PatternGridFrameUniforms& frame,
-    constant PatternRadialFrameUniforms& radial
-) {
-    if (
-        frame.showGridLines == 0
-        || frame.tilingKind == PatternTilingWirePlainCanvas
-    ) {
-        return color;
-    }
-    const float sectorPhase = fmod(
-        mapping.relativeAngle,
-        radial.sectorAngle
-    );
-    const float axisAngle = min(
-        sectorPhase,
-        radial.sectorAngle - sectorPhase
-    );
-    const float axisDistance =
-        mapping.radius * abs(sin(axisAngle)) * frame.zoom;
-    const float centerDistance = abs(mapping.radius * frame.zoom - 4.0);
-    const float guideDistance = min(axisDistance, centerDistance);
-    const float coverage = 1.0 - smoothstep(
-        frame.gridLineWidth,
-        frame.gridLineWidth + 1.0,
-        guideDistance
-    );
-    const float alpha = 0.24 * coverage;
-    return patternSourceOver(
-        float4(float3(0.18, 0.20, 0.19) * alpha, alpha),
-        color
-    );
-}
-
-static float4 patternFiniteBilinearComposite(
-    texture2d<float> canonical,
-    texture2d<float> settledLive,
-    texture2d<float> replayLive,
-    float2 canonicalPixel,
-    constant PatternGridFrameUniforms& frame,
-    constant PatternCompositeUniforms& material
-) {
-    constexpr sampler finiteSampler(
-        coord::normalized,
-        address::clamp_to_zero,
-        filter::linear
-    );
-    const float2 size = float2(
-        canonical.get_width(),
-        canonical.get_height()
-    );
-    const float2 uv = canonicalPixel / size;
-    const float4 settled = frame.liveVisible == 0
-        ? float4(0.0)
-        : settledLive.sample(finiteSampler, uv);
-    const float4 replay = frame.liveVisible == 0
-        ? float4(0.0)
-        : replayLive.sample(finiteSampler, uv);
-    return patternCompositeLive(
-        settled,
-        replay,
-        canonical.sample(finiteSampler, uv),
-        frame.compositeMode,
-        material.parameters.x,
-        material.parameters.y,
-        material.parameters.z
-    );
-}
-
-static float4 patternFiniteCanvasBoundaryOverlay(
-    float4 color,
-    float2 world,
-    constant PatternGridFrameUniforms& frame,
-    constant PatternRadialFrameUniforms& radial
-) {
-    if (frame.showCanvasBoundary == 0) {
-        return color;
-    }
-    const float edgeDistance = min(
-        min(world.x, radial.canvasSize.x - world.x),
-        min(world.y, radial.canvasSize.y - world.y)
-    ) * frame.zoom;
-    const float coverage = 1.0 - smoothstep(0.5, 1.5, edgeDistance);
-    const float alpha = 0.36 * coverage;
-    return patternSourceOver(
-        float4(float3(0.16, 0.18, 0.17) * alpha, alpha),
-        color
-    );
-}
-
-fragment float4 patternRadialGridFragment(
-    PatternFullscreenOut input [[stage_in]],
-    constant PatternGridFrameUniforms& frame
-        [[buffer(PatternBufferIndexGridFrameUniforms)]],
-    constant PatternCompositeUniforms& material
-        [[buffer(PatternBufferIndexBrushMaterial)]],
-    constant PatternRadialFrameUniforms& radial
-        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
-    texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]],
-    texture2d<float> live [[texture(PatternTextureIndexLive)]],
-    texture2d<float> replayLive [[texture(PatternTextureIndexReplayLive)]],
-    texture2d<int, access::read> pageTable
-        [[texture(PatternTextureIndexRadialPageTable)]]
-) {
-    const float2 screenCenter = frame.drawableSize * 0.5;
-    const float2 world = (input.screenPixel - screenCenter) / frame.zoom
-        + frame.worldCenter;
-    const PatternRadialMapping mapping = patternRadialMapping(
-        world,
-        frame,
-        radial
-    );
-    if (!mapping.valid) {
-        return float4(0.0);
-    }
-    float4 result;
-    if (frame.tilingKind == PatternTilingWirePlainCanvas) {
-        result = patternFiniteBilinearComposite(
-            canonical,
-            live,
-            replayLive,
-            mapping.logicalPixel,
-            frame,
-            material
-        );
-    } else {
-        result = patternRadialBilinearComposite(
-            canonical,
-            live,
-            replayLive,
-            pageTable,
-            mapping.logicalPixel,
-            frame,
-            radial,
-            material
-        );
-    }
-    return patternFiniteCanvasBoundaryOverlay(
-        patternRadialGuideOverlay(result, mapping, frame, radial),
-        world,
-        frame,
-        radial
-    );
-}
-
-fragment float4 patternCommitFragment(
-    PatternFullscreenOut input [[stage_in]],
-    constant PatternGridFrameUniforms& frame
-        [[buffer(PatternBufferIndexGridFrameUniforms)]],
-    constant PatternCompositeUniforms& material
-        [[buffer(PatternBufferIndexBrushMaterial)]],
-    texture2d<float> canonical [[texture(PatternTextureIndexCanonical)]],
-    texture2d<float> live [[texture(PatternTextureIndexLive)]],
-    texture2d<float> replayLive [[texture(PatternTextureIndexReplayLive)]]
-) {
-    constexpr sampler tileSampler(
-        coord::normalized,
-        address::clamp_to_edge,
-        filter::nearest
-    );
-    const float2 uv = input.screenPixel / frame.tileSize;
-    return patternCompositeLive(
-        live.sample(tileSampler, uv),
-        replayLive.sample(tileSampler, uv),
-        canonical.sample(tileSampler, uv),
-        frame.compositeMode,
-        material.parameters.x,
-        material.parameters.y,
-        material.parameters.z
-    );
-}
-
-// Stage D P4 production-inert sparse sampling probe. Nothing in the active
-// renderer creates these functions' pipeline states.
+// Current document-paint sampling path used by display and stable collection.
 vertex PatternFullscreenOut patternSparseSamplingVertex(
     uint vertexID [[vertex_id]],
     constant PatternSparseSamplingUniforms& sparse
@@ -2190,21 +1130,14 @@ static float4 patternSparseFallbackNeighbor(
     );
 }
 
-fragment float4 patternSparseSamplingTier2Fragment(
-    PatternFullscreenOut input [[stage_in]],
-    constant PatternCompositeUniforms& material
-        [[buffer(PatternBufferIndexBrushMaterial)]],
-    constant PatternSparseSamplingUniforms& sparse
-        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
-    constant PatternSparsePageTableDescriptor* descriptors
-        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
-    constant PatternSparseTilePageEntry* entries
-        [[buffer(PatternBufferIndexSparsePageEntries)]],
+static float4 patternSparseSamplingTier2ValueAtPoint(
+    float2 point,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
     constant PatternSparseTextureArguments& arguments
-        [[buffer(PatternBufferIndexSparseTextureArguments)]]
 ) {
-    const float2 point = sparse.sourceOrigin + input.screenPixel
-        * sparse.sourceStep;
     const float2 samplePosition = point - 0.5;
     const int2 lower = int2(floor(samplePosition));
     const float2 fraction = fract(samplePosition);
@@ -2228,22 +1161,15 @@ fragment float4 patternSparseSamplingTier2Fragment(
     );
 }
 
-fragment float4 patternSparseSamplingFallbackFragment(
-    PatternFullscreenOut input [[stage_in]],
-    constant PatternCompositeUniforms& material
-        [[buffer(PatternBufferIndexBrushMaterial)]],
-    constant PatternSparseSamplingUniforms& sparse
-        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
-    constant PatternSparsePageTableDescriptor* descriptors
-        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
-    constant PatternSparseTilePageEntry* entries
-        [[buffer(PatternBufferIndexSparsePageEntries)]],
-    constant int* remap [[buffer(PatternBufferIndexSparseBindingRemap)]],
+static float4 patternSparseSamplingFallbackValueAtPoint(
+    float2 point,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant int* remap,
     array<texture2d<float>, 16> textures
-        [[texture(PatternTextureIndexSparseFallbackBase)]]
 ) {
-    const float2 point = sparse.sourceOrigin + input.screenPixel
-        * sparse.sourceStep;
     const float2 samplePosition = point - 0.5;
     const int2 lower = int2(floor(samplePosition));
     const float2 fraction = fract(samplePosition);
@@ -2264,6 +1190,397 @@ fragment float4 patternSparseSamplingFallbackFragment(
             descriptors, entries, remap, textures
         ),
         fraction
+    );
+}
+
+static float4 patternSparseSamplingTier2Value(
+    PatternFullscreenOut input,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant PatternSparseTextureArguments& arguments
+) {
+    const float2 point = sparse.sourceOrigin + input.screenPixel
+        * sparse.sourceStep;
+    return patternSparseSamplingTier2ValueAtPoint(
+        point, material, sparse, descriptors, entries, arguments
+    );
+}
+
+static float4 patternSparseSamplingFallbackValue(
+    PatternFullscreenOut input,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant int* remap,
+    array<texture2d<float>, 16> textures
+) {
+    const float2 point = sparse.sourceOrigin + input.screenPixel
+        * sparse.sourceStep;
+    return patternSparseSamplingFallbackValueAtPoint(
+        point, material, sparse, descriptors, entries, remap, textures
+    );
+}
+
+static PatternRadialMapping patternSparseRadialMapping(
+    PatternFullscreenOut input,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternRadialFrameUniforms& radial
+) {
+    const float2 screenCenter = frame.drawableSize * 0.5;
+    const float2 world = (input.screenPixel - screenCenter) / frame.zoom
+        + frame.worldCenter;
+    return patternRadialMapping(world, frame, radial);
+}
+
+static float4 patternSparseRadialDisplayOverlay(
+    float4 color,
+    PatternFullscreenOut input,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternRadialFrameUniforms& radial
+) {
+    const PatternRadialMapping mapping = patternSparseRadialMapping(
+        input, frame, radial
+    );
+    if (!mapping.valid) {
+        return color;
+    }
+    if (
+        frame.showGridLines != 0
+        && frame.tilingKind != PatternTilingWirePlainCanvas
+    ) {
+        const float sectorPhase = fmod(
+            mapping.relativeAngle,
+            radial.sectorAngle
+        );
+        const float axisAngle = min(
+            sectorPhase,
+            radial.sectorAngle - sectorPhase
+        );
+        const float axisDistance =
+            mapping.radius * abs(sin(axisAngle)) * frame.zoom;
+        const float centerDistance = abs(
+            mapping.radius * frame.zoom - 4.0
+        );
+        const float coverage = 1.0 - smoothstep(
+            frame.gridLineWidth,
+            frame.gridLineWidth + 1.0,
+            min(axisDistance, centerDistance)
+        );
+        const float alpha = 0.24 * coverage;
+        color = patternSourceOver(
+            float4(float3(0.18, 0.20, 0.19) * alpha, alpha),
+            color
+        );
+    }
+    if (frame.showCanvasBoundary != 0) {
+        const float2 screenCenter = frame.drawableSize * 0.5;
+        const float2 world =
+            (input.screenPixel - screenCenter) / frame.zoom
+            + frame.worldCenter;
+        const float edgeDistance = min(
+            min(world.x, radial.canvasSize.x - world.x),
+            min(world.y, radial.canvasSize.y - world.y)
+        ) * frame.zoom;
+        const float coverage = 1.0 - smoothstep(
+            0.5, 1.5, edgeDistance
+        );
+        const float alpha = 0.36 * coverage;
+        color = patternSourceOver(
+            float4(float3(0.16, 0.18, 0.17) * alpha, alpha),
+            color
+        );
+    }
+    return color;
+}
+
+static float4 patternSparseRadialSamplingTier2Value(
+    PatternFullscreenOut input,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternRadialFrameUniforms& radial,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant PatternSparseTextureArguments& arguments
+) {
+    const PatternRadialMapping mapping = patternSparseRadialMapping(
+        input, frame, radial
+    );
+    if (!mapping.valid) {
+        return float4(0.0);
+    }
+    return patternSparseSamplingTier2ValueAtPoint(
+        mapping.logicalPixel,
+        material,
+        sparse,
+        descriptors,
+        entries,
+        arguments
+    );
+}
+
+static float4 patternSparseRadialSamplingFallbackValue(
+    PatternFullscreenOut input,
+    constant PatternGridFrameUniforms& frame,
+    constant PatternRadialFrameUniforms& radial,
+    constant PatternCompositeUniforms& material,
+    constant PatternSparseSamplingUniforms& sparse,
+    constant PatternSparsePageTableDescriptor* descriptors,
+    constant PatternSparseTilePageEntry* entries,
+    constant int* remap,
+    array<texture2d<float>, 16> textures
+) {
+    const PatternRadialMapping mapping = patternSparseRadialMapping(
+        input, frame, radial
+    );
+    if (!mapping.valid) {
+        return float4(0.0);
+    }
+    return patternSparseSamplingFallbackValueAtPoint(
+        mapping.logicalPixel,
+        material,
+        sparse,
+        descriptors,
+        entries,
+        remap,
+        textures
+    );
+}
+
+fragment float4 patternSparseSamplingTier2Fragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant PatternSparseTextureArguments& arguments
+        [[buffer(PatternBufferIndexSparseTextureArguments)]]
+) {
+    return patternSparseSamplingTier2Value(
+        input, material, sparse, descriptors, entries, arguments
+    );
+}
+
+fragment float4 patternSparseSamplingFallbackFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant int* remap [[buffer(PatternBufferIndexSparseBindingRemap)]],
+    array<texture2d<float>, 16> textures
+        [[texture(PatternTextureIndexSparseFallbackBase)]]
+) {
+    return patternSparseSamplingFallbackValue(
+        input, material, sparse, descriptors, entries, remap, textures
+    );
+}
+
+static float4 patternSparseInterchangeOutput(float4 linearPremultiplied) {
+    const float4 encodedStraight =
+        patternLinearPremultipliedToEncodedSRGB(linearPremultiplied);
+    return float4(
+        encodedStraight.rgb * encodedStraight.a,
+        encodedStraight.a
+    );
+}
+
+fragment float4 patternSparseSamplingInterchangeTier2Fragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant PatternSparseTextureArguments& arguments
+        [[buffer(PatternBufferIndexSparseTextureArguments)]]
+) {
+    return patternSparseInterchangeOutput(patternSparseSamplingTier2Value(
+        input, material, sparse, descriptors, entries, arguments
+    ));
+}
+
+fragment float4 patternSparseSamplingInterchangeFallbackFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant int* remap [[buffer(PatternBufferIndexSparseBindingRemap)]],
+    array<texture2d<float>, 16> textures
+        [[texture(PatternTextureIndexSparseFallbackBase)]]
+) {
+    return patternSparseInterchangeOutput(patternSparseSamplingFallbackValue(
+        input, material, sparse, descriptors, entries, remap, textures
+    ));
+}
+
+fragment float4 patternSparseRadialSamplingWorkingTier2Fragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternRadialFrameUniforms& radial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant PatternSparseTextureArguments& arguments
+        [[buffer(PatternBufferIndexSparseTextureArguments)]]
+) {
+    return patternSparseRadialSamplingTier2Value(
+        input, frame, radial, material, sparse,
+        descriptors, entries, arguments
+    );
+}
+
+fragment float4 patternSparseRadialSamplingWorkingFallbackFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternRadialFrameUniforms& radial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant int* remap [[buffer(PatternBufferIndexSparseBindingRemap)]],
+    array<texture2d<float>, 16> textures
+        [[texture(PatternTextureIndexSparseFallbackBase)]]
+) {
+    return patternSparseRadialSamplingFallbackValue(
+        input, frame, radial, material, sparse,
+        descriptors, entries, remap, textures
+    );
+}
+
+fragment float4 patternSparseRadialSamplingDisplayTier2Fragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternRadialFrameUniforms& radial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant PatternSparseTextureArguments& arguments
+        [[buffer(PatternBufferIndexSparseTextureArguments)]]
+) {
+    return patternSparseRadialDisplayOverlay(
+        patternSparseRadialSamplingTier2Value(
+            input, frame, radial, material, sparse,
+            descriptors, entries, arguments
+        ),
+        input, frame, radial
+    );
+}
+
+fragment float4 patternSparseRadialSamplingDisplayFallbackFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternRadialFrameUniforms& radial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant int* remap [[buffer(PatternBufferIndexSparseBindingRemap)]],
+    array<texture2d<float>, 16> textures
+        [[texture(PatternTextureIndexSparseFallbackBase)]]
+) {
+    return patternSparseRadialDisplayOverlay(
+        patternSparseRadialSamplingFallbackValue(
+            input, frame, radial, material, sparse,
+            descriptors, entries, remap, textures
+        ),
+        input, frame, radial
+    );
+}
+
+fragment float4 patternSparseRadialSamplingInterchangeTier2Fragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternRadialFrameUniforms& radial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant PatternSparseTextureArguments& arguments
+        [[buffer(PatternBufferIndexSparseTextureArguments)]]
+) {
+    return patternSparseInterchangeOutput(
+        patternSparseRadialSamplingTier2Value(
+            input, frame, radial, material, sparse,
+            descriptors, entries, arguments
+        )
+    );
+}
+
+fragment float4 patternSparseRadialSamplingInterchangeFallbackFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternCompositeUniforms& material
+        [[buffer(PatternBufferIndexBrushMaterial)]],
+    constant PatternRadialFrameUniforms& radial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    constant PatternSparseSamplingUniforms& sparse
+        [[buffer(PatternBufferIndexSparseSamplingUniforms)]],
+    constant PatternSparsePageTableDescriptor* descriptors
+        [[buffer(PatternBufferIndexSparsePageTableDescriptors)]],
+    constant PatternSparseTilePageEntry* entries
+        [[buffer(PatternBufferIndexSparsePageEntries)]],
+    constant int* remap [[buffer(PatternBufferIndexSparseBindingRemap)]],
+    array<texture2d<float>, 16> textures
+        [[texture(PatternTextureIndexSparseFallbackBase)]]
+) {
+    return patternSparseInterchangeOutput(
+        patternSparseRadialSamplingFallbackValue(
+            input, frame, radial, material, sparse,
+            descriptors, entries, remap, textures
+        )
     );
 }
 
@@ -2313,6 +1630,8 @@ kernel void patternDocumentPaintStrokeMutation(
         [[texture(PatternTextureIndexDocumentPaintBase)]],
     texture2d<float, access::read> authoritative
         [[texture(PatternTextureIndexDocumentPaintAuthoritative)]],
+    texture2d<float, access::read> prediction
+        [[texture(PatternTextureIndexDocumentPaintPrediction)]],
     texture2d<float, access::write> destination
         [[texture(PatternTextureIndexDocumentPaintDestination)]],
     constant PatternDocumentPaintMutationUniforms& mutation
@@ -2336,12 +1655,17 @@ kernel void patternDocumentPaintStrokeMutation(
         (mutation.flags & PatternDocumentPaintFlagAuthoritativeKnownClear) != 0
         ? float4(0.0)
         : authoritative.read(texel);
+    const float4 predictionValue =
+        (mutation.flags & PatternDocumentPaintFlagPredictionKnownClear) != 0
+        ? float4(0.0)
+        : prediction.read(texel);
     const bool inputWasValid =
         patternDocumentPaintIsValidPremultiplied(baseValue)
-        && patternDocumentPaintIsValidPremultiplied(authoritativeValue);
+        && patternDocumentPaintIsValidPremultiplied(authoritativeValue)
+        && patternDocumentPaintIsValidPremultiplied(predictionValue);
     const float4 result = patternCompositeLive(
         authoritativeValue,
-        float4(0.0),
+        predictionValue,
         baseValue,
         mutation.compositeMode,
         mutation.parameters.x,

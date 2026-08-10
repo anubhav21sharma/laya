@@ -8,7 +8,11 @@ struct PaintTileDescriptorTests {
     @Test
     func physicalContractAndClippedEdgeBoundsStayFixed() throws {
         #expect(PaintTileDescriptor.side == 256)
-        #expect(PaintTileDescriptor.pixelFormat == .rgba16Float)
+        #expect(
+            PaintTileDescriptor.pixelFormat
+                == DocumentColorPipeline.workingPixelFormat
+        )
+        #expect(PaintTileDescriptor.bytesPerPixel == 8)
         #expect(PaintTileDescriptor.residentByteCount == 524_288)
 
         let descriptor = try PaintTileDescriptor(

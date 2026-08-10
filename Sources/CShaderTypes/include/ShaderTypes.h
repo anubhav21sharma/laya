@@ -65,13 +65,6 @@ typedef struct PatternRadialFrameUniforms {
     PatternFloat2 atlasSize;
 } PatternRadialFrameUniforms;
 
-typedef struct PatternRadialResizePageUniforms {
-    PatternInt32 logicalPageX;
-    PatternInt32 logicalPageY;
-    PatternUInt32 destinationSlot;
-    PatternUInt32 padding;
-} PatternRadialResizePageUniforms;
-
 typedef struct PatternClipHalfPlane {
     PatternFloat2 normal;
     float offset;
@@ -374,9 +367,6 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexGridFrameUniforms = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexDabInstances = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexBrushMaterial = 3;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexRadialFrameUniforms = 4;
-PATTERN_WIRE_CONSTANT PatternUInt32
-    PatternBufferIndexRadialResizeDestinationUniforms = 5;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexRadialResizePage = 6;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexSparseSamplingUniforms = 7;
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternBufferIndexSparsePageTableDescriptors = 8;
@@ -390,24 +380,24 @@ PATTERN_WIRE_CONSTANT PatternUInt32
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternBufferIndexDocumentPaintMutationSourceBytes = 14;
 
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexCanonical = 0;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexLive = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushShape = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushGrain = 3;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexReplayLive = 4;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexRadialPageTable = 5;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexSparseFallbackBase = 6;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexDocumentPaintBase = 22;
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternTextureIndexDocumentPaintAuthoritative = 23;
 PATTERN_WIRE_CONSTANT PatternUInt32
-    PatternTextureIndexDocumentPaintDestination = 24;
+    PatternTextureIndexDocumentPaintPrediction = 24;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternTextureIndexDocumentPaintDestination = 25;
 
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintMutationABIVersion = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintMutationABIVersion = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintFlagBaseKnownClear = 1;
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternDocumentPaintFlagAuthoritativeKnownClear = 2;
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintFlagRadialTargetMask = 4;
+PATTERN_WIRE_CONSTANT PatternUInt32
+    PatternDocumentPaintFlagPredictionKnownClear = 4;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintFlagRadialTargetMask = 8;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseMaximumFallbackTextures = 16;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseMaximumTier2Textures = 512;
@@ -436,7 +426,7 @@ PATTERN_WIRE_CONSTANT PatternUInt32
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternTextureIndexDepositionSecondaryGrain = 3;
 
-PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionABIVersion = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternDepositionABIVersion = 2;
 
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternDepositionFunctionConstantSecondaryShape = 0;

@@ -1,6 +1,7 @@
 import BrushFormat
 import CShaderTypes
 import Foundation
+import Metal
 import PatternEngine
 
 enum SceneArtifactValidator {
@@ -50,7 +51,8 @@ enum SceneArtifactValidator {
     ]
     private static let artifactFiles: Set<String> = [
         "benchmark.json", "canonical.png", "characterization.json",
-        "committed.png", "eraser-after.png", "eraser-before.png",
+        "committed-display.png", "committed.png", "eraser-after.png",
+        "eraser-before.png",
         "evidence.json", "grid-origin.png", "grid-translated.png",
         "live.png", "prediction-off.png", "prediction-on.png",
         "professional-five-hundred-dabs.raw.json",
@@ -68,9 +70,8 @@ enum SceneArtifactValidator {
         expectedCommit: String,
         expectedGPUName: String,
         expectedOperatingSystem: String,
-        expectedRendererSHA256: String,
-        baseline: ProfessionalBrushLogicalBaseline
-    ) throws -> Double {
+        expectedRendererSHA256: String
+    ) throws -> ProfessionalPositiveEvidence {
         guard try ArtifactFileSystem.entryNames(root)
                 == Set(ProfessionalBrushTruth.positiveSceneNames)
         else {
@@ -78,7 +79,8 @@ enum SceneArtifactValidator {
                 "positive artifact set is not the exact four-scene set"
             )
         }
-        var p95Values: [Double] = []
+        var identities: [ProfessionalSceneIdentity] = []
+        var characterizations: [ProfessionalBrushCharacterizationRecord] = []
         for scene in ProfessionalBrushTruth.positiveSceneNames {
             let directory = root.appendingPathComponent(scene)
             guard try ArtifactFileSystem.entryNames(directory)
@@ -117,11 +119,10 @@ enum SceneArtifactValidator {
                   characterization.brushID == evidence.definitionID,
                   characterization.family == evidence.family,
                   characterization.definitionSemanticHash
-                    == evidence.definitionSemanticHash,
-                  baseline.records.contains(characterization)
+                    == evidence.definitionSemanticHash
             else {
                 throw ArtifactFileSystem.invalid(
-                    "\(scene) renderer characterization is not an exact baseline member"
+                    "\(scene) renderer characterization identity is invalid"
                 )
             }
             let benchmarkData = try ArtifactFileSystem.regularFileData(
@@ -149,16 +150,22 @@ enum SceneArtifactValidator {
                 expectedGPUName: expectedGPUName,
                 expectedOperatingSystem: expectedOperatingSystem
             )
-            p95Values.append(
-                percentile95(benchmark.cpuEncodeMilliseconds)
-            )
+            identities.append(.init(
+                scene: scene,
+                family: evidence.family,
+                definitionID: evidence.definitionID,
+                definitionSemanticHash: evidence.definitionSemanticHash,
+                pipelineKey: evidence.pipelineKey,
+                abiVersion: evidence.abiVersion
+            ))
+            characterizations.append(characterization)
         }
-        guard let maximum = p95Values.max(), maximum < 2 else {
-            throw ArtifactFileSystem.invalid(
-                "professional CPU preparation p95 is not below 2 ms"
-            )
-        }
-        return maximum
+        return try ProfessionalPositiveEvidence(
+            identities: ProfessionalSceneIdentitySet(
+                validating: identities
+            ),
+            characterizations: characterizations
+        )
     }
 
     static func validateNegative(root: URL) throws {
@@ -230,14 +237,17 @@ enum SceneArtifactValidator {
                 "\(scene) evidence is malformed"
             )
         }
-        guard let truth = ProfessionalBrushTruth.sceneTruth[scene],
+        let currentABIVersion = Int(PatternDepositionABIVersion)
+        guard let truth = ProfessionalBrushTruth.sceneContracts[scene],
               evidence.schemaVersion == 2,
               evidence.scene == scene,
               evidence.family == truth.family,
               evidence.definitionID == truth.definitionID,
-              evidence.definitionSemanticHash == truth.semanticHash,
-              evidence.pipelineKey == truth.pipelineKey,
-              evidence.abiVersion == 1,
+              ArtifactFileSystem.isSHA256(
+                  evidence.definitionSemanticHash
+              ),
+              isCurrentPipelineKey(evidence.pipelineKey),
+              evidence.abiVersion == currentABIVersion,
               evidence.residentResourceBytes == truth.residentBytes,
               evidence.logicalDabCount > 0,
               evidence.projectedInstanceCount >= evidence.logicalDabCount,
@@ -266,16 +276,30 @@ enum SceneArtifactValidator {
         guard derived.values.allSatisfy({ $0 }),
               evidence.invariantResults == derived
         else {
+            let mismatches = derived.keys.sorted().filter {
+                derived[$0] != evidence.invariantResults[$0]
+            }
             throw ArtifactFileSystem.invalid(
-                "\(scene) claimed invariants disagree with raw artifacts"
+                "\(scene) claimed invariants disagree with raw artifacts: \(mismatches)"
             )
         }
         return evidence
     }
 
+    private static func isCurrentPipelineKey(_ value: String) -> Bool {
+        let fields = value.split(separator: ":")
+        return fields.count == 10
+            && fields[0] == "deposition"
+            && fields[7] == "abi\(PatternDepositionABIVersion)"
+            && fields[8] == "format\(MTLPixelFormat.rgba16Float.rawValue)"
+            && fields[9].hasPrefix("samples")
+            && Int(fields[9].dropFirst("samples".count)).map { $0 > 0 }
+                == true
+    }
+
     private static func validateResources(
         _ evidence: SceneEvidence,
-        truth: ProfessionalSceneTruth,
+        truth: ProfessionalSceneContract,
         scene: String
     ) throws {
         let names = evidence.resolvedResources.map(\.identity)
@@ -343,7 +367,7 @@ enum SceneArtifactValidator {
 
     private static func deriveInvariants(
         _ evidence: SceneEvidence,
-        truth: ProfessionalSceneTruth,
+        truth: ProfessionalSceneContract,
         rasters: [String: [UInt8]]
     ) throws -> [String: Bool] {
         func bytes(_ name: String) throws -> [UInt8] {
@@ -353,6 +377,7 @@ enum SceneArtifactValidator {
             return value
         }
         let live = try bytes("live.png")
+        let committedDisplay = try bytes("committed-display.png")
         let committed = try bytes("committed.png")
         let canonical = try bytes("canonical.png")
         let predictionOff = try bytes("prediction-off.png")
@@ -406,7 +431,7 @@ enum SceneArtifactValidator {
         let predictionDelta = RasterObservationValidator
             .maximumChannelDelta(predictionOff, predictionOn)
         let previewCommitDelta = RasterObservationValidator
-            .maximumChannelDelta(live, committed)
+            .maximumChannelDelta(live, committedDisplay)
         let gridDelta = RasterObservationValidator.maximumChannelDelta(
             gridOrigin,
             gridTranslated
@@ -512,7 +537,7 @@ enum SceneArtifactValidator {
 
     private static func validateNumericBounds(
         _ evidence: SceneEvidence,
-        truth: ProfessionalSceneTruth,
+        truth: ProfessionalSceneContract,
         scene: String
     ) throws {
         guard evidence.logicalDabCount <= 2_048,
@@ -520,9 +545,8 @@ enum SceneArtifactValidator {
               let projected = UInt64(
                   exactly: evidence.projectedInstanceCount
               ),
-              (1 ... projected).contains(
-                  evidence.telemetry.encodedInstanceCount
-              ),
+              evidence.telemetry.encodedInstanceCount > 0,
+              evidence.telemetry.encodedInstanceCount >= projected,
               (1 ... 3).contains(evidence.telemetry.bufferHighWater),
               evidence.telemetry.authoritativeBacklog == 0,
               evidence.telemetry.predictedBacklog == 0,

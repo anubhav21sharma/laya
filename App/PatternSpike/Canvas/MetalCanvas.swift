@@ -9,13 +9,8 @@ private func configure(
 ) {
     view.device = renderer.device
     view.delegate = renderer
-    view.colorPixelFormat = .bgra8Unorm
-    view.clearColor = MTLClearColor(
-        red: 242.0 / 255.0,
-        green: 244.0 / 255.0,
-        blue: 241.0 / 255.0,
-        alpha: 1
-    )
+    view.colorPixelFormat = DocumentColorPipeline.displayPixelFormat
+    view.clearColor = GridCanvasContract.paperClearColor
     view.framebufferOnly = true
     view.isPaused = true
     view.enableSetNeedsDisplay = true

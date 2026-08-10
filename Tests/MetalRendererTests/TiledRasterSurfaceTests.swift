@@ -9,6 +9,725 @@ struct TiledRasterSurfaceTests {
     private let bytes = PaintTileDescriptor.residentByteCount
 
     @Test
+    func exactCaptureUsesOneAggregateTokenForEveryProviderOnOneStore()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes * 3)
+        let layerID = UUID()
+        let size = PixelSize(width: 256, height: 256)
+        let surfaces = (0..<3).map { _ in
+            TiledRasterSurface(
+                store: store,
+                layerID: layerID,
+                pixelSize: size,
+                generation: 7
+            )
+        }
+        for surface in surfaces {
+            let lease = try surface.reserveTiles(
+                at: [.init(x: 0, y: 0)],
+                pinReasons: [.dirty]
+            )
+            try surface.markDirty(lease)
+            try surface.returnLease(lease)
+        }
+        let providers = try surfaces.map {
+            try $0.makeExactReferenceProvider()
+        }
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: providers
+        )
+
+        var snapshot = store.snapshot()
+        #expect(snapshot.activeSnapshotTokenCount == 1)
+        #expect(snapshot.aggregateSnapshotReferenceCount == 3)
+        let bound = try providers[0].leaseExactReferences(
+            providers[0].references,
+            using: capture,
+            pinReasons: [.visible, .inFlight]
+        )
+        capture.close()
+        snapshot = store.snapshot()
+        #expect(snapshot.activeSnapshotTokenCount == 0)
+        #expect(snapshot.activeLeaseCount == 1)
+        try bound.returnLease()
+        #expect(store.snapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    func selectedEntitlementRetainsOnlySelectedDebtButPreservesFullIdentity()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes * 3)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 768, height: 256),
+            generation: 11
+        )
+        let seed = try surface.reserveTiles(
+            at: (0..<3).map { .init(x: $0, y: 0) },
+            pinReasons: [.dirty]
+        )
+        try surface.markDirty(seed)
+        try surface.returnLease(seed)
+
+        let full = try surface.makeExactReferenceProvider()
+        let selected = [full.identityReferences[0]]
+        let provider = try full.restrictingEntitlement(to: selected)
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: [provider]
+        )
+
+        #expect(provider.identityReferences.count == 3)
+        #expect(provider.entitledReferences == selected)
+        #expect(store.snapshot().activeSnapshotTokenCount == 1)
+        #expect(store.snapshot().aggregateSnapshotReferenceCount == 1)
+        #expect(throws: TiledRasterSurfaceError.exactReferenceNotCaptured) {
+            _ = try provider.leaseExactReferences(
+                [provider.identityReferences[1]],
+                using: capture,
+                pinReasons: [.visible]
+            )
+        }
+        let lease = try provider.leaseExactReferences(
+            selected,
+            using: capture,
+            pinReasons: [.visible]
+        )
+        capture.close()
+        try lease.returnLease()
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+        #expect(store.snapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    func exactCaptureBorrowAcceptsRestrictedProviderFromCapturedLineage()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes * 2)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 512, height: 256)
+        )
+        let seed = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0), .init(x: 1, y: 0)],
+            pinReasons: [.dirty]
+        )
+        try surface.markDirty(seed)
+        try surface.returnLease(seed)
+        let root = try surface.makeExactReferenceProvider()
+        let selected = [root.references[0]]
+        let restricted = try root.restrictingEntitlement(to: selected)
+        let capture = try TiledRasterExactReferenceCapture(providers: [root])
+
+        let borrow = try capture.borrowing(providers: [restricted])
+        let lease = try restricted.leaseExactReferences(
+            selected,
+            using: borrow,
+            pinReasons: [.visible]
+        )
+
+        borrow.close()
+        capture.close()
+        try lease.returnLease()
+        let terminal = store.snapshot()
+        #expect(terminal.activeSnapshotTokenCount == 0)
+        #expect(terminal.activeLeaseCount == 0)
+    }
+
+    @Test
+    func exactCaptureBorrowRejectsUncapturedAndWiderLineageAuthority()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes * 2)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 512, height: 256)
+        )
+        let seed = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0), .init(x: 1, y: 0)],
+            pinReasons: [.dirty]
+        )
+        try surface.markDirty(seed)
+        try surface.returnLease(seed)
+        let firstLineage = try surface.makeExactReferenceProvider()
+        let secondLineage = try surface.makeExactReferenceProvider()
+        let firstOnly = try firstLineage.restrictingEntitlement(
+            to: [firstLineage.references[0]]
+        )
+        let secondOnly = try secondLineage.restrictingEntitlement(
+            to: [secondLineage.references[1]]
+        )
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: [firstOnly, secondOnly]
+        )
+
+        #expect(throws: TiledRasterSurfaceError.providerNotCaptured) {
+            let uncapturedLineage = try surface.makeExactReferenceProvider()
+            _ = try capture.borrowing(providers: [uncapturedLineage])
+        }
+        #expect(throws: TiledRasterSurfaceError.exactReferenceNotCaptured) {
+            let widerSibling = try firstLineage.restrictingEntitlement(
+                to: [firstLineage.references[1]]
+            )
+            _ = try capture.borrowing(providers: [widerSibling])
+        }
+        let retained = store.snapshot()
+        #expect(retained.activeSnapshotTokenCount == 1)
+        #expect(retained.aggregateSnapshotReferenceCount == 2)
+        capture.close()
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+    }
+
+    @Test
+    func exactCaptureUnionsCapturedSiblingsWithinOneLineage() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes * 2)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 512, height: 256)
+        )
+        let seed = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0), .init(x: 1, y: 0)],
+            pinReasons: [.dirty]
+        )
+        try surface.markDirty(seed)
+        try surface.returnLease(seed)
+        let root = try surface.makeExactReferenceProvider()
+        let first = try root.restrictingEntitlement(to: [root.references[0]])
+        let second = try root.restrictingEntitlement(to: [root.references[1]])
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: [first, second]
+        )
+        let wider = try root.restrictingEntitlement(to: root.references)
+
+        let borrow = try capture.borrowing(providers: [wider])
+        let lease = try wider.leaseExactReferences(
+            root.references,
+            using: borrow,
+            pinReasons: [.visible]
+        )
+
+        borrow.close()
+        capture.close()
+        try lease.returnLease()
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+        #expect(store.snapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    func emptyCapturedLineageCanBeBorrowedWithoutTokenCapacity() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let root = try surface.makeExactReferenceProvider()
+        let empty = try root.restrictingEntitlement(to: [])
+        let capture = try TiledRasterExactReferenceCapture(providers: [empty])
+
+        let borrow = try capture.borrowing(providers: [empty])
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+        borrow.close()
+        capture.close()
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+    }
+
+    @Test
+    func captureCloseDefersTokensForLiveBorrowAndRejectsLaterBorrow()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let seed = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0)], pinReasons: [.dirty]
+        )
+        try surface.markDirty(seed)
+        try surface.returnLease(seed)
+        let provider = try surface.makeExactReferenceProvider()
+        let capture = try TiledRasterExactReferenceCapture(providers: [provider])
+        let borrow = try capture.borrowing(providers: [provider])
+
+        capture.close()
+        #expect(store.snapshot().activeSnapshotTokenCount == 1)
+        #expect(throws: TiledRasterSurfaceError.exactReferenceCaptureClosed) {
+            _ = try capture.borrowing(providers: [provider])
+        }
+        let lease = try provider.leaseExactReferences(
+            provider.references,
+            using: borrow,
+            pinReasons: [.visible]
+        )
+        borrow.close()
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+        #expect(store.snapshot().activeLeaseCount == 1)
+        try lease.returnLease()
+        #expect(store.snapshot().activeLeaseCount == 0)
+    }
+
+    @Test
+    func captureCloseWaitsForEveryBorrowAndBorrowCloseIsIdempotent()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let seed = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0)], pinReasons: [.dirty]
+        )
+        try surface.markDirty(seed)
+        try surface.returnLease(seed)
+        let provider = try surface.makeExactReferenceProvider()
+        let capture = try TiledRasterExactReferenceCapture(providers: [provider])
+        let first = try capture.borrowing(providers: [provider])
+        let second = try capture.borrowing(providers: [provider])
+
+        capture.close()
+        first.close()
+        #expect(store.snapshot().activeSnapshotTokenCount == 1)
+        async let closeA: Void = second.close()
+        async let closeB: Void = second.close()
+        _ = await (closeA, closeB)
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+    }
+
+    @Test
+    func borrowAndCaptureCloseRaceNeverStrandsSnapshotRetention()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        for _ in 0..<32 {
+            let store = PaintTileStore(device: device, byteBudget: bytes)
+            let surface = TiledRasterSurface(
+                store: store,
+                layerID: UUID(),
+                pixelSize: PixelSize(width: 256, height: 256)
+            )
+            let seed = try surface.reserveTiles(
+                at: [.init(x: 0, y: 0)], pinReasons: [.dirty]
+            )
+            try surface.markDirty(seed)
+            try surface.returnLease(seed)
+            let provider = try surface.makeExactReferenceProvider()
+            let capture = try TiledRasterExactReferenceCapture(
+                providers: [provider]
+            )
+
+            let borrowTask = Task {
+                try capture.borrowing(providers: [provider])
+            }
+            let closeTask = Task { capture.close() }
+            do {
+                let borrow = try await borrowTask.value
+                borrow.close()
+            } catch {
+                #expect(error as? TiledRasterSurfaceError
+                    == .exactReferenceCaptureClosed)
+            }
+            await closeTask.value
+            #expect(store.snapshot().activeSnapshotTokenCount == 0)
+            #expect(store.snapshot().activeLeaseCount == 0)
+        }
+    }
+
+    @Test
+    func borrowReserveAndCloseRaceNeverUsesClosedAuthorityOrLeaksLease()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        for _ in 0..<32 {
+            let store = PaintTileStore(device: device, byteBudget: bytes)
+            let surface = TiledRasterSurface(
+                store: store,
+                layerID: UUID(),
+                pixelSize: PixelSize(width: 256, height: 256)
+            )
+            let seed = try surface.reserveTiles(
+                at: [.init(x: 0, y: 0)], pinReasons: [.dirty]
+            )
+            try surface.markDirty(seed)
+            try surface.returnLease(seed)
+            let provider = try surface.makeExactReferenceProvider()
+            let capture = try TiledRasterExactReferenceCapture(
+                providers: [provider]
+            )
+            let borrow = try capture.borrowing(providers: [provider])
+
+            let leaseTask = Task {
+                try provider.leaseExactReferences(
+                    provider.references,
+                    using: borrow,
+                    pinReasons: [.visible]
+                )
+            }
+            let closeTask = Task { borrow.close() }
+            do {
+                let lease = try await leaseTask.value
+                try lease.returnLease()
+            } catch {
+                #expect(error as? TiledRasterSurfaceError
+                    == .exactReferenceCaptureClosed)
+            }
+            await closeTask.value
+            capture.close()
+            #expect(store.snapshot().activeSnapshotTokenCount == 0)
+            #expect(store.snapshot().activeLeaseCount == 0)
+        }
+    }
+
+    @Test
+    func captureRetainsLineageUntilTerminalThenReleasesAuthorityMetadata()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let seed = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0)], pinReasons: [.dirty]
+        )
+        try surface.markDirty(seed)
+        try surface.returnLease(seed)
+        var provider: TiledRasterExactReferenceProvider? = try surface
+            .makeExactReferenceProvider()
+        weak let lineage = try #require(provider).testingLineageAnchor
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: [try #require(provider)]
+        )
+
+        provider = nil
+        #expect(lineage != nil)
+        let unrelated = try surface.makeExactReferenceProvider()
+        #expect(throws: TiledRasterSurfaceError.providerNotCaptured) {
+            _ = try capture.borrowing(providers: [unrelated])
+        }
+
+        capture.close()
+        #expect(lineage == nil)
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+    }
+
+    @Test
+    func droppedDirectBorrowCannotStrandCaptureClosure() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256)
+        )
+        let seed = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0)], pinReasons: [.dirty]
+        )
+        try surface.markDirty(seed)
+        try surface.returnLease(seed)
+        let provider = try surface.makeExactReferenceProvider()
+        let capture = try TiledRasterExactReferenceCapture(providers: [provider])
+        var borrow: TiledRasterExactReferenceCapture.Borrow? = try capture
+            .borrowing(providers: [provider])
+        #expect(borrow != nil)
+
+        borrow = nil
+        capture.close()
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+    }
+
+    @Test
+    func emptyAndMixedEmptyEntitlementsConsumeNoEmptyTokenCapacity() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes * 2)
+        let layerID = UUID()
+        let size = PixelSize(width: 512, height: 256)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: layerID,
+            pixelSize: size
+        )
+        let seed = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0), .init(x: 1, y: 0)],
+            pinReasons: [.dirty]
+        )
+        try surface.markDirty(seed)
+        try surface.returnLease(seed)
+        let full = try surface.makeExactReferenceProvider()
+
+        let empty = try full.restrictingEntitlement(to: [])
+        let emptyCapture = try TiledRasterExactReferenceCapture(
+            providers: [empty]
+        )
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+        #expect(store.snapshot().aggregateSnapshotReferenceCount == 0)
+        emptyCapture.close()
+
+        let selected = try full.restrictingEntitlement(
+            to: [full.identityReferences[0]]
+        )
+        let mixedCapture = try TiledRasterExactReferenceCapture(
+            providers: [empty, selected]
+        )
+        #expect(store.snapshot().activeSnapshotTokenCount == 1)
+        #expect(store.snapshot().aggregateSnapshotReferenceCount == 1)
+        mixedCapture.close()
+        #expect(store.snapshot().activeSnapshotTokenCount == 0)
+    }
+
+    @Test
+    func selectedCaptureRollsBackEarlierStoreWhenLaterStoreAdmissionFails()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let oneTokenPerStore = PaintTileSnapshotRetentionLimits(
+            maximumActiveTokenCount: 1,
+            maximumReferencesPerToken: 4,
+            maximumAggregateReferenceCount: 4,
+            maximumIndexEntryCount: 4,
+            maximumMetadataBytes: 1_024 * 1_024,
+            maximumPayloadDebtBytes: bytes * 4
+        )
+        let firstStore = PaintTileStore(
+            device: device,
+            byteBudget: bytes,
+            transferByteCapacity: bytes * 4,
+            snapshotRetentionLimits: oneTokenPerStore
+        )
+        let secondStore = PaintTileStore(
+            device: device,
+            byteBudget: bytes,
+            transferByteCapacity: bytes * 4,
+            snapshotRetentionLimits: oneTokenPerStore
+        )
+        let successfulStore: PaintTileStore
+        let rejectingStore: PaintTileStore
+        if firstStore.identity < secondStore.identity {
+            successfulStore = firstStore
+            rejectingStore = secondStore
+        } else {
+            successfulStore = secondStore
+            rejectingStore = firstStore
+        }
+        let size = PixelSize(width: 256, height: 256)
+        func provider(_ store: PaintTileStore) throws
+            -> TiledRasterExactReferenceProvider
+        {
+            let surface = TiledRasterSurface(
+                store: store,
+                layerID: UUID(),
+                pixelSize: size
+            )
+            let seed = try surface.reserveTiles(
+                at: [.init(x: 0, y: 0)], pinReasons: [.dirty]
+            )
+            try surface.markDirty(seed)
+            try surface.returnLease(seed)
+            return try surface.makeExactReferenceProvider()
+        }
+        let successfulProvider = try provider(successfulStore)
+        let rejectingProvider = try provider(rejectingStore)
+        let blocker = try rejectingStore.retainSnapshotReferences(
+            rejectingProvider.references
+        )
+
+        #expect(throws: PaintTileStoreError.snapshotRetentionLimitExceeded(
+            limit: .activeTokens,
+            required: 2,
+            maximum: 1
+        )) {
+            _ = try TiledRasterExactReferenceCapture(
+                providers: [successfulProvider, rejectingProvider]
+            )
+        }
+        #expect(successfulStore.snapshot().activeSnapshotTokenCount == 0)
+        #expect(rejectingStore.snapshot().activeSnapshotTokenCount == 1)
+        blocker.close()
+        #expect(rejectingStore.snapshot().activeSnapshotTokenCount == 0)
+    }
+
+    @Test
+    func exactProviderAcceptsOnlySortedCapturedSubsetsAndFrozenNamespace()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let store = PaintTileStore(device: device, byteBudget: bytes * 3)
+        let surface = TiledRasterSurface(
+            store: store,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 768, height: 256),
+            generation: 9
+        )
+        let seed = try surface.reserveTiles(
+            at: (0..<3).map { .init(x: $0, y: 0) },
+            pinReasons: [.dirty]
+        )
+        try surface.markDirty(seed)
+        try surface.returnLease(seed)
+        let provider = try surface.makeExactReferenceProvider()
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: [provider]
+        )
+        let selected = [provider.references[0], provider.references[2]]
+        let lease = try provider.leaseExactReferences(
+            selected,
+            using: capture,
+            pinReasons: [.visible]
+        )
+        #expect(lease.bindings.map(\.identity) == selected.map(\.identity))
+        #expect(lease.surfaceID == provider.surfaceID)
+        #expect(lease.layerID == provider.layerID)
+        #expect(lease.generation == provider.generation)
+
+        #expect(throws: TiledRasterSurfaceError.unsortedExactReference) {
+            _ = try provider.leaseExactReferences(
+                Array(selected.reversed()),
+                using: capture,
+                pinReasons: [.visible]
+            )
+        }
+        var foreign = provider.references[1]
+        foreign = foreign.replacing(
+            identity: PaintTileIdentity(
+                layerID: foreign.layerID,
+                coordinate: foreign.coordinate,
+                tileID: PaintTileID(rawValue: UInt64.max)
+            )
+        )
+        #expect(throws: TiledRasterSurfaceError.exactReferenceNotCaptured) {
+            _ = try provider.leaseExactReferences(
+                [foreign],
+                using: capture,
+                pinReasons: [.visible]
+            )
+        }
+        capture.close()
+        try lease.returnLease()
+    }
+
+    @Test
+    func exactCaptureCloseRacingProviderLeaseNeverStrandsOwnership()
+        async throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        for _ in 0..<32 {
+            let store = PaintTileStore(device: device, byteBudget: bytes)
+            let surface = TiledRasterSurface(
+                store: store,
+                layerID: UUID(),
+                pixelSize: PixelSize(width: 256, height: 256)
+            )
+            let seed = try surface.reserveTiles(
+                at: [.init(x: 0, y: 0)],
+                pinReasons: [.dirty]
+            )
+            try surface.markDirty(seed)
+            try surface.returnLease(seed)
+            let provider = try surface.makeExactReferenceProvider()
+            let capture = try TiledRasterExactReferenceCapture(
+                providers: [provider]
+            )
+
+            let leaseTask = Task {
+                try provider.leaseExactReferences(
+                    provider.references,
+                    using: capture,
+                    pinReasons: [.visible]
+                )
+            }
+            let closeTask = Task { capture.close() }
+            do {
+                let lease = try await leaseTask.value
+                try lease.returnLease()
+            } catch {
+                #expect(error as? TiledRasterSurfaceError
+                    == .exactReferenceCaptureClosed)
+            }
+            await closeTask.value
+            let snapshot = store.snapshot()
+            #expect(snapshot.activeSnapshotTokenCount == 0)
+            #expect(snapshot.activeLeaseCount == 0)
+        }
+    }
+
+    @Test
+    func staleAndPendingRetirementProvidersCannotOpenCapture() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let size = PixelSize(width: 256, height: 256)
+
+        let staleStore = PaintTileStore(device: device, byteBudget: bytes)
+        let staleSurface = TiledRasterSurface(
+            store: staleStore,
+            layerID: UUID(),
+            pixelSize: size
+        )
+        let staleSeed = try staleSurface.reserveTiles(
+            at: [.init(x: 0, y: 0)],
+            pinReasons: [.dirty]
+        )
+        try staleSurface.markDirty(staleSeed)
+        try staleSurface.returnLease(staleSeed)
+        let staleProvider = try staleSurface.makeExactReferenceProvider()
+        try staleSurface.advanceGeneration()
+        let replacement = try staleSurface.reserveTiles(
+            at: [.init(x: 0, y: 0)],
+            pinReasons: [.dirty]
+        )
+        try staleSurface.markDirty(replacement)
+        try staleSurface.returnLease(replacement)
+        #expect(throws: PaintTileStoreError.staleTileReference) {
+            _ = try TiledRasterExactReferenceCapture(
+                providers: [staleProvider]
+            )
+        }
+        #expect(staleStore.snapshot().activeSnapshotTokenCount == 0)
+
+        let pendingStore = PaintTileStore(device: device, byteBudget: bytes)
+        let pendingSurface = TiledRasterSurface(
+            store: pendingStore,
+            layerID: UUID(),
+            pixelSize: size
+        )
+        let pendingSeed = try pendingSurface.reserveTiles(
+            at: [.init(x: 0, y: 0)],
+            pinReasons: [.dirty]
+        )
+        try pendingSurface.markDirty(pendingSeed)
+        let pendingProvider = try pendingSurface.makeExactReferenceProvider()
+        let retirement = try pendingStore.prepareRetirement(
+            pendingProvider.references
+        )
+        pendingStore.requestRetirement(retirement)
+        #expect(pendingStore.snapshot().pendingRetirementCount == 1)
+        #expect(throws: PaintTileStoreError.staleTileReference) {
+            _ = try TiledRasterExactReferenceCapture(
+                providers: [pendingProvider]
+            )
+        }
+        #expect(pendingStore.snapshot().activeSnapshotTokenCount == 0)
+        try pendingSurface.returnLease(pendingSeed)
+        #expect(pendingStore.snapshot().pendingRetirementCount == 0)
+    }
+
+    @Test
     func emptySurfaceOwnsNoTexturesAndOneDabAllocatesOnlyItsTile() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let surface = TiledRasterSurface(
@@ -54,6 +773,27 @@ struct TiledRasterSurfaceTests {
         #expect(surface.isEmpty)
         #expect(surface.residentTileCount == 0)
         #expect(surface.residentByteCount == 0)
+    }
+
+    @Test
+    func exactProviderOmitsPinnedKnownClearPhysicalRecord() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let surface = TiledRasterSurface(
+            device: device,
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 256, height: 256),
+            byteBudget: bytes
+        )
+        let lease = try surface.reserveTiles(
+            at: [.init(x: 0, y: 0)],
+            pinReasons: [.inFlight]
+        )
+
+        #expect(surface.references.count == 1)
+        #expect(try surface.makeExactReferenceProvider().references.isEmpty)
+
+        try surface.returnLease(lease)
+        #expect(surface.isEmpty)
     }
 
     @Test

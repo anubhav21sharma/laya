@@ -6,51 +6,58 @@ import Testing
 @Suite("Pattern project metadata codec")
 struct PatternProjectMetadataCodecTests {
     @Test
-    func schemaFourIsTheOnlyWriteVersionAndSchemaThreeStillDecodes()
-        throws
-    {
+    func onlySchemaFourReachesManifestPayloadDecoding() throws {
         #expect(PatternProjectFormat.currentSchemaVersion == 4)
         let encoded = try PatternProjectMetadataCodec.encode(
             fixture(preset: .grid)
         )
         #expect(try jsonObject(encoded.manifest)["schemaVersion"] as? Int == 4)
 
-        let schemaThree = PatternProjectMetadataFiles(
-            manifest: try mutateJSON(encoded.manifest) {
-                $0["schemaVersion"] = 3
-            },
-            symmetry: encoded.symmetry,
-            layersByPath: encoded.layersByPath,
-            surfacesByPath: encoded.surfacesByPath
-        )
-        let decoded = try PatternProjectMetadataCodec.decode(schemaThree)
-        #expect(decoded.sourceSchemaVersion == 3)
-        #expect(decoded.wasMigrated)
+        for version in [1, 2, 3, 5] {
+            let files = PatternProjectMetadataFiles(
+                manifest: Data("{\"schemaVersion\":\(version)}".utf8),
+                symmetry: Data(repeating: 0xFF, count: 32),
+                layersByPath: [
+                    "layers/should-not-decode.json":
+                        Data(repeating: 0xFF, count: 32),
+                ]
+            )
+            #expect(
+                throws: PatternProjectLoadError.unsupportedSchema(version)
+            ) {
+                try PatternProjectMetadataCodec.decode(files)
+            }
+        }
+
+        let expected = try fixture(preset: .grid)
+        let decoded = try PatternProjectMetadataCodec.decode(encoded)
+        #expect(decoded.metadata == expected)
     }
 
     @Test
     func schemaFourTiledSurfaceManifestRoundTripsWithoutPNGIndirection()
         throws
     {
-        let legacy = try fixture(preset: .grid)
-        let layer = try #require(legacy.layers.first)
+        let base = try fixture(preset: .grid)
+        let layer = try #require(base.layers.first)
         let tiled = PatternProjectPaintTileSurface(
             manifestFile: "surfaces/layer.tiles.json",
-            pixelSize: legacy.canvasSize,
+            pixelSize: base.canvasSize,
+            rasterRevision: 17,
             tiles: []
         )
         let metadata = PatternProjectMetadata(
-            documentID: legacy.documentID,
-            title: legacy.title,
-            appVersion: legacy.appVersion,
-            createdAt: legacy.createdAt,
-            modifiedAt: legacy.modifiedAt,
-            canvasSize: legacy.canvasSize,
-            viewport: legacy.viewport,
-            documentConfiguration: legacy.documentConfiguration,
-            documentDomainLocked: legacy.documentDomainLocked,
-            radialGeometryLocked: legacy.radialGeometryLocked,
-            activeLayerID: legacy.activeLayerID,
+            documentID: base.documentID,
+            title: base.title,
+            appVersion: base.appVersion,
+            createdAt: base.createdAt,
+            modifiedAt: base.modifiedAt,
+            canvasSize: base.canvasSize,
+            viewport: base.viewport,
+            documentConfiguration: base.documentConfiguration,
+            documentDomainLocked: base.documentDomainLocked,
+            radialGeometryLocked: base.radialGeometryLocked,
+            activeLayerID: base.activeLayerID,
             layers: [PatternProjectLayer(
                 id: layer.id,
                 name: layer.name,
@@ -72,64 +79,115 @@ struct PatternProjectMetadataCodecTests {
     }
 
     @Test
-    func legacyLayerMigrationPreservesEightAndRejectsNineBeforeDroppingAny()
+    func schemaFourRadialTilesUseExactCompiledAtlasBeyondLegacyRasterLimit()
         throws
     {
-        let base = try fixture(preset: .grid)
-        let layers = (0..<8).map { index in
-            PatternProjectLayer(
-                id: UUID(uuidString: String(
-                    format: "00000000-0000-0000-0000-%012d",
-                    index + 1
-                ))!,
-                name: "Layer \(index + 1)",
-                order: index,
-                surface: .singleRaster(PatternProjectRasterReference(
-                    file: "rasters/layer-\(index).png",
-                    pixelSize: base.canvasSize
+        let canvasSize = PixelSize(width: 4_096, height: 4_096)
+        let configuration = SymmetryDocumentConfiguration.finite(.radial(
+            RadialSymmetryConfiguration(
+                kind: .mirror,
+                rayCount: 1,
+                center: WorldPoint(x: 0, y: 0)
+            )
+        ))
+        let compiled = try SymmetryDescriptorCompiler.compile(
+            documentConfiguration: configuration,
+            canvasSize: canvasSize
+        )
+        let atlasSize = try #require(
+            compiled.domain.finite?.radial.layout?.atlasPixelSize
+        )
+        #expect(atlasSize.width > 4_096 || atlasSize.height > 4_096)
+        #expect(atlasSize.width <= 16_384)
+        #expect(atlasSize.height <= 16_384)
+
+        let surface = PatternProjectPaintTileSurface(
+            manifestFile: "surfaces/radial.tiles.json",
+            pixelSize: atlasSize,
+            rasterRevision: 29,
+            tiles: []
+        )
+        let metadata = project(
+            configuration: configuration,
+            canvasSize: canvasSize,
+            radialGeometryLocked: true,
+            surface: .paintTiles(surface)
+        )
+        let files = try PatternProjectMetadataCodec.encode(metadata)
+        let decoded = try PatternProjectMetadataCodec.decode(files)
+
+        #expect(decoded.metadata == metadata)
+
+        var wrongSurfaceFiles = files.surfacesByPath
+        wrongSurfaceFiles[surface.manifestFile] = try mutateJSON(
+            try #require(files.surfacesByPath[surface.manifestFile])
+        ) {
+            $0["pixelWidth"] = atlasSize.width - RadialSectorLayout.pageSide
+        }
+        let wrongDecoded = PatternProjectMetadataFiles(
+            manifest: files.manifest,
+            symmetry: files.symmetry,
+            layersByPath: files.layersByPath,
+            surfacesByPath: wrongSurfaceFiles
+        )
+        #expect(throws: PatternProjectLoadError.invalidRasterSize(
+            layerID: metadata.activeLayerID,
+            width: atlasSize.width - RadialSectorLayout.pageSide,
+            height: atlasSize.height
+        )) {
+            try PatternProjectMetadataCodec.decode(wrongDecoded)
+        }
+
+        let wrongSize = PixelSize(
+            width: atlasSize.width - RadialSectorLayout.pageSide,
+            height: atlasSize.height
+        )
+        let wrong = project(
+            configuration: configuration,
+            canvasSize: canvasSize,
+            radialGeometryLocked: true,
+            surface: .paintTiles(PatternProjectPaintTileSurface(
+                manifestFile: surface.manifestFile,
+                pixelSize: wrongSize,
+                rasterRevision: surface.rasterRevision,
+                tiles: []
+            ))
+        )
+        #expect(throws: PatternProjectLoadError.invalidRasterSize(
+            layerID: wrong.activeLayerID,
+            width: wrongSize.width,
+            height: wrongSize.height
+        )) {
+            try PatternProjectMetadataCodec.encode(wrong)
+        }
+    }
+
+    @Test
+    func schemaFourPlainAndPeriodicTilesUseMaximumCanvasStorage() throws {
+        let canvasSize = PixelSize(width: 4_096, height: 4_096)
+        let configurations: [SymmetryDocumentConfiguration] = [
+            .finite(.plain),
+            .periodic(.legacy(
+                presetID: .grid,
+                tileSize: PatternSize(width: 4_096, height: 4_096)
+            )),
+        ]
+
+        for (index, configuration) in configurations.enumerated() {
+            let metadata = project(
+                configuration: configuration,
+                canvasSize: canvasSize,
+                surface: .paintTiles(PatternProjectPaintTileSurface(
+                    manifestFile: "surfaces/maximum-\(index).tiles.json",
+                    pixelSize: canvasSize,
+                    rasterRevision: UInt64(index + 1),
+                    tiles: []
                 ))
             )
-        }
-        let metadata = PatternProjectMetadata(
-            documentID: base.documentID,
-            title: base.title,
-            appVersion: base.appVersion,
-            createdAt: base.createdAt,
-            modifiedAt: base.modifiedAt,
-            canvasSize: base.canvasSize,
-            viewport: base.viewport,
-            documentConfiguration: base.documentConfiguration,
-            radialGeometryLocked: false,
-            activeLayerID: layers[6].id,
-            layers: layers
-        )
-        let encoded = try PatternProjectMetadataCodec.encode(metadata)
-        let schemaTwo = PatternProjectMetadataFiles(
-            manifest: try mutateJSON(encoded.manifest) {
-                $0["schemaVersion"] = 2
-            },
-            symmetry: try mutateJSON(encoded.symmetry) {
-                $0.removeValue(forKey: "documentDomainLocked")
-            },
-            layersByPath: encoded.layersByPath,
-            surfacesByPath: encoded.surfacesByPath
-        )
-        let decoded = try PatternProjectMetadataCodec.decode(schemaTwo)
-        #expect(decoded.metadata.layers == layers)
-        #expect(decoded.metadata.activeLayerID == layers[6].id)
 
-        let nine = PatternProjectMetadataFiles(
-            manifest: try mutateJSON(schemaTwo.manifest) {
-                var paths = $0["layerFiles"] as! [String]
-                paths.append("layers/ninth.json")
-                $0["layerFiles"] = paths
-            },
-            symmetry: schemaTwo.symmetry,
-            layersByPath: schemaTwo.layersByPath,
-            surfacesByPath: schemaTwo.surfacesByPath
-        )
-        #expect(throws: PatternProjectLoadError.layerCountOutOfRange(9)) {
-            try PatternProjectMetadataCodec.decode(nine)
+            let files = try PatternProjectMetadataCodec.encode(metadata)
+            let decoded = try PatternProjectMetadataCodec.decode(files)
+            #expect(decoded.metadata == metadata)
         }
     }
 
@@ -140,12 +198,6 @@ struct PatternProjectMetadataCodecTests {
             let files = try PatternProjectMetadataCodec.encode(metadata)
             let decoded = try PatternProjectMetadataCodec.decode(files)
 
-            #expect(
-                decoded.sourceSchemaVersion
-                    == PatternProjectFormat.currentSchemaVersion,
-                "preset \(preset.rawValue)"
-            )
-            #expect(!decoded.wasMigrated, "preset \(preset.rawValue)")
             #expect(
                 decoded.compiledSymmetry.presetID == preset,
                 "preset \(preset.rawValue)"
@@ -158,80 +210,6 @@ struct PatternProjectMetadataCodecTests {
                 decoded.metadata.layers.count == 1,
                 "preset \(preset.rawValue)"
             )
-        }
-    }
-
-    @Test
-    func schemaThreeAcceptsIndependentPeriodicDocumentLock() throws {
-        let current = try PatternProjectMetadataCodec.encode(
-            fixture(preset: .grid)
-        )
-        let schemaThree = PatternProjectMetadataFiles(
-            manifest: try mutateJSON(current.manifest) {
-                $0["schemaVersion"] = 3
-            },
-            symmetry: try mutateJSON(current.symmetry) {
-                $0["documentDomainLocked"] = true
-            },
-            layersByPath: current.layersByPath
-        )
-
-        let decoded = try PatternProjectMetadataCodec.decode(schemaThree)
-
-        #expect(decoded.sourceSchemaVersion == 3)
-        #expect(decoded.metadata.documentDomainLocked)
-        #expect(!decoded.metadata.radialGeometryLocked)
-    }
-
-    @Test
-    func schemaTwoPeriodicProjectRetainsItsHistoricalLockInference()
-        throws
-    {
-        let current = try PatternProjectMetadataCodec.encode(
-            fixture(preset: .grid)
-        )
-        let schemaTwo = PatternProjectMetadataFiles(
-            manifest: try mutateJSON(current.manifest) {
-                $0["schemaVersion"] = 2
-            },
-            symmetry: try mutateJSON(current.symmetry) {
-                $0.removeValue(forKey: "documentDomainLocked")
-            },
-            layersByPath: current.layersByPath
-        )
-
-        let decoded = try PatternProjectMetadataCodec.decode(schemaTwo)
-
-        #expect(decoded.sourceSchemaVersion == 2)
-        #expect(decoded.wasMigrated)
-        #expect(!decoded.metadata.documentDomainLocked)
-    }
-
-    @Test
-    func legacyRawValuesMigrateToExactPeriodicMeaning() throws {
-        for rawValue in UInt32(0)...UInt32(6) {
-            let files = try legacyFiles(tilingRawValue: rawValue)
-            let decoded = try PatternProjectMetadataCodec.decode(files)
-            let preset = try #require(
-                SymmetryPresetID(rawValue: rawValue)
-            )
-
-            #expect(decoded.wasMigrated)
-            #expect(
-                decoded.sourceSchemaVersion
-                    == PatternProjectFormat.legacySchemaVersion
-            )
-            #expect(decoded.compiledSymmetry.presetID == preset)
-            guard case let .periodic(configuration) =
-                decoded.metadata.documentConfiguration
-            else {
-                Issue.record("Legacy project did not migrate to periodic")
-                continue
-            }
-            #expect(configuration.presetID == preset)
-            #expect(configuration.repeatSize.width == 512)
-            #expect(configuration.repeatSize.height == 384)
-            #expect(!decoded.metadata.radialGeometryLocked)
         }
     }
 
@@ -320,23 +298,10 @@ struct PatternProjectMetadataCodecTests {
     }
 
     @Test
-    func unknownSchemaAndPresetFailTyped() throws {
+    func unknownCurrentPresetFailsTyped() throws {
         let valid = try PatternProjectMetadataCodec.encode(
             fixture(preset: .grid)
         )
-        let unknownSchema = PatternProjectMetadataFiles(
-            manifest: try mutateJSON(valid.manifest) {
-                $0["schemaVersion"] = 99
-            },
-            symmetry: valid.symmetry,
-            layersByPath: valid.layersByPath
-        )
-        #expect(
-            throws: PatternProjectLoadError.unsupportedSchema(99)
-        ) {
-            try PatternProjectMetadataCodec.decode(unknownSchema)
-        }
-
         let unknownPreset = PatternProjectMetadataFiles(
             manifest: valid.manifest,
             symmetry: try mutateJSON(valid.symmetry) {
@@ -348,20 +313,6 @@ struct PatternProjectMetadataCodecTests {
             throws: PatternProjectLoadError.unknownPreset(999)
         ) {
             try PatternProjectMetadataCodec.decode(unknownPreset)
-        }
-    }
-
-    @Test
-    func legacyRejectsNewPresetInsteadOfReinterpretingIt() throws {
-        let files = try legacyFiles(
-            tilingRawValue: SymmetryPresetID.squareRotation.rawValue
-        )
-        #expect(
-            throws: PatternProjectLoadError.legacyPresetUnsupported(
-                SymmetryPresetID.squareRotation.rawValue
-            )
-        ) {
-            try PatternProjectMetadataCodec.decode(files)
         }
     }
 
@@ -676,6 +627,7 @@ private func project(
             offsetY: 27
         ),
         documentConfiguration: configuration,
+        documentDomainLocked: radialGeometryLocked,
         radialGeometryLocked: radialGeometryLocked,
         activeLayerID: layerID,
         layers: [
@@ -712,58 +664,6 @@ private func radialSurface(
 
 private func radialPagePath(_ coordinate: RadialPageCoordinate) -> String {
     "rasters/layer/page-\(coordinate.x)-\(coordinate.y).png"
-}
-
-private func legacyFiles(
-    tilingRawValue: UInt32
-) throws -> PatternProjectMetadataFiles {
-    let documentID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-    let layerID = "11111111-2222-3333-4444-555555555555"
-    let layerPath = "layers/\(layerID).json"
-    let manifest: [String: Any] = [
-        "schemaVersion": 1,
-        "documentID": documentID,
-        "title": "Legacy",
-        "appVersion": "0.0.9",
-        "createdAt": 1_700_000_000.0,
-        "modifiedAt": 1_700_000_100.0,
-        "canvasWidth": 512,
-        "canvasHeight": 384,
-        "viewport": [
-            "scale": 1.0,
-            "offsetX": 0.0,
-            "offsetY": 0.0,
-        ],
-        "activeLayerID": layerID,
-        "layerFiles": [layerPath],
-    ]
-    let layer: [String: Any] = [
-        "id": layerID,
-        "kind": 0,
-        "name": "Layer 1",
-        "order": 0,
-        "opacity": 1.0,
-        "blendMode": 0,
-        "isVisible": true,
-        "isLocked": false,
-        "rasterFile": "rasters/\(layerID).png",
-    ]
-    return PatternProjectMetadataFiles(
-        manifest: try JSONSerialization.data(
-            withJSONObject: manifest,
-            options: [.sortedKeys]
-        ),
-        symmetry: try JSONSerialization.data(
-            withJSONObject: ["type": tilingRawValue],
-            options: [.sortedKeys]
-        ),
-        layersByPath: [
-            layerPath: try JSONSerialization.data(
-                withJSONObject: layer,
-                options: [.sortedKeys]
-            ),
-        ]
-    )
 }
 
 private func mutateJSON(

@@ -73,16 +73,18 @@ func compositeWireValuesAreAppendOnly() {
 
 @Test
 func documentPaintMutationWireContractIsFrozen() {
-    #expect(PatternDocumentPaintMutationABIVersion == 1)
+    #expect(PatternDocumentPaintMutationABIVersion == 2)
     #expect(PatternBufferIndexDocumentPaintMutationUniforms == 12)
     #expect(PatternBufferIndexDocumentPaintMutationReduction == 13)
     #expect(PatternBufferIndexDocumentPaintMutationSourceBytes == 14)
     #expect(PatternTextureIndexDocumentPaintBase == 22)
     #expect(PatternTextureIndexDocumentPaintAuthoritative == 23)
-    #expect(PatternTextureIndexDocumentPaintDestination == 24)
+    #expect(PatternTextureIndexDocumentPaintPrediction == 24)
+    #expect(PatternTextureIndexDocumentPaintDestination == 25)
     #expect(PatternDocumentPaintFlagBaseKnownClear == 1)
     #expect(PatternDocumentPaintFlagAuthoritativeKnownClear == 2)
-    #expect(PatternDocumentPaintFlagRadialTargetMask == 4)
+    #expect(PatternDocumentPaintFlagPredictionKnownClear == 4)
+    #expect(PatternDocumentPaintFlagRadialTargetMask == 8)
 
     #expect(MemoryLayout<PatternDocumentPaintMutationUniforms>.size == 80)
     #expect(MemoryLayout<PatternDocumentPaintMutationUniforms>.stride == 80)
@@ -276,6 +278,7 @@ func depositionInstanceHasFrozenWireLayout() {
     ]
     #expect(cOffsets == expectedOffsets.map { numericCast($0!) })
     #expect(UInt32(DepositionABI.version) == PatternDepositionABIVersion)
+    #expect(PatternDepositionABIVersion == 2)
     #expect(ShaderABI.isValid)
 }
 
@@ -320,40 +323,14 @@ func radialUniformLayoutMatchesTheMetalContract() {
 }
 
 @Test
-func radialResizePageUniformLayoutMatchesTheMetalContract() {
-    #expect(MemoryLayout<PatternRadialResizePageUniforms>.size == 16)
-    #expect(MemoryLayout<PatternRadialResizePageUniforms>.stride == 16)
-    #expect(MemoryLayout<PatternRadialResizePageUniforms>.alignment == 4)
-    #expect(MemoryLayout<PatternRadialResizePageUniforms>.offset(
-        of: \.logicalPageX
-    ) == 0)
-    #expect(MemoryLayout<PatternRadialResizePageUniforms>.offset(
-        of: \.logicalPageY
-    ) == 4)
-    #expect(MemoryLayout<PatternRadialResizePageUniforms>.offset(
-        of: \.destinationSlot
-    ) == 8)
-    #expect(MemoryLayout<PatternRadialResizePageUniforms>.offset(
-        of: \.padding
-    ) == 12)
-    #expect(ShaderABI.isValid)
-}
-
-@Test
-func gridWireIndicesAppendWithoutRenumberingSliceZero() {
+func retainedGridWireIndicesMatchCurrentMetalContract() {
     #expect(PatternBufferIndexFrameUniforms == 0)
     #expect(PatternBufferIndexGridFrameUniforms == 1)
     #expect(PatternBufferIndexDabInstances == 2)
     #expect(PatternBufferIndexBrushMaterial == 3)
     #expect(PatternBufferIndexRadialFrameUniforms == 4)
-    #expect(PatternBufferIndexRadialResizeDestinationUniforms == 5)
-    #expect(PatternBufferIndexRadialResizePage == 6)
-    #expect(PatternTextureIndexCanonical == 0)
-    #expect(PatternTextureIndexLive == 1)
     #expect(PatternTextureIndexBrushShape == 2)
     #expect(PatternTextureIndexBrushGrain == 3)
-    #expect(PatternTextureIndexReplayLive == 4)
-    #expect(PatternTextureIndexRadialPageTable == 5)
 }
 
 @Test
@@ -363,20 +340,14 @@ func sparseSamplingWireValuesAppendWithoutRenumberingExistingSlots() {
     #expect(PatternBufferIndexDabInstances == 2)
     #expect(PatternBufferIndexBrushMaterial == 3)
     #expect(PatternBufferIndexRadialFrameUniforms == 4)
-    #expect(PatternBufferIndexRadialResizeDestinationUniforms == 5)
-    #expect(PatternBufferIndexRadialResizePage == 6)
     #expect(PatternBufferIndexSparseSamplingUniforms == 7)
     #expect(PatternBufferIndexSparsePageTableDescriptors == 8)
     #expect(PatternBufferIndexSparsePageEntries == 9)
     #expect(PatternBufferIndexSparseBindingRemap == 10)
     #expect(PatternBufferIndexSparseTextureArguments == 11)
 
-    #expect(PatternTextureIndexCanonical == 0)
-    #expect(PatternTextureIndexLive == 1)
     #expect(PatternTextureIndexBrushShape == 2)
     #expect(PatternTextureIndexBrushGrain == 3)
-    #expect(PatternTextureIndexReplayLive == 4)
-    #expect(PatternTextureIndexRadialPageTable == 5)
     #expect(PatternTextureIndexSparseFallbackBase == 6)
     #expect(PatternSparseMaximumFallbackTextures == 16)
     #expect(PatternSparseMaximumTier2Textures == 512)

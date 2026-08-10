@@ -41,6 +41,12 @@ enum SparseTileSamplingPlanError: Error, Equatable, Sendable {
     case leaseRetirementRequested
     case staleConsumer
     case leaseAlreadyRetired
+    case sourceBatchInUse
+    case sourceBatchConsumed
+    case sourceBatchSelectionMismatch(sourceIndex: Int)
+    case injectedSourceLeaseFailure(Int)
+    case injectedBoundTextureFailure
+    case injectedContentPublicationFailure
 }
 
 enum SparseTileSampleRole: UInt8, CaseIterable, Hashable, Sendable {
@@ -87,10 +93,123 @@ struct SparseTileOutputToSourceTransform: Equatable, Hashable, Sendable {
     }
 }
 
+enum SparseTileSamplingOutputMappingKind: UInt8, Hashable, Sendable {
+    case affine
+    case finiteRadial
+}
+
+struct SparseTileFiniteRadialOutputMapping: Equatable, Sendable {
+    let strategy: TilingStrategy
+    let outputToWorldTransform: SparseTileOutputToSourceTransform
+
+    init(
+        strategy: TilingStrategy,
+        outputToWorldTransform: SparseTileOutputToSourceTransform = .identity
+    ) throws {
+        guard strategy.compiledSymmetry.family == .radial,
+              let radial = strategy.compiledSymmetry.domain.finite?.radial,
+              radial.configuration != nil,
+              radial.layout != nil,
+              outputToWorldTransform.sourceOffset.x.isFinite,
+              outputToWorldTransform.sourceOffset.y.isFinite,
+              outputToWorldTransform.sourceStep.x.isFinite,
+              outputToWorldTransform.sourceStep.y.isFinite,
+              outputToWorldTransform.sourceStep.x > 0,
+              outputToWorldTransform.sourceStep.x
+                == outputToWorldTransform.sourceStep.y
+        else {
+            throw SparseTileSamplingPlanError.inconsistentAddressing
+        }
+        self.strategy = strategy
+        self.outputToWorldTransform = outputToWorldTransform
+    }
+
+    var radial: CompiledRadialDomain {
+        strategy.compiledSymmetry.domain.finite!.radial
+    }
+
+    var layout: RadialSectorLayout { radial.layout! }
+}
+
+extension SparseTileFiniteRadialOutputMapping: Hashable {
+    static func == (
+        lhs: SparseTileFiniteRadialOutputMapping,
+        rhs: SparseTileFiniteRadialOutputMapping
+    ) -> Bool {
+        lhs.strategy == rhs.strategy
+            && lhs.outputToWorldTransform == rhs.outputToWorldTransform
+    }
+
+    func hash(into hasher: inout Hasher) {
+        let radial = radial
+        let configuration = radial.configuration!
+        hasher.combine(strategy.canvasSize.width)
+        hasher.combine(strategy.canvasSize.height)
+        hasher.combine(configuration.kind.rawValue)
+        hasher.combine(configuration.rayCount)
+        hasher.combine(configuration.center.x)
+        hasher.combine(configuration.center.y)
+        hasher.combine(configuration.referenceAngleRadians)
+        hasher.combine(radial.sectorAngleRadians)
+        hasher.combine(radial.displayedSectorCount)
+        hasher.combine(configuration.kind != .rotation)
+        hasher.combine(layout.pageOrigin.x)
+        hasher.combine(layout.pageOrigin.y)
+        hasher.combine(layout.pageTableSize.width)
+        hasher.combine(layout.pageTableSize.height)
+        hasher.combine(layout.atlasColumns)
+        hasher.combine(layout.atlasPixelSize.width)
+        hasher.combine(layout.atlasPixelSize.height)
+        hasher.combine(outputToWorldTransform)
+    }
+}
+
+enum SparseTileSamplingOutputMapping: Equatable, Hashable, Sendable {
+    case affine(SparseTileOutputToSourceTransform)
+    case finiteRadial(SparseTileFiniteRadialOutputMapping)
+
+    static func finiteRadial(
+        strategy: TilingStrategy,
+        outputToWorldTransform: SparseTileOutputToSourceTransform = .identity
+    ) throws -> SparseTileSamplingOutputMapping {
+        .finiteRadial(try SparseTileFiniteRadialOutputMapping(
+            strategy: strategy,
+            outputToWorldTransform: outputToWorldTransform
+        ))
+    }
+
+    var kind: SparseTileSamplingOutputMappingKind {
+        switch self {
+        case .affine: .affine
+        case .finiteRadial: .finiteRadial
+        }
+    }
+
+    var affineTransform: SparseTileOutputToSourceTransform? {
+        guard case let .affine(transform) = self else { return nil }
+        return transform
+    }
+}
+
 struct SparseTileRoleContentKey: Hashable, Sendable {
     let role: SparseTileSampleRole
+    /// Stable namespace identity prevents equal per-surface revision counters
+    /// from aliasing across strokes or replacement surfaces.
+    let surfaceIdentity: UUID
     let contentRevision: UInt64
     let bindingChunkRevision: UInt64
+
+    init(
+        role: SparseTileSampleRole,
+        surfaceIdentity: UUID,
+        contentRevision: UInt64,
+        bindingChunkRevision: UInt64
+    ) {
+        self.role = role
+        self.surfaceIdentity = surfaceIdentity
+        self.contentRevision = contentRevision
+        self.bindingChunkRevision = bindingChunkRevision
+    }
 }
 
 struct SparseTileLayerContentKey: Hashable, Sendable {
@@ -103,7 +222,11 @@ struct SparseTileSamplingPlanKey: Hashable, Sendable {
     let orderedLayers: [SparseTileLayerContentKey]
     let addressingRevision: UInt64
     let outputGeometryRevision: UInt64
-    let outputToSourceTransform: SparseTileOutputToSourceTransform
+    let outputMapping: SparseTileSamplingOutputMapping
+
+    var outputToSourceTransform: SparseTileOutputToSourceTransform {
+        outputMapping.affineTransform ?? .identity
+    }
 
     init(
         documentGeneration: UInt64,
@@ -116,7 +239,21 @@ struct SparseTileSamplingPlanKey: Hashable, Sendable {
         self.orderedLayers = orderedLayers
         self.addressingRevision = addressingRevision
         self.outputGeometryRevision = outputGeometryRevision
-        self.outputToSourceTransform = outputToSourceTransform
+        outputMapping = .affine(outputToSourceTransform)
+    }
+
+    init(
+        documentGeneration: UInt64,
+        orderedLayers: [SparseTileLayerContentKey],
+        addressingRevision: UInt64,
+        outputGeometryRevision: UInt64,
+        outputMapping: SparseTileSamplingOutputMapping
+    ) {
+        self.documentGeneration = documentGeneration
+        self.orderedLayers = orderedLayers
+        self.addressingRevision = addressingRevision
+        self.outputGeometryRevision = outputGeometryRevision
+        self.outputMapping = outputMapping
     }
 }
 
@@ -128,7 +265,7 @@ enum SparseTileSourceDisposition: Equatable, Sendable {
 struct SparseTileSourceRequest: @unchecked Sendable {
     let contentKey: SparseTileRoleContentKey
     let addressing: SparseTileAddressing
-    let surface: TiledRasterSurface
+    let provider: TiledRasterExactReferenceProvider
     /// Exact immutable visible set captured at adaptation time. The mutable
     /// surface remains only as the owner used to lease these exact references.
     let references: [PaintTileReference]
@@ -138,7 +275,7 @@ struct SparseTileSourceRequest: @unchecked Sendable {
     init(
         contentKey: SparseTileRoleContentKey,
         addressing: SparseTileAddressing,
-        surface: TiledRasterSurface,
+        provider: TiledRasterExactReferenceProvider,
         changedCoordinates: [PaintTileCoordinate],
         disposition: SparseTileSourceDisposition
     ) throws {
@@ -155,14 +292,292 @@ struct SparseTileSourceRequest: @unchecked Sendable {
         }
         self.contentKey = contentKey
         self.addressing = addressing
-        self.surface = surface
-        references = surface.references
+        self.provider = provider
+        references = provider.references
         self.changedCoordinates = changedCoordinates
         self.disposition = disposition
     }
 
     var role: SparseTileSampleRole { contentKey.role }
-    var layerID: UUID { surface.layerID }
+    var layerID: UUID { provider.layerID }
+}
+
+/// Pure Phase-A result. Construction is confined to this file so callers can
+/// neither widen the selected entitlement nor substitute a different provider
+/// between viewport selection and exact store retention.
+struct SparseTileSourceSelection: @unchecked Sendable {
+    fileprivate let sources: [SparseTileSourceRequest]
+    fileprivate let selectedReferencesBySource: [[PaintTileReference]]
+
+    fileprivate init(
+        sources: [SparseTileSourceRequest],
+        selectedReferencesBySource: [[PaintTileReference]]
+    ) {
+        self.sources = sources
+        self.selectedReferencesBySource = selectedReferencesBySource
+    }
+
+    func selectedReferenceCount() throws -> Int {
+        var total = 0
+        for references in selectedReferencesBySource {
+            let (next, overflow) = total.addingReportingOverflow(
+                references.count
+            )
+            guard !overflow else {
+                throw SparseTileSamplingPlanError.arithmeticOverflow
+            }
+            total = next
+        }
+        return total
+    }
+}
+
+/// Explicit one-shot access envelope for every exact source provider in a plan
+/// build. It either owns aggregate retention or holds one checked borrow from a
+/// stable capture; consumption closes that access exactly once after selected
+/// leases are installed or on failure.
+final class SparseTileOwnedSourceBatch: @unchecked Sendable {
+    private enum State { case fresh, inUse, consumed }
+
+    private enum CaptureAccess {
+        case owned(TiledRasterExactReferenceCapture)
+        case borrowed(TiledRasterExactReferenceCapture.Borrow)
+
+        func leaseExactReferences(
+            _ references: [PaintTileReference],
+            from provider: TiledRasterExactReferenceProvider,
+            pinReasons: [PaintTilePinReason]
+        ) throws -> TiledRasterExactReferenceLease {
+            switch self {
+            case let .owned(capture):
+                try provider.leaseExactReferences(
+                    references,
+                    using: capture,
+                    pinReasons: pinReasons
+                )
+            case let .borrowed(borrow):
+                try provider.leaseExactReferences(
+                    references,
+                    using: borrow,
+                    pinReasons: pinReasons
+                )
+            }
+        }
+
+        func close() {
+            switch self {
+            case let .owned(capture): capture.close()
+            case let .borrowed(borrow): borrow.close()
+            }
+        }
+
+    }
+
+    let sources: [SparseTileSourceRequest]
+    private let captureAccess: CaptureAccess
+    private let lock = NSLock()
+    private var state = State.fresh
+    private let deinitDiagnostic: @Sendable () -> Void
+    private var terminalAction: (@Sendable () -> Void)?
+
+    private init(
+        sources: [SparseTileSourceRequest],
+        captureAccess: CaptureAccess,
+        deinitDiagnostic: @escaping @Sendable () -> Void = {},
+        onTerminal: @escaping @Sendable () -> Void = {}
+    ) {
+        self.sources = sources
+        self.captureAccess = captureAccess
+        self.deinitDiagnostic = deinitDiagnostic
+        terminalAction = onTerminal
+    }
+
+    private static func restrictedSources(
+        _ selection: SparseTileSourceSelection
+    ) throws -> [SparseTileSourceRequest] {
+        let sources = selection.sources
+        let selectedReferencesBySource = selection.selectedReferencesBySource
+        guard selectedReferencesBySource.count == sources.count else {
+            throw SparseTileSamplingPlanError
+                .sourceBatchSelectionMismatch(
+                    sourceIndex: min(
+                        selectedReferencesBySource.count,
+                        sources.count
+                    )
+                )
+        }
+        return try zip(sources, selectedReferencesBySource).map {
+            source, selected in
+            let provider = try source.provider
+                .restrictingEntitlement(to: selected)
+            return try SparseTileSourceRequest(
+                contentKey: source.contentKey,
+                addressing: source.addressing,
+                provider: provider,
+                changedCoordinates: source.changedCoordinates,
+                disposition: source.disposition
+            )
+        }
+    }
+
+    /// Pure selection path. Entitlement is derived by the same Phase-A selector
+    /// that the cache rechecks before any reservation.
+    /// This operation performs no store mutation and can run outside registry
+    /// locks before an immutable epoch identity is revalidated.
+    static func selecting(
+        sources: [SparseTileSourceRequest],
+        key: SparseTileSamplingPlanKey,
+        outputRegion: SparseTileOutputRegion
+    ) throws -> SparseTileSourceSelection {
+        let metadata = try sources.map {
+            try SparseTileSourceSnapshot(
+                contentKey: $0.contentKey,
+                addressing: $0.addressing,
+                layerID: $0.layerID,
+                references: $0.references,
+                changedCoordinates: $0.changedCoordinates,
+                disposition: $0.disposition
+            )
+        }
+        let selected = try SparseTileSamplingPlanBuilder
+            .selectingPhysicalReferences(
+                key: key,
+                sources: metadata,
+                outputRegion: outputRegion
+            )
+        return SparseTileSourceSelection(
+            sources: sources,
+            selectedReferencesBySource: selected.map(\.references)
+        )
+    }
+
+    /// Strict Phase-B capture. The selected entitlement is consumed exactly as
+    /// supplied; this method never recomputes viewport reachability. Registry
+    /// callers invoke it only after revalidating the immutable epoch identity.
+    static func capturing(
+        _ selection: SparseTileSourceSelection,
+        deinitDiagnostic: @escaping @Sendable () -> Void = {}
+    ) throws -> SparseTileOwnedSourceBatch {
+        let sources = try restrictedSources(selection)
+        let capture = try TiledRasterExactReferenceCapture(
+            providers: sources.map(\.provider)
+        )
+        return Self(
+            sources: sources,
+            captureAccess: .owned(capture),
+            deinitDiagnostic: deinitDiagnostic
+        )
+    }
+
+    /// Strict borrowed Phase-B access for a stable capture. The unforgeable
+    /// selection still determines the exact entitlement; the capture validates
+    /// that every restricted provider descends from a captured lineage.
+    static func borrowing(
+        _ selection: SparseTileSourceSelection,
+        from capture: TiledRasterExactReferenceCapture,
+        deinitDiagnostic: @escaping @Sendable () -> Void = {},
+        onTerminal: @escaping @Sendable () -> Void = {}
+    ) throws -> SparseTileOwnedSourceBatch {
+        let sources = try restrictedSources(selection)
+        let borrow = try capture.borrowing(providers: sources.map(\.provider))
+        return Self(
+            sources: sources,
+            captureAccess: .borrowed(borrow),
+            deinitDiagnostic: deinitDiagnostic,
+            onTerminal: onTerminal
+        )
+    }
+
+    /// Compatibility bridge for call sites that do not yet participate in a
+    /// registry epoch. B2b removes those callers in favor of registry-owned
+    /// selection and strict capture.
+    static func capturingSelection(
+        sources: [SparseTileSourceRequest],
+        key: SparseTileSamplingPlanKey,
+        outputRegion: SparseTileOutputRegion,
+        deinitDiagnostic: @escaping @Sendable () -> Void = {}
+    ) throws -> SparseTileOwnedSourceBatch {
+        try capturing(
+            selecting(
+                sources: sources,
+                key: key,
+                outputRegion: outputRegion
+            ),
+            deinitDiagnostic: deinitDiagnostic
+        )
+    }
+
+    func beginConsumption() throws -> [SparseTileSourceRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        switch state {
+        case .fresh:
+            state = .inUse
+            return sources
+        case .inUse:
+            throw SparseTileSamplingPlanError.sourceBatchInUse
+        case .consumed:
+            throw SparseTileSamplingPlanError.sourceBatchConsumed
+        }
+    }
+
+    func finishConsumption() {
+        lock.lock()
+        guard state != .consumed else {
+            lock.unlock()
+            return
+        }
+        state = .consumed
+        let terminalAction = terminalAction
+        self.terminalAction = nil
+        lock.unlock()
+        captureAccess.close()
+        terminalAction?()
+    }
+
+    func abandon() throws {
+        lock.lock()
+        switch state {
+        case .fresh:
+            state = .consumed
+            let terminalAction = terminalAction
+            self.terminalAction = nil
+            lock.unlock()
+            captureAccess.close()
+            terminalAction?()
+        case .inUse:
+            lock.unlock()
+            throw SparseTileSamplingPlanError.sourceBatchInUse
+        case .consumed:
+            lock.unlock()
+        }
+    }
+
+    deinit {
+        lock.lock()
+        let wasExplicitlyConsumed = state == .consumed
+        let terminalAction = terminalAction
+        self.terminalAction = nil
+        lock.unlock()
+        if !wasExplicitlyConsumed {
+            deinitDiagnostic()
+            captureAccess.close()
+            terminalAction?()
+        }
+    }
+
+    fileprivate func leaseExactReferences(
+        _ references: [PaintTileReference],
+        from provider: TiledRasterExactReferenceProvider,
+        pinReasons: [PaintTilePinReason]
+    ) throws -> TiledRasterExactReferenceLease {
+        try captureAccess.leaseExactReferences(
+            references,
+            from: provider,
+            pinReasons: pinReasons
+        )
+    }
+
 }
 
 /// Immutable, normalized metadata used to construct reusable plan content.
@@ -200,10 +615,7 @@ struct SparseTileSourceSnapshot: Sendable {
                 guard previous.coordinate < reference.coordinate else {
                     throw SparseTileSamplingPlanError.unsortedReference
                 }
-                guard previous.storeIdentity == reference.storeIdentity,
-                      previous.physicalSurfaceID == reference.physicalSurfaceID,
-                      previous.physicalGeneration == reference.physicalGeneration
-                else {
+                guard previous.storeIdentity == reference.storeIdentity else {
                     throw SparseTileSamplingPlanError.foreignReference(reference)
                 }
             }
@@ -230,7 +642,7 @@ struct SparseTileSourceSnapshot: Sendable {
     var role: SparseTileSampleRole { contentKey.role }
 }
 
-struct SparseTileOutputRegion: Equatable, Sendable {
+struct SparseTileOutputRegion: Equatable, Hashable, Sendable {
     let minX: Int
     let minY: Int
     let maxX: Int
@@ -286,7 +698,7 @@ struct SparseTilePlanLimits: Equatable, Sendable {
         self.maximumBatchCount = maximumBatchCount
     }
 
-    fileprivate var allValues: [Int] {
+    var allValues: [Int] {
         [
             maximumPageEntries, maximumPageChunks, maximumPageTableBytes,
             maximumBindingSlots, maximumBindingChunks, maximumBindingBytes,
@@ -374,6 +786,7 @@ struct SparseTilePlanTelemetry: Equatable, Sendable {
 final class SparseTileSamplingPlanContent: @unchecked Sendable {
     let key: SparseTileSamplingPlanKey
     let addressing: SparseTileAddressing
+    let outputMapping: SparseTileSamplingOutputMapping
     let pageTables: [SparseTilePageTable]
     let bindingRecords: [SparseTileBindingRecord]
     let bindingChunks: [SparseTileBindingChunk]
@@ -381,7 +794,7 @@ final class SparseTileSamplingPlanContent: @unchecked Sendable {
     let telemetry: SparseTilePlanTelemetry
     let outputToSourceTransform: SparseTileOutputToSourceTransform
     let shaderSourceOrigin: SIMD2<Float>
-    fileprivate let sourceFingerprints: [SparseTileSourceFingerprint]
+    let sourceFingerprints: [SparseTileSourceFingerprint]
     fileprivate let outputRegion: SparseTileOutputRegion
     private let recordsBySlot: [Int: SparseTileBindingRecord]
 
@@ -400,6 +813,7 @@ final class SparseTileSamplingPlanContent: @unchecked Sendable {
     ) {
         self.key = key
         self.addressing = addressing
+        outputMapping = key.outputMapping
         self.pageTables = pageTables
         self.bindingRecords = bindingRecords
         self.bindingChunks = bindingChunks
@@ -439,7 +853,7 @@ final class SparseTileSamplingPlanContent: @unchecked Sendable {
     }
 }
 
-private struct SparseTileSourceFingerprint: Equatable, Sendable {
+struct SparseTileSourceFingerprint: Equatable, Sendable {
     let layerID: UUID
     let contentKey: SparseTileRoleContentKey
     let addressing: SparseTileAddressing
@@ -452,8 +866,7 @@ struct SparseTileBoundTexture: @unchecked Sendable {
 }
 
 private struct SparseTileHeldLease {
-    let surface: TiledRasterSurface
-    let lease: PaintTileLease
+    let lease: TiledRasterExactReferenceLease
 }
 
 final class SparseTileSamplingPlanConsumerHandle: @unchecked Sendable {
@@ -531,7 +944,7 @@ final class SparseTileSamplingPlanConsumerHandle: @unchecked Sendable {
 }
 
 typealias SparseTileLeaseReturner = @Sendable (
-    TiledRasterSurface, PaintTileLease
+    TiledRasterExactReferenceLease
 ) throws -> Void
 
 /// Cache-owned retirement state. It deliberately outlives the public lease:
@@ -554,6 +967,18 @@ private final class SparseTileLeaseRetirementCoordinator: @unchecked Sendable {
         self.heldLeases = heldLeases
         self.returnLease = returnLease
         self.onFullyReturned = onFullyReturned
+    }
+
+    /// Installs ownership immediately after each exact lease is acquired.
+    /// No throwable operation may occur between acquisition and this append.
+    func append(_ heldLease: SparseTileHeldLease) {
+        lock.lock()
+        precondition(
+            !retirementRequested && !retirementInProgress && !completed,
+            "cannot append after sparse retirement begins"
+        )
+        heldLeases.append(heldLease)
+        lock.unlock()
     }
 
     func requestRetirement() throws -> Bool {
@@ -583,9 +1008,9 @@ private final class SparseTileLeaseRetirementCoordinator: @unchecked Sendable {
                 lock.unlock()
                 guard let value else { break }
 
-                try returnLease(value.surface, value.lease)
+                try returnLease(value.lease)
                 lock.lock()
-                guard heldLeases.last?.lease.id == value.lease.id else {
+                guard heldLeases.last?.lease === value.lease else {
                     retirementInProgress = false
                     lock.unlock()
                     throw SparseTileSamplingPlanError.staleConsumer
@@ -725,10 +1150,34 @@ private struct SparseTilePendingSlotReservation {
     let assignments: [SparseTileRecordCoordinateKey: Int]
 }
 
+/// CPU content identity. The logical plan key intentionally remains unchanged
+/// inside content/shader-facing metadata; output-region chunking is a cache
+/// concern and must not be smuggled through a fake geometry revision.
+private struct SparseTileSamplingPlanCacheIdentity: Hashable, Sendable {
+    let logicalKey: SparseTileSamplingPlanKey
+    let outputRegion: SparseTileOutputRegion
+}
+
+private final class SparseTileContentEpoch: @unchecked Sendable {}
+
+private struct SparseTileActiveContentAcquisition {
+    var epoch: SparseTileContentEpoch
+    var count: Int
+}
+
+struct SparseTileSamplingPlanCacheSnapshot: Equatable, Sendable {
+    let cachedContentCount: Int
+    let activeContentAcquisitionCount: Int
+    let pendingRetirementCount: Int
+}
+
 final class SparseTileSamplingPlanCache: @unchecked Sendable {
     private let lock = NSLock()
-    private var contents: [SparseTileSamplingPlanKey: SparseTileSamplingPlanContent]
-        = [:]
+    private var contents:
+        [SparseTileSamplingPlanCacheIdentity: SparseTileSamplingPlanContent] = [:]
+    private var activeContentAcquisitions:
+        [SparseTileSamplingPlanCacheIdentity:
+            SparseTileActiveContentAcquisition] = [:]
     private var liveSlots: [UInt64:
         [SparseTileRecordCoordinateKey: SparseTileLiveSlotEntry]] = [:]
     private var generationEpochs: [UInt64: SparseTileGenerationEpoch] = [:]
@@ -739,24 +1188,50 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
     private var nextSlotOwnerID: UInt64 = 1
     private let returnLease: SparseTileLeaseReturner
     private let afterSlotReservation: @Sendable () -> Void
+    private let beforePublication: @Sendable () -> Void
+    private let sourceLeaseFailureInjector: @Sendable (Int) throws -> Void
+    private let boundTextureFailureInjector: @Sendable () throws -> Void
+    private let afterContentPublication: @Sendable () throws -> Void
 
     init(
-        returnLease: @escaping SparseTileLeaseReturner = { surface, lease in
-            try surface.returnLease(lease)
+        returnLease: @escaping SparseTileLeaseReturner = { lease in
+            try lease.returnLease()
         },
-        afterSlotReservation: @escaping @Sendable () -> Void = {}
+        afterSlotReservation: @escaping @Sendable () -> Void = {},
+        beforePublication: @escaping @Sendable () -> Void = {},
+        sourceLeaseFailureInjector:
+            @escaping @Sendable (Int) throws -> Void = { _ in },
+        boundTextureFailureInjector:
+            @escaping @Sendable () throws -> Void = {},
+        afterContentPublication:
+            @escaping @Sendable () throws -> Void = {}
     ) {
         self.returnLease = returnLease
         self.afterSlotReservation = afterSlotReservation
+        self.beforePublication = beforePublication
+        self.sourceLeaseFailureInjector = sourceLeaseFailureInjector
+        self.boundTextureFailureInjector = boundTextureFailureInjector
+        self.afterContentPublication = afterContentPublication
     }
 
     func acquire(
         key: SparseTileSamplingPlanKey,
-        sources: [SparseTileSourceRequest],
+        sourceBatch: SparseTileOwnedSourceBatch,
         outputRegion: SparseTileOutputRegion,
         limits: SparseTilePlanLimits,
         updating previous: SparseTileSamplingPlanContent? = nil
     ) throws -> SparseTileSamplingPlanLease {
+        let cacheIdentity = SparseTileSamplingPlanCacheIdentity(
+            logicalKey: key,
+            outputRegion: outputRegion
+        )
+        let eligiblePrevious = previous?.outputRegion == outputRegion
+            ? previous
+            : nil
+        let contentEpoch = beginContentAcquisition(for: cacheIdentity)
+        defer { finishContentAcquisition(for: cacheIdentity) }
+        let sources = try sourceBatch.beginConsumption()
+        defer { sourceBatch.finishConsumption() }
         try Self.validate(key: key, sources: sources, limits: limits)
         let metadata = try sources.map {
             try SparseTileSourceSnapshot(
@@ -768,22 +1243,40 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
                 disposition: $0.disposition
             )
         }
+        let sourceFingerprints = metadata.fingerprints
+        // Selection is deliberately complete before the cache lock and slot
+        // reservation. Full metadata remains the cache/collision identity;
+        // only viewport-reachable physical references consume live resources.
+        let selectedMetadata = try SparseTileSamplingPlanBuilder
+            .selectingPhysicalReferences(
+                key: key,
+                sources: metadata,
+                outputRegion: outputRegion
+            )
+        for (sourceIndex, pair) in zip(
+            sources,
+            selectedMetadata
+        ).enumerated() where
+            pair.0.provider.entitledReferences != pair.1.references
+        {
+            throw SparseTileSamplingPlanError
+                .sourceBatchSelectionMismatch(sourceIndex: sourceIndex)
+        }
 
         let cachedBeforeBuild: SparseTileSamplingPlanContent?
         let reservation: SparseTilePendingSlotReservation
         lock.lock()
         do {
-            cachedBeforeBuild = contents[key]
+            cachedBeforeBuild = contents[cacheIdentity]
             if let cachedBeforeBuild {
-                guard cachedBeforeBuild.sourceFingerprints == metadata.fingerprints,
-                      cachedBeforeBuild.outputRegion == outputRegion
+                guard cachedBeforeBuild.sourceFingerprints == sourceFingerprints
                 else {
                     throw SparseTileSamplingPlanError.contentKeyCollision
                 }
             }
             reservation = try reserveSlotsLocked(
                 generation: key.documentGeneration,
-                sources: metadata,
+                sources: selectedMetadata,
                 maximum: min(limits.maximumBindingSlots, 512),
                 previous: previous
             )
@@ -794,6 +1287,35 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
         }
         afterSlotReservation()
 
+        // From this point onward one cache-owned coordinator is the rollback
+        // authority for both the pending slot reservation and every exact tile
+        // lease. It is installed before any build/acquisition step can throw.
+        let retirement = SparseTileLeaseRetirementCoordinator(
+            heldLeases: [],
+            returnLease: returnLease,
+            onFullyReturned: { [self] in
+                try finishRetirement(reservation.ownerID)
+            }
+        )
+        do {
+            try registerPendingRetirement(
+                reservation.ownerID,
+                retirement: retirement
+            )
+        } catch {
+            // Registration follows reservation without an intervening await or
+            // owner mutation. A cancellation failure here is an internal cache
+            // integrity violation; never hide it and continue with leaked slots.
+            do {
+                try cancelSlotOwner(reservation.ownerID)
+            } catch {
+                preconditionFailure(
+                    "sparse pending owner could neither register nor cancel"
+                )
+            }
+            throw error
+        }
+
         let candidate: SparseTileSamplingPlanContent
         if let cachedBeforeBuild,
            cachedBeforeBuild.matches(slotAssignments: reservation.assignments),
@@ -801,21 +1323,21 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
             candidate = cachedBeforeBuild
         } else {
             do {
-                candidate = try SparseTileSamplingPlanBuilder.buildFull(
+                candidate = try SparseTileSamplingPlanBuilder.buildSelected(
                     key: key,
-                    sources: metadata,
+                    sources: selectedMetadata,
+                    sourceFingerprints: sourceFingerprints,
                     outputRegion: outputRegion,
                     limits: limits,
-                    previous: cachedBeforeBuild ?? previous,
+                    previous: cachedBeforeBuild ?? eligiblePrevious,
                     slotAssignments: reservation.assignments
                 )
             } catch {
-                try? cancelSlotOwner(reservation.ownerID)
+                _ = try retirement.requestRetirement()
                 throw error
             }
         }
 
-        var held: [SparseTileHeldLease] = []
         var acquired: [(request: SparseTileSourceRequest,
                         references: [PaintTileReference],
                         bindings: [PaintTileBinding])] = []
@@ -823,27 +1345,47 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
         var displacedContent: SparseTileSamplingPlanContent?
         do {
             try ensureSlotOwnerCurrent(reservation.ownerID)
-            for (request, snapshot) in zip(sources, metadata) {
-                let references = snapshot.references
-                if references.isEmpty {
+            for (sourceIndex, pair) in zip(sources, selectedMetadata).enumerated() {
+                let (request, snapshot) = pair
+                let selectedReferences = snapshot.references
+                if selectedReferences.isEmpty {
                     acquired.append((request, [], []))
                     continue
                 }
-                let lease = try request.surface.leaseExistingTiles(
-                    at: references.map(\.coordinate),
+                try sourceLeaseFailureInjector(sourceIndex)
+                let lease = try sourceBatch.leaseExactReferences(
+                    selectedReferences,
+                    from: request.provider,
                     pinReasons: [.visible, .inFlight]
                 )
-                held.append(.init(surface: request.surface, lease: lease))
-                acquired.append((request, references, lease.bindings))
+                retirement.append(.init(lease: lease))
+                acquired.append((request, selectedReferences, lease.bindings))
             }
+
+            let textures = try Self.boundTextures(
+                content: candidate,
+                acquired: acquired
+            )
+            try boundTextureFailureInjector()
+            // Pins now own every selected physical tile. Drop aggregate
+            // snapshot retention before any reusable content or live slot
+            // owner becomes observable.
+            sourceBatch.finishConsumption()
+            beforePublication()
 
             let selected: SparseTileSamplingPlanContent
             lock.lock()
             do {
                 try ensureSlotOwnerCurrentLocked(reservation.ownerID)
-                if let raced = contents[key] {
-                    guard raced.sourceFingerprints == metadata.fingerprints,
-                          raced.outputRegion == outputRegion
+                if activeContentAcquisitions[cacheIdentity]?.epoch
+                    !== contentEpoch
+                {
+                    // An exact eviction linearized after this acquisition
+                    // began. The lease may finish, but stale work cannot undo
+                    // that eviction by repopulating CPU cache state.
+                    selected = candidate
+                } else if let raced = contents[cacheIdentity] {
+                    guard raced.sourceFingerprints == sourceFingerprints
                     else {
                         throw SparseTileSamplingPlanError.contentKeyCollision
                     }
@@ -852,12 +1394,12 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
                         selected = raced
                     } else {
                         displacedContent = raced
-                        contents[key] = candidate
+                        contents[cacheIdentity] = candidate
                         installedCandidate = true
                         selected = candidate
                     }
                 } else {
-                    contents[key] = candidate
+                    contents[cacheIdentity] = candidate
                     installedCandidate = true
                     selected = candidate
                 }
@@ -866,18 +1408,8 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
                 lock.unlock()
                 throw error
             }
+            try afterContentPublication()
 
-            let textures = try Self.boundTextures(
-                content: selected,
-                acquired: acquired
-            )
-            let retirement = SparseTileLeaseRetirementCoordinator(
-                heldLeases: held,
-                returnLease: returnLease,
-                onFullyReturned: { [self] in
-                    try finishRetirement(reservation.ownerID)
-                }
-            )
             try publishSlotOwner(reservation.ownerID, retirement: retirement)
             return SparseTileSamplingPlanLease(
                 content: selected,
@@ -885,36 +1417,24 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
                 retirement: retirement
             )
         } catch {
+            sourceBatch.finishConsumption()
             if installedCandidate {
                 lock.lock()
-                if contents[key] === candidate {
+                if contents[cacheIdentity] === candidate {
                     if let displacedContent {
-                        contents[key] = displacedContent
+                        contents[cacheIdentity] = displacedContent
                     } else {
-                        contents.removeValue(forKey: key)
+                        contents.removeValue(forKey: cacheIdentity)
                     }
                 }
                 lock.unlock()
             }
-            if held.isEmpty {
-                try? cancelSlotOwner(reservation.ownerID)
-            } else {
-                let retirement = SparseTileLeaseRetirementCoordinator(
-                    heldLeases: held,
-                    returnLease: returnLease,
-                    onFullyReturned: { [self] in
-                        try finishRetirement(reservation.ownerID)
-                    }
-                )
-                try registerPendingRetirement(
-                    reservation.ownerID,
-                    retirement: retirement
-                )
-                do {
-                    _ = try retirement.requestRetirement()
-                } catch {
-                    throw error
-                }
+            do {
+                _ = try retirement.requestRetirement()
+            } catch {
+                // The coordinator is already cache-owned and retryable. Surface
+                // cleanup failure rather than dropping the original exact leases.
+                throw error
             }
             throw error
         }
@@ -923,9 +1443,79 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
     func invalidate(documentGeneration: UInt64) {
         lock.lock()
         contents = contents.filter {
-            $0.key.documentGeneration != documentGeneration
+            $0.key.logicalKey.documentGeneration != documentGeneration
+        }
+        for (identity, var active) in activeContentAcquisitions
+        where identity.logicalKey.documentGeneration == documentGeneration {
+            active.epoch = SparseTileContentEpoch()
+            activeContentAcquisitions[identity] = active
         }
         generationEpochs[documentGeneration] = SparseTileGenerationEpoch()
+        lock.unlock()
+    }
+
+    /// Drops only one CPU content entry. Live leases and neighboring output
+    /// regions remain independently owned; a later request rebuilds this exact
+    /// compound identity.
+    @discardableResult
+    func evictContent(
+        key: SparseTileSamplingPlanKey,
+        outputRegion: SparseTileOutputRegion
+    ) -> Bool {
+        lock.lock()
+        let identity = SparseTileSamplingPlanCacheIdentity(
+            logicalKey: key,
+            outputRegion: outputRegion
+        )
+        let removed = contents.removeValue(forKey: identity) != nil
+        if var active = activeContentAcquisitions[identity] {
+            active.epoch = SparseTileContentEpoch()
+            activeContentAcquisitions[identity] = active
+        }
+        lock.unlock()
+        return removed
+    }
+
+    #if DEBUG
+    var testingActiveContentIdentityCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeContentAcquisitions.count
+    }
+    #endif
+
+    private func beginContentAcquisition(
+        for identity: SparseTileSamplingPlanCacheIdentity
+    ) -> SparseTileContentEpoch {
+        lock.lock()
+        var active = activeContentAcquisitions[identity]
+            ?? SparseTileActiveContentAcquisition(
+                epoch: SparseTileContentEpoch(),
+                count: 0
+            )
+        precondition(active.count < Int.max)
+        active.count += 1
+        activeContentAcquisitions[identity] = active
+        lock.unlock()
+        return active.epoch
+    }
+
+    private func finishContentAcquisition(
+        for identity: SparseTileSamplingPlanCacheIdentity
+    ) {
+        lock.lock()
+        guard var active = activeContentAcquisitions[identity],
+              active.count > 0
+        else {
+            lock.unlock()
+            preconditionFailure("missing sparse content acquisition")
+        }
+        active.count -= 1
+        if active.count == 0 {
+            activeContentAcquisitions.removeValue(forKey: identity)
+        } else {
+            activeContentAcquisitions[identity] = active
+        }
         lock.unlock()
     }
 
@@ -950,6 +1540,23 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return retirements.count
+    }
+
+    func snapshot() -> SparseTileSamplingPlanCacheSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        var activeAcquisitionCount = 0
+        for acquisition in activeContentAcquisitions.values {
+            let (sum, overflow) = activeAcquisitionCount
+                .addingReportingOverflow(acquisition.count)
+            precondition(!overflow)
+            activeAcquisitionCount = sum
+        }
+        return SparseTileSamplingPlanCacheSnapshot(
+            cachedContentCount: contents.count,
+            activeContentAcquisitionCount: activeAcquisitionCount,
+            pendingRetirementCount: retirements.count
+        )
     }
 
     private func reserveSlotsLocked(
@@ -1071,13 +1678,13 @@ final class SparseTileSamplingPlanCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard var owner = slotOwners[ownerID], owner.state == .pending,
-              generationEpochs[owner.generation] === owner.generationEpoch
+              generationEpochs[owner.generation] === owner.generationEpoch,
+              retirements[ownerID] === retirement
         else {
             throw SparseTileSamplingPlanError.staleSlotOwner
         }
         owner.state = .live
         slotOwners[ownerID] = owner
-        retirements[ownerID] = retirement
     }
 
     private func registerPendingRetirement(
@@ -1290,11 +1897,12 @@ enum SparseTileAcceptedSourceAdapter {
         return try SparseTileSourceRequest(
             contentKey: SparseTileRoleContentKey(
                 role: .canonical,
+                surfaceIdentity: binding.canonical.surfaceID,
                 contentRevision: revision,
                 bindingChunkRevision: revision
             ),
             addressing: addressing,
-            surface: binding.canonical,
+            provider: binding.canonical.makeExactReferenceProvider(),
             changedCoordinates: references.map(\.coordinate),
             disposition: .fullSnapshot
         )
@@ -1306,7 +1914,8 @@ enum SparseTileAcceptedSourceAdapter {
         prediction: TiledRasterSurface,
         changedRole: StrokePrivateSurfaceLayer,
         changedCoordinates: [PaintTileCoordinate],
-        addressing: SparseTileAddressing
+        addressing: SparseTileAddressing,
+        disposition: SparseTileSourceDisposition = .delta
     ) throws -> [SparseTileSourceRequest] {
         guard authoritative.layerID == layerID else {
             throw SparseTileSamplingPlanError.sourceLayerMismatch(
@@ -1328,32 +1937,38 @@ enum SparseTileAcceptedSourceAdapter {
             throw SparseTileSamplingPlanError.sourcePixelSizeMismatch
         }
         let sortedChanges = changedCoordinates.sorted()
+        let authoritativeChanges = disposition == .fullSnapshot
+            ? authoritative.references.map(\.coordinate).sorted()
+            : (changedRole == .authoritative ? sortedChanges : [])
+        let predictionChanges = disposition == .fullSnapshot
+            ? prediction.references.map(\.coordinate).sorted()
+            : (changedRole == .prediction ? sortedChanges : [])
         let authoritativeRevision = authoritative.revision.rawValue
         let predictionRevision = prediction.revision.rawValue
         return [
             try SparseTileSourceRequest(
                 contentKey: SparseTileRoleContentKey(
                     role: .authoritative,
+                    surfaceIdentity: authoritative.surfaceID,
                     contentRevision: authoritativeRevision,
                     bindingChunkRevision: authoritativeRevision
                 ),
                 addressing: addressing,
-                surface: authoritative,
-                changedCoordinates: changedRole == .authoritative
-                    ? sortedChanges : [],
-                disposition: .delta
+                provider: authoritative.makeExactReferenceProvider(),
+                changedCoordinates: authoritativeChanges,
+                disposition: disposition
             ),
             try SparseTileSourceRequest(
                 contentKey: SparseTileRoleContentKey(
                     role: .prediction,
+                    surfaceIdentity: prediction.surfaceID,
                     contentRevision: predictionRevision,
                     bindingChunkRevision: predictionRevision
                 ),
                 addressing: addressing,
-                surface: prediction,
-                changedCoordinates: changedRole == .prediction
-                    ? sortedChanges : [],
-                disposition: .delta
+                provider: prediction.makeExactReferenceProvider(),
+                changedCoordinates: predictionChanges,
+                disposition: disposition
             ),
         ]
     }
@@ -1366,24 +1981,6 @@ extension DocumentPaintLayerBinding {
     ) throws -> SparseTileSourceRequest {
         try SparseTileAcceptedSourceAdapter.canonical(
             self, addressing: addressing
-        )
-    }
-}
-
-extension StrokePreparedSurfaceLease {
-    func sparseTileSourceRequests(
-        addressing: SparseTileAddressing
-    ) throws -> [SparseTileSourceRequest] {
-        guard case let .tiled(backing) = backing else {
-            throw SparseTileSamplingPlanError.contentRoleMismatch
-        }
-        return try SparseTileAcceptedSourceAdapter.transient(
-            layerID: backing.layerID,
-            authoritative: backing.resources.authoritative,
-            prediction: backing.resources.prediction,
-            changedRole: layer,
-            changedCoordinates: backing.bindingDeltaCoordinates,
-            addressing: addressing
         )
     }
 }
@@ -1432,6 +2029,168 @@ enum SparseTileSamplingPlanBuilder {
             SparseTilePlanAllocationKind, Int
         ) -> Void)? = nil
     ) throws -> SparseTileSamplingPlanContent {
+        let sourceFingerprints = sources.fingerprints
+        let selectedSources = try selectingPhysicalReferences(
+            key: key,
+            sources: sources,
+            outputRegion: outputRegion
+        )
+        return try buildSelected(
+            key: key,
+            sources: selectedSources,
+            sourceFingerprints: sourceFingerprints,
+            outputRegion: outputRegion,
+            limits: limits,
+            previous: previous,
+            slotAssignments: slotAssignments,
+            allocationObserver: allocationObserver
+        )
+    }
+
+    /// Converts logical viewport reachability to the exact physical reference
+    /// set that may be sampled by the four-neighbor bilinear kernel. This is
+    /// metadata-only: it performs no reservation, page-in, or pin mutation.
+    fileprivate static func selectingPhysicalReferences(
+        key: SparseTileSamplingPlanKey,
+        sources: [SparseTileSourceSnapshot],
+        outputRegion: SparseTileOutputRegion
+    ) throws -> [SparseTileSourceSnapshot] {
+        guard !sources.isEmpty else {
+            throw SparseTileSamplingPlanError.contentKeyMismatch
+        }
+        guard sources.dropFirst().allSatisfy({
+            $0.addressing == sources[0].addressing
+        }) else {
+            throw SparseTileSamplingPlanError.inconsistentAddressing
+        }
+        let addressing = sources[0].addressing
+        try validateOutputMapping(key.outputMapping, addressing: addressing)
+
+        let selectedRadialPhysicalCoordinates: Set<PaintTileCoordinate>?
+        let affineIntervals: (x: [Range<Int>], y: [Range<Int>])?
+        switch key.outputMapping {
+        case let .affine(transform):
+            let shaderSourceOrigin = try transform.shaderSourceOrigin(
+                outputRegion: outputRegion
+            )
+            let halo = try mappedSourceHalo(
+                for: outputRegion,
+                within: outputRegion,
+                transform: transform,
+                shaderSourceOrigin: shaderSourceOrigin
+            )
+            affineIntervals = (
+                try addressedIntervals(
+                    minimum: halo.minX,
+                    maximumInclusive: halo.maxX,
+                    axisLimit: addressing.axisWidth,
+                    wraps: addressing.wraps
+                ),
+                try addressedIntervals(
+                    minimum: halo.minY,
+                    maximumInclusive: halo.maxY,
+                    axisLimit: addressing.axisHeight,
+                    wraps: addressing.wraps
+                )
+            )
+            selectedRadialPhysicalCoordinates = nil
+        case let .finiteRadial(mapping):
+            affineIntervals = nil
+            selectedRadialPhysicalCoordinates = Set(
+                try radialLogicalPages(
+                    for: outputRegion,
+                    mapping: mapping
+                ).compactMap { coordinate in
+                    mapping.layout.residentPage(at: coordinate)
+                }.map { page in
+                    PaintTileCoordinate(
+                        x: page.atlasSlot % mapping.layout.atlasColumns,
+                        y: page.atlasSlot / mapping.layout.atlasColumns
+                    )
+                }
+            )
+        }
+
+        return try sources.map { source in
+            let selectedCoordinates: Set<PaintTileCoordinate>
+            switch key.outputMapping {
+            case .affine:
+                let affineRanges = affineIntervals!
+                switch source.addressing {
+                case .finite, .periodic:
+                selectedCoordinates = Set(source.references.compactMap {
+                    reference in
+                    let bounds = reference.descriptor.logicalBounds
+                    guard intervals(
+                        affineRanges.x,
+                        overlap: bounds.minX..<bounds.maxX
+                    ), intervals(
+                        affineRanges.y,
+                        overlap: bounds.minY..<bounds.maxY
+                    ) else { return nil }
+                    return reference.coordinate
+                })
+                case let .radial(layout):
+                    var physical: Set<PaintTileCoordinate> = []
+                    for page in layout.residentPages {
+                        let minX = try checkedProduct(
+                            page.coordinate.x,
+                            PaintTileDescriptor.side
+                        )
+                        let minY = try checkedProduct(
+                            page.coordinate.y,
+                            PaintTileDescriptor.side
+                        )
+                        let maxX = try checkedSum(
+                            minX, PaintTileDescriptor.side
+                        )
+                        let maxY = try checkedSum(
+                            minY, PaintTileDescriptor.side
+                        )
+                        guard intervals(
+                            affineRanges.x, overlap: minX..<maxX
+                        ), intervals(
+                            affineRanges.y, overlap: minY..<maxY
+                        ) else { continue }
+                        physical.insert(PaintTileCoordinate(
+                            x: page.atlasSlot % layout.atlasColumns,
+                            y: page.atlasSlot / layout.atlasColumns
+                        ))
+                    }
+                    selectedCoordinates = physical
+                }
+            case .finiteRadial:
+                selectedCoordinates = selectedRadialPhysicalCoordinates!
+            }
+            let selectedReferences = source.references.filter {
+                selectedCoordinates.contains($0.coordinate)
+            }
+            let selectedChanges = source.changedCoordinates.filter {
+                selectedCoordinates.contains($0)
+            }
+            return try SparseTileSourceSnapshot(
+                contentKey: source.contentKey,
+                addressing: source.addressing,
+                layerID: source.layerID,
+                references: selectedReferences,
+                changedCoordinates: selectedChanges,
+                disposition: source.disposition
+            )
+        }
+    }
+
+    fileprivate static func buildSelected(
+        key: SparseTileSamplingPlanKey,
+        sources: [SparseTileSourceSnapshot],
+        sourceFingerprints: [SparseTileSourceFingerprint],
+        outputRegion: SparseTileOutputRegion,
+        limits: SparseTilePlanLimits,
+        previous: SparseTileSamplingPlanContent? = nil,
+        slotAssignments: [SparseTileRecordCoordinateKey: Int]? = nil,
+        allocationObserver: (@Sendable (
+            SparseTilePlanAllocationKind, Int
+        ) -> Void)? = nil
+    ) throws -> SparseTileSamplingPlanContent {
         guard !sources.isEmpty else {
             throw SparseTileSamplingPlanError.contentKeyMismatch
         }
@@ -1443,8 +2202,28 @@ enum SparseTileSamplingPlanBuilder {
         }) else {
             throw SparseTileSamplingPlanError.inconsistentAddressing
         }
-        let shaderSourceOrigin = try key.outputToSourceTransform
-            .shaderSourceOrigin(outputRegion: outputRegion)
+        guard sourceFingerprints.count == sources.count,
+              zip(sources, sourceFingerprints).allSatisfy({ source, fingerprint in
+                  source.layerID == fingerprint.layerID
+                      && source.contentKey == fingerprint.contentKey
+                      && source.addressing == fingerprint.addressing
+              })
+        else {
+            throw SparseTileSamplingPlanError.contentKeyMismatch
+        }
+        try validateOutputMapping(
+            key.outputMapping,
+            addressing: sources[0].addressing
+        )
+        let shaderSourceOrigin: SIMD2<Float>
+        switch key.outputMapping {
+        case let .affine(transform):
+            shaderSourceOrigin = try transform.shaderSourceOrigin(
+                outputRegion: outputRegion
+            )
+        case .finiteRadial:
+            shaderSourceOrigin = .zero
+        }
         let maximumGlobalSlots = min(limits.maximumBindingSlots, 512)
         let bindingCount = try sources.reduce(into: 0) { count, source in
             count = try checkedSum(count, source.references.count)
@@ -1514,14 +2293,14 @@ enum SparseTileSamplingPlanBuilder {
         // regions, not only an output that starts at one pixel.
         try preflightOutputHalo(
             outputRegion,
-            transform: key.outputToSourceTransform,
+            outputMapping: key.outputMapping,
             shaderSourceOrigin: shaderSourceOrigin,
             addressing: sources[0].addressing
         )
         try preflightBatches(
             sources: sources,
             outputRegion: outputRegion,
-            transform: key.outputToSourceTransform,
+            outputMapping: key.outputMapping,
             shaderSourceOrigin: shaderSourceOrigin,
             limits: limits
         )
@@ -1620,17 +2399,14 @@ enum SparseTileSamplingPlanBuilder {
         }
         allocationObserver?(.pageEntries, totalPageEntries)
         var pageTables: [SparseTilePageTable] = []
-        for (source, geometry) in zip(sources, geometries) {
+        for index in sources.indices {
+            let source = sources[index]
+            let geometry = geometries[index]
             let recordsForSource = records.filter {
                 $0.layerID == source.layerID
                     && $0.role == source.role
             }
-            let sourceFingerprint = SparseTileSourceFingerprint(
-                layerID: source.layerID,
-                contentKey: source.contentKey,
-                addressing: source.addressing,
-                references: source.references
-            )
+            let sourceFingerprint = sourceFingerprints[index]
             let previousFingerprint = previous?.sourceFingerprints.first {
                 $0.layerID == source.layerID
                     && $0.contentKey.role == source.role
@@ -1652,7 +2428,7 @@ enum SparseTileSamplingPlanBuilder {
             pageTables: pageTables,
             addressing: sources[0].addressing,
             outputRegion: outputRegion,
-            transform: key.outputToSourceTransform,
+            outputMapping: key.outputMapping,
             shaderSourceOrigin: shaderSourceOrigin,
             limits: limits
         )
@@ -1678,7 +2454,7 @@ enum SparseTileSamplingPlanBuilder {
             ),
             outputToSourceTransform: key.outputToSourceTransform,
             shaderSourceOrigin: shaderSourceOrigin,
-            sourceFingerprints: sources.fingerprints,
+            sourceFingerprints: sourceFingerprints,
             outputRegion: outputRegion
         )
     }
@@ -1832,10 +2608,20 @@ enum SparseTileSamplingPlanBuilder {
 
     private static func preflightOutputHalo(
         _ outputRegion: SparseTileOutputRegion,
-        transform: SparseTileOutputToSourceTransform,
+        outputMapping: SparseTileSamplingOutputMapping,
         shaderSourceOrigin: SIMD2<Float>,
         addressing: SparseTileAddressing
     ) throws {
+        if case let .finiteRadial(mapping) = outputMapping {
+            _ = try radialLogicalPages(
+                for: outputRegion,
+                mapping: mapping
+            )
+            return
+        }
+        guard case let .affine(transform) = outputMapping else {
+            throw SparseTileSamplingPlanError.inconsistentAddressing
+        }
         let halo = try mappedSourceHalo(
             for: outputRegion,
             within: outputRegion,
@@ -1859,10 +2645,37 @@ enum SparseTileSamplingPlanBuilder {
     private static func requiredSourceBindingCount(
         for region: SparseTileOutputRegion,
         within outputRegion: SparseTileOutputRegion,
-        transform: SparseTileOutputToSourceTransform,
+        outputMapping: SparseTileSamplingOutputMapping,
         shaderSourceOrigin: SIMD2<Float>,
         sources: [SparseTileSourceSnapshot]
     ) throws -> Int {
+        if case let .finiteRadial(mapping) = outputMapping {
+            let physicalCoordinates = Set(
+                try radialLogicalPages(for: region, mapping: mapping)
+                    .compactMap { mapping.layout.residentPage(at: $0) }
+                    .map {
+                        PaintTileCoordinate(
+                            x: $0.atlasSlot % mapping.layout.atlasColumns,
+                            y: $0.atlasSlot / mapping.layout.atlasColumns
+                        )
+                    }
+            )
+            var required: Set<SparseTileRecordCoordinateKey> = []
+            for source in sources {
+                for reference in source.references
+                    where physicalCoordinates.contains(reference.coordinate) {
+                    required.insert(SparseTileRecordCoordinateKey(
+                        layerID: source.layerID,
+                        role: source.role,
+                        coordinate: reference.coordinate
+                    ))
+                }
+            }
+            return required.count
+        }
+        guard case let .affine(transform) = outputMapping else {
+            throw SparseTileSamplingPlanError.inconsistentAddressing
+        }
         let addressing = sources[0].addressing
         let halo = try mappedSourceHalo(
             for: region,
@@ -1933,7 +2746,7 @@ enum SparseTileSamplingPlanBuilder {
     private static func preflightBatches(
         sources: [SparseTileSourceSnapshot],
         outputRegion: SparseTileOutputRegion,
-        transform: SparseTileOutputToSourceTransform,
+        outputMapping: SparseTileSamplingOutputMapping,
         shaderSourceOrigin: SIMD2<Float>,
         limits: SparseTilePlanLimits
     ) throws {
@@ -1954,7 +2767,7 @@ enum SparseTileSamplingPlanBuilder {
             let required = try requiredSourceBindingCount(
                 for: region,
                 within: outputRegion,
-                transform: transform,
+                outputMapping: outputMapping,
                 shaderSourceOrigin: shaderSourceOrigin,
                 sources: sources
             )
@@ -2023,7 +2836,7 @@ enum SparseTileSamplingPlanBuilder {
         pageTables: [SparseTilePageTable],
         addressing: SparseTileAddressing,
         outputRegion: SparseTileOutputRegion,
-        transform: SparseTileOutputToSourceTransform,
+        outputMapping: SparseTileSamplingOutputMapping,
         shaderSourceOrigin: SIMD2<Float>,
         limits: SparseTilePlanLimits
     ) throws -> [SparseTileBindingBatch] {
@@ -2032,7 +2845,7 @@ enum SparseTileSamplingPlanBuilder {
             let slots = try requiredSlots(
                 for: region,
                 within: outputRegion,
-                transform: transform,
+                outputMapping: outputMapping,
                 shaderSourceOrigin: shaderSourceOrigin,
                 pageTables: pageTables,
                 addressing: addressing
@@ -2092,11 +2905,33 @@ enum SparseTileSamplingPlanBuilder {
     private static func requiredSlots(
         for region: SparseTileOutputRegion,
         within outputRegion: SparseTileOutputRegion,
-        transform: SparseTileOutputToSourceTransform,
+        outputMapping: SparseTileSamplingOutputMapping,
         shaderSourceOrigin: SIMD2<Float>,
         pageTables: [SparseTilePageTable],
         addressing: SparseTileAddressing
     ) throws -> [Int] {
+        if case let .finiteRadial(mapping) = outputMapping {
+            let logicalPages = try radialLogicalPages(
+                for: region,
+                mapping: mapping
+            )
+            var slots: Set<Int> = []
+            for table in pageTables {
+                for coordinate in logicalPages {
+                    let page = PaintTileCoordinate(
+                        x: coordinate.x,
+                        y: coordinate.y
+                    )
+                    if let entry = table.entry(at: page), !entry.isMissing {
+                        slots.insert(entry.globalBindingSlot)
+                    }
+                }
+            }
+            return slots.sorted()
+        }
+        guard case let .affine(transform) = outputMapping else {
+            throw SparseTileSamplingPlanError.inconsistentAddressing
+        }
         let halo = try mappedSourceHalo(
             for: region,
             within: outputRegion,
@@ -2150,6 +2985,61 @@ enum SparseTileSamplingPlanBuilder {
         let maxY: Int
     }
 
+    private static func validateOutputMapping(
+        _ outputMapping: SparseTileSamplingOutputMapping,
+        addressing: SparseTileAddressing
+    ) throws {
+        switch outputMapping {
+        case .affine:
+            // Accepted B3b.2 behavior includes affine access to already-folded
+            // signed radial logical coordinates.
+            return
+        case let .finiteRadial(mapping):
+            guard case let .radial(layout) = addressing,
+                  layout == mapping.layout
+            else {
+                throw SparseTileSamplingPlanError.inconsistentAddressing
+            }
+        }
+    }
+
+    /// Conservative nonlinear reachability shared by root selection and every
+    /// preflight/batch bisection. `images(intersecting:)` supplies the exact
+    /// radial logical page cells; one logical page in every direction covers
+    /// the four-neighbor bilinear footprint at page, ray, and tile seams.
+    private static func radialLogicalPages(
+        for region: SparseTileOutputRegion,
+        mapping: SparseTileFiniteRadialOutputMapping
+    ) throws -> Set<RadialPageCoordinate> {
+        let transform = mapping.outputToWorldTransform
+        let origin = try transform.shaderSourceOrigin(outputRegion: region)
+        let extent = SIMD2(Float(region.width), Float(region.height))
+            * transform.sourceStep
+        let maximum = origin + extent
+        guard extent.x.isFinite, extent.y.isFinite,
+              maximum.x.isFinite, maximum.y.isFinite
+        else { throw SparseTileSamplingPlanError.invalidOutputToSourceTransform }
+        let bounds = AxisAlignedRect(
+            minimum: origin,
+            maximum: maximum
+        )
+        var result: Set<RadialPageCoordinate> = []
+        for image in mapping.strategy.images(intersecting: bounds) {
+            for deltaY in -1...1 {
+                for deltaX in -1...1 {
+                    let coordinate = RadialPageCoordinate(
+                        x: try checkedSum(image.cell.column, deltaX),
+                        y: try checkedSum(image.cell.row, deltaY)
+                    )
+                    if mapping.layout.residentPage(at: coordinate) != nil {
+                        result.insert(coordinate)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
     private static func mappedSourceHalo(
         for region: SparseTileOutputRegion,
         within outputRegion: SparseTileOutputRegion,
@@ -2179,13 +3069,50 @@ enum SparseTileSamplingPlanBuilder {
             guard firstCenter.isFinite, lastCenter.isFinite else {
                 throw SparseTileSamplingPlanError.invalidOutputToSourceTransform
             }
-            let first = origin + firstCenter * step - 0.5
-            let last = origin + lastCenter * step - 0.5
-            guard first.isFinite, last.isFinite else {
-                throw SparseTileSamplingPlanError.invalidOutputToSourceTransform
+            func sampleBounds(at center: Float) throws
+                -> (lower: Double, upper: Double)
+            {
+                // Metal fast math may both contract and reassociate
+                // `origin + center * step - 0.5`. Evaluate every legal Float
+                // grouping explicitly; any of them can cross a sparse-page
+                // boundary even when the written grouping and its FMA agree.
+                let product = center * step
+                let leftUnfused = (origin + product) - 0.5
+                let leftFused = origin.addingProduct(center, step) - 0.5
+                let shiftedOrigin = origin - 0.5
+                let shiftedOriginUnfused = shiftedOrigin + product
+                let shiftedOriginFused = shiftedOrigin.addingProduct(
+                    center,
+                    step
+                )
+                let shiftedProductUnfused = origin + (product - 0.5)
+                let shiftedProductFused = origin
+                    + (-Float(0.5)).addingProduct(center, step)
+                let samples = [
+                    leftUnfused,
+                    leftFused,
+                    shiftedOriginUnfused,
+                    shiftedOriginFused,
+                    shiftedProductUnfused,
+                    shiftedProductFused,
+                ]
+                guard samples.allSatisfy(\.isFinite),
+                      let minimum = samples.min(),
+                      let maximum = samples.max()
+                else {
+                    throw SparseTileSamplingPlanError
+                        .invalidOutputToSourceTransform
+                }
+                let lower = Double(minimum)
+                let upper = Double(maximum)
+                guard lower != upper else { return (lower, upper) }
+                return (lower.nextDown, upper.nextUp)
             }
-            let minimum = try checkedFloorToInt(Double(min(first, last)))
-            let upperLower = try checkedFloorToInt(Double(max(first, last)))
+
+            let first = try sampleBounds(at: firstCenter)
+            let last = try sampleBounds(at: lastCenter)
+            let minimum = try checkedFloorToInt(min(first.lower, last.lower))
+            let upperLower = try checkedFloorToInt(max(first.upper, last.upper))
             return (minimum, try checkedSum(upperLower, 1))
         }
 

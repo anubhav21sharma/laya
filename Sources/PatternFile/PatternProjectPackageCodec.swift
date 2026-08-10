@@ -242,11 +242,12 @@ private extension PatternProjectPackageCodec {
         let metadataFiles: PatternProjectMetadataFiles
         let validated: ValidatedPatternProjectMetadata
         do {
-            metadataFiles =
-                try PatternProjectMetadataCodec.extractedMetadataFiles(
+            let extracted =
+                try PatternProjectMetadataCodec.extractedMetadata(
                     from: archive
                 )
-            validated = try PatternProjectMetadataCodec.decode(metadataFiles)
+            metadataFiles = extracted.files
+            validated = extracted.validated
         } catch let error as PatternProjectLoadError {
             throw PatternProjectFileError.metadata(error)
         } catch let error as PatternProjectArchiveError {

@@ -34,10 +34,12 @@ public enum DocumentColorInterchangeError: Error, Equatable, Sendable {
 public enum DocumentColorPipeline {
     public static let workingPixelFormat: MTLPixelFormat = .rgba16Float
     public static let displayPixelFormat: MTLPixelFormat = .bgra8Unorm_srgb
+    public static let renderSampleCount = 1
+    public static let interchangePixelFormat: MTLPixelFormat = .bgra8Unorm
 
-    /// Non-production packing boundary for the Task 6 atomic surface switch.
-    /// Its encoded input type makes a second decode or premultiplication
-    /// impossible without explicitly leaving the typed route.
+    /// Sole production paint-ingress boundary. Its encoded input type makes a
+    /// second decode or premultiplication impossible without explicitly
+    /// leaving the typed route.
     public static func packShaderColor(
         _ color: EncodedSRGBColor
     ) -> SIMD4<Float> {

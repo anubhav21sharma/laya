@@ -7,10 +7,34 @@ import Metal
 import PatternEngine
 import UniformTypeIdentifiers
 
+public struct HarnessRunResult: Equatable, Sendable {
+    public let imageURL: URL
+    public let benchmarkURL: URL
+    public let benchmark: BenchmarkRecord
+    public let artifactURLs: [URL]
+
+    public init(
+        imageURL: URL,
+        benchmarkURL: URL,
+        benchmark: BenchmarkRecord,
+        artifactURLs: [URL]
+    ) {
+        self.imageURL = imageURL
+        self.benchmarkURL = benchmarkURL
+        self.benchmark = benchmark
+        self.artifactURLs = artifactURLs
+    }
+}
+
+struct DepositionHarnessInstanceIdentityAudit: Equatable, Sendable {
+    let newlyEncodedInstanceCount: Int
+    let restampedInstanceCount: Int
+    let encodedHighWater: UInt64
+}
+
 public enum DepositionHarnessRunError:
     Error, Equatable, LocalizedError
 {
-    case unsupportedSchema(Int)
     case unknownScene(String)
     case metalResourceUnavailable(String)
     case missingCompletion(String)
@@ -20,8 +44,6 @@ public enum DepositionHarnessRunError:
 
     public var errorDescription: String? {
         switch self {
-        case let .unsupportedSchema(version):
-            "Native deposition harness requires schema 6, found \(version)."
         case let .unknownScene(scene):
             "Unknown native deposition scene '\(scene)'."
         case let .metalResourceUnavailable(resource):
@@ -41,6 +63,104 @@ public enum DepositionHarnessRunError:
 @MainActor
 public final class DepositionHarnessRunner {
     nonisolated fileprivate static let seed: UInt64 = 0x4c_41_59_41
+
+    nonisolated static var taskEightLongStrokePoints: [WorldPoint] {
+        (0...400).map { index in
+            WorldPoint(
+                x: index.isMultiple(of: 2) ? 64 : 96,
+                y: 96
+            )
+        }
+    }
+
+    nonisolated static func auditEncodedInstanceIdentityRanges(
+        sceneName: String,
+        previousEncodedHighWater: UInt64,
+        emittedHighWater: UInt64,
+        encodedIdentityRanges: [Range<UInt64>],
+        requireEncodedThroughEmittedHighWater: Bool = true
+    ) throws -> DepositionHarnessInstanceIdentityAudit {
+        guard emittedHighWater >= previousEncodedHighWater else {
+            throw invariantError(
+                sceneName,
+                "emitted projected-instance identity moved backward"
+            )
+        }
+        var encodedHighWater = previousEncodedHighWater
+        var newlyEncodedInstanceCount = 0
+        for range in encodedIdentityRanges {
+            guard range.lowerBound == encodedHighWater else {
+                throw invariantError(
+                    sceneName,
+                    "encoded projected identity range \(range) did not begin at expected high-water \(encodedHighWater)"
+                )
+            }
+            guard !range.isEmpty,
+                  range.upperBound <= emittedHighWater
+            else {
+                throw invariantError(
+                    sceneName,
+                    "encoded projected identity range \(range) exceeded emitted high-water \(emittedHighWater)"
+                )
+            }
+            newlyEncodedInstanceCount += range.count
+            encodedHighWater = range.upperBound
+        }
+        guard !requireEncodedThroughEmittedHighWater
+                || encodedHighWater == emittedHighWater
+        else {
+            throw invariantError(
+                sceneName,
+                "encoded projected high-water \(encodedHighWater) did not reach emitted high-water \(emittedHighWater)"
+            )
+        }
+        return DepositionHarnessInstanceIdentityAudit(
+            newlyEncodedInstanceCount: newlyEncodedInstanceCount,
+            restampedInstanceCount: 0,
+            encodedHighWater: encodedHighWater
+        )
+    }
+
+    nonisolated static func auditLiveFlushIdentity(
+        sceneName: String,
+        previousEncodedHighWater: UInt64,
+        flushResult: HarnessLiveFlushResult
+    ) throws -> DepositionHarnessInstanceIdentityAudit {
+        guard flushResult.authoritativeBacklogRemaining >= 0,
+              let backlog = UInt64(
+                  exactly: flushResult.authoritativeBacklogRemaining
+              )
+        else {
+            throw invariantError(
+                sceneName,
+                "authoritative backlog was negative or unrepresentable"
+            )
+        }
+        let audit = try auditEncodedInstanceIdentityRanges(
+            sceneName: sceneName,
+            previousEncodedHighWater: previousEncodedHighWater,
+            emittedHighWater: flushResult.emittedHighWater,
+            encodedIdentityRanges: flushResult.encodedIdentityRanges,
+            requireEncodedThroughEmittedHighWater: backlog == 0
+        )
+        guard audit.encodedHighWater <= flushResult.emittedHighWater,
+              flushResult.emittedHighWater - audit.encodedHighWater
+                  == backlog
+        else {
+            throw invariantError(
+                sceneName,
+                "authoritative backlog \(backlog) did not equal emitted-minus-encoded identity high-water"
+            )
+        }
+        return audit
+    }
+
+    private nonisolated static func invariantError(
+        _ sceneName: String,
+        _ message: String
+    ) -> DepositionHarnessRunError {
+        .invariantFailed(scene: sceneName, invariant: message)
+    }
 
     private let device: any MTLDevice
     private let library: any MTLLibrary
@@ -77,20 +197,10 @@ public final class DepositionHarnessRunner {
         outputDirectory: URL,
         build: BenchmarkBuild
     ) async throws -> HarnessRunResult {
-        guard scene.schemaVersion == 6 else {
-            throw DepositionHarnessRunError.unsupportedSchema(
-                scene.schemaVersion
-            )
-        }
         let stem = Self.positiveStem(scene.name)
         let isProfessional =
             ProfessionalBrushEvidenceValidator.positiveSceneNames
                 .contains(stem)
-        guard DepositionEvidenceValidator.positiveSceneNames.contains(stem)
-                || isProfessional
-        else {
-            throw DepositionHarnessRunError.unknownScene(scene.name)
-        }
 
         let package = try package(for: stem)
         let tiling: TilingKind =
@@ -111,13 +221,13 @@ public final class DepositionHarnessRunner {
             try await seedEraseCanvas(context, scene: scene)
         }
         let countersBeforeStroke = context.compiler.debugCounters
-        let capture = try performStroke(
+        let capture = try await performStroke(
             context: context,
             scene: scene,
             stem: stem
         )
         let countersAfterStroke = context.compiler.debugCounters
-        let canonicalBytes = Self.textureBytes(capture.canonical)
+        let canonicalBytes = capture.canonical
         guard Self.hasNontransparentPixel(canonicalBytes) else {
             throw DepositionHarnessRunError.emptyCanonical(scene.name)
         }
@@ -192,8 +302,8 @@ public final class DepositionHarnessRunner {
             cpuReference = Self.hardRoundCPUReference(
                 records: capture.scheduledRecords,
                 material: context.compiled.depositionMaterial,
-                width: capture.canonical.width,
-                height: capture.canonical.height
+                width: scene.width,
+                height: scene.height
             )
         } else {
             cpuReference = nil
@@ -248,9 +358,21 @@ public final class DepositionHarnessRunner {
         let canonicalURL = outputDirectory.appendingPathComponent(
             "\(scene.name).canonical.png"
         )
-        try Self.writePNGAtomically(capture.live, to: liveURL)
-        try Self.writePNGAtomically(capture.committed, to: committedURL)
-        try Self.writePNGAtomically(capture.canonical, to: canonicalURL)
+        try Self.writePNGAtomically(
+            bgra: capture.live,
+            pixelSize: PixelSize(width: scene.width, height: scene.height),
+            to: liveURL
+        )
+        try Self.writePNGAtomically(
+            bgra: capture.committed,
+            pixelSize: PixelSize(width: scene.width, height: scene.height),
+            to: committedURL
+        )
+        try Self.writePNGAtomically(
+            bgra: capture.canonical,
+            pixelSize: PixelSize(width: scene.width, height: scene.height),
+            to: canonicalURL
+        )
 
         var artifactURLs = [liveURL, committedURL, canonicalURL]
         if let cpuReference {
@@ -260,8 +382,8 @@ public final class DepositionHarnessRunner {
             try Self.writePNGAtomically(
                 bgra: cpuReference,
                 pixelSize: PixelSize(
-                    width: capture.canonical.width,
-                    height: capture.canonical.height
+                    width: scene.width,
+                    height: scene.height
                 ),
                 to: cpuURL
             )
@@ -318,9 +440,10 @@ private extension DepositionHarnessRunner {
     }
 
     struct StrokeCapture {
-        let live: any MTLTexture
-        let committed: any MTLTexture
-        let canonical: any MTLTexture
+        let live: [UInt8]
+        let committedDisplay: [UInt8]
+        let committed: [UInt8]
+        let canonical: [UInt8]
         let canonicalBefore: [UInt8]
         let scheduledRecords: [ProjectedDepositionRecord]
         let logicalDabCount: Int
@@ -412,6 +535,7 @@ private extension DepositionHarnessRunner {
         scene: HarnessScene,
         package: BrushPackage,
         tiling: TilingKind = .grid,
+        finiteConfiguration: FiniteSymmetryConfiguration? = nil,
         drawableSize: PixelSize? = nil,
         cacheBudgetBytes: Int = 64 * 1_024 * 1_024,
         armablePipelineFailure: Bool = false
@@ -447,6 +571,15 @@ private extension DepositionHarnessRunner {
             width: scene.width,
             height: scene.height
         )
+        let configuration = try finiteConfiguration.map {
+            try TilingCanvasConfiguration(
+                pixelSize: size,
+                finiteConfiguration: $0
+            )
+        } ?? TilingCanvasConfiguration(
+            pixelSize: size,
+            tiling: tiling
+        )
         let renderer = try GridRenderer(
             device: device,
             library: library,
@@ -454,10 +587,7 @@ private extension DepositionHarnessRunner {
                 width: Float(size.width),
                 height: Float(size.height)
             ),
-            configuration: TilingCanvasConfiguration(
-                pixelSize: size,
-                tiling: tiling
-            )
+            configuration: configuration
         )
         let countersBeforeCompile = compiler.debugCounters
         let compiled = try await compiler.compileAndActivate(
@@ -488,7 +618,7 @@ private extension DepositionHarnessRunner {
             package: inkPackage
         )
         try context.renderer.activateDrawBrush(ink)
-        _ = try commitOnly(
+        _ = try await commitOnly(
             context: context,
             brush: ink,
             compositeMode: .draw,
@@ -517,7 +647,7 @@ private extension DepositionHarnessRunner {
         cancel: Bool = false,
         diameter: Float? = nil,
         collectPerformanceEvidence: Bool = false
-    ) throws -> StrokeCapture {
+    ) async throws -> StrokeCapture {
         let renderer = context.renderer
         let pipelinePrepareCallsBefore =
             context.pipelineLibrary.debugPrepareCallCount
@@ -542,9 +672,7 @@ private extension DepositionHarnessRunner {
         renderer.onLogicalDabsGenerated = {
             generatedLogicalDabs.append($0)
         }
-        let before = Self.textureBytes(
-            try renderer.copyCanonicalForHarness()
-        )
+        let before = try await currentCommittedBytes(renderer)
         let style = StrokeRenderStyle(
             color: color,
             diameter: diameter
@@ -584,13 +712,20 @@ private extension DepositionHarnessRunner {
         ) throws {
             performanceMetrics.append(result.metrics)
             let previousEncodedHighWater = encodedHighWater
-            let audit = try HarnessRunner.auditLiveFlushIdentity(
+            let audit = try Self.auditLiveFlushIdentity(
                 sceneName: scene.name,
                 previousEncodedHighWater: previousEncodedHighWater,
                 flushResult: result
             )
-            let currentGeneratedProjectedInstanceHighWater =
-                renderer.harnessCounters.totalInstancesThisStroke
+            guard let currentGeneratedProjectedInstanceHighWater = Int(
+                exactly: renderer.scheduledAuthoritativeIdentityHighWater
+            ) else {
+                throw DepositionHarnessRunError.invariantFailed(
+                    scene: scene.name,
+                    invariant:
+                        "generatedProjectedInstanceHighWaterRepresentable"
+                )
+            }
             guard currentGeneratedProjectedInstanceHighWater
                     >= generatedProjectedInstanceHighWater
             else {
@@ -631,7 +766,7 @@ private extension DepositionHarnessRunner {
         if collectPerformanceEvidence,
            partitionMode == .everySample
         {
-            let beganResult = try renderer.flushPendingLiveForHarness()
+            let beganResult = try await renderer.flushPendingLiveForHarness()
             intermediateMetrics.append(beganResult.metrics)
             try recordPerformanceFlush(
                 beganResult,
@@ -641,7 +776,7 @@ private extension DepositionHarnessRunner {
         for sample in samples.dropFirst().dropLast() {
             try renderer.appendStroke(token: token, sample: sample)
             if partitionMode == .everySample, sample.kind != .predicted {
-                let result = try renderer.flushPendingLiveForHarness()
+                let result = try await renderer.flushPendingLiveForHarness()
                 intermediateMetrics.append(result.metrics)
                 if collectPerformanceEvidence {
                     try recordPerformanceFlush(
@@ -651,15 +786,19 @@ private extension DepositionHarnessRunner {
                 }
             }
         }
+        var drainedFlushes: [HarnessLiveFlushResult] = []
         if !cancel {
-            try renderer.drainPreparedStrokeInputForHarness()
+            drainedFlushes = try await renderer
+                .drainPreparedStrokeInputForHarness(
+                    outputPixelSize: renderer.pixelSize
+                )
             try renderer.requestStrokeCommit(
                 token: token,
-                sample: samples.last!,
-                maximumRetainedBytes: 64 * 1_024 * 1_024
+                sample: samples.last!
             )
         }
-        let firstFlush = try renderer.flushPendingLiveForHarness()
+        let firstFlush = try await renderer.flushPendingLiveForHarness()
+            .mergingPrecedingSubmissions(drainedFlushes)
         let flushMetrics = firstFlush.metrics
         if collectPerformanceEvidence {
             try recordPerformanceFlush(
@@ -667,8 +806,30 @@ private extension DepositionHarnessRunner {
                 inputPhase: Self.phaseName(samples.last!.phase)
             )
         }
-        if !cancel {
-            try renderer.preparePendingCommitForHarness()
+        let liveFrame = firstFlush.frame
+        let commitMetrics: GPUFrameMetrics
+        if cancel {
+            try renderer.cancelStroke(token: token)
+            try renderer.drainStrokeWorkspaceRetirementForHarness()
+            commitMetrics = flushMetrics
+        } else {
+            commitMetrics = try await renderer.finishCommitForHarness()
+            guard let completion = completions.first else {
+                throw DepositionHarnessRunError.missingCompletion(
+                    scene.name
+                )
+            }
+            guard case let .rasterSuccess(receipt) = completion,
+                  receipt.token == token
+            else {
+                throw DepositionHarnessRunError.unexpectedCompletion(
+                    scene.name
+                )
+            }
+            try await renderer.releasePaintRevisions([
+                receipt.before.id,
+                receipt.after.id,
+            ])
         }
         let scheduled = try renderer.projectLogicalDabsForHarness(
             generatedLogicalDabs
@@ -682,47 +843,20 @@ private extension DepositionHarnessRunner {
             )
         }
         let logical = actorSnapshot?.logicalDabCount
-            ?? renderer.harnessCounters.totalDabsThisStroke
+            ?? generatedLogicalDabs.count
         let projected = actorSnapshot?.projectedInstanceCount
-            ?? renderer.harnessCounters.totalInstancesThisStroke
-        let liveFrame = try renderer.renderOffscreenDisplayForHarness(
-            width: scene.width,
-            height: scene.height,
-            showGridLines: false
+            ?? scheduled.count
+        let committed = try await currentCommittedBytes(renderer)
+        let live = Self.encodedBGRA8Bytes(
+            fromDisplayTexture: liveFrame.texture
         )
-        let commitMetrics: GPUFrameMetrics
-        if cancel {
-            try renderer.cancelStroke(token: token)
-            try renderer.drainStrokeWorkspaceRetirementForHarness()
-            commitMetrics = flushMetrics
-        } else {
-            commitMetrics = try renderer.finishCommitForHarness()
-            guard let completion = completions.first else {
-                throw DepositionHarnessRunError.missingCompletion(
-                    scene.name
-                )
-            }
-            guard case let .rasterSuccess(receipt) = completion,
-                  receipt.token == token
-            else {
-                throw DepositionHarnessRunError.unexpectedCompletion(
-                    scene.name
-                )
-            }
-            renderer.releaseRasterRevisions([
-                receipt.before.id,
-                receipt.after.id,
-            ])
-        }
-        let committedFrame = try renderer.renderOffscreenDisplayForHarness(
-            width: scene.width,
-            height: scene.height,
-            showGridLines: false
+        let flattened = try await renderer.exportFlattenedScene(
+            pixelSize: PixelSize(width: scene.width, height: scene.height),
+            transparentBackground: false
         )
-        let canonical = try renderer.copyCanonicalForHarness()
         let previewDelta = Self.maximumChannelDelta(
-            Self.textureBytes(liveFrame.texture),
-            Self.textureBytes(committedFrame.texture)
+            live,
+            flattened.bgra8Bytes
         )
         let timingTelemetry = renderer.brushLabDiagnosticSnapshot.deposition
         let telemetry = DepositionTelemetryEvidence(
@@ -737,9 +871,10 @@ private extension DepositionHarnessRunner {
             missedFrameCount: timingTelemetry.missedFrameCount
         )
         return StrokeCapture(
-            live: liveFrame.texture,
-            committed: committedFrame.texture,
-            canonical: canonical,
+            live: live,
+            committedDisplay: flattened.bgra8Bytes,
+            committed: committed,
+            canonical: committed,
             canonicalBefore: before,
             scheduledRecords: scheduled,
             logicalDabCount: logical,
@@ -752,12 +887,26 @@ private extension DepositionHarnessRunner {
             identityFrames: collectPerformanceEvidence
                 ? identityFrames : [],
             displayMetrics: intermediateMetrics
-                + [liveFrame.metrics, committedFrame.metrics],
+                + [liveFrame.metrics],
             pipelinePreparationUnchanged:
                 pipelinePrepareCallsBefore
                 == context.pipelineLibrary.debugPrepareCallCount,
             telemetry: telemetry
         )
+    }
+
+    func currentCommittedBytes(
+        _ renderer: GridRenderer
+    ) async throws -> [UInt8] {
+        let snapshot = try await renderer.captureCommittedDocument()
+        switch snapshot.storage {
+        case let .singleRaster(bytes):
+            return bytes
+        case .radialPages:
+            return try await renderer.exportFiniteCanvas(
+                transparentBackground: true
+            ).bgra8Bytes
+        }
     }
 
     func commitOnly(
@@ -768,7 +917,7 @@ private extension DepositionHarnessRunner {
         trace: [StrokeSample],
         partitionMode: PartitionMode = .oneFrame,
         diameter: Float = 22
-    ) throws -> [UInt8] {
+    ) async throws -> [UInt8] {
         let renderer = context.renderer
         let pipelinePrepareCallsBefore =
             context.pipelineLibrary.debugPrepareCallCount
@@ -788,25 +937,36 @@ private extension DepositionHarnessRunner {
             renderIdentity: brush.renderIdentity,
             seed: Self.seed
         )
-        try renderer.beginStroke(
-            token: token,
-            sample: trace[0],
-            style: style
-        )
-        for sample in trace.dropFirst().dropLast() {
-            try renderer.appendStroke(token: token, sample: sample)
-            if partitionMode == .everySample, sample.kind != .predicted {
-                _ = try renderer.flushPendingLiveForHarness()
+        var stage = "begin"
+        do {
+            try renderer.beginStroke(
+                token: token,
+                sample: trace[0],
+                style: style
+            )
+            for sample in trace.dropFirst().dropLast() {
+                stage = "append"
+                try renderer.appendStroke(token: token, sample: sample)
+                if partitionMode == .everySample, sample.kind != .predicted {
+                    stage = "flush"
+                    _ = try await renderer.flushPendingLiveForHarness()
+                }
             }
+            stage = "commitRequest"
+            try renderer.requestStrokeCommit(
+                token: token,
+                sample: trace.last!
+            )
+            stage = "commitCompletion"
+            _ = try await renderer.finishCommitForHarness()
+        } catch {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: brush.program.definition.id.rawValue,
+                invariant: "commitOnlyAt\(stage): \(error)"
+            )
         }
-        try renderer.requestStrokeCommit(
-            token: token,
-            sample: trace.last!,
-            maximumRetainedBytes: 64 * 1_024 * 1_024
-        )
-        _ = try renderer.finishCommitForHarness()
         if let receipt {
-            renderer.releaseRasterRevisions([
+            try await renderer.releasePaintRevisions([
                 receipt.before.id,
                 receipt.after.id,
             ])
@@ -819,32 +979,32 @@ private extension DepositionHarnessRunner {
                 invariant: "strokePipelinePreparationUnchanged"
             )
         }
-        return Self.textureBytes(try renderer.copyCanonicalForHarness())
+        return try await currentCommittedBytes(renderer)
     }
 
     func seededFailureContext(
         scene: HarnessScene,
         package: BrushPackage,
+        finiteConfiguration: FiniteSymmetryConfiguration? = nil,
         armablePipelineFailure: Bool = false
     ) async throws -> SeededFailureContext {
         let context = try await makeContext(
             scene: scene,
             package: package,
+            finiteConfiguration: finiteConfiguration,
             armablePipelineFailure: armablePipelineFailure
         )
-        _ = try commitRetainingHistory(
+        let historyReceipt = try await commitRetainingHistory(
             context: context,
             brush: context.compiled,
             trace: Self.trace(width: scene.width, height: scene.height)
         )
-        let baseline = try failureSnapshot(context.renderer)
+        let baseline = try await failureSnapshot(context.renderer)
         guard baseline.isIdle,
               Self.hasNontransparentPixel(baseline.canonicalBytes),
               baseline.historyResidentBytes > 0,
-              baseline.historySnapshots.count == 2,
-              baseline.historySnapshots.contains(where: {
-                  $0.retainedBytes.contains(where: { $0 != 0 })
-              })
+              historyReceipt.before.id != historyReceipt.after.id,
+              !historyReceipt.after.tileCoordinates.isEmpty
         else {
             throw DepositionHarnessRunError.invariantFailed(
                 scene: scene.name,
@@ -861,7 +1021,7 @@ private extension DepositionHarnessRunner {
         context: Context,
         brush: CompiledBrush,
         trace: [StrokeSample]
-    ) throws -> RasterMutationReceipt {
+    ) async throws -> RasterMutationReceipt {
         let renderer = context.renderer
         let pipelinePrepareCallsBefore =
             context.pipelineLibrary.debugPrepareCallCount
@@ -882,10 +1042,9 @@ private extension DepositionHarnessRunner {
         }
         try renderer.requestStrokeCommit(
             token: token,
-            sample: trace.last!,
-            maximumRetainedBytes: 64 * 1_024 * 1_024
+            sample: trace.last!
         )
-        _ = try renderer.finishCommitForHarness()
+        _ = try await renderer.finishCommitForHarness()
         guard let receipt,
               pipelinePrepareCallsBefore
                 == context.pipelineLibrary.debugPrepareCallCount
@@ -910,10 +1069,7 @@ private extension DepositionHarnessRunner {
         countersAfterStroke: BrushCompilerCounters
     ) async throws -> ProfessionalRunAudit {
         let definition = context.compiled.program.definition
-        let expectedHash =
-            ProfessionalBrushEvidenceValidator.expectedSemanticHash(
-                forPositiveScene: stem
-            )
+        let expectedHash = try package.contentHash
         let expectedResources =
             ProfessionalBrushEvidenceValidator.expectedResourceLevels(
                 forPositiveScene: stem
@@ -964,14 +1120,12 @@ private extension DepositionHarnessRunner {
                     after: eraser.second
                 ) > 0,
             "nonemptyVisibleOutput":
-                Self.hasNontransparentPixel(
-                    Self.textureBytes(primary.live)
+                Self.hasNontransparentPixel(primary.live)
+                && Self.hasNontransparentPixel(
+                    primary.committed
                 )
                 && Self.hasNontransparentPixel(
-                    Self.textureBytes(primary.committed)
-                )
-                && Self.hasNontransparentPixel(
-                    Self.textureBytes(primary.canonical)
+                    primary.canonical
                 ),
             "predictionOnOffEqual":
                 prediction.first == prediction.second,
@@ -1023,7 +1177,7 @@ private extension DepositionHarnessRunner {
             package: package
         )
         let trace = Self.trace(width: scene.width, height: scene.height)
-        let painted = try commitOnly(
+        let painted = try await commitOnly(
             context: context,
             brush: context.compiled,
             compositeMode: .draw,
@@ -1037,7 +1191,7 @@ private extension DepositionHarnessRunner {
             package: eraserPackage
         )
         try context.renderer.activateEraserBrush(eraser)
-        let erased = try commitOnly(
+        let erased = try await commitOnly(
             context: context,
             brush: eraser,
             compositeMode: .erase,
@@ -1115,24 +1269,26 @@ private extension DepositionHarnessRunner {
                 ),
                 trace: trace
             )
+        let rotationReference = Self.mergedWithTransformedCopy(
+            plain,
+            width: scene.width,
+            height: scene.height,
+            transform: .rotateHalfTurn
+        )
+        let reflectionReference = Self.mergedWithTransformedCopy(
+            plain,
+            width: scene.width,
+            height: scene.height,
+            transform: .reflectVertically
+        )
         return ProfessionalRadialObservations(
             rotation: ProfessionalRasterPair(
                 first: rotationRendered,
-                second: Self.mergedWithTransformedCopy(
-                    plain,
-                    width: scene.width,
-                    height: scene.height,
-                    transform: .rotateHalfTurn
-                )
+                second: rotationReference
             ),
             reflection: ProfessionalRasterPair(
                 first: reflectionRendered,
-                second: Self.mergedWithTransformedCopy(
-                    plain,
-                    width: scene.width,
-                    height: scene.height,
-                    transform: .reflectVertically
-                )
+                second: reflectionReference
             )
         )
     }
@@ -1144,9 +1300,9 @@ private extension DepositionHarnessRunner {
         trace: [StrokeSample]
     ) async throws -> [UInt8] {
         let context = try await makeContext(scene: scene, package: package)
-        try context.renderer.applyFiniteConfiguration(configuration)
+        try await context.renderer.applyFiniteConfiguration(configuration)
         try context.renderer.activateDrawBrush(context.compiled)
-        let capture = try performStroke(
+        let capture = try await performStroke(
             context: context,
             scene: scene,
             stem: Self.positiveStem(scene.name),
@@ -1160,7 +1316,7 @@ private extension DepositionHarnessRunner {
                 invariant: "strokePipelinePreparationUnchanged"
             )
         }
-        return Self.textureBytes(capture.committed)
+        return capture.committed
     }
 
     func finishProfessionalRun(
@@ -1185,12 +1341,32 @@ private extension DepositionHarnessRunner {
         let committedURL = outputDirectory.appendingPathComponent(
             "\(scene.name).committed.png"
         )
+        let committedDisplayURL = outputDirectory.appendingPathComponent(
+            "\(scene.name).committed-display.png"
+        )
         let canonicalURL = outputDirectory.appendingPathComponent(
             "\(scene.name).canonical.png"
         )
-        try Self.writePNGAtomically(capture.live, to: liveURL)
-        try Self.writePNGAtomically(capture.committed, to: committedURL)
-        try Self.writePNGAtomically(capture.canonical, to: canonicalURL)
+        try Self.writePNGAtomically(
+            bgra: capture.live,
+            pixelSize: PixelSize(width: scene.width, height: scene.height),
+            to: liveURL
+        )
+        try Self.writePNGAtomically(
+            bgra: capture.committed,
+            pixelSize: PixelSize(width: scene.width, height: scene.height),
+            to: committedURL
+        )
+        try Self.writePNGAtomically(
+            bgra: capture.committedDisplay,
+            pixelSize: PixelSize(width: scene.width, height: scene.height),
+            to: committedDisplayURL
+        )
+        try Self.writePNGAtomically(
+            bgra: capture.canonical,
+            pixelSize: PixelSize(width: scene.width, height: scene.height),
+            to: canonicalURL
+        )
 
         let observationRasters: [(String, [UInt8])] = [
             ("prediction-off", audit.prediction.first),
@@ -1270,9 +1446,9 @@ private extension DepositionHarnessRunner {
                 invariant: "boundedLiveWork"
             )
         }
-        let liveBytes = Self.textureBytes(capture.live)
-        let committedBytes = Self.textureBytes(capture.committed)
-        let canonicalBytes = Self.textureBytes(capture.canonical)
+        let liveBytes = capture.live
+        let committedBytes = capture.committed
+        let canonicalBytes = capture.canonical
         let observations = ProfessionalBrushInvariantObservations(
             liveBGRA8SHA256: Self.sha256(liveBytes),
             committedBGRA8SHA256: Self.sha256(committedBytes),
@@ -1434,8 +1610,8 @@ private extension DepositionHarnessRunner {
             benchmarkURL: benchmarkURL,
             benchmark: benchmark,
             artifactURLs: [
-                liveURL, committedURL, canonicalURL, characterizationURL,
-                evidenceURL, benchmarkURL,
+                liveURL, committedDisplayURL, committedURL, canonicalURL,
+                characterizationURL, evidenceURL, benchmarkURL,
             ] + observationURLs + performanceURLs
         )
     }
@@ -1517,7 +1693,7 @@ private extension DepositionHarnessRunner {
             drawableSize: performanceSize
         )
         let longBefore = longContext.compiler.debugCounters
-        let capture = try performStroke(
+        let capture = try await performStroke(
             context: longContext,
             scene: scene,
             stem: stem,
@@ -1537,6 +1713,11 @@ private extension DepositionHarnessRunner {
         )
         guard capture.strokeMetrics.count == 128,
               capture.identityFrames.count == 128,
+              let finalIdentityFrame = capture.identityFrames.last,
+              let finalLogicalIdentityHighWater = Int(
+                  exactly:
+                      finalIdentityFrame.emittedLogicalDabHighWater
+              ),
               eventToSubmitNanoseconds.count == 128,
               eventToSubmitNanoseconds.allSatisfy({ $0 > 0 }),
               let limits = package.definition.replayLimits,
@@ -1564,8 +1745,10 @@ private extension DepositionHarnessRunner {
             eventToSubmitNanoseconds: eventToSubmitNanoseconds,
             trend: trend,
             identityFrames: capture.identityFrames,
-            logicalDabCount: capture.logicalDabCount,
-            projectedInstanceCount: capture.projectedInstanceCount,
+            logicalDabCount: finalLogicalIdentityHighWater,
+            projectedInstanceCount:
+                finalIdentityFrame
+                    .generatedProjectedInstanceHighWater,
             replayMaximumDabs: limits.maximumDabs,
             replayMaximumProjectedInstances:
                 limits.maximumProjectedInstances,
@@ -1614,16 +1797,10 @@ private extension DepositionHarnessRunner {
         let exact = (0..<500).map { records[$0 % records.count] }
         var measurements: [Double] = []
         for _ in 0..<3 {
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm,
+            guard let target = makeClearedWorkingTexture(
                 width: width,
-                height: height,
-                mipmapped: false
-            )
-            descriptor.storageMode = .shared
-            descriptor.usage = [.renderTarget, .shaderRead]
-            guard let target = device.makeTexture(descriptor: descriptor),
-                  let queue = device.makeCommandQueue(),
+                height: height
+            ), let queue = device.makeCommandQueue(),
                   let commandBuffer = queue.makeCommandBuffer()
             else {
                 throw DepositionHarnessRunError
@@ -1631,16 +1808,6 @@ private extension DepositionHarnessRunner {
                         "professional 500-dab measurement resources"
                     )
             }
-            let empty = [UInt8](
-                repeating: 0,
-                count: width * height * 4
-            )
-            target.replace(
-                region: MTLRegionMake2D(0, 0, width, height),
-                mipmapLevel: 0,
-                withBytes: empty,
-                bytesPerRow: width * 4
-            )
             let pool = try DabInstanceBufferPool(device: device)
             var encoder = DepositionEncoder(
                 instancePool: pool,
@@ -1791,9 +1958,9 @@ private extension DepositionHarnessRunner {
                 zoom: 2
             )
             results["batchPartitionsEqual"] =
-                batch == Self.textureBytes(primary.canonical)
+                batch == primary.canonical
             results["zoomIndependent"] =
-                zoom == Self.textureBytes(primary.canonical)
+                zoom == primary.canonical
         case "deposition-periodic-seams":
             results["tilingPeriodTranslationEqual"] =
                 try await tilingTranslationIsEqual(
@@ -1867,7 +2034,7 @@ private extension DepositionHarnessRunner {
             package: package,
             tiling: tiling
         )
-        let capture = try performStroke(
+        let capture = try await performStroke(
             context: variant,
             scene: scene,
             stem: Self.positiveStem(scene.name),
@@ -1882,7 +2049,7 @@ private extension DepositionHarnessRunner {
                 invariant: "strokePipelinePreparationUnchanged"
             )
         }
-        return Self.textureBytes(capture.canonical)
+        return capture.canonical
     }
 
     func predictionIsEqual(
@@ -2125,7 +2292,7 @@ private extension DepositionHarnessRunner {
             scene: scene,
             package: inkPackage
         )
-        _ = try commitOnly(
+        _ = try await commitOnly(
             context: context,
             brush: context.compiled,
             compositeMode: .draw,
@@ -2136,7 +2303,7 @@ private extension DepositionHarnessRunner {
             package: package(for: "deposition-erase")
         )
         try context.renderer.activateEraserBrush(eraser)
-        return try commitOnly(
+        return try await commitOnly(
             context: context,
             brush: eraser,
             compositeMode: .erase,
@@ -2153,14 +2320,14 @@ private extension DepositionHarnessRunner {
             scene: scene,
             package: package
         )
-        let capture = try performStroke(
+        let capture = try await performStroke(
             context: context,
             scene: scene,
             stem: Self.positiveStem(scene.name),
             cancel: true
         )
         return capture.canonicalBefore
-            == Self.textureBytes(capture.canonical)
+            == capture.canonical
     }
 
     func radialReflectionAudit(
@@ -2174,7 +2341,7 @@ private extension DepositionHarnessRunner {
             scene: scene,
             package: package
         )
-        try context.renderer.applyFiniteConfiguration(
+        try await context.renderer.applyFiniteConfiguration(
             .radial(RadialSymmetryConfiguration(
                 kind: .mandala,
                 rayCount: 7,
@@ -2211,7 +2378,9 @@ private extension DepositionHarnessRunner {
                 sample: sample
             )
         }
-        try context.renderer.drainPreparedStrokeInputForHarness()
+        try await context.renderer.drainPreparedStrokeInputForHarness(
+            outputPixelSize: context.renderer.pixelSize
+        )
         context.renderer.onLogicalDabsGenerated = nil
         let records = try context.renderer.projectLogicalDabsForHarness(
             generatedLogicalDabs
@@ -2279,7 +2448,7 @@ private extension DepositionHarnessRunner {
             scene: scene,
             package: package
         )
-        try context.renderer.applyFiniteConfiguration(
+        try await context.renderer.applyFiniteConfiguration(
             .radial(RadialSymmetryConfiguration(
                 kind: .mirror,
                 rayCount: 1,
@@ -2315,14 +2484,14 @@ private extension DepositionHarnessRunner {
                 phase: .ended
             ),
         ]
-        let capture = try performStroke(
+        let capture = try await performStroke(
             context: context,
             scene: scene,
             stem: "deposition-radial-reflection",
             trace: trace,
             color: .black
         )
-        let display = Self.textureBytes(capture.committed)
+        let display = capture.committed
         guard Self.hasNontransparentPixel(display) else { return false }
         var reference = display
         let rowBytes = scene.width * 4
@@ -2445,12 +2614,12 @@ private extension DepositionHarnessRunner {
                             renderDistinct: false
                         )
                     }
-                    let capture = try performStroke(
+                    let capture = try await performStroke(
                         context: context,
                         scene: scene,
                         stem: "deposition-layer-matrix"
                     )
-                    let bytes = Self.textureBytes(capture.canonical)
+                    let bytes = capture.canonical
                     everyVariantRendered =
                         everyVariantRendered
                         && Self.hasNontransparentPixel(bytes)
@@ -2735,7 +2904,7 @@ private extension DepositionHarnessRunner {
             && Set(compiler.cachedKeys).isSuperset(of: firstKeys)
             && context.renderer.harnessPreparedDrawBrushIdentity
                 == first.renderIdentity
-        let firstBytes = try commitOnly(
+        let firstBytes = try await commitOnly(
             context: context,
             brush: first,
             compositeMode: .draw,
@@ -2789,7 +2958,7 @@ private extension DepositionHarnessRunner {
                 && context.renderer.harnessPreparedDrawBrushIdentity
                     == first.renderIdentity
         }
-        let recoveredOriginalBytes = try commitOnly(
+        let recoveredOriginalBytes = try await commitOnly(
             context: context,
             brush: first,
             compositeMode: .draw,
@@ -2820,7 +2989,7 @@ private extension DepositionHarnessRunner {
         try context.renderer.activateDrawBrush(secondCacheHit)
         let churnHit = compiler.debugCounters.cacheHitCount
             > counters.cacheHitCount
-        let recoveredSecondBytes = try commitOnly(
+        let recoveredSecondBytes = try await commitOnly(
             context: context,
             brush: secondCacheHit,
             compositeMode: .draw,
@@ -2860,31 +3029,43 @@ private extension DepositionHarnessRunner {
         package: BrushPackage
     ) async throws -> FailureMatrixAudit {
         var passed = true
-        let pipelinePassed = try await pipelineFailureIsAtomic(
-            scene: scene,
-            package: package
-        )
+        let pipelinePassed: Bool
+        do {
+            pipelinePassed = try await pipelineFailureIsAtomic(
+                scene: scene,
+                package: package
+            )
+        } catch {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: scene.name,
+                invariant: "pipelineFailureAudit: \(error)"
+            )
+        }
         passed = pipelinePassed && passed
-        passed = try await bufferFailureIsAtomic(
-            scene: scene,
-            package: package
-        ) && passed
-        passed = try await encoderFailureIsAtomic(
-            scene: scene,
-            package: package
-        ) && passed
-        passed = try await allocationFailureIsAtomic(
-            scene: scene,
-            package: package
-        ) && passed
-        passed = try await completionFailureIsAtomic(
-            scene: scene,
-            package: package
-        ) && passed
-        passed = try await revisionFailureIsAtomic(
-            scene: scene,
-            package: package
-        ) && passed
+        do {
+            let bufferPassed = try await bufferFailureIsAtomic(
+                scene: scene,
+                package: package
+            )
+            passed = bufferPassed && passed
+        } catch {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: scene.name,
+                invariant: "bufferFailureAudit: \(error)"
+            )
+        }
+        do {
+            let encoderPassed = try await encoderFailureIsAtomic(
+                scene: scene,
+                package: package
+            )
+            passed = encoderPassed && passed
+        } catch {
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: scene.name,
+                invariant: "encoderFailureAudit: \(error)"
+            )
+        }
         return FailureMatrixAudit(
             allFailuresPreservedState: passed,
             startedFromNonemptyExactHistory: passed,
@@ -2920,7 +3101,9 @@ private extension DepositionHarnessRunner {
             )
             return false
         } catch let failure as BrushCompilationFailure {
-            let rendererSnapshot = try failureSnapshot(context.renderer)
+            let rendererSnapshot = try await failureSnapshot(
+                context.renderer
+            )
             failureWasAtomic =
                 failure.stage == .pipelineSelection
                 && context.compiler.activeBrush === context.compiled
@@ -2930,7 +3113,7 @@ private extension DepositionHarnessRunner {
                 && rendererSnapshot == seeded.baseline
         }
         guard failureWasAtomic else { return false }
-        return try validRecovery(
+        return try await validRecovery(
             context: context,
             scene: scene,
             preservedState: seeded.baseline
@@ -2943,7 +3126,17 @@ private extension DepositionHarnessRunner {
     ) async throws -> Bool {
         let seeded = try await seededFailureContext(
             scene: scene,
-            package: package
+            package: package,
+            finiteConfiguration: .radial(
+                RadialSymmetryConfiguration(
+                    kind: .mandala,
+                    rayCount: 5,
+                    center: WorldPoint(
+                        x: Float(scene.width) * 0.5,
+                        y: Float(scene.height) * 0.5
+                    )
+                )
+            )
         )
         let context = seeded.context
         let before = seeded.baseline
@@ -2959,25 +3152,59 @@ private extension DepositionHarnessRunner {
         let previousBudget = context.renderer
             .replaceDepositionFrameBudgetForHarness(constrainedBudget)
         let token = RendererOperationToken(rawValue: Self.seed &+ 31)
-        let trace = Self.trace(
+        let previousCompletion = context.renderer.onOperationCompleted
+        var observedTerminalFailure: MetalRendererError?
+        context.renderer.onOperationCompleted = { completion in
+            previousCompletion?(completion)
+            if case let .failure(completionToken, error) = completion,
+               completionToken == token
+            {
+                observedTerminalFailure = error
+            }
+        }
+        defer {
+            context.renderer.onOperationCompleted = previousCompletion
+        }
+        var trace = Self.trace(
             width: scene.width,
             height: scene.height
         )
-        try context.renderer.beginStroke(
-            token: token,
-            sample: trace[0],
-            style: Self.style(context.compiled)
+        trace[0] = Self.sample(
+            x: Float(scene.width) * 0.5,
+            y: Float(scene.height) * 0.5,
+            pressure: trace[0].pressure,
+            timestamp: trace[0].timestamp,
+            phase: .began
         )
+        var stage = "begin"
         do {
+            try context.renderer.beginStroke(
+                token: token,
+                sample: trace[0],
+                style: Self.style(context.compiled)
+            )
             // Settle the begin message before submitting the overflowing
             // mutation so the failure is actor scheduler backpressure, not
             // synchronous input-ring admission.
-            try context.renderer.drainPreparedStrokeInputForHarness()
+            stage = "initialDrain"
+            try await context.renderer.drainPreparedStrokeInputForHarness(
+                outputPixelSize: context.renderer.pixelSize
+            )
+            if let observedTerminalFailure {
+                throw observedTerminalFailure
+            }
+            stage = "overflowAppend"
             try context.renderer.appendStroke(
                 token: token,
                 sample: trace[1]
             )
-            try context.renderer.drainPreparedStrokeInputForHarness()
+            stage = "overflowDrain"
+            try await context.renderer.drainPreparedStrokeInputForHarness(
+                outputPixelSize: context.renderer.pixelSize
+            )
+            if let observedTerminalFailure {
+                throw observedTerminalFailure
+            }
             if context.renderer.hasActiveStroke {
                 try context.renderer.cancelStroke(token: token)
                 try context.renderer
@@ -2988,19 +3215,47 @@ private extension DepositionHarnessRunner {
             )
             return false
         } catch MetalRendererError.projectedInstanceCapacityExceeded(4) {
-            try context.renderer.drainStrokeWorkspaceRetirementForHarness()
-            _ = context.renderer.replaceDepositionFrameBudgetForHarness(
-                previousBudget
-            )
-            let after = try failureSnapshot(context.renderer)
-            let failureWasAtomic = context.renderer.isIdle
-                && before == after
-            let recovered = try validRecovery(
-                context: context,
-                scene: scene,
-                preservedState: before
-            )
-            return failureWasAtomic && recovered
+            do {
+                stage = "retirement"
+                try context.renderer
+                    .drainStrokeWorkspaceRetirementForHarness()
+                stage = "budgetRestore"
+                _ = context.renderer.replaceDepositionFrameBudgetForHarness(
+                    previousBudget
+                )
+                stage = "failureSnapshot"
+                let after = try await failureSnapshot(context.renderer)
+                let failureWasAtomic = context.renderer.isIdle
+                    && before == after
+                guard failureWasAtomic else {
+                    throw DepositionHarnessRunError.invariantFailed(
+                        scene: scene.name,
+                        invariant:
+                            "bufferFailureStateChanged(idle: "
+                            + "\(context.renderer.isIdle), beforeEqualsAfter: "
+                            + "\(before == after), strokeSurfaces: "
+                            + "\(after.activeStrokeSurfaceCount), leases: "
+                            + "\(after.activeTileLeaseCount), tokens: "
+                            + "\(after.activeSnapshotTokenCount), references: "
+                            + "\(after.aggregateSnapshotReferenceCount), "
+                            + "liabilityBytes: "
+                            + "\(after.snapshotPayloadLiabilityByteCount))"
+                    )
+                }
+                stage = "validRecovery"
+                let recovered = try await validRecovery(
+                    context: context,
+                    scene: scene,
+                    preservedState: before
+                )
+                return failureWasAtomic && recovered
+            } catch {
+                throw DepositionHarnessRunError.invariantFailed(
+                    scene: scene.name,
+                    invariant:
+                        "bufferFailureSettlementAfter\(stage): \(error)"
+                )
+            }
         } catch {
             if context.renderer.hasActiveStroke {
                 try? context.renderer.cancelStroke(token: token)
@@ -3009,7 +3264,10 @@ private extension DepositionHarnessRunner {
             _ = context.renderer.replaceDepositionFrameBudgetForHarness(
                 previousBudget
             )
-            throw error
+            throw DepositionHarnessRunError.invariantFailed(
+                scene: scene.name,
+                invariant: "bufferFailureAt\(stage): \(error)"
+            )
         }
     }
 
@@ -3036,7 +3294,9 @@ private extension DepositionHarnessRunner {
             style: Self.style(context.compiled)
         )
         do {
-            try context.renderer.drainPreparedStrokeInputForHarness()
+            try await context.renderer.drainPreparedStrokeInputForHarness(
+                outputPixelSize: context.renderer.pixelSize
+            )
             if context.renderer.hasActiveStroke {
                 try context.renderer.cancelStroke(token: token)
                 try context.renderer
@@ -3049,10 +3309,10 @@ private extension DepositionHarnessRunner {
             try context.renderer.drainStrokeWorkspaceRetirementForHarness()
             context.renderer
                 .setForceOffMainStrokeCommandFailureForTesting(false)
-            let after = try failureSnapshot(context.renderer)
+            let after = try await failureSnapshot(context.renderer)
             let failureWasAtomic = context.renderer.isIdle
                 && before == after
-            let recovered = try validRecovery(
+            let recovered = try await validRecovery(
                 context: context,
                 scene: scene,
                 preservedState: before
@@ -3071,142 +3331,23 @@ private extension DepositionHarnessRunner {
         }
     }
 
-    func allocationFailureIsAtomic(
-        scene: HarnessScene,
-        package: BrushPackage
-    ) async throws -> Bool {
-        let seeded = try await seededFailureContext(
-            scene: scene,
-            package: package
-        )
-        let context = seeded.context
-        let before = seeded.baseline
-        do {
-            try context.renderer.requestResizeForHarness(
-                token: RendererOperationToken(
-                    rawValue: Self.seed &+ 33
-                ),
-                to: PixelSize(
-                    width: scene.width + 1,
-                    height: scene.height
-                ),
-                maximumRetainedBytes: 64 * 1_024 * 1_024,
-                forceResourceAllocationFailure: true
-            )
-            return false
-        } catch MetalRendererError.textureAllocationFailed {
-            let after = try failureSnapshot(context.renderer)
-            let failureWasAtomic = context.renderer.isIdle
-                && before == after
-            let recovered = try validRecovery(
-                context: context,
-                scene: scene,
-                preservedState: before
-            )
-            return failureWasAtomic && recovered
-        }
-    }
-
-    func completionFailureIsAtomic(
-        scene: HarnessScene,
-        package: BrushPackage
-    ) async throws -> Bool {
-        let seeded = try await seededFailureContext(
-            scene: scene,
-            package: package
-        )
-        let context = seeded.context
-        let before = seeded.baseline
-        let token = RendererOperationToken(rawValue: Self.seed &+ 34)
-        var completions: [RendererOperationCompletion] = []
-        context.renderer.onOperationCompleted = {
-            completions.append($0)
-        }
-        try context.renderer.beginStroke(
-            token: token,
-            sample: Self.trace(
-                width: scene.width,
-                height: scene.height
-            )[0],
-            style: Self.style(context.compiled)
-        )
-        do {
-            try context.renderer.preparePendingLiveSurfaceForHarness()
-            _ = try context.renderer.flushPendingLiveForHarness(
-                forceFailure: true
-            )
-            return false
-        } catch MetalRendererError.commandFailed {
-            try context.renderer.drainStrokeWorkspaceRetirementForHarness()
-            let oneFailure = completions.filter {
-                if case let .failure(value, _) = $0 {
-                    return value == token
-                }
-                return false
-            }.count == 1
-            let after = try failureSnapshot(context.renderer)
-            let failureWasAtomic = oneFailure
-                && context.renderer.isIdle
-                && before == after
-            let recovered = try validRecovery(
-                context: context,
-                scene: scene,
-                preservedState: before
-            )
-            return failureWasAtomic && recovered
-        }
-    }
-
-    func revisionFailureIsAtomic(
-        scene: HarnessScene,
-        package: BrushPackage
-    ) async throws -> Bool {
-        let seeded = try await seededFailureContext(
-            scene: scene,
-            package: package
-        )
-        let context = seeded.context
-        let before = seeded.baseline
-        let token = RendererOperationToken(rawValue: Self.seed &+ 35)
-        let trace = Self.trace(width: scene.width, height: scene.height)
-        try context.renderer.beginStroke(
-            token: token,
-            sample: trace[0],
-            style: Self.style(context.compiled)
-        )
-        try context.renderer.requestStrokeCommit(
-            token: token,
-            sample: trace.last!,
-            maximumRetainedBytes: 0
-        )
-        do {
-            _ = try context.renderer.finishCommitForHarness()
-            return false
-        } catch MetalRendererError.rasterRevisionStorageLimitExceeded {
-            let after = try failureSnapshot(context.renderer)
-            let failureWasAtomic = context.renderer.isIdle
-                && before == after
-            let recovered = try validRecovery(
-                context: context,
-                scene: scene,
-                preservedState: before
-            )
-            return failureWasAtomic && recovered
-        }
-    }
-
-    func failureSnapshot(_ renderer: GridRenderer) throws
+    func failureSnapshot(_ renderer: GridRenderer) async throws
         -> RendererFailureSnapshot
     {
-        RendererFailureSnapshot(
-            canonicalBytes: Self.textureBytes(
-                try renderer.copyCanonicalForHarness()
-            ),
-            revision: renderer.harnessRevision,
-            historyResidentBytes:
-                renderer.harnessRasterRevisionResidentBytes,
-            historySnapshots:
-                try renderer.harnessRasterRevisionSnapshots,
+        let paint = await renderer.paintStateSnapshotForTesting()
+        return RendererFailureSnapshot(
+            canonicalBytes: try await currentCommittedBytes(renderer),
+            documentGeneration: paint.documentGeneration,
+            historyResidentBytes: paint.revisionResidentBytes,
+            activeSnapshotTokenCount: paint.activeSnapshotTokenCount,
+            aggregateSnapshotReferenceCount:
+                paint.aggregateSnapshotReferenceCount,
+            activeTileLeaseCount: paint.activeTileLeaseCount,
+            snapshotMetadataByteCount: paint.snapshotMetadataByteCount,
+            snapshotPayloadLiabilityByteCount:
+                paint.snapshotPayloadLiabilityByteCount,
+            activeStrokeSurfaceCount: paint.activeStrokeSurfaceCount,
+            activeCommandOperationCount: paint.activeCommandOperationCount,
             isIdle: renderer.isIdle,
             hasActiveStroke: renderer.hasActiveStroke,
             preparedDrawBrushIdentity:
@@ -3230,10 +3371,10 @@ private extension DepositionHarnessRunner {
         context: Context,
         scene: HarnessScene,
         preservedState: RendererFailureSnapshot
-    ) throws
+    ) async throws
         -> Bool
     {
-        let bytes = try commitOnly(
+        let bytes = try await commitOnly(
             context: context,
             brush: context.compiled,
             compositeMode: .draw,
@@ -3244,26 +3385,39 @@ private extension DepositionHarnessRunner {
                 upper: false
             )
         )
-        let historySnapshots =
-            try context.renderer.harnessRasterRevisionSnapshots
+        let paint = await context.renderer.paintStateSnapshotForTesting()
         return Self.hasNontransparentPixel(bytes)
             && bytes != preservedState.canonicalBytes
-            && context.renderer.harnessRevision
-                != preservedState.revision
+            && paint.documentGeneration
+                != preservedState.documentGeneration
             && context.renderer.isIdle
             && context.renderer.harnessReservedInstanceBufferCount == 0
             && context.renderer.harnessScheduledAuthoritativeRecords.isEmpty
             && context.renderer.harnessScheduledPredictedRecords.isEmpty
             && context.renderer.harnessPendingInstanceColors.isEmpty
-            && historySnapshots == preservedState.historySnapshots
+            && paint.activeSnapshotTokenCount == 0
+            && paint.aggregateSnapshotReferenceCount == 0
+            && paint.activeTileLeaseCount == 0
+            && paint.snapshotMetadataByteCount == 0
+            && paint.snapshotPayloadLiabilityByteCount == 0
+            && paint.activeStrokeSurfaceCount == 0
+            && paint.activeCommandOperationCount == 0
+            && paint.revisionResidentBytes
+                == preservedState.historyResidentBytes
     }
 }
 
 private struct RendererFailureSnapshot: Equatable {
     let canonicalBytes: [UInt8]
-    let revision: RasterRevision
+    let documentGeneration: UInt64
     let historyResidentBytes: Int
-    let historySnapshots: [RasterRevisionHarnessSnapshot]
+    let activeSnapshotTokenCount: Int
+    let aggregateSnapshotReferenceCount: Int
+    let activeTileLeaseCount: Int
+    let snapshotMetadataByteCount: Int
+    let snapshotPayloadLiabilityByteCount: Int
+    let activeStrokeSurfaceCount: Int
+    let activeCommandOperationCount: Int
     let isIdle: Bool
     let hasActiveStroke: Bool
     let preparedDrawBrushIdentity: BrushRenderIdentity?
@@ -3364,15 +3518,10 @@ private extension DepositionHarnessRunner {
         height: Int
     ) throws -> [UInt8] where S.Element == ProjectedDepositionRecord {
         let values = Array(records)
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
+        guard let target = makeClearedWorkingTexture(
             width: width,
-            height: height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.renderTarget, .shaderRead]
-        guard let target = device.makeTexture(descriptor: descriptor),
+            height: height
+        ),
               let queue = device.makeCommandQueue(),
               let commandBuffer = queue.makeCommandBuffer()
         else {
@@ -3380,16 +3529,6 @@ private extension DepositionHarnessRunner {
                 "a direct-encoding target"
             )
         }
-        let empty = [UInt8](
-            repeating: 0,
-            count: width * height * 4
-        )
-        target.replace(
-            region: MTLRegionMake2D(0, 0, width, height),
-            mipmapLevel: 0,
-            withBytes: empty,
-            bytesPerRow: width * 4
-        )
         let pool = try DabInstanceBufferPool(device: device)
         var encoder = DepositionEncoder(
             instancePool: pool,
@@ -3416,7 +3555,37 @@ private extension DepositionHarnessRunner {
                 "a completed direct-encoding command"
             )
         }
-        return Self.textureBytes(target)
+        return Self.encodedBGRA8Bytes(fromWorkingTexture: target)
+    }
+
+    func makeClearedWorkingTexture(
+        width: Int,
+        height: Int
+    ) -> (any MTLTexture)? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: DocumentColorPipeline.workingPixelFormat,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .shared
+        descriptor.usage = [.renderTarget, .shaderRead]
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        let clear = [SIMD4<Float16>](
+            repeating: .zero,
+            count: width * height
+        )
+        clear.withUnsafeBytes { bytes in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: bytes.baseAddress!,
+                bytesPerRow: width * MemoryLayout<SIMD4<Float16>>.stride
+            )
+        }
+        return texture
     }
 
     static func hardRoundCPUReference(
@@ -3767,8 +3936,12 @@ private extension DepositionHarnessRunner {
         ].joined(separator: ":")
     }
 
-    static func textureBytes(_ texture: any MTLTexture) -> [UInt8] {
-        precondition(texture.pixelFormat == .bgra8Unorm)
+    static func encodedBGRA8Bytes(
+        fromDisplayTexture texture: any MTLTexture
+    ) -> [UInt8] {
+        precondition(
+            texture.pixelFormat == DocumentColorPipeline.displayPixelFormat
+        )
         let bytesPerRow = texture.width * 4
         var bytes = [UInt8](
             repeating: 0,
@@ -3786,6 +3959,51 @@ private extension DepositionHarnessRunner {
                 ),
                 mipmapLevel: 0
             )
+        }
+        return bytes
+    }
+
+    static func encodedBGRA8Bytes(
+        fromWorkingTexture texture: any MTLTexture
+    ) -> [UInt8] {
+        precondition(
+            texture.pixelFormat == DocumentColorPipeline.workingPixelFormat
+        )
+        let bytesPerRow = texture.width
+            * MemoryLayout<SIMD4<Float16>>.stride
+        var pixels = [SIMD4<Float16>](
+            repeating: .zero,
+            count: texture.width * texture.height
+        )
+        pixels.withUnsafeMutableBytes { storage in
+            texture.getBytes(
+                storage.baseAddress!,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegionMake2D(
+                    0,
+                    0,
+                    texture.width,
+                    texture.height
+                ),
+                mipmapLevel: 0
+            )
+        }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(pixels.count * 4)
+        for pixel in pixels {
+            let alpha = min(1, max(0, Float(pixel.w)))
+            let color = LinearPremultipliedColor(
+                red: min(alpha, max(0, Float(pixel.x))),
+                green: min(alpha, max(0, Float(pixel.y))),
+                blue: min(alpha, max(0, Float(pixel.z))),
+                alpha: alpha
+            )!
+            let encoded = DocumentColorPipeline
+                .exportEncodedPremultipliedBGRA8(color)
+            bytes.append(encoded.blue)
+            bytes.append(encoded.green)
+            bytes.append(encoded.red)
+            bytes.append(encoded.alpha)
         }
         return bytes
     }
@@ -3871,16 +4089,35 @@ private extension DepositionHarnessRunner {
                 let sourceIndex = (y * width + x) * 4
                 let destinationIndex =
                     (transformedY * width + transformedX) * 4
-                for channel in 0..<3 {
-                    result[destinationIndex + channel] = min(
-                        result[destinationIndex + channel],
-                        source[sourceIndex + channel]
+                let transformed =
+                    DocumentColorPipeline.importEncodedPremultipliedBGRA8(
+                        EncodedPremultipliedBGRA8(
+                            blue: source[sourceIndex],
+                            green: source[sourceIndex + 1],
+                            red: source[sourceIndex + 2],
+                            alpha: source[sourceIndex + 3]
+                        )
                     )
-                }
-                result[destinationIndex + 3] = max(
-                    result[destinationIndex + 3],
-                    source[sourceIndex + 3]
-                )
+                let original =
+                    DocumentColorPipeline.importEncodedPremultipliedBGRA8(
+                        EncodedPremultipliedBGRA8(
+                            blue: result[destinationIndex],
+                            green: result[destinationIndex + 1],
+                            red: result[destinationIndex + 2],
+                            alpha: result[destinationIndex + 3]
+                        )
+                    )
+                let merged = DocumentColorPipeline
+                    .exportEncodedPremultipliedBGRA8(
+                        DocumentColorPipeline.referenceSourceOver(
+                            source: transformed,
+                            destination: original
+                        )
+                    )
+                result[destinationIndex] = merged.blue
+                result[destinationIndex + 1] = merged.green
+                result[destinationIndex + 2] = merged.red
+                result[destinationIndex + 3] = merged.alpha
             }
         }
         return result
@@ -4049,22 +4286,11 @@ private extension DepositionHarnessRunner {
             assetResidentBytes: evidence.residentResourceBytes,
             logicalDabDigest: characterization.logicalDabDigest,
             canonicalBGRA8Digest: DepositionSceneEvidence.sha256(
-                Self.textureBytes(capture.canonical)
+                capture.canonical
             ),
             logicalDabCount: evidence.logicalDabCount,
             program: "professionalNativeDeposition"
         )
-    }
-
-    static func writePNGAtomically(
-        _ texture: any MTLTexture,
-        to url: URL
-    ) throws {
-        let temporary = url.deletingLastPathComponent()
-            .appendingPathComponent(".\(UUID().uuidString).png")
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        try PNGWriter.write(texture: texture, to: temporary)
-        try installAtomically(temporary, at: url)
     }
 
     static func writePNGAtomically(

@@ -4,6 +4,50 @@ import Metal
 import PatternEngine
 
 @MainActor
+extension HarnessLiveFlushResult {
+    func mergingPrecedingSubmissions(
+        _ preceding: [HarnessLiveFlushResult]
+    ) -> HarnessLiveFlushResult {
+        let results = preceding + [self]
+        return HarnessLiveFlushResult(
+            frame: frame,
+            metrics: GPUFrameMetrics(
+                cpuEncodeMilliseconds: results.reduce(0) {
+                    $0 + $1.metrics.cpuEncodeMilliseconds
+                },
+                gpuMilliseconds: results.reduce(0) {
+                    $0 + $1.metrics.gpuMilliseconds
+                },
+                eventToSubmitNanoseconds:
+                    results.map(\.metrics.eventToSubmitNanoseconds)
+                        .max() ?? 0,
+                gpuCompletionNanoseconds: results.reduce(0) {
+                    GridRenderer.saturatingAdd(
+                        $0,
+                        $1.metrics.gpuCompletionNanoseconds
+                    )
+                },
+                encodedDabCount: results.reduce(0) {
+                    $0 + $1.metrics.encodedDabCount
+                },
+                encodedInstanceCount: results.reduce(0) {
+                    $0 + $1.metrics.encodedInstanceCount
+                },
+                bufferLeaseCount: results.reduce(0) {
+                    $0 + $1.metrics.bufferLeaseCount
+                }
+            ),
+            emittedHighWater: emittedHighWater,
+            encodedIdentityRanges:
+                results.flatMap(\.encodedIdentityRanges),
+            authoritativeBacklogRemaining:
+                authoritativeBacklogRemaining,
+            replayRetention: replayRetention
+        )
+    }
+}
+
+@MainActor
 extension GridRenderer {
     public func armInputPathStorageAuditForHarness() {
         armInputPathStorageAuditAfterWarmup()
@@ -60,8 +104,8 @@ extension GridRenderer {
             brush: pipelineKey,
             abiVersion: DepositionABI.version,
             colorPixelFormatRawValue:
-                GridPipelineLibrary.colorPixelFormat.rawValue,
-            sampleCount: GridPipelineLibrary.sampleCount
+                DocumentColorPipeline.workingPixelFormat.rawValue,
+            sampleCount: DocumentColorPipeline.renderSampleCount
         )
         let pipeline = try DepositionPipelineLibrary(
             device: device,
@@ -243,140 +287,54 @@ extension GridRenderer {
         )
     }
 
-    public func flushPendingLiveForHarness(
-        forceFailure: Bool = false,
-        forceCommandBufferUnavailable: Bool = false
-    ) throws -> HarnessLiveFlushResult {
-        let progressWaiter =
-            installStrokePreparationProgressWaiterForHarness()
-        defer {
-            if let progressWaiter {
-                removeStrokePreparationProgressWaiterForHarness(
-                    progressWaiter
-                )
-            }
+    public func flushPendingLiveForHarness() async throws
+        -> HarnessLiveFlushResult
+    {
+        let frame: RenderedFrame
+        if let transientFrame = try await renderCurrentPaintFrameForHarness(
+            width: pixelSize.width,
+            height: pixelSize.height,
+            includeTransient: true
+        ) {
+            frame = transientFrame
+        } else {
+            // A fully clipped/synthetic frame owns no transient texture. The
+            // committed sparse plan is still the exact visible result.
+            guard let committedFrame = try await
+                renderCurrentPaintFrameForHarness(
+                width: pixelSize.width,
+                height: pixelSize.height,
+                includeTransient: false
+            ) else { throw MetalRendererError.invalidStrokeLifecycle }
+            frame = committedFrame
         }
-        let deadline = Date(timeIntervalSinceNow: 5)
-        if let progressWaiter,
-           !hasPendingPreparedStrokeSurfaceForHarness,
-           !strokePreparationIsQuiescentForAllocationHarness
-        {
-            try waitForPendingLiveSurfaceForHarness(
-                progressWaiter: progressWaiter,
-                deadline: deadline
-            )
-        }
-        let submittedPreparedSurface =
-            hasPendingPreparedStrokeSurfaceForHarness
-        let frameMetrics = try completeNextPendingInteractiveFrame(
-            forceFailure: forceFailure,
-            forceCommandBufferUnavailable:
-                forceCommandBufferUnavailable
-        )
-        if submittedPreparedSurface, let progressWaiter {
-            try waitForPreparedSurfaceRetirementForHarness(
-                progressWaiter: progressWaiter,
-                deadline: deadline
-            )
-        }
-        return HarnessLiveFlushResult(
-            metrics: frameMetrics,
+        return takeHarnessLiveFlushResult(frame: frame)
+    }
+
+    private func takeHarnessLiveFlushResult(
+        frame: RenderedFrame
+    ) -> HarnessLiveFlushResult {
+        HarnessLiveFlushResult(
+            frame: frame,
+            metrics: frame.metrics,
             emittedHighWater: scheduledAuthoritativeIdentityHighWater,
             encodedIdentityRanges:
-                lastEncodedAuthoritativeIdentityRange.map { [$0] } ?? [],
+                takeEncodedAuthoritativeIdentityRangesForHarness(),
             authoritativeBacklogRemaining:
                 activeStroke?.frozenHarnessScheduler?
                     .authoritativeCount ?? 0,
             replayRetention: HarnessReplayRetentionSnapshot(
                 retainedDabCount:
-                    transientStrokeBuffer?.retainedDabCount ?? 0,
+                    offMainReplayRetentionForHarness.retainedDabCount,
                 visibleProjectedInstanceCount:
-                    transientStrokeBuffer?
-                        .visibleProjectedInstanceCount ?? 0
+                    offMainReplayRetentionForHarness
+                        .visibleProjectedInstanceCount
             )
         )
     }
-
     /// Waits until the actor publishes a surface lease, but deliberately does
     /// not submit it. Failure harnesses use this boundary to inject a failure
     /// into a command buffer that actually owns stroke work.
-    func preparePendingLiveSurfaceForHarness() throws {
-        guard let progressWaiter =
-                installStrokePreparationProgressWaiterForHarness()
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        defer {
-            removeStrokePreparationProgressWaiterForHarness(progressWaiter)
-        }
-        let deadline = Date(timeIntervalSinceNow: 5)
-        try waitForPendingLiveSurfaceForHarness(
-            progressWaiter: progressWaiter,
-            deadline: deadline
-        )
-    }
-
-    private func waitForPendingLiveSurfaceForHarness(
-        progressWaiter: StrokePreparationProgressRegistration,
-        deadline: Date
-    ) throws {
-        while true {
-            let observedRevision = progressWaiter.currentRevision
-            try drainCompletedInteractiveOperations()
-            if hasPendingPreparedStrokeSurfaceForHarness {
-                return
-            }
-            guard activeStroke != nil else {
-                throw lastError ?? MetalRendererError.invalidStrokeLifecycle
-            }
-            if progressWaiter.currentRevision != observedRevision {
-                continue
-            }
-            guard progressWaiter.waitForProgress(
-                after: observedRevision,
-                until: deadline
-            ) else {
-                break
-            }
-        }
-        throw MetalRendererError.commandFailed(
-            "stroke surface preparation exceeded its harness bound"
-        )
-    }
-
-    /// The GPU completion transfers a prepared surface back to the actor, but
-    /// the acknowledgement itself is processed independently. Do not let a
-    /// synchronous harness caller start measuring or enqueueing the next event
-    /// while that prior actor operation is still running. A newly published
-    /// surface is also a stable boundary: the actor cannot mutate it again
-    /// until Main submits and acknowledges it on the next flush.
-    private func waitForPreparedSurfaceRetirementForHarness(
-        progressWaiter: StrokePreparationProgressRegistration,
-        deadline: Date
-    ) throws {
-        while true {
-            let observedRevision = progressWaiter.currentRevision
-            try drainCompletedInteractiveOperations()
-            if strokePreparationIsQuiescentForAllocationHarness
-                || hasPendingPreparedStrokeSurfaceForHarness
-            {
-                return
-            }
-            if progressWaiter.currentRevision != observedRevision {
-                continue
-            }
-            guard progressWaiter.waitForProgress(
-                after: observedRevision,
-                until: deadline
-            ) else {
-                break
-            }
-        }
-        throw MetalRendererError.commandFailed(
-            "stroke surface retirement exceeded its harness bound"
-        )
-    }
-
     nonisolated static func nativeEncodedIdentityRanges(
         previousEncodedHighWater: UInt64,
         emittedHighWater: UInt64,
@@ -400,584 +358,104 @@ extension GridRenderer {
         width: Int,
         height: Int,
         showGridLines: Bool
-    ) throws -> RenderedFrame {
-        guard (1...4096).contains(width), (1...4096).contains(height) else {
-            throw MetalRendererError.invalidDrawableSize
-        }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
+    ) async throws -> RenderedFrame {
+        guard let frame = try await renderCurrentPaintFrameForHarness(
             width: width,
             height: height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.renderTarget, .shaderRead]
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
-        }
-
-        let start = CFAbsoluteTimeGetCurrent()
-        try encodeDisplay(
-            into: texture,
-            commandBuffer: commandBuffer,
-            showGridLines: showGridLines,
-            liveVisible: compositeLiveIsVisible
-        )
-        let cpuMilliseconds = elapsedMilliseconds(since: start)
-        commandBuffer.commit()
-        do {
-            try waitForHarnessCommand(commandBuffer)
-        } catch let error as MetalRendererError {
-            report(error)
-            throw error
-        }
-        return RenderedFrame(
-            texture: texture,
-            metrics: metrics(
-                commandBuffer: commandBuffer,
-                cpuMilliseconds: cpuMilliseconds
-            )
-        )
-    }
-
-    /// Test-only presentation seam for a caller-owned canonical texture. It
-    /// reuses the renderer's real display pipeline and radial page table while
-    /// keeping live paint, guides, the canvas outline, and the UI background
-    /// out of geometric support measurements.
-    func renderOffscreenCanonicalTextureForHarness(
-        _ canonicalTexture: any MTLTexture,
-        width: Int,
-        height: Int
-    ) throws -> RenderedFrame {
-        guard (1...4096).contains(width), (1...4096).contains(height),
-              canonicalTexture.width == storagePixelSize.width,
-              canonicalTexture.height == storagePixelSize.height
-        else { throw MetalRendererError.invalidDrawableSize }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: width,
-            height: height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.renderTarget, .shaderRead]
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        let start = CFAbsoluteTimeGetCurrent()
-        try encodeDisplay(
-            into: texture,
-            commandBuffer: commandBuffer,
-            showGridLines: false,
-            liveVisible: false,
-            canonicalTexture: canonicalTexture,
-            documentPixelMapping: true,
-            transparentBackground: true,
-            showCanvasBoundary: false
-        )
-        let cpuMilliseconds = elapsedMilliseconds(since: start)
-        commandBuffer.commit()
-        try waitForHarnessCommand(commandBuffer)
-        return RenderedFrame(
-            texture: texture,
-            metrics: metrics(
-                commandBuffer: commandBuffer,
-                cpuMilliseconds: cpuMilliseconds
-            )
-        )
-    }
-
-    func renderDiagnosticFootprintForHarness(
-        footprint: StampFootprint,
-        radius: Float,
-        diagnosticMode: UInt32,
-        width: Int,
-        height: Int
-    ) throws -> HarnessDiagnosticRenderedFrame {
-        guard (1...4096).contains(width), (1...4096).contains(height) else {
-            throw MetalRendererError.invalidDrawableSize
-        }
-        precondition(
-            diagnosticMode == PatternDiagnosticWireAsymmetricCoverage
-                || diagnosticMode == PatternDiagnosticWireCanonicalCoordinates
-                || diagnosticMode == PatternDiagnosticWireBrushLocalCoordinates,
-            "Harness diagnostic mode must use a shared nonzero wire value"
-        )
-
-        let fragments = TilingProjection.fragments(
-            for: footprint,
-            using: tilingStrategy
-        )
-        let instances = try fragments.enumerated().map { ordinal, fragment in
-            let dab = LogicalDab(
-                position: WorldPoint(footprint.brushToWorld.translation),
-                brushToWorld: footprint.brushToWorld,
-                radius: radius,
-                diameter: radius * 2,
-                spacing: 1,
-                flow: 1,
-                strokeOpacity: 1,
-                rotation: 0,
-                scatter: .zero,
-                hardness: 1,
-                grainOffset: .zero,
-                grainScale: 1,
-                grainRotation: 0,
-                color: .black,
-                colorAdjustment: .identity,
-                materialFamily: .ink,
-                materialContribution: 1,
-                sourceDistance: 0,
-                ordinal: UInt64(ordinal),
-                isPredicted: false
-            )
-            return try PatternDepositionStampInstance(
-                fragment: fragment,
-                dab: dab,
-                logicalOrdinal: UInt64(ordinal),
-                isometryOrdinal: compiledIsometryOrdinal(for: fragment)
-            )
-        }
-        guard
-            !instances.isEmpty,
-            instances.count <= GridCanvasContract.pendingCapacity
-        else {
-            throw MetalRendererError.projectedInstanceCapacityExceeded(
-                GridCanvasContract.pendingCapacity
-            )
-        }
-        let instanceByteCount =
-            instances.count
-                * MemoryLayout<PatternDepositionStampInstance>.stride
-        guard let instanceBuffer = device.makeBuffer(
-            length: instanceByteCount,
-            options: .storageModeShared
+            includeTransient: compositeLiveIsVisible,
+            showGridLines: showGridLines
         ) else {
-            throw MetalRendererError.instanceBufferAllocationFailed
-        }
-        instances.withUnsafeBytes { bytes in
-            instanceBuffer.contents().copyMemory(
-                from: bytes.baseAddress!,
-                byteCount: bytes.count
-            )
-        }
-
-        let canonicalTexture = try makeHarnessTexture(
-            width: storagePixelSize.width,
-            height: storagePixelSize.height
-        )
-        let screenTexture = try makeHarnessTexture(
-            width: width,
-            height: height
-        )
-        let displayValidationCanonical =
-            try makeHarnessDisplayValidationTexture()
-        let displayValidationScreen = try makeHarnessTexture(
-            width: width,
-            height: height
-        )
-        let gridLinesScreen = try makeHarnessTexture(
-            width: width,
-            height: height
-        )
-        let diagnosticPipeline =
-            try GridPipelineLibrary.makeHarnessDiagnosticPipeline(
-                device: device,
-                library: library
-            )
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            let error = MetalRendererError.commandBufferUnavailable
-            failActiveOperationIfNeeded(error)
-            throw error
-        }
-
-        let start = CFAbsoluteTimeGetCurrent()
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = canonicalTexture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        encoder.label = "Harness Diagnostic Projected Footprint"
-        encoder.setRenderPipelineState(diagnosticPipeline)
-        var uniforms = frameUniforms(
-            drawableSize: tileSize,
-            showGridLines: false,
-            liveVisible: false,
-            diagnosticMode: diagnosticMode
-        )
-        encoder.setVertexBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setFragmentBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setVertexBuffer(
-            instanceBuffer,
-            offset: 0,
-            index: Int(PatternBufferIndexDabInstances)
-        )
-        encoder.drawPrimitives(
-            type: .triangle,
-            vertexStart: 0,
-            vertexCount: 6,
-            instanceCount: instances.count
-        )
-        encoder.endEncoding()
-
-        try encodeDisplay(
-            into: screenTexture,
-            commandBuffer: commandBuffer,
-            showGridLines: false,
-            liveVisible: false,
-            canonicalTexture: canonicalTexture
-        )
-        try encodeDisplay(
-            into: displayValidationScreen,
-            commandBuffer: commandBuffer,
-            showGridLines: false,
-            liveVisible: false,
-            canonicalTexture: displayValidationCanonical
-        )
-        try encodeDisplay(
-            into: gridLinesScreen,
-            commandBuffer: commandBuffer,
-            showGridLines: true,
-            liveVisible: false,
-            canonicalTexture: displayValidationCanonical
-        )
-        let cpuMilliseconds = elapsedMilliseconds(since: start)
-        commandBuffer.commit()
-        do {
-            try waitForHarnessCommand(commandBuffer)
-        } catch let error as MetalRendererError {
-            report(error)
-            throw error
-        }
-        return HarnessDiagnosticRenderedFrame(
-            canonical: canonicalTexture,
-            screen: screenTexture,
-            displayValidationCanonical: displayValidationCanonical,
-            displayValidationScreen: displayValidationScreen,
-            gridLinesScreen: gridLinesScreen,
-            fragments: fragments,
-            metrics: metrics(
-                commandBuffer: commandBuffer,
-                cpuMilliseconds: cpuMilliseconds
-            )
-        )
-    }
-
-    public func finishCommitForHarness(
-        forceCommitFailure: Bool = false
-    ) throws -> GPUFrameMetrics {
-        do {
-            let metrics = try completePendingInteractiveStroke(
-                forceCommitFailure: forceCommitFailure
-            )
-            try drainStrokeWorkspaceRetirementForHarness()
-            return metrics
-        } catch {
-            // A terminal failure also retires the borrowed actor workspace.
-            // Keep the original failure as the observable result, but finish
-            // the harness-only drain so a recovery stroke can start.
-            try? drainStrokeWorkspaceRetirementForHarness()
-            throw error
-        }
-    }
-
-    /// Drains actor-prepared surface leases up to the commit barrier without
-    /// submitting the raster commit. Capture harnesses use this to snapshot
-    /// the complete live surface before comparing it with committed output.
-    func preparePendingCommitForHarness() throws {
-        guard let progressWaiter =
-                installStrokePreparationProgressWaiterForHarness()
-        else {
             throw MetalRendererError.invalidStrokeLifecycle
         }
-        defer {
-            removeStrokePreparationProgressWaiterForHarness(progressWaiter)
-        }
-        let deadline = Date(timeIntervalSinceNow: 5)
-        while true {
-            let observedRevision = progressWaiter.currentRevision
-            try advanceStrokePreparationForAllocationHarness()
-            try prepareCompiledCommitIfReady()
-            if activeStroke == nil { return }
-            if activeStroke?.pendingRevisions != nil {
-                return
-            }
-            if progressWaiter.currentRevision != observedRevision {
+        return frame
+    }
+
+    public func finishCommitForHarness() async throws
+        -> GPUFrameMetrics
+    {
+        var frames: [GPUFrameMetrics] = []
+        let deadline = DispatchTime.now().uptimeNanoseconds
+            &+ 5_000_000_000
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            try drainCompletedInteractiveOperations()
+            if activeStroke == nil, isIdle { break }
+            if let frame = try await renderCurrentPaintFrameForHarness(
+                width: pixelSize.width,
+                height: pixelSize.height,
+                includeTransient: true
+            ) {
+                frames.append(frame.metrics)
                 continue
             }
-            guard progressWaiter.waitForProgress(
-                after: observedRevision,
-                until: deadline
-            ) else {
-                break
-            }
+            try await Task.sleep(nanoseconds: 1_000_000)
         }
-        throw MetalRendererError.commandFailed(
-            "stroke commit preparation exceeded its harness bound"
+        guard activeStroke == nil, isIdle else {
+            throw lastError ?? MetalRendererError.commandFailed(
+                "stroke commit exceeded its harness bound"
+            )
+        }
+        return GPUFrameMetrics(
+            cpuEncodeMilliseconds: frames.reduce(0) {
+                $0 + $1.cpuEncodeMilliseconds
+            },
+            gpuMilliseconds: frames.reduce(0) {
+                $0 + $1.gpuMilliseconds
+            },
+            eventToSubmitNanoseconds:
+                frames.map(\.eventToSubmitNanoseconds).max() ?? 0,
+            gpuCompletionNanoseconds: frames.reduce(0) {
+                Self.saturatingAdd(
+                    $0,
+                    $1.gpuCompletionNanoseconds
+                )
+            },
+            encodedDabCount: frames.reduce(0) {
+                $0 + $1.encodedDabCount
+            },
+            encodedInstanceCount: frames.reduce(0) {
+                $0 + $1.encodedInstanceCount
+            },
+            bufferLeaseCount: frames.reduce(0) {
+                $0 + $1.bufferLeaseCount
+            }
         )
     }
 
-    /// Drains all currently accepted actor input while leaving the stroke
-    /// editable. This is an explicit capture boundary, not an interactive API.
-    func drainPreparedStrokeInputForHarness() throws {
-        guard let progressWaiter =
-                installStrokePreparationProgressWaiterForHarness()
-        else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        defer {
-            removeStrokePreparationProgressWaiterForHarness(progressWaiter)
-        }
-        let deadline = Date(timeIntervalSinceNow: 5)
-        while true {
-            let observedRevision = progressWaiter.currentRevision
-            try advanceStrokePreparationForAllocationHarness()
+    /// Drains currently accepted actor input while leaving the stroke editable.
+    /// Every transient surface is submitted through the same Context display
+    /// owner and acknowledged only after its GPU terminal callback.
+    @discardableResult
+    func drainPreparedStrokeInputForHarness(
+        outputPixelSize: PixelSize
+    ) async throws
+        -> [HarnessLiveFlushResult]
+    {
+        var inactivityDeadline = DispatchTime.now().uptimeNanoseconds
+            &+ 5_000_000_000
+        var submittedFrames: [HarnessLiveFlushResult] = []
+        while DispatchTime.now().uptimeNanoseconds < inactivityDeadline {
+            try drainCompletedInteractiveOperations()
             if strokePreparationIsQuiescentForAllocationHarness {
-                return
+                return submittedFrames
             }
-            if progressWaiter.currentRevision != observedRevision {
-                continue
+            if let frame = try await renderCurrentPaintFrameForHarness(
+                width: outputPixelSize.width,
+                height: outputPixelSize.height,
+                includeTransient: true
+            ) {
+                submittedFrames.append(
+                    takeHarnessLiveFlushResult(frame: frame)
+                )
+                inactivityDeadline = DispatchTime.now().uptimeNanoseconds
+                    &+ 5_000_000_000
             }
-            guard progressWaiter.waitForProgress(
-                after: observedRevision,
-                until: deadline
-            ) else {
-                break
-            }
+            try await Task.sleep(nanoseconds: 1_000_000)
         }
         throw MetalRendererError.commandFailed(
             "stroke input preparation exceeded its harness bound"
         )
     }
 
-    func requestRasterRestoreForHarness(
-        token: RendererOperationToken,
-        revision: RasterRevisionReference,
-        forceFailure: Bool
-    ) throws {
-        try requestRasterRestore(
-            token: token,
-            revision: revision,
-            forceFailure: forceFailure
-        )
-    }
-
-    func requestClearForHarness(
-        token: RendererOperationToken,
-        maximumRetainedBytes: Int,
-        forceFailure: Bool
-    ) throws {
-        try requestClear(
-            token: token,
-            maximumRetainedBytes: maximumRetainedBytes,
-            forceFailure: forceFailure
-        )
-    }
-
-    func requestResizeForHarness(
-        token: RendererOperationToken,
-        to pixelSize: PixelSize,
-        maximumRetainedBytes: Int,
-        forceResourceAllocationFailure: Bool,
-        forceCommandFailure: Bool = false
-    ) throws {
-        try requestResize(
-            token: token,
-            to: pixelSize,
-            maximumRetainedBytes: maximumRetainedBytes,
-            forceResourceAllocationFailure: forceResourceAllocationFailure,
-            forceCommandFailure: forceCommandFailure
-        )
-    }
-
-    func requestResizeRestoreForHarness(
-        token: RendererOperationToken,
-        revision: RasterRevisionReference,
-        forceCommandFailure: Bool
-    ) throws {
-        try requestResizeRestore(
-            token: token,
-            revision: revision,
-            forceCommandFailure: forceCommandFailure
-        )
-    }
-
-    public func finishRasterOperationForHarness() throws {
-        try completePendingRasterOperation()
-    }
-
-    func submitCommitForHarness(
-        forceFailure: Bool = false
-    ) throws -> GPUFrameMetrics {
-        try submitPendingInteractiveCommit(forceFailure: forceFailure)
-    }
-
-    func drainCompletedOperationsForHarness() throws {
-        try drainCompletedInteractiveOperations()
-    }
-
-    func submitDisplayOnlyForHarness(
-        forceFailure: Bool
-    ) throws {
-        let texture = try makeHarnessTexture(width: 64, height: 64)
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        try encodeDisplay(
-            into: texture,
-            commandBuffer: commandBuffer,
-            showGridLines: false,
-            liveVisible: false
-        )
-        _ = try finalizeFrameEncoding(
-            encodedClear: false,
-            uploads: [],
-            rasterCommit: nil,
-            commandBuffer: commandBuffer,
-            forceFailure: forceFailure
-        )
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        try validateHarnessCommand(commandBuffer)
-    }
-
-    func prioritizeLatestFrameOutcomeForHarness() {
-        completionMailbox.prioritizeLastForHarness()
-    }
-
-    func deferNextFrameOutcomeForHarness() {
-        completionMailbox.deferNextForHarness()
-    }
-
-    func releaseDeferredFrameOutcomesForHarness() {
-        completionMailbox.releaseDeferredForHarness()
-    }
-
-    func drainNextCompletedOperationForHarness() throws {
-        guard let outcome = completionMailbox.drainFirstForHarness() else {
-            return
-        }
-        let submittedError = processFrameOutcome(outcome)
-        drainCompletedUploadRanges()
-        if let submittedError {
-            throw submittedError
-        }
-    }
-
-    public func copyCanonicalForHarness() throws -> any MTLTexture {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: canonical.pixelSize.width,
-            height: canonical.pixelSize.height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.shaderRead]
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
-            throw MetalRendererError.commandFailed(
-                "Metal blit encoder creation failed."
-            )
-        }
-        encoder.copy(
-            from: canonical.front,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: MTLSize(
-                width: canonical.pixelSize.width,
-                height: canonical.pixelSize.height,
-                depth: 1
-            ),
-            to: texture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-        )
-        encoder.endEncoding()
-        commandBuffer.commit()
-        do {
-            try waitForHarnessCommand(commandBuffer)
-        } catch let error as MetalRendererError {
-            report(error)
-            throw error
-        }
-        return texture
-    }
-
-    public func replaceCanonicalPixelsForHarness(_ bytes: [UInt8]) throws {
-        let bytesPerRow = storagePixelSize.width * 4
-        guard bytes.count == bytesPerRow * storagePixelSize.height else {
-            throw MetalRendererError.commandFailed(
-                "Harness canonical byte count does not match storage size."
-            )
-        }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: storagePixelSize.width,
-            height: storagePixelSize.height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.shaderRead]
-        guard let staging = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        bytes.withUnsafeBytes { storage in
-            staging.replace(
-                region: MTLRegionMake2D(
-                    0,
-                    0,
-                    storagePixelSize.width,
-                    storagePixelSize.height
-                ),
-                mipmapLevel: 0,
-                withBytes: storage.baseAddress!,
-                bytesPerRow: bytesPerRow
-            )
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        try encodeResizeIntersectionCopy(
-            from: staging,
-            oldPixelSize: storagePixelSize,
-            to: canonical.front,
-            newPixelSize: storagePixelSize,
-            on: commandBuffer
-        )
-        commandBuffer.commit()
-        try waitForHarnessCommand(commandBuffer)
-        try reconcileGeometryLock(
-            documentIsEmpty: !bytes.contains(where: { $0 != 0 })
-        )
-    }
 
     struct HarnessOffMainDepositionSnapshot: Equatable, Sendable {
         let logicalDabCount: Int
@@ -992,24 +470,24 @@ extension GridRenderer {
         HarnessOffMainDepositionSnapshot?
     {
         guard let surface = offMainSurfaceSnapshotForHarness,
+              let coordinator = offMainCoordinatorSnapshotForHarness,
+              let logicalDabCount = Int(
+                  exactly: coordinator.commitMetadata.emittedDabCount
+              ),
               let projectedInstanceCount = Int(
-                  exactly: surface.encodedInstanceCount
+                  exactly: scheduledAuthoritativeIdentityHighWater
               )
         else {
             return nil
         }
-        let coordinator = offMainCoordinatorSnapshotForHarness
-        let logicalDabCount = coordinator.flatMap {
-            Int(exactly: $0.commitMetadata.emittedDabCount)
-        } ?? counters.totalDabsThisStroke
         return HarnessOffMainDepositionSnapshot(
             logicalDabCount: logicalDabCount,
             projectedInstanceCount: projectedInstanceCount,
             authoritativeBacklog:
-                coordinator?.authoritativeQueueDepth ?? 0,
+                coordinator.authoritativeQueueDepth,
             authoritativeBacklogHighWater:
                 max(
-                    coordinator?.authoritativeQueueHighWater ?? 0,
+                    coordinator.authoritativeQueueHighWater,
                     logicalDabCount > 0 ? 1 : 0
                 ),
             encodedInstanceCount: surface.encodedInstanceCount,
@@ -1065,19 +543,12 @@ extension GridRenderer {
     }
 
     public var harnessCounters: GridStructuralCounters { counters }
-    var harnessRevision: RasterRevision { canonical.revision }
     var harnessTiling: TilingKind { tilingStrategy.kind }
     func harnessWorldPoint(for screenPoint: ScreenPoint) -> WorldPoint {
         viewport.screenToWorld(screenPoint)
     }
     func harnessCell(for screenPoint: ScreenPoint) -> CellIndex {
         tilingStrategy.cell(containing: viewport.screenToWorld(screenPoint))
-    }
-    var harnessRasterRevisionResidentBytes: Int {
-        revisionStore.residentBytes
-    }
-    var harnessRasterRevisionSnapshots: [RasterRevisionHarnessSnapshot] {
-        get throws { try revisionStore.snapshotsForHarness() }
     }
     var harnessReservedInstanceBufferCount: Int {
         instancePool.unavailableSlotCount
@@ -1153,100 +624,5 @@ extension GridRenderer {
         activeStroke?.frozenHarnessScheduler?.authoritativeRecords.map(
             \.instance.premultipliedColor
         ) ?? []
-    }
-    var harnessTilingMutationSnapshot: HarnessTilingMutationSnapshot {
-        HarnessTilingMutationSnapshot(
-            canonicalFront: ObjectIdentifier(canonical.front as AnyObject),
-            canonicalScratch: ObjectIdentifier(canonical.scratch as AnyObject),
-            liveTexture: ObjectIdentifier(liveTile.texture as AnyObject),
-            revision: canonical.revision,
-            liveVisible: liveTile.isVisible,
-            liveDirty: liveTile.isDirty,
-            needsLiveClear: needsLiveClear,
-            counters: counters,
-            pendingInstanceCount: liveStroke.pending.count,
-            bakedHighWater: liveStroke.bakedHighWater,
-            emittedHighWater: liveStroke.emittedHighWater
-        )
-    }
-
-    func injectFiveHundredInteriorDabsIntoOneFrame() throws {
-        try beginFrozenProjectionHarnessExecution(
-            radius: GridCanvasContract.brushRadius
-        )
-        counters = GridStructuralCounters()
-        counters.newDabsThisEvent = 500
-        counters.totalDabsThisStroke = 500
-
-        for row in 0..<25 {
-            for column in 0..<20 {
-                try appendProjectedFragments(
-                    at: WorldPoint(
-                        x: 32 + Float(column) * 8,
-                        y: 32 + Float(row) * 7
-                    )
-                )
-            }
-        }
-    }
-
-    @discardableResult
-    func injectHarnessDab(
-        at world: WorldPoint,
-        radius requestedRadius: Float = GridCanvasContract.brushRadius,
-        coverageSymmetry: FootprintCoverageSymmetry = .halfTurnInvariant,
-        compositeMode: StrokeCompositeMode = .draw
-    ) throws -> [CellFragment] {
-        try beginFrozenProjectionHarnessExecution(
-            radius: requestedRadius,
-            compositeMode: compositeMode
-        )
-        counters = GridStructuralCounters()
-        counters.newDabsThisEvent = 1
-        counters.totalDabsThisStroke = 1
-        let fragments = try appendProjectedFragments(
-            at: world,
-            requestedRadius: requestedRadius,
-            coverageSymmetry: coverageSymmetry
-        )
-        try prepareFrozenProjectionHarnessCommit(
-            maximumRetainedBytes: Int.max
-        )
-        return fragments
-    }
-
-    @discardableResult
-    func beginFixedProjectedStrokeForHarness(
-        at world: WorldPoint
-    ) throws -> [CellFragment] {
-        try beginFrozenProjectionHarnessExecution(
-            radius: GridCanvasContract.brushRadius
-        )
-        counters = GridStructuralCounters()
-        counters.newDabsThisEvent = 1
-        counters.totalDabsThisStroke = 1
-        return try appendProjectedFragments(at: world)
-    }
-
-    @discardableResult
-    func appendFixedProjectedSegmentForHarness(
-        to world: WorldPoint
-    ) throws -> [CellFragment] {
-        guard hasActiveStroke else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        counters.newDabsThisEvent = 1
-        counters.totalDabsThisStroke += 1
-        return try appendProjectedFragments(at: world)
-    }
-
-    func endFixedProjectedStrokeForHarness() throws {
-        guard hasActiveStroke else {
-            throw MetalRendererError.invalidStrokeLifecycle
-        }
-        counters.newDabsThisEvent = 0
-        try prepareFrozenProjectionHarnessCommit(
-            maximumRetainedBytes: Int.max
-        )
     }
 }

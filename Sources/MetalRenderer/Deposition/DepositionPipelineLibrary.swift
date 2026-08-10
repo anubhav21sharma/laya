@@ -84,6 +84,7 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
     public func prepare(
         for key: DepositionPipelineKey
     ) async throws -> DepositionPipelineBinding {
+        try validate(key)
         debugPrepareCallCount += 1
         if let binding = prepared[key] {
             return binding
@@ -112,20 +113,6 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
         return try await task.value
     }
 
-    /// Prepares the sparse paint-tile variant without reusing the compiled
-    /// brush's legacy BGRA8 target binding.
-    public func prepareRGBA16Float(
-        matching compiledKey: DepositionPipelineKey
-    ) async throws -> DepositionPipelineBinding {
-        try await prepare(for: DepositionPipelineKey(
-            brush: compiledKey.brush,
-            abiVersion: compiledKey.abiVersion,
-            colorPixelFormatRawValue:
-                MTLPixelFormat.rgba16Float.rawValue,
-            sampleCount: compiledKey.sampleCount
-        ))
-    }
-
     public func preparedBinding(
         for key: DepositionPipelineKey
     ) throws -> DepositionPipelineBinding {
@@ -138,6 +125,7 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
     func prepareImmediately(
         for key: DepositionPipelineKey
     ) throws -> DepositionPipelineBinding {
+        try validate(key)
         if let binding = prepared[key] {
             return binding
         }
@@ -190,29 +178,7 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
     private func makePipelineDescriptor(
         for key: DepositionPipelineKey
     ) throws -> MTLRenderPipelineDescriptor {
-        guard key.abiVersion == DepositionABI.version else {
-            throw DepositionPipelineLibraryError.unsupportedABI(
-                key.abiVersion
-            )
-        }
-        guard key.brush.backend == .deposition else {
-            throw DepositionPipelineLibraryError.unsupportedBackend(
-                key.brush.backend
-            )
-        }
-        guard key.sampleCount > 0 else {
-            throw DepositionPipelineLibraryError.invalidSampleCount(
-                key.sampleCount
-            )
-        }
-        guard let pixelFormat = MTLPixelFormat(
-            rawValue: key.colorPixelFormatRawValue
-        ), pixelFormat != .invalid
-        else {
-            throw DepositionPipelineLibraryError.invalidPixelFormat(
-                key.colorPixelFormatRawValue
-            )
-        }
+        try validate(key)
         guard let library else {
             throw DepositionPipelineLibraryError.shaderLibraryUnavailable
         }
@@ -246,9 +212,34 @@ public final class DepositionPipelineLibrary: DepositionPipelinePreparing {
                 "Metal did not provide color attachment zero."
             )
         }
-        attachment.pixelFormat = pixelFormat
+        attachment.pixelFormat = DocumentColorPipeline.workingPixelFormat
         configureBlend(attachment, accumulation: key.brush.accumulation)
         return descriptor
+    }
+
+    private func validate(_ key: DepositionPipelineKey) throws {
+        guard key.abiVersion == DepositionABI.version else {
+            throw DepositionPipelineLibraryError.unsupportedABI(
+                key.abiVersion
+            )
+        }
+        guard key.brush.backend == .deposition else {
+            throw DepositionPipelineLibraryError.unsupportedBackend(
+                key.brush.backend
+            )
+        }
+        guard key.sampleCount > 0 else {
+            throw DepositionPipelineLibraryError.invalidSampleCount(
+                key.sampleCount
+            )
+        }
+        guard key.colorPixelFormatRawValue
+                == DocumentColorPipeline.workingPixelFormat.rawValue
+        else {
+            throw DepositionPipelineLibraryError.invalidPixelFormat(
+                key.colorPixelFormatRawValue
+            )
+        }
     }
 
     private func makeSpecializedFunction(

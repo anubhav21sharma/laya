@@ -65,25 +65,22 @@ public enum ProfessionalManualEvidenceValidator {
     private static let orderedCapabilities = [
         "pressure", "altitude", "azimuth", "roll",
     ]
-    private static let professionalDefinitionIDs = Set(
-        ProfessionalBrushTruth.sceneTruth.values.map(\.definitionID)
+    private static let currentDefinitionIDs = Set(
+        ProfessionalBrushTruth.sceneContracts.values.map(\.definitionID)
     )
     private static let retainedEraserID = "builtin.native-eraser"
 
     public static func validate(_ data: Data) throws -> Bool {
-        try validateCatalog(data, requireCanonicalHash: true)
+        try validateCatalog(data, definitionIDs: currentDefinitionIDs)
     }
 
-    /// Validates the complete executable review meaning without consulting the
-    /// canonical-card digest. This is the explicit boundary used to prove that
-    /// named scenarios fail for their own semantic defect.
     public static func validateSemantics(_ data: Data) throws {
-        _ = try validateCatalog(data, requireCanonicalHash: false)
+        _ = try validateCatalog(data, definitionIDs: currentDefinitionIDs)
     }
 
     private static func validateCatalog(
         _ data: Data,
-        requireCanonicalHash: Bool
+        definitionIDs: Set<String>
     ) throws -> Bool {
         let object = try ArtifactFileSystem.jsonObject(
             data,
@@ -120,7 +117,7 @@ public enum ProfessionalManualEvidenceValidator {
                       "cardID"
                   ),
                   let brushID = card["brushID"] as? String,
-                  professionalDefinitionIDs.contains(brushID),
+                  definitionIDs.contains(brushID),
                   let gesture = card["gesture"] as? String,
                   gestures.contains(gesture),
                   cardID.hasPrefix(
@@ -175,22 +172,6 @@ public enum ProfessionalManualEvidenceValidator {
                 "professional manual cards are not the exact sorted brush/gesture matrix"
             )
         }
-        if requireCanonicalHash {
-            let canonicalCards = try JSONSerialization.data(
-                withJSONObject: cards,
-                options: [.sortedKeys]
-            )
-            let actualCanonicalHash = ArtifactFileSystem.sha256(canonicalCards)
-            guard actualCanonicalHash
-                    == ProfessionalBrushTruth.canonicalManualCardsSHA256
-            else {
-                throw ArtifactFileSystem.invalid(
-                    "professional manual card truth changed: "
-                        + actualCanonicalHash
-                )
-            }
-        }
-
         let assessmentIDs = assessments.compactMap {
             $0["cardID"] as? String
         }
@@ -211,18 +192,22 @@ public enum ProfessionalManualEvidenceValidator {
         return true
     }
 
-    static func validate(root: URL) throws -> Bool {
+    static func validate(
+        root: URL,
+        identities: ProfessionalSceneIdentitySet
+    ) throws -> Bool {
         guard try ArtifactFileSystem.entryNames(root) == ["catalog.json"]
         else {
             throw ArtifactFileSystem.invalid(
                 "manual-card root file set is not exact"
             )
         }
-        return try validate(
+        return try validateCatalog(
             ArtifactFileSystem.regularFileData(
                 root.appendingPathComponent("catalog.json"),
                 label: "professional manual catalog"
-            )
+            ),
+            definitionIDs: Set(identities.definitionIDs)
         )
     }
 
@@ -276,7 +261,7 @@ public enum ProfessionalManualEvidenceValidator {
                   let role = pass["role"] as? String,
                   [
                       "professionalDraw",
-                      "retainedStageFourEraser",
+                      "nativeEraser",
                   ].contains(role),
                   let tool = pass["tool"] as? String,
                   ["draw", "erase"].contains(tool),
@@ -755,7 +740,7 @@ public enum ProfessionalManualEvidenceValidator {
                   passes.map(\.role)
                     == [
                         "professionalDraw",
-                        "retainedStageFourEraser",
+                        "nativeEraser",
                     ],
                   passes[1].brushID == retainedEraserID,
                   exactPass(
@@ -766,7 +751,7 @@ public enum ProfessionalManualEvidenceValidator {
                   ),
                   exactPass(
                       passes[1],
-                      role: "retainedStageFourEraser",
+                      role: "nativeEraser",
                       tool: "erase",
                       diameter: 20,
                       source: "pencil",

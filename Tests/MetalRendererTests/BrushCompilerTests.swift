@@ -263,6 +263,10 @@ struct BrushCompilerTests {
                 == DepositionABI.version
         )
         #expect(
+            compiled.depositionPipeline.key.colorPixelFormatRawValue
+                == DocumentColorPipeline.workingPixelFormat.rawValue
+        )
+        #expect(
             compiled.depositionMaterial.textures[.primaryShape]
                 === compiled.textures["shape.main"]
         )

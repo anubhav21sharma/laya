@@ -117,6 +117,12 @@ public extension PatternPaintTileCodec {
         surfaceManifestPaths: [String],
         maximumDecodedBytes: Int = PatternPaintTileCodec.maximumDecodedBytes
     ) throws -> [PatternPaintTileSurface] {
+        guard (1...maximumLayerCount).contains(surfaceManifestPaths.count)
+        else {
+            throw PatternPaintTileError.layerCountOutOfRange(
+                surfaceManifestPaths.count
+            )
+        }
         var manifestPaths = Set<String>()
         for path in surfaceManifestPaths {
             guard manifestPaths.insert(path).inserted else {
@@ -147,54 +153,79 @@ public extension PatternPaintTileCodec {
             } catch {
                 throw PatternPaintTileError.missingPayload(path)
             }
-            surfaces.append(try decodeManifestMetadata(data))
+            surfaces.append(try decodeManifestMetadata(
+                data,
+                maximumDecodedBytes: maximumDecodedBytes
+            ))
         }
-        try validateMetadata(surfaces)
+        try validateMetadata(
+            surfaces,
+            maximumDecodedBytes: maximumDecodedBytes
+        )
 
+        var tileCount = 0
         var decodedBytes = 0
-        for record in surfaces.flatMap(\.tiles) {
-            guard !manifestPaths.contains(record.file) else {
-                throw PatternPaintTileError.duplicatePath(record.file)
-            }
-            let byteCount: Int
-            do {
-                byteCount = try archive.byteCount(for: record.file)
-            } catch {
-                throw PatternPaintTileError.missingPayload(record.file)
-            }
-            guard byteCount == record.byteCount else {
-                throw PatternPaintTileError.payloadByteCountMismatch(
-                    tileID: record.id,
-                    expected: record.byteCount,
-                    actual: byteCount
-                )
-            }
-            let (sum, overflow) = decodedBytes.addingReportingOverflow(
-                byteCount
+        for surface in surfaces {
+            let (count, countOverflow) = tileCount.addingReportingOverflow(
+                surface.tiles.count
             )
-            let actual = overflow ? Int.max : sum
-            guard !overflow, actual <= maximumDecodedBytes else {
-                throw PatternPaintTileError.decodedByteLimitExceeded(
-                    actual: actual,
+            guard !countOverflow else {
+                throw PatternPaintTileError.tileCountOutOfRange(
+                    actual: Int.max,
                     maximum: maximumDecodedBytes
+                        / PatternPaintTileCodec.bytesPerTile
                 )
             }
-            decodedBytes = sum
+            tileCount = count
+            for record in surface.tiles {
+                guard !manifestPaths.contains(record.file) else {
+                    throw PatternPaintTileError.duplicatePath(record.file)
+                }
+                let byteCount: Int
+                do {
+                    byteCount = try archive.byteCount(for: record.file)
+                } catch {
+                    throw PatternPaintTileError.missingPayload(record.file)
+                }
+                guard byteCount == record.byteCount else {
+                    throw PatternPaintTileError.payloadByteCountMismatch(
+                        tileID: record.id,
+                        expected: record.byteCount,
+                        actual: byteCount
+                    )
+                }
+                let (sum, overflow) = decodedBytes.addingReportingOverflow(
+                    byteCount
+                )
+                let actual = overflow ? Int.max : sum
+                guard !overflow, actual <= maximumDecodedBytes else {
+                    throw PatternPaintTileError.decodedByteLimitExceeded(
+                        actual: actual,
+                        maximum: maximumDecodedBytes
+                    )
+                }
+                decodedBytes = sum
+            }
         }
 
         var payloads: [String: Data] = [:]
-        payloads.reserveCapacity(surfaces.reduce(0) { $0 + $1.tiles.count })
-        for record in surfaces.flatMap(\.tiles) {
-            let payload: Data
-            do {
-                payload = try archive.data(
-                    for: record.file,
-                    maximumByteCount: UInt64(record.byteCount)
-                )
-            } catch {
-                throw PatternPaintTileError.missingPayload(record.file)
+        payloads.reserveCapacity(tileCount)
+        for surface in surfaces {
+            for record in surface.tiles {
+                let payload: Data
+                do {
+                    payload = try archive.data(
+                        for: record.file,
+                        maximumByteCount: UInt64(record.byteCount)
+                    )
+                } catch {
+                    throw PatternPaintTileError.missingPayload(record.file)
+                }
+                guard payloads.updateValue(payload, forKey: record.file) == nil
+                else {
+                    throw PatternPaintTileError.duplicatePath(record.file)
+                }
             }
-            payloads[record.file] = payload
         }
         try validate(
             surfaces,

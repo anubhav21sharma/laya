@@ -18,6 +18,15 @@ public enum ProfessionalBrushDefinitions {
         maximumResidentBytes: 64 * 1_024 * 1_024
     )
 
+    private static let replayTailTermination =
+        BrushTerminationDefinition.boundedCorrection(
+            maximumSamples:
+                BrushRecipePolicy.replayTailLimits.maximumSamples,
+            maximumWorldLength: 4_096,
+            maximumDabs:
+                BrushRecipePolicy.replayTailLimits.maximumDabs
+        )
+
     private static func constant(_ value: Float) -> BrushMappingDefinition {
         BrushMappingDefinition(
             input: .pressure,
@@ -148,6 +157,7 @@ public enum ProfessionalBrushDefinitions {
                 ),
                 replayMode: .replayTail,
                 replayLimits: BrushRecipePolicy.replayTailLimits,
+                termination: replayTailTermination,
                 seedPolicy: .perStroke,
                 limits: limits,
                 performanceIntent: .realtime120,
@@ -301,6 +311,7 @@ public enum ProfessionalBrushDefinitions {
                 ),
                 replayMode: .replayTail,
                 replayLimits: BrushRecipePolicy.replayTailLimits,
+                termination: replayTailTermination,
                 seedPolicy: .perStroke,
                 limits: limits,
                 performanceIntent: .realtime120,
@@ -465,6 +476,7 @@ public enum ProfessionalBrushDefinitions {
                 ),
                 replayMode: .replayTail,
                 replayLimits: BrushRecipePolicy.replayTailLimits,
+                termination: replayTailTermination,
                 seedPolicy: .perStroke,
                 limits: limits,
                 performanceIntent: .realtime120,
@@ -575,6 +587,7 @@ public enum ProfessionalBrushDefinitions {
                 ),
                 replayMode: .replayTail,
                 replayLimits: BrushRecipePolicy.replayTailLimits,
+                termination: replayTailTermination,
                 seedPolicy: .perStroke,
                 limits: limits,
                 performanceIntent: .realtime120,

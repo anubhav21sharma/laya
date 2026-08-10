@@ -6,12 +6,10 @@ import PatternEngine
 enum DocumentPaintSurfaceMetalBackendFailurePoint:
     Hashable, Sendable
 {
-    case metadataAllocation
     case commandBuffer
     case reductionBuffer
-    case importBuffer
+    case importBuffer(Int)
     case encoder
-    case precommit
     case gpu
     case complete
     case discard
@@ -55,16 +53,13 @@ enum DocumentPaintSurfaceMetalBackendError:
 {
     case invalidShaderABI
     case invalidOperation
-    case unsupportedRestore
     case resourceDeviceMismatch
     case invalidTexture
     case textureAlias
-    case metadataAllocationFailed
     case commandBufferUnavailable
     case reductionBufferAllocationFailed
     case importBufferAllocationFailed
     case encoderUnavailable
-    case precommitFailed
     case gpuCommandFailed
     case commandNotTerminal(Int)
     case outcomeMismatch(
@@ -105,7 +100,7 @@ final class DocumentPaintSurfaceMetalBackend:
     private struct RetainedResources: @unchecked Sendable {
         let textures: [any MTLTexture]
         let reduction: (any MTLBuffer)?
-        let importSource: (any MTLBuffer)?
+        let importSources: [any MTLBuffer]
     }
 
     private final class ActiveEncoding: @unchecked Sendable {
@@ -191,18 +186,18 @@ final class DocumentPaintSurfaceMetalBackend:
                     $0 + ($1.resources.reduction == nil ? 0 : 1)
                 },
                 activeImportBufferCount: active.values.reduce(0) {
-                    $0 + ($1.resources.importSource == nil ? 0 : 1)
+                    $0 + $1.resources.importSources.count
                 }
             )
         }
     }
 
-    func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws {
+    private func validateResources(
+        _ operation: DocumentPaintSurfaceBackendOperation
+    ) throws {
         switch operation {
         case .clear:
             return
-        case let .restore(payload):
-            try validateRestore(payload)
         case let .stroke(payload):
             try validateStroke(payload)
         case let .resize(payload):
@@ -215,12 +210,9 @@ final class DocumentPaintSurfaceMetalBackend:
     func encode(
         _ operation: DocumentPaintSurfaceBackendOperation
     ) throws -> DocumentPaintSurfaceMutationBackendEncoding {
-        try preflight(operation)
+        try validateResources(operation)
         if case .clear = operation {
             return try makeTerminalEncoding()
-        }
-        if case .restore = operation {
-            throw DocumentPaintSurfaceMetalBackendError.unsupportedRestore
         }
         switch operation {
         case let .resize(payload) where payload.destinations.isEmpty:
@@ -230,11 +222,6 @@ final class DocumentPaintSurfaceMetalBackend:
         default:
             break
         }
-        if failureInjection?.consume(.metadataAllocation) == true {
-            throw DocumentPaintSurfaceMetalBackendError
-                .metadataAllocationFailed
-        }
-
         if failureInjection?.consume(.commandBuffer) == true {
             throw DocumentPaintSurfaceMetalBackendError
                 .commandBufferUnavailable
@@ -269,28 +256,34 @@ final class DocumentPaintSurfaceMetalBackend:
         memset(reduction.contents(), 0, reductionLength)
         increment { $0.reductionBuffers += 1 }
 
-        let importSource: (any MTLBuffer)?
+        let importSources: [any MTLBuffer]
         if case let .encodedImport(payload) = operation {
-            if failureInjection?.consume(.importBuffer) == true {
-                throw DocumentPaintSurfaceMetalBackendError
-                    .importBufferAllocationFailed
+            var buffers: [any MTLBuffer] = []
+            buffers.reserveCapacity(payload.planeBindings.count)
+            for (index, binding) in payload.planeBindings.enumerated() {
+                if failureInjection?.consume(.importBuffer(index)) == true {
+                    throw DocumentPaintSurfaceMetalBackendError
+                        .importBufferAllocationFailed
+                }
+                let buffer: (any MTLBuffer)? = binding.bytes.withUnsafeBytes {
+                    (bytes: UnsafeRawBufferPointer) in
+                    guard let baseAddress = bytes.baseAddress else { return nil }
+                    return device.makeBuffer(
+                        bytes: baseAddress,
+                        length: bytes.count,
+                        options: .storageModeShared
+                    )
+                }
+                guard let buffer else {
+                    throw DocumentPaintSurfaceMetalBackendError
+                        .importBufferAllocationFailed
+                }
+                buffers.append(buffer)
+                increment { $0.importBuffers += 1 }
             }
-            importSource = payload.encodedPremultipliedBGRA8.withUnsafeBytes {
-                bytes in
-                guard let baseAddress = bytes.baseAddress else { return nil }
-                return device.makeBuffer(
-                    bytes: baseAddress,
-                    length: bytes.count,
-                    options: .storageModeShared
-                )
-            }
-            guard importSource != nil else {
-                throw DocumentPaintSurfaceMetalBackendError
-                    .importBufferAllocationFailed
-            }
-            increment { $0.importBuffers += 1 }
+            importSources = buffers
         } else {
-            importSource = nil
+            importSources = []
         }
 
         if failureInjection?.consume(.encoder) == true {
@@ -309,7 +302,7 @@ final class DocumentPaintSurfaceMetalBackend:
                 operation,
                 encoder: encoder,
                 reduction: reduction,
-                importSource: importSource
+                importSources: importSources
             )
             encoder.endEncoding()
         } catch {
@@ -317,9 +310,6 @@ final class DocumentPaintSurfaceMetalBackend:
             throw error
         }
 
-        if failureInjection?.consume(.precommit) == true {
-            throw DocumentPaintSurfaceMetalBackendError.precommitFailed
-        }
         let token = try makeToken()
         let record = ActiveEncoding(
             commandBuffer: commandBuffer,
@@ -327,7 +317,7 @@ final class DocumentPaintSurfaceMetalBackend:
             resources: RetainedResources(
                 textures: encoded.retainedTextures,
                 reduction: reduction,
-                importSource: importSource
+                importSources: importSources
             ),
             injectsGPUFailure: failureInjection?.consume(.gpu) == true
         )
@@ -390,13 +380,13 @@ final class DocumentPaintSurfaceMetalBackend:
         _ operation: DocumentPaintSurfaceBackendOperation,
         encoder: any MTLComputeCommandEncoder,
         reduction: any MTLBuffer,
-        importSource: (any MTLBuffer)?
+        importSources: [any MTLBuffer]
     ) throws -> (
         evidence: [EvidenceMetadata],
         retainedTextures: [any MTLTexture]
     ) {
         switch operation {
-        case .clear, .restore:
+        case .clear:
             preconditionFailure("Non-GPU operation reached mutation encoder")
         case let .stroke(payload):
             return encodeStroke(
@@ -411,14 +401,12 @@ final class DocumentPaintSurfaceMetalBackend:
                 reduction: reduction
             )
         case let .encodedImport(payload):
-            guard let importSource else {
-                preconditionFailure("Validated import lost source buffer")
-            }
+            precondition(importSources.count == payload.planeBindings.count)
             return encodeImport(
                 payload,
                 encoder: encoder,
                 reduction: reduction,
-                importSource: importSource
+                importSources: importSources
             )
         }
     }
@@ -435,10 +423,11 @@ final class DocumentPaintSurfaceMetalBackend:
         var evidence: [EvidenceMetadata] = []
         var retained: [any MTLTexture] = []
         evidence.reserveCapacity(payload.destinations.count)
-        retained.reserveCapacity(payload.destinations.count * 3)
+        retained.reserveCapacity(payload.destinations.count * 4)
         for index in payload.destinations.indices {
             let base = payload.baseSources[index]
             let authoritative = payload.authoritativeSources[index]
+            let prediction = payload.predictionSources[index]
             let destination = payload.destinations[index]
             var uniforms = Self.uniforms(
                 for: destination,
@@ -446,12 +435,17 @@ final class DocumentPaintSurfaceMetalBackend:
             )
             let baseTexture = Self.texture(from: base)
             let authoritativeTexture = Self.texture(from: authoritative)
+            let predictionTexture = Self.texture(from: prediction)
             if baseTexture == nil {
                 uniforms.flags |= PatternDocumentPaintFlagBaseKnownClear
             }
             if authoritativeTexture == nil {
                 uniforms.flags |=
                     PatternDocumentPaintFlagAuthoritativeKnownClear
+            }
+            if predictionTexture == nil {
+                uniforms.flags |=
+                    PatternDocumentPaintFlagPredictionKnownClear
             }
             set(
                 uniforms,
@@ -468,6 +462,10 @@ final class DocumentPaintSurfaceMetalBackend:
                 index: Int(PatternTextureIndexDocumentPaintAuthoritative)
             )
             encoder.setTexture(
+                predictionTexture,
+                index: Int(PatternTextureIndexDocumentPaintPrediction)
+            )
+            encoder.setTexture(
                 destination.texture,
                 index: Int(PatternTextureIndexDocumentPaintDestination)
             )
@@ -479,6 +477,7 @@ final class DocumentPaintSurfaceMetalBackend:
             ))
             if let baseTexture { retained.append(baseTexture) }
             if let authoritativeTexture { retained.append(authoritativeTexture) }
+            if let predictionTexture { retained.append(predictionTexture) }
             retained.append(destination.texture)
         }
         return (evidence, retained)
@@ -568,7 +567,7 @@ final class DocumentPaintSurfaceMetalBackend:
         _ payload: DocumentPaintSurfaceEncodedImportBackendPayload,
         encoder: any MTLComputeCommandEncoder,
         reduction: any MTLBuffer,
-        importSource: any MTLBuffer
+        importSources: [any MTLBuffer]
     ) -> (
         evidence: [EvidenceMetadata],
         retainedTextures: [any MTLTexture]
@@ -576,14 +575,14 @@ final class DocumentPaintSurfaceMetalBackend:
         encoder.setComputePipelineState(pipelines.encodedImport)
         var evidence: [EvidenceMetadata] = []
         var retained: [any MTLTexture] = []
-        evidence.reserveCapacity(payload.destinations.count)
-        retained.reserveCapacity(payload.destinations.count)
-        for index in payload.destinations.indices {
-            let region = payload.tileRegions[index]
-            let destination = payload.destinations[index]
+        evidence.reserveCapacity(payload.planeBindings.count)
+        retained.reserveCapacity(payload.planeBindings.count)
+        for index in payload.planeBindings.indices {
+            let binding = payload.planeBindings[index]
+            let destination = binding.destination
             var uniforms = Self.uniforms(for: destination)
-            uniforms.sourceBytesPerRow = UInt32(payload.bytesPerRow)
-            uniforms.sourceByteOffset = UInt32(region.sourceByteOffset)
+            uniforms.sourceBytesPerRow = UInt32(binding.bytesPerRow)
+            uniforms.sourceByteOffset = 0
             set(
                 uniforms,
                 reduction: reduction,
@@ -591,7 +590,7 @@ final class DocumentPaintSurfaceMetalBackend:
                 encoder: encoder
             )
             encoder.setBuffer(
-                importSource,
+                importSources[index],
                 offset: 0,
                 index: Int(PatternBufferIndexDocumentPaintMutationSourceBytes)
             )
@@ -616,7 +615,8 @@ final class DocumentPaintSurfaceMetalBackend:
         guard payload.compositeParameters.isValid,
               !payload.destinations.isEmpty,
               payload.baseSources.count == payload.destinations.count,
-              payload.authoritativeSources.count == payload.destinations.count
+              payload.authoritativeSources.count == payload.destinations.count,
+              payload.predictionSources.count == payload.destinations.count
         else {
             throw DocumentPaintSurfaceMetalBackendError.invalidOperation
         }
@@ -624,7 +624,8 @@ final class DocumentPaintSurfaceMetalBackend:
         guard coordinates == coordinates.sorted(),
               Set(coordinates).count == coordinates.count,
               payload.baseSources.map(\.coordinate) == coordinates,
-              payload.authoritativeSources.map(\.coordinate) == coordinates
+              payload.authoritativeSources.map(\.coordinate) == coordinates,
+              payload.predictionSources.map(\.coordinate) == coordinates
         else {
             throw DocumentPaintSurfaceMetalBackendError.invalidOperation
         }
@@ -632,11 +633,14 @@ final class DocumentPaintSurfaceMetalBackend:
             payload.destinations,
             geometry: payload.geometry
         )
-        for source in payload.baseSources + payload.authoritativeSources {
+        for source in payload.baseSources + payload.authoritativeSources
+            + payload.predictionSources
+        {
             try validate(source: source, geometry: payload.geometry)
         }
         try validateNoAliases(
-            read: (payload.baseSources + payload.authoritativeSources)
+            read: (payload.baseSources + payload.authoritativeSources
+                + payload.predictionSources)
                 .compactMap(Self.texture(from:)),
             write: payload.destinations.map(\.texture)
         )
@@ -711,112 +715,20 @@ final class DocumentPaintSurfaceMetalBackend:
     private func validateEncodedImport(
         _ payload: DocumentPaintSurfaceEncodedImportBackendPayload
     ) throws {
-        let (minimumBytesPerRow, rowByteOverflow) = payload.width
-            .multipliedReportingOverflow(by: 4)
-        guard !rowByteOverflow,
-              payload.candidateGeometry.radialLayout == nil,
-              payload.conversion
-                == .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float,
-              payload.clearsDestinationsBeforeConversion,
-              payload.width == payload.candidateGeometry.documentPixelSize.width,
-              payload.height == payload.candidateGeometry.documentPixelSize.height,
-              payload.bytesPerRow >= minimumBytesPerRow,
-              payload.destinations.count == payload.tileRegions.count
-        else {
-            throw DocumentPaintSurfaceMetalBackendError.invalidOperation
-        }
-        let (requiredBytes, overflow) = payload.bytesPerRow
-            .multipliedReportingOverflow(by: payload.height)
-        let coordinates = payload.destinations.map(\.coordinate)
-        guard !overflow,
-              payload.encodedPremultipliedBGRA8.count >= requiredBytes,
-              coordinates == coordinates.sorted(),
-              Set(coordinates).count == coordinates.count,
-              coordinates == payload.tileRegions.map(\.coordinate)
-        else {
-            throw DocumentPaintSurfaceMetalBackendError.invalidOperation
-        }
-        if payload.destinations.isEmpty,
-           Self.encodedImportContainsNonzeroAlpha(payload)
-        {
-            throw DocumentPaintSurfaceMetalBackendError.invalidOperation
-        }
         try validateDestinations(
             payload.destinations,
             geometry: payload.candidateGeometry
         )
-        for (destination, region) in zip(
-            payload.destinations,
-            payload.tileRegions
-        ) {
-            guard region.destinationOrigin == .zero,
-                  region.extent.width == destination.logicalBounds.width,
-                  region.extent.height == destination.logicalBounds.height,
-                  Self.regionFits(
-                    origin: region.sourceOrigin,
-                    extent: region.extent,
-                    width: payload.width,
-                    height: payload.height
-                  ),
-                  let expectedOffset = Self.sourceByteOffset(
-                    origin: region.sourceOrigin,
-                    bytesPerRow: payload.bytesPerRow
-                  ),
-                  region.sourceByteOffset == expectedOffset,
-                  UInt32(exactly: region.sourceByteOffset) != nil,
-                  UInt32(exactly: payload.bytesPerRow) != nil
+        var destinationIDs: Set<ObjectIdentifier> = []
+        for binding in payload.planeBindings {
+            let byteCount = binding.bytes.count
+            guard byteCount <= 256 * 256 * 4,
+                  byteCount <= device.maxBufferLength,
+                  destinationIDs.insert(ObjectIdentifier(
+                    binding.destination.texture as AnyObject
+                  )).inserted
             else {
                 throw DocumentPaintSurfaceMetalBackendError.invalidOperation
-            }
-        }
-    }
-
-    private func validateRestore(
-        _ payload: DocumentPaintSurfaceRestoreBackendPayload
-    ) throws {
-        let coordinates = payload.destinations.map(\.coordinate)
-        guard coordinates == coordinates.sorted(),
-              Set(coordinates).count == coordinates.count
-        else {
-            throw DocumentPaintSurfaceMetalBackendError.invalidOperation
-        }
-        var textureIDs: Set<ObjectIdentifier> = []
-        for destination in payload.destinations {
-            let (expectedMinX, xOverflow) = destination.coordinate.x
-                .multipliedReportingOverflow(by: PaintTileDescriptor.side)
-            let (expectedMinY, yOverflow) = destination.coordinate.y
-                .multipliedReportingOverflow(by: PaintTileDescriptor.side)
-            guard destination.coordinate.x >= 0,
-                  destination.coordinate.y >= 0,
-                  !xOverflow,
-                  !yOverflow,
-                  destination.logicalBounds.minX == expectedMinX,
-                  destination.logicalBounds.minY == expectedMinY,
-                  (1...PaintTileDescriptor.side).contains(
-                    destination.logicalBounds.width
-                  ),
-                  (1...PaintTileDescriptor.side).contains(
-                    destination.logicalBounds.height
-                  )
-            else {
-                throw DocumentPaintSurfaceMetalBackendError.invalidOperation
-            }
-            guard Self.sameDevice(device, destination.texture.device) else {
-                throw DocumentPaintSurfaceMetalBackendError
-                    .resourceDeviceMismatch
-            }
-            guard destination.texture.pixelFormat
-                    == PaintTileDescriptor.pixelFormat,
-                  destination.texture.width == PaintTileDescriptor.side,
-                  destination.texture.height == PaintTileDescriptor.side,
-                  destination.texture.usage.contains(.shaderWrite)
-            else {
-                throw DocumentPaintSurfaceMetalBackendError.invalidTexture
-            }
-            guard textureIDs.insert(ObjectIdentifier(
-                destination.texture as AnyObject
-            )).inserted else {
-                throw DocumentPaintSurfaceMetalBackendError.textureAlias
             }
         }
     }
@@ -1015,7 +927,7 @@ final class DocumentPaintSurfaceMetalBackend:
                 resources: RetainedResources(
                     textures: [],
                     reduction: nil,
-                    importSource: nil
+                    importSources: []
                 ),
                 injectsGPUFailure: false
             )
@@ -1037,7 +949,7 @@ final class DocumentPaintSurfaceMetalBackend:
         for operation: DocumentPaintSurfaceBackendOperation
     ) -> [DocumentPaintSurfaceMutationDestination] {
         switch operation {
-        case .clear, .restore:
+        case .clear:
             return []
         case let .stroke(payload):
             return payload.destinations
@@ -1105,22 +1017,6 @@ final class DocumentPaintSurfaceMetalBackend:
             return nil
         }
         return offset
-    }
-
-    private static func encodedImportContainsNonzeroAlpha(
-        _ payload: DocumentPaintSurfaceEncodedImportBackendPayload
-    ) -> Bool {
-        payload.encodedPremultipliedBGRA8.withUnsafeBytes { rawBuffer in
-            let bytes = rawBuffer.bindMemory(to: UInt8.self)
-            for y in 0..<payload.height {
-                var alphaOffset = y * payload.bytesPerRow + 3
-                for _ in 0..<payload.width {
-                    if bytes[alphaOffset] != 0 { return true }
-                    alphaOffset += 4
-                }
-            }
-            return false
-        }
     }
 
     private static func radialUniforms(

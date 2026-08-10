@@ -6,6 +6,230 @@ import Testing
 @Suite("Pattern paint tile codec")
 struct PatternPaintTileCodecTests {
     @Test
+    func nativeSurfaceAcceptsMaximumPhysicalGeometryAndRetainsEmptyRevision()
+        throws
+    {
+        for pixelSize in [
+            PixelSize(width: 16_384, height: 1),
+            PixelSize(width: 1, height: 16_384),
+            PixelSize(width: 16_384, height: 16_384),
+        ] {
+            let surface = PatternPaintTileSurface(
+                layerID: UUID(),
+                pixelSize: pixelSize,
+                rasterRevision: 41,
+                tiles: []
+            )
+
+            let encoded = try PatternPaintTileCodec.encodeManifest(surface)
+            let decoded = try PatternPaintTileCodec.decodeManifest(
+                encoded,
+                payloadsByPath: [:]
+            )
+
+            #expect(decoded == surface)
+            #expect(decoded.rasterRevision == 41)
+        }
+
+        let valid = try PatternPaintTileCodec.encodeManifest(
+            PatternPaintTileSurface(
+                layerID: UUID(),
+                pixelSize: PixelSize(width: 256, height: 256),
+                rasterRevision: 5,
+                tiles: []
+            )
+        )
+        var object = try #require(
+            JSONSerialization.jsonObject(with: valid) as? [String: Any]
+        )
+        object.removeValue(forKey: "rasterRevision")
+        let missingRevision = try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys]
+        )
+        #expect(throws: PatternPaintTileError.invalidManifest) {
+            try PatternPaintTileCodec.decodeManifest(
+                missingRevision,
+                payloadsByPath: [:]
+            )
+        }
+    }
+
+    @Test
+    func nativeSurfaceRejectsDimensionsOutsidePhysicalGeometryBound() throws {
+        for pixelSize in [
+            PixelSize(width: 16_385, height: 1),
+            PixelSize(width: 1, height: 16_385),
+        ] {
+            #expect(throws: PatternPaintTileError.invalidPixelSize) {
+                try PatternPaintTileCodec.validateMetadata([
+                    PatternPaintTileSurface(
+                        layerID: UUID(),
+                        pixelSize: pixelSize,
+                        rasterRevision: 1,
+                        tiles: []
+                    ),
+                ])
+            }
+        }
+
+        let valid = try PatternPaintTileCodec.encodeManifest(
+            PatternPaintTileSurface(
+                layerID: UUID(),
+                pixelSize: PixelSize(width: 1, height: 1),
+                rasterRevision: 1,
+                tiles: []
+            )
+        )
+        for key in ["pixelWidth", "pixelHeight"] {
+            var object = try #require(
+                JSONSerialization.jsonObject(with: valid) as? [String: Any]
+            )
+            object[key] = 0
+            let malformed = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            #expect(throws: PatternPaintTileError.invalidPixelSize) {
+                try PatternPaintTileCodec.decodeManifest(
+                    malformed,
+                    payloadsByPath: [:]
+                )
+            }
+        }
+    }
+
+    @Test
+    func maximumCoordinateIsAcceptedAndNextCoordinateIsRejected() throws {
+        let layerID = UUID()
+        let valid = metadataRecord(
+            coordinate: PatternPaintTileCoordinate(x: 63, y: 63),
+            bounds: PatternPaintTileBounds(
+                minX: 16_128,
+                minY: 16_128,
+                width: 255,
+                height: 255
+            ),
+            rasterRevision: 3,
+            ordinal: 0
+        )
+        let surface = PatternPaintTileSurface(
+            layerID: layerID,
+            pixelSize: PixelSize(width: 16_383, height: 16_383),
+            rasterRevision: 3,
+            tiles: [valid]
+        )
+        try PatternPaintTileCodec.validateMetadata([surface])
+
+        let invalid = metadataRecord(
+            coordinate: PatternPaintTileCoordinate(x: 64, y: 0),
+            bounds: PatternPaintTileBounds(
+                minX: 16_384,
+                minY: 0,
+                width: 1,
+                height: 256
+            ),
+            rasterRevision: 3,
+            ordinal: 1
+        )
+        #expect(throws: PatternPaintTileError.invalidLogicalBounds(invalid.id)) {
+            try PatternPaintTileCodec.validateMetadata([
+                PatternPaintTileSurface(
+                    layerID: layerID,
+                    pixelSize: surface.pixelSize,
+                    rasterRevision: 3,
+                    tiles: [invalid]
+                ),
+            ])
+        }
+    }
+
+    @Test
+    func metadataPreflightsAggregateTileCountWithoutPayloadMaterialization()
+        throws
+    {
+        let records = (0..<1_025).map { ordinal in
+            let x = ordinal % 64
+            let y = ordinal / 64
+            return metadataRecord(
+                coordinate: PatternPaintTileCoordinate(x: x, y: y),
+                bounds: PatternPaintTileBounds(
+                    minX: x * 256,
+                    minY: y * 256,
+                    width: 256,
+                    height: 256
+                ),
+                rasterRevision: 9,
+                ordinal: ordinal
+            )
+        }
+        let surface = PatternPaintTileSurface(
+            layerID: UUID(),
+            pixelSize: PixelSize(width: 16_384, height: 16_384),
+            rasterRevision: 9,
+            tiles: Array(records.prefix(1_024))
+        )
+        try PatternPaintTileCodec.validateMetadata([surface])
+
+        #expect(throws: PatternPaintTileError.tileCountOutOfRange(
+            actual: 1_025,
+            maximum: 1_024
+        )) {
+            try PatternPaintTileCodec.validateMetadata([
+                PatternPaintTileSurface(
+                    layerID: surface.layerID,
+                    pixelSize: surface.pixelSize,
+                    rasterRevision: surface.rasterRevision,
+                    tiles: records
+                ),
+            ])
+        }
+
+        #expect(throws: PatternPaintTileError.tileCountOutOfRange(
+            actual: 2,
+            maximum: 1
+        )) {
+            try PatternPaintTileCodec.validateMetadata([
+                PatternPaintTileSurface(
+                    layerID: surface.layerID,
+                    pixelSize: surface.pixelSize,
+                    rasterRevision: surface.rasterRevision,
+                    tiles: Array(records.prefix(2))
+                ),
+            ], maximumDecodedBytes: PatternPaintTileCodec.bytesPerTile)
+        }
+    }
+
+    @Test
+    func surfaceRejectsTileFromAnotherRasterRevision() {
+        let record = metadataRecord(
+            coordinate: PatternPaintTileCoordinate(x: 0, y: 0),
+            bounds: PatternPaintTileBounds(
+                minX: 0,
+                minY: 0,
+                width: 256,
+                height: 256
+            ),
+            rasterRevision: 12,
+            ordinal: 0
+        )
+        #expect(throws: PatternPaintTileError.rasterRevisionMismatch(
+            tileID: record.id,
+            expected: 11,
+            actual: 12
+        )) {
+            try PatternPaintTileCodec.validateMetadata([
+                PatternPaintTileSurface(
+                    layerID: UUID(),
+                    pixelSize: PixelSize(width: 256, height: 256),
+                    rasterRevision: 11,
+                    tiles: [record]
+                ),
+            ])
+        }
+    }
+
+    @Test
     func recordCreationRejectsUnsafePathAndNonclippedBoundsBeforeHashing()
         throws
     {
@@ -75,6 +299,7 @@ struct PatternPaintTileCodecTests {
                 PatternPaintTileSurface(
                     layerID: fixture.surface.layerID,
                     pixelSize: fixture.surface.pixelSize,
+                    rasterRevision: fixture.surface.rasterRevision,
                     tiles: [unsafe]
                 )
             )
@@ -129,6 +354,7 @@ struct PatternPaintTileCodecTests {
         let surface = PatternPaintTileSurface(
             layerID: fixture.surface.layerID,
             pixelSize: fixture.surface.pixelSize,
+            rasterRevision: rebound.rasterRevision,
             tiles: [rebound]
         )
 
@@ -197,6 +423,7 @@ struct PatternPaintTileCodecTests {
             let surface = PatternPaintTileSurface(
                 layerID: fixture.surface.layerID,
                 pixelSize: fixture.surface.pixelSize,
+                rasterRevision: fixture.surface.rasterRevision,
                 tiles: [record]
             )
             #expect(throws: expected) {
@@ -227,6 +454,7 @@ struct PatternPaintTileCodecTests {
         let coordinateSurface = PatternPaintTileSurface(
             layerID: fixture.surface.layerID,
             pixelSize: fixture.surface.pixelSize,
+            rasterRevision: fixture.surface.rasterRevision,
             tiles: [fixture.record, duplicateCoordinate]
         )
         #expect(throws: PatternPaintTileError.duplicateCoordinate(
@@ -264,6 +492,7 @@ struct PatternPaintTileCodecTests {
                 [PatternPaintTileSurface(
                     layerID: fixture.surface.layerID,
                     pixelSize: fixture.surface.pixelSize,
+                    rasterRevision: fixture.surface.rasterRevision,
                     tiles: [fixture.record, duplicateID]
                 )],
                 payloadsByPath: [fixture.record.file: fixture.payload]
@@ -293,6 +522,7 @@ struct PatternPaintTileCodecTests {
                 [PatternPaintTileSurface(
                     layerID: fixture.surface.layerID,
                     pixelSize: fixture.surface.pixelSize,
+                    rasterRevision: fixture.surface.rasterRevision,
                     tiles: [invalidBounds]
                 )],
                 payloadsByPath: [fixture.record.file: fixture.payload]
@@ -321,6 +551,7 @@ struct PatternPaintTileCodecTests {
                 [PatternPaintTileSurface(
                     layerID: fixture.surface.layerID,
                     pixelSize: fixture.surface.pixelSize,
+                    rasterRevision: fixture.surface.rasterRevision,
                     tiles: [fixture.record, sharedPath]
                 )],
                 payloadsByPath: [fixture.record.file: fixture.payload]
@@ -338,15 +569,16 @@ struct PatternPaintTileCodecTests {
                     index + 1
                 ))!,
                 pixelSize: PixelSize(width: 300, height: 256),
+                rasterRevision: 1,
                 tiles: []
             )
         }
         #expect(throws: PatternPaintTileError.layerCountOutOfRange(9)) {
             try PatternPaintTileCodec.validate(layers, payloadsByPath: [:])
         }
-        #expect(throws: PatternPaintTileError.decodedByteLimitExceeded(
-            actual: 524_288,
-            maximum: 524_287
+        #expect(throws: PatternPaintTileError.tileCountOutOfRange(
+            actual: 1,
+            maximum: 0
         )) {
             try PatternPaintTileCodec.validate(
                 [fixture.surface],
@@ -355,6 +587,28 @@ struct PatternPaintTileCodecTests {
             )
         }
     }
+}
+
+private func metadataRecord(
+    coordinate: PatternPaintTileCoordinate,
+    bounds: PatternPaintTileBounds,
+    rasterRevision: UInt64,
+    ordinal: Int
+) -> PatternPaintTileRecord {
+    PatternPaintTileRecord(
+        id: UUID(uuidString: String(
+            format: "00000000-0000-4000-8000-%012x",
+            ordinal + 1
+        ))!,
+        coordinate: coordinate,
+        logicalBounds: bounds,
+        pixelFormat: .rgba16Float,
+        byteOrder: .littleEndian,
+        byteCount: PatternPaintTileCodec.bytesPerTile,
+        semanticSHA256: String(repeating: "0", count: 64),
+        rasterRevision: rasterRevision,
+        file: "tiles/\(ordinal).rgba16f"
+    )
 }
 
 private func tileFixture() throws -> (
@@ -388,6 +642,7 @@ private func tileFixture() throws -> (
         PatternPaintTileSurface(
             layerID: layerID,
             pixelSize: PixelSize(width: 300, height: 256),
+            rasterRevision: 1,
             tiles: [record]
         ),
         record,

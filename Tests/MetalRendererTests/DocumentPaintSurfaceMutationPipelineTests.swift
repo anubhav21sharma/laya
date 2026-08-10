@@ -300,6 +300,7 @@ struct DocumentPaintSurfaceMutationPipelineTests {
         radial: PatternRadialFrameUniforms? = nil,
         base: (any MTLTexture)? = nil,
         authoritative: (any MTLTexture)? = nil,
+        prediction: (any MTLTexture)? = nil,
         sourceBytes: (any MTLBuffer)? = nil,
         destination: any MTLTexture
     ) throws -> PatternDocumentPaintMutationReduction {
@@ -309,6 +310,9 @@ struct DocumentPaintSurfaceMutationPipelineTests {
         let encoder = try #require(commandBuffer.makeComputeCommandEncoder())
         encoder.setComputePipelineState(pipeline)
         var uniforms = uniforms
+        if prediction == nil {
+            uniforms.flags |= PatternDocumentPaintFlagPredictionKnownClear
+        }
         encoder.setBytes(
             &uniforms,
             length: MemoryLayout.size(ofValue: uniforms),
@@ -333,6 +337,7 @@ struct DocumentPaintSurfaceMutationPipelineTests {
         }
         encoder.setTexture(base, index: Int(PatternTextureIndexDocumentPaintBase))
         encoder.setTexture(authoritative, index: Int(PatternTextureIndexDocumentPaintAuthoritative))
+        encoder.setTexture(prediction, index: Int(PatternTextureIndexDocumentPaintPrediction))
         encoder.setTexture(destination, index: Int(PatternTextureIndexDocumentPaintDestination))
         encoder.dispatchThreads(
             MTLSize(width: 256, height: 256, depth: 1),

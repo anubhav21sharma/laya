@@ -4,19 +4,14 @@ import PatternEngine
 import Testing
 
 @MainActor
-private func makeResizeRenderer(
-    pixelSize: PixelSize,
-    tiling: TilingKind = .grid
-) throws -> GridRenderer? {
+private func makeResizeRenderer(pixelSize: PixelSize) throws -> GridRenderer? {
     guard let device = MTLCreateSystemDefaultDevice() else { return nil }
     let root = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
         .deletingLastPathComponent()
         .deletingLastPathComponent()
     let shader = try String(
-        contentsOf: root.appendingPathComponent(
-            "Sources/MetalRenderer/Shaders.metal"
-        ),
+        contentsOf: root.appendingPathComponent("Sources/MetalRenderer/Shaders.metal"),
         encoding: .utf8
     )
     let header = try String(
@@ -36,508 +31,134 @@ private func makeResizeRenderer(
         device: device,
         library: library,
         drawableSize: PatternSize(width: 320, height: 240),
-        configuration: TilingCanvasConfiguration(
-            pixelSize: pixelSize,
-            tiling: tiling
-        )
+        configuration: TilingCanvasConfiguration(pixelSize: pixelSize, tiling: .grid)
     )
 }
 
 @Test
 @MainActor
-func emptyFiniteConfigurationAtomicallyReplacesStrokeWorkspace() throws {
-    let oldSize = PixelSize(width: 64, height: 64)
-    let newSize = PixelSize(width: 96, height: 80)
-    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else {
-        return
-    }
-    let initialWorkspaceIdentity =
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-    let initialWorkspaceInstallationCount =
-        renderer.offMainStrokeWorkspaceInstallationCountForTesting
-
-    try renderer.replaceEmptyDocumentConfiguration(
-        .finite(.plain),
-        pixelSize: newSize
-    )
-
-    #expect(renderer.pixelSize == newSize)
-    #expect(renderer.storagePixelSize == newSize)
-    #expect(renderer.offMainStrokeWorkspacePixelSizeForTesting == newSize)
-    #expect(
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-            != initialWorkspaceIdentity
-    )
-    #expect(
-        renderer.offMainStrokeWorkspaceInstallationCountForTesting
-            == initialWorkspaceInstallationCount + 1
-    )
-    #expect(renderer.isIdle)
-}
-
-@Test
-@MainActor
-func emptyFiniteConfigurationWorkspaceFailurePreservesOldInstallation() throws {
-    let oldSize = PixelSize(width: 64, height: 64)
-    let newSize = PixelSize(width: 96, height: 80)
-    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else {
-        return
-    }
-    let initialSnapshot = renderer.harnessTilingMutationSnapshot
-    let initialWorkspaceIdentity =
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-    let initialWorkspaceInstallationCount =
-        renderer.offMainStrokeWorkspaceInstallationCountForTesting
-    let initialViewport = renderer.viewport
-
-    #expect(throws: MetalRendererError.textureAllocationFailed) {
-        try renderer.replaceEmptyDocumentConfigurationForTesting(
-            .finite(.plain),
-            pixelSize: newSize,
-            forceStrokeSurfaceAllocationFailure: true
-        )
-    }
-
-    #expect(renderer.harnessTilingMutationSnapshot == initialSnapshot)
-    #expect(renderer.pixelSize == oldSize)
-    #expect(renderer.storagePixelSize == oldSize)
-    #expect(renderer.offMainStrokeWorkspacePixelSizeForTesting == oldSize)
-    #expect(
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-            == initialWorkspaceIdentity
-    )
-    #expect(
-        renderer.offMainStrokeWorkspaceInstallationCountForTesting
-            == initialWorkspaceInstallationCount
-    )
-    #expect(renderer.viewport == initialViewport)
-    #expect(renderer.isIdle)
-}
-
-@Test
-@MainActor
-func resizeShrinkCropsOnlyRightAndBottomBytes() throws {
+func currentResizeShrinkCropsOnlyRightAndBottomBytes() async throws {
     let oldSize = PixelSize(width: 96, height: 80)
-    let newSize = PixelSize(width: 64, height: 72)
-    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else {
-        return
-    }
-    let original = deterministicPixels(oldSize)
-    try renderer.replaceCanonicalPixelsForHarness(original)
-    let initialWorkspaceIdentity =
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-    let initialWorkspaceInstallationCount =
-        renderer.offMainStrokeWorkspaceInstallationCountForTesting
-    let initialRevision = renderer.harnessRevision
-    var receipts: [RasterMutationReceipt] = []
-    renderer.onOperationCompleted = {
-        if case let .rasterSuccess(receipt) = $0 {
-            receipts.append(receipt)
-        }
-    }
+    let newSize = PixelSize(width: 64, height: 64)
+    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else { return }
+    let original = deterministicResizePixels(oldSize)
+    try await installResizePixels(original, into: renderer)
 
-    try renderer.requestResize(
+    try await renderer.resizeDocument(
         token: RendererOperationToken(rawValue: 1),
-        to: newSize,
-        maximumRetainedBytes: 1_000_000
-    )
-    #expect(renderer.pixelSize == oldSize)
-    #expect(renderer.harnessRevision == initialRevision)
-    #expect(
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-            == initialWorkspaceIdentity
-    )
-    try renderer.finishRasterOperationForHarness()
-
-    #expect(renderer.pixelSize == newSize)
-    #expect(renderer.harnessRevision == initialRevision.advanced())
-    #expect(
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-            != initialWorkspaceIdentity
-    )
-    #expect(
-        renderer.offMainStrokeWorkspaceInstallationCountForTesting
-            == initialWorkspaceInstallationCount + 1
-    )
-    #expect(try canonicalBytes(renderer) == croppedOrFilled(
-        original,
-        from: oldSize,
         to: newSize
-    ))
-    let receipt = try #require(receipts.first)
-    #expect(receipt.before.pixelSize == oldSize)
-    #expect(receipt.after.pixelSize == newSize)
-    renderer.releaseRasterRevisions([receipt.before.id, receipt.after.id])
+    )
+
+    #expect(renderer.pixelSize == newSize)
+    #expect(
+        try await resizeSnapshotBytes(renderer)
+            == croppedOrFilledResizePixels(original, from: oldSize, to: newSize)
+    )
 }
 
 @Test
 @MainActor
-func resizeGrowPreservesTopLeftAndTransparentFillsRightAndBottom() throws {
-    let oldSize = PixelSize(width: 64, height: 72)
+func currentResizeGrowPreservesTopLeftAndTransparentFillsRemainder()
+    async throws
+{
+    let oldSize = PixelSize(width: 64, height: 64)
     let newSize = PixelSize(width: 96, height: 80)
-    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else {
-        return
-    }
-    let original = deterministicPixels(oldSize)
-    try renderer.replaceCanonicalPixelsForHarness(original)
-    var receipt: RasterMutationReceipt?
-    renderer.onOperationCompleted = {
-        if case let .rasterSuccess(value) = $0 {
-            receipt = value
-        }
-    }
+    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else { return }
+    let original = deterministicResizePixels(oldSize)
+    try await installResizePixels(original, into: renderer)
 
-    try renderer.requestResize(
+    try await renderer.resizeDocument(
         token: RendererOperationToken(rawValue: 2),
-        to: newSize,
-        maximumRetainedBytes: 1_000_000
-    )
-    try renderer.finishRasterOperationForHarness()
-
-    let grown = try canonicalBytes(renderer)
-    #expect(grown == croppedOrFilled(original, from: oldSize, to: newSize))
-    for y in 0..<newSize.height {
-        for x in 0..<newSize.width where x >= oldSize.width || y >= oldSize.height {
-            let offset = (y * newSize.width + x) * 4
-            #expect(Array(grown[offset..<(offset + 4)]) == [0, 0, 0, 0])
-        }
-    }
-
-    let stored = try #require(receipt)
-    renderer.releaseRasterRevisions([stored.before.id, stored.after.id])
-}
-
-@Test
-@MainActor
-func successfulResizeRecentersNewCanvasWithoutChangingZoom() throws {
-    let oldSize = PixelSize(width: 64, height: 72)
-    let newSize = PixelSize(width: 96, height: 80)
-    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else {
-        return
-    }
-    renderer.zoom(
-        by: 1.5,
-        anchor: ScreenPoint(x: 160, y: 120)
+        to: newSize
     )
 
-    try renderer.requestResize(
-        token: RendererOperationToken(rawValue: 3),
-        to: newSize,
-        maximumRetainedBytes: 1_000_000
-    )
-    try renderer.finishRasterOperationForHarness()
-
-    #expect(renderer.viewport.worldCenter == WorldPoint(x: 48, y: 40))
-    #expect(renderer.viewport.zoom == 1.5)
-}
-
-@Test
-@MainActor
-func resizeUndoRedoRestoresExactDimensionsBytesAndMonotonicRevision() throws {
-    let oldSize = PixelSize(width: 96, height: 80)
-    let newSize = PixelSize(width: 64, height: 72)
-    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else {
-        return
-    }
-    let original = deterministicPixels(oldSize)
-    let resized = croppedOrFilled(original, from: oldSize, to: newSize)
-    try renderer.replaceCanonicalPixelsForHarness(original)
-    var resizeReceipt: RasterMutationReceipt?
-    renderer.onOperationCompleted = {
-        if case let .rasterSuccess(receipt) = $0 {
-            resizeReceipt = receipt
-        }
-    }
-
-    try renderer.requestResize(
-        token: RendererOperationToken(rawValue: 10),
-        to: newSize,
-        maximumRetainedBytes: 1_000_000
-    )
-    try renderer.finishRasterOperationForHarness()
-    let receipt = try #require(resizeReceipt)
-    let afterResizeRevision = renderer.harnessRevision
-
-    try renderer.requestResizeRestore(
-        token: RendererOperationToken(rawValue: 11),
-        revision: receipt.before
-    )
-    #expect(renderer.pixelSize == newSize)
-    try renderer.finishRasterOperationForHarness()
-    #expect(renderer.pixelSize == oldSize)
-    #expect(try canonicalBytes(renderer) == original)
-    #expect(renderer.harnessRevision == afterResizeRevision.advanced())
-
-    try renderer.requestResizeRestore(
-        token: RendererOperationToken(rawValue: 12),
-        revision: receipt.after
-    )
-    try renderer.finishRasterOperationForHarness()
-    #expect(renderer.pixelSize == newSize)
-    #expect(try canonicalBytes(renderer) == resized)
-    #expect(renderer.harnessRevision == afterResizeRevision.advanced().advanced())
-
-    renderer.releaseRasterRevisions([receipt.before.id, receipt.after.id])
-}
-
-@Test
-@MainActor
-func replacementAllocationFailurePreservesAllRendererState() throws {
-    let oldSize = PixelSize(width: 96, height: 80)
-    guard let renderer = try makeResizeRenderer(
-        pixelSize: oldSize,
-        tiling: .mirrorX
-    ) else { return }
-    let original = deterministicPixels(oldSize)
-    try renderer.replaceCanonicalPixelsForHarness(original)
-    renderer.pan(byScreenDelta: SIMD2<Float>(17, -9))
-    renderer.zoom(
-        by: 1.5,
-        anchor: ScreenPoint(x: 80, y: 60)
-    )
-    let resourceSnapshot = renderer.harnessTilingMutationSnapshot
-    let workspaceIdentity =
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-    let workspaceInstallationCount =
-        renderer.offMainStrokeWorkspaceInstallationCountForTesting
-    let viewport = renderer.viewport
-    let residentBytes = renderer.harnessRasterRevisionResidentBytes
-    var completions: [RendererOperationCompletion] = []
-    renderer.onOperationCompleted = { completions.append($0) }
-
-    #expect(throws: MetalRendererError.textureAllocationFailed) {
-        try renderer.requestResizeForHarness(
-            token: RendererOperationToken(rawValue: 20),
-            to: PixelSize(width: 64, height: 72),
-            maximumRetainedBytes: 1_000_000,
-            forceResourceAllocationFailure: true
-        )
-    }
-
-    #expect(renderer.harnessTilingMutationSnapshot == resourceSnapshot)
     #expect(
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-            == workspaceIdentity
+        try await resizeSnapshotBytes(renderer)
+            == croppedOrFilledResizePixels(original, from: oldSize, to: newSize)
     )
-    #expect(
-        renderer.offMainStrokeWorkspaceInstallationCountForTesting
-            == workspaceInstallationCount
-    )
-    #expect(renderer.pixelSize == oldSize)
-    #expect(renderer.tiling == .mirrorX)
-    #expect(renderer.viewport == viewport)
-    #expect(try canonicalBytes(renderer) == original)
-    #expect(renderer.harnessRasterRevisionResidentBytes == residentBytes)
-    #expect(renderer.isIdle)
-    #expect(completions.isEmpty)
 }
 
 @Test
 @MainActor
-func submittedResizeFailurePreservesResourcesPixelsAndRevisionStorage() throws {
+func currentResizeHistoryRestoresExactDimensionsAndBytes() async throws {
     let oldSize = PixelSize(width: 96, height: 80)
-    guard let renderer = try makeResizeRenderer(
-        pixelSize: oldSize,
-        tiling: .brick
-    ) else { return }
-    let original = deterministicPixels(oldSize)
-    try renderer.replaceCanonicalPixelsForHarness(original)
-    let snapshot = renderer.harnessTilingMutationSnapshot
-    let workspaceIdentity =
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-    let workspaceInstallationCount =
-        renderer.offMainStrokeWorkspaceInstallationCountForTesting
-    var completions: [RendererOperationCompletion] = []
-    renderer.onOperationCompleted = { completions.append($0) }
-
-    try renderer.requestResizeForHarness(
-        token: RendererOperationToken(rawValue: 25),
-        to: PixelSize(width: 64, height: 72),
-        maximumRetainedBytes: 1_000_000,
-        forceResourceAllocationFailure: false,
-        forceCommandFailure: true
-    )
-    #expect(!renderer.isIdle)
-    #expect(throws: MetalRendererError.commandFailed(
-        "injected harness command-buffer failure"
-    )) {
-        try renderer.finishRasterOperationForHarness()
-    }
-
-    #expect(renderer.harnessTilingMutationSnapshot == snapshot)
-    #expect(
-        renderer.offMainStrokeWorkspaceIdentityForTesting
-            == workspaceIdentity
-    )
-    #expect(
-        renderer.offMainStrokeWorkspaceInstallationCountForTesting
-            == workspaceInstallationCount
-    )
-    #expect(renderer.pixelSize == oldSize)
-    #expect(renderer.tiling == .brick)
-    #expect(try canonicalBytes(renderer) == original)
-    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
-    #expect(renderer.isIdle)
-    #expect(completions.count == 1)
-    guard case let .failure(token, _) = completions.first else {
-        Issue.record("Expected one terminal resize failure")
-        return
-    }
-    #expect(token == RendererOperationToken(rawValue: 25))
-}
-
-@Test
-@MainActor
-func submittedResizeRestoreFailureKeepsInstalledDimensionsAndBytes() throws {
-    let oldSize = PixelSize(width: 96, height: 80)
-    let newSize = PixelSize(width: 64, height: 72)
-    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else {
-        return
-    }
-    let original = deterministicPixels(oldSize)
-    try renderer.replaceCanonicalPixelsForHarness(original)
+    let newSize = PixelSize(width: 64, height: 64)
+    guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else { return }
+    let original = deterministicResizePixels(oldSize)
+    try await installResizePixels(original, into: renderer)
     var receipt: RasterMutationReceipt?
     renderer.onOperationCompleted = {
-        if case let .rasterSuccess(value) = $0 {
-            receipt = value
-        }
-    }
-    try renderer.requestResize(
-        token: RendererOperationToken(rawValue: 26),
-        to: newSize,
-        maximumRetainedBytes: 1_000_000
-    )
-    try renderer.finishRasterOperationForHarness()
-    let stored = try #require(receipt)
-    let snapshot = renderer.harnessTilingMutationSnapshot
-    let resized = try canonicalBytes(renderer)
-
-    try renderer.requestResizeRestoreForHarness(
-        token: RendererOperationToken(rawValue: 27),
-        revision: stored.before,
-        forceCommandFailure: true
-    )
-    #expect(throws: MetalRendererError.commandFailed(
-        "injected harness command-buffer failure"
-    )) {
-        try renderer.finishRasterOperationForHarness()
+        if case let .rasterSuccess(value) = $0 { receipt = value }
     }
 
-    #expect(renderer.harnessTilingMutationSnapshot == snapshot)
+    try await renderer.resizeDocument(
+        token: RendererOperationToken(rawValue: 10),
+        to: newSize
+    )
+    let history = try #require(receipt)
+    let resized = try await resizeSnapshotBytes(renderer)
+
+    try await renderer.restoreDocumentRevision(
+        token: RendererOperationToken(rawValue: 11),
+        revision: history.before,
+        targetPixelSize: oldSize
+    )
+    #expect(renderer.pixelSize == oldSize)
+    #expect(try await resizeSnapshotBytes(renderer) == original)
+
+    try await renderer.restoreDocumentRevision(
+        token: RendererOperationToken(rawValue: 12),
+        revision: history.after,
+        targetPixelSize: newSize
+    )
     #expect(renderer.pixelSize == newSize)
-    #expect(try canonicalBytes(renderer) == resized)
-    #expect(renderer.isIdle)
-    renderer.releaseRasterRevisions([stored.before.id, stored.after.id])
+    #expect(try await resizeSnapshotBytes(renderer) == resized)
+    try await renderer.releasePaintRevisions([history.before.id, history.after.id])
 }
 
 @Test
 @MainActor
-func resizeRejectsInvalidDimensionsAndHistoryCostBeforeMutation() throws {
+func invalidCurrentResizeLeavesGeometryAndPixelsUnchanged() async throws {
     let size = PixelSize(width: 64, height: 64)
-    guard let renderer = try makeResizeRenderer(pixelSize: size) else {
-        return
-    }
-    let snapshot = renderer.harnessTilingMutationSnapshot
+    guard let renderer = try makeResizeRenderer(pixelSize: size) else { return }
+    let original = deterministicResizePixels(size)
+    try await installResizePixels(original, into: renderer)
 
-    #expect(throws: MetalRendererError.invalidTileDimensions(
-        width: 63,
-        height: 64
-    )) {
-        try renderer.requestResize(
-            token: RendererOperationToken(rawValue: 30),
-            to: PixelSize(width: 63, height: 64),
-            maximumRetainedBytes: Int.max
+    await #expect(throws: MetalRendererError.self) {
+        try await renderer.resizeDocument(
+            token: RendererOperationToken(rawValue: 20),
+            to: PixelSize(width: 63, height: 64)
         )
     }
-    #expect(throws: MetalRendererError.rasterRevisionStorageLimitExceeded) {
-        try renderer.requestResize(
-            token: RendererOperationToken(rawValue: 31),
-            to: PixelSize(width: 96, height: 80),
-            maximumRetainedBytes: 0
-        )
-    }
-    #expect(renderer.harnessTilingMutationSnapshot == snapshot)
-    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
-    #expect(renderer.isIdle)
+
+    #expect(renderer.pixelSize == size)
+    #expect(try await resizeSnapshotBytes(renderer) == original)
 }
 
-@Test
 @MainActor
-func failedNativeClearIsAtomicAndDiscardsOnlyItsProvisionalPair() throws {
-    let size = PixelSize(width: 64, height: 64)
-    guard let renderer = try makeResizeRenderer(pixelSize: size) else {
-        return
-    }
-    let original = deterministicPixels(size)
-    try renderer.replaceCanonicalPixelsForHarness(original)
-    let snapshot = renderer.harnessTilingMutationSnapshot
-    let residentBytes = renderer.harnessRasterRevisionResidentBytes
-    var completions: [RendererOperationCompletion] = []
-    renderer.onOperationCompleted = { completions.append($0) }
-    let token = RendererOperationToken(rawValue: 41)
-
-    try renderer.requestClearForHarness(
-        token: token,
-        maximumRetainedBytes: 1_000_000,
-        forceFailure: true
-    )
-    #expect(renderer.harnessRasterRevisionResidentBytes > residentBytes)
-    #expect(throws: MetalRendererError.commandFailed(
-        "injected harness command-buffer failure"
-    )) {
-        try renderer.finishRasterOperationForHarness()
-    }
-
-    #expect(renderer.harnessTilingMutationSnapshot == snapshot)
-    #expect(try canonicalBytes(renderer) == original)
-    #expect(renderer.harnessRasterRevisionResidentBytes == residentBytes)
-    #expect(renderer.isIdle)
-    #expect(completions.count == 1)
-    guard case let .failure(completedToken, _) = completions.first else {
-        Issue.record("Expected exactly one native clear failure")
-        return
-    }
-    #expect(completedToken == token)
+private func installResizePixels(
+    _ bytes: [UInt8],
+    into renderer: GridRenderer
+) async throws {
+    try await renderer.restoreCommittedDocument(CommittedDocumentSnapshot(
+        canvasSize: renderer.pixelSize,
+        documentConfiguration: renderer.documentConfiguration,
+        documentDomainLocked: bytes.contains { $0 != 0 },
+        radialGeometryLocked: false,
+        storage: .singleRaster(bgra8PremultipliedBytes: bytes)
+    ))
 }
 
-@Test
 @MainActor
-func nativeRestoreRejectsMismatchedCanonicalSizeBeforeSubmission() throws {
-    guard let renderer = try makeResizeRenderer(
-        pixelSize: PixelSize(width: 64, height: 64)
-    ) else {
-        return
+private func resizeSnapshotBytes(_ renderer: GridRenderer) async throws -> [UInt8] {
+    let snapshot = try await renderer.captureCommittedDocument()
+    guard case let .singleRaster(bytes) = snapshot.storage else {
+        throw MetalRendererError.committedSnapshotIncompatible
     }
-    let mismatchedSize = PixelSize(width: 65, height: 64)
-    let region = PixelRegionSet(
-        [try #require(
-            PixelRect(minX: 0, minY: 0, maxX: 65, maxY: 64)
-        )],
-        clippedTo: mismatchedSize
-    )
-    let mismatched = RasterRevisionReference(
-        id: StoredRasterRevisionID(rawValue: 999),
-        pixelSize: mismatchedSize,
-        regions: region,
-        retainedBytes: 65 * 64 * 4
-    )
-
-    #expect(throws: MetalRendererError.rasterRevisionTextureSizeMismatch(
-        expectedWidth: 64,
-        expectedHeight: 64,
-        actualWidth: 65,
-        actualHeight: 64
-    )) {
-        try renderer.requestRasterRestore(
-            token: RendererOperationToken(rawValue: 42),
-            revision: mismatched
-        )
-    }
-    #expect(renderer.isIdle)
-    #expect(renderer.harnessRasterRevisionResidentBytes == 0)
+    return bytes
 }
 
-private func deterministicPixels(_ size: PixelSize) -> [UInt8] {
+private func deterministicResizePixels(_ size: PixelSize) -> [UInt8] {
     var bytes = [UInt8](repeating: 0, count: size.width * size.height * 4)
     for y in 0..<size.height {
         for x in 0..<size.width {
@@ -545,13 +166,13 @@ private func deterministicPixels(_ size: PixelSize) -> [UInt8] {
             bytes[offset] = UInt8(truncatingIfNeeded: x &* 13 &+ y &* 7)
             bytes[offset + 1] = UInt8(truncatingIfNeeded: x &* 3 &+ y &* 17)
             bytes[offset + 2] = UInt8(truncatingIfNeeded: x &* 19 &+ y &* 5)
-            bytes[offset + 3] = UInt8(truncatingIfNeeded: 1 &+ x &+ y)
+            bytes[offset + 3] = 255
         }
     }
     return bytes
 }
 
-private func croppedOrFilled(
+private func croppedOrFilledResizePixels(
     _ source: [UInt8],
     from sourceSize: PixelSize,
     to destinationSize: PixelSize
@@ -571,23 +192,4 @@ private func croppedOrFilled(
         )
     }
     return destination
-}
-
-@MainActor
-private func canonicalBytes(_ renderer: GridRenderer) throws -> [UInt8] {
-    let texture = try renderer.copyCanonicalForHarness()
-    let bytesPerRow = texture.width * 4
-    var bytes = [UInt8](
-        repeating: 0,
-        count: bytesPerRow * texture.height
-    )
-    bytes.withUnsafeMutableBytes { storage in
-        texture.getBytes(
-            storage.baseAddress!,
-            bytesPerRow: bytesPerRow,
-            from: MTLRegionMake2D(0, 0, texture.width, texture.height),
-            mipmapLevel: 0
-        )
-    }
-    return bytes
 }

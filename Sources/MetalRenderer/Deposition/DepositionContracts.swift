@@ -1,7 +1,7 @@
 import PatternEngine
 
 public enum DepositionABI {
-    public static let version: UInt16 = 1
+    public static let version: UInt16 = 2
 }
 
 public enum DepositionFrameBudgetError: Error, Equatable, Sendable {

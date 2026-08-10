@@ -7,18 +7,20 @@ import Testing
 struct PeriodicRepeatExportTests {
     @Test
     @MainActor
-    func validatesSquarePresetAndDensityBeforeChangingState() throws {
+    func validatesSquarePresetAndDensityBeforeChangingState() async throws {
         guard let grid = try makeExportRenderer(preset: .grid) else {
             return
         }
-        let gridSnapshot = grid.harnessTilingMutationSnapshot
+        let gridBytes = try await canonicalBytes(grid)
         let gridViewport = grid.viewport
         let gridConfiguration = grid.periodicConfiguration
 
-        #expect(throws: PeriodicRepeatExportError.unsupportedPreset(.grid)) {
-            try grid.exportPeriodicRepeat(density: 64)
+        await #expect(
+            throws: PeriodicRepeatExportError.unsupportedPreset(.grid)
+        ) {
+            try await grid.exportPeriodicRepeat(density: 64)
         }
-        #expect(grid.harnessTilingMutationSnapshot == gridSnapshot)
+        #expect(try await canonicalBytes(grid) == gridBytes)
         #expect(grid.viewport == gridViewport)
         #expect(grid.periodicConfiguration == gridConfiguration)
 
@@ -27,61 +29,21 @@ struct PeriodicRepeatExportTests {
         ) else {
             return
         }
-        let initialBytes = try canonicalBytes(square)
-        let initialSnapshot = square.harnessTilingMutationSnapshot
+        let initialBytes = try await canonicalBytes(square)
         let initialViewport = square.viewport
         let initialConfiguration = square.periodicConfiguration
 
-        #expect(throws: PeriodicRepeatExportError.invalidDensity(63)) {
-            try square.exportPeriodicRepeat(density: 63)
+        await #expect(throws: PeriodicRepeatExportError.invalidDensity(63)) {
+            try await square.exportPeriodicRepeat(density: 63)
         }
-        #expect(throws: PeriodicRepeatExportError.invalidDensity(4_097)) {
-            try square.exportPeriodicRepeat(density: 4_097)
+        await #expect(
+            throws: PeriodicRepeatExportError.invalidDensity(4_097)
+        ) {
+            try await square.exportPeriodicRepeat(density: 4_097)
         }
-        #expect(square.harnessTilingMutationSnapshot == initialSnapshot)
         #expect(square.viewport == initialViewport)
         #expect(square.periodicConfiguration == initialConfiguration)
-        #expect(try canonicalBytes(square) == initialBytes)
-    }
-
-    @Test
-    @MainActor
-    func allocationAndEncodingFailuresLeaveAllRendererStateUntouched()
-        throws
-    {
-        guard let renderer = try makeExportRenderer(
-            preset: .squareKaleidoscope
-        ) else {
-            return
-        }
-        let source = makeCanonicalFixture(side: 64)
-        try renderer.replaceCanonicalPixelsForHarness(source)
-        let snapshot = renderer.harnessTilingMutationSnapshot
-        let viewport = renderer.viewport
-        let configuration = renderer.periodicConfiguration
-        let cases: [
-            (
-                PeriodicRepeatExportInjectedFailure,
-                MetalRendererError
-            )
-        ] = [
-            (.textureAllocation, .textureAllocationFailed),
-            (.commandBuffer, .commandBufferUnavailable),
-            (.renderEncoder, .renderEncoderUnavailable),
-        ]
-
-        for (failure, expectedError) in cases {
-            #expect(throws: expectedError) {
-                try renderer.exportPeriodicRepeat(
-                    density: 96,
-                    injecting: failure
-                )
-            }
-            #expect(renderer.harnessTilingMutationSnapshot == snapshot)
-            #expect(renderer.viewport == viewport)
-            #expect(renderer.periodicConfiguration == configuration)
-            #expect(try canonicalBytes(renderer) == source)
-        }
+        #expect(try await canonicalBytes(square) == initialBytes)
     }
 
     @Test(arguments: [
@@ -91,14 +53,14 @@ struct PeriodicRepeatExportTests {
     @MainActor
     func rendersOneSquareRepeatAtRequestedDensity(
         preset: SymmetryPresetID
-    ) throws {
+    ) async throws {
         guard let renderer = try makeExportRenderer(preset: preset) else {
             return
         }
         let source = makeCanonicalFixture(side: 64)
-        try renderer.replaceCanonicalPixelsForHarness(source)
+        try await installCommittedRaster(source, into: renderer)
 
-        let exported = try renderer.exportPeriodicRepeat(density: 64)
+        let exported = try await renderer.exportPeriodicRepeat(density: 64)
 
         #expect(exported.pixelSize == PixelSize(width: 64, height: 64))
         #expect(exported.bytesPerRow == 64 * 4)
@@ -116,14 +78,14 @@ struct PeriodicRepeatExportTests {
     @MainActor
     func rendersMetricTriangularSupercellAtRequestedHorizontalDensity(
         preset: SymmetryPresetID
-    ) throws {
+    ) async throws {
         guard let renderer = try makeExportRenderer(preset: preset) else {
             return
         }
         let source = makeCanonicalFixture(side: 64)
-        try renderer.replaceCanonicalPixelsForHarness(source)
+        try await installCommittedRaster(source, into: renderer)
 
-        let exported = try renderer.exportPeriodicRepeat(density: 64)
+        let exported = try await renderer.exportPeriodicRepeat(density: 64)
         let expectedSize = PixelSize(width: 64, height: 111)
         let expected = wrappedBilinearReference(
             source,
@@ -143,20 +105,20 @@ struct PeriodicRepeatExportTests {
     @Test
     @MainActor
     func maximumTriangularDensityFitsTheRectangularExportLimit()
-        throws
+        async throws
     {
         guard let renderer = try makeExportRenderer(
             preset: .kaleidoscope30
         ) else {
             return
         }
-        let snapshot = renderer.harnessTilingMutationSnapshot
+        let bytes = try await canonicalBytes(renderer)
         let configuration = renderer.periodicConfiguration
 
-        let exported = try renderer.exportPeriodicRepeat(density: 4_096)
+        let exported = try await renderer.exportPeriodicRepeat(density: 4_096)
         #expect(exported.pixelSize == PixelSize(width: 4_096, height: 7_094))
         #expect(exported.bgra8Bytes.count == 4_096 * 7_094 * 4)
-        #expect(renderer.harnessTilingMutationSnapshot == snapshot)
+        #expect(try await canonicalBytes(renderer) == bytes)
         #expect(renderer.periodicConfiguration == configuration)
     }
 
@@ -167,7 +129,7 @@ struct PeriodicRepeatExportTests {
     @MainActor
     func rectangularRasterExportMatchesIndependentWrappedBilinearReference(
         preset: SymmetryPresetID
-    ) throws {
+    ) async throws {
         let raster = PixelSize(width: 96, height: 64)
         guard let renderer = try makeExportRenderer(
             preset: preset,
@@ -181,10 +143,10 @@ struct PeriodicRepeatExportTests {
             width: raster.width,
             height: raster.height
         )
-        try renderer.replaceCanonicalPixelsForHarness(source)
+        try await installCommittedRaster(source, into: renderer)
 
         let density = 137
-        let exported = try renderer.exportPeriodicRepeat(density: density)
+        let exported = try await renderer.exportPeriodicRepeat(density: density)
         let expected = wrappedBilinearReference(
             source,
             sourceSize: raster,
@@ -206,7 +168,7 @@ struct PeriodicRepeatExportTests {
     @Test
     @MainActor
     func packagedThreeByThreeRepeatMatchesIndependentTranslatedSampling()
-        throws
+        async throws
     {
         guard let renderer = try makeExportRenderer(
             preset: .squareKaleidoscope
@@ -214,8 +176,8 @@ struct PeriodicRepeatExportTests {
             return
         }
         let source = makeCanonicalFixture(side: 64)
-        try renderer.replaceCanonicalPixelsForHarness(source)
-        let exported = try renderer.exportPeriodicRepeat(density: 96)
+        try await installCommittedRaster(source, into: renderer)
+        let exported = try await renderer.exportPeriodicRepeat(density: 96)
         let repeated = tileThreeByThree(exported)
         let expected = wrappedBilinearReference(
             source,
@@ -231,7 +193,7 @@ struct PeriodicRepeatExportTests {
     @Test
     @MainActor
     func triangularThreeByThreeRepeatMatchesIndependentTranslatedSampling()
-        throws
+        async throws
     {
         guard let renderer = try makeExportRenderer(
             preset: .kaleidoscope30,
@@ -241,8 +203,8 @@ struct PeriodicRepeatExportTests {
             return
         }
         let source = makeCanonicalFixture(side: 64)
-        try renderer.replaceCanonicalPixelsForHarness(source)
-        let exported = try renderer.exportPeriodicRepeat(density: 96)
+        try await installCommittedRaster(source, into: renderer)
+        let exported = try await renderer.exportPeriodicRepeat(density: 96)
         let repeated = tileThreeByThree(exported)
         let expected = wrappedBilinearReference(
             source,
@@ -260,29 +222,30 @@ struct PeriodicRepeatExportTests {
 
     @Test
     @MainActor
-    func successfulExportLeavesBytesDescriptorAndViewportUnchanged() throws {
+    func successfulExportLeavesBytesDescriptorAndViewportUnchanged()
+        async throws
+    {
         guard let renderer = try makeExportRenderer(
             preset: .squareRotation
         ) else {
             return
         }
-        try renderer.replaceCanonicalPixelsForHarness(
-            makeCanonicalFixture(side: 64)
+        try await installCommittedRaster(
+            makeCanonicalFixture(side: 64),
+            into: renderer
         )
         renderer.pan(byScreenDelta: SIMD2(11, -7))
         renderer.zoom(
             by: 1.75,
             anchor: ScreenPoint(x: 13, y: 41)
         )
-        let bytesBefore = try canonicalBytes(renderer)
-        let snapshotBefore = renderer.harnessTilingMutationSnapshot
+        let bytesBefore = try await canonicalBytes(renderer)
         let viewportBefore = renderer.viewport
         let configurationBefore = renderer.periodicConfiguration
 
-        _ = try renderer.exportPeriodicRepeat(density: 128)
+        _ = try await renderer.exportPeriodicRepeat(density: 128)
 
-        #expect(try canonicalBytes(renderer) == bytesBefore)
-        #expect(renderer.harnessTilingMutationSnapshot == snapshotBefore)
+        #expect(try await canonicalBytes(renderer) == bytesBefore)
         #expect(renderer.viewport == viewportBefore)
         #expect(renderer.periodicConfiguration == configurationBefore)
     }
@@ -291,16 +254,15 @@ struct PeriodicRepeatExportTests {
     @MainActor
     func bakedRepeatCompletesEveryPeriodicPreset(
         preset: SymmetryPresetID
-    ) throws {
+    ) async throws {
         guard let renderer = try makeExportRenderer(preset: preset) else {
             return
         }
         let source = makeCanonicalFixture(side: 64)
-        try renderer.replaceCanonicalPixelsForHarness(source)
-        let snapshot = renderer.harnessTilingMutationSnapshot
+        try await installCommittedRaster(source, into: renderer)
         let viewport = renderer.viewport
 
-        let exported = try renderer.exportBakedPeriodicRepeat()
+        let exported = try await renderer.exportBakedPeriodicRepeat()
 
         let expectedSize: PixelSize
         switch preset {
@@ -327,9 +289,8 @@ struct PeriodicRepeatExportTests {
                 == expectedSize.width * expectedSize.height * 4,
             "\(preset)"
         )
-        #expect(renderer.harnessTilingMutationSnapshot == snapshot)
         #expect(renderer.viewport == viewport)
-        #expect(try canonicalBytes(renderer) == source)
+        #expect(try await canonicalBytes(renderer) == source)
         if preset == .grid || preset == .rotational
             || preset.isSquare
         {
@@ -339,8 +300,8 @@ struct PeriodicRepeatExportTests {
 
     @Test
     @MainActor
-    func legacyBakedRepeatEncodesPhaseAndReflectionPeriods()
-        throws
+    func bakedRepeatEncodesPhaseAndReflectionPeriods()
+        async throws
     {
         let source = makeCanonicalFixture(side: 64)
 
@@ -349,8 +310,8 @@ struct PeriodicRepeatExportTests {
         ) else {
             return
         }
-        try halfDrop.replaceCanonicalPixelsForHarness(source)
-        let halfDropExport = try halfDrop.exportBakedPeriodicRepeat()
+        try await installCommittedRaster(source, into: halfDrop)
+        let halfDropExport = try await halfDrop.exportBakedPeriodicRepeat()
         #expect(
             exportPixel(halfDropExport, x: 64, y: 0)
                 == sourcePixel(source, width: 64, x: 0, y: 32)
@@ -361,48 +322,14 @@ struct PeriodicRepeatExportTests {
         ) else {
             return
         }
-        try mirrorX.replaceCanonicalPixelsForHarness(source)
-        let mirrorExport = try mirrorX.exportBakedPeriodicRepeat()
+        try await installCommittedRaster(source, into: mirrorX)
+        let mirrorExport = try await mirrorX.exportBakedPeriodicRepeat()
         #expect(
             exportPixel(mirrorExport, x: 64, y: 0)
                 == sourcePixel(source, width: 64, x: 63, y: 0)
         )
     }
 
-    @Test
-    @MainActor
-    func flattenedSceneExcludesDraftAndPreservesViewportAndPixels()
-        throws
-    {
-        guard let renderer = try makeExportRenderer(preset: .grid) else {
-            return
-        }
-        let source = makeCanonicalFixture(side: 64)
-        try renderer.replaceCanonicalPixelsForHarness(source)
-        renderer.pan(byScreenDelta: SIMD2(7, -5))
-        renderer.zoom(
-            by: 1.5,
-            anchor: ScreenPoint(x: 19, y: 23)
-        )
-        let viewport = renderer.viewport
-        try renderer.installNativeHarnessBrushes()
-        _ = try renderer.beginFixedProjectedStrokeForHarness(
-            at: WorldPoint(x: 11, y: 13)
-        )
-        let snapshot = renderer.harnessTilingMutationSnapshot
-
-        let scene = try renderer.exportFlattenedScene(
-            pixelSize: PixelSize(width: 96, height: 80),
-            transparentBackground: true
-        )
-
-        #expect(scene.pixelSize == PixelSize(width: 96, height: 80))
-        #expect(scene.hasTransparentBackground)
-        #expect(renderer.viewport == viewport)
-        #expect(renderer.harnessTilingMutationSnapshot == snapshot)
-        #expect(try canonicalBytes(renderer) == source)
-        #expect(renderer.hasActiveStroke)
-    }
 }
 
 private func exportPixel(
@@ -538,69 +465,75 @@ private func wrappedBilinearReference(
     for y in 0..<outputHeight {
         for x in 0..<outputWidth {
             let canonicalX =
-                (Double(x) + 0.5) / Double(period.width)
-                * Double(sourceSize.width)
+                (Float(x) + 0.5) / Float(period.width)
+                * Float(sourceSize.width)
             let canonicalY =
-                (Double(y) + 0.5) / Double(period.height)
-                * Double(sourceSize.height)
+                (Float(y) + 0.5) / Float(period.height)
+                * Float(sourceSize.height)
             let sampleX = canonicalX - 0.5
             let sampleY = canonicalY - 0.5
             let lowerX = Int(floor(sampleX))
             let lowerY = Int(floor(sampleY))
-            let blendX = sampleX - Double(lowerX)
-            let blendY = sampleY - Double(lowerY)
-
-            for channel in 0..<4 {
-                let value00 = Double(sourceChannel(
-                    source,
-                    size: sourceSize,
-                    x: lowerX,
-                    y: lowerY,
-                    channel: channel
-                ))
-                let value10 = Double(sourceChannel(
-                    source,
-                    size: sourceSize,
-                    x: lowerX + 1,
-                    y: lowerY,
-                    channel: channel
-                ))
-                let value01 = Double(sourceChannel(
-                    source,
-                    size: sourceSize,
-                    x: lowerX,
-                    y: lowerY + 1,
-                    channel: channel
-                ))
-                let value11 = Double(sourceChannel(
-                    source,
-                    size: sourceSize,
-                    x: lowerX + 1,
-                    y: lowerY + 1,
-                    channel: channel
-                ))
-                let top = value00 + (value10 - value00) * blendX
-                let bottom = value01 + (value11 - value01) * blendX
-                let value = top + (bottom - top) * blendY
-                result[(y * outputWidth + x) * 4 + channel] = UInt8(
-                    clamping: Int(value.rounded())
-                )
+            let blendX = sampleX - Float(lowerX)
+            let blendY = sampleY - Float(lowerY)
+            let value00 = sourceLinearPixel(
+                source, size: sourceSize, x: lowerX, y: lowerY
+            )
+            let value10 = sourceLinearPixel(
+                source, size: sourceSize, x: lowerX + 1, y: lowerY
+            )
+            let value01 = sourceLinearPixel(
+                source, size: sourceSize, x: lowerX, y: lowerY + 1
+            )
+            let value11 = sourceLinearPixel(
+                source, size: sourceSize, x: lowerX + 1, y: lowerY + 1
+            )
+            let top = value00 + (value10 - value00) * blendX
+            let bottom = value01 + (value11 - value01) * blendX
+            let value = top + (bottom - top) * blendY
+            guard let color = LinearPremultipliedColor(
+                red: value.x,
+                green: value.y,
+                blue: value.z,
+                alpha: value.w
+            ) else {
+                preconditionFailure("bilinear oracle left premultiplied space")
             }
+            let encoded = DocumentColorPipeline
+                .exportEncodedPremultipliedBGRA8(color)
+            let offset = (y * outputWidth + x) * 4
+            result[offset] = encoded.blue
+            result[offset + 1] = encoded.green
+            result[offset + 2] = encoded.red
+            result[offset + 3] = encoded.alpha
         }
     }
     return result
 }
 
-private func sourceChannel(
+private func sourceLinearPixel(
     _ source: [UInt8],
     size: PixelSize,
     x: Int,
-    y: Int,
-    channel: Int
-) -> UInt8 {
+    y: Int
+) -> SIMD4<Float> {
     let wrappedX = (x % size.width + size.width) % size.width
     let wrappedY = (y % size.height + size.height) % size.height
-    return source[(wrappedY * size.width + wrappedX) * 4 + channel]
+    let offset = (wrappedY * size.width + wrappedX) * 4
+    let linear = DocumentColorPipeline.importEncodedPremultipliedBGRA8(
+        EncodedPremultipliedBGRA8(
+            blue: source[offset],
+            green: source[offset + 1],
+            red: source[offset + 2],
+            alpha: source[offset + 3]
+        )
+    ).simd
+    return SIMD4(
+        Float(Float16(linear.x)),
+        Float(Float16(linear.y)),
+        Float(Float16(linear.z)),
+        Float(Float16(linear.w))
+    )
 }
 
 private func maximumChannelDelta(
@@ -614,19 +547,26 @@ private func maximumChannelDelta(
 }
 
 @MainActor
-private func canonicalBytes(_ renderer: GridRenderer) throws -> [UInt8] {
-    let texture = try renderer.copyCanonicalForHarness()
-    let bytesPerRow = texture.width * 4
-    var bytes = [UInt8](
-        repeating: 0,
-        count: bytesPerRow * texture.height
-    )
-    texture.getBytes(
-        &bytes,
-        bytesPerRow: bytesPerRow,
-        from: MTLRegionMake2D(0, 0, texture.width, texture.height),
-        mipmapLevel: 0
-    )
+private func installCommittedRaster(
+    _ bytes: [UInt8],
+    into renderer: GridRenderer
+) async throws {
+    try await renderer.restoreCommittedDocument(CommittedDocumentSnapshot(
+        canvasSize: renderer.pixelSize,
+        documentConfiguration: renderer.documentConfiguration,
+        documentDomainLocked: bytes.contains { $0 != 0 },
+        radialGeometryLocked: false,
+        storage: .singleRaster(bgra8PremultipliedBytes: bytes)
+    ))
+}
+
+@MainActor
+private func canonicalBytes(_ renderer: GridRenderer) async throws -> [UInt8] {
+    let snapshot = try await renderer.captureCommittedDocument()
+    guard case let .singleRaster(bytes) = snapshot.storage else {
+        Issue.record("Expected one current periodic committed raster")
+        return []
+    }
     return bytes
 }
 

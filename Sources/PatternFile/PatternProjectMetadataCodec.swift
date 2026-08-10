@@ -127,6 +127,7 @@ public enum PatternProjectMetadataCodec {
                 let nativeSurface = PatternPaintTileSurface(
                     layerID: layer.id,
                     pixelSize: surface.pixelSize,
+                    rasterRevision: surface.rasterRevision,
                     tiles: surface.tiles
                 )
                 try PatternPaintTileCodec.validateMetadata([nativeSurface])
@@ -147,42 +148,38 @@ public enum PatternProjectMetadataCodec {
     public static func decode(
         _ files: PatternProjectMetadataFiles
     ) throws -> ValidatedPatternProjectMetadata {
-        let manifest: ManifestWire = try decodeJSON(
-            files.manifest,
-            path: PatternProjectFormat.manifestPath
-        )
-        switch manifest.schemaVersion {
-        case PatternProjectFormat.legacySchemaVersion:
-            return try decodeLegacy(manifest: manifest, files: files)
-        case PatternProjectFormat.previousSchemaVersion,
-             PatternProjectFormat.layeredSchemaVersion,
-             PatternProjectFormat.currentSchemaVersion:
-            return try decodeCurrent(
-                manifest: manifest,
-                files: files,
-                sourceSchemaVersion: manifest.schemaVersion
-            )
-        default:
-            throw PatternProjectLoadError.unsupportedSchema(
-                manifest.schemaVersion
-            )
-        }
+        try requireCurrentSchema(files.manifest)
+        return try decodeCurrentFiles(files)
     }
 
     public static func decode(
         from archive: PatternProjectArchive
     ) throws -> ValidatedPatternProjectMetadata {
-        try decode(metadataFiles(from: archive))
+        try decodeCurrentFiles(metadataFiles(from: archive))
     }
 
-    static func extractedMetadataFiles(
+    static func extractedMetadata(
         from archive: PatternProjectArchive
-    ) throws -> PatternProjectMetadataFiles {
-        try metadataFiles(from: archive)
+    ) throws -> (
+        files: PatternProjectMetadataFiles,
+        validated: ValidatedPatternProjectMetadata
+    ) {
+        let files = try metadataFiles(from: archive)
+        return (files, try decodeCurrentFiles(files))
     }
 }
 
 private extension PatternProjectMetadataCodec {
+    static func decodeCurrentFiles(
+        _ files: PatternProjectMetadataFiles
+    ) throws -> ValidatedPatternProjectMetadata {
+        let manifest: ManifestWire = try decodeJSON(
+            files.manifest,
+            path: PatternProjectFormat.manifestPath
+        )
+        return try decodeCurrent(manifest: manifest, files: files)
+    }
+
     static func metadataFiles(
         from archive: PatternProjectArchive
     ) throws -> PatternProjectMetadataFiles {
@@ -190,23 +187,11 @@ private extension PatternProjectMetadataCodec {
             for: PatternProjectFormat.manifestPath,
             from: archive
         )
+        try requireCurrentSchema(manifestData)
         let manifest: ManifestWire = try decodeJSON(
             manifestData,
             path: PatternProjectFormat.manifestPath
         )
-        guard manifest.schemaVersion
-                == PatternProjectFormat.legacySchemaVersion
-                || manifest.schemaVersion
-                    == PatternProjectFormat.previousSchemaVersion
-                || manifest.schemaVersion
-                    == PatternProjectFormat.layeredSchemaVersion
-                || manifest.schemaVersion
-                    == PatternProjectFormat.currentSchemaVersion
-        else {
-            throw PatternProjectLoadError.unsupportedSchema(
-                manifest.schemaVersion
-            )
-        }
         guard (1...maximumLayerCount).contains(manifest.layerFiles.count)
         else {
             throw PatternProjectLoadError.layerCountOutOfRange(
@@ -228,38 +213,34 @@ private extension PatternProjectMetadataCodec {
                 from: archive
             )
             layersByPath[path] = layerData
-            if manifest.schemaVersion
-                != PatternProjectFormat.legacySchemaVersion
+            let layer: LayerWire = try decodeJSON(
+                layerData,
+                path: path
+            )
+            if layer.surfaceKind == SurfaceKindWire.radialPages.rawValue
+                || layer.surfaceKind == SurfaceKindWire.paintTiles.rawValue
             {
-                let layer: LayerWire = try decodeJSON(
-                    layerData,
-                    path: path
-                )
-                if layer.surfaceKind == SurfaceKindWire.radialPages.rawValue
-                    || layer.surfaceKind == SurfaceKindWire.paintTiles.rawValue
-                {
-                    let surfacePath = layer.surfaceKind
-                        == SurfaceKindWire.radialPages.rawValue
-                        ? layer.radialSurfaceManifestFile
-                        : layer.paintTileSurfaceManifestFile
-                    guard let surfacePath
-                    else {
-                        throw PatternProjectLoadError.invalidLayer(layer.id)
-                    }
-                    try validateResourcePath(surfacePath)
-                    guard !reservedArchivePaths.contains(surfacePath),
-                          !manifest.layerFiles.contains(surfacePath)
-                    else {
-                        throw PatternProjectLoadError
-                            .resourcePathCollision(surfacePath)
-                    }
-                    if surfacesByPath[surfacePath] == nil {
-                        surfacesByPath[surfacePath] =
-                            try boundedMetadataData(
-                                for: surfacePath,
-                                from: archive
-                            )
-                    }
+                let surfacePath = layer.surfaceKind
+                    == SurfaceKindWire.radialPages.rawValue
+                    ? layer.radialSurfaceManifestFile
+                    : layer.paintTileSurfaceManifestFile
+                guard let surfacePath
+                else {
+                    throw PatternProjectLoadError.invalidLayer(layer.id)
+                }
+                try validateResourcePath(surfacePath)
+                guard !reservedArchivePaths.contains(surfacePath),
+                      !manifest.layerFiles.contains(surfacePath)
+                else {
+                    throw PatternProjectLoadError
+                        .resourcePathCollision(surfacePath)
+                }
+                if surfacesByPath[surfacePath] == nil {
+                    surfacesByPath[surfacePath] =
+                        try boundedMetadataData(
+                            for: surfacePath,
+                            from: archive
+                        )
                 }
             }
         }
@@ -302,65 +283,18 @@ private extension PatternProjectMetadataCodec {
         }
     }
 
-    static func decodeLegacy(
-        manifest: ManifestWire,
-        files: PatternProjectMetadataFiles
-    ) throws -> ValidatedPatternProjectMetadata {
-        let canvasSize = try validateManifest(manifest, legacy: true)
-        let legacy: LegacySymmetryWire = try decodeJSON(
-            files.symmetry,
-            path: PatternProjectFormat.symmetryPath
-        )
-        guard legacy.type <= SymmetryPresetID.rotational.rawValue,
-              let preset = SymmetryPresetID(rawValue: legacy.type)
-        else {
-            throw PatternProjectLoadError.legacyPresetUnsupported(legacy.type)
-        }
-        let configuration = SymmetryDocumentConfiguration.periodic(
-            .legacy(
-                presetID: preset,
-                tileSize: PatternSize(
-                    width: Float(canvasSize.width),
-                    height: Float(canvasSize.height)
-                )
-            )
-        )
-        let layers = try decodeLayers(
-            manifest: manifest,
-            files: files,
-            canvasSize: canvasSize,
-            compiled: compile(configuration, canvasSize: canvasSize),
-            schemaVersion: PatternProjectFormat.legacySchemaVersion
-        )
-        let metadata = try makeMetadata(
-            manifest: manifest,
-            canvasSize: canvasSize,
-            configuration: configuration,
-            documentDomainLocked: false,
-            radialGeometryLocked: false,
-            layers: layers
-        )
-        let compiled = try validate(metadata)
-        return ValidatedPatternProjectMetadata(
-            sourceSchemaVersion: PatternProjectFormat.legacySchemaVersion,
-            metadata: metadata,
-            compiledSymmetry: compiled
-        )
-    }
-
     static func decodeCurrent(
         manifest: ManifestWire,
-        files: PatternProjectMetadataFiles,
-        sourceSchemaVersion: Int
+        files: PatternProjectMetadataFiles
     ) throws -> ValidatedPatternProjectMetadata {
         guard manifest.canonicalSurfaceLayoutVersion
             == PatternProjectFormat.canonicalSurfaceLayoutVersion
         else {
             throw PatternProjectLoadError.unsupportedSurfaceLayout(
-                manifest.canonicalSurfaceLayoutVersion ?? -1
+                manifest.canonicalSurfaceLayoutVersion
             )
         }
-        let canvasSize = try validateManifest(manifest, legacy: false)
+        let canvasSize = try validateManifest(manifest)
         let symmetry: SymmetryWire = try decodeJSON(
             files.symmetry,
             path: PatternProjectFormat.symmetryPath
@@ -381,29 +315,18 @@ private extension PatternProjectMetadataCodec {
             manifest: manifest,
             files: files,
             canvasSize: canvasSize,
-            compiled: compiled,
-            schemaVersion: sourceSchemaVersion
+            compiled: compiled
         )
-        let documentDomainLocked: Bool
-        if sourceSchemaVersion >= PatternProjectFormat.layeredSchemaVersion {
-            guard let locked = symmetry.documentDomainLocked else {
-                throw PatternProjectLoadError.symmetryConfigurationMismatch
-            }
-            documentDomainLocked = locked
-        } else {
-            documentDomainLocked = symmetry.radialGeometryLocked
-        }
         let metadata = try makeMetadata(
             manifest: manifest,
             canvasSize: canvasSize,
             configuration: configuration,
-            documentDomainLocked: documentDomainLocked,
+            documentDomainLocked: symmetry.documentDomainLocked,
             radialGeometryLocked: symmetry.radialGeometryLocked,
             layers: layers
         )
-        _ = try validate(metadata)
+        try validateSemantics(metadata, compiled: compiled)
         return ValidatedPatternProjectMetadata(
-            sourceSchemaVersion: sourceSchemaVersion,
             metadata: metadata,
             compiledSymmetry: compiled
         )
@@ -423,6 +346,14 @@ private extension PatternProjectMetadataCodec {
             metadata.documentConfiguration,
             canvasSize: metadata.canvasSize
         )
+        try validateSemantics(metadata, compiled: compiled)
+        return compiled
+    }
+
+    static func validateSemantics(
+        _ metadata: PatternProjectMetadata,
+        compiled: CompiledSymmetry
+    ) throws {
         switch metadata.documentConfiguration {
         case .periodic, .finite(.plain):
             guard !metadata.radialGeometryLocked else {
@@ -441,7 +372,6 @@ private extension PatternProjectMetadataCodec {
             canvasSize: metadata.canvasSize,
             compiled: compiled
         )
-        return compiled
     }
 
     static func compile(
@@ -534,8 +464,7 @@ private extension PatternProjectMetadataCodec {
         manifest: ManifestWire,
         files: PatternProjectMetadataFiles,
         canvasSize: PixelSize,
-        compiled: CompiledSymmetry,
-        schemaVersion: Int
+        compiled: CompiledSymmetry
     ) throws -> [PatternProjectLayer] {
         guard (1...maximumLayerCount).contains(manifest.layerFiles.count)
         else {
@@ -545,22 +474,17 @@ private extension PatternProjectMetadataCodec {
         }
         var layers: [PatternProjectLayer] = []
         layers.reserveCapacity(manifest.layerFiles.count)
-        var expectedIDs = Set<UUID>()
         for path in manifest.layerFiles {
             try validateResourcePath(path)
             guard let data = files.layersByPath[path] else {
                 throw PatternProjectLoadError.missingMetadata(path)
             }
             let wire: LayerWire = try decodeJSON(data, path: path)
-            guard expectedIDs.insert(wire.id).inserted else {
-                throw PatternProjectLoadError.duplicateLayerID(wire.id)
-            }
             let layer = try decodeLayer(
                 wire,
                 files: files,
                 canvasSize: canvasSize,
-                compiled: compiled,
-                schemaVersion: schemaVersion
+                compiled: compiled
             )
             layers.append(layer)
         }
@@ -581,8 +505,7 @@ private extension PatternProjectMetadataCodec {
         _ wire: LayerWire,
         files: PatternProjectMetadataFiles,
         canvasSize: PixelSize,
-        compiled: CompiledSymmetry,
-        schemaVersion: Int
+        compiled: CompiledSymmetry
     ) throws -> PatternProjectLayer {
         guard let kind = PatternProjectLayerKind(rawValue: wire.kind),
               let blendMode = PatternProjectBlendMode(
@@ -602,27 +525,12 @@ private extension PatternProjectMetadataCodec {
         }
 
         let surface: PatternProjectLayerSurface
-        if schemaVersion == PatternProjectFormat.legacySchemaVersion {
-            guard kind == .pattern,
-                  let rasterFile = wire.rasterFile
-            else {
-                throw PatternProjectLoadError.invalidLayer(wire.id)
-            }
-            try validateResourcePath(rasterFile)
-            surface = .singleRaster(PatternProjectRasterReference(
-                file: rasterFile,
-                pixelSize: canvasSize
-            ))
-        } else {
-            guard let rawSurfaceKind = wire.surfaceKind,
-                  let surfaceKind = SurfaceKindWire(
-                      rawValue: rawSurfaceKind
-                  )
-            else {
-                throw PatternProjectLoadError.invalidLayer(wire.id)
-            }
-            switch surfaceKind {
-            case .single:
+        guard let surfaceKind = SurfaceKindWire(rawValue: wire.surfaceKind)
+        else {
+            throw PatternProjectLoadError.invalidLayer(wire.id)
+        }
+        switch surfaceKind {
+        case .single:
                 guard let rasterFile = wire.rasterFile,
                       let width = wire.rasterWidth,
                       let height = wire.rasterHeight
@@ -639,7 +547,7 @@ private extension PatternProjectMetadataCodec {
                     file: rasterFile,
                     pixelSize: size
                 ))
-            case .radialPages:
+        case .radialPages:
                 guard let manifestFile = wire.radialSurfaceManifestFile
                 else {
                     throw PatternProjectLoadError.invalidLayer(wire.id)
@@ -661,10 +569,8 @@ private extension PatternProjectMetadataCodec {
                     compiled: compiled
                 )
                 surface = .radialPages(radial)
-            case .paintTiles:
-                guard schemaVersion
-                        == PatternProjectFormat.currentSchemaVersion,
-                      let manifestFile = wire.paintTileSurfaceManifestFile
+        case .paintTiles:
+                guard let manifestFile = wire.paintTileSurfaceManifestFile
                 else {
                     throw PatternProjectLoadError.invalidLayer(wire.id)
                 }
@@ -689,9 +595,9 @@ private extension PatternProjectMetadataCodec {
                 surface = .paintTiles(PatternProjectPaintTileSurface(
                     manifestFile: manifestFile,
                     pixelSize: native.pixelSize,
+                    rasterRevision: native.rasterRevision,
                     tiles: native.tiles
                 ))
-            }
         }
 
         return PatternProjectLayer(
@@ -921,18 +827,21 @@ private extension PatternProjectMetadataCodec {
                     surface.manifestFile
                 )
             }
-            if layer.kind == .pattern {
-                guard surface.pixelSize == canvasSize else {
-                    throw PatternProjectLoadError.invalidRasterSize(
-                        layerID: layer.id,
-                        width: surface.pixelSize.width,
-                        height: surface.pixelSize.height
-                    )
-                }
+            let expectedPixelSize = expectedPaintTilePixelSize(
+                canvasSize: canvasSize,
+                compiled: compiled
+            )
+            guard surface.pixelSize == expectedPixelSize else {
+                throw PatternProjectLoadError.invalidRasterSize(
+                    layerID: layer.id,
+                    width: surface.pixelSize.width,
+                    height: surface.pixelSize.height
+                )
             }
             let native = PatternPaintTileSurface(
                 layerID: layer.id,
                 pixelSize: surface.pixelSize,
+                rasterRevision: surface.rasterRevision,
                 tiles: surface.tiles
             )
             do {
@@ -951,14 +860,8 @@ private extension PatternProjectMetadataCodec {
     }
 
     static func validateManifest(
-        _ manifest: ManifestWire,
-        legacy: Bool
+        _ manifest: ManifestWire
     ) throws -> PixelSize {
-        if !legacy {
-            guard manifest.canonicalSurfaceLayoutVersion != nil else {
-                throw PatternProjectLoadError.unsupportedSurfaceLayout(-1)
-            }
-        }
         guard (64...4_096).contains(manifest.canvasWidth),
               (64...4_096).contains(manifest.canvasHeight)
         else {
@@ -1052,6 +955,13 @@ private extension PatternProjectMetadataCodec {
             )
         }
         return PixelSize(width: width, height: height)
+    }
+
+    static func expectedPaintTilePixelSize(
+        canvasSize: PixelSize,
+        compiled: CompiledSymmetry
+    ) -> PixelSize {
+        compiled.domain.finite?.radial.layout?.atlasPixelSize ?? canvasSize
     }
 
     static func validateResourcePath(_ path: String) throws {
@@ -1168,11 +1078,29 @@ private extension PatternProjectMetadataCodec {
             throw PatternProjectLoadError.invalidJSON(path: path)
         }
     }
+
+    static func requireCurrentSchema(_ manifestData: Data) throws {
+        let envelope: ManifestVersionEnvelope = try decodeJSON(
+            manifestData,
+            path: PatternProjectFormat.manifestPath
+        )
+        guard envelope.schemaVersion
+                == PatternProjectFormat.currentSchemaVersion
+        else {
+            throw PatternProjectLoadError.unsupportedSchema(
+                envelope.schemaVersion
+            )
+        }
+    }
+}
+
+private struct ManifestVersionEnvelope: Decodable {
+    let schemaVersion: Int
 }
 
 private struct ManifestWire: Codable {
     let schemaVersion: Int
-    let canonicalSurfaceLayoutVersion: Int?
+    let canonicalSurfaceLayoutVersion: Int
     let documentID: UUID
     let title: String
     let appVersion: String
@@ -1205,16 +1133,12 @@ private struct ViewportWire: Codable {
     }
 }
 
-private struct LegacySymmetryWire: Codable {
-    let type: UInt32
-}
-
 private struct SymmetryWire: Codable {
     let domain: UInt32
     let preset: UInt32
     let periodic: PeriodicWire?
     let radial: RadialWire?
-    let documentDomainLocked: Bool?
+    let documentDomainLocked: Bool
     let radialGeometryLocked: Bool
     let rasterMetric: RasterMetricWire
 }
@@ -1291,7 +1215,7 @@ private struct LayerWire: Codable {
     let isLocked: Bool
     let originX: Float?
     let originY: Float?
-    let surfaceKind: UInt32?
+    let surfaceKind: UInt32
     let rasterFile: String?
     let rasterWidth: Int?
     let rasterHeight: Int?

@@ -95,6 +95,7 @@ public struct TiledRasterRevisionEndpoint: Equatable, Sendable {
     public let generation: UInt64
     public let pixelSize: PixelSize
     public let documentPixelSize: PixelSize
+    public let radialLayout: RadialSectorLayout?
     public let coordinates: [PaintTileCoordinate]
     public let presentCoordinates: [PaintTileCoordinate]
     public let regions: PixelRegionSet
@@ -103,6 +104,7 @@ public struct TiledRasterRevisionEndpoint: Equatable, Sendable {
         generation: UInt64,
         pixelSize: PixelSize,
         documentPixelSize: PixelSize,
+        radialLayout: RadialSectorLayout? = nil,
         coordinates: [PaintTileCoordinate],
         presentCoordinates: [PaintTileCoordinate]
     ) throws {
@@ -131,6 +133,7 @@ public struct TiledRasterRevisionEndpoint: Equatable, Sendable {
         self.generation = generation
         self.pixelSize = pixelSize
         self.documentPixelSize = documentPixelSize
+        self.radialLayout = radialLayout
         self.coordinates = coordinates
         self.presentCoordinates = presentCoordinates
         regions = PixelRegionSet(bounds, clippedTo: pixelSize)
@@ -252,8 +255,7 @@ struct TiledRasterRevisionHarnessSnapshot: Equatable {
     let payloads: [TiledRasterRevisionHarnessPayloadEntry]
 }
 
-/// Tile-native history storage. The full-surface `RasterRevisionStore` remains
-/// as a compatibility helper until the renderer atomically switches routes.
+/// Tile-native history storage for the current document-paint authority.
 public final class TiledRasterRevisionStore: @unchecked Sendable {
     private enum Lifetime {
         case provisional
@@ -325,7 +327,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
     private let device: any MTLDevice
     public let maximumRetainedBytes: Int
     private let storeIdentity =
-        RasterRevisionStoreIdentitySource.shared.makeIdentity()
+        TiledRasterRevisionStoreIdentitySource.shared.makeIdentity()
     private let lock = NSLock()
     private var entries: [StoredRasterRevisionID: Entry] = [:]
     private var pairs: [StoredRasterRevisionID: PairRecord] = [:]
@@ -400,6 +402,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 generation: generation,
                 pixelSize: pixelSize,
                 documentPixelSize: pixelSize,
+                radialLayout: nil,
                 coordinates: dirtyCoordinates,
                 presentCoordinates: beforePresent
             ),
@@ -407,6 +410,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 generation: generation,
                 pixelSize: pixelSize,
                 documentPixelSize: pixelSize,
+                radialLayout: nil,
                 coordinates: dirtyCoordinates,
                 presentCoordinates: afterPresent
             ),
@@ -422,6 +426,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
     ) throws -> PendingRasterRevisionPair {
         let geometryChanged = before.pixelSize != after.pixelSize
             || before.documentPixelSize != after.documentPixelSize
+            || before.radialLayout != after.radialLayout
         guard !before.coordinates.isEmpty || !after.coordinates.isEmpty
                 || geometryChanged
         else {
@@ -495,6 +500,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 id: beforeID,
                 pixelSize: before.pixelSize,
                 documentPixelSize: before.documentPixelSize,
+                radialLayout: before.radialLayout,
                 regions: before.regions,
                 retainedBytes: beforeLayout.retainedBytes,
                 storage: beforeStorage
@@ -503,6 +509,7 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
                 id: afterID,
                 pixelSize: after.pixelSize,
                 documentPixelSize: after.documentPixelSize,
+                radialLayout: after.radialLayout,
                 regions: after.regions,
                 retainedBytes: afterLayout.retainedBytes,
                 storage: afterStorage
@@ -1645,6 +1652,27 @@ public final class TiledRasterRevisionStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return try body()
+    }
+}
+
+private final class TiledRasterRevisionStoreIdentitySource:
+    @unchecked Sendable
+{
+    static let shared = TiledRasterRevisionStoreIdentitySource()
+
+    private let lock = NSLock()
+    private var nextIdentity: UInt64 = 1
+
+    func makeIdentity() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        precondition(
+            nextIdentity < UInt64.max,
+            "Raster revision store identity space exhausted."
+        )
+        let identity = nextIdentity
+        nextIdentity += 1
+        return identity
     }
 }
 

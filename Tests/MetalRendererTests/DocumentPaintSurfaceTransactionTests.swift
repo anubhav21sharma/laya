@@ -8,113 +8,6 @@ import Testing
 @Suite("Document paint surface transaction", .serialized)
 struct DocumentPaintSurfaceTransactionTests {
     @Test
-    func coordinatorHasOneStrictTerminalAndNoCompatibilityCalls() throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: root.appendingPathComponent(
-                "Sources/MetalRenderer/Raster/DocumentPaintSurfaceTransaction.swift"
-            ),
-            encoding: .utf8
-        )
-        let fileManager = FileManager.default
-        func swiftFiles(below directory: URL) -> [URL] {
-            guard let enumerator = fileManager.enumerator(
-                at: directory,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            ) else { return [] }
-            return enumerator.compactMap { $0 as? URL }
-                .filter { $0.pathExtension == "swift" }
-                .sorted { $0.path < $1.path }
-        }
-        let metalRendererDirectory = root.appendingPathComponent(
-            "Sources/MetalRenderer"
-        )
-        let ownerImplementationPaths: Set<String> = [
-            "Compositing/SparseTileSamplingPipeline.swift",
-            "Compositing/SparseTileSamplingPlan.swift",
-            "Raster/DocumentPaintSurfaceMetalBackend.swift",
-            "Raster/DocumentPaintSurfaceStore.swift",
-            "Raster/DocumentPaintSurfaceTransaction.swift",
-            "StrokeRuntime/StrokePrivateSurfaceEncoder.swift",
-            "StrokeRuntime/StrokeTileSurfaceResources.swift",
-        ]
-        let productionMetalFiles = swiftFiles(below: metalRendererDirectory)
-            .filter { file in
-                let relative = file.path.replacingOccurrences(
-                    of: metalRendererDirectory.path + "/",
-                    with: ""
-                )
-                return !ownerImplementationPaths.contains(relative)
-                    && file.lastPathComponent != "GridRenderer+Harness.swift"
-            }
-        let productionAppFiles = swiftFiles(
-            below: root.appendingPathComponent("App/PatternSpike")
-        ).filter { !$0.path.contains("/BrushLab/") }
-        let integrationFiles = productionMetalFiles + productionAppFiles
-        let integrationSources = try integrationFiles.map {
-            ($0, try String(contentsOf: $0, encoding: .utf8))
-        }
-
-        #expect(source.components(
-            separatedBy: "registry.commitPreparedForCoordinator("
-        ).count - 1 == 1)
-        #expect(!source.contains("registry.commitPrepared("))
-        #expect(!source.contains("revisionStore.beginInstall("))
-        #expect(!source.contains("dirtyRegions:"))
-        let forbiddenIntegrationSymbols = [
-            "DocumentPaintSurfaceTransaction",
-            "DocumentPaintSurfaceMutationBackend",
-            "DocumentPaintSurfaceStore",
-            "StrokeTileSurfaceResources",
-            "StrokeTileSurfaceEncoder",
-            "tiledTestSurfaces:",
-            "SparseTileSourceRequest",
-            "SparseTileAcceptedSourceAdapter",
-            "sparseTileSourceRequests(",
-            "SparseTileSamplingPlan",
-            "SparseTileSamplingPlanCache",
-            "SparseTileSamplingGPUPlanCache",
-            "SparseTileSamplingPipeline",
-            "SparseTileSamplingEncoder",
-        ]
-        for (file, integrationSource) in integrationSources {
-            for symbol in forbiddenIntegrationSymbols {
-                #expect(
-                    !integrationSource.contains(symbol),
-                    "\(file.path) must not activate \(symbol) before Task 6"
-                )
-            }
-        }
-
-        let rendererSources = integrationSources
-            .filter {
-                $0.0.lastPathComponent.hasPrefix("GridRenderer")
-                    && $0.0.lastPathComponent != "GridRenderer+Harness.swift"
-            }
-            .map(\.1)
-            .joined(separator: "\n")
-        let descriptorConstructionCount = rendererSources.components(
-            separatedBy: "StrokeMetalResourceDescriptor("
-        ).count - 1
-        let legacySelectionCount = rendererSources.components(
-            separatedBy: "surfaces: strokeMetalSurfaceResources"
-        ).count - 1
-        #expect(descriptorConstructionCount > 0)
-        #expect(legacySelectionCount == descriptorConstructionCount)
-        let selectorSource = try String(
-            contentsOf: root.appendingPathComponent(
-                "Sources/MetalRenderer/StrokeRuntime/StrokePrivateSurfaceEncoder.swift"
-            ),
-            encoding: .utf8
-        )
-        #expect(selectorSource.contains("backend = .legacy(surfaces)"))
-    }
-
-    @Test
     func quiescenceOracleCapturesEveryObservableOwnershipDimension() throws {
         guard let fixture = try TransactionFixture.make() else { return }
         let history = DocumentHistory()
@@ -217,7 +110,7 @@ struct DocumentPaintSurfaceTransactionTests {
         let ownership = fixture.coordinator.ownershipSnapshotForTesting()
         #expect(ownership.destinationLeaseID == nil)
         #expect(ownership.strokeBaseSourceLeaseID == nil)
-        #expect(ownership.strokeAuthoritativeSourceLeaseID == nil)
+        #expect(ownership.strokeCommitSourceLeaseID == nil)
         #expect(fixture.backend.encodeCallCount == 0)
         try fixture.coordinator.discard(prepared)
     }
@@ -253,7 +146,7 @@ struct DocumentPaintSurfaceTransactionTests {
         }
         let ownership = fixture.coordinator.ownershipSnapshotForTesting()
         #expect(ownership.strokeBaseSourceLeaseID != nil)
-        #expect(ownership.strokeAuthoritativeSourceLeaseID == nil)
+        #expect(ownership.strokeCommitSourceLeaseID == nil)
         try fixture.coordinator.discard(encoded)
     }
 
@@ -289,6 +182,10 @@ struct DocumentPaintSurfaceTransactionTests {
                 logicalBounds: bounds
             )],
             authoritativeSources: [.texture(source)],
+            predictionSources: [.knownClear(
+                coordinate: coordinate,
+                logicalBounds: bounds
+            )],
             destinations: [.init(
                 coordinate: coordinate,
                 logicalBounds: bounds,
@@ -300,8 +197,7 @@ struct DocumentPaintSurfaceTransactionTests {
             .strokeTextureAlias) {
             try DocumentPaintSurfaceTransaction.validateStrokePayload(
                 payload,
-                expectedCoordinates: [coordinate],
-                allowsKnownClearAuthoritativeSources: false
+                expectedCoordinates: [coordinate]
             )
         }
         #expect(fixture.backend.encodeCallCount == 0)
@@ -1146,7 +1042,7 @@ struct DocumentPaintSurfaceTransactionTests {
         ] {
             guard let fixture = try TransactionFixture.make(width: 1, height: 1)
             else { return }
-            let request = transactionEncodedImportRequest(
+            let request = try transactionEncodedImportRequest(
                 fixture,
                 bytes: Data([19, 37, 91, 255])
             )
@@ -1171,7 +1067,7 @@ struct DocumentPaintSurfaceTransactionTests {
 
         guard let cleanup = try TransactionFixture.make(width: 1, height: 1)
         else { return }
-        let request = transactionEncodedImportRequest(
+        let request = try transactionEncodedImportRequest(
             cleanup,
             bytes: Data([19, 37, 91, 255])
         )
@@ -1207,10 +1103,7 @@ struct DocumentPaintSurfaceTransactionTests {
                 publish: true
             )
             let request = fixture.restoreRequest(
-                reference: pair.after,
-                expected: [
-                    .init(coordinate: coordinate, disposition: .replace),
-                ]
+                reference: pair.after
             )
             let oracle = try TransactionQuiescenceOracle.capture(fixture)
             let prepared = try fixture.coordinator.prepareRestore(request)
@@ -1238,10 +1131,7 @@ struct DocumentPaintSurfaceTransactionTests {
                 publish: true
             )
             let request = fixture.restoreRequest(
-                reference: pair.after,
-                expected: [
-                    .init(coordinate: coordinate, disposition: .replace),
-                ]
+                reference: pair.after
             )
             let oracle = try TransactionQuiescenceOracle.capture(fixture)
             let prepared = try fixture.coordinator.prepareRestore(request)
@@ -1441,7 +1331,6 @@ struct DocumentPaintSurfaceTransactionTests {
         let undoPrepared = try fixture.coordinator.prepareRestore(
             fixture.restoreRequest(
                 reference: pair.before,
-                expected: [],
                 targetGeometry: fixture.geometry
             )
         )
@@ -1459,7 +1348,6 @@ struct DocumentPaintSurfaceTransactionTests {
         let redoPrepared = try fixture.coordinator.prepareRestore(
             fixture.restoreRequest(
                 reference: pair.after,
-                expected: [],
                 targetGeometry: target
             )
         )
@@ -1678,7 +1566,6 @@ struct DocumentPaintSurfaceTransactionTests {
         let undoPrepared = try fixture.coordinator.prepareRestore(
             fixture.restoreRequest(
                 reference: pair.before,
-                expected: [.init(coordinate: edge, disposition: .replace)],
                 targetGeometry: fixture.geometry
             )
         )
@@ -1696,7 +1583,6 @@ struct DocumentPaintSurfaceTransactionTests {
         let redoPrepared = try fixture.coordinator.prepareRestore(
             fixture.restoreRequest(
                 reference: pair.after,
-                expected: [.init(coordinate: edge, disposition: .remove)],
                 targetGeometry: target
             )
         )
@@ -1851,9 +1737,6 @@ struct DocumentPaintSurfaceTransactionTests {
         let undoPrepared = try fixture.coordinator.prepareRestore(
             fixture.restoreRequest(
                 reference: pair.before,
-                expected: beforePhysical.map {
-                    .init(coordinate: $0, disposition: .replace)
-                },
                 targetGeometry: sourceGeometry
             )
         )
@@ -1872,9 +1755,6 @@ struct DocumentPaintSurfaceTransactionTests {
         let redoPrepared = try fixture.coordinator.prepareRestore(
             fixture.restoreRequest(
                 reference: pair.after,
-                expected: [
-                    .init(coordinate: targetPhysical, disposition: .replace),
-                ],
                 targetGeometry: targetGeometry
             )
         )
@@ -2013,130 +1893,6 @@ struct DocumentPaintSurfaceTransactionTests {
     }
 
     @Test
-    func encodedImportRejectsMalformedBoundariesBeforeCandidateAllocation() throws {
-        guard let fixture = try TransactionFixture.make(width: 2, height: 1)
-        else { return }
-        let baseline = fixture.registry.snapshot()
-        let revisions = fixture.revisions.snapshot()
-
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .unsupportedMutationKind(.encodedImport)) {
-            _ = try fixture.coordinator.prepareMutation(
-                fixture.request(
-                    kind: .encodedImport,
-                    dirty: [.init(x: 0, y: 0)],
-                    requiresHistoryPair: false
-                )
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .invalidEncodedImport(.invalidDimensions(width: 0, height: 1))) {
-            _ = try fixture.coordinator.prepareEncodedImport(
-                DocumentPaintSurfaceEncodedImportRequest(
-                    layerID: fixture.layerID,
-                    candidateGeometry: fixture.geometry,
-                    width: 0,
-                    height: 1,
-                    bytesPerRow: 0,
-                    encodedPremultipliedBGRA8: Data()
-                ),
-                failureInjection: .init(failingAt: .candidateReserve(0))
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .invalidEncodedImport(.invalidRowStride(minimum: 8, actual: 7))) {
-            _ = try fixture.coordinator.prepareEncodedImport(
-                DocumentPaintSurfaceEncodedImportRequest(
-                    layerID: fixture.layerID,
-                    candidateGeometry: fixture.geometry,
-                    width: 2,
-                    height: 1,
-                    bytesPerRow: 7,
-                    encodedPremultipliedBGRA8: Data(repeating: 0, count: 7)
-                ),
-                failureInjection: .init(failingAt: .candidateReserve(0))
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .invalidEncodedImport(
-                .invalidEncodedByteCount(expected: 8, actual: 7)
-            )) {
-            _ = try fixture.coordinator.prepareEncodedImport(
-                DocumentPaintSurfaceEncodedImportRequest(
-                    layerID: fixture.layerID,
-                    candidateGeometry: fixture.geometry,
-                    width: 2,
-                    height: 1,
-                    bytesPerRow: 8,
-                    encodedPremultipliedBGRA8: Data(repeating: 0, count: 7)
-                ),
-                failureInjection: .init(failingAt: .candidateReserve(0))
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .invalidEncodedImport(.byteCountOverflow)) {
-            _ = try fixture.coordinator.prepareEncodedImport(
-                DocumentPaintSurfaceEncodedImportRequest(
-                    layerID: fixture.layerID,
-                    candidateGeometry: fixture.geometry,
-                    width: Int.max,
-                    height: 2,
-                    bytesPerRow: Int.max,
-                    encodedPremultipliedBGRA8: Data()
-                ),
-                failureInjection: .init(failingAt: .candidateReserve(0))
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .encodedImportGeometryMismatch(
-                expected: fixture.geometry.storagePixelSize,
-                actual: PixelSize(width: 1, height: 1)
-            )) {
-            _ = try fixture.coordinator.prepareEncodedImport(
-                DocumentPaintSurfaceEncodedImportRequest(
-                    layerID: fixture.layerID,
-                    candidateGeometry: fixture.geometry,
-                    width: 1,
-                    height: 1,
-                    bytesPerRow: 4,
-                    encodedPremultipliedBGRA8: Data(repeating: 0, count: 4)
-                ),
-                failureInjection: .init(failingAt: .candidateReserve(0))
-            )
-        }
-        let radialLayout = try RadialSectorLayout(
-            maximumRadius: 1,
-            sectorAngleRadians: .pi
-        )
-        let radialGeometry = try DocumentPaintGeometry(
-            documentPixelSize: PixelSize(width: 2, height: 2),
-            storagePixelSize: radialLayout.atlasPixelSize,
-            radialLayout: radialLayout
-        )
-        let radialByteCount = radialLayout.atlasPixelSize.width
-            * radialLayout.atlasPixelSize.height * 4
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .encodedImportRadialUnsupported) {
-            _ = try fixture.coordinator.prepareEncodedImport(
-                DocumentPaintSurfaceEncodedImportRequest(
-                    layerID: fixture.layerID,
-                    candidateGeometry: radialGeometry,
-                    width: radialLayout.atlasPixelSize.width,
-                    height: radialLayout.atlasPixelSize.height,
-                    bytesPerRow: radialLayout.atlasPixelSize.width * 4,
-                    encodedPremultipliedBGRA8:
-                        Data(repeating: 0, count: radialByteCount)
-                ),
-                failureInjection: .init(failingAt: .candidateReserve(0))
-            )
-        }
-
-        #expect(fixture.registry.snapshot() == baseline)
-        #expect(fixture.revisions.snapshot() == revisions)
-        #expect(fixture.coordinator.snapshot().state == .idle)
-    }
-
-    @Test
     func transparentEncodedImportAllocatesNothingButStillReplacesWhenRequired() throws {
         let transparentGarbage = Data([
             255, 91, 37, 0,
@@ -2146,13 +1902,13 @@ struct DocumentPaintSurfaceTransactionTests {
         else { return }
         let emptyBaseline = empty.registry.snapshot()
         let noOp = try empty.coordinator.prepareEncodedImport(
-            DocumentPaintSurfaceEncodedImportRequest(
+            try transactionValidatedImportRequest(
                 layerID: empty.layerID,
-                candidateGeometry: empty.geometry,
+                geometry: empty.geometry,
                 width: 2,
                 height: 1,
                 bytesPerRow: 8,
-                encodedPremultipliedBGRA8: transparentGarbage
+                bytes: transparentGarbage
             )
         )
         guard case let .noOp(receipt) = noOp else {
@@ -2171,13 +1927,13 @@ struct DocumentPaintSurfaceTransactionTests {
         let revisions = replacement.revisions.snapshot()
         let prepared = try transactionPrepared(
             replacement.coordinator.prepareEncodedImport(
-                DocumentPaintSurfaceEncodedImportRequest(
+                try transactionValidatedImportRequest(
                     layerID: replacement.layerID,
-                    candidateGeometry: replacement.geometry,
+                    geometry: replacement.geometry,
                     width: 2,
                     height: 1,
                     bytesPerRow: 8,
-                    encodedPremultipliedBGRA8: transparentGarbage
+                    bytes: transparentGarbage
                 )
             )
         )
@@ -2185,7 +1941,7 @@ struct DocumentPaintSurfaceTransactionTests {
         let encoded = try replacement.coordinator.encodeMutation(prepared)
         let payload = try #require(replacement.backend.encodedImportPayload)
         #expect(payload.destinations.isEmpty)
-        #expect(payload.tileRegions.isEmpty)
+        #expect(payload.planeBindings.isEmpty)
         #expect(replacement.registry.snapshot().activeTileLeaseCount == 0)
         let reduced = try replacement.coordinator.completeMutation(
             encoded,
@@ -2205,13 +1961,13 @@ struct DocumentPaintSurfaceTransactionTests {
         let target = try transactionGeometry(width: 1, height: 1)
         let changed = try transactionPrepared(
             geometryChange.coordinator.prepareEncodedImport(
-                DocumentPaintSurfaceEncodedImportRequest(
+                try transactionValidatedImportRequest(
                     layerID: geometryChange.layerID,
-                    candidateGeometry: target,
+                    geometry: target,
                     width: 1,
                     height: 1,
                     bytesPerRow: 4,
-                    encodedPremultipliedBGRA8: Data([255, 99, 17, 0])
+                    bytes: Data([255, 99, 17, 0])
                 )
             )
         )
@@ -2276,13 +2032,13 @@ struct DocumentPaintSurfaceTransactionTests {
         let revisionBaseline = fixture.revisions.snapshot()
         let prepared = try transactionPrepared(
             fixture.coordinator.prepareEncodedImport(
-                DocumentPaintSurfaceEncodedImportRequest(
+                try transactionValidatedImportRequest(
                     layerID: fixture.layerID,
-                    candidateGeometry: fixture.geometry,
+                    geometry: fixture.geometry,
                     width: width,
                     height: height,
                     bytesPerRow: bytesPerRow,
-                    encodedPremultipliedBGRA8: bytes
+                    bytes: bytes
                 )
             )
         )
@@ -2295,44 +2051,10 @@ struct DocumentPaintSurfaceTransactionTests {
                 + coordinates.count * PaintTileDescriptor.residentByteCount)
         let encoded = try fixture.coordinator.encodeMutation(prepared)
         let payload = try #require(fixture.backend.encodedImportPayload)
-        #expect(payload.width == width)
-        #expect(payload.height == height)
-        #expect(payload.bytesPerRow == bytesPerRow)
-        #expect(payload.encodedPremultipliedBGRA8 == bytes)
-        #expect(payload.conversion
-            == .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float)
-        #expect(payload.clearsDestinationsBeforeConversion)
         #expect(payload.destinations.map(\.coordinate) == coordinates)
-        #expect(payload.tileRegions == [
-            .init(
-                coordinate: coordinates[0],
-                sourceOrigin: SIMD2(0, 0),
-                sourceByteOffset: 0,
-                destinationOrigin: .zero,
-                extent: PixelSize(width: 256, height: 256)
-            ),
-            .init(
-                coordinate: coordinates[1],
-                sourceOrigin: SIMD2(256, 0),
-                sourceByteOffset: 256 * 4,
-                destinationOrigin: .zero,
-                extent: PixelSize(width: 1, height: 256)
-            ),
-            .init(
-                coordinate: coordinates[2],
-                sourceOrigin: SIMD2(0, 256),
-                sourceByteOffset: 256 * bytesPerRow,
-                destinationOrigin: .zero,
-                extent: PixelSize(width: 256, height: 3)
-            ),
-            .init(
-                coordinate: coordinates[3],
-                sourceOrigin: SIMD2(256, 256),
-                sourceByteOffset: 256 * bytesPerRow + 256 * 4,
-                destinationOrigin: .zero,
-                extent: PixelSize(width: 1, height: 3)
-            ),
-        ])
+        #expect(payload.planeBindings.map(\.width) == [256, 1, 256, 1])
+        #expect(payload.planeBindings.map(\.height) == [256, 256, 3, 3])
+        #expect(payload.planeBindings.map(\.bytesPerRow) == [1024, 4, 1024, 4])
         let encodedSnapshot = fixture.registry.snapshot()
         #expect(encodedSnapshot.generation == baseline.generation)
         #expect(encodedSnapshot.layers == baseline.layers)
@@ -2397,7 +2119,7 @@ struct DocumentPaintSurfaceTransactionTests {
         else { return }
         let coordinate = PaintTileCoordinate(x: 0, y: 0)
         fixture.backend.alphaByCoordinate[coordinate] = 0
-        let request = transactionEncodedImportRequest(
+        let request = try transactionEncodedImportRequest(
             fixture,
             bytes: Data([19, 37, 91, 255])
         )
@@ -2424,7 +2146,7 @@ struct DocumentPaintSurfaceTransactionTests {
     func encodedImportFailuresRestoreExactBaselineAndAllowImmediateReuse() throws {
         guard let reserve = try TransactionFixture.make(width: 1, height: 1)
         else { return }
-        let reserveRequest = transactionEncodedImportRequest(
+        let reserveRequest = try transactionEncodedImportRequest(
             reserve,
             bytes: Data([19, 37, 91, 255])
         )
@@ -2446,7 +2168,7 @@ struct DocumentPaintSurfaceTransactionTests {
 
         guard let encode = try TransactionFixture.make(width: 1, height: 1)
         else { return }
-        let encodeRequest = transactionEncodedImportRequest(
+        let encodeRequest = try transactionEncodedImportRequest(
             encode,
             bytes: Data([19, 37, 91, 255])
         )
@@ -2482,7 +2204,7 @@ struct DocumentPaintSurfaceTransactionTests {
         ] {
             guard let fixture = try TransactionFixture.make(width: 1, height: 1)
             else { return }
-            let request = transactionEncodedImportRequest(
+            let request = try transactionEncodedImportRequest(
                 fixture,
                 bytes: Data([19, 37, 91, 255])
             )
@@ -2519,7 +2241,7 @@ struct DocumentPaintSurfaceTransactionTests {
         ] {
             guard let fixture = try TransactionFixture.make(width: 1, height: 1)
             else { return }
-            let request = transactionEncodedImportRequest(
+            let request = try transactionEncodedImportRequest(
                 fixture,
                 bytes: Data([19, 37, 91, 255])
             )
@@ -2550,7 +2272,7 @@ struct DocumentPaintSurfaceTransactionTests {
 
         guard let publish = try TransactionFixture.make(width: 1, height: 1)
         else { return }
-        let publishRequest = transactionEncodedImportRequest(
+        let publishRequest = try transactionEncodedImportRequest(
             publish,
             bytes: Data([19, 37, 91, 255])
         )
@@ -2583,92 +2305,6 @@ struct DocumentPaintSurfaceTransactionTests {
             registryBaseline: publishRegistry,
             revisionBaseline: publishRevisions
         )
-    }
-
-    @Test
-    func encodedImportRejectsWinnerAfterReplacementAuthorityDerivation() throws {
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue()
-        else { return }
-        let layerID = UUID()
-        let geometry = try transactionGeometry(width: 512, height: 256)
-        let tileBytes = PaintTileDescriptor.residentByteCount
-        let registry = try DocumentPaintSurfaceStore(
-            device: device,
-            byteBudget: tileBytes * 8,
-            transferByteCapacity: tileBytes * 16,
-            geometry: geometry,
-            layerIDs: [layerID]
-        )
-        let revisions = TiledRasterRevisionStore(
-            device: device,
-            maximumRetainedBytes: tileBytes * 8
-        )
-        let winningCoordinate = PaintTileCoordinate(x: 1, y: 0)
-        let winningCoordinator = DocumentPaintSurfaceTransaction(
-            registry: registry,
-            revisionStore: revisions,
-            commandQueue: queue,
-            mutationBackend: TransactionTestMutationBackend(),
-            allowKnownClearAuthoritativeStrokeSourcesForTesting: true
-        )
-        let winningRequest = DocumentPaintSurfaceMutationRequest(
-            kind: .stroke,
-            layerID: layerID,
-            baseGeometry: geometry,
-            candidateGeometry: geometry,
-            dirtyCoordinates: [winningCoordinate],
-            explicitlyRemovedCoordinates: [],
-            requiresHistoryPair: false
-        )
-        let importBackend = TransactionTestMutationBackend()
-        let importCoordinator = DocumentPaintSurfaceTransaction(
-            registry: registry,
-            revisionStore: revisions,
-            commandQueue: queue,
-            mutationBackend: importBackend,
-            afterEncodedImportReplacementAuthorityForTesting: {
-                let prepared = try transactionPrepared(
-                    winningCoordinator.prepareMutation(winningRequest)
-                )
-                let encoded = try winningCoordinator.encodeMutation(prepared)
-                let reduced = try winningCoordinator.completeMutation(
-                    encoded,
-                    as: .succeeded
-                )
-                let terminal = try winningCoordinator
-                    .prepareTerminalCommit(reduced)
-                _ = try winningCoordinator.publish(terminal)
-            }
-        )
-        var bytes = Data(count: 512 * 256 * 4)
-        bytes[3] = 255
-        let request = DocumentPaintSurfaceEncodedImportRequest(
-            layerID: layerID,
-            candidateGeometry: geometry,
-            width: 512,
-            height: 256,
-            bytesPerRow: 512 * 4,
-            encodedPremultipliedBGRA8: bytes
-        )
-        let revisionBaseline = revisions.snapshot()
-
-        #expect(throws: DocumentPaintSurfaceStoreError.staleGeneration(
-            expected: 1,
-            actual: 0
-        )) {
-            _ = try importCoordinator.prepareEncodedImport(request)
-        }
-
-        #expect(importCoordinator.snapshot().state == .idle)
-        #expect(importBackend.encodeCallCount == 0)
-        #expect(registry.snapshot().generation == 1)
-        #expect(registry.snapshot().layers[0].references.map(\.coordinate) == [
-            winningCoordinate,
-        ])
-        #expect(registry.snapshot().activeTileLeaseCount == 0)
-        #expect(registry.snapshot().preparedCandidateCount == 0)
-        #expect(revisions.snapshot() == revisionBaseline)
     }
 
     @Test
@@ -2832,8 +2468,7 @@ struct DocumentPaintSurfaceTransactionTests {
         let undo = try #require(try history.beginUndo())
         let preparedUndo = try fixture.coordinator.prepareRestore(
             fixture.restoreRequest(
-                reference: pair.before,
-                expected: [.init(coordinate: coordinate, disposition: .remove)]
+                reference: pair.before
             )
         )
         #expect(fixture.registry.snapshot().generation == 1)
@@ -2862,8 +2497,7 @@ struct DocumentPaintSurfaceTransactionTests {
         let redo = try #require(try history.beginRedo())
         let preparedRedo = try fixture.coordinator.prepareRestore(
             fixture.restoreRequest(
-                reference: pair.after,
-                expected: [.init(coordinate: coordinate, disposition: .replace)]
+                reference: pair.after
             )
         )
         let encodedRedo = try fixture.coordinator.encodeRestore(preparedRedo)
@@ -2898,13 +2532,7 @@ struct DocumentPaintSurfaceTransactionTests {
         for expectedGeneration in 1...2 {
             let prepared = try fixture.coordinator.prepareRestore(
                 fixture.restoreRequest(
-                    reference: pair.after,
-                    expected: [
-                        .init(
-                            coordinate: coordinate,
-                            disposition: .remove
-                        ),
-                    ]
+                    reference: pair.after
                 )
             )
             let encoded = try fixture.coordinator.encodeRestore(prepared)
@@ -2931,7 +2559,7 @@ struct DocumentPaintSurfaceTransactionTests {
     }
 
     @Test
-    func restoreRejectsProvisionalForgedForeignLayerGeometryAndDispositionAuthority() throws {
+    func restoreRejectsProvisionalForgedForeignAndMismatchedGeometry() throws {
         guard let fixture = try TransactionFixture.make(width: 256, height: 256)
         else { return }
         let coordinate = PaintTileCoordinate(x: 0, y: 0)
@@ -2944,13 +2572,11 @@ struct DocumentPaintSurfaceTransactionTests {
             .restoreReferenceUnavailable) {
             _ = try fixture.coordinator.prepareRestore(
                 fixture.restoreRequest(
-                    reference: provisional.after,
-                    expected: [
-                        .init(coordinate: coordinate, disposition: .replace),
-                    ]
+                    reference: provisional.after
                 )
             )
         }
+
         try fixture.revisions.discard(provisional)
 
         let published = try transactionCapturedPair(
@@ -2958,6 +2584,22 @@ struct DocumentPaintSurfaceTransactionTests {
             coordinate: coordinate,
             publish: true
         )
+        let fullSurface = RasterRevisionReference(
+            id: published.after.id,
+            pixelSize: published.after.pixelSize,
+            documentPixelSize: published.after.documentPixelSize,
+            regions: published.after.regions,
+            retainedBytes: published.after.retainedBytes,
+            storage: .fullSurfaceBGRA8
+        )
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreReferenceUnavailable) {
+            _ = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: fullSurface
+                )
+            )
+        }
         let forged = RasterRevisionReference(
             id: published.after.id,
             pixelSize: published.after.pixelSize,
@@ -2970,10 +2612,7 @@ struct DocumentPaintSurfaceTransactionTests {
             .restoreReferenceUnavailable) {
             _ = try fixture.coordinator.prepareRestore(
                 fixture.restoreRequest(
-                    reference: forged,
-                    expected: [
-                        .init(coordinate: coordinate, disposition: .replace),
-                    ]
+                    reference: forged
                 )
             )
         }
@@ -2992,40 +2631,17 @@ struct DocumentPaintSurfaceTransactionTests {
             .restoreReferenceUnavailable) {
             _ = try fixture.coordinator.prepareRestore(
                 fixture.restoreRequest(
-                    reference: foreign.after,
-                    expected: [
-                        .init(coordinate: coordinate, disposition: .replace),
-                    ]
+                    reference: foreign.after
                 )
             )
         }
 
-        let wrongLayer = UUID()
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .restoreLayerMismatch(
-                expected: fixture.layerID,
-                actual: wrongLayer
-            )) {
-            _ = try fixture.coordinator.prepareRestore(
-                DocumentPaintSurfaceRestoreRequest(
-                    reference: published.after,
-                    targetGeometry: fixture.geometry,
-                    layerID: wrongLayer,
-                    expectedInstallDispositions: [
-                        .init(coordinate: coordinate, disposition: .replace),
-                    ]
-                )
-            )
-        }
         let wrongGeometry = try transactionGeometry(width: 512, height: 256)
         #expect(throws: DocumentPaintSurfaceTransactionError
             .restoreGeometryMismatch) {
             _ = try fixture.coordinator.prepareRestore(
                 fixture.restoreRequest(
                     reference: published.after,
-                    expected: [
-                        .init(coordinate: coordinate, disposition: .replace),
-                    ],
                     targetGeometry: wrongGeometry
                 )
             )
@@ -3040,29 +2656,21 @@ struct DocumentPaintSurfaceTransactionTests {
             _ = try fixture.coordinator.prepareRestore(
                 fixture.restoreRequest(
                     reference: published.after,
-                    expected: [
-                        .init(
-                            coordinate: coordinate,
-                            disposition: .replace
-                        ),
-                    ],
                     targetGeometry: wrongVisibleGeometry
-                )
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .restoreDispositionMismatch) {
-            _ = try fixture.coordinator.prepareRestore(
-                fixture.restoreRequest(
-                    reference: published.after,
-                    expected: [
-                        .init(coordinate: coordinate, disposition: .remove),
-                    ]
                 )
             )
         }
         #expect(fixture.coordinator.snapshot().state == .idle)
         try fixture.revisions.release(published.revisionIDs)
+        #expect(throws: DocumentPaintSurfaceTransactionError
+            .restoreReferenceUnavailable) {
+            _ = try fixture.coordinator.prepareRestore(
+                fixture.restoreRequest(
+                    reference: published.after
+                )
+            )
+        }
+        #expect(fixture.coordinator.snapshot().state == .idle)
         try foreignFixture.revisions.release(foreign.revisionIDs)
     }
 
@@ -3081,10 +2689,7 @@ struct DocumentPaintSurfaceTransactionTests {
             )
             let prepared = try fixture.coordinator.prepareRestore(
                 fixture.restoreRequest(
-                    reference: pair.after,
-                    expected: [
-                        .init(coordinate: coordinate, disposition: .replace),
-                    ]
+                    reference: pair.after
                 )
             )
             switch phase {
@@ -3117,10 +2722,7 @@ struct DocumentPaintSurfaceTransactionTests {
 
             let immediate = try fixture.coordinator.prepareRestore(
                 fixture.restoreRequest(
-                    reference: pair.after,
-                    expected: [
-                        .init(coordinate: coordinate, disposition: .replace),
-                    ]
+                    reference: pair.after
                 )
             )
             try fixture.coordinator.discard(immediate)
@@ -3148,8 +2750,7 @@ struct DocumentPaintSurfaceTransactionTests {
         let undo = try #require(try history.beginUndo())
         let prepared = try fixture.coordinator.prepareRestore(
             fixture.restoreRequest(
-                reference: pair.before,
-                expected: [.init(coordinate: coordinate, disposition: .remove)]
+                reference: pair.before
             )
         )
         let encoded = try fixture.coordinator.encodeRestore(prepared)
@@ -3207,10 +2808,7 @@ struct DocumentPaintSurfaceTransactionTests {
             .restorePreparationFailed) {
             _ = try reserveFixture.coordinator.prepareRestore(
                 reserveFixture.restoreRequest(
-                    reference: reservePair.after,
-                    expected: [
-                        .init(coordinate: coordinate, disposition: .replace),
-                    ]
+                    reference: reservePair.after
                 ),
                 failureInjection: .init(failingAt: .candidateReserve(0))
             )
@@ -3236,10 +2834,7 @@ struct DocumentPaintSurfaceTransactionTests {
             )
             let prepared = try fixture.coordinator.prepareRestore(
                 fixture.restoreRequest(
-                    reference: pair.after,
-                    expected: [
-                        .init(coordinate: coordinate, disposition: .replace),
-                    ]
+                    reference: pair.after
                 )
             )
             if point == .restoreEncoding {
@@ -3273,10 +2868,7 @@ struct DocumentPaintSurfaceTransactionTests {
 
             let retry = try fixture.coordinator.prepareRestore(
                 fixture.restoreRequest(
-                    reference: pair.after,
-                    expected: [
-                        .init(coordinate: coordinate, disposition: .replace),
-                    ]
+                    reference: pair.after
                 )
             )
             try fixture.coordinator.discard(retry)
@@ -3294,10 +2886,7 @@ struct DocumentPaintSurfaceTransactionTests {
         )
         let prepared = try terminalFixture.coordinator.prepareRestore(
             terminalFixture.restoreRequest(
-                reference: terminalPair.after,
-                expected: [
-                    .init(coordinate: coordinate, disposition: .replace),
-                ]
+                reference: terminalPair.after
             )
         )
         let encoded = try terminalFixture.coordinator.encodeRestore(prepared)
@@ -3332,10 +2921,7 @@ struct DocumentPaintSurfaceTransactionTests {
         #expect(terminalFixture.coordinator.snapshot().state == .idle)
         let immediate = try terminalFixture.coordinator.prepareRestore(
             terminalFixture.restoreRequest(
-                reference: terminalPair.after,
-                expected: [
-                    .init(coordinate: coordinate, disposition: .replace),
-                ]
+                reference: terminalPair.after
             )
         )
         try terminalFixture.coordinator.discard(immediate)
@@ -3354,8 +2940,7 @@ struct DocumentPaintSurfaceTransactionTests {
         )
         let prepared = try fixture.coordinator.prepareRestore(
             fixture.restoreRequest(
-                reference: pair.after,
-                expected: [.init(coordinate: coordinate, disposition: .replace)]
+                reference: pair.after
             )
         )
         let encoded = try fixture.coordinator.encodeRestore(prepared)
@@ -3376,46 +2961,6 @@ struct DocumentPaintSurfaceTransactionTests {
         try fixture.revisions.release([pair.before.id])
     }
 
-    @Test
-    func restoreDispositionAuthorityRejectsOrderAndDuplicatesBeforeLeasing() throws {
-        guard let fixture = try TransactionFixture.make(width: 512, height: 256)
-        else { return }
-        let first = PaintTileCoordinate(x: 0, y: 0)
-        let second = PaintTileCoordinate(x: 1, y: 0)
-        let pair = try transactionCapturedPair(
-            fixture,
-            coordinates: [first, second],
-            beforePresentCoordinates: [],
-            afterPresentCoordinates: [first, second],
-            publish: true
-        )
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .unsortedCoordinate(previous: second, current: first)) {
-            _ = try fixture.coordinator.prepareRestore(
-                fixture.restoreRequest(
-                    reference: pair.after,
-                    expected: [
-                        .init(coordinate: second, disposition: .replace),
-                        .init(coordinate: first, disposition: .replace),
-                    ]
-                )
-            )
-        }
-        #expect(throws: DocumentPaintSurfaceTransactionError
-            .duplicateCoordinate(first)) {
-            _ = try fixture.coordinator.prepareRestore(
-                fixture.restoreRequest(
-                    reference: pair.after,
-                    expected: [
-                        .init(coordinate: first, disposition: .replace),
-                        .init(coordinate: first, disposition: .replace),
-                    ]
-                )
-            )
-        }
-        #expect(fixture.revisions.snapshot().inFlightInstallLeaseCount == 0)
-        try fixture.revisions.release(pair.revisionIDs)
-    }
 }
 
 private final class TransactionTestMutationBackend:
@@ -3436,7 +2981,10 @@ private final class TransactionTestMutationBackend:
     private(set) var encodedImportPayload:
         DocumentPaintSurfaceEncodedImportBackendPayload?
 
-    func preflight(_ operation: DocumentPaintSurfaceBackendOperation) throws {
+    func encode(
+        _ operation: DocumentPaintSurfaceBackendOperation
+    ) throws -> DocumentPaintSurfaceMutationBackendEncoding {
+        encodeCallCount += 1
         switch operation {
         case let .stroke(payload):
             strokePayload = payload
@@ -3449,30 +2997,6 @@ private final class TransactionTestMutationBackend:
             destinations = payload.destinations
         case let .encodedImport(payload):
             encodedImportPayload = payload
-            destinations = payload.destinations
-        case let .restore(payload):
-            _ = payload.reference
-            destinations = payload.destinations
-        }
-    }
-
-    func encode(
-        _ operation: DocumentPaintSurfaceBackendOperation
-    ) throws -> DocumentPaintSurfaceMutationBackendEncoding {
-        encodeCallCount += 1
-        switch operation {
-        case let .stroke(payload):
-            strokePayload = payload
-            destinations = payload.destinations
-        case .clear:
-            destinations = []
-        case let .resize(payload):
-            resizePayload = payload
-            destinations = payload.destinations
-        case let .encodedImport(payload):
-            encodedImportPayload = payload
-            destinations = payload.destinations
-        case let .restore(payload):
             destinations = payload.destinations
         }
         let encoding = DocumentPaintSurfaceMutationBackendEncoding()
@@ -3585,14 +3109,11 @@ private struct TransactionFixture {
 
     func restoreRequest(
         reference: RasterRevisionReference,
-        expected: [DocumentPaintSurfaceRestoreTileExpectation],
         targetGeometry: DocumentPaintGeometry? = nil
     ) -> DocumentPaintSurfaceRestoreRequest {
         DocumentPaintSurfaceRestoreRequest(
             reference: reference,
-            targetGeometry: targetGeometry ?? geometry,
-            layerID: layerID,
-            expectedInstallDispositions: expected
+            targetGeometry: targetGeometry ?? geometry
         )
     }
 }
@@ -3623,18 +3144,23 @@ private func transactionImportPayloadColor(
     x: Int,
     y: Int
 ) -> SIMD4<Float> {
-    let offset = y * payload.bytesPerRow + x * 4
-    let pixel = EncodedPremultipliedBGRA8(
-        blue: payload.encodedPremultipliedBGRA8[offset],
-        green: payload.encodedPremultipliedBGRA8[offset + 1],
-        red: payload.encodedPremultipliedBGRA8[offset + 2],
-        alpha: payload.encodedPremultipliedBGRA8[offset + 3]
+    let coordinate = PaintTileCoordinate(
+        x: x / PaintTileDescriptor.side,
+        y: y / PaintTileDescriptor.side
     )
-    switch payload.conversion {
-    case .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float:
-        return DocumentColorPipeline
-            .importEncodedPremultipliedBGRA8(pixel).simd
-    }
+    guard let binding = payload.planeBindings.first(where: {
+        $0.coordinate == coordinate
+    }) else { return .zero }
+    let localX = x % PaintTileDescriptor.side
+    let localY = y % PaintTileDescriptor.side
+    let offset = localY * binding.bytesPerRow + localX * 4
+    let pixel = EncodedPremultipliedBGRA8(
+        blue: binding.bytes[offset],
+        green: binding.bytes[offset + 1],
+        red: binding.bytes[offset + 2],
+        alpha: binding.bytes[offset + 3]
+    )
+    return DocumentColorPipeline.importEncodedPremultipliedBGRA8(pixel).simd
 }
 
 private func transactionWrongStraightAlphaImport(
@@ -3680,15 +3206,39 @@ private func transactionWrongDoubleDecodedImport(
 private func transactionEncodedImportRequest(
     _ fixture: TransactionFixture,
     bytes: Data
-) -> DocumentPaintSurfaceEncodedImportRequest {
+) throws -> DocumentPaintSurfaceEncodedImportRequest {
     let size = fixture.geometry.storagePixelSize
-    return DocumentPaintSurfaceEncodedImportRequest(
+    return try DocumentPaintSurfaceEncodedImportRequest.validate(
         layerID: fixture.layerID,
         candidateGeometry: fixture.geometry,
-        width: size.width,
-        height: size.height,
-        bytesPerRow: size.width * 4,
-        encodedPremultipliedBGRA8: bytes
+        input: .singleRaster(.init(
+            width: size.width,
+            height: size.height,
+            bytesPerRow: size.width * 4,
+            bytes: bytes
+        )),
+        maximumUploadBytes: size.width * size.height * 4
+    )
+}
+
+private func transactionValidatedImportRequest(
+    layerID: UUID,
+    geometry: DocumentPaintGeometry,
+    width: Int,
+    height: Int,
+    bytesPerRow: Int,
+    bytes: Data
+) throws -> DocumentPaintSurfaceEncodedImportRequest {
+    try DocumentPaintSurfaceEncodedImportRequest.validate(
+        layerID: layerID,
+        candidateGeometry: geometry,
+        input: .singleRaster(.init(
+            width: width,
+            height: height,
+            bytesPerRow: bytesPerRow,
+            bytes: bytes
+        )),
+        maximumUploadBytes: width * height * 4
     )
 }
 

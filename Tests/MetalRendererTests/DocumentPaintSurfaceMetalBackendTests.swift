@@ -17,7 +17,6 @@ struct DocumentPaintSurfaceMetalBackendTests {
     func clearIsTerminalWithoutAllocatingACommandOrResource() throws {
         guard let context = try makeContext() else { return }
 
-        try context.backend.preflight(.clear)
         let token = try context.backend.encode(.clear)
         let encoded = context.backend.debugSnapshot
         #expect(encoded.commandBufferCount == 0)
@@ -47,7 +46,6 @@ struct DocumentPaintSurfaceMetalBackendTests {
             destinations: [],
             mappings: []
         ))
-        try context.backend.preflight(resize)
         let resizeToken = try context.backend.encode(resize)
         #expect(try context.backend.complete(
             resizeToken,
@@ -55,19 +53,16 @@ struct DocumentPaintSurfaceMetalBackendTests {
         ).isEmpty)
 
         let importGeometry = try geometry(width: 2, height: 2)
-        let imported = DocumentPaintSurfaceBackendOperation.encodedImport(.init(
-            candidateGeometry: importGeometry,
-            width: 2,
-            height: 2,
-            bytesPerRow: 8,
-            encodedPremultipliedBGRA8: Data(repeating: 0, count: 16),
-            conversion:
-                .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float,
-            clearsDestinationsBeforeConversion: true,
-            destinations: [],
-            tileRegions: []
-        ))
-        try context.backend.preflight(imported)
+        let imported = DocumentPaintSurfaceBackendOperation.encodedImport(
+            try importPayload(
+                geometry: importGeometry,
+                width: 2,
+                height: 2,
+                bytesPerRow: 8,
+                bytes: Data(repeating: 0, count: 16),
+                destinations: []
+            )
+        )
         let importToken = try context.backend.encode(imported)
         #expect(try context.backend.complete(
             importToken,
@@ -106,7 +101,6 @@ struct DocumentPaintSurfaceMetalBackendTests {
             destinations: [],
             mappings: []
         ))
-        try context.backend.preflight(plainToRadial)
         let toRadial = try context.backend.encode(plainToRadial)
         #expect(try context.backend.complete(
             toRadial,
@@ -121,7 +115,6 @@ struct DocumentPaintSurfaceMetalBackendTests {
             destinations: [],
             mappings: []
         ))
-        try context.backend.preflight(radialToPlain)
         let toPlain = try context.backend.encode(radialToPlain)
         #expect(try context.backend.complete(
             toPlain,
@@ -142,7 +135,7 @@ struct DocumentPaintSurfaceMetalBackendTests {
             mappings: []
         ))
         #expect(throws: DocumentPaintSurfaceMetalBackendError.invalidOperation) {
-            try context.backend.preflight(invalidTarget)
+            _ = try context.backend.encode(invalidTarget)
         }
         expectZeroGPUWork(context.backend.debugSnapshot)
     }
@@ -207,6 +200,10 @@ struct DocumentPaintSurfaceMetalBackendTests {
                         texture: live1
                     )),
                 ],
+                predictionSources: [
+                    .knownClear(coordinate: first, logicalBounds: firstBounds),
+                    .knownClear(coordinate: second, logicalBounds: secondBounds),
+                ],
                 destinations: [
                     .init(
                         coordinate: first,
@@ -222,7 +219,6 @@ struct DocumentPaintSurfaceMetalBackendTests {
             )
         )
 
-        try context.backend.preflight(operation)
         let token = try context.backend.encode(operation)
         #expect(context.backend.debugSnapshot.commandBufferCount == 1)
         #expect(context.backend.debugSnapshot.reductionBufferCount == 1)
@@ -279,6 +275,10 @@ struct DocumentPaintSurfaceMetalBackendTests {
                     logicalBounds: bounds
                 )],
                 authoritativeSources: [.knownClear(
+                    coordinate: .init(x: 0, y: 0),
+                    logicalBounds: bounds
+                )],
+                predictionSources: [.knownClear(
                     coordinate: .init(x: 0, y: 0),
                     logicalBounds: bounds
                 )],
@@ -418,31 +418,79 @@ struct DocumentPaintSurfaceMetalBackendTests {
     }
 
     @Test
-    func restorePreflightIsPureButMetalEncodeRejectsIt() throws {
+    func denseAndSparse2048ImportsKeepOneCommandAndBoundedPlaneResources() throws {
         guard let context = try makeContext() else { return }
-        let bounds = try tileBounds(width: 256, height: 256)
-        let restore = DocumentPaintSurfaceBackendOperation.restore(.init(
-            reference: RasterRevisionReference(
-                id: StoredRasterRevisionID(rawValue: 1),
-                pixelSize: PixelSize(width: 256, height: 256),
-                regions: PixelRegionSet([], clippedTo: PixelSize(
-                    width: 256,
-                    height: 256
-                )),
-                retainedBytes: 0
-            ),
-            destinations: [.init(
-                coordinate: .init(x: 0, y: 0),
-                logicalBounds: bounds,
-                texture: try texture(context.device)
-            )]
-        ))
+        let side = 2_048
+        let geometry = try geometry(width: side, height: side)
+        let byteCount = side * side * 4
 
-        try context.backend.preflight(restore)
-        #expect(context.backend.debugSnapshot.commandBufferCount == 0)
-        #expect(throws: DocumentPaintSurfaceMetalBackendError.unsupportedRestore) {
-            _ = try context.backend.encode(restore)
+        let denseRequest = try DocumentPaintSurfaceEncodedImportRequest.validate(
+            layerID: UUID(),
+            candidateGeometry: geometry,
+            input: .singleRaster(.init(
+                width: side,
+                height: side,
+                bytesPerRow: side * 4,
+                bytes: Data(repeating: 255, count: byteCount)
+            )),
+            maximumUploadBytes: byteCount
+        )
+        let denseCoordinates = (0..<8).flatMap { y in
+            (0..<8).map { x in PaintTileCoordinate(x: x, y: y) }
         }
+        let denseDestinations = try importDestinations(
+            for: denseCoordinates,
+            geometry: geometry,
+            device: context.device
+        )
+        let denseToken = try context.backend.encode(.encodedImport(
+            denseRequest.makeBackendPayload(destinations: denseDestinations)
+        ))
+        let denseActive = context.backend.debugSnapshot
+        #expect(denseCoordinates.count == 64)
+        #expect(denseActive.commandBufferCount == 1)
+        #expect(denseActive.encoderCount == 1)
+        #expect(denseActive.reductionBufferCount == 1)
+        #expect(denseActive.importBufferCount == 64)
+        #expect(denseActive.activeImportBufferCount == 64)
+        #expect(try context.backend.complete(
+            denseToken,
+            as: .succeeded
+        ).count == 64)
+        #expect(context.backend.debugSnapshot.activeImportBufferCount == 0)
+
+        var sparseBytes = Data(repeating: 0, count: byteCount)
+        sparseBytes[3] = 255
+        let sparseRequest = try DocumentPaintSurfaceEncodedImportRequest.validate(
+            layerID: UUID(),
+            candidateGeometry: geometry,
+            input: .singleRaster(.init(
+                width: side,
+                height: side,
+                bytesPerRow: side * 4,
+                bytes: sparseBytes
+            )),
+            maximumUploadBytes: byteCount
+        )
+        let sparseDestinations = try importDestinations(
+            for: [PaintTileCoordinate(x: 0, y: 0)],
+            geometry: geometry,
+            device: context.device
+        )
+        let sparseToken = try context.backend.encode(.encodedImport(
+            sparseRequest.makeBackendPayload(destinations: sparseDestinations)
+        ))
+        let sparseActive = context.backend.debugSnapshot
+        #expect(sparseActive.commandBufferCount == 2)
+        #expect(sparseActive.encoderCount == 2)
+        #expect(sparseActive.reductionBufferCount == 2)
+        #expect(sparseActive.importBufferCount == 65)
+        #expect(sparseActive.activeImportBufferCount == 1)
+        #expect(try context.backend.complete(
+            sparseToken,
+            as: .succeeded
+        ).count == 1)
+        #expect(context.backend.debugSnapshot.activeImportBufferCount == 0)
         #expect(context.backend.debugSnapshot.activeTokenCount == 0)
     }
 
@@ -482,11 +530,9 @@ struct DocumentPaintSurfaceMetalBackendTests {
     }
 
     @Test(arguments: [
-        DocumentPaintSurfaceMetalBackendFailurePoint.metadataAllocation,
-        .commandBuffer,
+        DocumentPaintSurfaceMetalBackendFailurePoint.commandBuffer,
         .reductionBuffer,
         .encoder,
-        .precommit,
     ])
     func precommitFailureIsMutationFreeAndImmediatelyRetryable(
         point: DocumentPaintSurfaceMetalBackendFailurePoint
@@ -501,11 +547,9 @@ struct DocumentPaintSurfaceMetalBackendTests {
             destination: SIMD4(0.2, 0.1, 0.05, 0.25)
         )
         let expectedError: DocumentPaintSurfaceMetalBackendError = switch point {
-        case .metadataAllocation: .metadataAllocationFailed
         case .commandBuffer: .commandBufferUnavailable
         case .reductionBuffer: .reductionBufferAllocationFailed
         case .encoder: .encoderUnavailable
-        case .precommit: .precommitFailed
         default: fatalError("Unexpected precommit failure point")
         }
 
@@ -527,7 +571,7 @@ struct DocumentPaintSurfaceMetalBackendTests {
     @Test
     func importAllocationFailureIsMutationFreeAndRetryable() throws {
         let injection = DocumentPaintSurfaceMetalBackendFailureInjection(
-            failingOnceAt: .importBuffer
+            failingOnceAt: .importBuffer(0)
         )
         guard let context = try makeContext(failureInjection: injection)
         else { return }
@@ -545,6 +589,71 @@ struct DocumentPaintSurfaceMetalBackendTests {
         #expect(context.backend.debugSnapshot.activeTokenCount == 0)
         let retry = try context.backend.encode(imported.operation)
         _ = try context.backend.complete(retry, as: .succeeded)
+    }
+
+    @Test
+    func indexedSecondPlaneAllocationFailureRetainsNothingAndReusesImmediately()
+        throws
+    {
+        let injection = DocumentPaintSurfaceMetalBackendFailureInjection(
+            failingOnceAt: .importBuffer(1)
+        )
+        guard let context = try makeContext(failureInjection: injection)
+        else { return }
+        let geometry = try geometry(width: 512, height: 256)
+        var bytes = Data(count: 512 * 256 * 4)
+        bytes[3] = 255
+        bytes[256 * 4 + 3] = 255
+        let coordinates = [
+            PaintTileCoordinate(x: 0, y: 0),
+            PaintTileCoordinate(x: 1, y: 0),
+        ]
+        let destinations = try coordinates.map { coordinate in
+            DocumentPaintSurfaceMutationDestination(
+                coordinate: coordinate,
+                logicalBounds: try PaintTileDescriptor(
+                    coordinate: coordinate,
+                    logicalPixelSize: geometry.storagePixelSize
+                ).logicalBounds,
+                texture: try texture(context.device)
+            )
+        }
+        let request = try DocumentPaintSurfaceEncodedImportRequest.validate(
+            layerID: UUID(),
+            candidateGeometry: geometry,
+            input: .singleRaster(.init(
+                width: 512,
+                height: 256,
+                bytesPerRow: 2_048,
+                bytes: bytes
+            )),
+            maximumUploadBytes: bytes.count
+        )
+        let operation = DocumentPaintSurfaceBackendOperation.encodedImport(
+            request.makeBackendPayload(destinations: destinations)
+        )
+
+        #expect(throws: DocumentPaintSurfaceMetalBackendError
+            .importBufferAllocationFailed) {
+            _ = try context.backend.encode(operation)
+        }
+        let failed = context.backend.debugSnapshot
+        #expect(failed.importBufferCount == 1)
+        #expect(failed.encoderCount == 0)
+        #expect(failed.committedCommandBufferCount == 0)
+        #expect(failed.activeImportBufferCount == 0)
+        #expect(failed.activeTokenCount == 0)
+
+        let retry = try context.backend.encode(operation)
+        let active = context.backend.debugSnapshot
+        #expect(active.importBufferCount == 3)
+        #expect(active.encoderCount == 1)
+        #expect(active.committedCommandBufferCount == 1)
+        #expect(active.activeImportBufferCount == 2)
+        #expect(active.activeTokenCount == 1)
+        _ = try context.backend.complete(retry, as: .succeeded)
+        #expect(context.backend.debugSnapshot.activeImportBufferCount == 0)
+        #expect(context.backend.debugSnapshot.activeTokenCount == 0)
     }
 
     @Test
@@ -602,12 +711,10 @@ struct DocumentPaintSurfaceMetalBackendTests {
     }
 
     @Test(arguments: [
-        DocumentPaintSurfaceMetalBackendFailurePoint.metadataAllocation,
-        .commandBuffer,
+        DocumentPaintSurfaceMetalBackendFailurePoint.commandBuffer,
         .reductionBuffer,
-        .importBuffer,
+        .importBuffer(0),
         .encoder,
-        .precommit,
         .gpu,
         .complete,
         .discard,
@@ -630,12 +737,10 @@ struct DocumentPaintSurfaceMetalBackendTests {
     }
 
     @Test(arguments: [
-        DocumentPaintSurfaceMetalBackendFailurePoint.metadataAllocation,
-        .commandBuffer,
+        DocumentPaintSurfaceMetalBackendFailurePoint.commandBuffer,
         .reductionBuffer,
-        .importBuffer,
+        .importBuffer(0),
         .encoder,
-        .precommit,
         .gpu,
         .complete,
         .discard,
@@ -664,18 +769,16 @@ struct DocumentPaintSurfaceMetalBackendTests {
             as: .succeeded
         ).isEmpty)
 
-        let imported = DocumentPaintSurfaceBackendOperation.encodedImport(.init(
-            candidateGeometry: targetGeometry,
-            width: 128,
-            height: 128,
-            bytesPerRow: 512,
-            encodedPremultipliedBGRA8: Data(repeating: 0, count: 65_536),
-            conversion:
-                .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float,
-            clearsDestinationsBeforeConversion: true,
-            destinations: [],
-            tileRegions: []
-        ))
+        let imported = DocumentPaintSurfaceBackendOperation.encodedImport(
+            try importPayload(
+                geometry: targetGeometry,
+                width: 128,
+                height: 128,
+                bytesPerRow: 512,
+                bytes: Data(repeating: 0, count: 65_536),
+                destinations: []
+            )
+        )
         let importToken = try context.backend.encode(imported)
         if point == .discard {
             try context.backend.discardAndWaitUntilTerminal(importToken)
@@ -755,16 +858,19 @@ struct DocumentPaintSurfaceMetalBackendTests {
 
         guard let imported = try makeTransactionFixture(width: 2, height: 2)
         else { return }
-        let importRequest = DocumentPaintSurfaceEncodedImportRequest(
+        let importRequest = try DocumentPaintSurfaceEncodedImportRequest.validate(
             layerID: imported.layerID,
             candidateGeometry: imported.geometry,
-            width: 2,
-            height: 2,
-            bytesPerRow: 8,
-            encodedPremultipliedBGRA8: Data([
-                0, 0, 128, 128, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0,
-            ])
+            input: .singleRaster(.init(
+                width: 2,
+                height: 2,
+                bytesPerRow: 8,
+                bytes: Data([
+                    0, 0, 128, 128, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                ])
+            )),
+            maximumUploadBytes: 16
         )
         _ = try commit(imported, request: importRequest)
         #expect(imported.backend.debugSnapshot.commandBufferCount == 1)
@@ -799,13 +905,16 @@ struct DocumentPaintSurfaceMetalBackendTests {
         let importedGeometry = try geometry(width: 3, height: 2)
         _ = try commit(
             imported,
-            request: .init(
+            request: try .validate(
                 layerID: imported.layerID,
                 candidateGeometry: importedGeometry,
-                width: 3,
-                height: 2,
-                bytesPerRow: 12,
-                encodedPremultipliedBGRA8: Data(repeating: 0, count: 24)
+                input: .singleRaster(.init(
+                    width: 3,
+                    height: 2,
+                    bytesPerRow: 12,
+                    bytes: Data(repeating: 0, count: 24)
+                )),
+                maximumUploadBytes: 24
             )
         )
         #expect(imported.registry.snapshot().geometry == importedGeometry)
@@ -908,6 +1017,7 @@ struct DocumentPaintSurfaceMetalBackendTests {
             compositeParameters: payload.compositeParameters,
             baseSources: payload.baseSources,
             authoritativeSources: payload.authoritativeSources,
+            predictionSources: payload.predictionSources,
             destinations: [.init(
                 coordinate: payload.destinations[0].coordinate,
                 logicalBounds: payload.destinations[0].logicalBounds,
@@ -919,7 +1029,7 @@ struct DocumentPaintSurfaceMetalBackendTests {
             )]
         ))
         #expect(throws: DocumentPaintSurfaceMetalBackendError.textureAlias) {
-            try context.backend.preflight(aliased)
+            _ = try context.backend.encode(aliased)
         }
         let pure = context.backend.debugSnapshot
         #expect(pure.commandBufferCount == 0)
@@ -969,7 +1079,43 @@ struct DocumentPaintSurfaceMetalBackendTests {
     }
 
     @Test
-    func malformedDuplicatePayloadsFailCheckedPreflightWithoutTrapping() throws {
+    func bgraStrokeAttachmentRejectsBeforeCommandOrResourceAllocation() throws {
+        guard let context = try makeContext() else { return }
+        let stroke = try strokeOperation(context.device)
+        guard case let .stroke(payload) = stroke.operation else {
+            Issue.record("Expected stroke operation")
+            return
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: PaintTileDescriptor.side,
+            height: PaintTileDescriptor.side,
+            mipmapped: false
+        )
+        descriptor.storageMode = .shared
+        descriptor.usage = [.shaderRead]
+        let bgra = try #require(context.device.makeTexture(descriptor: descriptor))
+        let invalid = DocumentPaintSurfaceBackendOperation.stroke(.init(
+            geometry: payload.geometry,
+            compositeParameters: payload.compositeParameters,
+            baseSources: payload.baseSources,
+            authoritativeSources: [.texture(.init(
+                coordinate: payload.authoritativeSources[0].coordinate,
+                logicalBounds: payload.authoritativeSources[0].logicalBounds,
+                texture: bgra
+            ))],
+            predictionSources: payload.predictionSources,
+            destinations: payload.destinations
+        ))
+
+        #expect(throws: DocumentPaintSurfaceMetalBackendError.invalidTexture) {
+            _ = try context.backend.encode(invalid)
+        }
+        expectZeroGPUWork(context.backend.debugSnapshot)
+    }
+
+    @Test
+    func malformedDuplicateResizePayloadFailsCheckedPreflightWithoutTrapping() throws {
         guard let context = try makeContext() else { return }
         let resize = try resizeOperation(context.device)
         guard case let .resize(resizePayload) = resize.operation else {
@@ -986,57 +1132,11 @@ struct DocumentPaintSurfaceMetalBackendTests {
             mappings: resizePayload.mappings + resizePayload.mappings
         ))
         #expect(throws: DocumentPaintSurfaceMetalBackendError.invalidOperation) {
-            try context.backend.preflight(duplicateResize)
+            _ = try context.backend.encode(duplicateResize)
         }
 
-        let imported = try importOperation(context.device)
-        guard case let .encodedImport(importPayload) = imported.operation else {
-            Issue.record("Expected import operation")
-            return
-        }
-        let duplicateImport = DocumentPaintSurfaceBackendOperation
-            .encodedImport(.init(
-                candidateGeometry: importPayload.candidateGeometry,
-                width: importPayload.width,
-                height: importPayload.height,
-                bytesPerRow: importPayload.bytesPerRow,
-                encodedPremultipliedBGRA8:
-                    importPayload.encodedPremultipliedBGRA8,
-                conversion: importPayload.conversion,
-                clearsDestinationsBeforeConversion: true,
-                destinations: importPayload.destinations
-                    + importPayload.destinations,
-                tileRegions: importPayload.tileRegions
-                    + importPayload.tileRegions
-            ))
-        #expect(throws: DocumentPaintSurfaceMetalBackendError.invalidOperation) {
-            try context.backend.preflight(duplicateImport)
-        }
         #expect(context.backend.debugSnapshot.commandBufferCount == 0)
         #expect(context.backend.debugSnapshot.activeTokenCount == 0)
-    }
-
-    @Test
-    func emptyImportRejectsSourceBytesContainingVisiblePixels() throws {
-        guard let context = try makeContext() else { return }
-        var bytes = Data(repeating: 0, count: 16)
-        bytes[3] = 255
-        let malformed = DocumentPaintSurfaceBackendOperation.encodedImport(.init(
-            candidateGeometry: try geometry(width: 2, height: 2),
-            width: 2,
-            height: 2,
-            bytesPerRow: 8,
-            encodedPremultipliedBGRA8: bytes,
-            conversion:
-                .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float,
-            clearsDestinationsBeforeConversion: true,
-            destinations: [],
-            tileRegions: []
-        ))
-        #expect(throws: DocumentPaintSurfaceMetalBackendError.invalidOperation) {
-            try context.backend.preflight(malformed)
-        }
-        expectZeroGPUWork(context.backend.debugSnapshot)
     }
 
     private func makeContext() throws -> (
@@ -1088,6 +1188,23 @@ struct DocumentPaintSurfaceMetalBackendTests {
             snapshot.activeRetainedTextureCount == 0,
             sourceLocation: sourceLocation
         )
+    }
+
+    private func importDestinations(
+        for coordinates: [PaintTileCoordinate],
+        geometry: DocumentPaintGeometry,
+        device: any MTLDevice
+    ) throws -> [DocumentPaintSurfaceMutationDestination] {
+        try coordinates.map { coordinate in
+            DocumentPaintSurfaceMutationDestination(
+                coordinate: coordinate,
+                logicalBounds: try PaintTileDescriptor(
+                    coordinate: coordinate,
+                    logicalPixelSize: geometry.storagePixelSize
+                ).logicalBounds,
+                texture: try texture(device)
+            )
+        }
     }
 
     private struct MetalTransactionFixture {
@@ -1293,6 +1410,10 @@ struct DocumentPaintSurfaceMetalBackendTests {
                     logicalBounds: bounds,
                     texture: authoritativeTexture
                 ))],
+                predictionSources: [.knownClear(
+                    coordinate: coordinate,
+                    logicalBounds: bounds
+                )],
                 destinations: [.init(
                     coordinate: coordinate,
                     logicalBounds: bounds,
@@ -1366,30 +1487,42 @@ struct DocumentPaintSurfaceMetalBackendTests {
             0, 0, 128, 128, 0, 0, 0, 0, 0xEE, 0xFF, 0x11, 0x22,
         ]
         return (
-            .encodedImport(.init(
-                candidateGeometry: try geometry(width: 2, height: 2),
+            .encodedImport(try importPayload(
+                geometry: try geometry(width: 2, height: 2),
                 width: 2,
                 height: 2,
                 bytesPerRow: 12,
-                encodedPremultipliedBGRA8: Data(bytes),
-                conversion:
-                    .encodedPremultipliedSRGBBGRA8ToLinearPremultipliedRGBA16Float,
-                clearsDestinationsBeforeConversion: true,
+                bytes: Data(bytes),
                 destinations: [.init(
                     coordinate: coordinate,
                     logicalBounds: bounds,
                     texture: destination
-                )],
-                tileRegions: [.init(
-                    coordinate: coordinate,
-                    sourceOrigin: .zero,
-                    sourceByteOffset: 0,
-                    destinationOrigin: .zero,
-                    extent: PixelSize(width: 2, height: 2)
                 )]
             )),
             destination
         )
+    }
+
+    private func importPayload(
+        geometry: DocumentPaintGeometry,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int,
+        bytes: Data,
+        destinations: [DocumentPaintSurfaceMutationDestination]
+    ) throws -> DocumentPaintSurfaceEncodedImportBackendPayload {
+        let request = try DocumentPaintSurfaceEncodedImportRequest.validate(
+            layerID: UUID(),
+            candidateGeometry: geometry,
+            input: .singleRaster(.init(
+                width: width,
+                height: height,
+                bytesPerRow: bytesPerRow,
+                bytes: bytes
+            )),
+            maximumUploadBytes: width * height * 4
+        )
+        return request.makeBackendPayload(destinations: destinations)
     }
 
     private func tileBounds(width: Int, height: Int) throws -> PixelRect {

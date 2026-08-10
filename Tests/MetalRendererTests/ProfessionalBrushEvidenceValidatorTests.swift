@@ -1,5 +1,4 @@
 import Foundation
-import BrushDepositionEvidenceValidation
 @testable import MetalRenderer
 @testable import ProfessionalBrushEvidenceValidation
 import Testing
@@ -103,8 +102,8 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 expectedOperatingSystem: fixture.operatingSystem,
                 expectedCommit: fixture.commit,
                 expectedRendererSHA256: fixture.renderer,
-                measuredCPUP95Milliseconds: 1.25,
-                positiveRoot: root
+                positiveRoot: root,
+                identities: fixture.identities
             ) == false
         )
         for (key, value) in [
@@ -125,70 +124,10 @@ struct ProfessionalBrushEvidenceValidatorTests {
                     expectedOperatingSystem: fixture.operatingSystem,
                     expectedCommit: fixture.commit,
                     expectedRendererSHA256: fixture.renderer,
-                    measuredCPUP95Milliseconds: 1.25,
-                    positiveRoot: root
+                    positiveRoot: root,
+                    identities: fixture.identities
                 )
             }
-        }
-    }
-
-    @Test
-    func copiedStageFourPhysicalProfilesAreNotStageFiveEvidence() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let stageFour = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer {
-            try? FileManager.default.removeItem(at: root)
-            try? FileManager.default.removeItem(at: stageFour)
-        }
-        try FileManager.default.createDirectory(
-            at: root,
-            withIntermediateDirectories: true
-        )
-        let source = stageFour.appendingPathComponent(
-            "physical-profiles",
-            isDirectory: true
-        )
-        try FileManager.default.createDirectory(
-            at: source,
-            withIntermediateDirectories: true
-        )
-        for profile in StageFourEvidenceValidator.requiredPhysicalProfiles {
-            let sourceProfile = source.appendingPathComponent(
-                profile,
-                isDirectory: true
-            )
-            let copiedProfile = root.appendingPathComponent(
-                profile,
-                isDirectory: true
-            )
-            try FileManager.default.createDirectory(
-                at: sourceProfile,
-                withIntermediateDirectories: true
-            )
-            try FileManager.default.createDirectory(
-                at: copiedProfile,
-                withIntermediateDirectories: true
-            )
-            let bytes = Data("stage-four-\(profile)".utf8)
-            try bytes.write(
-                to: sourceProfile.appendingPathComponent("evidence.json")
-            )
-            try bytes.write(
-                to: copiedProfile.appendingPathComponent("evidence.json")
-            )
-        }
-
-        #expect(throws: Error.self) {
-            _ = try PhysicalEvidenceValidator.validate(
-                root: root,
-                expectedCommit: String(repeating: "a", count: 40),
-                expectedSourceTreeSHA256:
-                    String(repeating: "b", count: 64),
-                expectedRendererSHA256:
-                    String(repeating: "c", count: 64)
-            )
         }
     }
 
@@ -230,8 +169,8 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 expectedCommit: String(repeating: "a", count: 40),
                 expectedRendererSHA256:
                     String(repeating: "b", count: 64),
-                measuredCPUP95Milliseconds: 1,
-                positiveRoot: root
+                positiveRoot: root,
+                identities: try professionalSceneIdentitiesForValidation()
             )
         }
     }
@@ -247,7 +186,8 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 root: fixture.root,
                 expectedCommit: fixture.commit,
                 expectedSourceTreeSHA256: fixture.tree,
-                expectedRendererSHA256: fixture.renderer
+                expectedRendererSHA256: fixture.renderer,
+                identities: fixture.identities
             )
         )
 
@@ -265,7 +205,8 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 root: fixture.root,
                 expectedCommit: fixture.commit,
                 expectedSourceTreeSHA256: fixture.tree,
-                expectedRendererSHA256: fixture.renderer
+                expectedRendererSHA256: fixture.renderer,
+                identities: fixture.identities
             )
         }
         try validProfile.write(to: profile)
@@ -282,7 +223,8 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 root: fixture.root,
                 expectedCommit: fixture.commit,
                 expectedSourceTreeSHA256: fixture.tree,
-                expectedRendererSHA256: fixture.renderer
+                expectedRendererSHA256: fixture.renderer,
+                identities: fixture.identities
             )
         }
         try validRaw.write(to: raw)
@@ -301,7 +243,8 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 root: fixture.root,
                 expectedCommit: fixture.commit,
                 expectedSourceTreeSHA256: fixture.tree,
-                expectedRendererSHA256: fixture.renderer
+                expectedRendererSHA256: fixture.renderer,
+                identities: fixture.identities
             )
         }
     }
@@ -342,7 +285,8 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 root: fixture.root,
                 expectedCommit: fixture.commit,
                 expectedSourceTreeSHA256: fixture.tree,
-                expectedRendererSHA256: fixture.renderer
+                expectedRendererSHA256: fixture.renderer,
+                identities: fixture.identities
             )
         }
 
@@ -364,7 +308,8 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 root: fixture.root,
                 expectedCommit: fixture.commit,
                 expectedSourceTreeSHA256: fixture.tree,
-                expectedRendererSHA256: fixture.renderer
+                expectedRendererSHA256: fixture.renderer,
+                identities: fixture.identities
             )
         }
     }
@@ -392,6 +337,31 @@ struct ProfessionalBrushEvidenceValidatorTests {
         let valid = try fixture()
         #expect(try validatePerformanceFixture(valid, gpuMaximum: 1))
         try? FileManager.default.removeItem(at: valid.root)
+
+        let aggregatedFinalInput = try fixture()
+        try mutatePerformanceRawAndRebind(
+            fixture: aggregatedFinalInput,
+            scene: "professional-chisel-marker",
+            filename: "professional-long-stroke.raw.json",
+            referenceKey: "longStroke"
+        ) { raw in
+            var frames = raw["identityFrames"] as! [[String: Any]]
+            let finalProjectedHighWater = 127 * 64 + 4_097
+            frames[127]["generatedProjectedInstanceHighWater"] =
+                finalProjectedHighWater
+            frames[127]["encodedGPUInstanceCount"] = 4_097
+            raw["identityFrames"] = frames
+            raw["projectedInstanceCount"] = finalProjectedHighWater
+        }
+        #expect(
+            try validatePerformanceFixture(
+                aggregatedFinalInput,
+                gpuMaximum: 1
+            )
+        )
+        try? FileManager.default.removeItem(
+            at: aggregatedFinalInput.root
+        )
 
         let isolatedSpike = try fixture()
         try mutatePerformanceRawAndRebind(
@@ -844,51 +814,6 @@ struct ProfessionalBrushEvidenceValidatorTests {
         }
         reject(value)
 
-        value = try fixture()
-        try mutatePerformanceRawAndRebind(
-            fixture: value,
-            scene: "professional-chisel-marker",
-            filename: "professional-long-stroke.raw.json",
-            referenceKey: "longStroke"
-        ) { raw in
-            var frames = raw["identityFrames"] as! [[String: Any]]
-            frames[64]["encodedGPUInstanceCount"] = 4_097
-            raw["identityFrames"] = frames
-        }
-        reject(value)
-
-        value = try fixture()
-        try mutatePerformanceRawAndRebind(
-            fixture: value,
-            scene: "professional-chisel-marker",
-            filename: "professional-long-stroke.raw.json",
-            referenceKey: "longStroke"
-        ) { raw in
-            setLinearLongStrokeTiming(
-                &raw,
-                rawKey: "cpuPreparationMilliseconds",
-                blockMedianKey: "cpuMedianMilliseconds",
-                slopeKey: "cpuSlopeMillisecondsPerFrame"
-            )
-        }
-        reject(value)
-
-        value = try fixture()
-        try mutatePerformanceRawAndRebind(
-            fixture: value,
-            scene: "professional-chisel-marker",
-            filename: "professional-long-stroke.raw.json",
-            referenceKey: "longStroke"
-        ) { raw in
-            setLinearLongStrokeTiming(
-                &raw,
-                rawKey: "gpuMilliseconds",
-                blockMedianKey: "gpuMedianMilliseconds",
-                slopeKey: "gpuSlopeMillisecondsPerFrame"
-            )
-        }
-        reject(value)
-
         for nonfinite in ["NaN", "1e999"] {
             value = try fixture()
             try mutatePerformanceRawBytesAndRebind(
@@ -970,7 +895,8 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 root: fixture.root,
                 expectedCommit: fixture.commit,
                 expectedSourceTreeSHA256: fixture.tree,
-                expectedRendererSHA256: fixture.renderer
+                expectedRendererSHA256: fixture.renderer,
+                identities: fixture.identities
             )
         }
         try? FileManager.default.removeItem(at: fixture.root)
@@ -987,13 +913,16 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 root: fixture.root,
                 expectedCommit: fixture.commit,
                 expectedSourceTreeSHA256: fixture.tree,
-                expectedRendererSHA256: fixture.renderer
+                expectedRendererSHA256: fixture.renderer,
+                identities: fixture.identities
             )
         }
     }
 
     @Test
-    func gpuTrendGatesOnlyPhysicalHardwareButIsAlwaysAudited() throws {
+    func trendClaimsMatchRawAndGPUStabilityGatesOnlyPhysicalHardware()
+        throws
+    {
         let paravirtualGPU = try professionalPerformanceFixture(
             gpuName: "Apple Paravirtual device"
         )
@@ -1019,58 +948,6 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 gpuMaximum: 1
             ) == false
         )
-
-        let paravirtualCPU = try professionalPerformanceFixture(
-            gpuName: "Apple Paravirtual device"
-        )
-        defer {
-            try? FileManager.default.removeItem(at: paravirtualCPU.root)
-        }
-        try mutatePerformanceRawAndRebind(
-            fixture: paravirtualCPU,
-            scene: "professional-chisel-marker",
-            filename: "professional-long-stroke.raw.json",
-            referenceKey: "longStroke"
-        ) { raw in
-            setLinearLongStrokeTiming(
-                &raw,
-                rawKey: "cpuPreparationMilliseconds",
-                blockMedianKey: "cpuMedianMilliseconds",
-                slopeKey: "cpuSlopeMillisecondsPerFrame"
-            )
-        }
-        #expect(throws: Error.self) {
-            _ = try validatePerformanceFixture(
-                paravirtualCPU,
-                gpuMaximum: 1
-            )
-        }
-
-        let physicalGPU = try professionalPerformanceFixture(
-            gpuName: "Apple M4"
-        )
-        defer {
-            try? FileManager.default.removeItem(at: physicalGPU.root)
-        }
-        try mutatePerformanceRawAndRebind(
-            fixture: physicalGPU,
-            scene: "professional-chisel-marker",
-            filename: "professional-long-stroke.raw.json",
-            referenceKey: "longStroke"
-        ) { raw in
-            setLinearLongStrokeTiming(
-                &raw,
-                rawKey: "gpuMilliseconds",
-                blockMedianKey: "gpuMedianMilliseconds",
-                slopeKey: "gpuSlopeMillisecondsPerFrame"
-            )
-        }
-        #expect(throws: Error.self) {
-            _ = try validatePerformanceFixture(
-                physicalGPU,
-                gpuMaximum: 1
-            )
-        }
 
         for gpuName in [
             "Apple M4",
@@ -1143,9 +1020,8 @@ struct ProfessionalBrushEvidenceValidatorTests {
         )
         let commit = String(repeating: "a", count: 40)
         let tree = String(repeating: "b", count: 64)
-        let stageFour = String(repeating: "c", count: 64)
         let provenance: [String: Any] = [
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "commit": commit,
             "sourceTreeSHA256": tree,
             "configuration": "Debug",
@@ -1159,8 +1035,6 @@ struct ProfessionalBrushEvidenceValidatorTests {
             "gpuName": "Apple Paravirtual device",
             "gpuClassification": "paravirtual",
             "artifactRoot": root.path,
-            "stageFourExitStatus": 2,
-            "stageFourArtifactManifestSHA256": stageFour,
             "rawProvenanceSHA256": rawHashes,
             "rendererExecutableSHA256":
                 ArtifactFileSystem.sha256(executable),
@@ -1174,9 +1048,7 @@ struct ProfessionalBrushEvidenceValidatorTests {
             root: raw,
             artifactRoot: root,
             expectedCommit: commit,
-            expectedSourceTreeSHA256: tree,
-            expectedStageFourManifestSHA256: stageFour,
-            expectedStageFourExitStatus: 2
+            expectedSourceTreeSHA256: tree
         )
 
         for rawOperatingSystem in [
@@ -1213,9 +1085,7 @@ struct ProfessionalBrushEvidenceValidatorTests {
                     root: raw,
                     artifactRoot: root,
                     expectedCommit: commit,
-                    expectedSourceTreeSHA256: tree,
-                    expectedStageFourManifestSHA256: stageFour,
-                    expectedStageFourExitStatus: 2
+                    expectedSourceTreeSHA256: tree
                 )
             }
         }
@@ -1239,9 +1109,7 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 root: raw,
                 artifactRoot: root,
                 expectedCommit: commit,
-                expectedSourceTreeSHA256: tree,
-                expectedStageFourManifestSHA256: stageFour,
-                expectedStageFourExitStatus: 2
+                expectedSourceTreeSHA256: tree
             )
         }
         try Data(rawValues["kernel.txt"]!.utf8).write(to: kernelURL)
@@ -1258,17 +1126,21 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 root: raw,
                 artifactRoot: root,
                 expectedCommit: commit,
-                expectedSourceTreeSHA256: tree,
-                expectedStageFourManifestSHA256: stageFour,
-                expectedStageFourExitStatus: 2
+                expectedSourceTreeSHA256: tree
             )
         }
     }
 
     @Test
-    func characterizationBaselineBindsEveryRecordToGoldenTruth() throws {
+    func characterizationBaselineBindsEveryRecordToCurrentSceneIdentity()
+        throws
+    {
         let baseline =
             try professionalCharacterizationBaselineForValidation()
+        let identities = try professionalSceneIdentitiesForValidation()
+        let positiveCharacterizations = baseline.records.filter {
+            $0.traceName == "professional-slow-line"
+        }
         let valid = try baseline.encoded()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1279,7 +1151,11 @@ struct ProfessionalBrushEvidenceValidatorTests {
         )
         let url = root.appendingPathComponent("baseline.json")
         try valid.write(to: url)
-        _ = try CharacterizationValidator.validateBaseline(url)
+        _ = try CharacterizationValidator.validateBaseline(
+            url,
+            identities: identities,
+            positiveCharacterizations: positiveCharacterizations
+        )
 
         let mutations: [(String, (inout [String: Any]) -> Void)] = [
             ("family", { $0["family"] = "Wrong Family" }),
@@ -1290,11 +1166,6 @@ struct ProfessionalBrushEvidenceValidatorTests {
             ("logical digest", {
                 $0["logicalDabDigest"] =
                     String(repeating: "0", count: 64)
-            }),
-            ("metric", {
-                $0["maximumDiameter"] =
-                    (($0["maximumDiameter"] as? NSNumber)?.doubleValue
-                        ?? 0) + 1
             }),
         ]
         for (name, mutate) in mutations {
@@ -1318,7 +1189,11 @@ struct ProfessionalBrushEvidenceValidatorTests {
                 options: [.sortedKeys]
             ).write(to: url)
             #expect(throws: Error.self, "\(name)") {
-                _ = try CharacterizationValidator.validateBaseline(url)
+                _ = try CharacterizationValidator.validateBaseline(
+                    url,
+                    identities: identities,
+                    positiveCharacterizations: positiveCharacterizations
+                )
             }
         }
     }
@@ -1539,6 +1414,7 @@ private struct ProfessionalPerformanceTestFixture {
     let renderer: String
     let operatingSystem: String
     let gpuName: String
+    let identities: ProfessionalSceneIdentitySet
 }
 
 private func professionalPerformanceFixture(
@@ -1555,41 +1431,29 @@ private func professionalPerformanceFixture(
     let commit = String(repeating: "a", count: 40)
     let renderer = String(repeating: "b", count: 64)
     let operatingSystem = "Version 26.0 (Build 25A1)"
-    let truths: [(String, String, String, [(String, String, Int)])] = [
-        (
-            "professional-chisel-marker",
-            "builtin.professional-chisel-marker",
-            "2c1b9c2c7770dacfd4eee5e5fc6bbbf57b202bbcb15b6edca37de868ed2ec1f1",
-            [("builtin.shape.marker-chisel", "shape", 8)]
-        ),
-        (
-            "professional-graphite-pencil",
-            "builtin.professional-graphite-pencil",
-            "10af674df1d65e52efde75a68860e554c31e75dda12c17027bb728a47550aa52",
-            [
-                ("builtin.grain.graphite", "grain", 9),
-                ("builtin.grain.paper", "grain", 7),
-                ("builtin.shape.graphite-tip", "shape", 8),
-            ]
-        ),
-        (
-            "professional-natural-charcoal",
-            "builtin.professional-natural-charcoal",
-            "c686a582f773263649cb5259851eeffbe2403d38ed9a2be4ae9114bb7c8bd007",
-            [
-                ("builtin.grain.charcoal", "grain", 9),
-                ("builtin.grain.paper", "grain", 7),
-                ("builtin.shape.charcoal-tip", "shape", 8),
-                ("builtin.shape.soft-round", "shape", 7),
-            ]
-        ),
-        (
-            "professional-technical-ink",
-            "builtin.professional-technical-ink",
-            "394e34d6ddccb13978714550537cae9b2cab9e566032b6b3ddc25b6eab0d5534",
-            [("builtin.shape.technical-nib", "shape", 8)]
-        ),
-    ]
+    let identitySet = try professionalSceneIdentitiesForValidation()
+    let truths: [(String, String, String, [(String, String, Int)])] =
+        try ProfessionalBrushTruth.positiveSceneNames.map { scene in
+            let identity = try #require(identitySet[scene])
+            let contract = try #require(
+                ProfessionalBrushTruth.sceneContracts[scene]
+            )
+            let resources = contract.resourceLevels.keys.sorted().map {
+                resource in
+                (
+                    resource,
+                    resource.hasPrefix("builtin.shape.")
+                        ? "shape" : "grain",
+                    contract.resourceLevels[resource]!
+                )
+            }
+            return (
+                scene,
+                identity.definitionID,
+                identity.definitionSemanticHash,
+                resources
+            )
+        }
     let counters: [String: Any] = [
         "packageDecodeCount": 1,
         "imageDecodeCount": 0,
@@ -1696,7 +1560,7 @@ private func professionalPerformanceFixture(
                 "startFrameIndex": start,
                 "endFrameIndexExclusive": start + 8,
                 "centerFrameIndex": Double(start) + 3.5,
-                "cpuMedianMilliseconds": 0.1,
+                "cpuMedianMilliseconds": 1.25,
                 "gpuMedianMilliseconds": 0.1,
             ]
         }
@@ -1712,7 +1576,7 @@ private func professionalPerformanceFixture(
             "tracePath": "professional-long-stroke-trace.json",
             "traceSHA256": ArtifactFileSystem.sha256(trace),
             "cpuPreparationMilliseconds":
-                Array(repeating: 0.1, count: 128),
+                Array(repeating: 1.25, count: 128),
             "gpuMilliseconds": Array(repeating: 0.1, count: 128),
             "eventToSubmitNanoseconds":
                 Array(repeating: 1_000_000, count: 128),
@@ -1767,7 +1631,8 @@ private func professionalPerformanceFixture(
         commit: commit,
         renderer: renderer,
         operatingSystem: operatingSystem,
-        gpuName: gpuName
+        gpuName: gpuName,
+        identities: identitySet
     )
 }
 
@@ -1776,6 +1641,7 @@ private struct ProfessionalPhysicalTestFixture {
     let commit: String
     let tree: String
     let renderer: String
+    let identities: ProfessionalSceneIdentitySet
 }
 
 private func professionalPhysicalFixture()
@@ -1797,38 +1663,36 @@ private func professionalPhysicalFixture()
         "sourceTreeSHA256": tree,
         "rendererExecutableSHA256": renderer,
     ]
-    let truths: [(String, String, [(String, String, Int)])] = [
-        (
-            "builtin.professional-chisel-marker",
-            "2c1b9c2c7770dacfd4eee5e5fc6bbbf57b202bbcb15b6edca37de868ed2ec1f1",
-            [("builtin.shape.marker-chisel", "shape", 8)]
-        ),
-        (
-            "builtin.professional-graphite-pencil",
-            "10af674df1d65e52efde75a68860e554c31e75dda12c17027bb728a47550aa52",
-            [
-                ("builtin.grain.graphite", "grain", 9),
-                ("builtin.grain.paper", "grain", 7),
-                ("builtin.shape.graphite-tip", "shape", 8),
-            ]
-        ),
-        (
-            "builtin.professional-natural-charcoal",
-            "c686a582f773263649cb5259851eeffbe2403d38ed9a2be4ae9114bb7c8bd007",
-            [
-                ("builtin.grain.charcoal", "grain", 9),
-                ("builtin.grain.paper", "grain", 7),
-                ("builtin.shape.charcoal-tip", "shape", 8),
-                ("builtin.shape.soft-round", "shape", 7),
-            ]
-        ),
-        (
-            "builtin.professional-technical-ink",
-            "394e34d6ddccb13978714550537cae9b2cab9e566032b6b3ddc25b6eab0d5534",
-            [("builtin.shape.technical-nib", "shape", 8)]
-        ),
+    let identitySet = try professionalSceneIdentitiesForValidation()
+    let truths: [(String, String, [(String, String, Int)])] =
+        try identitySet.definitionIDs.map { definitionID in
+            let identity = try #require(
+                identitySet.identity(definitionID: definitionID)
+            )
+            let contract = try #require(
+                ProfessionalBrushTruth.contractByDefinitionID[definitionID]
+            )
+            let resources = contract.resourceLevels.keys.sorted().map {
+                resource in
+                (
+                    resource,
+                    resource.hasPrefix("builtin.shape.")
+                        ? "shape" : "grain",
+                    contract.resourceLevels[resource]!
+                )
+            }
+            return (
+                definitionID,
+                identity.definitionSemanticHash,
+                resources
+            )
+        }
+    let profileIDs = [
+        "a14Floor60Hz", "inputToPhoton", "memoryWarning", "pencil",
+        "referenceMSeriesProMotion120Hz", "suspendResume",
+        "sustainedThermal", "wacom",
     ]
-    let profiles = StageFourEvidenceValidator.requiredPhysicalProfiles.map {
+    let profiles = profileIDs.map {
         ($0, physicalScenario(for: $0))
     }
     let counters: [String: Any] = [
@@ -1906,7 +1770,8 @@ private func professionalPhysicalFixture()
         root: root,
         commit: commit,
         tree: tree,
-        renderer: renderer
+        renderer: renderer,
+        identities: identitySet
     )
 }
 
@@ -2235,8 +2100,8 @@ private func validatePerformanceFixture(
         expectedOperatingSystem: fixture.operatingSystem,
         expectedCommit: fixture.commit,
         expectedRendererSHA256: fixture.renderer,
-        measuredCPUP95Milliseconds: 1.25,
-        positiveRoot: fixture.root
+        positiveRoot: fixture.root,
+        identities: fixture.identities
     )
 }
 

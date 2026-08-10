@@ -27,8 +27,9 @@ public struct PaintTileCoordinate: Hashable, Comparable, Sendable {
 
 public struct PaintTileDescriptor: Hashable, Sendable {
     public static let side = 256
-    public static let pixelFormat: MTLPixelFormat = .rgba16Float
-    public static let residentByteCount = 256 * 256 * 4 * 2
+    public static let pixelFormat = DocumentColorPipeline.workingPixelFormat
+    public static let bytesPerPixel = 8
+    public static let residentByteCount = side * side * bytesPerPixel
 
     public let coordinate: PaintTileCoordinate
     public let logicalBounds: PixelRect

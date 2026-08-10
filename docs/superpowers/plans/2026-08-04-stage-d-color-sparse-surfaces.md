@@ -37,6 +37,24 @@ passed 37 tests, the prescribed medium gate passed 400 tests, and the broad
 suite completed 1,716 tests with exactly the 27 frozen Stage B issue records.
 No Stage D production behavior exists at the baseline.
 
+## Current-Only And Boundary-Validation Amendment
+
+The project owner's 2026-08-10 direction removes all Laya-native pre-release
+compatibility obligations. The binding design and removal sequence are
+[`2026-08-10-native-current-only-validation-design.md`](../specs/2026-08-10-native-current-only-validation-design.md)
+and
+[`2026-08-10-native-current-only-cleanup.md`](2026-08-10-native-current-only-cleanup.md).
+They supersede conflicting migration, alias, old-execution, compatibility-test,
+and duplicated-validation requirements in this plan.
+
+Stage D therefore accepts only native project schema 4, deletes schema-v1/v2/v3
+migration at the Task 7 persistence boundary, deletes legacy renderer/harness
+routes at the Task 6 authority cutover, and keeps external imports as separately
+validated product features. Validation remains strong at untrusted bytes,
+checked arithmetic/memory/Metal limits, transactional publication, and
+GPU/resource ownership. Validated internal values are trusted rather than
+rechecked in every layer.
+
 ## Global Constraints
 
 - Execute directly on `main`; do not create a worktree.
@@ -79,8 +97,9 @@ No Stage D production behavior exists at the baseline.
 - At most eight layers exist. Only the active unlocked layer accepts paint,
   erase, or clear. Normal, multiply, and screen are the only Stage D blend
   modes.
-- Existing schema-v1/v2/v3 project files decode without data loss. New saves
-  use schema v4. Unknown required formats fail closed.
+- Native project schema 4 is the sole accepted project format. Schemas 1, 2, 3,
+  and unknown future versions fail typed before payload allocation. No native
+  migration adapter or compatibility alias is retained.
 - In schema v4, a tiled surface's `pixelSize` is physical paint-storage
   geometry, not viewport/document size: plain and periodic use the compiled
   canonical raster size, radial uses `RadialSectorLayout.atlasPixelSize`.
@@ -94,9 +113,10 @@ No Stage D production behavior exists at the baseline.
 The following transitions are exhaustive and must have tests before production
 wiring changes:
 
-1. **Initialize/import:** create an empty one-layer tiled document, or decode
-   v1/v2/v3 encoded BGRA8 once into v4 linear tiles. No empty tile allocates a
-   texture.
+1. **Initialize/import:** create an empty one-layer tiled document, decode a
+   current schema-4 native project, or explicitly import a supported external
+   interchange format into a fully validated candidate. No empty tile allocates
+   a texture and no native pre-release schema is migrated.
 2. **Begin:** capture the active unlocked layer ID, compiled brush, color, and
    surface generation. Begin with empty authoritative/prediction tile sets.
 3. **Append actual/coalesced:** the Stage C scheduler emits new projected
@@ -141,8 +161,9 @@ wiring changes:
 
 - Consumes: Stage C accepted production lifecycle and
   `Tests/Baselines/stage-b-known-issues.txt`.
-- Produces: frozen encoded-BGRA8 import fixtures, existing project v1/v2/v3
-  archive hashes, representative dry-scene semantic/canonical hashes, and an
+- Produces: frozen external encoded-BGRA8 import fixtures, a current schema-4
+  archive baseline, typed old-version rejection fixtures, representative
+  dry-scene semantic/canonical hashes, and an
   executable inventory of every full-canvas paint allocation that Task 6 must
   remove.
 
@@ -156,9 +177,9 @@ wiring changes:
   periodic seam, and radial pages. Record encoded input bytes and independent
   expected linear reference values; do not bless current blended pixels as
   color truth.
-- [ ] Freeze schema-v1/v2/v3 project decode and deterministic re-encode behavior
-  with archives that exercise single raster, radial pages, layer metadata, and
-  transparent pixels.
+- [ ] Freeze deterministic schema-4 decode/re-encode behavior and add early
+  rejection fixtures for schemas 1, 2, 3, and an unknown future version. Delete
+  migration fixtures once the current-only decoder lands.
 - [ ] Enumerate the twelve lifecycle transitions above in one table-driven test
   so every later task adds its new assertions to a named row rather than
   creating a second lifecycle owner.
@@ -295,8 +316,8 @@ wiring changes:
   pointer-down layer ID in renderer receipts, construct every layer-bound
   command, and pass the target ID back for undo/redo before finishing history
   navigation.
-- Sets `PatternProjectFormat.currentSchemaVersion = 4`, retains decode support
-  for versions 1, 2, and 3, and writes v4 only.
+- Sets `PatternProjectFormat.currentSchemaVersion = 4`, writes and accepts only
+  schema 4, and rejects every other native version before payload allocation.
 - Produces a v4 tiled surface manifest whose nonempty records contain stable
   tile ID, integer coordinate, clipped logical bounds, `rgba16Float`, little
   endian byte order, byte count, SHA-256 semantic hash, and raster revision.
@@ -335,9 +356,9 @@ wiring changes:
   16,384. Require identical physical size, surface revision, tile UUIDs,
   payload bytes, and semantic hashes; malformed oversized or noncompiled
   dimensions fail before payload materialization.
-- [ ] Add v1 single-raster, v2/v3 layer, and v3 radial-page migration fixtures.
-  Preserve every declared layer up to the eight-layer bound; never flatten or
-  drop a valid old layer. Reject larger legacy stacks with a typed error.
+- [ ] Add typed early-rejection fixtures for native schemas 1, 2, 3, and an
+  unknown future schema; delete successful migration fixtures and migration
+  metadata. Current schema-4 archives still enforce the eight-layer bound.
 - [ ] Keep PNG as encoded-sRGB import/export only. The v4 native tile payload is
   lossless little-endian RGBA16F and is not disguised as PNG.
 - [ ] Run `swift test --filter 'LayerStackTests|DocumentHistoryTests|PatternProjectMetadataCodecTests|PatternPaintTileCodecTests|PatternProjectArchiveTests'`.
@@ -372,9 +393,9 @@ wiring changes:
   after the atomic destination swap. Failed finalization invalidates the lease.
   History release, pruning, memory pressure, a second install, and forged or
   wrong-layer leases cannot invalidate retained buffers during installation.
-- Keeps the old full-surface store as a private production compatibility helper
-  while Task 5 proves the tiled route behind an explicit test seam. Task 6 is
-  the only production switch and then deletes the helper.
+- Leaves the existing full-surface authority untouched only until the atomic
+  Task 6 replacement is ready. It is not a supported compatibility mode; Task 6
+  deletes it and its tests immediately after the new authority is proven.
 
 - [ ] Write RED tests for 1/2/4-tile capture/restore, empty-before, erase-to-
   empty, stale token, wrong layer/generation/format/coordinate, duplicate
@@ -411,11 +432,12 @@ wiring changes:
 
 **Interfaces:**
 
-- Adds an explicit legacy-versus-tiled backend to
+- Adds a temporary old-versus-tiled test backend to
   `StrokeMetalResourceDescriptor`. Normal application construction continues to
   install the existing full-canvas BGRA8 backend; only tests and the allocation
   harness may select the tiled backend in this task. Task 6 remains the single
-  production switch and deletes the legacy backend.
+  production switch and deletes the old backend, selector, and compatibility-
+  only tests.
 - `StrokeTileSurfaceResources` owns sparse RGBA16F authoritative and prediction
   `TiledRasterSurface`s from Task 2, an immutable per-stroke layer/generation
   namespace, and preallocated partition/upload workspace. Its production
@@ -638,13 +660,16 @@ wiring changes:
 - [ ] Add offscreen Metal differentials for the same sampling cases. Assert
   absolute linear-channel error at most `2e-3`, transparent missing entries,
   no seam discontinuity above that tolerance, and identical Tier-2/fallback
-  output. Add a source/performance gate rejecting per-tile fullscreen passes.
+  output. Add behavioral pass-count and allocation evidence rejecting per-tile
+  fullscreen passes; do not use a brittle source-text scanner.
 - [ ] Add encoded-premultiplied import/export vectors for alpha 0, 0.5, and 1,
   non-gray translucent edges, low channel values, row padding, and round trip.
   Require at most one encoded channel of PNG error and tests that fail for
   straight-alpha packing, encoded-space blend, double encode, or encoding alpha.
-- [ ] Add opaque old-path versus tiled geometry/support differentials before
-  deleting the oracle. Then activate RGBA16F pipeline validation, the typed
+- [ ] Add opaque old-path versus tiled geometry/support differentials as a
+  temporary cutover oracle, then delete both the old renderer and those
+  compatibility-only differentials in this task. Activate RGBA16F pipeline
+  validation, the typed
   stamp packer, shared document store, sparse sampling plans, Task 5 leases,
   Task 4 install leases, and transactional clear/restore/resize/import as one
   production change.
@@ -654,10 +679,22 @@ wiring changes:
   reserve, page-in, plan build, command creation/encoding/completion, install,
   prune, candidate swap, resize, and import; every failure must allow an
   immediate successful next stroke.
-- [ ] Invert Task 0: ban the legacy types/symbols, any full-canvas paint-bearing
-  allocation in any format, and encoded-BGRA deposition. Assert the exact BGRA8
-  allowlist plus runtime one-dab 4096 touched-tile count/resident bytes. Update
-  Task 0/report wording from Task 5 to Task 6.
+- [ ] Invert Task 0: delete the legacy types/symbols, renderer-harness schemas
+  1 through 5, deprecated factories, compatibility constructors,
+  `compatibilityLayerID`, every full-canvas paint-bearing allocation in any
+  format, and encoded-BGRA deposition. Accept only the current harness schema
+  6. Replace transitional source-text scanners with structural access control,
+  current-schema decode rejection, and behavioral allocation/route evidence;
+  retain the exact BGRA8 boundary inventory plus runtime one-dab 4096
+  touched-tile count/resident bytes. Update Task 0/report wording from Task 5
+  to Task 6.
+- [ ] Consolidate validation at the Task 6 boundary. Construct trusted
+  geometry, sampling, transaction, and ownership values only after checked
+  arithmetic, Metal-limit, registry-generation, and resource-ownership
+  validation. Downstream render/cache layers consume those types without
+  repeating the same range and identity checks. Remove redundant test hooks,
+  duplicate invariant tests, and source-shape gates once construction and
+  terminal ownership make the invalid state unrepresentable.
 - [ ] Stream stable tiled revisions directly into display/export/interchange
   destinations without assembling a full RGBA16F source. Prove erase-to-empty
   pruning, bounded page-table/argument-buffer bytes, shared-budget pressure,
@@ -713,14 +750,16 @@ wiring changes:
 
 **Interfaces:**
 
-Task 7 is implemented and reviewed in eight bounded subphases rather than as
+Task 7 is implemented in eight bounded subphases rather than as
 one integration commit: freeze Task 6 contracts; CPU reference plus immutable
 composite plans; GPU compositor/shared display-export kernel; atomic layer
 transactions plus production layer controls; persisted tile-ID bijection;
 bounded SafeArchive provider/consumer primitives; v4 streaming persistence and
-legacy migration; then exporter integration and eight-layer budget/failure
-traces. Each subphase receives RED tests, a focused gate, and scoped review
-before the next seam is activated.
+current-schema enforcement; then exporter integration and eight-layer
+budget/failure traces. Each subphase receives focused RED/GREEN tests. One
+end-to-end functional/performance checkpoint follows the meaningful vertical
+slice, and the comprehensive adversarial/review gate remains at Task 8 rather
+than being repeated after minor edits.
 
 - Task 7 extends—not replaces—Task 6's generic registry and immutable sampling
   plan. `PreparedLayerCompositePlan` contains an immutable bottom-to-top visible
@@ -775,11 +814,14 @@ before the next seam is activated.
 - Native v4 load validates the complete manifest, paths, counts, checked
   per-entry/aggregate sizes, exact compiled physical storage geometry, manifest/
   tile revision uniformity, persisted-ID bijection, hashes, and layer limits
-  before allocating a candidate shared store. It then bounded-reads/uploads one
-  tile at a time, sets the candidate surface's persisted revision even when it
-  is empty, and swaps only after every tile succeeds. V1/v2/v3 encoded-
-  premultiplied BGRA imports use Task 6's explicit conversion once and install
-  a valid one-to-eight-layer registry without dropping declared layers.
+  once before constructing a trusted current-project value or allocating a
+  candidate shared store. It then bounded-reads/uploads one tile at a time,
+  sets the candidate surface's persisted revision even when it is empty, and
+  swaps only after every tile succeeds. Native schema 1, 2, 3, and unknown
+  future schemas fail clearly before payload allocation; no migration adapter,
+  alias, compatibility decoder, or migration fixture is retained. Downstream
+  transaction and upload layers consume the trusted current-project value and
+  do not repeat archive/manifest validation.
 - PNG/interchange remains flattened encoded-premultiplied BGRA8. Transparent
   export first composites layers in linear premultiplied space and then uses
   Task 6's boundary packer exactly once; native project tiles never pass through
@@ -809,10 +851,10 @@ before the next seam is activated.
   snapshot mutation while saving, and exact lease closure. Peak payload memory
   must be measured and bounded by one tile plus fixed archive buffers, not
   inferred from chunked APIs or allowed to scale with archive size.
-- [ ] Add v1/v2/v3 fixtures covering translucent pixels, multiple declared
-  layers, periodic cells, and radial pages. Require visual import parity within
-  one encoded channel, no layer loss, and transactional failure for invalid or
-  over-limit input.
+- [ ] Add compact schema 1/2/3/future rejection fixtures proving typed failure
+  before payload allocation or registry mutation, then delete native migration
+  code and successful-migration fixtures. Keep external PNG and external brush
+  import coverage separate from the native project codec.
 - [ ] Route display, finite, periodic repeat/baked repeat, flattened PNG, and
   native project capture through the correct shared snapshot. Compare each
   flattened export against an independent CPU layer/color reference and prove
@@ -866,7 +908,7 @@ before the next seam is activated.
 | Stroke lifecycle | initialize/import, begin, append actual/coalesced, prediction, estimate replacement, prepare/submit/display, finish, cancel, every injected failure, rapid next stroke, clear, undo/redo, brush/layer switch | canonical hashes, one-shot ordinals, command count, token/lease return, cursor/generation, renderer reuse |
 | Modes | plain; periodic grid, half-drop, brick, mirror-X, mirror-Y, mirror-XY, rotational, square-rotation, square-kaleidoscope, hexagons, rotation-3, rotation-6, kaleidoscope-60, kaleidoscope-30; radial rotation/mirror/mandala at minimum and maximum rays; resize crop/empty-fill | seam probes, logical-to-physical maps, stable hashes with prediction on/off, bounded radial storage |
 | Layers | one/eight layers, sparse/full, all blend modes, order, visibility, opacity, lock, active fallback, add/delete/undo/redo/resize | CPU/GPU blend parity, exact target layer/revision identity, transactional rollback, shared budget |
-| Persistence/export | v1/v2/v3 imports, v4 empty/periodic/radial/eight-layer, save/load/save, finite/repeat/baked/PNG | bounded streaming reads, stable IDs/revisions/hashes/bytes, independent flattened reference, one transfer conversion |
+| Persistence/export | schema-4 empty/periodic/radial/eight-layer, schema-1/2/3/future rejection, save/load/save, finite/repeat/baked/PNG | bounded streaming reads, pre-allocation typed rejection, stable IDs/revisions/hashes/bytes, independent flattened reference, one transfer conversion |
 | Sustained runtime | cold/warm, 10-second wall trace, 36,000-sample no-sleep accelerated trace, allocation/residency pressure, injected failure/reuse | JSONL plus summary: input provenance, replay, queues, prepare/submit/GPU/present p95/p99, allocations, page tables/bindings/leases, resident/high-water bytes |
 | App/UI routes | color selection, draw/erase/clear, size/brush/layer changes, mode/resize, undo/redo, save/open/export, tilde HUD, digit/letter/command shortcuts while canvas vs numeric fields own focus | Xcode-hosted `PatternSpikeMacUITests` `.xcresult` plus app-written route manifest prove real control/key delivery, focus ownership, production sparse route, disabled/rejected states, and matching state/pixels |
 
@@ -877,12 +919,14 @@ before the next seam is activated.
   oracle, producer kind, and typed result. The shell script rejects missing/
   duplicate rows, an absent/failed required Xcode test identifier, skipped
   software evidence, nonfinite metrics, or any nonproduction backend.
-- [ ] Add mutation/negative controls that independently invert transfer
+- [ ] Add mutation/negative controls at genuine boundaries that independently
+  invert transfer
   direction, straight/premultiplied handling, alpha, bilinear neighbor/tile
   origin, periodic/radial lookup, LRU/pinning, install atomicity, empty pruning,
-  layer order/blend, display/export encode, archive identity, and banned legacy
-  route detection. Require each control to fail exactly its named gate while
-  the unmodified fixture passes.
+  layer order/blend, display/export encode, and archive identity. Require each
+  control to fail exactly its named gate while the unmodified fixture passes.
+  Prove obsolete native paths are absent through current-version rejection and
+  production behavior rather than brittle source-text inventories.
 - [ ] Strengthen lifecycle/app coverage so every one of the twelve inventory
   rows runs through production GridRenderer plus EditorSessionController. Cover
   app commands for color, draw, erase, clear, brush/size/layer/mode/resize,
@@ -906,6 +950,11 @@ before the next seam is activated.
   no dropped actual input, no GPU wait on input/main, all queues and lease/token
   counts at zero after quiescence, resident plus transient bytes within their
   configured budgets, and no per-event page-table rebuild or full-canvas source.
+- [ ] Audit validation and test infrastructure at acceptance: keep untrusted-
+  input, checked-arithmetic/memory/Metal-limit, transactional-publication, and
+  GPU/resource-ownership guards. Remove duplicate downstream validation,
+  compatibility-only tests, source-text gates, and implausible-state hooks
+  whose states are already excluded by trusted construction and access control.
 - [ ] Run two complementary sustained gates: the current production GPU/app
   harness, which advances ten logical minutes in roughly ten wall-clock
   seconds, and the existing no-sleep allocation/scheduler probe, which actually

@@ -25,10 +25,6 @@ let package = Package(
             targets: ["BrushConverterFuzz"]
         ),
         .executable(
-            name: "SliceThreeEvidenceGate",
-            targets: ["SliceThreeEvidenceGate"]
-        ),
-        .executable(
             name: "BrushCharacterizationTool",
             targets: ["BrushCharacterizationTool"]
         ),
@@ -92,10 +88,6 @@ let package = Package(
             dependencies: ["BrushConverterFuzzSupport"]
         ),
         .executableTarget(
-            name: "SliceThreeEvidenceGate",
-            dependencies: ["MetalRenderer"]
-        ),
-        .executableTarget(
             name: "BrushCharacterizationTool",
             dependencies: [
                 "PatternEngine", "EditorCore", "BrushFormat",
@@ -116,7 +108,6 @@ let package = Package(
         .target(
             name: "ProfessionalBrushEvidenceValidation",
             dependencies: [
-                "BrushDepositionEvidenceValidation",
                 "BrushFormat",
                 "CShaderTypes",
                 "PatternEngine",
@@ -214,8 +205,6 @@ let package = Package(
                 "PatternSpike/ContentView.swift",
                 "PatternSpike/Debug/DebugPerformanceHUD.swift",
                 "PatternSpike/Debug/DebugPerformanceMonitor.swift",
-                "PatternSpike/Harness/SliceThreeHarnessHistory.swift",
-                "PatternSpike/Harness/SliceThreeHarnessRunner.swift",
                 "PatternSpike/Panels/EditorTopBar.swift",
                 "PatternSpike/Panels/TilingInspector.swift",
                 "PatternSpike/Panels/ToolRail.swift",
@@ -228,7 +217,6 @@ let package = Package(
                 "Tests/EditorTopBarColorBoundaryTests.swift",
                 "Tests/EditorSessionControllerTests.swift",
                 "Tests/PatternProjectBridgeTests.swift",
-                "Tests/SliceThreeHarnessHistoryTests.swift",
             ]
         ),
     ]

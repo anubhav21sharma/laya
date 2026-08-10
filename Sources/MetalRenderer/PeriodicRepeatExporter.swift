@@ -54,197 +54,83 @@ public enum PeriodicRepeatExportError:
     }
 }
 
-enum PeriodicRepeatExportInjectedFailure: Equatable {
-    case none
-    case textureAllocation
-    case commandBuffer
-    case renderEncoder
-}
+struct DocumentPaintStableMetricRepeatPlan: Sendable {
+    let pixelSize: PixelSize
+    let outputMapping: SparseTileSamplingOutputMapping
 
-@MainActor
-public extension GridRenderer {
-    /// Resolves one half-open metric repeat from the committed canonical
-    /// raster. Live/replay pixels are deliberately excluded.
-    func exportPeriodicRepeat(
-        density: Int
-    ) throws -> PeriodicRepeatExport {
-        try exportPeriodicRepeat(
-            density: density,
-            injecting: .none
-        )
-    }
-}
-
-@MainActor
-extension GridRenderer {
-    func exportPeriodicRepeat(
-        density: Int,
-        injecting failure: PeriodicRepeatExportInjectedFailure
-    ) throws -> PeriodicRepeatExport {
-        guard periodicConfiguration.presetID.supportsMetricRepeatExport else {
-            throw PeriodicRepeatExportError.unsupportedPreset(tiling)
+    init(strategy: TilingStrategy, density: Int) throws {
+        guard strategy.presetID.supportsMetricRepeatExport else {
+            throw PeriodicRepeatExportError.unsupportedPreset(
+                strategy.presetID
+            )
         }
         guard (64...4_096).contains(density) else {
             throw PeriodicRepeatExportError.invalidDensity(density)
         }
-
-        let exportPixelSize = try periodicRepeatExportPixelSize(
-            horizontalDensity: density
-        )
-        let (bytesPerRow, rowOverflow) = exportPixelSize.width
-            .multipliedReportingOverflow(
-                by: 4
-            )
-        let (byteCount, imageOverflow) = bytesPerRow
-            .multipliedReportingOverflow(by: exportPixelSize.height)
-        guard !rowOverflow, !imageOverflow else {
-            throw PeriodicRepeatExportError.byteCountOverflow
-        }
-
-        let pipeline = try makePeriodicRepeatExportPipeline()
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: exportPixelSize.width,
-            height: exportPixelSize.height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.renderTarget, .shaderRead]
-        if failure == .textureAllocation {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        guard let target = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        if failure == .commandBuffer {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = target
-        pass.colorAttachments[0].loadAction = .dontCare
-        pass.colorAttachments[0].storeAction = .store
-        if failure == .renderEncoder {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(
-            descriptor: pass
-        ) else {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        encoder.label = "Periodic Metric Repeat Export"
-        encoder.setRenderPipelineState(pipeline)
-        var uniforms = frameUniforms(
-            drawableSize: PatternSize(
-                width: Float(exportPixelSize.width),
-                height: Float(exportPixelSize.height)
-            ),
-            showGridLines: false,
-            liveVisible: false
-        )
-        encoder.setVertexBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setFragmentBytes(
-            &uniforms,
-            length: MemoryLayout<PatternGridFrameUniforms>.stride,
-            index: Int(PatternBufferIndexGridFrameUniforms)
-        )
-        encoder.setFragmentTexture(
-            canonical.front,
-            index: Int(PatternTextureIndexCanonical)
-        )
-        encoder.drawPrimitives(
-            type: .triangle,
-            vertexStart: 0,
-            vertexCount: 3
-        )
-        encoder.endEncoding()
-
-        commandBuffer.commit()
-        try waitForHarnessCommand(commandBuffer)
-
-        var bytes = [UInt8](repeating: 0, count: byteCount)
-        bytes.withUnsafeMutableBytes { storage in
-            target.getBytes(
-                storage.baseAddress!,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegionMake2D(
-                    0,
-                    0,
-                    exportPixelSize.width,
-                    exportPixelSize.height
-                ),
-                mipmapLevel: 0
+        guard let periodic = strategy.compiledSymmetry.domain.periodic else {
+            throw PeriodicRepeatExportError.unsupportedPreset(
+                strategy.presetID
             )
         }
-        return PeriodicRepeatExport(
-            pixelSize: exportPixelSize,
-            bytesPerRow: bytesPerRow,
-            bgra8Bytes: bytes
-        )
-    }
-
-    private func periodicRepeatExportPixelSize(
-        horizontalDensity: Int
-    ) throws -> PixelSize {
         let height: Int
-        if tilingStrategy.compiledSymmetry.family == .triangular {
-            let periodic = tilingStrategy.compiledSymmetry.domain.periodic!
+        if strategy.compiledSymmetry.family == .triangular {
             let horizontal = Double(simd_length(
                 periodic.translationBasis.u
             ))
             let vertical = Double(simd_length(
                 periodic.translationBasis.v
             ))
-            let derived = Double(horizontalDensity) * vertical / horizontal
+            let derived = Double(density) * vertical / horizontal
             guard derived.isFinite, derived <= Double(Int.max) else {
                 throw PeriodicRepeatExportError.byteCountOverflow
             }
             height = Int(derived.rounded())
         } else {
-            height = horizontalDensity
+            height = density
         }
-        guard
-            (64...4_096).contains(horizontalDensity),
-            (64...8_192).contains(height)
-        else {
+        guard (64...8_192).contains(height) else {
             throw PeriodicRepeatExportError.derivedDimensionOutOfRange(
-                width: horizontalDensity,
+                width: density,
                 height: height
             )
         }
-        return PixelSize(width: horizontalDensity, height: height)
-    }
-
-    private func makePeriodicRepeatExportPipeline()
-        throws -> any MTLRenderPipelineState
-    {
-        let vertexName = "patternFullscreenVertex"
-        let fragmentName = "patternPeriodicRepeatExportFragment"
-        guard let vertex = library.makeFunction(name: vertexName) else {
-            throw MetalRendererError.shaderFunctionUnavailable(vertexName)
-        }
-        guard let fragment = library.makeFunction(name: fragmentName) else {
-            throw MetalRendererError.shaderFunctionUnavailable(fragmentName)
-        }
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.label = "Periodic Metric Repeat Export"
-        descriptor.vertexFunction = vertex
-        descriptor.fragmentFunction = fragment
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-        descriptor.colorAttachments[0].isBlendingEnabled = false
-        do {
-            return try device.makeRenderPipelineState(descriptor: descriptor)
-        } catch {
-            throw MetalRendererError.pipelineCreationFailed(
-                error.localizedDescription
+        pixelSize = PixelSize(width: density, height: height)
+        outputMapping = .affine(SparseTileOutputToSourceTransform(
+            sourceOffset: .zero,
+            sourceStep: SIMD2(
+                Float(strategy.canvasSize.width) / Float(density),
+                Float(strategy.canvasSize.height) / Float(height)
             )
-        }
+        ))
+    }
+}
+
+extension PeriodicRepeatExport {
+    static func collectStableMetric(
+        strategy: TilingStrategy,
+        density: Int,
+        snapshot: DocumentPaintStableCanonicalSnapshot,
+        renderer: DocumentPaintStableSnapshotRenderer,
+        outputGeometryRevision: UInt64
+    ) async throws -> PeriodicRepeatExport {
+        defer { snapshot.close() }
+        let plan = try DocumentPaintStableMetricRepeatPlan(
+            strategy: strategy,
+            density: density
+        )
+        let image = try await DocumentPaintStableExportAdapter.collect(
+            snapshot: snapshot,
+            renderer: renderer,
+            outputRegion: try DocumentPaintStableExportAdapter.outputRegion(
+                pixelSize: plan.pixelSize
+            ),
+            outputGeometryRevision: outputGeometryRevision,
+            outputMapping: plan.outputMapping
+        )
+        return PeriodicRepeatExport(
+            pixelSize: plan.pixelSize,
+            bytesPerRow: image.bytesPerRow,
+            bgra8Bytes: [UInt8](image.bgra8PremultipliedBytes)
+        )
     }
 }

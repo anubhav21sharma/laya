@@ -56,326 +56,154 @@ private extension CommittedRasterStorage {
     }
 }
 
-@MainActor
-public extension GridRenderer {
-    convenience init(
-        device: any MTLDevice,
-        drawableSize: PatternSize,
-        committedSnapshot: CommittedDocumentSnapshot
-    ) throws {
-        guard let library = device.makeDefaultLibrary() else {
-            throw MetalRendererError.defaultLibraryUnavailable
-        }
-        try self.init(
-            device: device,
-            library: library,
-            drawableSize: drawableSize,
-            committedSnapshot: committedSnapshot
+enum DocumentPaintStableExportAdapter {
+    static let limits = DocumentPaintStableSnapshotRendererLimits.production
+
+    static func outputRegion(
+        pixelSize: PixelSize
+    ) throws -> SparseTileOutputRegion {
+        try SparseTileOutputRegion(
+            minX: 0,
+            minY: 0,
+            maxX: pixelSize.width,
+            maxY: pixelSize.height
         )
     }
 
-    convenience init(
-        device: any MTLDevice,
-        library: any MTLLibrary,
-        drawableSize: PatternSize,
-        committedSnapshot: CommittedDocumentSnapshot
-    ) throws {
-        let configuration = try TilingCanvasConfiguration(
-            pixelSize: committedSnapshot.canvasSize,
-            documentConfiguration:
-                committedSnapshot.documentConfiguration
+    static func collect(
+        snapshot: DocumentPaintStableCanonicalSnapshot,
+        renderer: DocumentPaintStableSnapshotRenderer,
+        outputRegion: SparseTileOutputRegion,
+        outputGeometryRevision: UInt64,
+        outputMapping: SparseTileSamplingOutputMapping
+    ) async throws -> DocumentPaintEncodedPremultipliedBGRA8 {
+        try DocumentPaintStableSnapshotChunkPlanner.validateOutput(
+            outputRegion,
+            limits: limits
         )
-        try self.init(
-            device: device,
-            library: library,
-            drawableSize: drawableSize,
-            configuration: configuration
+        return try await DocumentPaintStableCollectionEngine.collect(
+            snapshot: snapshot,
+            renderer: renderer,
+            descriptor: try DocumentPaintTightBGRA8Descriptor(
+                outputRegion: outputRegion,
+                maximumByteCount: limits.maximumOutputBytes
+            ),
+            outputGeometryRevision: outputGeometryRevision,
+            outputMapping: outputMapping
         )
-        try installCommittedSnapshot(committedSnapshot)
     }
 
-    /// Captures committed canonical storage only. An active uncommitted
-    /// stroke is deliberately excluded.
-    func captureCommittedDocument() throws -> CommittedDocumentSnapshot {
-        guard pendingRasterOperation == nil,
-              activeStroke?.isCommitSubmitted != true
-        else {
-            throw MetalRendererError.committedSnapshotUnavailable
-        }
-        let bytes = try copyCommittedCanonicalBytes()
-        let storage: CommittedRasterStorage
-        if let layout = tilingStrategy.compiledSymmetry.domain.finite?
-            .radial.layout
-        {
-            let pageByteCount =
-                RadialSectorLayout.pageSide
-                * RadialSectorLayout.pageSide
-                * 4
-            var pages: [CommittedRadialPagePixels] = []
-            pages.reserveCapacity(layout.residentPages.count)
-            for page in layout.residentPages {
-                let pageBytes = extractPage(
-                    page,
-                    layout: layout,
-                    atlasBytes: bytes
-                )
-                precondition(pageBytes.count == pageByteCount)
-                if pageBytes.contains(where: { $0 != 0 }) {
-                    pages.append(CommittedRadialPagePixels(
-                        coordinate: page.coordinate,
-                        bgra8PremultipliedBytes: pageBytes
-                    ))
-                }
+    static func destinationBytes(
+        _ image: DocumentPaintEncodedPremultipliedBGRA8,
+        transparentBackground: Bool
+    ) throws -> [UInt8] {
+        try Task.checkCancellation()
+        var bytes = [UInt8](image.bgra8PremultipliedBytes)
+        guard !transparentBackground else { return bytes }
+        let paper = GridCanvasContract.paperLinearPremultiplied
+        for rowStart in stride(
+            from: 0,
+            to: bytes.count,
+            by: image.bytesPerRow
+        ) {
+            try Task.checkCancellation()
+            for offset in stride(
+                from: rowStart,
+                to: rowStart + image.bytesPerRow,
+                by: 4
+            ) {
+                let source = DocumentColorPipeline
+                    .importEncodedPremultipliedBGRA8(
+                        EncodedPremultipliedBGRA8(
+                            blue: bytes[offset],
+                            green: bytes[offset + 1],
+                            red: bytes[offset + 2],
+                            alpha: bytes[offset + 3]
+                        )
+                    )
+                let output = DocumentColorPipeline
+                    .exportEncodedPremultipliedBGRA8(
+                        DocumentColorPipeline.referenceSourceOver(
+                            source: source,
+                            destination: paper
+                        )
+                    )
+                bytes[offset] = output.blue
+                bytes[offset + 1] = output.green
+                bytes[offset + 2] = output.red
+                bytes[offset + 3] = output.alpha
             }
-            storage = .radialPages(pages)
-        } else {
-            storage = .singleRaster(
-                bgra8PremultipliedBytes: bytes
+        }
+        return bytes
+    }
+}
+
+extension CommittedDocumentSnapshot {
+    static func collectStable(
+        canvasSize: PixelSize,
+        documentConfiguration: SymmetryDocumentConfiguration,
+        documentDomainLocked: Bool,
+        radialGeometryLocked: Bool,
+        capture: DocumentPaintStableCommittedCapture,
+        renderer: DocumentPaintStableSnapshotRenderer,
+        outputGeometryRevision: UInt64
+    ) async throws -> CommittedDocumentSnapshot {
+        defer { capture.close() }
+        let collected = try await DocumentPaintStableCollectionEngine
+            .collectCommitted(
+                capture,
+                renderer: renderer,
+                outputGeometryRevision: outputGeometryRevision
             )
+        guard collected.documentPixelSize == canvasSize else {
+            throw MetalRendererError.committedSnapshotIncompatible
+        }
+        let strategy: TilingStrategy
+        do {
+            strategy = try TilingStrategy(
+                documentConfiguration: documentConfiguration,
+                canvasSize: canvasSize
+            )
+        } catch {
+            throw MetalRendererError.committedSnapshotIncompatible
+        }
+        let expectedStorageSize = PixelSize(
+            width: Int(strategy.tileSize.width),
+            height: Int(strategy.tileSize.height)
+        )
+        guard collected.storagePixelSize == expectedStorageSize else {
+            throw MetalRendererError.committedSnapshotIncompatible
+        }
+
+        let storage: CommittedRasterStorage
+        try Task.checkCancellation()
+        let radialLayout = strategy.compiledSymmetry.domain.finite?
+            .radial.layout
+        switch (collected.storage, radialLayout) {
+        case let (.singleRaster(image), nil):
+            storage = .singleRaster(
+                bgra8PremultipliedBytes: [UInt8](
+                    image.bgra8PremultipliedBytes
+                )
+            )
+        case let (.radialPages(pages), .some):
+            storage = .radialPages(pages.map {
+                CommittedRadialPagePixels(
+                    coordinate: $0.coordinate,
+                    bgra8PremultipliedBytes: [UInt8](
+                        $0.image.bgra8PremultipliedBytes
+                    )
+                )
+            }.sorted { $0.coordinate < $1.coordinate })
+        default:
+            throw MetalRendererError.committedSnapshotIncompatible
         }
         return CommittedDocumentSnapshot(
-            canvasSize: pixelSize,
+            canvasSize: canvasSize,
             documentConfiguration: documentConfiguration,
             documentDomainLocked: documentDomainLocked,
             radialGeometryLocked: radialGeometryLocked,
             storage: storage
         )
-    }
-}
-
-@MainActor
-private extension GridRenderer {
-    func installCommittedSnapshot(
-        _ snapshot: CommittedDocumentSnapshot
-    ) throws {
-        guard snapshot.canvasSize == pixelSize,
-              snapshot.documentConfiguration == documentConfiguration
-        else {
-            throw MetalRendererError.committedSnapshotIncompatible
-        }
-        let bytes: [UInt8]
-        switch snapshot.storage {
-        case let .singleRaster(single):
-            guard tilingStrategy.compiledSymmetry.domain.finite?
-                    .radial.layout == nil,
-                  single.count
-                    == storagePixelSize.width
-                        * storagePixelSize.height
-                        * 4
-            else {
-                throw MetalRendererError.committedSnapshotIncompatible
-            }
-            bytes = single
-        case let .radialPages(pages):
-            guard let layout = tilingStrategy.compiledSymmetry.domain
-                .finite?.radial.layout
-            else {
-                throw MetalRendererError.committedSnapshotIncompatible
-            }
-            let pageByteCount =
-                RadialSectorLayout.pageSide
-                * RadialSectorLayout.pageSide
-                * 4
-            let allowed = Set(layout.residentPages.map(\.coordinate))
-            var coordinates = Set<RadialPageCoordinate>()
-            var atlas = [UInt8](
-                repeating: 0,
-                count: storagePixelSize.width
-                    * storagePixelSize.height
-                    * 4
-            )
-            for page in pages {
-                guard page.bgra8PremultipliedBytes.count
-                        == pageByteCount,
-                      coordinates.insert(page.coordinate).inserted,
-                      allowed.contains(page.coordinate),
-                      let resident = layout.residentPage(
-                          at: page.coordinate
-                      )
-                else {
-                    throw MetalRendererError
-                        .committedSnapshotIncompatible
-                }
-                insertPage(
-                    page.bgra8PremultipliedBytes,
-                    resident: resident,
-                    layout: layout,
-                    atlasBytes: &atlas
-                )
-            }
-            if !snapshot.radialGeometryLocked,
-               atlas.contains(where: { $0 != 0 })
-            {
-                throw MetalRendererError.committedSnapshotIncompatible
-            }
-            bytes = atlas
-        }
-        let isRadial = tilingStrategy.compiledSymmetry.domain.finite?
-            .radial.layout != nil
-        guard (!isRadial && !snapshot.radialGeometryLocked)
-            || (isRadial
-                && snapshot.documentDomainLocked
-                    == snapshot.radialGeometryLocked),
-              snapshot.documentDomainLocked || !bytes.contains(where: { $0 != 0 })
-        else { throw MetalRendererError.committedSnapshotIncompatible }
-        try uploadCommittedCanonicalBytes(bytes)
-        radialGeometryLocked = snapshot.radialGeometryLocked
-        documentDomainLocked = snapshot.documentDomainLocked
-    }
-
-    func copyCommittedCanonicalBytes() throws -> [UInt8] {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: storagePixelSize.width,
-            height: storagePixelSize.height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.shaderRead]
-        guard let staging = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
-            throw MetalRendererError.commandFailed(
-                "Committed snapshot blit encoder creation failed."
-            )
-        }
-        encoder.label = "Capture Committed Document"
-        encoder.copy(
-            from: canonical.front,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: MTLSize(
-                width: storagePixelSize.width,
-                height: storagePixelSize.height,
-                depth: 1
-            ),
-            to: staging,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-        )
-        encoder.endEncoding()
-        commandBuffer.commit()
-        try waitForHarnessCommand(commandBuffer)
-
-        let bytesPerRow = storagePixelSize.width * 4
-        var bytes = [UInt8](
-            repeating: 0,
-            count: bytesPerRow * storagePixelSize.height
-        )
-        bytes.withUnsafeMutableBytes { storage in
-            staging.getBytes(
-                storage.baseAddress!,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegionMake2D(
-                    0,
-                    0,
-                    storagePixelSize.width,
-                    storagePixelSize.height
-                ),
-                mipmapLevel: 0
-            )
-        }
-        return bytes
-    }
-
-    func uploadCommittedCanonicalBytes(
-        _ bytes: [UInt8]
-    ) throws {
-        let bytesPerRow = storagePixelSize.width * 4
-        guard bytes.count == bytesPerRow * storagePixelSize.height else {
-            throw MetalRendererError.committedSnapshotIncompatible
-        }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: storagePixelSize.width,
-            height: storagePixelSize.height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.shaderRead]
-        guard let staging = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        bytes.withUnsafeBytes { storage in
-            staging.replace(
-                region: MTLRegionMake2D(
-                    0,
-                    0,
-                    storagePixelSize.width,
-                    storagePixelSize.height
-                ),
-                mipmapLevel: 0,
-                withBytes: storage.baseAddress!,
-                bytesPerRow: bytesPerRow
-            )
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        try encodeResizeIntersectionCopy(
-            from: staging,
-            oldPixelSize: storagePixelSize,
-            to: canonical.front,
-            newPixelSize: storagePixelSize,
-            on: commandBuffer
-        )
-        commandBuffer.commit()
-        try waitForHarnessCommand(commandBuffer)
-    }
-
-    func extractPage(
-        _ page: RadialResidentPage,
-        layout: RadialSectorLayout,
-        atlasBytes: [UInt8]
-    ) -> [UInt8] {
-        let side = RadialSectorLayout.pageSide
-        let atlasX = page.atlasSlot % layout.atlasColumns
-        let atlasY = page.atlasSlot / layout.atlasColumns
-        let atlasBytesPerRow = layout.atlasPixelSize.width * 4
-        let pageBytesPerRow = side * 4
-        var result = [UInt8](
-            repeating: 0,
-            count: pageBytesPerRow * side
-        )
-        for row in 0..<side {
-            let source =
-                (atlasY * side + row) * atlasBytesPerRow
-                + atlasX * pageBytesPerRow
-            let destination = row * pageBytesPerRow
-            result.replaceSubrange(
-                destination..<(destination + pageBytesPerRow),
-                with: atlasBytes[source..<(source + pageBytesPerRow)]
-            )
-        }
-        return result
-    }
-
-    func insertPage(
-        _ pageBytes: [UInt8],
-        resident: RadialResidentPage,
-        layout: RadialSectorLayout,
-        atlasBytes: inout [UInt8]
-    ) {
-        let side = RadialSectorLayout.pageSide
-        let atlasX = resident.atlasSlot % layout.atlasColumns
-        let atlasY = resident.atlasSlot / layout.atlasColumns
-        let atlasBytesPerRow = layout.atlasPixelSize.width * 4
-        let pageBytesPerRow = side * 4
-        for row in 0..<side {
-            let source = row * pageBytesPerRow
-            let destination =
-                (atlasY * side + row) * atlasBytesPerRow
-                + atlasX * pageBytesPerRow
-            atlasBytes.replaceSubrange(
-                destination..<(destination + pageBytesPerRow),
-                with: pageBytes[source..<(source + pageBytesPerRow)]
-            )
-        }
     }
 }

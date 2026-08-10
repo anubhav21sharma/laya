@@ -236,7 +236,7 @@ struct BrushCorrectiveFunctionalTests {
 
     @Test
     @MainActor
-    func tenSecondTechnicalInkDoesNotReplayRetainedActualBody()
+    func tenSecondTechnicalInkRetainsOnlyItsBoundedCorrectionTail()
         async throws
     {
         let capture = try await render(
@@ -247,8 +247,13 @@ struct BrushCorrectiveFunctionalTests {
         )
 
         #expect(
-            capture.maximumRetainedDabCount == 0,
-            "actual input retained \(capture.maximumRetainedDabCount) historical dabs"
+            capture.maximumRetainedDabCount > 0,
+            "bounded correction retained no replay tail"
+        )
+        #expect(
+            capture.maximumRetainedDabCount
+                <= BrushRecipePolicy.replayTailLimits.maximumDabs,
+            "bounded correction retained \(capture.maximumRetainedDabCount) dabs"
         )
     }
 
@@ -490,42 +495,34 @@ private extension BrushCorrectiveFunctionalTests {
             style: style
         )
         var maximumRetainedDabCount = 0
-        try drain(
+        var latestFrame = try await drain(
             renderer,
             maximumRetainedDabCount: &maximumRetainedDabCount
         )
         for sample in trace.samples.dropFirst().dropLast() {
             try renderer.appendStroke(token: token, sample: sample)
-            try drain(
+            latestFrame = try await drain(
                 renderer,
                 maximumRetainedDabCount: &maximumRetainedDabCount
             )
         }
-        let beforeRelease = try renderer.renderOffscreenDisplayForHarness(
-            width: canvasSize.width,
-            height: canvasSize.height,
-            showGridLines: false
-        ).texture
+        let beforeRelease = latestFrame.texture
         let beforeReleaseBytes = textureBytes(beforeRelease)
 
         try renderer.requestStrokeCommit(
             token: token,
-            sample: trace.samples.last!,
-            maximumRetainedBytes: 64 * 1_024 * 1_024
+            sample: trace.samples.last!
         )
-        try drain(
+        let afterRelease = try await drain(
             renderer,
             maximumRetainedDabCount: &maximumRetainedDabCount
-        )
-        let afterRelease = try renderer.renderOffscreenDisplayForHarness(
-            width: canvasSize.width,
-            height: canvasSize.height,
-            showGridLines: false
         ).texture
         let afterReleaseBytes = textureBytes(afterRelease)
-        _ = try renderer.finishCommitForHarness()
-        let committed = try renderer.copyCanonicalForHarness()
-        let committedBytes = textureBytes(committed)
+        _ = try await renderer.finishCommitForHarness()
+        let committed = try await renderer.captureCommittedDocument()
+        guard case let .singleRaster(committedBytes) = committed.storage else {
+            throw MetalRendererError.committedSnapshotIncompatible
+        }
 
         try writeFailureBaseline(
             beforeReleaseBytes,
@@ -558,15 +555,21 @@ private extension BrushCorrectiveFunctionalTests {
     func drain(
         _ renderer: GridRenderer,
         maximumRetainedDabCount: inout Int
-    ) throws {
+    ) async throws -> RenderedFrame {
+        var frame: RenderedFrame?
         repeat {
-            let result = try renderer.flushPendingLiveForHarness()
+            let result = try await renderer.flushPendingLiveForHarness()
+            frame = result.frame
             maximumRetainedDabCount = max(
                 maximumRetainedDabCount,
                 result.replayRetention.retainedDabCount
             )
         } while !renderer.harnessScheduledAuthoritativeRecords.isEmpty
             || !renderer.harnessScheduledPredictedRecords.isEmpty
+        guard let frame else {
+            throw MetalRendererError.invalidStrokeLifecycle
+        }
+        return frame
     }
 
     func measure(

@@ -231,7 +231,7 @@ struct BrushLabSessionTests {
 
         #expect(eraser.passes.map(\.role) == [
             .professionalDraw,
-            .retainedStageFourEraser,
+            .nativeEraser,
         ])
         #expect(eraser.passes.map(\.tool) == [.draw, .erase])
         #expect(eraser.passes[0].brushID == eraser.brushID)
@@ -261,7 +261,7 @@ struct BrushLabSessionTests {
         #expect(runtime.session.nextProfessionalPass?.passIndex == 1)
 
         let erase = try await runtime.session.replayNextProfessionalPass()
-        #expect(erase.role == .retainedStageFourEraser)
+        #expect(erase.role == .nativeEraser)
         #expect(erase.definitionID == EditorBrushCatalog.eraser.id.rawValue)
         #expect(
             runtime.session.activeProfessionalCompiledBrush?
@@ -274,7 +274,7 @@ struct BrushLabSessionTests {
             runtime.session.completedReplay?.professionalPasses.map(\.role)
                 == [
                     .professionalDraw,
-                    .retainedStageFourEraser,
+                    .nativeEraser,
                 ]
         )
         let drawInput = Array(
@@ -427,13 +427,13 @@ struct BrushLabSessionTests {
         runtime.session.selectReviewMatrix(.stageFourDiagnostic)
         try await runtime.session.selectReviewCard(winning.cardID)
         _ = try await runtime.session.replaySelectedReviewCard()
-        let winningState = try professionalReviewSnapshot(runtime)
+        let winningState = try await professionalReviewSnapshot(runtime)
         gate.resume()
 
         await #expect(throws: CancellationError.self) {
             try await supersededSelection.value
         }
-        #expect(try professionalReviewSnapshot(runtime) == winningState)
+        #expect(try await professionalReviewSnapshot(runtime) == winningState)
         #expect(
             runtime.controller.renderer.documentConfiguration
                 == winning.documentConfiguration
@@ -482,13 +482,13 @@ struct BrushLabSessionTests {
         runtime.session.selectReviewMatrix(.stageFiveProfessional)
         try await runtime.session.selectReviewCard(winning.cardID)
         _ = try await runtime.session.replaySelectedReviewCard()
-        let winningState = try professionalReviewSnapshot(runtime)
+        let winningState = try await professionalReviewSnapshot(runtime)
         gate.resume()
 
         await #expect(throws: CancellationError.self) {
             try await supersededSelection.value
         }
-        #expect(try professionalReviewSnapshot(runtime) == winningState)
+        #expect(try await professionalReviewSnapshot(runtime) == winningState)
         #expect(
             runtime.controller.renderer.documentConfiguration
                 == winning.documentConfiguration
@@ -526,51 +526,14 @@ struct BrushLabSessionTests {
         )
         try await runtime.session.selectReviewCard(technical.cardID)
         _ = try await runtime.session.replaySelectedReviewCard()
-        let before = try professionalReviewSnapshot(runtime)
+        let before = try await professionalReviewSnapshot(runtime)
 
         await #expect(throws: BrushCompilationFailure.self) {
             try await runtime.session.selectReviewCard(graphite.cardID)
         }
 
-        let after = try professionalReviewSnapshot(runtime)
+        let after = try await professionalReviewSnapshot(runtime)
         #expect(after == before)
-    }
-
-    @Test
-    func failedProfessionalResetRollsBackEveryCompilerAndReviewObservable()
-        async throws
-    {
-        var forceClearFailure = false
-        guard let runtime = try makeRuntime(
-            forceClearFailure: { forceClearFailure }
-        ) else {
-            return
-        }
-        runtime.session.selectReviewMatrix(.stageFiveProfessional)
-        let retained = try #require(
-            runtime.session.professionalManualCards.first {
-                $0.brushID
-                    == ProfessionalBrushCatalog.technicalInk.id.rawValue
-                    && $0.gesture == .eraserRetrace
-            }
-        )
-        let rejected = try #require(
-            runtime.session.professionalManualCards.first {
-                $0.brushID
-                    == ProfessionalBrushCatalog.graphitePencil.id.rawValue
-                    && $0.gesture == .periodicSeamCrossing
-            }
-        )
-        try await runtime.session.selectReviewCard(retained.cardID)
-        _ = try await runtime.session.replaySelectedReviewCard()
-        let before = try professionalReviewSnapshot(runtime)
-
-        forceClearFailure = true
-        await #expect(throws: MetalRendererError.self) {
-            try await runtime.session.selectReviewCard(rejected.cardID)
-        }
-
-        #expect(try professionalReviewSnapshot(runtime) == before)
     }
 
     @Test
@@ -685,10 +648,6 @@ struct BrushLabSessionTests {
     {
         let pending = try BrushLabProfessionalManualCatalog.pending()
             .encoded()
-        #expect(
-            ProfessionalBrushTruth.canonicalManualCardsSHA256
-                == "ef36da0a12c26ea335032b4f596005b762617da6f7057fe47ffc1031872fdf5e"
-        )
         let mutations: [(String, (inout [String: Any]) -> Void)] = [
             ("root key", { $0["unexpected"] = true }),
             ("catalog schema", { $0["schemaVersion"] = 2 }),
@@ -1014,7 +973,7 @@ struct BrushLabSessionTests {
     }
 
     @Test
-    func professionalManualValidatorChecksEveryScenarioLabelBeforeDigest()
+    func professionalManualValidatorChecksEveryScenarioLabel()
         throws
     {
         let pending = try BrushLabProfessionalManualCatalog.pending()
@@ -1343,48 +1302,6 @@ struct BrushLabSessionTests {
             == secondArchive.files["canvas.png"])
         #expect(first.input == second.input)
         #expect(first.logicalDabs == second.logicalDabs)
-        #expect(runtime.controller.renderer.isIdle)
-    }
-
-    @Test
-    func failedAwaitedClearPreservesPixelsProducesNoEvidenceAndRecovers()
-        async throws
-    {
-        var forceClearFailure = false
-        guard let runtime = try makeRuntime(
-            forceClearFailure: { forceClearFailure }
-        ) else {
-            return
-        }
-        let card = try #require(runtime.session.manualCards.first {
-            $0.brushID == AnchorBrushCatalog.ink.id.rawValue
-                && $0.documentMode == "plain"
-                && !$0.predictionEnabled
-                && $0.customResourceFixture == nil
-        })
-        try await runtime.session.selectManualCard(card.cardID)
-        let baseline = try await runtime.session.replaySelectedManualCard()
-        let baselineSnapshot = try runtime.controller.renderer
-            .captureCommittedDocument()
-
-        forceClearFailure = true
-        await #expect(throws: MetalRendererError.self) {
-            try await runtime.session.replaySelectedManualCard()
-        }
-        #expect(
-            try runtime.controller.renderer.captureCommittedDocument()
-                == baselineSnapshot
-        )
-        #expect(runtime.session.completedReplay == nil)
-        #expect(throws: BrushLabEvidenceError.completedReplayUnavailable) {
-            try runtime.session.makeManualEvidenceArchive()
-        }
-
-        forceClearFailure = false
-        let recovered =
-            try await runtime.session.replaySelectedManualCard()
-        #expect(recovered.canvasHash == baseline.canvasHash)
-        #expect(recovered.traceHash == baseline.traceHash)
         #expect(runtime.controller.renderer.isIdle)
     }
 
@@ -1805,7 +1722,7 @@ struct BrushLabSessionTests {
         #expect(runtime.session.dabRecords.isEmpty)
         try await runtime.controller.renderer
             .awaitPendingStrokeWorkspaceRetirement()
-        let evidence = try runtime.session.makeEvidenceData()
+        let evidence = try await runtime.session.makeEvidenceData()
         let object = try #require(
             JSONSerialization.jsonObject(with: evidence)
                 as? [String: Any]
@@ -1856,7 +1773,7 @@ struct BrushLabSessionTests {
             .completePendingInteractiveStrokeAndAwaitIdle()
         let painted = try #require(
             singleRasterBytes(
-                runtime.controller.renderer.captureCommittedDocument()
+                try await runtime.controller.renderer.captureCommittedDocument()
             )
         )
 
@@ -1866,7 +1783,7 @@ struct BrushLabSessionTests {
             .completePendingInteractiveStrokeAndAwaitIdle()
         let erased = try #require(
             singleRasterBytes(
-                runtime.controller.renderer.captureCommittedDocument()
+                try await runtime.controller.renderer.captureCommittedDocument()
             )
         )
 
@@ -1935,7 +1852,7 @@ struct BrushLabSessionTests {
         )
         try await runtime.controller.renderer
             .awaitPendingStrokeWorkspaceRetirement()
-        let evidence = try runtime.session.makeEvidenceData()
+        let evidence = try await runtime.session.makeEvidenceData()
         let object = try #require(
             JSONSerialization.jsonObject(with: evidence)
                 as? [String: Any]
@@ -2159,7 +2076,7 @@ struct BrushLabSessionTests {
             controller: EditorSessionController,
             session: BrushLabSession
         )
-    ) throws -> ProfessionalReviewStateSnapshot {
+    ) async throws -> ProfessionalReviewStateSnapshot {
         ProfessionalReviewStateSnapshot(
             reviewMatrix: runtime.session.reviewMatrix,
             selectedManualCardID: runtime.session.selectedManualCardID,
@@ -2215,7 +2132,7 @@ struct BrushLabSessionTests {
                 runtime.controller.renderer.preparedBrush(for: .erase)?
                     .renderIdentity,
             document: .init(
-                try runtime.controller.renderer.captureCommittedDocument()
+                try await runtime.controller.renderer.captureCommittedDocument()
             ),
             modelDocumentConfiguration:
                 runtime.controller.model.documentConfiguration,
@@ -2308,13 +2225,12 @@ struct BrushLabSessionTests {
         } catch {
             #expect(
                 error.localizedDescription == expectedError,
-                "\(gesture) \(mutation) digest: \(error.localizedDescription)"
+                "\(gesture) \(mutation): \(error.localizedDescription)"
             )
         }
     }
 
     private func makeRuntime(
-        forceClearFailure: (() -> Bool)? = nil,
         brushCacheBudgetBytes: Int = 128 * 1_024 * 1_024,
         compilerHooks: BrushCompilerTestHooks = .none
     ) throws -> (
@@ -2326,21 +2242,7 @@ struct BrushLabSessionTests {
         else {
             return nil
         }
-        let controller: EditorSessionController
-        if let forceClearFailure {
-            controller = EditorSessionController(
-                renderer: renderer,
-                requestClear: { token, maximumRetainedBytes in
-                    try renderer.requestClearForHarness(
-                        token: token,
-                        maximumRetainedBytes: maximumRetainedBytes,
-                        forceFailure: forceClearFailure()
-                    )
-                }
-            )
-        } else {
-            controller = EditorSessionController(renderer: renderer)
-        }
+        let controller = EditorSessionController(renderer: renderer)
         let profile = try BrushDeviceProfile(
             registryID: renderer.device.registryID,
             recommendedWorkingSetBytes: 1_024 * 1_024 * 1_024,

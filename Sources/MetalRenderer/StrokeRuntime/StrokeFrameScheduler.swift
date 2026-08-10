@@ -7,7 +7,6 @@ package enum StrokePreparationAllocationProbeStage: UInt8, Sendable {
     case predictionCPU
     case estimatedCPU
     case batchPackaging
-    case surfaceRecordPacking
     case surfaceMetalSubmission
     case surfaceTilePartition
     case surfaceTileLease
@@ -310,6 +309,11 @@ private final class StrokePreparedOutputPage: @unchecked Sendable {
     }
 }
 
+struct StrokePreparedReplayRetention: Equatable, Sendable {
+    let retainedDabCount: Int
+    let visibleProjectedInstanceCount: Int
+}
+
 struct StrokePreparedDepositionBatch: Sendable {
     let generation: UInt64
     let sequence: UInt64
@@ -317,13 +321,19 @@ struct StrokePreparedDepositionBatch: Sendable {
     let logicalDabs: StrokePreparedLogicalDabView
     let dirtyRegions: StrokePreparedDirtyRegionView
     let authoritativeInstanceCount: Int
+    let newAuthoritativeInstanceCount: Int
     let predictedInstanceCount: Int
     let predictionProvenanceBoundary: PredictionProvenanceBoundary
     let coordinatorSnapshot: StrokeRenderSnapshot
+    let replayRetention: StrokePreparedReplayRetention
     let executorProbe: StrokePreparationExecutorProbe
     let isFinishing: Bool
-    let predictionAdmission: PredictionOverlayAdmission?
+    let predictionAdmission: PredictionAdmission?
     let surfaceLease: StrokePreparedSurfaceLease?
+    /// Opaque Main-side ownership handoff. The bridge installs this atomically
+    /// with publication; scheduler-direct tests retain `surfaceLease` only as
+    /// a closed-owner inspection seam until the GridRenderer cutover.
+    let displayFrame: StrokePreparedDisplayFrame?
     let surfaceSnapshot: StrokePrivateSurfaceEncoderSnapshot?
     let preparationCPUNanoseconds: UInt64
 
@@ -332,6 +342,32 @@ struct StrokePreparedDepositionBatch: Sendable {
             && frameToken != nil
             && authoritativeInstanceCount == 0
             && predictedInstanceCount == 0
+    }
+
+    func installingDisplayFrame(
+        _ displayFrame: StrokePreparedDisplayFrame
+    ) -> Self {
+        Self(
+            generation: generation,
+            sequence: sequence,
+            frameToken: frameToken,
+            logicalDabs: logicalDabs,
+            dirtyRegions: dirtyRegions,
+            authoritativeInstanceCount: authoritativeInstanceCount,
+            newAuthoritativeInstanceCount:
+                newAuthoritativeInstanceCount,
+            predictedInstanceCount: predictedInstanceCount,
+            predictionProvenanceBoundary: predictionProvenanceBoundary,
+            coordinatorSnapshot: coordinatorSnapshot,
+            replayRetention: replayRetention,
+            executorProbe: executorProbe,
+            isFinishing: isFinishing,
+            predictionAdmission: predictionAdmission,
+            surfaceLease: surfaceLease,
+            displayFrame: displayFrame,
+            surfaceSnapshot: surfaceSnapshot,
+            preparationCPUNanoseconds: preparationCPUNanoseconds
+        )
     }
 }
 
@@ -361,7 +397,6 @@ struct StrokeFrameSchedulerSnapshot: Equatable, Sendable {
     let authoritativeCandidateResumeCount: UInt64
     let authoritativeCandidateLogicalHighWater: Int
     let authoritativeCandidateProjectionHighWater: Int
-    let synchronousCompatibilityReplayInvocationCount: UInt64
     let retainedActualSampleCount: Int
     let retainedPredictedSampleCount: Int
     let transientMutationVersion: UInt64
@@ -643,9 +678,6 @@ actor StrokeFrameScheduler {
                 authoritativeCandidateLogicalHighWater,
             authoritativeCandidateProjectionHighWater:
                 authoritativeCandidateProjectionHighWater,
-            synchronousCompatibilityReplayInvocationCount:
-                preparationCoordinator?
-                    .synchronousCompatibilityReplayInvocationCount ?? 0,
             retainedActualSampleCount:
                 transientStrokeBuffer?.actualSampleCount ?? 0,
             retainedPredictedSampleCount:
@@ -904,7 +936,7 @@ actor StrokeFrameScheduler {
         singleActualSampleScratch.reserveCapacity(1)
         singlePredictionSampleScratch.reserveCapacity(1)
         predictionBatchSampleScratch.reserveCapacity(
-            PredictionOverlay.maximumNormalizedSampleCount
+            PredictionAdmissionLimits.maximumNormalizedSampleCount
         )
     }
 
@@ -965,7 +997,7 @@ actor StrokeFrameScheduler {
             ):
                 guard count > 0,
                       count
-                        <= PredictionOverlay.maximumNormalizedSampleCount,
+                        <= PredictionAdmissionLimits.maximumNormalizedSampleCount,
                       submittedCount >= count,
                       index >= 0,
                       index < count
@@ -1034,7 +1066,7 @@ actor StrokeFrameScheduler {
                             ),
                             isFinishing: false,
                             emitEmpty: true,
-                            predictionAdmission: PredictionOverlayAdmission(
+                            predictionAdmission: PredictionAdmission(
                                 normalizedSampleCount: 0,
                                 logicalDabCount: 0,
                                 projectedInstanceCount: 0,
@@ -1043,7 +1075,10 @@ actor StrokeFrameScheduler {
                         )!
                     )
                 }
-                return .commitBarrierReached(generation: generation)
+                return .commitBarrierReached(
+                    generation: generation,
+                    commitMutation: .noOp
+                )
             case let .cancel(generation, reason):
                 resetPredictionBatchAssembly()
                 if let cleanup = cancel(generation: generation) {
@@ -1255,7 +1290,12 @@ actor StrokeFrameScheduler {
             }
             if pendingCommitBarrierGeneration == generation {
                 pendingCommitBarrierGeneration = nil
-                return .commitBarrierReached(generation: generation)
+                let mutation = try privateSurfaceEncoder?
+                    .sealCommitMutation() ?? .noOp
+                return .commitBarrierReached(
+                    generation: generation,
+                    commitMutation: mutation
+                )
             }
             return nil
         } catch let error as StrokeStageCInjectedFailure {
@@ -1323,6 +1363,19 @@ actor StrokeFrameScheduler {
                 failure: .unexpected(String(describing: error))
             )
         }
+    }
+
+    func ownsPreparedFrame(generation: UInt64, token: UInt64) -> Bool {
+        if let lease = outstandingSurfaceLease {
+            return lease.generation == generation && lease.token == token
+        }
+        if activeGeneration == generation,
+           outstandingFrame?.token == token
+        {
+            return true
+        }
+        return activeGeneration == generation
+            && outstandingZeroWorkContinuationToken == token
     }
 
     func begin(generation: UInt64) throws {
@@ -1565,7 +1618,7 @@ actor StrokeFrameScheduler {
                 $0 + $1.projectedInstanceCount
             }
         let maximumPredictionSamples = min(
-            PredictionOverlay.maximumNormalizedSampleCount,
+            PredictionAdmissionLimits.maximumNormalizedSampleCount,
             max(
                 0,
                 replayLimits.maximumSamples
@@ -1573,7 +1626,7 @@ actor StrokeFrameScheduler {
             )
         )
         let maximumPredictionDabs = min(
-            PredictionOverlay.maximumLogicalDabCount,
+            PredictionAdmissionLimits.maximumLogicalDabCount,
             max(
                 0,
                 replayLimits.maximumDabs
@@ -1810,7 +1863,7 @@ actor StrokeFrameScheduler {
             ),
             isFinishing: false,
             emitEmpty: true,
-            predictionAdmission: PredictionOverlayAdmission(
+            predictionAdmission: PredictionAdmission(
                 normalizedSampleCount: acceptedSampleCount,
                 logicalDabCount: generatedLogicalDabScratch.count,
                 projectedInstanceCount:
@@ -1899,7 +1952,7 @@ actor StrokeFrameScheduler {
         let maximumReplacementDabCount = max(
             0,
             min(
-                PredictionOverlay.maximumLogicalDabCount
+                PredictionAdmissionLimits.maximumLogicalDabCount
                     - retainedPredictionDabCount,
                 replayLimits.maximumDabs
                     - candidateBuffer.actualDabCount
@@ -2398,7 +2451,7 @@ actor StrokeFrameScheduler {
                 isFinishing: preparationHasFinished,
                 emitEmpty: true,
                 predictionAdmission: isPredictedReplay
-                    ? PredictionOverlayAdmission(
+                    ? PredictionAdmission(
                         normalizedSampleCount:
                             candidateBuffer.predictedSampleCount,
                         logicalDabCount:
@@ -3566,6 +3619,9 @@ actor StrokeFrameScheduler {
         // before that probe is armed so continuation pages remain separately
         // measurable instead of nesting/resetting the same counter.
         disarmAuthoritativeAllocationProbe(drain: drain)
+        let newAuthoritativeInstanceCount =
+            generatedLogicalDabScratch.isEmpty
+            ? 0 : generatedProjectionScratch.count
         let batch = try await makePreparedOutputBatch(
             generation: drain.generation,
             predictionProvenanceBoundary:
@@ -3578,6 +3634,8 @@ actor StrokeFrameScheduler {
             isFinishing: isFinishing,
             emitEmpty: true,
             predictionAdmission: nil,
+            newAuthoritativeInstanceCount:
+                newAuthoritativeInstanceCount,
             forcedSurfaceLayer: drain.stagingSurfaceLayer,
             preparationCPUNanoseconds:
                 preparationClock()
@@ -3970,7 +4028,8 @@ actor StrokeFrameScheduler {
         executorProbe: StrokePreparationExecutorProbe,
         isFinishing: Bool,
         emitEmpty: Bool,
-        predictionAdmission: PredictionOverlayAdmission?,
+        predictionAdmission: PredictionAdmission?,
+        newAuthoritativeInstanceCount: Int? = nil,
         forcedSurfaceLayer: StrokePrivateSurfaceLayer? = nil,
         preparationCPUNanoseconds: UInt64 = 0
     ) async throws -> StrokePreparedDepositionBatch? {
@@ -4099,6 +4158,13 @@ actor StrokeFrameScheduler {
             logicalDabView = .empty
             dirtyRegionView = .empty
         }
+        let replayBuffer = authoritativeCandidateDrain?.buffer
+            ?? transientStrokeBuffer
+        let replayRetention = StrokePreparedReplayRetention(
+            retainedDabCount: replayBuffer?.retainedDabCount ?? 0,
+            visibleProjectedInstanceCount:
+                replayBuffer?.visibleProjectedInstanceCount ?? 0
+        )
         let batch = StrokePreparedDepositionBatch(
             generation: generation,
             sequence: sequence,
@@ -4107,14 +4173,19 @@ actor StrokeFrameScheduler {
             dirtyRegions: dirtyRegionView,
             authoritativeInstanceCount:
                 frame?.authoritative.count ?? 0,
+            newAuthoritativeInstanceCount:
+                newAuthoritativeInstanceCount
+                    ?? frame?.authoritative.count ?? 0,
             predictedInstanceCount: frame?.predicted.count ?? 0,
             predictionProvenanceBoundary:
                 predictionProvenanceBoundary ?? fallbackBoundary,
             coordinatorSnapshot: coordinatorSnapshot ?? fallbackSnapshot,
+            replayRetention: replayRetention,
             executorProbe: executorProbe,
             isFinishing: isFinishing,
             predictionAdmission: predictionAdmission,
             surfaceLease: surfaceLease,
+            displayFrame: nil,
             surfaceSnapshot: privateSurfaceEncoder?.snapshot,
             preparationCPUNanoseconds: preparationCPUNanoseconds
         )
@@ -4157,9 +4228,8 @@ actor StrokeFrameScheduler {
     ) throws -> Bool {
         let footprint = StampFootprint(
             brushToWorld: dab.brushToWorld,
-            localBounds: AxisAlignedRect(
-                minimum: SIMD2(-1, -1),
-                maximum: SIMD2(1, 1)
+            localBounds: TilingProjection.depositionSupportLocalBounds(
+                radius: dab.radius
             ),
             coverageSymmetry: .oriented
         )

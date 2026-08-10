@@ -37,97 +37,41 @@ public enum FiniteCanvasExportError: Error, Equatable, LocalizedError, Sendable 
     }
 }
 
-enum FiniteCanvasExportInjectedFailure: Equatable {
-    case none
-    case textureAllocation
-    case commandBuffer
-    case renderEncoder
-}
-
-@MainActor
-public extension GridRenderer {
-    /// Resolves the committed finite document at exactly its canvas dimensions.
-    /// Live/replay pixels, viewport pan/zoom, and grid guides are excluded.
-    func exportFiniteCanvas(
-        transparentBackground: Bool = false
-    ) throws -> FiniteCanvasExport {
-        try exportFiniteCanvas(
-            transparentBackground: transparentBackground,
-            injecting: .none
-        )
-    }
-}
-
-@MainActor
-extension GridRenderer {
-    func exportFiniteCanvas(
-        transparentBackground: Bool,
-        injecting failure: FiniteCanvasExportInjectedFailure
-    ) throws -> FiniteCanvasExport {
-        guard case .finite = documentConfiguration else {
+extension FiniteCanvasExport {
+    static func collectStable(
+        strategy: TilingStrategy,
+        snapshot: DocumentPaintStableCanonicalSnapshot,
+        renderer: DocumentPaintStableSnapshotRenderer,
+        outputGeometryRevision: UInt64,
+        transparentBackground: Bool
+    ) async throws -> FiniteCanvasExport {
+        defer { snapshot.close() }
+        guard case .finite = strategy.documentConfiguration else {
             throw FiniteCanvasExportError.periodicDocument
         }
-        let (bytesPerRow, rowOverflow) = pixelSize.width
-            .multipliedReportingOverflow(by: 4)
-        let (byteCount, imageOverflow) = bytesPerRow
-            .multipliedReportingOverflow(by: pixelSize.height)
-        guard !rowOverflow, !imageOverflow else {
-            throw FiniteCanvasExportError.byteCountOverflow
+        let pixelSize = strategy.canvasSize
+        let outputMapping: SparseTileSamplingOutputMapping
+        if strategy.compiledSymmetry.domain.finite?.radial.layout != nil {
+            outputMapping = try .finiteRadial(strategy: strategy)
+        } else {
+            outputMapping = .affine(.identity)
         }
-
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: pixelSize.width,
-            height: pixelSize.height,
-            mipmapped: false
+        let image = try await DocumentPaintStableExportAdapter.collect(
+            snapshot: snapshot,
+            renderer: renderer,
+            outputRegion: try DocumentPaintStableExportAdapter.outputRegion(
+                pixelSize: pixelSize
+            ),
+            outputGeometryRevision: outputGeometryRevision,
+            outputMapping: outputMapping
         )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.renderTarget, .shaderRead]
-        if failure == .textureAllocation {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        guard let target = device.makeTexture(descriptor: descriptor) else {
-            throw MetalRendererError.textureAllocationFailed
-        }
-        if failure == .commandBuffer {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalRendererError.commandBufferUnavailable
-        }
-        if failure == .renderEncoder {
-            throw MetalRendererError.renderEncoderUnavailable
-        }
-        try encodeDisplay(
-            into: target,
-            commandBuffer: commandBuffer,
-            showGridLines: false,
-            liveVisible: false,
-            documentPixelMapping: true,
-            transparentBackground: transparentBackground,
-            showCanvasBoundary: false
-        )
-        commandBuffer.commit()
-        try waitForHarnessCommand(commandBuffer)
-
-        var bytes = [UInt8](repeating: 0, count: byteCount)
-        bytes.withUnsafeMutableBytes { storage in
-            target.getBytes(
-                storage.baseAddress!,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegionMake2D(
-                    0,
-                    0,
-                    pixelSize.width,
-                    pixelSize.height
-                ),
-                mipmapLevel: 0
-            )
-        }
         return FiniteCanvasExport(
             pixelSize: pixelSize,
-            bytesPerRow: bytesPerRow,
-            bgra8Bytes: bytes,
+            bytesPerRow: image.bytesPerRow,
+            bgra8Bytes: try DocumentPaintStableExportAdapter.destinationBytes(
+                image,
+                transparentBackground: transparentBackground
+            ),
             hasTransparentBackground: transparentBackground
         )
     }

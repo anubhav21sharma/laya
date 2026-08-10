@@ -147,7 +147,7 @@ struct DepositionEncoderTests {
         guard var context = try makeContext(capacity: 2) else { return }
         let mismatched = try texture(
             device: context.device,
-            pixelFormat: .rgba16Float,
+            pixelFormat: .bgra8Unorm,
             width: 8,
             height: 8,
             usage: [.renderTarget]
@@ -155,8 +155,8 @@ struct DepositionEncoderTests {
 
         #expect(
             throws: DepositionEncodingError.targetPixelFormatMismatch(
-                expected: MTLPixelFormat.bgra8Unorm.rawValue,
-                actual: MTLPixelFormat.rgba16Float.rawValue
+                expected: MTLPixelFormat.rgba16Float.rawValue,
+                actual: MTLPixelFormat.bgra8Unorm.rawValue
             )
         ) {
             _ = try context.encoder.preflight(
@@ -164,6 +164,35 @@ struct DepositionEncoderTests {
                 binding: context.binding,
                 material: context.material,
                 target: mismatched
+            )
+        }
+        #expect(context.pool.unavailableSlotCount == 0)
+    }
+
+    @Test
+    func bgraPipelineFailsBeforeAnyLeaseIsReserved() throws {
+        guard var context = try makeContext(capacity: 2) else { return }
+        let invalidKey = DepositionPipelineKey(
+            brush: context.binding.key.brush,
+            abiVersion: DepositionABI.version,
+            colorPixelFormatRawValue: MTLPixelFormat.bgra8Unorm.rawValue,
+            sampleCount: 1
+        )
+        let invalid = DepositionPipelineBinding(
+            key: invalidKey,
+            state: context.binding.state
+        )
+
+        #expect(
+            throws: DepositionEncodingError.invalidPipelinePixelFormat(
+                MTLPixelFormat.bgra8Unorm.rawValue
+            )
+        ) {
+            _ = try context.encoder.preflight(
+                records: records(count: 1),
+                binding: invalid,
+                material: context.material,
+                target: context.target
             )
         }
         #expect(context.pool.unavailableSlotCount == 0)
@@ -275,7 +304,8 @@ struct DepositionEncoderTests {
         #expect(outcome.instanceCount == 3)
         #expect(outcome.uploadCount == 2)
         #expect(outcome.textureLevelRange == nil)
-        #expect(pixel(context.target, x: 4, y: 4).contains { $0 > 0 })
+        let written = pixel(context.target, x: 4, y: 4)
+        #expect(written.x > 0 || written.y > 0 || written.z > 0 || written.w > 0)
 
         let reusable = try #require(context.pool.acquire(count: 3))
         for lease in reusable {
@@ -302,7 +332,8 @@ struct DepositionEncoderTests {
                 )
             ),
             abiVersion: DepositionABI.version,
-            colorPixelFormatRawValue: MTLPixelFormat.bgra8Unorm.rawValue,
+            colorPixelFormatRawValue:
+                DocumentColorPipeline.workingPixelFormat.rawValue,
             sampleCount: 1
         )
         let binding = DepositionPipelineBinding(
@@ -330,7 +361,7 @@ struct DepositionEncoderTests {
         )
         let target = try texture(
             device: device,
-            pixelFormat: .bgra8Unorm,
+            pixelFormat: DocumentColorPipeline.workingPixelFormat,
             width: 8,
             height: 8,
             usage: [.renderTarget]
@@ -360,7 +391,7 @@ struct DepositionEncoderTests {
         #expect(commandBuffer.status == .completed)
         #expect(outcome.instanceCount == 3)
         #expect(outcome.uploadCount == 3)
-        #expect(pixel(target, x: 4, y: 4) == [0, 0, 255, 255])
+        #expect(pixel(target, x: 4, y: 4) == SIMD4(1, 0, 0, 1))
     }
 
     @Test
@@ -422,7 +453,7 @@ struct DepositionEncoderTests {
         guard var context = try makeContext(capacity: 2) else { return }
         let replacement = try texture(
             device: context.device,
-            pixelFormat: .bgra8Unorm,
+            pixelFormat: DocumentColorPipeline.workingPixelFormat,
             width: 8,
             height: 8,
             usage: [.renderTarget]
@@ -634,18 +665,23 @@ struct DepositionEncoderTests {
         guard var context = try makeContext(capacity: 2) else { return }
         let nonRenderTarget = try texture(
             device: context.device,
-            pixelFormat: .bgra8Unorm,
+            pixelFormat: DocumentColorPipeline.workingPixelFormat,
             width: 8,
             height: 8,
             usage: [.shaderRead]
         )
-        let sentinel = [UInt8](repeating: 37, count: 8 * 8 * 4)
-        nonRenderTarget.replace(
-            region: MTLRegionMake2D(0, 0, 8, 8),
-            mipmapLevel: 0,
-            withBytes: sentinel,
-            bytesPerRow: 8 * 4
+        let sentinel = [SIMD4<Float16>](
+            repeating: SIMD4(0.25, 0.125, 0.0625, 0.5),
+            count: 8 * 8
         )
+        sentinel.withUnsafeBytes { bytes in
+            nonRenderTarget.replace(
+                region: MTLRegionMake2D(0, 0, 8, 8),
+                mipmapLevel: 0,
+                withBytes: bytes.baseAddress!,
+                bytesPerRow: 8 * MemoryLayout<SIMD4<Float16>>.stride
+            )
+        }
 
         #expect(throws: DepositionEncodingError.targetIsNotRenderTarget) {
             _ = try context.encoder.preflight(
@@ -656,13 +692,15 @@ struct DepositionEncoderTests {
             )
         }
 
-        var actual = [UInt8](repeating: 0, count: sentinel.count)
-        nonRenderTarget.getBytes(
-            &actual,
-            bytesPerRow: 8 * 4,
-            from: MTLRegionMake2D(0, 0, 8, 8),
-            mipmapLevel: 0
-        )
+        var actual = [SIMD4<Float16>](repeating: .zero, count: sentinel.count)
+        actual.withUnsafeMutableBytes { bytes in
+            nonRenderTarget.getBytes(
+                bytes.baseAddress!,
+                bytesPerRow: 8 * MemoryLayout<SIMD4<Float16>>.stride,
+                from: MTLRegionMake2D(0, 0, 8, 8),
+                mipmapLevel: 0
+            )
+        }
         #expect(actual == sentinel)
         #expect(context.pool.unavailableSlotCount == 0)
     }
@@ -689,7 +727,8 @@ struct DepositionEncoderTests {
                 )
             ),
             abiVersion: DepositionABI.version,
-            colorPixelFormatRawValue: MTLPixelFormat.bgra8Unorm.rawValue,
+            colorPixelFormatRawValue:
+                DocumentColorPipeline.workingPixelFormat.rawValue,
             sampleCount: 1
         )
         let binding = DepositionPipelineBinding(
@@ -702,7 +741,7 @@ struct DepositionEncoderTests {
         )
         let target = try texture(
             device: device,
-            pixelFormat: .bgra8Unorm,
+            pixelFormat: DocumentColorPipeline.workingPixelFormat,
             width: 8,
             height: 8,
             usage: [.renderTarget]
@@ -788,7 +827,8 @@ struct DepositionEncoderTests {
         descriptor.fragmentFunction = library.makeFunction(
             name: "fragment_main"
         )
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        descriptor.colorAttachments[0].pixelFormat =
+            DocumentColorPipeline.workingPixelFormat
         return try device.makeRenderPipelineState(descriptor: descriptor)
     }
 
@@ -817,7 +857,8 @@ struct DepositionEncoderTests {
         descriptor.fragmentFunction = library.makeFunction(
             name: "fragment_main"
         )
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        descriptor.colorAttachments[0].pixelFormat =
+            DocumentColorPipeline.workingPixelFormat
         return try device.makeRenderPipelineState(descriptor: descriptor)
     }
 
@@ -977,31 +1018,34 @@ struct DepositionEncoderTests {
     }
 
     private func clear(_ texture: any MTLTexture) {
-        let bytes = [UInt8](
-            repeating: 0,
-            count: texture.width * texture.height * 4
+        let pixels = [SIMD4<Float16>](
+            repeating: .zero,
+            count: texture.width * texture.height
         )
-        texture.replace(
-            region: MTLRegionMake2D(0, 0, texture.width, texture.height),
-            mipmapLevel: 0,
-            withBytes: bytes,
-            bytesPerRow: texture.width * 4
-        )
+        pixels.withUnsafeBytes { bytes in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, texture.width, texture.height),
+                mipmapLevel: 0,
+                withBytes: bytes.baseAddress!,
+                bytesPerRow: texture.width
+                    * MemoryLayout<SIMD4<Float16>>.stride
+            )
+        }
     }
 
     private func pixel(
         _ texture: any MTLTexture,
         x: Int,
         y: Int
-    ) -> [UInt8] {
-        var bytes = [UInt8](repeating: 0, count: 4)
+    ) -> SIMD4<Float16> {
+        var pixel = SIMD4<Float16>.zero
         texture.getBytes(
-            &bytes,
-            bytesPerRow: 4,
+            &pixel,
+            bytesPerRow: MemoryLayout<SIMD4<Float16>>.stride,
             from: MTLRegionMake2D(x, y, 1, 1),
             mipmapLevel: 0
         )
-        return bytes
+        return pixel
     }
 }
 

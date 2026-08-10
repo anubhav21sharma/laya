@@ -57,7 +57,10 @@ struct DepositionStampInstanceTests {
         #expect(instance.primaryGrainFrame1 == .zero)
         #expect(instance.secondaryGrainFrame0 == .zero)
         #expect(instance.secondaryGrainFrame1 == .zero)
-        #expect(instance.premultipliedColor == SIMD4(0.4, 0.2, 0.1, 0.5))
+        expectChannels(
+            instance.premultipliedColor,
+            SIMD4(0.3019137, 0.06643416, 0.01655238, 0.5)
+        )
         #expect(instance.coverageInputs == SIMD4(0.6, 0.7, 0.8, 0.9))
         #expect(instance.clip0.normal == SIMD2(1, 0))
         #expect(instance.clip0.offset == -1)
@@ -78,6 +81,41 @@ struct DepositionStampInstanceTests {
         #expect(instance.metadata.w == UInt32(DepositionABI.version))
         #expect(instance.reserved0 == .zero)
         #expect(instance.reserved1 == .zero)
+    }
+
+    @Test
+    func colorPackingDecodesAtBreakpointOnceAndZerosTransparentChroma() throws {
+        let breakpoint = try PatternDepositionStampInstance(
+            fragment: fragment(),
+            dab: logicalDab(color: try #require(InkColor(
+                red: 0.04045,
+                green: 0.5,
+                blue: 1,
+                alpha: 0.5
+            ))),
+            logicalOrdinal: 0,
+            isometryOrdinal: 0
+        )
+        expectChannels(
+            breakpoint.premultipliedColor,
+            SIMD4(0.0015654025, 0.10702057, 0.5, 0.5),
+            tolerance: 2e-7
+        )
+        #expect(abs(breakpoint.premultipliedColor.y - 0.25) > 0.1)
+        #expect(abs(breakpoint.premultipliedColor.y - 0.053510286) > 0.05)
+
+        let transparent = try PatternDepositionStampInstance(
+            fragment: fragment(),
+            dab: logicalDab(color: try #require(InkColor(
+                red: 1,
+                green: 0.5,
+                blue: 0.25,
+                alpha: 0
+            ))),
+            logicalOrdinal: 1,
+            isometryOrdinal: 0
+        )
+        #expect(transparent.premultipliedColor == .zero)
     }
 
     @Test
@@ -352,6 +390,20 @@ struct DepositionStampInstanceTests {
             value.z.bitPattern,
             value.w.bitPattern
         )
+    }
+
+    private func expectChannels(
+        _ actual: SIMD4<Float>,
+        _ expected: SIMD4<Float>,
+        tolerance: Float = 2e-7,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        for channel in 0..<4 {
+            #expect(
+                abs(actual[channel] - expected[channel]) <= tolerance,
+                sourceLocation: sourceLocation
+            )
+        }
     }
 
     private func makeShaderLibrary(
