@@ -1092,7 +1092,10 @@ struct SparseTileSamplingPlanTests {
         let store = PaintTileStore(
             device: device,
             byteBudget: bytes,
-            transferByteCapacity: bytes * 4,
+            // One-in/one-out seeding owns the resident and replacement
+            // textures, the persistent zero source, and one readback payload
+            // in both staging and retained form at the transfer boundary.
+            transferByteCapacity: bytes * 5,
             snapshotRetentionLimits: .init(
                 maximumActiveTokenCount: count + 1,
                 maximumReferencesPerToken: 65_536,
@@ -1118,6 +1121,9 @@ struct SparseTileSamplingPlanTests {
                 at: [coordinate],
                 pinReasons: [.visible]
             )
+            if coordinate == coordinates[0] {
+                try physical.markDirty(seed)
+            }
             let reference = try #require(physical.references.last)
             seedTokens.append(try store.retainSnapshotReferences([reference]))
             try physical.returnLease(seed)

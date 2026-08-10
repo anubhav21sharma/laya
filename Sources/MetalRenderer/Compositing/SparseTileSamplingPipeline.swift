@@ -1866,7 +1866,7 @@ struct SparseTileSamplingEncodeParameters: Equatable, Sendable {
     )
 }
 
-private enum SparseTileSamplingRadialFrames {
+enum SparseTileSamplingRadialFrames {
     static func make(
         mapping: SparseTileFiniteRadialOutputMapping,
         outputOrigin: SIMD2<Int>,

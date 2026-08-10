@@ -8,74 +8,6 @@ enum EditorSessionLayerError: Error, Equatable {
     case rendererStorageUnavailable(UUID)
 }
 
-enum EditorLayerRasterOperationCompletion {
-    case success(RendererOperationToken)
-    case failure(RendererOperationToken, MetalRendererError)
-}
-
-@MainActor
-protocol EditorLayerRasterStorage: AnyObject {
-    var onOperationCompleted:
-        ((EditorLayerRasterOperationCompletion) -> Void)? { get set }
-
-    func captureRevision(
-        for layerID: UUID,
-        maximumRetainedBytes: Int
-    ) throws -> RasterRevisionReference
-    func deleteLayer(_ layerID: UUID) throws
-    func containsRevision(_ id: StoredRasterRevisionID) -> Bool
-    func requestRestore(
-        token: RendererOperationToken,
-        layerID: UUID,
-        revision: RasterRevisionReference
-    ) throws
-    func requestDelete(
-        token: RendererOperationToken,
-        layerID: UUID,
-        revision: RasterRevisionReference
-    ) throws
-    func releaseRevisions(_ ids: Set<StoredRasterRevisionID>)
-}
-
-@MainActor
-private final class UnsupportedEditorLayerRasterStorage:
-    EditorLayerRasterStorage
-{
-    var onOperationCompleted:
-        ((EditorLayerRasterOperationCompletion) -> Void)?
-
-    func captureRevision(
-        for layerID: UUID,
-        maximumRetainedBytes _: Int
-    ) throws -> RasterRevisionReference {
-        throw EditorSessionLayerError.rendererStorageUnavailable(layerID)
-    }
-
-    func deleteLayer(_ layerID: UUID) throws {
-        throw EditorSessionLayerError.rendererStorageUnavailable(layerID)
-    }
-
-    func containsRevision(_: StoredRasterRevisionID) -> Bool { false }
-
-    func requestRestore(
-        token _: RendererOperationToken,
-        layerID: UUID,
-        revision _: RasterRevisionReference
-    ) throws {
-        throw EditorSessionLayerError.rendererStorageUnavailable(layerID)
-    }
-
-    func requestDelete(
-        token _: RendererOperationToken,
-        layerID: UUID,
-        revision _: RasterRevisionReference
-    ) throws {
-        throw EditorSessionLayerError.rendererStorageUnavailable(layerID)
-    }
-
-    func releaseRevisions(_: Set<StoredRasterRevisionID>) {}
-}
-
 @MainActor
 func handleEditorShortcut(
     _ shortcut: EditorShortcut,
@@ -139,7 +71,6 @@ final class EditorSessionController {
     /// wait for the actor-owned stroke workspace to finish retiring. The
     /// reducer operation stays pending until this exact effect is applied.
     private var pendingRendererIdleMetadataEffect: EditorTransactionEffect?
-    private let layerRasterStorage: any EditorLayerRasterStorage
     private var pendingPaintRevisionReleaseIDs:
         Set<StoredRasterRevisionID> = []
     private var paintRevisionReleaseTask: Task<Void, Never>?
@@ -149,6 +80,8 @@ final class EditorSessionController {
     ) throws -> Void
     private(set) var lastRecordedRasterCommandForTesting: RasterHistoryCommand?
     private(set) var lastRecordedResizeCommandForTesting: TileResizeHistoryCommand?
+    private(set) var lastRecordedLayerRevisionForTesting:
+        LayerSurfaceRevisionReference?
     private var awaitedClear: AwaitedClear?
 
     private struct PendingRasterMutation {
@@ -159,7 +92,6 @@ final class EditorSessionController {
 
     private struct PendingTileResize {
         let token: EditorTransactionToken
-        let layerID: UUID
         let before: PixelSize
         let after: PixelSize
     }
@@ -168,7 +100,6 @@ final class EditorSessionController {
         let operationToken: EditorTransactionToken
         let historyToken: UInt64
         let targetPixelSize: PixelSize?
-        var layerStackAfterSuccess: LayerStack?
     }
 
     private struct AwaitedClear {
@@ -181,7 +112,6 @@ final class EditorSessionController {
         renderer: GridRenderer,
         layerStack: LayerStack = .initial(),
         documentHistory: DocumentHistory? = nil,
-        layerRasterStorage: (any EditorLayerRasterStorage)? = nil,
         requestStrokeCancellation: ((
             RendererOperationToken
         ) throws -> Void)? = nil,
@@ -193,6 +123,10 @@ final class EditorSessionController {
     ) {
         self.model = model
         self.renderer = renderer
+        precondition(
+            renderer.layerStack == layerStack,
+            "Controller and renderer must share one initial layer stack."
+        )
         activeDrawBrush = renderer.preparedBrush(for: .draw)
         activeEraserBrush = renderer.preparedBrush(for: .erase)
         if let documentHistory {
@@ -208,8 +142,6 @@ final class EditorSessionController {
             )
         }
         self.layerStack = layerStack
-        self.layerRasterStorage = layerRasterStorage
-            ?? UnsupportedEditorLayerRasterStorage()
         self.strokeSeedSessionEntropy = strokeSeedSessionEntropy
         self.requestStrokeCancellation = requestStrokeCancellation ?? {
             try renderer.cancelStroke(token: $0)
@@ -235,15 +167,13 @@ final class EditorSessionController {
             documentDomainLocked: renderer.documentDomainLocked,
             radialGeometryLocked: renderer.radialGeometryLocked
         )
+        model.confirmLayerStack(layerStack)
         renderer.setInteractiveGridVisibility(model.showGrid)
         renderer.onOperationCompleted = { [weak self] completion in
             self?.handleRendererCompletion(completion)
         }
         renderer.onIdleStateChange = { [weak self] isIdle in
             self?.handleRendererIdleStateChange(isIdle)
-        }
-        self.layerRasterStorage.onOperationCompleted = { [weak self] completion in
-            self?.handleLayerRasterStorageCompletion(completion)
         }
         refreshDerivedModelState()
     }
@@ -253,6 +183,7 @@ final class EditorSessionController {
     }
 
     var layerStackForTesting: LayerStack { layerStack }
+    var currentLayerStack: LayerStack { layerStack }
 
     private static func unsupportedDefinitionCompilation(
         _: BrushDefinition
@@ -342,7 +273,7 @@ final class EditorSessionController {
             else { return }
             let layerID: UUID
             do {
-                layerID = try compatibilityRasterLayerID()
+                layerID = try activeRasterLayerID()
             } catch {
                 report(.commandFailed(error.localizedDescription))
                 return
@@ -928,6 +859,16 @@ final class EditorSessionController {
         try mutateLayerStack { try $0.add(descriptor, at: order) }
     }
 
+    func addLayerAndActivate(
+        _ descriptor: LayerDescriptor,
+        at order: Int
+    ) throws {
+        try mutateLayerStack {
+            try $0.add(descriptor, at: order)
+            try $0.setActiveLayer(descriptor.id)
+        }
+    }
+
     func deleteLayer(_ id: UUID) throws {
         guard transaction.state == .idle,
               transaction.pendingOperation == nil,
@@ -938,27 +879,26 @@ final class EditorSessionController {
 
         var candidate = layerStack
         let removal = try candidate.delete(id)
-        let revision = try layerRasterStorage.captureRevision(
-            for: id,
-            maximumRetainedBytes: history.maximumBytes
-        )
+        let revision = try renderer.applyLayerStack(candidate)
         let command = DocumentHistoryCommand.layerDeletion(
             LayerDeletionHistoryCommand(
                 removal: removal,
-                rasterRevision: revision
+                layerRevision: revision
             )
         )
         do {
             try history.validateNewCommand(
                 retainedBytes: command.retainedBytes
             )
-            try layerRasterStorage.deleteLayer(id)
         } catch {
+            _ = try? renderer.restoreLayerStackBefore(revision)
             releaseHistoryRevisions([revision.id])
             throw error
         }
 
         layerStack = candidate
+        model.confirmLayerStack(candidate)
+        lastRecordedLayerRevisionForTesting = revision
         let released = history.appendSuccessful(command)
         releaseHistoryRevisions(released)
         refreshDerivedModelState()
@@ -1008,14 +948,24 @@ final class EditorSessionController {
         var candidate = layerStack
         try mutation(&candidate)
         guard candidate != layerStack else { return }
+        let revision = try renderer.applyLayerStack(candidate)
         let command = DocumentHistoryCommand.layerMetadata(
             LayerStackMetadataCommand(
                 before: layerStack.snapshot,
-                after: candidate.snapshot
+                after: candidate.snapshot,
+                layerRevision: revision
             )
         )
-        try history.validateNewCommand(retainedBytes: command.retainedBytes)
+        do {
+            try history.validateNewCommand(retainedBytes: command.retainedBytes)
+        } catch {
+            _ = try? renderer.restoreLayerStackBefore(revision)
+            releaseHistoryRevisions([revision.id])
+            throw error
+        }
         layerStack = candidate
+        model.confirmLayerStack(candidate)
+        lastRecordedLayerRevisionForTesting = revision
         let released = history.appendSuccessful(command)
         releaseHistoryRevisions(released)
         refreshDerivedModelState()
@@ -1272,11 +1222,9 @@ final class EditorSessionController {
                 apply(.operationCompleted(token, succeeded: true))
                 return
             }
-            let layerID = try compatibilityRasterLayerID()
             precondition(pendingTileResize == nil)
             pendingTileResize = PendingTileResize(
                 token: token,
-                layerID: layerID,
                 before: model.pixelSize,
                 after: pixelSize
             )
@@ -1364,7 +1312,7 @@ final class EditorSessionController {
     ) throws {
         switch command {
         case .clear:
-            let layerID = try compatibilityRasterLayerID()
+            let layerID = try activeRasterLayerID()
             precondition(pendingRasterMutation == nil)
             pendingRasterMutation = PendingRasterMutation(
                 token: token,
@@ -1407,10 +1355,9 @@ final class EditorSessionController {
                     return nil
                 }
                 return navigation.direction == .undo
-                    ? command.before.documentPixelSize
-                    : command.after.documentPixelSize
-            }(),
-            layerStackAfterSuccess: nil
+                    ? command.beforePixelSize
+                    : command.afterPixelSize
+            }()
         )
 
         do {
@@ -1418,11 +1365,6 @@ final class EditorSessionController {
             case let .raster(command):
                 guard layerStack.layer(id: command.layerID) != nil else {
                     throw LayerStackError.layerMissing(command.layerID)
-                }
-                guard command.layerID == LayerStack.initialLayerID else {
-                    throw EditorSessionLayerError.rendererStorageUnavailable(
-                        command.layerID
-                    )
                 }
                 let revision = navigation.direction == .undo
                     ? command.before
@@ -1457,33 +1399,38 @@ final class EditorSessionController {
                     )
                 }
             case let .tileResize(command):
-                guard layerStack.layer(id: command.layerID) != nil else {
-                    throw LayerStackError.layerMissing(command.layerID)
-                }
-                guard command.layerID == LayerStack.initialLayerID else {
-                    throw EditorSessionLayerError.rendererStorageUnavailable(
-                        command.layerID
-                    )
-                }
-                let revision = navigation.direction == .undo
-                    ? command.before
-                    : command.after
                 let targetPixelSize = navigation.direction == .undo
-                    ? command.before.documentPixelSize
-                    : command.after.documentPixelSize
-                let rendererToken = rendererToken(operationToken)
-                Task { @MainActor [renderer] in
-                    try? await renderer.restoreDocumentRevision(
-                        token: rendererToken,
-                        revision: revision,
-                        targetPixelSize: targetPixelSize
+                    ? command.beforePixelSize
+                    : command.afterPixelSize
+                let restored = try navigation.direction == .undo
+                    ? renderer.restoreLayerGeometryBefore(
+                        command.layerRevision
                     )
+                    : renderer.restoreLayerGeometryAfter(
+                        command.layerRevision
+                    )
+                guard restored == targetPixelSize else {
+                    throw LayerStackError.invalidRestoration
                 }
+                confirmPixelSizeAndClampDiameter(restored)
+                try history.finishNavigation(
+                    token: navigation.token,
+                    succeeded: true
+                )
+                pendingHistoryNavigation = nil
+                apply(.operationCompleted(operationToken, succeeded: true))
             case let .layerMetadata(command):
                 let target = navigation.direction == .undo
                     ? command.before
                     : command.after
-                layerStack = try LayerStack(snapshot: target)
+                let restored = try navigation.direction == .undo
+                    ? renderer.restoreLayerStackBefore(command.layerRevision)
+                    : renderer.restoreLayerStackAfter(command.layerRevision)
+                guard restored.snapshot == target else {
+                    throw LayerStackError.invalidRestoration
+                }
+                layerStack = restored
+                model.confirmLayerStack(restored)
                 try history.finishNavigation(
                     token: navigation.token,
                     succeeded: true
@@ -1497,16 +1444,17 @@ final class EditorSessionController {
                     try command.restoreMetadata(
                         into: &candidate,
                         revisionIsAvailable: {
-                            layerRasterStorage.containsRevision($0)
+                            renderer.containsLayerRevision($0)
                         }
                     )
-                    pendingHistoryNavigation?.layerStackAfterSuccess =
-                        candidate
-                    try layerRasterStorage.requestRestore(
-                        token: rendererToken(operationToken),
-                        layerID: command.removedLayer.id,
-                        revision: command.rasterRevision
+                    let restored = try renderer.restoreLayerStackBefore(
+                        command.layerRevision
                     )
+                    guard restored == candidate else {
+                        throw LayerStackError.invalidRestoration
+                    }
+                    layerStack = restored
+                    model.confirmLayerStack(restored)
                 case .redo:
                     let removal = try candidate.delete(
                         command.removedLayer.id
@@ -1520,14 +1468,21 @@ final class EditorSessionController {
                     else {
                         throw LayerStackError.invalidRestoration
                     }
-                    pendingHistoryNavigation?.layerStackAfterSuccess =
-                        candidate
-                    try layerRasterStorage.requestDelete(
-                        token: rendererToken(operationToken),
-                        layerID: command.removedLayer.id,
-                        revision: command.rasterRevision
+                    let restored = try renderer.restoreLayerStackAfter(
+                        command.layerRevision
                     )
+                    guard restored == candidate else {
+                        throw LayerStackError.invalidRestoration
+                    }
+                    layerStack = restored
+                    model.confirmLayerStack(restored)
                 }
+                try history.finishNavigation(
+                    token: navigation.token,
+                    succeeded: true
+                )
+                pendingHistoryNavigation = nil
+                apply(.operationCompleted(operationToken, succeeded: true))
             }
         } catch {
             try history.finishNavigation(
@@ -1745,36 +1700,6 @@ final class EditorSessionController {
                 kind = pendingRasterMutation.kind
                 layerID = pendingRasterMutation.layerID
                 self.pendingRasterMutation = nil
-            } else if let pendingTileResize,
-                      pendingTileResize.token == completedToken
-            {
-                precondition(
-                    receipt.before.documentPixelSize
-                        == pendingTileResize.before
-                        && receipt.after.documentPixelSize
-                            == pendingTileResize.after,
-                    "Renderer resize receipt must match the pending resize."
-                )
-                self.pendingTileResize = nil
-                let command = TileResizeHistoryCommand(
-                    layerID: pendingTileResize.layerID,
-                    before: receipt.before,
-                    after: receipt.after
-                )
-                let released = history.appendSuccessful(.tileResize(command))
-                lastRecordedResizeCommandForTesting = command
-                releaseHistoryRevisions(released)
-                confirmPixelSizeAndClampDiameter(
-                    receipt.after.documentPixelSize
-                )
-                apply(
-                    .operationCompleted(
-                        completedToken,
-                        succeeded: true
-                    )
-                )
-                refreshDerivedModelState()
-                return
             } else {
                 preconditionFailure(
                     "Renderer completed a raster mutation the controller did not accept."
@@ -1800,6 +1725,32 @@ final class EditorSessionController {
                 token: completedToken,
                 result: .success(())
             )
+        case let .layerGeometrySuccess(receipt):
+            let completedToken = editorToken(receipt.token)
+            guard let pendingTileResize,
+                  pendingTileResize.token == completedToken
+            else {
+                preconditionFailure(
+                    "Renderer completed a layer geometry mutation the controller did not accept."
+                )
+            }
+            precondition(
+                receipt.beforePixelSize == pendingTileResize.before
+                    && receipt.afterPixelSize == pendingTileResize.after,
+                "Renderer resize receipt must match the pending resize."
+            )
+            self.pendingTileResize = nil
+            let command = TileResizeHistoryCommand(
+                beforePixelSize: receipt.beforePixelSize,
+                afterPixelSize: receipt.afterPixelSize,
+                layerRevision: receipt.revision
+            )
+            let released = history.appendSuccessful(.tileResize(command))
+            lastRecordedResizeCommandForTesting = command
+            releaseHistoryRevisions(released)
+            confirmPixelSizeAndClampDiameter(receipt.afterPixelSize)
+            apply(.operationCompleted(completedToken, succeeded: true))
+            refreshDerivedModelState()
         case let .operationSuccess(token):
             let completedToken = editorToken(token)
             if pendingRasterMutation?.token == completedToken {
@@ -1859,59 +1810,6 @@ final class EditorSessionController {
             finishAwaitedClear(
                 token: completedToken,
                 result: .failure(error)
-            )
-        }
-        refreshDerivedModelState()
-        resumeDeferredPointerIfIdle()
-    }
-
-    private func handleLayerRasterStorageCompletion(
-        _ completion: EditorLayerRasterOperationCompletion
-    ) {
-        let token: RendererOperationToken
-        let failure: MetalRendererError?
-        switch completion {
-        case let .success(completedToken):
-            token = completedToken
-            failure = nil
-        case let .failure(completedToken, error):
-            token = completedToken
-            failure = error
-        }
-        let completedToken = editorToken(token)
-        guard let pendingHistoryNavigation,
-              pendingHistoryNavigation.operationToken == completedToken,
-              let candidate = pendingHistoryNavigation
-                .layerStackAfterSuccess
-        else {
-            preconditionFailure(
-                "Layer raster storage completed an unowned operation."
-            )
-        }
-
-        if let failure {
-            report(failure)
-            finishHistoryNavigationIfNeeded(
-                operationToken: completedToken,
-                succeeded: false
-            )
-            apply(
-                .operationCompleted(
-                    completedToken,
-                    succeeded: false
-                )
-            )
-        } else {
-            layerStack = candidate
-            finishHistoryNavigationIfNeeded(
-                operationToken: completedToken,
-                succeeded: true
-            )
-            apply(
-                .operationCompleted(
-                    completedToken,
-                    succeeded: true
-                )
             )
         }
         refreshDerivedModelState()
@@ -2178,7 +2076,6 @@ final class EditorSessionController {
         _ ids: Set<StoredRasterRevisionID>
     ) {
         guard !ids.isEmpty else { return }
-        layerRasterStorage.releaseRevisions(ids)
         pendingPaintRevisionReleaseIDs.formUnion(ids)
         startPaintRevisionReleaseIfNeeded()
     }
@@ -2283,12 +2180,8 @@ final class EditorSessionController {
         model.confirmPixelSize(pixelSize)
     }
 
-    private func compatibilityRasterLayerID() throws -> UUID {
-        let active = try layerStack.activeLayerForRasterMutation()
-        guard active.id == LayerStack.initialLayerID else {
-            throw EditorSessionLayerError.rendererStorageUnavailable(active.id)
-        }
-        return active.id
+    private func activeRasterLayerID() throws -> UUID {
+        try layerStack.activeLayerForRasterMutation().id
     }
 
     private func targetPixelSize(

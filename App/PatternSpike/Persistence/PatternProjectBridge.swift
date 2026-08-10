@@ -1,3 +1,4 @@
+import EditorCore
 import Foundation
 import Metal
 import MetalRenderer
@@ -6,23 +7,51 @@ import PatternFile
 
 struct PatternProjectIdentity: Equatable, Sendable {
     let documentID: UUID
-    let layerID: UUID
     var title: String
     let createdAt: Date
 
     static func new(title: String = "Untitled Pattern") -> Self {
         Self(
             documentID: UUID(),
-            layerID: UUID(),
             title: title,
             createdAt: Date()
         )
     }
 }
 
-struct CapturedPatternProject: Equatable, Sendable {
+final class CapturedPatternProject:
+    PatternProjectTilePayloadProvider,
+    @unchecked Sendable
+{
     let metadata: PatternProjectMetadata
-    let rastersByPath: [String: PatternRasterImage]
+    private let capture: DocumentPaintNativeArchiveCapture
+
+    init(
+        metadata: PatternProjectMetadata,
+        capture: DocumentPaintNativeArchiveCapture
+    ) {
+        self.metadata = metadata
+        self.capture = capture
+    }
+
+    func providePayloadChunks(
+        for record: PatternPaintTileRecord,
+        layerID: UUID,
+        maximumChunkByteCount: Int,
+        consume: (Data) throws -> Void
+    ) throws {
+        let payload = try capture.payload(for: record.id)
+        var offset = 0
+        while offset < payload.count {
+            let end = min(payload.count, offset + maximumChunkByteCount)
+            try consume(payload.subdata(in: offset..<end))
+            offset = end
+        }
+    }
+
+    func close() { capture.close() }
+
+    deinit { close() }
 }
 
 enum PatternProjectBridgeError:
@@ -32,17 +61,14 @@ enum PatternProjectBridgeError:
     Sendable
 {
     case unsupportedLayerModel
-    case missingRaster(String)
     case incompatibleSurface
 
     var errorDescription: String? {
         switch self {
         case .unsupportedLayerModel:
-            "This build can open only its current single pattern-layer model."
-        case let .missingRaster(path):
-            "The decoded project is missing raster \(path)."
+            "This project contains a layer model unsupported by this build."
         case .incompatibleSurface:
-            "The decoded raster surface does not match document symmetry."
+            "The native paint surface does not match document symmetry."
         }
     }
 }
@@ -55,202 +81,297 @@ enum PatternProjectBridge {
         appVersion: String,
         modifiedAt: Date = Date()
     ) async throws -> CapturedPatternProject {
-        let snapshot = try await renderer.captureCommittedDocument()
-        let layerPathStem =
-            "rasters/\(identity.layerID.uuidString.lowercased())"
-        let surface: PatternProjectLayerSurface
-        var rasters: [String: PatternRasterImage] = [:]
-        switch snapshot.storage {
-        case let .singleRaster(bytes):
-            let path = "\(layerPathStem).png"
-            let image = try PatternRasterImage(
-                pixelSize: snapshot.canvasSize,
-                bgra8PremultipliedBytes: bytes
-            )
-            surface = .singleRaster(PatternProjectRasterReference(
-                file: path,
-                pixelSize: snapshot.canvasSize
-            ))
-            rasters[path] = image
-        case let .radialPages(pages):
-            let pageSize = PixelSize(
-                width: RadialSectorLayout.pageSide,
-                height: RadialSectorLayout.pageSide
-            )
-            var references: [PatternProjectRadialPage] = []
-            references.reserveCapacity(pages.count)
-            for page in pages.sorted(by: {
-                $0.coordinate < $1.coordinate
-            }) {
-                let path = "\(layerPathStem)/page-\(page.coordinate.x)-\(page.coordinate.y).png"
-                references.append(PatternProjectRadialPage(
-                    coordinate: page.coordinate,
-                    file: path
+        let capture = try renderer.captureNativeArchive()
+        do {
+            let stack = capture.layerStack
+            var layers: [PatternProjectLayer] = []
+            layers.reserveCapacity(stack.layers.count)
+            for (order, pair) in zip(stack.layers, capture.layers).enumerated() {
+                let descriptor = pair.0
+                let capturedLayer = pair.1
+                guard descriptor.id == capturedLayer.layerID else {
+                    throw PatternProjectBridgeError.incompatibleSurface
+                }
+                var records: [PatternPaintTileRecord] = []
+                records.reserveCapacity(capturedLayer.tiles.count)
+                for tile in capturedLayer.tiles {
+                    let payload = try capture.payload(for: tile.persistedID)
+                    let path = "tiles/\(descriptor.id.uuidString.lowercased())/"
+                        + "\(tile.persistedID.uuidString.lowercased()).rgba16f"
+                    records.append(try PatternPaintTileCodec.makeRecord(
+                        layerID: descriptor.id,
+                        id: tile.persistedID,
+                        coordinate: PatternPaintTileCoordinate(
+                            x: tile.coordinate.x,
+                            y: tile.coordinate.y
+                        ),
+                        logicalBounds: PatternPaintTileBounds(
+                            minX: tile.logicalBounds.minX,
+                            minY: tile.logicalBounds.minY,
+                            width: tile.logicalBounds.width,
+                            height: tile.logicalBounds.height
+                        ),
+                        pixelSize: capture.geometry.storagePixelSize,
+                        rasterRevision: capturedLayer.rasterRevision,
+                        file: path,
+                        payload: payload
+                    ))
+                }
+                let surfacePath = "surfaces/"
+                    + "\(descriptor.id.uuidString.lowercased()).tiles.json"
+                layers.append(PatternProjectLayer(
+                    id: descriptor.id,
+                    name: descriptor.name,
+                    order: order,
+                    opacity: descriptor.opacity,
+                    blendMode: patternBlendMode(descriptor.blendMode),
+                    isVisible: descriptor.isVisible,
+                    isLocked: descriptor.isLocked,
+                    surface: PatternProjectPaintTileSurface(
+                        manifestFile: surfacePath,
+                        pixelSize: capture.geometry.storagePixelSize,
+                        rasterRevision: capturedLayer.rasterRevision,
+                        tiles: records
+                    )
                 ))
-                rasters[path] = try PatternRasterImage(
-                    pixelSize: pageSize,
-                    bgra8PremultipliedBytes:
-                        page.bgra8PremultipliedBytes
-                )
             }
-            surface = .radialPages(PatternProjectRadialSurface(
-                manifestFile: "\(layerPathStem)/surface.json",
-                pages: references
-            ))
-        }
-        let viewport = renderer.viewport
-        let metadata = PatternProjectMetadata(
-            documentID: identity.documentID,
-            title: identity.title,
-            appVersion: appVersion,
-            createdAt: identity.createdAt,
-            modifiedAt: max(modifiedAt, identity.createdAt),
-            canvasSize: snapshot.canvasSize,
-            viewport: PatternProjectViewport(
-                scale: viewport.zoom,
-                offsetX: viewport.worldCenter.x,
-                offsetY: viewport.worldCenter.y
-            ),
-            documentConfiguration: snapshot.documentConfiguration,
-            documentDomainLocked: snapshot.documentDomainLocked,
-            radialGeometryLocked: snapshot.radialGeometryLocked,
-            activeLayerID: identity.layerID,
-            layers: [
-                PatternProjectLayer(
-                    id: identity.layerID,
-                    name: "Layer 1",
-                    order: 0,
-                    surface: surface
+            let viewport = renderer.viewport
+            let metadata = PatternProjectMetadata(
+                documentID: identity.documentID,
+                title: identity.title,
+                appVersion: appVersion,
+                createdAt: identity.createdAt,
+                modifiedAt: max(modifiedAt, identity.createdAt),
+                canvasSize: capture.geometry.documentPixelSize,
+                viewport: PatternProjectViewport(
+                    scale: viewport.zoom,
+                    offsetX: viewport.worldCenter.x,
+                    offsetY: viewport.worldCenter.y
                 ),
-            ]
-        )
-        return CapturedPatternProject(
-            metadata: metadata,
-            rastersByPath: rasters
-        )
+                documentConfiguration: renderer.documentConfiguration,
+                documentDomainLocked: renderer.documentDomainLocked,
+                radialGeometryLocked: renderer.radialGeometryLocked,
+                activeLayerID: stack.activeLayerID,
+                layers: layers
+            )
+            return CapturedPatternProject(
+                metadata: metadata,
+                capture: capture
+            )
+        } catch {
+            capture.close()
+            throw error
+        }
     }
 
     static func identity(
         from project: DecodedPatternProject
     ) throws -> PatternProjectIdentity {
         let metadata = project.metadata.metadata
-        guard metadata.layers.count == 1,
-              let layer = metadata.layers.first,
-              layer.id == metadata.activeLayerID,
-              layer.kind == .pattern,
-              layer.order == 0,
-              layer.opacity == 1,
-              layer.blendMode == .normal,
-              layer.isVisible,
-              !layer.isLocked,
-              layer.origin == nil
-        else {
-            throw PatternProjectBridgeError.unsupportedLayerModel
-        }
+        _ = try layerStack(from: metadata)
         return PatternProjectIdentity(
             documentID: metadata.documentID,
-            layerID: layer.id,
             title: metadata.title,
             createdAt: metadata.createdAt
-        )
-    }
-
-    static func committedSnapshot(
-        from project: DecodedPatternProject
-    ) throws -> CommittedDocumentSnapshot {
-        let metadata = project.metadata.metadata
-        _ = try identity(from: project)
-        let layer = metadata.layers[0]
-        let storage: CommittedRasterStorage
-        switch layer.surface {
-        case let .singleRaster(reference):
-            guard let image = project.rastersByPath[reference.file],
-                  image.pixelSize == reference.pixelSize
-            else {
-                throw PatternProjectBridgeError.missingRaster(
-                    reference.file
-                )
-            }
-            storage = .singleRaster(
-                bgra8PremultipliedBytes:
-                    image.bgra8PremultipliedBytes
-            )
-        case let .radialPages(surface):
-            var pages: [CommittedRadialPagePixels] = []
-            pages.reserveCapacity(surface.pages.count)
-            for reference in surface.pages {
-                guard let image =
-                    project.rastersByPath[reference.file]
-                else {
-                    throw PatternProjectBridgeError.missingRaster(
-                        reference.file
-                    )
-                }
-                pages.append(CommittedRadialPagePixels(
-                    coordinate: reference.coordinate,
-                    bgra8PremultipliedBytes:
-                        image.bgra8PremultipliedBytes
-                ))
-            }
-            storage = .radialPages(pages)
-        case .paintTiles:
-            // The native tile archive contract lands before the renderer
-            // storage route. Do not pretend PNG-backed renderer state can
-            // consume it until that switch is installed.
-            throw PatternProjectBridgeError.unsupportedLayerModel
-        }
-        let documentDomainLocked = metadata.documentDomainLocked
-        guard documentDomainLocked || !storage.containsNonzeroBytes else {
-            throw PatternProjectBridgeError.incompatibleSurface
-        }
-        return CommittedDocumentSnapshot(
-            canvasSize: metadata.canvasSize,
-            documentConfiguration: metadata.documentConfiguration,
-            documentDomainLocked: documentDomainLocked,
-            radialGeometryLocked: metadata.radialGeometryLocked,
-            storage: storage
         )
     }
 
     static func makeRenderer(
         from project: DecodedPatternProject,
         device: any MTLDevice,
+        library: any MTLLibrary,
         drawableSize: PatternSize
     ) async throws -> GridRenderer {
-        let snapshot = try committedSnapshot(from: project)
-        let identity = try identity(from: project)
-        let configuration = try TilingCanvasConfiguration(
-            pixelSize: snapshot.canvasSize,
-            documentConfiguration: snapshot.documentConfiguration
+        let metadata = project.metadata.metadata
+        let stack = try layerStack(from: metadata)
+        let manifest = try nativeImportManifest(
+            from: metadata,
+            layerStack: stack,
+            compiled: project.metadata.compiledSymmetry
         )
+        let hasPaint = manifest.layers.contains { !$0.tiles.isEmpty }
+        guard metadata.documentDomainLocked || !hasPaint else {
+            throw PatternProjectBridgeError.incompatibleSurface
+        }
         let renderer = try GridRenderer(
             device: device,
+            library: library,
             drawableSize: drawableSize,
-            configuration: configuration,
-            initialLayerID: identity.layerID
+            configuration: try TilingCanvasConfiguration(
+                pixelSize: metadata.canvasSize,
+                documentConfiguration: metadata.documentConfiguration
+            ),
+            initialLayerStack: stack
         )
-        try await renderer.restoreCommittedDocument(snapshot)
-        let viewport = project.metadata.metadata.viewport
+        try await renderer.importNativeArchive(
+            manifest,
+            documentDomainLocked: metadata.documentDomainLocked,
+            radialGeometryLocked: metadata.radialGeometryLocked
+        ) { writer in
+            let consumer = NativeTileImportConsumer(writer: writer)
+            try project.consumeTilePayloads(
+                maximumChunkByteCount:
+                    PatternProjectPackageCodec.tileChunkByteCount,
+                consumer: consumer
+            )
+        }
         renderer.restoreSavedViewport(
             worldCenter: WorldPoint(
-                x: viewport.offsetX,
-                y: viewport.offsetY
+                x: metadata.viewport.offsetX,
+                y: metadata.viewport.offsetY
             ),
-            zoom: viewport.scale
+            zoom: metadata.viewport.scale
         )
         return renderer
     }
 }
 
-private extension CommittedRasterStorage {
-    var containsNonzeroBytes: Bool {
-        switch self {
-        case let .singleRaster(bytes):
-            bytes.contains(where: { $0 != 0 })
-        case let .radialPages(pages):
-            pages.contains {
-                $0.bgra8PremultipliedBytes.contains(where: { $0 != 0 })
+private final class NativeTileImportConsumer:
+    PatternProjectTilePayloadConsumer,
+    @unchecked Sendable
+{
+    private let writer: DocumentPaintNativeArchiveImportWriter
+    private var activeRecord: PatternPaintTileRecord?
+    private var payload = Data()
+
+    init(writer: DocumentPaintNativeArchiveImportWriter) {
+        self.writer = writer
+    }
+
+    func beginTile(
+        _ record: PatternPaintTileRecord,
+        layerID: UUID
+    ) throws {
+        activeRecord = record
+        payload.removeAll(keepingCapacity: true)
+        payload.reserveCapacity(record.byteCount)
+    }
+
+    func consumeTileChunk(
+        _ chunk: Data,
+        record: PatternPaintTileRecord,
+        layerID: UUID
+    ) throws {
+        payload.append(chunk)
+    }
+
+    func finishTile(
+        _ record: PatternPaintTileRecord,
+        layerID: UUID
+    ) throws {
+        guard activeRecord == record else {
+            throw PatternProjectBridgeError.incompatibleSurface
+        }
+        try writer.install(payload, for: record.id)
+        activeRecord = nil
+        payload.removeAll(keepingCapacity: true)
+    }
+
+    func close() {
+        activeRecord = nil
+        payload.removeAll(keepingCapacity: false)
+    }
+}
+
+private extension PatternProjectBridge {
+    static func layerStack(
+        from metadata: PatternProjectMetadata
+    ) throws -> LayerStack {
+        let descriptors = try metadata.layers.sorted {
+            $0.order < $1.order
+        }.map { layer -> LayerDescriptor in
+            guard layer.kind == .pattern, layer.origin == nil else {
+                throw PatternProjectBridgeError.unsupportedLayerModel
             }
+            return try LayerDescriptor(
+                id: layer.id,
+                name: layer.name,
+                isVisible: layer.isVisible,
+                opacity: layer.opacity,
+                isLocked: layer.isLocked,
+                blendMode: rendererBlendMode(layer.blendMode)
+            )
+        }
+        return try LayerStack(
+            layers: descriptors,
+            activeLayerID: metadata.activeLayerID
+        )
+    }
+
+    static func nativeImportManifest(
+        from metadata: PatternProjectMetadata,
+        layerStack: LayerStack,
+        compiled: CompiledSymmetry
+    ) throws -> DocumentPaintNativeArchiveImportManifest {
+        let sortedLayers = metadata.layers.sorted { $0.order < $1.order }
+        let storagePixelSize: PixelSize
+        guard let first = sortedLayers.first else {
+            throw PatternProjectBridgeError.unsupportedLayerModel
+        }
+        let firstSurface = first.surface
+        storagePixelSize = firstSurface.pixelSize
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: metadata.canvasSize,
+            storagePixelSize: storagePixelSize,
+            radialLayout: compiled.domain.finite?.radial.layout
+        )
+        let layers = try sortedLayers.map { layer
+            -> DocumentPaintNativeArchiveLayer in
+            let surface = layer.surface
+            guard surface.pixelSize == storagePixelSize else {
+                throw PatternProjectBridgeError.unsupportedLayerModel
+            }
+            let tiles = try surface.tiles.map { record
+                -> DocumentPaintNativeArchiveTile in
+                guard let bounds = PixelRect(
+                    minX: record.logicalBounds.minX,
+                    minY: record.logicalBounds.minY,
+                    maxX: record.logicalBounds.minX
+                        + record.logicalBounds.width,
+                    maxY: record.logicalBounds.minY
+                        + record.logicalBounds.height
+                ) else {
+                    throw PatternProjectBridgeError.incompatibleSurface
+                }
+                return DocumentPaintNativeArchiveTile(
+                    persistedID: record.id,
+                    coordinate: PaintTileCoordinate(
+                        x: record.coordinate.x,
+                        y: record.coordinate.y
+                    ),
+                    logicalBounds: bounds
+                )
+            }
+            return DocumentPaintNativeArchiveLayer(
+                layerID: layer.id,
+                rasterRevision: surface.rasterRevision,
+                tiles: tiles
+            )
+        }
+        return try DocumentPaintNativeArchiveImportManifest(
+            geometry: geometry,
+            layerStack: layerStack,
+            layers: layers
+        )
+    }
+
+    static func patternBlendMode(
+        _ mode: LayerBlendMode
+    ) -> PatternProjectBlendMode {
+        switch mode {
+        case .normal: .normal
+        case .multiply: .multiply
+        case .screen: .screen
+        }
+    }
+
+    static func rendererBlendMode(
+        _ mode: PatternProjectBlendMode
+    ) -> LayerBlendMode {
+        switch mode {
+        case .normal: .normal
+        case .multiply: .multiply
+        case .screen: .screen
         }
     }
 }

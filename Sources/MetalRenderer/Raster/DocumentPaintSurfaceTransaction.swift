@@ -2848,7 +2848,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         )
     }
 
-    private static func validateResizeBindings(
+    static func validateResizeBindings(
         sources: [DocumentPaintSurfaceMutationSource],
         destinations: [DocumentPaintSurfaceMutationDestination],
         plan: ResizePlan
@@ -3061,7 +3061,7 @@ public final class DocumentPaintSurfaceTransaction: @unchecked Sendable {
         }
     }
 
-    private static func validateReduction(
+    static func validateReduction(
         _ evidence: [DocumentPaintSurfaceMutationEvidence],
         dirtyCoordinates: [PaintTileCoordinate],
         pixelSize: PixelSize

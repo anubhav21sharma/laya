@@ -741,17 +741,9 @@ final class BrushLabSession {
         if controller.renderer.documentConfiguration
             != card.documentConfiguration
         {
-            switch card.documentConfiguration {
-            case let .periodic(configuration):
-                controller.handlePeriodicConfiguration(configuration)
-            case let .finite(configuration):
-                controller.handleFiniteConfiguration(configuration)
-            }
-        }
-        guard controller.renderer.documentConfiguration
-                == card.documentConfiguration
-        else {
-            throw BrushLabEvidenceError.documentConfigurationUnavailable
+            try await controller.resetReviewDocument(
+                to: card.documentConfiguration
+            )
         }
         let package = try Self.manualPackage(
             anchor: anchor,

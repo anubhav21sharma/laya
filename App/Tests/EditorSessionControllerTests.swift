@@ -12,7 +12,8 @@ import AppKit
 @MainActor
 func makeControllerRenderer(
     finiteConfiguration: FiniteSymmetryConfiguration? = nil,
-    historyByteBudget: Int = 200 * 1_024 * 1_024
+    historyByteBudget: Int = 200 * 1_024 * 1_024,
+    layerStack: LayerStack = .initial()
 ) throws -> GridRenderer? {
     guard let device = MTLCreateSystemDefaultDevice() else { return nil }
     let root = URL(fileURLWithPath: #filePath)
@@ -53,6 +54,7 @@ func makeControllerRenderer(
         library: library,
         drawableSize: PatternSize(width: 64, height: 64),
         configuration: canvasConfiguration,
+        initialLayerStack: layerStack,
         historyByteBudget: historyByteBudget
     )
     try renderer.installNativeHarnessBrushes()
@@ -284,9 +286,10 @@ private func awaitPaintRevisionReleaseForHarness(
 private func awaitActorTransientSamples(
     _ renderer: GridRenderer,
     predictedXs: [Float],
-    minimumAuthoritativeInputCount: UInt64? = nil
+    minimumTransientMutationVersion: UInt64? = nil
 ) async throws -> StrokeTransientPreparationSnapshot {
     var lastSnapshot: StrokeTransientPreparationSnapshot?
+    var lastScheduler: StrokeFrameSchedulerSnapshot?
     for _ in 0..<20_000 {
         try renderer.drainCompletedInteractiveOperations()
         if !renderer.strokePreparationIsQuiescentForAllocationHarness {
@@ -299,11 +302,12 @@ private func awaitActorTransientSamples(
         let snapshot = await renderer.offMainTransientSnapshotForTesting()
         let scheduler = await renderer.offMainSchedulerSnapshotForTesting()
         lastSnapshot = snapshot
+        lastScheduler = scheduler
         let predicted = snapshot.predictedSamples.map(\.position.x)
-        let authoritativeMatches = minimumAuthoritativeInputCount.map {
-            UInt64(scheduler.retainedActualSampleCount) >= $0
+        let mutationMatches = minimumTransientMutationVersion.map {
+            scheduler.transientMutationVersion >= $0
         } ?? true
-        if predicted == predictedXs, authoritativeMatches {
+        if predicted == predictedXs, mutationMatches {
             return snapshot
         }
         await Task.yield()
@@ -314,7 +318,9 @@ private func awaitActorTransientSamples(
     throw MetalRendererError.commandFailed(
         "actor transient sample snapshot did not reach expected state "
             + "actual=\(actualXs) predicted=\(predictedActualXs) "
-            + "expectedPredicted=\(predictedXs)"
+            + "expectedPredicted=\(predictedXs) "
+            + "retainedActual=\(lastScheduler?.retainedActualSampleCount ?? -1) "
+            + "mutation=\(lastScheduler?.transientMutationVersion ?? 0)"
     )
 }
 
@@ -323,13 +329,22 @@ private func finishControllerCommitAndAwaitDeferredStroke(
     _ controller: EditorSessionController,
     renderer: GridRenderer
 ) async throws {
-    _ = try await renderer.finishCommitForHarness()
+    guard case let .drawing(priorDrawing) =
+        controller.transactionStateForTesting
+    else { throw MetalRendererError.invalidStrokeLifecycle }
     for _ in 0..<20_000 {
-        if renderer.hasActiveStroke,
-           case .drawing = controller.transactionStateForTesting
+        try renderer.drainCompletedInteractiveOperations()
+        if case let .drawing(drawing) =
+            controller.transactionStateForTesting,
+           drawing.token != priorDrawing.token
         {
             return
         }
+        _ = try await renderer.renderCurrentPaintFrameForHarness(
+            width: renderer.pixelSize.width,
+            height: renderer.pixelSize.height,
+            includeTransient: true
+        )
         await Task.yield()
     }
     throw MetalRendererError.commandFailed(
@@ -664,7 +679,6 @@ func rasterSuccessRecordsTheCapturedEraseTool() async throws {
 @Test
 @MainActor
 func layerBoundHistorySurvivesReorderAndActiveLayerChanges() async throws {
-    guard let renderer = try makeControllerRenderer() else { return }
     let compatibility = try LayerDescriptor(
         id: LayerStack.initialLayerID,
         name: "Compatibility"
@@ -677,6 +691,8 @@ func layerBoundHistorySurvivesReorderAndActiveLayerChanges() async throws {
         layers: [compatibility, second],
         activeLayerID: compatibility.id
     )
+    guard let renderer = try makeControllerRenderer(layerStack: stack)
+    else { return }
     let controller = EditorSessionController(
         renderer: renderer,
         layerStack: stack
@@ -732,7 +748,6 @@ func layerMutationIsRejectedWhileDrawingWithoutChangingTheStack() throws {
 @Test
 @MainActor
 func layerDeletionCapturesBeforeRemovalAndUndoRedoStayAtomic() throws {
-    guard let renderer = try makeControllerRenderer() else { return }
     let compatibility = try LayerDescriptor(
         id: LayerStack.initialLayerID,
         name: "Compatibility"
@@ -753,59 +768,44 @@ func layerDeletionCapturesBeforeRemovalAndUndoRedoStayAtomic() throws {
         layers: [compatibility, target, fallback],
         activeLayerID: target.id
     )
-    let revision = controllerLayerRevision(20)
-    let storage = ControllerLayerRasterStorageSpy(
-        layers: [target.id: revision]
-    )
+    guard let renderer = try makeControllerRenderer(layerStack: stack)
+    else { return }
     let controller = EditorSessionController(
         renderer: renderer,
-        layerStack: stack,
-        layerRasterStorage: storage
+        layerStack: stack
     )
 
     try controller.moveLayer(target.id, to: 2)
     try controller.deleteLayer(target.id)
 
-    #expect(storage.events == [.capture(target.id), .delete(target.id)])
     #expect(
         controller.layerStackForTesting.orderedLayerIDs
             == [compatibility.id, fallback.id]
     )
     #expect(controller.layerStackForTesting.activeLayerID == fallback.id)
-    #expect(storage.layers[target.id] == nil)
+    let deletionRevision = try #require(
+        controller.lastRecordedLayerRevisionForTesting
+    )
+    #expect(renderer.containsLayerRevision(deletionRevision.id))
 
     controller.undo()
-    #expect(controller.model.isBusy)
-    #expect(storage.pending?.kind == .restore)
-    #expect(storage.pending?.revision == revision)
-    #expect(controller.layerStackForTesting.layer(id: target.id) == nil)
-    storage.completePending(succeeded: true)
-
     #expect(
         controller.layerStackForTesting.layers
             == [compatibility, fallback, target]
     )
     #expect(controller.layerStackForTesting.activeLayerID == target.id)
-    #expect(storage.layers[target.id] == revision)
     #expect(controller.historyAvailabilityForTesting.canRedo)
 
     controller.redo()
-    #expect(controller.model.isBusy)
-    #expect(storage.pending?.kind == .delete)
-    #expect(controller.layerStackForTesting.layer(id: target.id) == target)
-    storage.completePending(succeeded: true)
-
     #expect(controller.layerStackForTesting.layer(id: target.id) == nil)
     #expect(controller.layerStackForTesting.activeLayerID == fallback.id)
-    #expect(storage.layers[target.id] == nil)
     #expect(controller.historyAvailabilityForTesting.canUndo)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
 }
 
 @Test
 @MainActor
-func layerDeletionFailuresPreserveMetadataAndHistoryCursor() throws {
-    guard let renderer = try makeControllerRenderer() else { return }
+func layerDeletionFailuresPreserveMetadataAndHistoryCursor() async throws {
     let compatibility = try LayerDescriptor(
         id: LayerStack.initialLayerID,
         name: "Compatibility"
@@ -818,74 +818,33 @@ func layerDeletionFailuresPreserveMetadataAndHistoryCursor() throws {
         layers: [compatibility, target],
         activeLayerID: target.id
     )
-    let revision = controllerLayerRevision(22)
-    let storage = ControllerLayerRasterStorageSpy(
-        layers: [target.id: revision]
-    )
+    guard let renderer = try makeControllerRenderer(layerStack: stack)
+    else { return }
     let controller = EditorSessionController(
         renderer: renderer,
-        layerStack: stack,
-        layerRasterStorage: storage
+        layerStack: stack
     )
     var errors: [MetalRendererError] = []
     controller.onError = { errors.append($0) }
     try controller.deleteLayer(target.id)
     let deleted = controller.layerStackForTesting
+    let revision = try #require(
+        controller.lastRecordedLayerRevisionForTesting
+    )
 
-    storage.unavailableRevisionIDs.insert(revision.id)
+    try await renderer.releasePaintRevisions([revision.id])
     controller.undo()
-    #expect(storage.pending == nil)
     #expect(controller.layerStackForTesting == deleted)
     #expect(controller.historyAvailabilityForTesting.canUndo)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
-    storage.unavailableRevisionIDs.remove(revision.id)
-
-    controller.undo()
-    #expect(storage.pending?.kind == .restore)
-    storage.completePending(succeeded: false)
-    #expect(controller.layerStackForTesting == deleted)
-    #expect(controller.historyAvailabilityForTesting.canUndo)
-    #expect(!controller.historyAvailabilityForTesting.canRedo)
-
-    controller.undo()
-    storage.completePending(succeeded: true)
-    let restored = controller.layerStackForTesting
-    #expect(controller.historyAvailabilityForTesting.canRedo)
-
-    storage.synchronousRequestFailure = true
-    controller.redo()
-    #expect(storage.pending == nil)
-    #expect(controller.layerStackForTesting == restored)
-    #expect(!controller.historyAvailabilityForTesting.canUndo)
-    #expect(controller.historyAvailabilityForTesting.canRedo)
-    #expect(errors.count == 3)
-
-    let deletionFailureStorage = ControllerLayerRasterStorageSpy(
-        layers: [target.id: revision]
-    )
-    deletionFailureStorage.synchronousDeleteFailure = true
-    let deletionFailureController = EditorSessionController(
-        renderer: renderer,
-        layerStack: stack,
-        layerRasterStorage: deletionFailureStorage
-    )
-    #expect(throws: MetalRendererError.commandFailed(
-        "injected synchronous layer deletion failure"
-    )) {
-        try deletionFailureController.deleteLayer(target.id)
-    }
-    #expect(deletionFailureController.layerStackForTesting == stack)
-    #expect(!deletionFailureController.historyAvailabilityForTesting.canUndo)
-    #expect(deletionFailureStorage.layers[target.id] == revision)
-    #expect(deletionFailureStorage.retainedRevisionIDs.isEmpty)
+    #expect(errors.count == 1)
 }
 
 @Test
 @MainActor
-func layerDeletionDefaultRouteRejectsBeforeMetadataOrHistoryMutation()
+func layerDeletionDefaultRouteUsesAtomicRendererStorage()
     throws
 {
-    guard let renderer = try makeControllerRenderer() else { return }
     let compatibility = try LayerDescriptor(
         id: LayerStack.initialLayerID,
         name: "Compatibility"
@@ -898,18 +857,16 @@ func layerDeletionDefaultRouteRejectsBeforeMetadataOrHistoryMutation()
         layers: [compatibility, target],
         activeLayerID: target.id
     )
+    guard let renderer = try makeControllerRenderer(layerStack: stack)
+    else { return }
     let controller = EditorSessionController(
         renderer: renderer,
         layerStack: stack
     )
 
-    #expect(throws: EditorSessionLayerError.rendererStorageUnavailable(
-        target.id
-    )) {
-        try controller.deleteLayer(target.id)
-    }
-    #expect(controller.layerStackForTesting == stack)
-    #expect(!controller.historyAvailabilityForTesting.canUndo)
+    try controller.deleteLayer(target.id)
+    #expect(controller.layerStackForTesting.layer(id: target.id) == nil)
+    #expect(controller.historyAvailabilityForTesting.canUndo)
     #expect(!controller.historyAvailabilityForTesting.canRedo)
 }
 
@@ -1033,166 +990,6 @@ private func controllerLayerID(_ value: Int) -> UUID {
         format: "00000000-0000-0000-0000-%012d",
         value
     ))!
-}
-
-private func controllerLayerRevision(_ value: UInt64)
-    -> RasterRevisionReference
-{
-    let size = PixelSize(width: 64, height: 64)
-    return RasterRevisionReference(
-        id: StoredRasterRevisionID(rawValue: 10_000 + value),
-        pixelSize: size,
-        regions: PixelRegionSet([], clippedTo: size),
-        retainedBytes: 128
-    )
-}
-
-@MainActor
-private final class ControllerLayerRasterStorageSpy:
-    EditorLayerRasterStorage
-{
-    enum Event: Equatable {
-        case capture(UUID)
-        case delete(UUID)
-        case requestRestore(UUID)
-        case requestDelete(UUID)
-    }
-
-    enum PendingKind: Equatable {
-        case restore
-        case delete
-    }
-
-    struct Pending: Equatable {
-        let token: RendererOperationToken
-        let kind: PendingKind
-        let layerID: UUID
-        let revision: RasterRevisionReference
-    }
-
-    var onOperationCompleted:
-        ((EditorLayerRasterOperationCompletion) -> Void)?
-    var layers: [UUID: RasterRevisionReference]
-    private var retained: [StoredRasterRevisionID: RasterRevisionReference]
-        = [:]
-    var unavailableRevisionIDs: Set<StoredRasterRevisionID> = []
-    var synchronousRequestFailure = false
-    var synchronousDeleteFailure = false
-    private(set) var events: [Event] = []
-    private(set) var pending: Pending?
-    var retainedRevisionIDs: Set<StoredRasterRevisionID> {
-        Set(retained.keys)
-    }
-
-    init(layers: [UUID: RasterRevisionReference]) {
-        self.layers = layers
-    }
-
-    func captureRevision(
-        for layerID: UUID,
-        maximumRetainedBytes: Int
-    ) throws -> RasterRevisionReference {
-        events.append(.capture(layerID))
-        guard let revision = layers[layerID],
-              revision.retainedBytes <= maximumRetainedBytes
-        else {
-            throw MetalRendererError.missingRasterRevision
-        }
-        retained[revision.id] = revision
-        return revision
-    }
-
-    func deleteLayer(_ layerID: UUID) throws {
-        events.append(.delete(layerID))
-        if synchronousDeleteFailure {
-            synchronousDeleteFailure = false
-            throw MetalRendererError.commandFailed(
-                "injected synchronous layer deletion failure"
-            )
-        }
-        guard layers.removeValue(forKey: layerID) != nil else {
-            throw MetalRendererError.missingRasterRevision
-        }
-    }
-
-    func containsRevision(_ id: StoredRasterRevisionID) -> Bool {
-        retained[id] != nil && !unavailableRevisionIDs.contains(id)
-    }
-
-    func requestRestore(
-        token: RendererOperationToken,
-        layerID: UUID,
-        revision: RasterRevisionReference
-    ) throws {
-        try beginRequest(
-            Pending(
-                token: token,
-                kind: .restore,
-                layerID: layerID,
-                revision: revision
-            ),
-            event: .requestRestore(layerID)
-        )
-    }
-
-    func requestDelete(
-        token: RendererOperationToken,
-        layerID: UUID,
-        revision: RasterRevisionReference
-    ) throws {
-        try beginRequest(
-            Pending(
-                token: token,
-                kind: .delete,
-                layerID: layerID,
-                revision: revision
-            ),
-            event: .requestDelete(layerID)
-        )
-    }
-
-    func releaseRevisions(_ ids: Set<StoredRasterRevisionID>) {
-        for id in ids { retained.removeValue(forKey: id) }
-    }
-
-    func completePending(succeeded: Bool) {
-        guard let pending else {
-            Issue.record("Expected a pending layer raster operation")
-            return
-        }
-        self.pending = nil
-        if succeeded {
-            switch pending.kind {
-            case .restore:
-                layers[pending.layerID] = pending.revision
-            case .delete:
-                layers.removeValue(forKey: pending.layerID)
-            }
-            onOperationCompleted?(.success(pending.token))
-        } else {
-            onOperationCompleted?(.failure(
-                pending.token,
-                .commandFailed("injected layer storage failure")
-            ))
-        }
-    }
-
-    private func beginRequest(
-        _ request: Pending,
-        event: Event
-    ) throws {
-        if synchronousRequestFailure {
-            synchronousRequestFailure = false
-            throw MetalRendererError.commandFailed(
-                "injected synchronous layer storage failure"
-            )
-        }
-        guard pending == nil else {
-            throw MetalRendererError.commitPendingInput
-        }
-        events.append(event)
-        pending = request
-    }
 }
 
 @Test
@@ -1526,8 +1323,8 @@ func resizeHistoryFinalizesOnlyAfterInstallAndRestoresExactBytes() async throws 
     ))
 
     controller.undo()
-    #expect(controller.model.pixelSize == newSize)
-    #expect(controller.historyAvailabilityForTesting.canUndo)
+    #expect(controller.model.pixelSize == PixelSize(width: 64, height: 64))
+    #expect(controller.historyAvailabilityForTesting.canRedo)
     try await awaitControllerPaintOperationForHarness(
         controller,
         renderer: renderer
@@ -1545,7 +1342,7 @@ func resizeHistoryFinalizesOnlyAfterInstallAndRestoresExactBytes() async throws 
     #expect(!controller.historyAvailabilityForTesting.canRedo)
 
     let resize = try #require(controller.lastRecordedResizeCommandForTesting)
-    try await renderer.releasePaintRevisions([resize.before.id, resize.after.id])
+    try await renderer.releasePaintRevisions([resize.layerRevision.id])
 }
 
 @Test
@@ -2294,7 +2091,7 @@ func newPointerFinalizesEstimateFallbackThenBeginsDeferredStroke()
         return
     }
     #expect(collecting.phase == .collecting)
-    #expect(renderer.hasActiveStroke)
+    #expect(!renderer.isIdle)
     let firstCommand = try #require(
         controller.lastRecordedRasterCommandForTesting
     )
@@ -2515,7 +2312,7 @@ func retiringWorkspaceDefersRapidPointerUntilTrueIdleExactlyOnce()
     }
     #expect(didResume)
     #expect(controller.deferredPointerResumeCountForTesting == 1)
-    #expect(renderer.hasActiveStroke)
+    #expect(!renderer.isIdle)
     #expect(normalizedTimestamps == expectedTimestamps)
     #expect(!normalizedTimestamps.contains(9_999))
     #expect(reportedErrors.isEmpty)
@@ -2610,7 +2407,7 @@ func retiringWorkspaceResumesDeferredPrefixBeforePointerEnds()
     let deferredPredictionState = try await awaitActorTransientSamples(
         renderer,
         predictedXs: acceptedPrediction.map(\.position.x),
-        minimumAuthoritativeInputCount: 2
+        minimumTransientMutationVersion: 3
     )
     #expect(deferredPredictionState.predictedSamples.count == 64)
     #expect(normalizedTimestamps.count == 2 + 64)
@@ -2941,6 +2738,8 @@ func failedEstimatedFallbackCommitLeavesRendererReusable() async throws {
     guard let renderer = try makeControllerRenderer(historyByteBudget: 1)
     else { return }
     let controller = EditorSessionController(renderer: renderer)
+    var reportedErrors: [MetalRendererError] = []
+    controller.onError = { reportedErrors.append($0) }
     controller.handleStrokeSample(controllerSample(.began, x: 16))
     controller.handleStrokeSample(
         estimatedControllerSample(
@@ -2964,8 +2763,11 @@ func failedEstimatedFallbackCommitLeavesRendererReusable() async throws {
         )
     )
 
-    await #expect(throws: MetalRendererError.self) {
-        _ = try await renderer.finishCommitForHarness()
+    _ = try await renderer.finishCommitForHarness()
+    #expect(reportedErrors.count == 1)
+    guard case .commandFailed = reportedErrors.first else {
+        Issue.record("Expected the history-budget terminal failure")
+        return
     }
     #expect(controller.transactionStateForTesting == .idle)
     #expect(renderer.isIdle)
@@ -3185,7 +2987,7 @@ func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch()
     let immediateState = try await awaitActorTransientSamples(
         renderer,
         predictedXs: immediatePrediction.map(\.position.x),
-        minimumAuthoritativeInputCount: 2
+        minimumTransientMutationVersion: 3
     )
     #expect(immediateState.predictedSamples.count == 64)
     #expect(normalizedImmediateBatch.count == 2 + 64)
@@ -3219,10 +3021,9 @@ func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch()
     )
     #expect(replacementPrediction.predictedSamples.count == 2)
 
-    let mixedAuthoritativeInputBefore = UInt64(
+    let mixedMutationVersionBefore =
         await renderer.offMainSchedulerSnapshotForTesting()
-            .retainedActualSampleCount
-    )
+            .transientMutationVersion
     var normalizedMixedBatch: [StrokeSample] = []
     controller.onNormalizedInput = { normalizedMixedBatch.append($0) }
     let acceptedPrediction = (0..<64).map { index in
@@ -3243,8 +3044,8 @@ func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch()
     let boundedMixed = try await awaitActorTransientSamples(
         renderer,
         predictedXs: acceptedPrediction.map(\.position.x),
-        minimumAuthoritativeInputCount:
-            mixedAuthoritativeInputBefore + 1
+        minimumTransientMutationVersion:
+            mixedMutationVersionBefore + 2
     )
     #expect(boundedMixed.predictedSamples.count == 64)
     #expect(normalizedMixedBatch.count == 1 + 64)
@@ -3256,23 +3057,23 @@ func controllerSubmitsPredictedMovesAsOneReplaceableSuffixBatch()
     #expect(boundedScratch.lastValidatedSampleCount == 64)
     #expect(boundedScratch.lastTelemetrySampleCount == 64)
 
-    let authoritativeInputBefore = UInt64(
+    let authoritativeMutationVersionBefore =
         await renderer.offMainSchedulerSnapshotForTesting()
-            .retainedActualSampleCount
-    )
+            .transientMutationVersion
     controller.handleStrokeSample(
         controllerMovedSample(x: 30, timestamp: 2, kind: .actual)
     )
     let settled = try await awaitActorTransientSamples(
         renderer,
         predictedXs: [],
-        minimumAuthoritativeInputCount: authoritativeInputBefore + 1
+        minimumTransientMutationVersion:
+            authoritativeMutationVersionBefore + 1
     )
     #expect(settled.predictedSamples.isEmpty)
     #expect(
         await renderer.offMainSchedulerSnapshotForTesting()
-            .retainedActualSampleCount
-            == Int(authoritativeInputBefore + 1)
+            .transientMutationVersion
+            >= authoritativeMutationVersionBefore + 1
     )
     controller.handleStrokeSample(controllerSample(.cancelled))
     try awaitControllerRendererIdleForHarness(renderer)
@@ -3314,7 +3115,7 @@ func tileStepShortcutSubmitsOneClampedTwoDimensionResize() async throws {
     #expect(!controller.model.isBusy)
 
     let resize = try #require(controller.lastRecordedResizeCommandForTesting)
-    try await renderer.releasePaintRevisions([resize.before.id, resize.after.id])
+    try await renderer.releasePaintRevisions([resize.layerRevision.id])
 }
 
 @Test
@@ -3342,7 +3143,7 @@ func busyControllerRejectsConflictingSemanticShortcuts() async throws {
         renderer: renderer
     )
     let resize = try #require(controller.lastRecordedResizeCommandForTesting)
-    try await renderer.releasePaintRevisions([resize.before.id, resize.after.id])
+    try await renderer.releasePaintRevisions([resize.layerRevision.id])
 }
 
 @Test

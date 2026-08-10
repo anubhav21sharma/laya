@@ -532,6 +532,25 @@ final class TiledRasterExactReferenceCapture: @unchecked Sendable {
         )
     }
 
+    func payload(
+        _ reference: PaintTileReference,
+        from provider: TiledRasterExactReferenceProvider
+    ) throws -> PaintTilePayload {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closeRequested else {
+            throw TiledRasterSurfaceError.exactReferenceCaptureClosed
+        }
+        let group = try retainedGroup(
+            for: provider,
+            references: [reference]
+        )
+        return try group.store.payload(
+            exactReference: reference,
+            retainedBy: group.token
+        )
+    }
+
     private func reserveBorrowed(
         _ references: [PaintTileReference],
         from provider: TiledRasterExactReferenceProvider,

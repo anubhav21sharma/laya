@@ -15,19 +15,22 @@ struct EditorTopBar: View {
     let openProject: @MainActor () -> Void
     let saveProject: @MainActor () -> Void
     let fileOperationsEnabled: Bool
+    let reportError: @MainActor (Error) -> Void
 
     init(
         controller: EditorSessionController,
         requestEditorFocus: @escaping @MainActor () -> Void,
         openProject: @escaping @MainActor () -> Void = {},
         saveProject: @escaping @MainActor () -> Void = {},
-        fileOperationsEnabled: Bool = false
+        fileOperationsEnabled: Bool = false,
+        reportError: @escaping @MainActor (Error) -> Void = { _ in }
     ) {
         self.controller = controller
         self.requestEditorFocus = requestEditorFocus
         self.openProject = openProject
         self.saveProject = saveProject
         self.fileOperationsEnabled = fileOperationsEnabled
+        self.reportError = reportError
     }
 
     var body: some View {
@@ -45,6 +48,19 @@ struct EditorTopBar: View {
             .frame(width: editorControlExtent, height: editorControlExtent)
             .accessibilityLabel("Save Project")
             .disabled(!fileOperationsEnabled)
+
+            Divider()
+                .frame(height: 20)
+
+            Picker("Layer", selection: activeLayerBinding) {
+                ForEach(controller.model.layerStack.layers.reversed(), id: \.id) {
+                    layer in
+                    Text(layer.name).tag(layer.id)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(minWidth: 100, maxWidth: 140)
+            .accessibilityIdentifier("Active Layer")
 
             Divider()
                 .frame(height: 20)
@@ -155,6 +171,20 @@ struct EditorTopBar: View {
                 Task { @MainActor in
                     await controller.selectBrush(recipeID)
                     requestEditorFocus()
+                }
+            }
+        )
+    }
+
+    private var activeLayerBinding: Binding<UUID> {
+        Binding(
+            get: { controller.model.layerStack.activeLayerID },
+            set: { layerID in
+                do {
+                    try controller.setActiveLayer(layerID)
+                    requestEditorFocus()
+                } catch {
+                    reportError(error)
                 }
             }
         )

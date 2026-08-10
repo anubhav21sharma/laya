@@ -1,4 +1,5 @@
 import Foundation
+import EditorCore
 import PatternEngine
 
 public struct RendererOperationToken:
@@ -41,8 +42,28 @@ public struct RasterMutationReceipt: Equatable, Sendable {
     }
 }
 
+public struct LayerGeometryMutationReceipt: Equatable, Sendable {
+    public let token: RendererOperationToken
+    public let beforePixelSize: PixelSize
+    public let afterPixelSize: PixelSize
+    public let revision: LayerSurfaceRevisionReference
+
+    public init(
+        token: RendererOperationToken,
+        beforePixelSize: PixelSize,
+        afterPixelSize: PixelSize,
+        revision: LayerSurfaceRevisionReference
+    ) {
+        self.token = token
+        self.beforePixelSize = beforePixelSize
+        self.afterPixelSize = afterPixelSize
+        self.revision = revision
+    }
+}
+
 public enum RendererOperationCompletion: Sendable {
     case rasterSuccess(RasterMutationReceipt)
+    case layerGeometrySuccess(LayerGeometryMutationReceipt)
     case operationSuccess(RendererOperationToken)
     case failure(RendererOperationToken, MetalRendererError)
 }

@@ -330,6 +330,30 @@ struct SparseTileSourceSelection: @unchecked Sendable {
         }
         return total
     }
+
+    func restrictedSources() throws -> [SparseTileSourceRequest] {
+        guard selectedReferencesBySource.count == sources.count else {
+            throw SparseTileSamplingPlanError
+                .sourceBatchSelectionMismatch(
+                    sourceIndex: min(
+                        selectedReferencesBySource.count,
+                        sources.count
+                    )
+                )
+        }
+        return try zip(sources, selectedReferencesBySource).map {
+            source, selected in
+            let provider = try source.provider
+                .restrictingEntitlement(to: selected)
+            return try SparseTileSourceRequest(
+                contentKey: source.contentKey,
+                addressing: source.addressing,
+                provider: provider,
+                changedCoordinates: source.changedCoordinates,
+                disposition: source.disposition
+            )
+        }
+    }
 }
 
 /// Explicit one-shot access envelope for every exact source provider in a plan
@@ -392,34 +416,6 @@ final class SparseTileOwnedSourceBatch: @unchecked Sendable {
         terminalAction = onTerminal
     }
 
-    private static func restrictedSources(
-        _ selection: SparseTileSourceSelection
-    ) throws -> [SparseTileSourceRequest] {
-        let sources = selection.sources
-        let selectedReferencesBySource = selection.selectedReferencesBySource
-        guard selectedReferencesBySource.count == sources.count else {
-            throw SparseTileSamplingPlanError
-                .sourceBatchSelectionMismatch(
-                    sourceIndex: min(
-                        selectedReferencesBySource.count,
-                        sources.count
-                    )
-                )
-        }
-        return try zip(sources, selectedReferencesBySource).map {
-            source, selected in
-            let provider = try source.provider
-                .restrictingEntitlement(to: selected)
-            return try SparseTileSourceRequest(
-                contentKey: source.contentKey,
-                addressing: source.addressing,
-                provider: provider,
-                changedCoordinates: source.changedCoordinates,
-                disposition: source.disposition
-            )
-        }
-    }
-
     /// Pure selection path. Entitlement is derived by the same Phase-A selector
     /// that the cache rechecks before any reservation.
     /// This operation performs no store mutation and can run outside registry
@@ -458,7 +454,7 @@ final class SparseTileOwnedSourceBatch: @unchecked Sendable {
         _ selection: SparseTileSourceSelection,
         deinitDiagnostic: @escaping @Sendable () -> Void = {}
     ) throws -> SparseTileOwnedSourceBatch {
-        let sources = try restrictedSources(selection)
+        let sources = try selection.restrictedSources()
         let capture = try TiledRasterExactReferenceCapture(
             providers: sources.map(\.provider)
         )
@@ -478,7 +474,7 @@ final class SparseTileOwnedSourceBatch: @unchecked Sendable {
         deinitDiagnostic: @escaping @Sendable () -> Void = {},
         onTerminal: @escaping @Sendable () -> Void = {}
     ) throws -> SparseTileOwnedSourceBatch {
-        let sources = try restrictedSources(selection)
+        let sources = try selection.restrictedSources()
         let borrow = try capture.borrowing(providers: sources.map(\.provider))
         return Self(
             sources: sources,

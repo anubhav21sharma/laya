@@ -58,7 +58,9 @@ let package = Package(
         ),
         .target(
             name: "MetalRenderer",
-            dependencies: ["PatternEngine", "CShaderTypes", "BrushFormat"],
+            dependencies: [
+                "PatternEngine", "EditorCore", "CShaderTypes", "BrushFormat",
+            ],
             exclude: ["Shaders.metal"]
         ),
         .target(
@@ -206,6 +208,7 @@ let package = Package(
                 "PatternSpike/Debug/DebugPerformanceHUD.swift",
                 "PatternSpike/Debug/DebugPerformanceMonitor.swift",
                 "PatternSpike/Panels/EditorTopBar.swift",
+                "PatternSpike/Panels/LayerPanel.swift",
                 "PatternSpike/Panels/TilingInspector.swift",
                 "PatternSpike/Panels/ToolRail.swift",
                 "PatternSpike/Persistence/EditorBrushSelectionStore.swift",

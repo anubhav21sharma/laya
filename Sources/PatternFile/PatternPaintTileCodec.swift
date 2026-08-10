@@ -212,7 +212,8 @@ public enum PatternPaintTileCodec {
     public static func encodeManifest(
         _ surface: PatternPaintTileSurface
     ) throws -> Data {
-        try encodeManifest(
+        try validateMetadata([surface])
+        return try encodeManifestOfValidatedSurface(
             surface,
             maximumByteCount: maximumManifestBytes
         )
@@ -223,6 +224,16 @@ public enum PatternPaintTileCodec {
         maximumByteCount: Int
     ) throws -> Data {
         try validateMetadata([surface])
+        return try encodeManifestOfValidatedSurface(
+            surface,
+            maximumByteCount: maximumByteCount
+        )
+    }
+
+    static func encodeManifestOfValidatedSurface(
+        _ surface: PatternPaintTileSurface,
+        maximumByteCount: Int = maximumManifestBytes
+    ) throws -> Data {
         let wire = SurfaceWire(surface)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [
@@ -286,6 +297,17 @@ public enum PatternPaintTileCodec {
         _ data: Data,
         maximumDecodedBytes: Int = maximumDecodedBytes
     ) throws -> PatternPaintTileSurface {
+        let surface = try decodeManifestMetadataStructure(data)
+        try validateMetadata(
+            [surface],
+            maximumDecodedBytes: maximumDecodedBytes
+        )
+        return surface
+    }
+
+    static func decodeManifestMetadataStructure(
+        _ data: Data
+    ) throws -> PatternPaintTileSurface {
         guard data.count <= maximumManifestBytes else {
             throw PatternPaintTileError.invalidManifest
         }
@@ -303,17 +325,12 @@ public enum PatternPaintTileCodec {
         else {
             throw PatternPaintTileError.invalidManifest
         }
-        let surface = PatternPaintTileSurface(
+        return PatternPaintTileSurface(
             layerID: wire.layerID,
             pixelSize: pixelSize,
             rasterRevision: wire.rasterRevision,
             tiles: wire.tiles
         )
-        try validateMetadata(
-            [surface],
-            maximumDecodedBytes: maximumDecodedBytes
-        )
-        return surface
     }
 
     public static func validateMetadata(
@@ -439,13 +456,6 @@ public enum PatternPaintTileCodec {
                 guard let payload = payloadsByPath[record.file] else {
                     throw PatternPaintTileError.missingPayload(record.file)
                 }
-                guard payload.count == record.byteCount else {
-                    throw PatternPaintTileError.payloadByteCountMismatch(
-                        tileID: record.id,
-                        expected: record.byteCount,
-                        actual: payload.count
-                    )
-                }
                 let (sum, overflow) = decodedBytes.addingReportingOverflow(
                     payload.count
                 )
@@ -457,20 +467,39 @@ public enum PatternPaintTileCodec {
                     )
                 }
                 decodedBytes = sum
-                try validateComponents(payload, tileID: record.id)
-                guard semanticHash(
-                    layerID: surface.layerID,
-                    record: record,
-                    payload: payload
-                ) == record.semanticSHA256 else {
-                    throw PatternPaintTileError.semanticHashMismatch(record.id)
-                }
+                try validatePayload(
+                    payload,
+                    for: record,
+                    layerID: surface.layerID
+                )
             }
         }
         if let unexpected = payloadsByPath.keys.sorted().first(where: {
             !expectedPaths.contains($0)
         }) {
             throw PatternPaintTileError.unexpectedPayload(unexpected)
+        }
+    }
+
+    public static func validatePayload(
+        _ payload: Data,
+        for record: PatternPaintTileRecord,
+        layerID: UUID
+    ) throws {
+        guard payload.count == record.byteCount else {
+            throw PatternPaintTileError.payloadByteCountMismatch(
+                tileID: record.id,
+                expected: record.byteCount,
+                actual: payload.count
+            )
+        }
+        try validateComponents(payload, tileID: record.id)
+        guard semanticHash(
+            layerID: layerID,
+            record: record,
+            payload: payload
+        ) == record.semanticSHA256 else {
+            throw PatternPaintTileError.semanticHashMismatch(record.id)
         }
     }
 }

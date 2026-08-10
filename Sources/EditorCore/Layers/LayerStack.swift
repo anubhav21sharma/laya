@@ -115,6 +115,17 @@ public struct LayerStack: Equatable, Sendable {
         )
     }
 
+    public static func single(
+        id: UUID,
+        name: String = "Layer 1"
+    ) throws -> LayerStack {
+        let descriptor = try LayerDescriptor(id: id, name: name)
+        return try LayerStack(
+            layers: [descriptor],
+            activeLayerID: id
+        )
+    }
+
     public var orderedLayerIDs: [UUID] { layers.map(\.id) }
 
     public var snapshot: LayerStackSnapshot {

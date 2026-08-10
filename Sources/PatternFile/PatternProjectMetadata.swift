@@ -4,7 +4,6 @@ import PatternEngine
 public enum PatternProjectFormat {
     public static let currentSchemaVersion = 4
     public static let canonicalSurfaceLayoutVersion = 1
-    public static let radialSurfaceLayoutVersion = 1
 
     public static let manifestPath = "manifest.json"
     public static let symmetryPath = "tiling.json"
@@ -33,45 +32,6 @@ public enum PatternProjectBlendMode: UInt32, Equatable, Sendable {
     case screen = 2
 }
 
-public struct PatternProjectRasterReference: Equatable, Sendable {
-    public let file: String
-    public let pixelSize: PixelSize
-
-    public init(file: String, pixelSize: PixelSize) {
-        self.file = file
-        self.pixelSize = pixelSize
-    }
-}
-
-public struct PatternProjectRadialPage: Equatable, Sendable {
-    public let coordinate: RadialPageCoordinate
-    public let file: String
-
-    public init(coordinate: RadialPageCoordinate, file: String) {
-        self.coordinate = coordinate
-        self.file = file
-    }
-}
-
-public struct PatternProjectRadialSurface: Equatable, Sendable {
-    public let layoutVersion: Int
-    public let pageSide: Int
-    public let manifestFile: String
-    public let pages: [PatternProjectRadialPage]
-
-    public init(
-        layoutVersion: Int = PatternProjectFormat.radialSurfaceLayoutVersion,
-        pageSide: Int = RadialSectorLayout.pageSide,
-        manifestFile: String,
-        pages: [PatternProjectRadialPage]
-    ) {
-        self.layoutVersion = layoutVersion
-        self.pageSide = pageSide
-        self.manifestFile = manifestFile
-        self.pages = pages
-    }
-}
-
 public struct PatternProjectPaintTileSurface: Equatable, Sendable {
     public let manifestFile: String
     public let pixelSize: PixelSize
@@ -91,12 +51,6 @@ public struct PatternProjectPaintTileSurface: Equatable, Sendable {
     }
 }
 
-public enum PatternProjectLayerSurface: Equatable, Sendable {
-    case singleRaster(PatternProjectRasterReference)
-    case radialPages(PatternProjectRadialSurface)
-    case paintTiles(PatternProjectPaintTileSurface)
-}
-
 public struct PatternProjectLayer: Equatable, Sendable {
     public let id: UUID
     public let kind: PatternProjectLayerKind
@@ -107,7 +61,7 @@ public struct PatternProjectLayer: Equatable, Sendable {
     public let isVisible: Bool
     public let isLocked: Bool
     public let origin: WorldPoint?
-    public let surface: PatternProjectLayerSurface
+    public let surface: PatternProjectPaintTileSurface
 
     public init(
         id: UUID,
@@ -119,7 +73,7 @@ public struct PatternProjectLayer: Equatable, Sendable {
         isVisible: Bool = true,
         isLocked: Bool = false,
         origin: WorldPoint? = nil,
-        surface: PatternProjectLayerSurface
+        surface: PatternProjectPaintTileSurface
     ) {
         self.id = id
         self.kind = kind
@@ -238,13 +192,7 @@ public enum PatternProjectLoadError:
     case activeLayerMissing(UUID)
     case layerIdentityMismatch(expected: UUID, actual: UUID)
     case invalidLayer(UUID)
-    case surfaceKindMismatch(UUID)
     case invalidRasterSize(layerID: UUID, width: Int, height: Int)
-    case unsupportedRadialSurfaceLayout(Int)
-    case invalidRadialPageSide(Int)
-    case duplicateRadialPage(RadialPageCoordinate)
-    case unexpectedRadialPage(RadialPageCoordinate)
-    case radialPageCountOutOfRange(Int)
 
     public var errorDescription: String? {
         switch self {
@@ -294,20 +242,8 @@ public enum PatternProjectLoadError:
             "Layer file identity \(actual) does not match \(expected)."
         case let .invalidLayer(id):
             "Layer \(id) contains invalid metadata."
-        case let .surfaceKindMismatch(id):
-            "Layer \(id) uses storage incompatible with the document domain."
         case let .invalidRasterSize(layerID, width, height):
             "Layer \(layerID) raster size \(width)x\(height) is invalid."
-        case let .unsupportedRadialSurfaceLayout(version):
-            "Radial surface layout \(version) is unsupported."
-        case let .invalidRadialPageSide(side):
-            "Radial page side \(side) is invalid."
-        case let .duplicateRadialPage(coordinate):
-            "Radial page \(coordinate.x),\(coordinate.y) is duplicated."
-        case let .unexpectedRadialPage(coordinate):
-            "Radial page \(coordinate.x),\(coordinate.y) is outside the compiled sector."
-        case let .radialPageCountOutOfRange(count):
-            "Radial page count \(count) is outside the compiled layout."
         }
     }
 }

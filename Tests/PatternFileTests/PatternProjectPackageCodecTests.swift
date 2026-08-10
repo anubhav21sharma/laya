@@ -6,365 +6,402 @@ import Testing
 @Suite("Pattern project package codec")
 struct PatternProjectPackageCodecTests {
     @Test
-    func pngOnlyPackageRouteRejectsNativeTileSurfacesOnEncodeAndOpen()
+    func nativePackageStreamsDeterministicallyAndPreservesEmptyRevision()
         throws
     {
-        let metadata = try paintTilePackageFixture()
-        let layerID = try #require(metadata.layers.first?.id)
-        let expected = PatternProjectFileError.unsupportedSurfaceRoute(
-            layerID
-        )
-
-        #expect(throws: expected) {
-            try PatternProjectPackageCodec.encode(
-                metadata: metadata,
-                rastersByPath: [:]
-            )
-        }
-
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: false
-        )
+        let fixture = try nativePackageFixture()
+        let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let destination = directory.appendingPathComponent("native.patternproj")
-        #expect(throws: expected) {
+        let firstURL = directory.appendingPathComponent("first.patternproj")
+        let secondURL = directory.appendingPathComponent("second.patternproj")
+        let firstProvider = TileProvider(payloads: fixture.payloads)
+        let secondProvider = TileProvider(payloads: fixture.payloads)
+
+        try PatternProjectPackageCodec.save(
+            metadata: fixture.metadata,
+            tilePayloadProvider: firstProvider,
+            projectPaletteJSON: Data(#"{"name":"Native"}"#.utf8),
+            to: firstURL
+        )
+        try PatternProjectPackageCodec.save(
+            metadata: fixture.metadata,
+            tilePayloadProvider: secondProvider,
+            projectPaletteJSON: Data(#"{"name":"Native"}"#.utf8),
+            to: secondURL
+        )
+
+        #expect(try Data(contentsOf: firstURL) == Data(contentsOf: secondURL))
+        #expect(firstProvider.closeCount == 1)
+        #expect(firstProvider.maximumObservedChunkByteCount
+            <= PatternProjectPackageCodec.tileChunkByteCount)
+        let decoded = try PatternProjectPackageCodec.open(at: firstURL)
+        #expect(decoded.metadata.metadata == fixture.metadata)
+        #expect(decoded.projectPaletteJSON == Data(#"{"name":"Native"}"#.utf8))
+        let empty = try #require(decoded.metadata.metadata.layers.last)
+        let emptySurface = empty.surface
+        #expect(emptySurface.tiles.isEmpty)
+        #expect(emptySurface.rasterRevision == 11)
+
+        let consumer = TileConsumer()
+        try decoded.consumeTilePayloads(
+            maximumChunkByteCount: 8_193,
+            consumer: consumer
+        )
+        #expect(consumer.closeCount == 1)
+        #expect(consumer.maximumObservedChunkByteCount <= 8_193)
+        #expect(consumer.payloads == fixture.payloads)
+    }
+
+    @Test
+    func providerAndConsumerCloseExactlyOnceWhenStreamingThrows() throws {
+        let fixture = try nativePackageFixture()
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("project.patternproj")
+        let failingProvider = TileProvider(
+            payloads: fixture.payloads,
+            failure: .provider
+        )
+        #expect(throws: StreamFixtureError.provider) {
             try PatternProjectPackageCodec.save(
-                metadata: metadata,
-                rastersByPath: [:],
+                metadata: fixture.metadata,
+                tilePayloadProvider: failingProvider,
                 to: destination
             )
         }
+        #expect(failingProvider.closeCount == 1)
         #expect(!FileManager.default.fileExists(atPath: destination.path))
 
-        let files = try PatternProjectMetadataCodec.encode(metadata)
-        var entries: [String: Data] = [
-            PatternProjectFormat.manifestPath: files.manifest,
-            PatternProjectFormat.symmetryPath: files.symmetry,
-        ]
-        for (path, data) in files.layersByPath { entries[path] = data }
-        for (path, data) in files.surfacesByPath { entries[path] = data }
-        let archive = try PatternProjectArchiveCodec.encode(entries: entries)
-
-        #expect(throws: expected) {
-            try PatternProjectPackageCodec.open(archive)
+        let provider = TileProvider(payloads: fixture.payloads)
+        try PatternProjectPackageCodec.save(
+            metadata: fixture.metadata,
+            tilePayloadProvider: provider,
+            to: destination
+        )
+        let decoded = try PatternProjectPackageCodec.open(at: destination)
+        let failingConsumer = TileConsumer(failure: .consumer)
+        #expect(throws: StreamFixtureError.consumer) {
+            try decoded.consumeTilePayloads(
+                maximumChunkByteCount: 4_097,
+                consumer: failingConsumer
+            )
         }
+        #expect(failingConsumer.closeCount == 1)
     }
 
     @Test
-    func periodicPackageRoundTripsMetadataPixelsAndAdvisoryFiles()
+    func invalidMetadataPreflightClosesProviderWithoutCreatingDestination()
         throws
     {
-        let (metadata, rasters) = try packageFixture(radial: false)
-        let thumbnail = try opaqueImage(
-            PixelSize(width: 16, height: 12),
-            salt: 19
+        let fixture = try nativePackageFixture()
+        let invalid = PatternProjectMetadata(
+            documentID: fixture.metadata.documentID,
+            title: fixture.metadata.title,
+            appVersion: fixture.metadata.appVersion,
+            createdAt: fixture.metadata.createdAt,
+            modifiedAt: fixture.metadata.modifiedAt,
+            canvasSize: fixture.metadata.canvasSize,
+            viewport: fixture.metadata.viewport,
+            documentConfiguration: fixture.metadata.documentConfiguration,
+            documentDomainLocked: fixture.metadata.documentDomainLocked,
+            radialGeometryLocked: fixture.metadata.radialGeometryLocked,
+            activeLayerID: fixture.metadata.activeLayerID,
+            layers: []
         )
-        let palette = Data(
-            ##"{"colors":["#112233","#abcdef"]}"##.utf8
-        )
-
-        let encoded = try PatternProjectPackageCodec.encode(
-            metadata: metadata,
-            rastersByPath: rasters,
-            thumbnail: thumbnail,
-            projectPaletteJSON: palette
-        )
-        let decoded = try PatternProjectPackageCodec.open(encoded)
-
-        #expect(decoded.metadata.metadata == metadata)
-        #expect(decoded.rastersByPath == rasters)
-        #expect(decoded.thumbnail == thumbnail)
-        #expect(decoded.projectPaletteJSON == palette)
-    }
-
-    @Test
-    func radialSparsePagePackageRoundTripsExactPageBytes() throws {
-        let (metadata, rasters) = try packageFixture(radial: true)
-        let encoded = try PatternProjectPackageCodec.encode(
-            metadata: metadata,
-            rastersByPath: rasters
-        )
-        let decoded = try PatternProjectPackageCodec.open(encoded)
-
-        #expect(decoded.metadata.metadata == metadata)
-        #expect(decoded.rastersByPath == rasters)
-        #expect(decoded.metadata.metadata.radialGeometryLocked)
+        let provider = TileProvider(payloads: fixture.payloads)
+        let destination = temporaryFileURL()
+        #expect(throws: PatternProjectFileError.metadata(
+            .layerCountOutOfRange(0)
+        )) {
+            try PatternProjectPackageCodec.save(
+                metadata: invalid,
+                tilePayloadProvider: provider,
+                to: destination
+            )
+        }
+        #expect(provider.closeCount == 1)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
     }
 
     @Test
     func unsupportedNativeSchemasWinBeforePayloadLookup() throws {
         for version in [1, 2, 3, 5] {
             let archive = try PatternProjectArchiveCodec.encode(entries: [
-                "manifest.json": Data(
+                PatternProjectFormat.manifestPath: Data(
                     "{\"schemaVersion\":\(version)}".utf8
                 ),
             ])
-            #expect(
-                throws: PatternProjectFileError.metadata(
-                    .unsupportedSchema(version)
-                )
-            ) {
+            #expect(throws: PatternProjectFileError.metadata(
+                .unsupportedSchema(version)
+            )) {
                 try PatternProjectPackageCodec.open(archive)
             }
         }
     }
 
     @Test
-    func invalidMetadataWinsBeforeRasterDecode() throws {
-        let (metadata, rasters) = try packageFixture(radial: false)
-        let encoded = try PatternProjectPackageCodec.encode(
-            metadata: metadata,
-            rastersByPath: rasters
-        )
+    func missingAndUnexpectedTileEntriesFailClosed() throws {
+        let fixture = try nativePackageFixture()
+        let encoded = try savedArchive(fixture)
         let archive = try PatternProjectArchiveCodec.open(encoded)
         var entries = try archiveEntries(archive)
-        entries["tiling.json"] = try mutateObject(
-            try #require(entries["tiling.json"])
-        ) {
-            $0["preset"] = 999
+        let path = try #require(fixture.payloads.keys.first)
+        entries.removeValue(forKey: path)
+        #expect(throws: PatternProjectFileError.missingTilePayload(path)) {
+            try PatternProjectPackageCodec.open(
+                PatternProjectArchiveCodec.encode(entries: entries)
+            )
         }
-        entries["rasters/layer.png"] = Data("not a PNG".utf8)
-        let corrupt = try PatternProjectArchiveCodec.encode(entries: entries)
 
-        #expect(
-            throws: PatternProjectFileError.metadata(.unknownPreset(999))
-        ) {
-            try PatternProjectPackageCodec.open(corrupt)
+        entries = try archiveEntries(archive)
+        entries["tiles/stale.rgba16f"] = Data()
+        #expect(throws: PatternProjectFileError.unexpectedArchiveEntry(
+            "tiles/stale.rgba16f"
+        )) {
+            try PatternProjectPackageCodec.open(
+                PatternProjectArchiveCodec.encode(entries: entries)
+            )
         }
     }
 
     @Test
-    func missingUnexpectedAndWrongSizedRastersFailTyped() throws {
-        let (metadata, rasters) = try packageFixture(radial: false)
-        #expect(
-            throws: PatternProjectFileError.missingRaster(
-                "rasters/layer.png"
-            )
-        ) {
-            try PatternProjectPackageCodec.encode(
-                metadata: metadata,
-                rastersByPath: [:]
-            )
-        }
-        var unexpected = rasters
-        unexpected["rasters/extra.png"] = try opaqueImage(
-            PixelSize(width: 64, height: 64),
-            salt: 1
-        )
-        #expect(
-            throws: PatternProjectFileError.unexpectedRaster(
-                "rasters/extra.png"
-            )
-        ) {
-            try PatternProjectPackageCodec.encode(
-                metadata: metadata,
-                rastersByPath: unexpected
-            )
-        }
-
-        let metadataFiles = try PatternProjectMetadataCodec.encode(metadata)
-        var entries: [String: Data] = [
-            "manifest.json": metadataFiles.manifest,
-            "tiling.json": metadataFiles.symmetry,
-        ]
-        for (path, data) in metadataFiles.layersByPath {
-            entries[path] = data
-        }
-        entries["rasters/layer.png"] = try PatternRasterPNGCodec.encode(
-            opaqueImage(PixelSize(width: 32, height: 32), salt: 3)
-        )
-        let wrongSize = try PatternProjectArchiveCodec.encode(
-            entries: entries
-        )
-        #expect(
-            throws: PatternProjectFileError.raster(
-                path: "rasters/layer.png",
-                error: .unexpectedDimensions(
-                    expected: PixelSize(width: 64, height: 64),
-                    actualWidth: 32,
-                    actualHeight: 32
-                )
-            )
-        ) {
-            try PatternProjectPackageCodec.open(wrongSize)
-        }
-    }
-
-    @Test
-    func undeclaredArchiveEntriesAndInvalidPaletteFailClosed() throws {
-        let (metadata, rasters) = try packageFixture(radial: false)
-        let encoded = try PatternProjectPackageCodec.encode(
-            metadata: metadata,
-            rastersByPath: rasters
-        )
+    func wrongTileHashAndByteCountFailWithTileIdentity() throws {
+        let fixture = try nativePackageFixture()
+        let encoded = try savedArchive(fixture)
         let archive = try PatternProjectArchiveCodec.open(encoded)
+        let record = try #require(fixture.record)
         var entries = try archiveEntries(archive)
-        entries["rasters/stale-page.png"] = Data()
-        let stale = try PatternProjectArchiveCodec.encode(entries: entries)
-        #expect(
-            throws: PatternProjectFileError.unexpectedArchiveEntry(
-                "rasters/stale-page.png"
+        var changed = try #require(entries[record.file])
+        changed[6] = 0
+        changed[7] = 0x3c
+        entries[record.file] = changed
+        #expect(throws: PatternProjectFileError.paintTile(
+            .semanticHashMismatch(record.id)
+        )) {
+            try PatternProjectPackageCodec.open(
+                PatternProjectArchiveCodec.encode(entries: entries)
             )
-        ) {
-            try PatternProjectPackageCodec.open(stale)
         }
 
-        entries.removeValue(forKey: "rasters/stale-page.png")
-        entries[PatternProjectPackageCodec.palettePath] =
-            Data("invalid json".utf8)
-        let invalidPalette = try PatternProjectArchiveCodec.encode(
-            entries: entries
-        )
-        #expect(throws: PatternProjectFileError.invalidPalette) {
-            try PatternProjectPackageCodec.open(invalidPalette)
+        entries = try archiveEntries(archive)
+        var short = try #require(entries[record.file])
+        short.removeLast()
+        entries[record.file] = short
+        #expect(throws: PatternProjectFileError.paintTile(
+            .payloadByteCountMismatch(
+                tileID: record.id,
+                expected: PatternPaintTileCodec.bytesPerTile,
+                actual: PatternPaintTileCodec.bytesPerTile - 1
+            )
+        )) {
+            try PatternProjectPackageCodec.open(
+                PatternProjectArchiveCodec.encode(entries: entries)
+            )
         }
     }
+
 }
 
-private func paintTilePackageFixture() throws -> PatternProjectMetadata {
-    let (base, _) = try packageFixture(radial: false)
-    let layer = try #require(base.layers.first)
-    let tiledLayer = PatternProjectLayer(
-        id: layer.id,
-        kind: layer.kind,
-        name: layer.name,
-        order: layer.order,
-        opacity: layer.opacity,
-        blendMode: layer.blendMode,
-        isVisible: layer.isVisible,
-        isLocked: layer.isLocked,
-        origin: layer.origin,
-        surface: .paintTiles(PatternProjectPaintTileSurface(
-            manifestFile: "surfaces/layer.tiles.json",
-            pixelSize: base.canvasSize,
-            rasterRevision: 1,
-            tiles: []
-        ))
-    )
-    return PatternProjectMetadata(
-        documentID: base.documentID,
-        title: base.title,
-        appVersion: base.appVersion,
-        createdAt: base.createdAt,
-        modifiedAt: base.modifiedAt,
-        canvasSize: base.canvasSize,
-        viewport: base.viewport,
-        documentConfiguration: base.documentConfiguration,
-        documentDomainLocked: base.documentDomainLocked,
-        radialGeometryLocked: base.radialGeometryLocked,
-        activeLayerID: base.activeLayerID,
-        layers: [tiledLayer]
-    )
+private struct NativePackageFixture {
+    let metadata: PatternProjectMetadata
+    let payloads: [String: Data]
+    let record: PatternPaintTileRecord?
 }
 
-private func packageFixture(
-    radial: Bool
-) throws -> (
-    metadata: PatternProjectMetadata,
-    rasters: [String: PatternRasterImage]
-) {
-    let canvasSize = PixelSize(width: 64, height: 64)
+private func nativePackageFixture() throws -> NativePackageFixture {
     let documentID = UUID(
         uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     )!
-    let layerID = UUID(
+    let firstLayerID = UUID(
         uuidString: "11111111-2222-3333-4444-555555555555"
     )!
-    let configuration: SymmetryDocumentConfiguration
-    let surface: PatternProjectLayerSurface
-    var rasters: [String: PatternRasterImage] = [:]
-    if radial {
-        configuration = .finite(.radial(RadialSymmetryConfiguration(
-            kind: .mandala,
-            rayCount: 5,
-            center: WorldPoint(x: 31, y: 29),
-            referenceAngleRadians: 0.25
-        )))
-        let compiled = try SymmetryDescriptorCompiler.compile(
-            documentConfiguration: configuration,
-            canvasSize: canvasSize
-        )
-        let layout = try #require(compiled.domain.finite?.radial.layout)
-        let page = try #require(layout.residentPages.first)
-        let pagePath = "rasters/layer/page-\(page.coordinate.x)-\(page.coordinate.y).png"
-        surface = .radialPages(PatternProjectRadialSurface(
-            manifestFile: "rasters/layer/surface.json",
-            pages: [
-                PatternProjectRadialPage(
-                    coordinate: page.coordinate,
-                    file: pagePath
-                ),
-            ]
-        ))
-        rasters[pagePath] = try opaqueImage(
-            PixelSize(
-                width: RadialSectorLayout.pageSide,
-                height: RadialSectorLayout.pageSide
-            ),
-            salt: 11
-        )
-    } else {
-        configuration = .periodic(.legacy(
-            presetID: .grid,
-            tileSize: PatternSize(width: 64, height: 64)
-        ))
-        surface = .singleRaster(PatternProjectRasterReference(
-            file: "rasters/layer.png",
-            pixelSize: canvasSize
-        ))
-        rasters["rasters/layer.png"] = try opaqueImage(
-            canvasSize,
-            salt: 5
-        )
-    }
+    let secondLayerID = UUID(
+        uuidString: "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    )!
+    let tileID = UUID(
+        uuidString: "01234567-89ab-cdef-0123-456789abcdef"
+    )!
+    let pixelSize = PixelSize(width: 256, height: 256)
+    let payload = Data(count: PatternPaintTileCodec.bytesPerTile)
+    let path = "tiles/\(firstLayerID.uuidString.lowercased())/"
+        + "\(tileID.uuidString.lowercased()).rgba16f"
+    let record = try PatternPaintTileCodec.makeRecord(
+        layerID: firstLayerID,
+        id: tileID,
+        coordinate: PatternPaintTileCoordinate(x: 0, y: 0),
+        logicalBounds: PatternPaintTileBounds(
+            minX: 0,
+            minY: 0,
+            width: 256,
+            height: 256
+        ),
+        pixelSize: pixelSize,
+        rasterRevision: 7,
+        file: path,
+        payload: payload,
+        validatingComponents: false
+    )
+    let firstSurfacePath = "surfaces/"
+        + "\(firstLayerID.uuidString.lowercased()).tiles.json"
+    let secondSurfacePath = "surfaces/"
+        + "\(secondLayerID.uuidString.lowercased()).tiles.json"
     let metadata = PatternProjectMetadata(
         documentID: documentID,
-        title: "Package",
+        title: "Native",
         appVersion: "0.1.0",
         createdAt: Date(timeIntervalSince1970: 1_700_000_000),
         modifiedAt: Date(timeIntervalSince1970: 1_700_000_100),
-        canvasSize: canvasSize,
-        viewport: PatternProjectViewport(
-            scale: 1,
-            offsetX: 0,
-            offsetY: 0
-        ),
-        documentConfiguration: configuration,
-        documentDomainLocked: radial,
-        radialGeometryLocked: radial,
-        activeLayerID: layerID,
+        canvasSize: pixelSize,
+        viewport: PatternProjectViewport(scale: 1, offsetX: 0, offsetY: 0),
+        documentConfiguration: .periodic(.legacy(
+            presetID: .grid,
+            tileSize: PatternSize(width: 256, height: 256)
+        )),
+        documentDomainLocked: true,
+        radialGeometryLocked: false,
+        activeLayerID: firstLayerID,
         layers: [
             PatternProjectLayer(
-                id: layerID,
-                name: "Layer 1",
+                id: firstLayerID,
+                name: "Paint",
                 order: 0,
-                surface: surface
+                surface: PatternProjectPaintTileSurface(
+                    manifestFile: firstSurfacePath,
+                    pixelSize: pixelSize,
+                    rasterRevision: 7,
+                    tiles: [record]
+                )
+            ),
+            PatternProjectLayer(
+                id: secondLayerID,
+                name: "Empty",
+                order: 1,
+                opacity: 0.5,
+                blendMode: .multiply,
+                surface: PatternProjectPaintTileSurface(
+                    manifestFile: secondSurfacePath,
+                    pixelSize: pixelSize,
+                    rasterRevision: 11,
+                    tiles: []
+                )
             ),
         ]
     )
-    return (metadata, rasters)
+    return NativePackageFixture(
+        metadata: metadata,
+        payloads: [path: payload],
+        record: record
+    )
 }
 
-private func opaqueImage(
-    _ size: PixelSize,
-    salt: UInt8
-) throws -> PatternRasterImage {
-    var bytes = [UInt8]()
-    bytes.reserveCapacity(size.width * size.height * 4)
-    for index in 0..<(size.width * size.height) {
-        let value = UInt8(truncatingIfNeeded: index) &+ salt
-        bytes.append(value)
-        bytes.append(value &* 3)
-        bytes.append(value &* 7)
-        bytes.append(255)
+private final class TileProvider:
+    PatternProjectTilePayloadProvider,
+    @unchecked Sendable
+{
+    let payloads: [String: Data]
+    let failure: StreamFixtureError?
+    private(set) var closeCount = 0
+    private(set) var requestCount = 0
+    private(set) var maximumObservedChunkByteCount = 0
+
+    init(
+        payloads: [String: Data],
+        failure: StreamFixtureError? = nil
+    ) {
+        self.payloads = payloads
+        self.failure = failure
     }
-    return try PatternRasterImage(
-        pixelSize: size,
-        bgra8PremultipliedBytes: bytes
+
+    func providePayloadChunks(
+        for record: PatternPaintTileRecord,
+        layerID: UUID,
+        maximumChunkByteCount: Int,
+        consume: (Data) throws -> Void
+    ) throws {
+        requestCount += 1
+        if failure == .provider { throw StreamFixtureError.provider }
+        guard let payload = payloads[record.file] else {
+            throw StreamFixtureError.missingPayload
+        }
+        var offset = 0
+        while offset < payload.count {
+            let end = min(payload.count, offset + maximumChunkByteCount)
+            let chunk = payload.subdata(in: offset..<end)
+            maximumObservedChunkByteCount = max(
+                maximumObservedChunkByteCount,
+                chunk.count
+            )
+            try consume(chunk)
+            offset = end
+        }
+    }
+
+    func close() { closeCount += 1 }
+}
+
+private final class TileConsumer:
+    PatternProjectTilePayloadConsumer,
+    @unchecked Sendable
+{
+    let failure: StreamFixtureError?
+    private var activePath: String?
+    private var activePayload = Data()
+    private(set) var payloads: [String: Data] = [:]
+    private(set) var closeCount = 0
+    private(set) var maximumObservedChunkByteCount = 0
+
+    init(failure: StreamFixtureError? = nil) {
+        self.failure = failure
+    }
+
+    func beginTile(
+        _ record: PatternPaintTileRecord,
+        layerID: UUID
+    ) throws {
+        activePath = record.file
+        activePayload.removeAll(keepingCapacity: true)
+    }
+
+    func consumeTileChunk(
+        _ chunk: Data,
+        record: PatternPaintTileRecord,
+        layerID: UUID
+    ) throws {
+        if failure == .consumer { throw StreamFixtureError.consumer }
+        maximumObservedChunkByteCount = max(
+            maximumObservedChunkByteCount,
+            chunk.count
+        )
+        activePayload.append(chunk)
+    }
+
+    func finishTile(
+        _ record: PatternPaintTileRecord,
+        layerID: UUID
+    ) throws {
+        payloads[try #require(activePath)] = activePayload
+        activePath = nil
+    }
+
+    func close() { closeCount += 1 }
+}
+
+private enum StreamFixtureError: Error, Equatable {
+    case provider
+    case consumer
+    case missingPayload
+}
+
+private func savedArchive(_ fixture: NativePackageFixture) throws -> Data {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let destination = directory.appendingPathComponent("project.patternproj")
+    try PatternProjectPackageCodec.save(
+        metadata: fixture.metadata,
+        tilePayloadProvider: TileProvider(payloads: fixture.payloads),
+        to: destination
     )
+    return try Data(contentsOf: destination)
 }
 
 private func archiveEntries(
@@ -375,17 +412,37 @@ private func archiveEntries(
     })
 }
 
-private func jsonData(_ object: Any) throws -> Data {
-    try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+private func temporaryDirectory() throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: url,
+        withIntermediateDirectories: false
+    )
+    return url
 }
 
-private func mutateObject(
-    _ data: Data,
-    mutation: (inout [String: Any]) -> Void
-) throws -> Data {
-    var object = try #require(
-        JSONSerialization.jsonObject(with: data) as? [String: Any]
+private func temporaryFileURL() -> URL {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("\(UUID().uuidString).patternproj")
+}
+
+private func replacingLayers(
+    in metadata: PatternProjectMetadata,
+    with layers: [PatternProjectLayer]
+) -> PatternProjectMetadata {
+    PatternProjectMetadata(
+        documentID: metadata.documentID,
+        title: metadata.title,
+        appVersion: metadata.appVersion,
+        createdAt: metadata.createdAt,
+        modifiedAt: metadata.modifiedAt,
+        canvasSize: metadata.canvasSize,
+        viewport: metadata.viewport,
+        documentConfiguration: metadata.documentConfiguration,
+        documentDomainLocked: metadata.documentDomainLocked,
+        radialGeometryLocked: metadata.radialGeometryLocked,
+        activeLayerID: metadata.activeLayerID,
+        layers: layers
     )
-    mutation(&object)
-    return try jsonData(object)
 }

@@ -24,12 +24,12 @@ public enum PeriodicBakedRepeatExportError:
     }
 }
 
-private struct DocumentPaintStableBakedPiece {
+struct DocumentPaintStableBakedPiece {
     let outputRegion: SparseTileOutputRegion
     let outputMapping: SparseTileSamplingOutputMapping
 }
 
-private struct DocumentPaintStableBakedPlan {
+struct DocumentPaintStableBakedPlan {
     let pixelSize: PixelSize
     let pieces: [DocumentPaintStableBakedPiece]
 

@@ -62,7 +62,7 @@ struct PatternProjectMetadataCodecTests {
                 id: layer.id,
                 name: layer.name,
                 order: layer.order,
-                surface: .paintTiles(tiled)
+                surface: tiled
             )]
         )
 
@@ -71,8 +71,13 @@ struct PatternProjectMetadataCodecTests {
         let layerJSON = try jsonObject(
             try #require(files.layersByPath.values.first)
         )
-        #expect(layerJSON["surfaceKind"] as? Int == 2)
+        #expect(layerJSON["surfaceKind"] == nil)
         #expect(layerJSON["rasterFile"] == nil)
+        #expect(layerJSON["radialSurfaceManifestFile"] == nil)
+        #expect(
+            layerJSON["paintTileSurfaceManifestFile"] as? String
+                == tiled.manifestFile
+        )
 
         let decoded = try PatternProjectMetadataCodec.decode(files)
         #expect(decoded.metadata == metadata)
@@ -111,7 +116,7 @@ struct PatternProjectMetadataCodecTests {
             configuration: configuration,
             canvasSize: canvasSize,
             radialGeometryLocked: true,
-            surface: .paintTiles(surface)
+            surface: surface
         )
         let files = try PatternProjectMetadataCodec.encode(metadata)
         let decoded = try PatternProjectMetadataCodec.decode(files)
@@ -146,12 +151,12 @@ struct PatternProjectMetadataCodecTests {
             configuration: configuration,
             canvasSize: canvasSize,
             radialGeometryLocked: true,
-            surface: .paintTiles(PatternProjectPaintTileSurface(
+            surface: PatternProjectPaintTileSurface(
                 manifestFile: surface.manifestFile,
                 pixelSize: wrongSize,
                 rasterRevision: surface.rasterRevision,
                 tiles: []
-            ))
+            )
         )
         #expect(throws: PatternProjectLoadError.invalidRasterSize(
             layerID: wrong.activeLayerID,
@@ -177,12 +182,12 @@ struct PatternProjectMetadataCodecTests {
             let metadata = project(
                 configuration: configuration,
                 canvasSize: canvasSize,
-                surface: .paintTiles(PatternProjectPaintTileSurface(
+                surface: PatternProjectPaintTileSurface(
                     manifestFile: "surfaces/maximum-\(index).tiles.json",
                     pixelSize: canvasSize,
                     rasterRevision: UInt64(index + 1),
                     tiles: []
-                ))
+                )
             )
 
             let files = try PatternProjectMetadataCodec.encode(metadata)
@@ -214,51 +219,6 @@ struct PatternProjectMetadataCodecTests {
     }
 
     @Test
-    func radialSparsePagesRoundTripAndMissingPagesStayImplicit() throws {
-        let configuration = SymmetryDocumentConfiguration.finite(
-            .radial(RadialSymmetryConfiguration(
-                kind: .mandala,
-                rayCount: 7,
-                center: WorldPoint(x: 91, y: 137),
-                referenceAngleRadians: 0.37
-            ))
-        )
-        let size = PixelSize(width: 512, height: 384)
-        let compiled = try SymmetryDescriptorCompiler.compile(
-            documentConfiguration: configuration,
-            canvasSize: size
-        )
-        let layout = try #require(compiled.domain.finite?.radial.layout)
-        let stored = Array(layout.residentPages.prefix(1)).map {
-            PatternProjectRadialPage(
-                coordinate: $0.coordinate,
-                file: radialPagePath($0.coordinate)
-            )
-        }
-        let metadata = project(
-            configuration: configuration,
-            canvasSize: size,
-            radialGeometryLocked: true,
-            surface: .radialPages(PatternProjectRadialSurface(
-                manifestFile: "rasters/layer/surface.json",
-                pages: stored
-            ))
-        )
-
-        let decoded = try PatternProjectMetadataCodec.decode(
-            PatternProjectMetadataCodec.encode(metadata)
-        )
-        let layer = try #require(decoded.metadata.layers.first)
-        guard case let .radialPages(surface) = layer.surface else {
-            Issue.record("Expected radial page storage")
-            return
-        }
-        #expect(surface.pages == stored)
-        #expect(surface.pages.count < layout.residentPages.count)
-        #expect(decoded.metadata.radialGeometryLocked)
-    }
-
-    @Test
     func encodingIsCanonicalAndDeterministic() throws {
         let metadata = try fixture(preset: .kaleidoscope30)
         let first = try PatternProjectMetadataCodec.encode(metadata)
@@ -276,12 +236,21 @@ struct PatternProjectMetadataCodecTests {
                 referenceAngleRadians: 9 * .pi
             ))
         )
+        let size = PixelSize(width: 256, height: 256)
+        let compiled = try SymmetryDescriptorCompiler.compile(
+            documentConfiguration: configuration,
+            canvasSize: size
+        )
         let metadata = project(
             configuration: configuration,
-            canvasSize: PixelSize(width: 256, height: 256),
-            surface: try radialSurface(
-                configuration: configuration,
-                canvasSize: PixelSize(width: 256, height: 256)
+            canvasSize: size,
+            surface: PatternProjectPaintTileSurface(
+                manifestFile: "surfaces/layer.tiles.json",
+                pixelSize: try #require(
+                    compiled.domain.finite?.radial.layout?.atlasPixelSize
+                ),
+                rasterRevision: 0,
+                tiles: []
             )
         )
         let decoded = try PatternProjectMetadataCodec.decode(
@@ -339,7 +308,7 @@ struct PatternProjectMetadataCodecTests {
     }
 
     @Test
-    func unsafeRasterPathIsRejected() throws {
+    func unsafeNativeManifestPathIsRejected() throws {
         let valid = try PatternProjectMetadataCodec.encode(
             fixture(preset: .plainCanvas)
         )
@@ -348,16 +317,17 @@ struct PatternProjectMetadataCodecTests {
         layers[layerPath] = try mutateJSON(
             try #require(valid.layersByPath[layerPath])
         ) {
-            $0["rasterFile"] = "../outside.png"
+            $0["paintTileSurfaceManifestFile"] = "../outside.tiles.json"
         }
         let changed = PatternProjectMetadataFiles(
             manifest: valid.manifest,
             symmetry: valid.symmetry,
-            layersByPath: layers
+            layersByPath: layers,
+            surfacesByPath: valid.surfacesByPath
         )
         #expect(
             throws: PatternProjectLoadError.unsafeResourcePath(
-                "../outside.png"
+                "../outside.tiles.json"
             )
         ) {
             try PatternProjectMetadataCodec.decode(changed)
@@ -367,12 +337,14 @@ struct PatternProjectMetadataCodecTests {
         collidingLayers[layerPath] = try mutateJSON(
             try #require(valid.layersByPath[layerPath])
         ) {
-            $0["rasterFile"] = PatternProjectFormat.manifestPath
+            $0["paintTileSurfaceManifestFile"] =
+                PatternProjectFormat.manifestPath
         }
         let colliding = PatternProjectMetadataFiles(
             manifest: valid.manifest,
             symmetry: valid.symmetry,
-            layersByPath: collidingLayers
+            layersByPath: collidingLayers,
+            surfacesByPath: valid.surfacesByPath
         )
         #expect(
             throws: PatternProjectLoadError.resourcePathCollision(
@@ -384,55 +356,54 @@ struct PatternProjectMetadataCodecTests {
     }
 
     @Test
-    func radialPagesRejectDuplicatesAndNonresidentCoordinates() throws {
-        let valid = try PatternProjectMetadataCodec.encode(
-            fixture(preset: .radialMandala)
-        )
-        let surfacePath = try #require(valid.surfacesByPath.keys.first)
-        let surfaceData = try #require(valid.surfacesByPath[surfacePath])
-        let root = try jsonObject(surfaceData)
-        let pages = try #require(root["pages"] as? [[String: Any]])
-        let first = try #require(pages.first)
-
-        var duplicateSurfaces = valid.surfacesByPath
-        duplicateSurfaces[surfacePath] = try mutateJSON(surfaceData) {
-            $0["pages"] = [first, first]
-        }
-        let duplicate = PatternProjectMetadataFiles(
-            manifest: valid.manifest,
-            symmetry: valid.symmetry,
-            layersByPath: valid.layersByPath,
-            surfacesByPath: duplicateSurfaces
-        )
-        let coordinate = RadialPageCoordinate(
-            x: first["x"] as! Int,
-            y: first["y"] as! Int
-        )
-        #expect(
-            throws: PatternProjectLoadError.duplicateRadialPage(coordinate)
-        ) {
-            try PatternProjectMetadataCodec.decode(duplicate)
-        }
-
-        var unexpectedSurfaces = valid.surfacesByPath
-        unexpectedSurfaces[surfacePath] = try mutateJSON(surfaceData) {
-            var page = first
-            page["x"] = 1_000_000
-            page["y"] = -1_000_000
-            $0["pages"] = [page]
-        }
-        let unexpected = PatternProjectMetadataFiles(
-            manifest: valid.manifest,
-            symmetry: valid.symmetry,
-            layersByPath: valid.layersByPath,
-            surfacesByPath: unexpectedSurfaces
-        )
-        #expect(
-            throws: PatternProjectLoadError.unexpectedRadialPage(
-                RadialPageCoordinate(x: 1_000_000, y: -1_000_000)
+    func crossLayerTileIdentityIsValidatedOnceForTheWholeDocument() throws {
+        let size = PixelSize(width: 256, height: 256)
+        let tileID = UUID(
+            uuidString: "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
+        )!
+        let layers = [0, 1].map { order in
+            let layerID = UUID(
+                uuidString: order == 0
+                    ? "11111111-2222-3333-4444-555555555555"
+                    : "66666666-7777-8888-9999-aaaaaaaaaaaa"
+            )!
+            let record = PatternPaintTileRecord(
+                id: tileID,
+                coordinate: .init(x: 0, y: 0),
+                logicalBounds: .init(
+                    minX: 0,
+                    minY: 0,
+                    width: 256,
+                    height: 256
+                ),
+                pixelFormat: .rgba16Float,
+                byteOrder: .littleEndian,
+                byteCount: PatternPaintTileCodec.bytesPerTile,
+                semanticSHA256: String(repeating: "0", count: 64),
+                rasterRevision: 1,
+                file: "tiles/\(order).rgba16f"
             )
-        ) {
-            try PatternProjectMetadataCodec.decode(unexpected)
+            return PatternProjectLayer(
+                id: layerID,
+                name: "Layer \(order)",
+                order: order,
+                surface: PatternProjectPaintTileSurface(
+                    manifestFile: "surfaces/\(order).tiles.json",
+                    pixelSize: size,
+                    rasterRevision: 1,
+                    tiles: [record]
+                )
+            )
+        }
+        let base = project(
+            configuration: .finite(.plain),
+            canvasSize: size,
+            surface: layers[0].surface
+        )
+        let duplicate = replacingLayers(base, with: layers)
+
+        #expect(throws: PatternProjectLoadError.invalidDocumentMetadata) {
+            try PatternProjectMetadataCodec.encode(duplicate)
         }
     }
 
@@ -445,20 +416,24 @@ struct PatternProjectMetadataCodecTests {
                 center: WorldPoint(x: 128, y: 128)
             ))
         )
-        let single = project(
+        let wrong = project(
             configuration: radial,
             canvasSize: PixelSize(width: 256, height: 256),
-            surface: .singleRaster(PatternProjectRasterReference(
-                file: "rasters/layer.png",
-                pixelSize: PixelSize(width: 256, height: 256)
-            ))
+            surface: PatternProjectPaintTileSurface(
+                manifestFile: "surfaces/layer.tiles.json",
+                pixelSize: PixelSize(width: 64, height: 64),
+                rasterRevision: 0,
+                tiles: []
+            )
         )
         #expect(
-            throws: PatternProjectLoadError.surfaceKindMismatch(
-                single.activeLayerID
+            throws: PatternProjectLoadError.invalidRasterSize(
+                layerID: wrong.activeLayerID,
+                width: 64,
+                height: 64
             )
         ) {
-            try PatternProjectMetadataCodec.encode(single)
+            try PatternProjectMetadataCodec.encode(wrong)
         }
 
         let unsupported = SymmetryDocumentConfiguration.finite(
@@ -471,10 +446,12 @@ struct PatternProjectMetadataCodecTests {
         let invalid = project(
             configuration: unsupported,
             canvasSize: PixelSize(width: 256, height: 256),
-            surface: .radialPages(PatternProjectRadialSurface(
-                manifestFile: "rasters/layer/surface.json",
-                pages: []
-            ))
+            surface: PatternProjectPaintTileSurface(
+                manifestFile: "surfaces/layer.tiles.json",
+                pixelSize: PixelSize(width: 256, height: 256),
+                rasterRevision: 0,
+                tiles: []
+            )
         )
         #expect(
             throws: PatternProjectLoadError.descriptorRejected(
@@ -581,19 +558,17 @@ private func fixture(
             tileSize: PatternSize(width: 256, height: 256)
         ))
     }
-    let surface: PatternProjectLayerSurface
-    switch configuration {
-    case .finite(.radial):
-        surface = try radialSurface(
-            configuration: configuration,
-            canvasSize: size
-        )
-    case .periodic, .finite(.plain):
-        surface = .singleRaster(PatternProjectRasterReference(
-            file: "rasters/layer.png",
-            pixelSize: size
-        ))
-    }
+    let compiled = try SymmetryDescriptorCompiler.compile(
+        documentConfiguration: configuration,
+        canvasSize: size
+    )
+    let surface = PatternProjectPaintTileSurface(
+        manifestFile: "surfaces/layer.tiles.json",
+        pixelSize:
+            compiled.domain.finite?.radial.layout?.atlasPixelSize ?? size,
+        rasterRevision: 0,
+        tiles: []
+    )
     return project(
         configuration: configuration,
         canvasSize: size,
@@ -606,7 +581,7 @@ private func project(
     configuration: SymmetryDocumentConfiguration,
     canvasSize: PixelSize,
     radialGeometryLocked: Bool = false,
-    surface: PatternProjectLayerSurface
+    surface: PatternProjectPaintTileSurface
 ) -> PatternProjectMetadata {
     let documentID = UUID(
         uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -641,29 +616,24 @@ private func project(
     )
 }
 
-private func radialSurface(
-    configuration: SymmetryDocumentConfiguration,
-    canvasSize: PixelSize
-) throws -> PatternProjectLayerSurface {
-    let compiled = try SymmetryDescriptorCompiler.compile(
-        documentConfiguration: configuration,
-        canvasSize: canvasSize
+private func replacingLayers(
+    _ metadata: PatternProjectMetadata,
+    with layers: [PatternProjectLayer]
+) -> PatternProjectMetadata {
+    PatternProjectMetadata(
+        documentID: metadata.documentID,
+        title: metadata.title,
+        appVersion: metadata.appVersion,
+        createdAt: metadata.createdAt,
+        modifiedAt: metadata.modifiedAt,
+        canvasSize: metadata.canvasSize,
+        viewport: metadata.viewport,
+        documentConfiguration: metadata.documentConfiguration,
+        documentDomainLocked: metadata.documentDomainLocked,
+        radialGeometryLocked: metadata.radialGeometryLocked,
+        activeLayerID: layers[0].id,
+        layers: layers
     )
-    let layout = try #require(compiled.domain.finite?.radial.layout)
-    let pages = Array(layout.residentPages.prefix(2)).map {
-        PatternProjectRadialPage(
-            coordinate: $0.coordinate,
-            file: radialPagePath($0.coordinate)
-        )
-    }
-    return .radialPages(PatternProjectRadialSurface(
-        manifestFile: "rasters/layer/surface.json",
-        pages: pages
-    ))
-}
-
-private func radialPagePath(_ coordinate: RadialPageCoordinate) -> String {
-    "rasters/layer/page-\(coordinate.x)-\(coordinate.y).png"
 }
 
 private func mutateJSON(

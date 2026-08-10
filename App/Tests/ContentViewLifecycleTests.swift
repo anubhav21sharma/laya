@@ -743,8 +743,12 @@ func hostedBrushPickerUsesOnlyEditorDrawEntriesAndKeepsNominalDiameter() async t
         host.frame = CGRect(x: 0, y: 0, width: 760, height: 48)
 
         await settle(host)
-        let picker: NSPopUpButton = try #require(findSubview(in: host))
         let expectedNames = EditorBrushCatalog.drawEntries.map(\.displayName)
+        let picker = try #require(
+            findSubviews(of: NSPopUpButton.self, in: host).first {
+                $0.itemTitles == expectedNames
+            }
+        )
         #expect(picker.itemTitles == expectedNames)
         #expect(!picker.itemTitles.contains(
             AnchorBrushCatalog.eraser.displayName

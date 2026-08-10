@@ -15,6 +15,10 @@ public enum PatternProjectArchiveError: Error, Equatable, LocalizedError, Sendab
     case archiveTooLarge(actual: UInt64, maximum: UInt64)
     case checksumMismatch(String)
     case missingEntry(String)
+    case invalidChunkByteCount(Int)
+    case emptyChunk(String)
+    case chunkTooLarge(path: String, actual: Int, maximum: Int)
+    case entrySizeMismatch(path: String, expected: UInt64, actual: UInt64)
     case saveFailed
     case injectedSaveFailure
 
@@ -33,6 +37,14 @@ public enum PatternProjectArchiveError: Error, Equatable, LocalizedError, Sendab
         case let .archiveTooLarge(actual, maximum): "Expanded archive size \(actual) bytes exceeds \(maximum)."
         case let .checksumMismatch(path): "Archive entry \(path) failed its checksum."
         case let .missingEntry(path): "Archive entry \(path) is missing."
+        case let .invalidChunkByteCount(count):
+            "Archive chunk size \(count) must be positive."
+        case let .emptyChunk(path):
+            "Archive entry \(path) produced an empty chunk."
+        case let .chunkTooLarge(path, actual, maximum):
+            "Archive entry \(path) produced a \(actual)-byte chunk; the limit is \(maximum)."
+        case let .entrySizeMismatch(path, expected, actual):
+            "Archive entry \(path) produced \(actual) bytes; it declared \(expected)."
         case .saveFailed: "The project archive could not be saved."
         case .injectedSaveFailure: "The injected project-save failure occurred."
         }
@@ -73,6 +85,22 @@ public struct PatternProjectArchive: Sendable {
             throw PatternProjectArchiveError(error)
         }
     }
+
+    public func consumeEntry(
+        at path: String,
+        maximumChunkByteCount: Int,
+        consume: (Data) throws -> Void
+    ) throws {
+        do {
+            try archive.consumeEntry(
+                at: path,
+                maximumChunkByteCount: maximumChunkByteCount,
+                consume: consume
+            )
+        } catch let error as SafeArchiveError {
+            throw PatternProjectArchiveError(error)
+        }
+    }
 }
 
 public enum PatternProjectArchiveCodec {
@@ -80,7 +108,7 @@ public enum PatternProjectArchiveCodec {
     public static let maximumEntryBytes: UInt64 = 256 * 1_024 * 1_024
     public static let maximumExpandedBytes: UInt64 = 1_024 * 1_024 * 1_024
 
-    fileprivate static let limits = SafeArchiveLimits(
+    static let limits = SafeArchiveLimits(
         maximumEntryCount: maximumEntryCount,
         maximumEntryBytes: maximumEntryBytes,
         maximumExpandedBytes: maximumExpandedBytes,
@@ -111,131 +139,6 @@ public enum PatternProjectArchiveIO {
     }
 }
 
-public extension PatternPaintTileCodec {
-    static func decodeArchive(
-        _ archive: PatternProjectArchive,
-        surfaceManifestPaths: [String],
-        maximumDecodedBytes: Int = PatternPaintTileCodec.maximumDecodedBytes
-    ) throws -> [PatternPaintTileSurface] {
-        guard (1...maximumLayerCount).contains(surfaceManifestPaths.count)
-        else {
-            throw PatternPaintTileError.layerCountOutOfRange(
-                surfaceManifestPaths.count
-            )
-        }
-        var manifestPaths = Set<String>()
-        for path in surfaceManifestPaths {
-            guard manifestPaths.insert(path).inserted else {
-                throw PatternPaintTileError.duplicatePath(path)
-            }
-        }
-        var surfaces: [PatternPaintTileSurface] = []
-        surfaces.reserveCapacity(surfaceManifestPaths.count)
-
-        for path in surfaceManifestPaths {
-            let byteCount: Int
-            do {
-                byteCount = try archive.byteCount(for: path)
-            } catch {
-                throw PatternPaintTileError.missingPayload(path)
-            }
-            guard byteCount <= maximumManifestBytes else {
-                throw PatternPaintTileError.invalidManifest
-            }
-        }
-        for path in surfaceManifestPaths {
-            let data: Data
-            do {
-                data = try archive.data(
-                    for: path,
-                    maximumByteCount: UInt64(maximumManifestBytes)
-                )
-            } catch {
-                throw PatternPaintTileError.missingPayload(path)
-            }
-            surfaces.append(try decodeManifestMetadata(
-                data,
-                maximumDecodedBytes: maximumDecodedBytes
-            ))
-        }
-        try validateMetadata(
-            surfaces,
-            maximumDecodedBytes: maximumDecodedBytes
-        )
-
-        var tileCount = 0
-        var decodedBytes = 0
-        for surface in surfaces {
-            let (count, countOverflow) = tileCount.addingReportingOverflow(
-                surface.tiles.count
-            )
-            guard !countOverflow else {
-                throw PatternPaintTileError.tileCountOutOfRange(
-                    actual: Int.max,
-                    maximum: maximumDecodedBytes
-                        / PatternPaintTileCodec.bytesPerTile
-                )
-            }
-            tileCount = count
-            for record in surface.tiles {
-                guard !manifestPaths.contains(record.file) else {
-                    throw PatternPaintTileError.duplicatePath(record.file)
-                }
-                let byteCount: Int
-                do {
-                    byteCount = try archive.byteCount(for: record.file)
-                } catch {
-                    throw PatternPaintTileError.missingPayload(record.file)
-                }
-                guard byteCount == record.byteCount else {
-                    throw PatternPaintTileError.payloadByteCountMismatch(
-                        tileID: record.id,
-                        expected: record.byteCount,
-                        actual: byteCount
-                    )
-                }
-                let (sum, overflow) = decodedBytes.addingReportingOverflow(
-                    byteCount
-                )
-                let actual = overflow ? Int.max : sum
-                guard !overflow, actual <= maximumDecodedBytes else {
-                    throw PatternPaintTileError.decodedByteLimitExceeded(
-                        actual: actual,
-                        maximum: maximumDecodedBytes
-                    )
-                }
-                decodedBytes = sum
-            }
-        }
-
-        var payloads: [String: Data] = [:]
-        payloads.reserveCapacity(tileCount)
-        for surface in surfaces {
-            for record in surface.tiles {
-                let payload: Data
-                do {
-                    payload = try archive.data(
-                        for: record.file,
-                        maximumByteCount: UInt64(record.byteCount)
-                    )
-                } catch {
-                    throw PatternPaintTileError.missingPayload(record.file)
-                }
-                guard payloads.updateValue(payload, forKey: record.file) == nil
-                else {
-                    throw PatternPaintTileError.duplicatePath(record.file)
-                }
-            }
-        }
-        try validate(
-            surfaces,
-            payloadsByPath: payloads,
-            maximumDecodedBytes: maximumDecodedBytes
-        )
-        return surfaces
-    }
-}
-
 enum PatternProjectArchiveSaveInjection: Equatable { case none; case beforeReplacement }
 
 extension PatternProjectArchiveIO {
@@ -263,7 +166,7 @@ extension PatternProjectArchiveIO {
     }
 }
 
-private extension PatternProjectArchiveError {
+extension PatternProjectArchiveError {
     init(_ error: SafeArchiveError) {
         switch error {
         case .emptyArchive: self = .emptyArchive
@@ -279,6 +182,21 @@ private extension PatternProjectArchiveError {
         case let .archiveTooLarge(actual, maximum): self = .archiveTooLarge(actual: actual, maximum: maximum)
         case let .checksumMismatch(path): self = .checksumMismatch(path)
         case let .missingEntry(path): self = .missingEntry(path)
+        case let .invalidChunkByteCount(count):
+            self = .invalidChunkByteCount(count)
+        case let .emptyChunk(path): self = .emptyChunk(path)
+        case let .chunkTooLarge(path, actual, maximum):
+            self = .chunkTooLarge(
+                path: path,
+                actual: actual,
+                maximum: maximum
+            )
+        case let .entrySizeMismatch(path, expected, actual):
+            self = .entrySizeMismatch(
+                path: path,
+                expected: expected,
+                actual: actual
+            )
         case .saveFailed: self = .saveFailed
         }
     }

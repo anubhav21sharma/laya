@@ -86,9 +86,9 @@ func currentResizeHistoryRestoresExactDimensionsAndBytes() async throws {
     guard let renderer = try makeResizeRenderer(pixelSize: oldSize) else { return }
     let original = deterministicResizePixels(oldSize)
     try await installResizePixels(original, into: renderer)
-    var receipt: RasterMutationReceipt?
+    var receipt: LayerGeometryMutationReceipt?
     renderer.onOperationCompleted = {
-        if case let .rasterSuccess(value) = $0 { receipt = value }
+        if case let .layerGeometrySuccess(value) = $0 { receipt = value }
     }
 
     try await renderer.resizeDocument(
@@ -98,22 +98,14 @@ func currentResizeHistoryRestoresExactDimensionsAndBytes() async throws {
     let history = try #require(receipt)
     let resized = try await resizeSnapshotBytes(renderer)
 
-    try await renderer.restoreDocumentRevision(
-        token: RendererOperationToken(rawValue: 11),
-        revision: history.before,
-        targetPixelSize: oldSize
-    )
+    #expect(try renderer.restoreLayerGeometryBefore(history.revision) == oldSize)
     #expect(renderer.pixelSize == oldSize)
     #expect(try await resizeSnapshotBytes(renderer) == original)
 
-    try await renderer.restoreDocumentRevision(
-        token: RendererOperationToken(rawValue: 12),
-        revision: history.after,
-        targetPixelSize: newSize
-    )
+    #expect(try renderer.restoreLayerGeometryAfter(history.revision) == newSize)
     #expect(renderer.pixelSize == newSize)
     #expect(try await resizeSnapshotBytes(renderer) == resized)
-    try await renderer.releasePaintRevisions([history.before.id, history.after.id])
+    try await renderer.releasePaintRevisions([history.revision.id])
 }
 
 @Test

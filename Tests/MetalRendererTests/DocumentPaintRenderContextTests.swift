@@ -1,4 +1,5 @@
 import CShaderTypes
+import EditorCore
 import Foundation
 @preconcurrency import Metal
 @testable import MetalRenderer
@@ -11,6 +12,90 @@ struct DocumentPaintRenderContextTests {
         case ready
         case prepared
         case building
+    }
+
+    @Test
+    @MainActor
+    func lockedActiveLayerRejectsStrokeAndClearWithTypedError() async throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue()
+        else { return }
+        let layerID = UUID()
+        let locked = try LayerDescriptor(
+            id: layerID,
+            name: "Locked",
+            isLocked: true
+        )
+        let context = try DocumentPaintRenderContext(
+            device: device,
+            commandQueue: queue,
+            library: makeShaderLibrary(device: device),
+            geometry: try DocumentPaintGeometry(
+                documentPixelSize: PixelSize(width: 64, height: 64),
+                storagePixelSize: PixelSize(width: 64, height: 64),
+                radialLayout: nil
+            ),
+            initialLayerStack: try LayerStack(
+                layers: [locked],
+                activeLayerID: layerID
+            ),
+            byteBudget: PaintTileDescriptor.residentByteCount * 4,
+            transferByteCapacity: PaintTileDescriptor.residentByteCount * 4,
+            maximumRevisionBytes: PaintTileDescriptor.residentByteCount * 4
+        )
+
+        #expect(throws: DocumentPaintRenderContextError
+            .activeLayerLocked(layerID)) {
+            _ = try context.beginStrokeSurface()
+        }
+        await #expect(throws: DocumentPaintRenderContextError
+            .activeLayerLocked(layerID)) {
+            _ = try await context.clear()
+        }
+        #expect(await context.snapshot().documentGeneration == 0)
+    }
+
+    @Test
+    @MainActor
+    func activeStrokePinsPointerDownLayerAndRejectsStackRetargeting()
+        async throws
+    {
+        guard let fixture = try makeFixture(size: 64) else { return }
+        let context = fixture.context
+        let capability = try context.beginStrokeSurface()
+        #expect(capability.layerID == fixture.layerID)
+        var target = context.layerStack
+        let added = try LayerDescriptor(id: UUID(), name: "Other")
+        try target.add(added, at: 1)
+        try target.setActiveLayer(added.id)
+
+        #expect(throws: DocumentPaintRenderContextError.activeStrokeExists) {
+            _ = try context.applyLayerStack(target)
+        }
+        #expect(context.layerStack.activeLayerID == fixture.layerID)
+        #expect(capability.layerID == fixture.layerID)
+        try context.cancelStrokeSurface(capability)
+        let result = try context.applyLayerStack(target)
+        #expect(result.after == target)
+        try await context.releaseRevisions([result.revision.id])
+    }
+
+    @Test
+    @MainActor
+    func shutdownClosesOwnedLayerHistoryRevision() async throws {
+        guard let fixture = try makeFixture(size: 64) else { return }
+        var target = fixture.context.layerStack
+        try target.rename(fixture.layerID, to: "Renamed")
+        let result = try fixture.context.applyLayerStack(target)
+        #expect(fixture.context.containsLayerRevision(result.revision.id))
+
+        let shutdown = try await fixture.context.shutdown(
+            reason: .sessionReplacement
+        )
+
+        #expect(shutdown.isComplete)
+        #expect(!fixture.context.containsLayerRevision(result.revision.id))
+        #expect(await fixture.context.snapshot().revisionResidentBytes == 0)
     }
 
     @Test
@@ -81,10 +166,11 @@ struct DocumentPaintRenderContextTests {
             storagePixelSize: PixelSize(width: 1, height: 1),
             radialLayout: nil
         )
-        let resized = try await context.resize(to: resizedGeometry)
-        let resizePair = try #require(resized.historyPair)
+        let resized = try #require(
+            try await context.resize(to: resizedGeometry)
+        )
         #expect(resized.generation == 12)
-        try await context.releaseRevisions(resizePair.revisionIDs)
+        try await context.releaseRevisions([resized.revision.id])
         try await context.retryTransactionCleanup()
 
         let output = try await context.collectStableFiniteCanonical(
@@ -387,7 +473,7 @@ struct DocumentPaintRenderContextTests {
             commandQueue: queue,
             library: makeShaderLibrary(device: device),
             geometry: geometry,
-            initialLayerID: UUID(),
+            initialLayerStack: try .single(id: UUID()),
             byteBudget: PaintTileDescriptor.residentByteCount
                 * layout.residentPages.count,
             transferByteCapacity: PaintTileDescriptor.residentByteCount
@@ -3421,7 +3507,7 @@ struct DocumentPaintRenderContextTests {
                 storagePixelSize: PixelSize(width: size, height: size),
                 radialLayout: nil
             ),
-            initialLayerID: layerID,
+            initialLayerStack: try .single(id: layerID),
             byteBudget: byteBudget,
             snapshotPayloadLiabilityByteBudget:
                 snapshotPayloadLiabilityByteBudget,

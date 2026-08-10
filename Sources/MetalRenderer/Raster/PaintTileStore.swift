@@ -198,6 +198,26 @@ public final class PaintTilePreparedRetirement: @unchecked Sendable {
     }
 }
 
+/// Opaque preflight proving that exact snapshot-retained references may be
+/// made current again. Preparing it changes no store state; the owning
+/// registry consumes it immediately before publishing the epoch that refers
+/// to those entries.
+final class PaintTilePreparedReactivation: @unchecked Sendable {
+    fileprivate let storeIdentity: PaintTileStoreIdentity
+    fileprivate let references: [PaintTileReference]
+    fileprivate let retentionToken: PaintTileSnapshotToken
+
+    fileprivate init(
+        storeIdentity: PaintTileStoreIdentity,
+        references: [PaintTileReference],
+        retentionToken: PaintTileSnapshotToken
+    ) {
+        self.storeIdentity = storeIdentity
+        self.references = references
+        self.retentionToken = retentionToken
+    }
+}
+
 /// Opaque, explicitly closed capability retaining exact physical tile
 /// identities for immutable snapshot readers. Dropping the object is a
 /// diagnostic only; it never changes store ownership.
@@ -1105,6 +1125,139 @@ public final class PaintTileStore: @unchecked Sendable {
         }
     }
 
+    /// Reads one exact payload through the snapshot capability that retained
+    /// it. The payload is bounded to one physical tile and never exposes a
+    /// texture or a mutable store lease to the archive layer.
+    func payload(
+        exactReference reference: PaintTileReference,
+        retainedBy token: PaintTileSnapshotToken
+    ) throws -> PaintTilePayload {
+        try withLock {
+            guard reference.storeIdentity == identity else {
+                throw PaintTileStoreError.foreignStoreReference
+            }
+            guard token.storeIdentity == identity,
+                  !token.isClosed,
+                  let retained = snapshotRetentions[token.token],
+                  retained.capabilityIdentity == ObjectIdentifier(token),
+                  Self.snapshotRetentionContains(
+                    reference.identity.tileID,
+                    in: retained.sortedTileIDs
+                  )
+            else {
+                throw PaintTileStoreError.invalidSnapshotRetentionToken
+            }
+            let key = Key(
+                surfaceID: reference.physicalSurfaceID,
+                layerID: reference.layerID,
+                generation: reference.physicalGeneration,
+                coordinate: reference.coordinate
+            )
+            guard tileKeyByID[reference.identity.tileID] == key,
+                  let record = records[key],
+                  self.reference(key: key, record: record) == reference
+            else { throw PaintTileStoreError.staleTileReference }
+
+            let backing: PaintTileBackingSnapshot?
+            if let installed = record.backing {
+                backing = installed
+            } else {
+                backing = try transfer(
+                    evicted: [record.identity],
+                    allocations: []
+                ).captured[record.identity]
+            }
+            switch backing {
+            case .knownClear:
+                return .knownClear
+            case let .rgba16Float(data):
+                guard data.count == PaintTileDescriptor.residentByteCount else {
+                    throw PaintTileStoreError.leaseBindingMismatch
+                }
+                return .rgba16Float(data)
+            case .residentOnly, nil:
+                throw PaintTileStoreError.leaseBindingMismatch
+            }
+        }
+    }
+
+    /// Installs one already-authenticated native RGBA16F payload into an
+    /// unpublished candidate reference. The caller owns candidate authority;
+    /// this layer checks only exact store identity and byte geometry.
+    func installNativeArchivePayload(
+        _ payload: Data,
+        exactReference reference: PaintTileReference
+    ) throws {
+        guard payload.count == PaintTileDescriptor.residentByteCount else {
+            throw PaintTileStoreError.leaseBindingMismatch
+        }
+        try withLock {
+            guard reference.storeIdentity == identity else {
+                throw PaintTileStoreError.foreignStoreReference
+            }
+            let key = Key(
+                surfaceID: reference.physicalSurfaceID,
+                layerID: reference.layerID,
+                generation: reference.physicalGeneration,
+                coordinate: reference.coordinate
+            )
+            guard tileKeyByID[reference.identity.tileID] == key,
+                  let record = records[key],
+                  self.reference(key: key, record: record) == reference,
+                  let texture = record.texture
+            else { throw PaintTileStoreError.staleTileReference }
+            guard let source = payload.withUnsafeBytes({ raw in
+                raw.baseAddress.map {
+                    device.makeBuffer(
+                        bytes: $0,
+                        length: payload.count,
+                        options: .storageModeShared
+                    )
+                } ?? nil
+            }) else {
+                throw PaintTileStoreError.stagingBufferAllocationFailed
+            }
+            guard let queue = device.makeCommandQueue() else {
+                throw PaintTileStoreError.commandQueueUnavailable
+            }
+            guard let command = queue.makeCommandBuffer() else {
+                throw PaintTileStoreError.commandBufferUnavailable
+            }
+            guard let blit = command.makeBlitCommandEncoder() else {
+                throw PaintTileStoreError.blitEncoderUnavailable
+            }
+            let rowBytes = PaintTileDescriptor.side
+                * PaintTileDescriptor.bytesPerPixel
+            blit.copy(
+                from: source,
+                sourceOffset: 0,
+                sourceBytesPerRow: rowBytes,
+                sourceBytesPerImage: PaintTileDescriptor.residentByteCount,
+                sourceSize: MTLSize(
+                    width: PaintTileDescriptor.side,
+                    height: PaintTileDescriptor.side,
+                    depth: 1
+                ),
+                to: texture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            blit.endEncoding()
+            command.commit()
+            command.waitUntilCompleted()
+            guard command.status == .completed else {
+                throw PaintTileStoreError.gpuTransferFailed(
+                    command.error?.localizedDescription
+                        ?? "Native paint tile upload did not complete."
+                )
+            }
+            let nextRevision = try advancedStateRevision()
+            records[key]?.storage.backing = nil
+            stateRevision = nextRevision
+        }
+    }
+
     /// Retains one exact, sorted set across every referenced physical
     /// namespace. Capture may overlap a prepared-retirement barrier, but a
     /// retirement that is already pending has passed the capture boundary and
@@ -1628,6 +1781,92 @@ public final class PaintTileStore: @unchecked Sendable {
                 }
             }
             preparedRetirements.removeValue(forKey: plan.token)
+        }
+    }
+
+    /// Preflights restoration of references whose prior registry retirement
+    /// is pending behind the supplied exact snapshot token.
+    func prepareReactivation(
+        _ references: [PaintTileReference],
+        retainedBy token: PaintTileSnapshotToken
+    ) throws -> PaintTilePreparedReactivation? {
+        guard !references.isEmpty else { return nil }
+        return try withLock {
+            guard token.storeIdentity == identity,
+                  !token.isClosed,
+                  let retained = snapshotRetentions[token.token],
+                  retained.capabilityIdentity == ObjectIdentifier(token)
+            else { throw PaintTileStoreError.invalidSnapshotRetentionToken }
+            let requestedTileIDs = references.map(\.identity.tileID).sorted()
+            var retainedIndex = 0
+            for tileID in requestedTileIDs {
+                while retainedIndex < retained.sortedTileIDs.count,
+                      retained.sortedTileIDs[retainedIndex] < tileID
+                {
+                    retainedIndex += 1
+                }
+                guard retainedIndex < retained.sortedTileIDs.count,
+                      retained.sortedTileIDs[retainedIndex] == tileID
+                else {
+                    throw PaintTileStoreError.invalidSnapshotRetentionToken
+                }
+            }
+            for index in references.indices {
+                let value = references[index]
+                guard value.storeIdentity == identity else {
+                    throw PaintTileStoreError.foreignStoreReference
+                }
+                if index > references.startIndex {
+                    if references[index - 1] == value {
+                        throw PaintTileStoreError.duplicateReference
+                    }
+                    guard references[index - 1] < value else {
+                        throw PaintTileStoreError.unsortedReference
+                    }
+                }
+                let key = Key(
+                    surfaceID: value.physicalSurfaceID,
+                    layerID: value.layerID,
+                    generation: value.physicalGeneration,
+                    coordinate: value.coordinate
+                )
+                guard pendingRetirementKeys.contains(key),
+                      let record = records[key],
+                      reference(key: key, record: record) == value
+                else { throw PaintTileStoreError.staleTileReference }
+            }
+            return PaintTilePreparedReactivation(
+                storeIdentity: identity,
+                references: references,
+                retentionToken: token
+            )
+        }
+    }
+
+    /// Nonthrowing terminal paired with `prepareReactivation`. The retained
+    /// token is still live here, so every preflighted physical record must be
+    /// present and pending retirement.
+    func commitReactivation(_ plan: PaintTilePreparedReactivation) {
+        precondition(plan.storeIdentity == identity)
+        withLock {
+            let token = plan.retentionToken
+            precondition(!token.isClosed)
+            precondition(
+                snapshotRetentions[token.token]?.capabilityIdentity
+                    == ObjectIdentifier(token)
+            )
+            for value in plan.references {
+                let key = Key(
+                    surfaceID: value.physicalSurfaceID,
+                    layerID: value.layerID,
+                    generation: value.physicalGeneration,
+                    coordinate: value.coordinate
+                )
+                precondition(pendingRetirementKeys.remove(key) != nil)
+                precondition(records[key].map {
+                    reference(key: key, record: $0) == value
+                } == true)
+            }
         }
     }
 

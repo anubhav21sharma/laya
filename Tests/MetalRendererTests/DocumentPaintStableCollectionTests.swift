@@ -1,4 +1,5 @@
 import Foundation
+import EditorCore
 @preconcurrency import Metal
 @testable import MetalRenderer
 import PatternEngine
@@ -193,7 +194,7 @@ struct DocumentPaintStableCollectionTests {
             commandQueue: queue,
             library: try makeLibrary(device),
             geometry: geometry,
-            initialLayerID: UUID(),
+            initialLayerStack: try .single(id: UUID()),
             byteBudget: PaintTileDescriptor.residentByteCount
                 * layout.residentPages.count,
             transferByteCapacity: PaintTileDescriptor.residentByteCount
@@ -616,7 +617,7 @@ struct DocumentPaintStableCollectionTests {
             commandQueue: queue,
             library: try makeLibrary(device),
             geometry: geometry,
-            initialLayerID: UUID(),
+            initialLayerStack: try .single(id: UUID()),
             byteBudget: PaintTileDescriptor.residentByteCount
                 * layout.residentPages.count,
             transferByteCapacity: PaintTileDescriptor.residentByteCount
@@ -1488,7 +1489,7 @@ struct DocumentPaintStableCollectionTests {
                     storagePixelSize: pixelSize,
                     radialLayout: nil
                 ),
-                initialLayerID: UUID(),
+                initialLayerStack: try .single(id: UUID()),
                 byteBudget: PaintTileDescriptor.residentByteCount * 4,
                 transferByteCapacity:
                     PaintTileDescriptor.residentByteCount * 8,

@@ -221,9 +221,9 @@ struct RadialShaderTests {
             )
         )
 
-        var resizeReceipt: RasterMutationReceipt?
+        var resizeReceipt: LayerGeometryMutationReceipt?
         renderer.onOperationCompleted = { completion in
-            if case let .rasterSuccess(receipt) = completion {
+            if case let .layerGeometrySuccess(receipt) = completion {
                 resizeReceipt = receipt
             }
         }
@@ -232,8 +232,8 @@ struct RadialShaderTests {
             to: PixelSize(width: 64, height: 64)
         )
         let receipt = try #require(resizeReceipt)
-        #expect(receipt.before.documentPixelSize == PixelSize(width: 128, height: 128))
-        #expect(receipt.after.documentPixelSize == PixelSize(width: 64, height: 64))
+        #expect(receipt.beforePixelSize == PixelSize(width: 128, height: 128))
+        #expect(receipt.afterPixelSize == PixelSize(width: 64, height: 64))
         #expect(renderer.pixelSize == PixelSize(width: 64, height: 64))
         #expect(renderer.radialGeometryLocked)
 
@@ -288,9 +288,9 @@ struct RadialShaderTests {
             tokenValue: 10
         )
         let original = try await radialCanonicalBytes(renderer)
-        var resizeReceipt: RasterMutationReceipt?
+        var resizeReceipt: LayerGeometryMutationReceipt?
         renderer.onOperationCompleted = { completion in
-            if case let .rasterSuccess(receipt) = completion {
+            if case let .layerGeometrySuccess(receipt) = completion {
                 resizeReceipt = receipt
             }
         }
@@ -304,25 +304,24 @@ struct RadialShaderTests {
         #expect(renderer.pixelSize == PixelSize(width: 64, height: 64))
         #expect(renderer.radialGeometryLocked)
 
-        try await renderer.restoreDocumentRevision(
-            token: RendererOperationToken(rawValue: 12),
-            revision: receipt.before
+        #expect(
+            try renderer.restoreLayerGeometryBefore(receipt.revision)
+                == PixelSize(width: 128, height: 128)
         )
         #expect(renderer.pixelSize == PixelSize(width: 128, height: 128))
         #expect(try await radialCanonicalBytes(renderer) == original)
         #expect(renderer.radialGeometryLocked)
 
-        try await renderer.restoreDocumentRevision(
-            token: RendererOperationToken(rawValue: 13),
-            revision: receipt.after
+        #expect(
+            try renderer.restoreLayerGeometryAfter(receipt.revision)
+                == PixelSize(width: 64, height: 64)
         )
         #expect(renderer.pixelSize == PixelSize(width: 64, height: 64))
         #expect(try await radialCanonicalBytes(renderer) == resized)
         #expect(renderer.radialGeometryLocked)
 
         try await renderer.releasePaintRevisions([
-            receipt.before.id,
-            receipt.after.id,
+            receipt.revision.id,
         ])
     }
 }

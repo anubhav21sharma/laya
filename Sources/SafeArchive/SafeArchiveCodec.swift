@@ -5,97 +5,53 @@ public enum SafeArchiveCodec {
         entries: [String: Data],
         limits: SafeArchiveLimits
     ) throws -> Data {
-        guard !entries.isEmpty else { throw SafeArchiveError.emptyArchive }
-        guard entries.count <= limits.maximumEntryCount,
-              entries.count <= Int(UInt16.max)
-        else { throw SafeArchiveError.entryCountOutOfRange(entries.count) }
-
-        var total: UInt64 = 0
-        var validated: [(path: String, name: Data, data: Data)] = []
-        validated.reserveCapacity(entries.count)
-        for path in entries.keys.sorted() {
-            try validateArchivePath(path, limits: limits)
-            let data = entries[path]!
-            let count = UInt64(data.count)
-            guard count <= limits.maximumEntryBytes else {
-                throw SafeArchiveError.entryTooLarge(
-                    path: path, actual: count, maximum: limits.maximumEntryBytes
+        let validated = try validateEntryDescriptors(
+            entries.map {
+                SafeArchiveEntryDescriptor(
+                    path: $0.key,
+                    byteCount: UInt64($0.value.count)
                 )
-            }
-            let (nextTotal, overflow) = total.addingReportingOverflow(count)
-            guard !overflow, nextTotal <= limits.maximumExpandedBytes else {
-                throw SafeArchiveError.archiveTooLarge(
-                    actual: overflow ? UInt64.max : nextTotal,
-                    maximum: limits.maximumExpandedBytes
-                )
-            }
-            total = nextTotal
-            guard let name = path.data(using: .utf8), name.count <= Int(UInt16.max) else {
-                throw SafeArchiveError.unsafePath(path)
-            }
-            validated.append((path, name, data))
-        }
+            },
+            limits: limits
+        )
 
         var output = Data()
         var central: [CentralWriteRecord] = []
         central.reserveCapacity(validated.count)
         for entry in validated {
-            guard output.count <= Int(UInt32.max), entry.data.count <= Int(UInt32.max) else {
+            guard output.count <= Int(UInt32.max),
+                  let data = entries[entry.path]
+            else {
                 throw SafeArchiveError.unsupportedZIP64
             }
             let offset = UInt32(output.count)
-            let size = UInt32(entry.data.count)
-            let checksum = CRC32.checksum(entry.data)
-            output.appendUInt32(ZipSignature.localFile)
-            output.appendUInt16(20)
-            output.appendUInt16(ZipFlag.utf8)
-            output.appendUInt16(ZipCompression.stored)
-            output.appendUInt16(0)
-            output.appendUInt16(ZipDate.firstJanuary1980)
-            output.appendUInt32(checksum)
-            output.appendUInt32(size)
-            output.appendUInt32(size)
-            output.appendUInt16(UInt16(entry.name.count))
-            output.appendUInt16(0)
-            output.append(entry.name)
-            output.append(entry.data)
+            let checksum = CRC32.checksum(data)
+            output.append(localHeader(
+                name: entry.name,
+                checksum: checksum,
+                size: entry.size
+            ))
+            output.append(data)
             central.append(CentralWriteRecord(
-                name: entry.name, checksum: checksum, size: size, localOffset: offset
+                name: entry.name,
+                checksum: checksum,
+                size: entry.size,
+                localOffset: offset
             ))
         }
 
         guard output.count <= Int(UInt32.max) else { throw SafeArchiveError.unsupportedZIP64 }
         let centralOffset = UInt32(output.count)
         for entry in central {
-            output.appendUInt32(ZipSignature.centralDirectory)
-            output.appendUInt16(ZipVersion.unix20)
-            output.appendUInt16(20)
-            output.appendUInt16(ZipFlag.utf8)
-            output.appendUInt16(ZipCompression.stored)
-            output.appendUInt16(0)
-            output.appendUInt16(ZipDate.firstJanuary1980)
-            output.appendUInt32(entry.checksum)
-            output.appendUInt32(entry.size)
-            output.appendUInt32(entry.size)
-            output.appendUInt16(UInt16(entry.name.count))
-            output.appendUInt16(0)
-            output.appendUInt16(0)
-            output.appendUInt16(0)
-            output.appendUInt16(0)
-            output.appendUInt32(ZipExternalAttribute.regularFile0644)
-            output.appendUInt32(entry.localOffset)
-            output.append(entry.name)
+            output.append(centralHeader(entry))
         }
         let centralSize = output.count - Int(centralOffset)
         guard centralSize <= Int(UInt32.max) else { throw SafeArchiveError.unsupportedZIP64 }
-        output.appendUInt32(ZipSignature.endOfCentralDirectory)
-        output.appendUInt16(0)
-        output.appendUInt16(0)
-        output.appendUInt16(UInt16(central.count))
-        output.appendUInt16(UInt16(central.count))
-        output.appendUInt32(UInt32(centralSize))
-        output.appendUInt32(centralOffset)
-        output.appendUInt16(0)
+        output.append(endOfCentralDirectory(
+            entryCount: central.count,
+            centralSize: UInt32(centralSize),
+            centralOffset: centralOffset
+        ))
         return output
     }
 
@@ -256,9 +212,135 @@ public enum SafeArchiveCodec {
         guard cursor == centralEnd else { throw SafeArchiveError.malformedArchive }
         return SafeArchive(storage: data, records: records)
     }
+
+    static func validateEntryDescriptors(
+        _ entries: [SafeArchiveEntryDescriptor],
+        limits: SafeArchiveLimits
+    ) throws -> [SafeArchiveValidatedEntry] {
+        guard !entries.isEmpty else { throw SafeArchiveError.emptyArchive }
+        guard entries.count <= limits.maximumEntryCount,
+              entries.count <= Int(UInt16.max)
+        else { throw SafeArchiveError.entryCountOutOfRange(entries.count) }
+
+        var seenPaths = Set<String>()
+        var total: UInt64 = 0
+        var validated: [SafeArchiveValidatedEntry] = []
+        validated.reserveCapacity(entries.count)
+        for entry in entries.sorted(by: { $0.path < $1.path }) {
+            guard seenPaths.insert(entry.path).inserted else {
+                throw SafeArchiveError.duplicateEntry(entry.path)
+            }
+            try validateArchivePath(entry.path, limits: limits)
+            guard entry.byteCount <= limits.maximumEntryBytes else {
+                throw SafeArchiveError.entryTooLarge(
+                    path: entry.path,
+                    actual: entry.byteCount,
+                    maximum: limits.maximumEntryBytes
+                )
+            }
+            let (nextTotal, overflow) = total.addingReportingOverflow(
+                entry.byteCount
+            )
+            guard !overflow,
+                  nextTotal <= limits.maximumExpandedBytes
+            else {
+                throw SafeArchiveError.archiveTooLarge(
+                    actual: overflow ? UInt64.max : nextTotal,
+                    maximum: limits.maximumExpandedBytes
+                )
+            }
+            total = nextTotal
+            guard entry.byteCount <= UInt64(UInt32.max),
+                  let name = entry.path.data(using: .utf8),
+                  name.count <= Int(UInt16.max)
+            else {
+                if entry.byteCount > UInt64(UInt32.max) {
+                    throw SafeArchiveError.unsupportedZIP64
+                }
+                throw SafeArchiveError.unsafePath(entry.path)
+            }
+            validated.append(SafeArchiveValidatedEntry(
+                path: entry.path,
+                name: name,
+                size: UInt32(entry.byteCount)
+            ))
+        }
+        return validated
+    }
+
+    static func localHeader(
+        name: Data,
+        checksum: UInt32,
+        size: UInt32
+    ) -> Data {
+        var output = Data()
+        output.reserveCapacity(30 + name.count)
+        output.appendUInt32(ZipSignature.localFile)
+        output.appendUInt16(20)
+        output.appendUInt16(ZipFlag.utf8)
+        output.appendUInt16(ZipCompression.stored)
+        output.appendUInt16(0)
+        output.appendUInt16(ZipDate.firstJanuary1980)
+        output.appendUInt32(checksum)
+        output.appendUInt32(size)
+        output.appendUInt32(size)
+        output.appendUInt16(UInt16(name.count))
+        output.appendUInt16(0)
+        output.append(name)
+        return output
+    }
+
+    static func centralHeader(_ entry: CentralWriteRecord) -> Data {
+        var output = Data()
+        output.reserveCapacity(46 + entry.name.count)
+        output.appendUInt32(ZipSignature.centralDirectory)
+        output.appendUInt16(ZipVersion.unix20)
+        output.appendUInt16(20)
+        output.appendUInt16(ZipFlag.utf8)
+        output.appendUInt16(ZipCompression.stored)
+        output.appendUInt16(0)
+        output.appendUInt16(ZipDate.firstJanuary1980)
+        output.appendUInt32(entry.checksum)
+        output.appendUInt32(entry.size)
+        output.appendUInt32(entry.size)
+        output.appendUInt16(UInt16(entry.name.count))
+        output.appendUInt16(0)
+        output.appendUInt16(0)
+        output.appendUInt16(0)
+        output.appendUInt16(0)
+        output.appendUInt32(ZipExternalAttribute.regularFile0644)
+        output.appendUInt32(entry.localOffset)
+        output.append(entry.name)
+        return output
+    }
+
+    static func endOfCentralDirectory(
+        entryCount: Int,
+        centralSize: UInt32,
+        centralOffset: UInt32
+    ) -> Data {
+        precondition(entryCount <= Int(UInt16.max))
+        var output = Data()
+        output.reserveCapacity(22)
+        output.appendUInt32(ZipSignature.endOfCentralDirectory)
+        output.appendUInt16(0)
+        output.appendUInt16(0)
+        output.appendUInt16(UInt16(entryCount))
+        output.appendUInt16(UInt16(entryCount))
+        output.appendUInt32(centralSize)
+        output.appendUInt32(centralOffset)
+        output.appendUInt16(0)
+        return output
+    }
 }
 
-private struct CentralWriteRecord {
+struct SafeArchiveValidatedEntry {
+    let path: String
+    let name: Data
+    let size: UInt32
+}
+
+struct CentralWriteRecord {
     let name: Data
     let checksum: UInt32
     let size: UInt32

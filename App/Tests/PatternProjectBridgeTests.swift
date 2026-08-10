@@ -1,3 +1,4 @@
+import EditorCore
 import Foundation
 import Metal
 @testable import MetalRenderer
@@ -5,16 +6,14 @@ import PatternEngine
 import PatternFile
 import Testing
 
-@Suite("Pattern project app bridge")
+@Suite("Pattern project app bridge", .serialized)
 struct PatternProjectBridgeTests {
     @Test
     @MainActor
-    func rendererPackageAndFreshRendererRoundTripCommittedPixels()
+    func nativeMultiLayerSaveLoadSavePreservesRawTilesAndMetadata()
         async throws
     {
-        guard let (device, library) = try bridgeTestMetal() else {
-            return
-        }
+        guard let (device, library) = try bridgeTestMetal() else { return }
         let size = PixelSize(width: 64, height: 64)
         let renderer = try GridRenderer(
             device: device,
@@ -25,8 +24,23 @@ struct PatternProjectBridgeTests {
                 tiling: .brick
             )
         )
-        let bytes = bridgeOpaqueBytes(size, salt: 17)
-        try await bridgeInstallSingleRaster(bytes, into: renderer)
+        try await bridgeInstallSingleRaster(
+            bridgeOpaqueBytes(size, salt: 17),
+            into: renderer
+        )
+        var stack = renderer.layerStack
+        let top = try LayerDescriptor(
+            id: UUID(
+                uuidString: "66666666-7777-8888-9999-aaaaaaaaaaaa"
+            )!,
+            name: "Highlights",
+            isVisible: false,
+            opacity: 0.5,
+            isLocked: true,
+            blendMode: .screen
+        )
+        try stack.add(top, at: 1)
+        _ = try renderer.applyLayerStack(stack)
         renderer.restoreSavedViewport(
             worldCenter: WorldPoint(x: 41, y: 27),
             zoom: 2
@@ -35,172 +49,105 @@ struct PatternProjectBridgeTests {
             documentID: UUID(
                 uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
             )!,
-            layerID: UUID(
-                uuidString: "11111111-2222-3333-4444-555555555555"
-            )!,
             title: "Bridge",
             createdAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
+        let modifiedAt = Date(timeIntervalSince1970: 1_700_000_100)
 
-        let captured = try await PatternProjectBridge.capture(
+        let firstCapture = try await PatternProjectBridge.capture(
             renderer: renderer,
             identity: identity,
             appVersion: "0.1.0",
-            modifiedAt: Date(timeIntervalSince1970: 1_700_000_100)
+            modifiedAt: modifiedAt
         )
-        let encoded = try PatternProjectPackageCodec.encode(
-            metadata: captured.metadata,
-            rastersByPath: captured.rastersByPath
-        )
-        let decoded = try PatternProjectPackageCodec.open(encoded)
-        let snapshot = try PatternProjectBridge.committedSnapshot(
-            from: decoded
-        )
-        let restored = try await bridgeRestoredRenderer(
+        let firstBytes = try save(firstCapture)
+        let decoded = try PatternProjectPackageCodec.open(firstBytes)
+        let restored = try await PatternProjectBridge.makeRenderer(
+            from: decoded,
             device: device,
             library: library,
-            drawableSize: PatternSize(width: 160, height: 120),
-            snapshot: snapshot
-        )
-        restored.restoreSavedViewport(
-            worldCenter: WorldPoint(
-                x: decoded.metadata.metadata.viewport.offsetX,
-                y: decoded.metadata.metadata.viewport.offsetY
-            ),
-            zoom: decoded.metadata.metadata.viewport.scale
+            drawableSize: PatternSize(width: 160, height: 120)
         )
 
-        #expect(try await restored.captureCommittedDocument() == snapshot)
+        #expect(restored.layerStack == stack)
         #expect(restored.viewport.worldCenter == WorldPoint(x: 41, y: 27))
         #expect(restored.viewport.zoom == 2)
+        #expect(restored.documentDomainLocked)
+        #expect(!restored.radialGeometryLocked)
         #expect(try PatternProjectBridge.identity(from: decoded) == identity)
+        let originalNative = try renderer.captureNativeArchive()
+        let restoredNative = try restored.captureNativeArchive()
+        defer {
+            originalNative.close()
+            restoredNative.close()
+        }
+        #expect(originalNative.layers == restoredNative.layers)
+        for tile in originalNative.layers.flatMap(\.tiles) {
+            #expect(try originalNative.payload(for: tile.persistedID)
+                == restoredNative.payload(for: tile.persistedID))
+        }
+
+        let secondCapture = try await PatternProjectBridge.capture(
+            renderer: restored,
+            identity: identity,
+            appVersion: "0.1.0",
+            modifiedAt: modifiedAt
+        )
+        #expect(try save(secondCapture) == firstBytes)
     }
 
     @Test
     @MainActor
-    func importedRendererKeepsBrushRuntimeAndCanDraw() async throws {
-        guard let (device, library) = try bridgeTestMetal() else {
-            return
-        }
-        let size = PixelSize(width: 64, height: 64)
-        let sourceRenderer = try GridRenderer(
-            device: device,
-            library: library,
-            drawableSize: PatternSize(width: 160, height: 120),
-            configuration: TilingCanvasConfiguration(
-                pixelSize: size,
-                tiling: .grid
-            )
-        )
-        try sourceRenderer.installNativeHarnessBrushes()
-        let source = EditorSessionController(renderer: sourceRenderer)
-        source.handleInkColor(
-            try #require(
-                InkColor(red: 0.2, green: 0.3, blue: 0.4, alpha: 1)
-            )
-        )
-        source.model.confirmBrushDiameter(32)
-        source.handleGridVisibility(true)
-
-        let importedRenderer = try await bridgeRestoredRenderer(
-            device: device,
-            library: library,
-            drawableSize: PatternSize(width: 160, height: 120),
-            snapshot:
-                try await sourceRenderer.captureCommittedDocument()
-        )
-        #expect(importedRenderer.preparedBrush(for: .draw) == nil)
-        #expect(importedRenderer.preparedBrush(for: .erase) == nil)
-
-        let imported = try source.replacementSession(
-            renderer: importedRenderer
-        )
-
-        #expect(importedRenderer.preparedBrush(for: .draw) != nil)
-        #expect(importedRenderer.preparedBrush(for: .erase) != nil)
-        #expect(imported.model.inkColor == source.model.inkColor)
-        #expect(imported.model.brushDiameter == 32)
-        #expect(imported.model.showGrid)
-
-        imported.handleStrokeSamples([
-            .mouse(
-                position: ScreenPoint(x: 16, y: 16),
-                timestamp: 1,
-                phase: .began
-            ),
-            .mouse(
-                position: ScreenPoint(x: 48, y: 48),
-                timestamp: 2,
-                phase: .ended
-            ),
-        ])
-        try await importedRenderer
-            .completePendingInteractiveStrokeAndAwaitIdle()
-
-        #expect(importedRenderer.isIdle)
-        #expect(imported.model.canUndo)
-        #expect(importedRenderer.documentDomainLocked)
-    }
-
-    @Test
-    @MainActor
-    func transparentButLogicallyEditedPeriodicProjectStaysLocked()
-        async throws
-    {
-        guard let (device, library) = try bridgeTestMetal() else {
-            return
-        }
-        let size = PixelSize(width: 64, height: 64)
+    func nativeImportedRendererCanInstallBrushesAndDraw() async throws {
+        guard let (device, library) = try bridgeTestMetal() else { return }
         let renderer = try GridRenderer(
             device: device,
             library: library,
             drawableSize: PatternSize(width: 64, height: 64),
             configuration: TilingCanvasConfiguration(
-                pixelSize: size,
+                pixelSize: PixelSize(width: 64, height: 64),
                 tiling: .grid
             )
         )
-        try renderer.reconcileGeometryLock(documentIsEmpty: false)
-        let identity = PatternProjectIdentity(
-            documentID: UUID(),
-            layerID: UUID(),
-            title: "Transparent edit",
-            createdAt: Date(timeIntervalSince1970: 1_700_000_000)
-        )
-
         let captured = try await PatternProjectBridge.capture(
             renderer: renderer,
-            identity: identity,
-            appVersion: "0.1.0",
-            modifiedAt: Date(timeIntervalSince1970: 1_700_000_001)
+            identity: .new(),
+            appVersion: "0.1.0"
         )
-        let decoded = try PatternProjectPackageCodec.open(
-            PatternProjectPackageCodec.encode(
-                metadata: captured.metadata,
-                rastersByPath: captured.rastersByPath
-            )
-        )
-        let restored = try await bridgeRestoredRenderer(
+        let decoded = try PatternProjectPackageCodec.open(save(captured))
+        let importedRenderer = try await PatternProjectBridge.makeRenderer(
+            from: decoded,
             device: device,
             library: library,
-            drawableSize: PatternSize(width: 64, height: 64),
-            snapshot: try PatternProjectBridge.committedSnapshot(
-                from: decoded
-            )
+            drawableSize: PatternSize(width: 64, height: 64)
         )
+        try importedRenderer.installNativeHarnessBrushes()
+        let imported = EditorSessionController(renderer: importedRenderer)
+        imported.handleStrokeSamples([
+            .mouse(
+                position: ScreenPoint(x: 10, y: 10),
+                timestamp: 1,
+                phase: .began
+            ),
+            .mouse(
+                position: ScreenPoint(x: 40, y: 40),
+                timestamp: 2,
+                phase: .ended
+            ),
+        ])
+        _ = try await importedRenderer
+            .completePendingInteractiveStrokeAndAwaitIdle()
 
-        #expect(restored.documentDomainLocked)
-        #expect(!restored.radialGeometryLocked)
+        #expect(importedRenderer.isIdle)
+        #expect(importedRenderer.documentDomainLocked)
+        #expect(try importedRenderer.captureNativeArchive()
+            .layers.flatMap(\.tiles).count > 0)
     }
 
     @Test
     @MainActor
-    func schemaThreeUnlockedProjectRejectsNonzeroCommittedPixels()
-        async throws
-    {
-        guard let (device, library) = try bridgeTestMetal() else {
-            return
-        }
+    func nonemptyNativeProjectCannotClaimAnUnlockedDocument() async throws {
+        guard let (device, library) = try bridgeTestMetal() else { return }
         let size = PixelSize(width: 64, height: 64)
         let renderer = try GridRenderer(
             device: device,
@@ -221,7 +168,7 @@ struct PatternProjectBridgeTests {
             appVersion: "0.1.0"
         )
         let metadata = captured.metadata
-        let invalidMetadata = PatternProjectMetadata(
+        let invalid = PatternProjectMetadata(
             documentID: metadata.documentID,
             title: metadata.title,
             appVersion: metadata.appVersion,
@@ -236,109 +183,38 @@ struct PatternProjectBridgeTests {
             layers: metadata.layers
         )
         let decoded = try PatternProjectPackageCodec.open(
-            PatternProjectPackageCodec.encode(
-                metadata: invalidMetadata,
-                rastersByPath: captured.rastersByPath
+            save(captured, metadata: invalid)
+        )
+
+        await #expect(throws: PatternProjectBridgeError.incompatibleSurface) {
+            try await PatternProjectBridge.makeRenderer(
+                from: decoded,
+                device: device,
+                library: library,
+                drawableSize: PatternSize(width: 64, height: 64)
             )
-        )
-
-        #expect(throws: PatternProjectBridgeError.incompatibleSurface) {
-            try PatternProjectBridge.committedSnapshot(from: decoded)
         }
-    }
-
-    @Test
-    @MainActor
-    func radialBridgeUsesLogicalPageCoordinatesAndPreservesLock()
-        async throws
-    {
-        guard let (device, library) = try bridgeTestMetal() else {
-            return
-        }
-        let size = PixelSize(width: 64, height: 64)
-        let configuration = SymmetryDocumentConfiguration.finite(
-            .radial(RadialSymmetryConfiguration(
-                kind: .mandala,
-                rayCount: 7,
-                center: WorldPoint(x: 31, y: 29),
-                referenceAngleRadians: 0.1
-            ))
-        )
-        let compiled = try SymmetryDescriptorCompiler.compile(
-            documentConfiguration: configuration,
-            canvasSize: size
-        )
-        let resident = try #require(
-            compiled.domain.finite?.radial.layout?.residentPages.first
-        )
-        let pageSize = PixelSize(
-            width: RadialSectorLayout.pageSide,
-            height: RadialSectorLayout.pageSide
-        )
-        let initial = CommittedDocumentSnapshot(
-            canvasSize: size,
-            documentConfiguration: configuration,
-            radialGeometryLocked: true,
-            storage: .radialPages([
-                CommittedRadialPagePixels(
-                    coordinate: resident.coordinate,
-                    bgra8PremultipliedBytes:
-                        bridgeOpaqueBytes(pageSize, salt: 23)
-                ),
-            ])
-        )
-        let renderer = try await bridgeRestoredRenderer(
-            device: device,
-            library: library,
-            drawableSize: PatternSize(width: 64, height: 64),
-            snapshot: initial
-        )
-        let identity = PatternProjectIdentity(
-            documentID: UUID(),
-            layerID: UUID(),
-            title: "Radial",
-            createdAt: Date(timeIntervalSince1970: 1_700_000_000)
-        )
-
-        let captured = try await PatternProjectBridge.capture(
-            renderer: renderer,
-            identity: identity,
-            appVersion: "0.1.0",
-            modifiedAt: Date(timeIntervalSince1970: 1_700_000_001)
-        )
-        let decoded = try PatternProjectPackageCodec.open(
-            PatternProjectPackageCodec.encode(
-                metadata: captured.metadata,
-                rastersByPath: captured.rastersByPath
-            )
-        )
-        let restored = try PatternProjectBridge.committedSnapshot(
-            from: decoded
-        )
-
-        #expect(restored == initial)
-        #expect(decoded.metadata.metadata.radialGeometryLocked)
     }
 }
 
-@MainActor
-private func bridgeRestoredRenderer(
-    device: any MTLDevice,
-    library: any MTLLibrary,
-    drawableSize: PatternSize,
-    snapshot: CommittedDocumentSnapshot
-) async throws -> GridRenderer {
-    let renderer = try GridRenderer(
-        device: device,
-        library: library,
-        drawableSize: drawableSize,
-        configuration: try TilingCanvasConfiguration(
-            pixelSize: snapshot.canvasSize,
-            documentConfiguration: snapshot.documentConfiguration
-        )
+private func save(
+    _ captured: CapturedPatternProject,
+    metadata: PatternProjectMetadata? = nil
+) throws -> Data {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: false
     )
-    try await renderer.restoreCommittedDocument(snapshot)
-    return renderer
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let destination = directory.appendingPathComponent("project.patternproj")
+    try PatternProjectPackageCodec.save(
+        metadata: metadata ?? captured.metadata,
+        tilePayloadProvider: captured,
+        to: destination
+    )
+    return try Data(contentsOf: destination)
 }
 
 @MainActor

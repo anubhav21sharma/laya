@@ -379,6 +379,7 @@ PATTERN_WIRE_CONSTANT PatternUInt32
     PatternBufferIndexDocumentPaintMutationReduction = 13;
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternBufferIndexDocumentPaintMutationSourceBytes = 14;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternBufferIndexLayerBlendUniforms = 15;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushShape = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexBrushGrain = 3;
@@ -390,6 +391,9 @@ PATTERN_WIRE_CONSTANT PatternUInt32
     PatternTextureIndexDocumentPaintPrediction = 24;
 PATTERN_WIRE_CONSTANT PatternUInt32
     PatternTextureIndexDocumentPaintDestination = 25;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexLayerBlendBackdrop = 26;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexLayerBlendSource = 27;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternTextureIndexLayerBlendDestination = 28;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintMutationABIVersion = 2;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintFlagBaseKnownClear = 1;
@@ -402,6 +406,11 @@ PATTERN_WIRE_CONSTANT PatternUInt32 PatternDocumentPaintFlagRadialTargetMask = 8
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseMaximumFallbackTextures = 16;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseMaximumTier2Textures = 512;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseSamplingABIVersion = 1;
+
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternLayerBlendABIVersion = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternLayerBlendWireNormal = 0;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternLayerBlendWireMultiply = 1;
+PATTERN_WIRE_CONSTANT PatternUInt32 PatternLayerBlendWireScreen = 2;
 
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseRoleCanonical = 0;
 PATTERN_WIRE_CONSTANT PatternUInt32 PatternSparseRoleAuthoritative = 1;

@@ -14,6 +14,10 @@ public enum SafeArchiveError: Error, Equatable, LocalizedError, Sendable {
     case archiveTooLarge(actual: UInt64, maximum: UInt64)
     case checksumMismatch(String)
     case missingEntry(String)
+    case invalidChunkByteCount(Int)
+    case emptyChunk(String)
+    case chunkTooLarge(path: String, actual: Int, maximum: Int)
+    case entrySizeMismatch(path: String, expected: UInt64, actual: UInt64)
     case saveFailed
 
     public var errorDescription: String? {
@@ -36,9 +40,50 @@ public enum SafeArchiveError: Error, Equatable, LocalizedError, Sendable {
             "Expanded archive size \(actual) bytes exceeds \(maximum)."
         case let .checksumMismatch(path): "Archive entry \(path) failed its checksum."
         case let .missingEntry(path): "Archive entry \(path) is missing."
+        case let .invalidChunkByteCount(count):
+            "Archive chunk size \(count) must be positive."
+        case let .emptyChunk(path):
+            "Archive entry \(path) produced an empty chunk."
+        case let .chunkTooLarge(path, actual, maximum):
+            "Archive entry \(path) produced a \(actual)-byte chunk; the limit is \(maximum)."
+        case let .entrySizeMismatch(path, expected, actual):
+            "Archive entry \(path) produced \(actual) bytes; it declared \(expected)."
         case .saveFailed: "The archive could not be saved."
         }
     }
+}
+
+public struct SafeArchiveEntryDescriptor: Equatable, Sendable {
+    public let path: String
+    public let byteCount: UInt64
+
+    public init(path: String, byteCount: UInt64) {
+        self.path = path
+        self.byteCount = byteCount
+    }
+}
+
+/// Synchronous, close-once source of bounded entry chunks. Implementations
+/// retain their snapshot/lease until `close()` and must not require the whole
+/// archive payload to be materialized.
+public protocol SafeArchiveEntryProvider: AnyObject {
+    func archiveEntries() throws -> [SafeArchiveEntryDescriptor]
+    func provideChunks(
+        for path: String,
+        maximumChunkByteCount: Int,
+        consume: (Data) throws -> Void
+    ) throws
+    func close()
+}
+
+/// Synchronous destination for a fully preflighted archive. A consumer sees
+/// sorted entries and bounded chunks, and is closed exactly once on success or
+/// on any begin/chunk/finish failure.
+public protocol SafeArchiveEntryConsumer: AnyObject {
+    func beginEntry(_ entry: SafeArchiveEntryDescriptor) throws
+    func consume(_ chunk: Data, for path: String) throws
+    func finishEntry(_ entry: SafeArchiveEntryDescriptor) throws
+    func close()
 }
 
 public struct SafeArchiveLimits: Equatable, Sendable {
@@ -99,6 +144,65 @@ public struct SafeArchive: Sendable {
             throw SafeArchiveError.missingEntry(path)
         }
         return record.dataRange.count
+    }
+
+    public func consumeEntries(
+        maximumChunkByteCount: Int,
+        consumer: any SafeArchiveEntryConsumer
+    ) throws {
+        defer { consumer.close() }
+        guard maximumChunkByteCount > 0 else {
+            throw SafeArchiveError.invalidChunkByteCount(
+                maximumChunkByteCount
+            )
+        }
+        for path in paths {
+            guard let record = records[path] else {
+                throw SafeArchiveError.missingEntry(path)
+            }
+            let entry = SafeArchiveEntryDescriptor(
+                path: path,
+                byteCount: UInt64(record.dataRange.count)
+            )
+            try consumer.beginEntry(entry)
+            var cursor = record.dataRange.lowerBound
+            while cursor < record.dataRange.upperBound {
+                let end = min(
+                    record.dataRange.upperBound,
+                    cursor + maximumChunkByteCount
+                )
+                try consumer.consume(
+                    storage.subdata(in: cursor..<end),
+                    for: path
+                )
+                cursor = end
+            }
+            try consumer.finishEntry(entry)
+        }
+    }
+
+    public func consumeEntry(
+        at path: String,
+        maximumChunkByteCount: Int,
+        consume: (Data) throws -> Void
+    ) throws {
+        guard maximumChunkByteCount > 0 else {
+            throw SafeArchiveError.invalidChunkByteCount(
+                maximumChunkByteCount
+            )
+        }
+        guard let record = records[path] else {
+            throw SafeArchiveError.missingEntry(path)
+        }
+        var cursor = record.dataRange.lowerBound
+        while cursor < record.dataRange.upperBound {
+            let end = min(
+                record.dataRange.upperBound,
+                cursor + maximumChunkByteCount
+            )
+            try consume(storage.subdata(in: cursor..<end))
+            cursor = end
+        }
     }
 }
 

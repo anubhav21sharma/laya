@@ -1,3 +1,4 @@
+import EditorCore
 import Foundation
 import Metal
 @testable import MetalRenderer
@@ -472,6 +473,191 @@ struct DocumentPaintSurfaceStoreTests {
         let snapshot = registry.sharedTileStore.snapshot()
         #expect(snapshot.activeSnapshotTokenCount == 0)
         #expect(snapshot.aggregateSnapshotReferenceCount == 0)
+    }
+
+    @Test
+    func layerCompositeCaptureBindsExactStackOrderBeforeRetention() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let first = try LayerDescriptor(id: UUID(), name: "Bottom")
+        let second = try LayerDescriptor(id: UUID(), name: "Top")
+        let stack = try LayerStack(
+            layers: [first, second],
+            activeLayerID: second.id
+        )
+        let registry = try makeRegistry(
+            device: device,
+            layers: [first.id, second.id],
+            layerStack: stack
+        )
+        let candidate = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [
+                first.id: [.init(x: 0, y: 0)],
+                second.id: [.init(x: 0, y: 0)],
+            ]
+        )
+        registry.commitPrepared(try registry.prepareCommit(candidate))
+        let reversed = try LayerStack(
+            layers: [second, first],
+            activeLayerID: first.id
+        )
+        let before = registry.sharedTileStore.snapshot()
+
+        #expect(throws: DocumentPaintSurfaceStoreError.layerStackMismatch(
+            expected: [first.id, second.id],
+            actual: [second.id, first.id]
+        )) {
+            _ = try registry.prepareLayerCompositePlan(
+                layerStack: reversed,
+                addressing: .finite(registry.geometry.storagePixelSize),
+                addressingRevision: 1,
+                outputRegion: SparseTileOutputRegion(
+                    minX: 0, minY: 0, maxX: 1, maxY: 1
+                ),
+                outputGeometryRevision: 1,
+                limits: .documentProduction
+            )
+        }
+        let after = registry.sharedTileStore.snapshot()
+        #expect(after.activeSnapshotTokenCount
+            == before.activeSnapshotTokenCount)
+        #expect(after.aggregateSnapshotReferenceCount
+            == before.aggregateSnapshotReferenceCount)
+        #expect(after.snapshotMetadataByteCount
+            == before.snapshotMetadataByteCount)
+        #expect(after.snapshotPayloadDebtByteCount
+            == before.snapshotPayloadDebtByteCount)
+
+        let plan = try registry.prepareLayerCompositePlan(
+            layerStack: stack,
+            addressing: .finite(registry.geometry.storagePixelSize),
+            addressingRevision: 2,
+            outputRegion: SparseTileOutputRegion(
+                minX: 0, minY: 0, maxX: 1, maxY: 1
+            ),
+            outputGeometryRevision: 3,
+            limits: .documentProduction
+        )
+        #expect(plan.layers.map(\.layerID) == [first.id, second.id])
+        #expect(plan.documentGeneration == registry.generation)
+        let retained = registry.sharedTileStore.snapshot()
+        #expect(retained.activeSnapshotTokenCount == 1)
+        #expect(retained.aggregateSnapshotReferenceCount == 2)
+        #expect(retained.snapshotPayloadDebtByteCount == tileBytes * 2)
+        plan.close()
+        plan.close()
+        let closed = registry.sharedTileStore.snapshot()
+        #expect(closed.activeSnapshotTokenCount == 0)
+        #expect(closed.aggregateSnapshotReferenceCount == 0)
+        #expect(closed.snapshotMetadataByteCount == 0)
+        #expect(closed.snapshotPayloadDebtByteCount == 0)
+    }
+
+    @Test
+    func layerCompositeCaptureRetriesWholeEpochWithoutMixedRoots() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let bottom = try LayerDescriptor(id: UUID(), name: "Bottom")
+        let top = try LayerDescriptor(id: UUID(), name: "Top")
+        let stack = try LayerStack(
+            layers: [bottom, top],
+            activeLayerID: top.id
+        )
+        let registry = try makeRegistry(
+            device: device,
+            layers: stack.orderedLayerIDs,
+            layerStack: stack
+        )
+        let initial = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [bottom.id: [.init(x: 0, y: 0)]]
+        )
+        registry.commitPrepared(try registry.prepareCommit(initial))
+        let replacement = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [top.id: [.init(x: 1, y: 0)]]
+        )
+        let preparedReplacement = try registry.prepareCommit(replacement)
+        let publication = OneShotDocumentPaintAction()
+        registry.testingVisibleSelectionCompleted = {
+            publication.run {
+                registry.commitPrepared(preparedReplacement)
+            }
+        }
+
+        let plan = try registry.prepareLayerCompositePlan(
+            layerStack: stack,
+            addressing: .finite(registry.geometry.storagePixelSize),
+            addressingRevision: 5,
+            outputRegion: SparseTileOutputRegion(
+                minX: 256, minY: 0, maxX: 257, maxY: 1
+            ),
+            outputGeometryRevision: 7,
+            limits: .documentProduction
+        )
+        registry.testingVisibleSelectionCompleted = nil
+
+        #expect(publication.runCount == 1)
+        #expect(plan.documentGeneration == replacement.generation)
+        #expect(plan.layers.map(\.layerID) == [top.id])
+        let retained = registry.sharedTileStore.snapshot()
+        #expect(retained.activeSnapshotTokenCount == 1)
+        #expect(retained.aggregateSnapshotReferenceCount == 1)
+        plan.close()
+        let closed = registry.sharedTileStore.snapshot()
+        #expect(closed.activeSnapshotTokenCount == 0)
+        #expect(closed.aggregateSnapshotReferenceCount == 0)
+        #expect(closed.snapshotMetadataByteCount == 0)
+        #expect(closed.snapshotPayloadDebtByteCount == 0)
+    }
+
+    @Test
+    func layerCompositeAggregateRetentionFailurePublishesNoPartialRoot()
+        throws
+    {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let bottom = try LayerDescriptor(id: UUID(), name: "Bottom")
+        let top = try LayerDescriptor(id: UUID(), name: "Top")
+        let stack = try LayerStack(
+            layers: [bottom, top],
+            activeLayerID: top.id
+        )
+        let geometry = try DocumentPaintGeometry(
+            documentPixelSize: PixelSize(width: 256, height: 256),
+            storagePixelSize: PixelSize(width: 256, height: 256),
+            radialLayout: nil
+        )
+        let registry = try DocumentPaintSurfaceStore(
+            device: device,
+            byteBudget: tileBytes * 4,
+            snapshotPayloadLiabilityByteBudget: tileBytes,
+            geometry: geometry,
+            layerIDs: stack.orderedLayerIDs,
+            layerStack: stack
+        )
+        let candidate = try registry.makeCandidate(
+            dirtyCoordinatesByLayer: [
+                bottom.id: [.init(x: 0, y: 0)],
+                top.id: [.init(x: 0, y: 0)],
+            ]
+        )
+        registry.commitPrepared(try registry.prepareCommit(candidate))
+        let before = registry.sharedTileStore.snapshot()
+
+        #expect(throws: PaintTileStoreError.snapshotRetentionLimitExceeded(
+            limit: .payloadDebtBytes,
+            required: tileBytes * 2,
+            maximum: tileBytes
+        )) {
+            _ = try registry.prepareLayerCompositePlan(
+                layerStack: stack,
+                addressing: .finite(geometry.storagePixelSize),
+                addressingRevision: 1,
+                outputRegion: SparseTileOutputRegion(
+                    minX: 0, minY: 0, maxX: 1, maxY: 1
+                ),
+                outputGeometryRevision: 1,
+                limits: .documentProduction
+            )
+        }
+
+        #expect(registry.sharedTileStore.snapshot() == before)
     }
 
     @Test
@@ -1548,7 +1734,8 @@ struct DocumentPaintSurfaceStoreTests {
 
     private func makeRegistry(
         device: any MTLDevice,
-        layers: [UUID]
+        layers: [UUID],
+        layerStack: LayerStack? = nil
     ) throws -> DocumentPaintSurfaceStore {
         try DocumentPaintSurfaceStore(
             device: device,
@@ -1558,7 +1745,8 @@ struct DocumentPaintSurfaceStoreTests {
                 storagePixelSize: PixelSize(width: 1_024, height: 1_024),
                 radialLayout: nil
             ),
-            layerIDs: layers
+            layerIDs: layers,
+            layerStack: layerStack
         )
     }
 

@@ -1,5 +1,6 @@
 import Foundation
 @preconcurrency import Metal
+import EditorCore
 import PatternEngine
 
 enum DocumentPaintRenderContextError: Error, Equatable, Sendable {
@@ -9,6 +10,10 @@ enum DocumentPaintRenderContextError: Error, Equatable, Sendable {
     case activeTransientDisplaySourceExists
     case staleTransientDisplaySource
     case activeCommandOperationExists
+    case activeLayerLocked(UUID)
+    case layerHistoryBudgetExceeded(required: Int, available: Int)
+    case layerHistoryIdentityOverflow
+    case missingLayerHistoryRevision(StoredRasterRevisionID)
     case isShutdown
 }
 
@@ -17,6 +22,16 @@ struct DocumentPaintSurfaceApplicationResult: Equatable, Sendable {
     let layerID: UUID
     let generation: UInt64
     let historyPair: PendingRasterRevisionPair?
+}
+
+struct DocumentPaintLayerApplicationResult: Equatable, Sendable {
+    let before: LayerStack
+    let after: LayerStack
+    let beforeGeometry: DocumentPaintGeometry
+    let afterGeometry: DocumentPaintGeometry
+    let baseGeneration: UInt64
+    let generation: UInt64
+    let revision: LayerSurfaceRevisionReference
 }
 
 struct DocumentPaintTransientDisplaySource: @unchecked Sendable {
@@ -132,6 +147,8 @@ struct DocumentPaintRenderContextSnapshot:
     let visiblePlan: DocumentPaintVisiblePlanControllerSnapshot
     let stableCollectionRenderer:
         DocumentPaintStableSnapshotRendererSnapshot
+    let layerCompositor: LayerCompositorSnapshot
+    let pendingLayerDisplayAcknowledgementCount: Int
 }
 
 /// Serialized command boundary around the transaction coordinator. Every phase
@@ -156,7 +173,7 @@ private actor DocumentPaintTransactionWorker {
     private let transaction: DocumentPaintSurfaceTransaction
     private let registry: DocumentPaintSurfaceStore
     private let revisionStore: TiledRasterRevisionStore
-    private let activeLayerID: UUID
+    private let mutationBackend: any DocumentPaintSurfaceMutationBackend
     private var dispatchSequence: UInt64 = 0
     private var isShutdown = false
 
@@ -164,12 +181,12 @@ private actor DocumentPaintTransactionWorker {
         transaction: DocumentPaintSurfaceTransaction,
         registry: DocumentPaintSurfaceStore,
         revisionStore: TiledRasterRevisionStore,
-        activeLayerID: UUID
+        mutationBackend: any DocumentPaintSurfaceMutationBackend
     ) {
         self.transaction = transaction
         self.registry = registry
         self.revisionStore = revisionStore
-        self.activeLayerID = activeLayerID
+        self.mutationBackend = mutationBackend
     }
 
     func snapshot() -> DocumentPaintTransactionWorkerSnapshot {
@@ -190,7 +207,7 @@ private actor DocumentPaintTransactionWorker {
             let current = registry.snapshot()
             let request = DocumentPaintSurfaceMutationRequest(
                 kind: .stroke,
-                layerID: activeLayerID,
+                layerID: source.layerID,
                 baseGeometry: current.geometry,
                 candidateGeometry: current.geometry,
                 dirtyCoordinates: source.coordinates,
@@ -210,15 +227,17 @@ private actor DocumentPaintTransactionWorker {
         }
     }
 
-    func clear() async throws -> DocumentPaintSurfaceApplicationResult {
+    func clear(
+        layerID: UUID
+    ) async throws -> DocumentPaintSurfaceApplicationResult {
         try beginCommand()
         let current = registry.snapshot()
         let references = current.layers.first {
-            $0.layerID == activeLayerID
+            $0.layerID == layerID
         }?.references ?? []
         let request = DocumentPaintSurfaceMutationRequest(
             kind: .clear,
-            layerID: activeLayerID,
+            layerID: layerID,
             baseGeometry: current.geometry,
             candidateGeometry: current.geometry,
             dirtyCoordinates: [],
@@ -231,41 +250,20 @@ private actor DocumentPaintTransactionWorker {
         )
     }
 
-    func resize(
+    func resizeAllLayers(
         to candidateGeometry: DocumentPaintGeometry,
         targetRadialConfiguration: RadialSymmetryConfiguration?
-    ) async throws -> DocumentPaintSurfaceApplicationResult {
+    ) throws -> LayerSurfaceTransaction? {
         try beginCommand()
         let current = registry.snapshot()
         if current.geometry == candidateGeometry {
-            return DocumentPaintSurfaceApplicationResult(
-                didPublish: false,
-                layerID: activeLayerID,
-                generation: current.generation,
-                historyPair: nil
-            )
+            return nil
         }
-        let references = current.layers.first {
-            $0.layerID == activeLayerID
-        }?.references ?? []
-        let resizePlan = try DocumentPaintSurfaceTransaction.makeResizePlan(
-            baseCoordinates: references.map(\.coordinate),
-            sourceGeometry: current.geometry,
-            candidateGeometry: candidateGeometry
-        )
-        let request = DocumentPaintSurfaceMutationRequest(
-            kind: .resize,
-            layerID: activeLayerID,
-            baseGeometry: current.geometry,
-            candidateGeometry: candidateGeometry,
+        return try registry.prepareLayerSurfaceResizeTransaction(
+            layerStack: current.layerStack,
+            geometry: candidateGeometry,
             targetRadialConfiguration: targetRadialConfiguration,
-            dirtyCoordinates: resizePlan.afterCoordinates,
-            explicitlyRemovedCoordinates: resizePlan.removedCoordinates,
-            requiresHistoryPair: true
-        )
-        return try executeMutation(
-            transaction.prepareMutation(request),
-            requiresHistory: true
+            backend: mutationBackend
         )
     }
 
@@ -500,21 +498,37 @@ private actor DocumentPaintTransactionWorker {
 /// read immutable snapshots. Fallible work runs on owned actors off MainActor.
 @MainActor
 final class DocumentPaintRenderContext {
+    private struct LayerDisplayTransientObligation {
+        let source: DocumentPaintTransientDisplaySource
+        let submission: PreparedLayerCompositeDisplaySubmission
+    }
+
     private let identity = UUID()
-    let activeLayerID: UUID
+    var activeLayerID: UUID { registry.layerStack.activeLayerID }
+    var layerStack: LayerStack { registry.layerStack }
 
     private let registry: DocumentPaintSurfaceStore
     private let revisionStore: TiledRasterRevisionStore
     private let transactionWorker: DocumentPaintTransactionWorker
     private let visiblePlanController: DocumentPaintVisiblePlanController
     private let stableCollectionRenderer: DocumentPaintStableSnapshotRenderer
+    private let layerCompositor: LayerCompositor
     private let stableCollectionRendererLimits =
         DocumentPaintStableSnapshotRendererLimits.production
+    private let maximumRevisionBytes: Int
+    private let layerRevisionStoreIdentity =
+        RasterRevisionStoreIdentitySource.shared.makeIdentity()
+    private var nextLayerRevisionID: UInt64 = 1
+    private var layerHistoryRevisions:
+        [StoredRasterRevisionID: LayerSurfaceHistoryRevision] = [:]
+    private var layerHistoryResidentBytes = 0
     private let maximumEncodedImportBytes =
         DocumentPaintStableSnapshotRendererLimits.production.maximumOutputBytes
     private let activeStrokeSurfaceSlot = DocumentPaintActiveStrokeSurfaceSlot()
     private var activeTransientDisplaySource:
         DocumentPaintTransientDisplaySource?
+    private var layerDisplayTransientObligations:
+        [UUID: LayerDisplayTransientObligation] = [:]
     private var activeCommandOperationID: UUID?
     private var hasPublishedTransientSurfaceSnapshot = false
     private var hasRequestedShutdown = false
@@ -555,7 +569,7 @@ final class DocumentPaintRenderContext {
         commandQueue: any MTLCommandQueue,
         library: any MTLLibrary,
         geometry: DocumentPaintGeometry,
-        initialLayerID: UUID,
+        initialLayerStack: LayerStack,
         byteBudget: Int,
         snapshotPayloadLiabilityByteBudget: Int? = nil,
         transferByteCapacity: Int,
@@ -571,7 +585,8 @@ final class DocumentPaintRenderContext {
                 snapshotPayloadLiabilityByteBudget,
             transferByteCapacity: transferByteCapacity,
             geometry: geometry,
-            layerIDs: [initialLayerID],
+            layerIDs: initialLayerStack.orderedLayerIDs,
+            layerStack: initialLayerStack,
             generation: generation
         )
         let revisionStore = TiledRasterRevisionStore(
@@ -624,14 +639,14 @@ final class DocumentPaintRenderContext {
             )
         )
 
-        activeLayerID = initialLayerID
         self.registry = registry
         self.revisionStore = revisionStore
+        self.maximumRevisionBytes = maximumRevisionBytes
         transactionWorker = DocumentPaintTransactionWorker(
             transaction: transaction,
             registry: registry,
             revisionStore: revisionStore,
-            activeLayerID: initialLayerID
+            mutationBackend: mutationBackend
         )
         visiblePlanController = DocumentPaintVisiblePlanController(
             device: device,
@@ -649,6 +664,12 @@ final class DocumentPaintRenderContext {
                 limits: .production,
                 planLimits: .documentProduction
             )
+        layerCompositor = try LayerCompositor.make(
+            device: device,
+            library: library,
+            limits: .production,
+            planLimits: .documentProduction
+        )
     }
 
     func snapshot() async -> DocumentPaintRenderContextSnapshot {
@@ -658,9 +679,14 @@ final class DocumentPaintRenderContext {
         async let planSnapshot = visiblePlanController.snapshot()
         async let collectionRendererSnapshot =
             stableCollectionRenderer.snapshot()
+        async let layerCompositorSnapshot = layerCompositor.snapshot()
         let transaction = await transactionSnapshot
         let visiblePlan = await planSnapshot
         let stableCollectionRenderer = await collectionRendererSnapshot
+        let layerCompositor = await layerCompositorSnapshot
+        let (revisionResidentBytes, revisionOverflow) = revisionStore
+            .residentBytes.addingReportingOverflow(layerHistoryResidentBytes)
+        precondition(!revisionOverflow, "Revision diagnostics overflow")
         return DocumentPaintRenderContextSnapshot(
             storeIdentity: registry.tileStoreIdentity,
             activeLayerID: activeLayerID,
@@ -678,14 +704,17 @@ final class DocumentPaintRenderContext {
                 tileStoreSnapshot.snapshotMetadataByteCount,
             snapshotPayloadLiabilityByteCount:
                 tileStoreSnapshot.snapshotPayloadDebtByteCount,
-            revisionResidentBytes: revisionStore.residentBytes,
+            revisionResidentBytes: revisionResidentBytes,
             activeStrokeSurfaceCount:
                 activeStrokeSurfaceSlot.current == nil ? 0 : 1,
             activeCommandOperationCount:
                 activeCommandOperationID == nil ? 0 : 1,
             transaction: transaction,
             visiblePlan: visiblePlan,
-            stableCollectionRenderer: stableCollectionRenderer
+            stableCollectionRenderer: stableCollectionRenderer,
+            layerCompositor: layerCompositor,
+            pendingLayerDisplayAcknowledgementCount:
+                layerDisplayTransientObligations.count
         )
     }
 
@@ -702,9 +731,16 @@ final class DocumentPaintRenderContext {
             throw DocumentPaintRenderContextError
                 .activeCommandOperationExists
         }
+        let activeLayer: LayerDescriptor
+        do {
+            activeLayer = try registry.layerStack
+                .activeLayerForRasterMutation()
+        } catch LayerStackError.activeLayerLocked(let layerID) {
+            throw DocumentPaintRenderContextError.activeLayerLocked(layerID)
+        }
         let slot = activeStrokeSurfaceSlot
         let capability = try registry.issueCurrentStrokeSurfaceCapability(
-            layerID: activeLayerID,
+            layerID: activeLayer.id,
             ownerIdentity: identity,
             onTerminal: { [weak slot] token in
                 slot?.finish(token: token)
@@ -736,7 +772,7 @@ final class DocumentPaintRenderContext {
               frame.surface.authenticates(capability),
               frame.generation == capability.generation,
               frame.surface.storeIdentity == registry.tileStoreIdentity,
-              frame.surface.layerID == activeLayerID,
+              frame.surface.layerID == capability.layerID,
               frame.surface.pixelSize == capability.pixelSize,
               frame.surface.radialLayout == capability.radialLayout,
               frame.surface.authoritativeSurfaceID
@@ -947,23 +983,59 @@ final class DocumentPaintRenderContext {
         )
     }
 
+    func captureNativeArchive() throws
+        -> DocumentPaintNativeArchiveCapture
+    {
+        try registry.captureNativeArchive()
+    }
+
+    func importNativeArchive(
+        _ manifest: DocumentPaintNativeArchiveImportManifest,
+        consume: @escaping @Sendable
+            (DocumentPaintNativeArchiveImportWriter) throws -> Void
+    ) async throws {
+        let claim = try beginCommandOperation()
+        defer { finishCommandOperation(claim) }
+        let writer = try registry.prepareNativeArchiveImport(manifest)
+        do {
+            try await Task.detached(priority: .utility) {
+                try consume(writer)
+                try writer.finish()
+            }.value
+        } catch {
+            do {
+                try writer.cancel()
+            } catch let cleanupError {
+                throw cleanupError
+            }
+            throw error
+        }
+    }
+
     func exportFiniteCanvas(
         strategy: TilingStrategy,
         outputGeometryRevision: UInt64,
         transparentBackground: Bool
     ) async throws -> FiniteCanvasExport {
-        let snapshot = try registry.captureStableCanonicalSnapshot(
-            layerID: activeLayerID,
-            addressing: Self.storageAddressing(for: strategy),
-            addressingRevision: outputGeometryRevision,
-            outputMapping: try Self.finiteOutputMapping(for: strategy)
-        )
-        return try await FiniteCanvasExport.collectStable(
+        guard case .finite = strategy.documentConfiguration else {
+            throw FiniteCanvasExportError.periodicDocument
+        }
+        let image = try await collectLayerComposite(
             strategy: strategy,
-            snapshot: snapshot,
-            renderer: stableCollectionRenderer,
+            outputRegion: try DocumentPaintStableExportAdapter.outputRegion(
+                pixelSize: strategy.canvasSize
+            ),
             outputGeometryRevision: outputGeometryRevision,
-            transparentBackground: transparentBackground
+            outputMapping: try Self.finiteOutputMapping(for: strategy)
+        ).image
+        return FiniteCanvasExport(
+            pixelSize: strategy.canvasSize,
+            bytesPerRow: image.bytesPerRow,
+            bgra8Bytes: try DocumentPaintStableExportAdapter.destinationBytes(
+                image,
+                transparentBackground: transparentBackground
+            ),
+            hasTransparentBackground: transparentBackground
         )
     }
 
@@ -972,18 +1044,22 @@ final class DocumentPaintRenderContext {
         density: Int,
         outputGeometryRevision: UInt64
     ) async throws -> PeriodicRepeatExport {
-        let snapshot = try registry.captureStableCanonicalSnapshot(
-            layerID: activeLayerID,
-            addressing: Self.storageAddressing(for: strategy),
-            addressingRevision: outputGeometryRevision,
-            outputMapping: .affine(.identity)
-        )
-        return try await PeriodicRepeatExport.collectStableMetric(
+        let plan = try DocumentPaintStableMetricRepeatPlan(
             strategy: strategy,
-            density: density,
-            snapshot: snapshot,
-            renderer: stableCollectionRenderer,
-            outputGeometryRevision: outputGeometryRevision
+            density: density
+        )
+        let image = try await collectLayerComposite(
+            strategy: strategy,
+            outputRegion: try DocumentPaintStableExportAdapter.outputRegion(
+                pixelSize: plan.pixelSize
+            ),
+            outputGeometryRevision: outputGeometryRevision,
+            outputMapping: plan.outputMapping
+        ).image
+        return PeriodicRepeatExport(
+            pixelSize: plan.pixelSize,
+            bytesPerRow: image.bytesPerRow,
+            bgra8Bytes: [UInt8](image.bgra8PremultipliedBytes)
         )
     }
 
@@ -991,17 +1067,54 @@ final class DocumentPaintRenderContext {
         strategy: TilingStrategy,
         outputGeometryRevision: UInt64
     ) async throws -> PeriodicRepeatExport {
-        let snapshot = try registry.captureStableCanonicalSnapshot(
-            layerID: activeLayerID,
-            addressing: Self.storageAddressing(for: strategy),
-            addressingRevision: outputGeometryRevision,
-            outputMapping: .affine(.identity)
+        guard case .periodic = strategy.documentConfiguration else {
+            throw PeriodicBakedRepeatExportError.finiteDocument
+        }
+        if strategy.presetID.supportsMetricRepeatExport {
+            return try await exportPeriodicMetric(
+                strategy: strategy,
+                density: strategy.canvasSize.width,
+                outputGeometryRevision: outputGeometryRevision
+            )
+        }
+        let plan = try DocumentPaintStableBakedPlan(strategy: strategy)
+        let fullRegion = try DocumentPaintStableExportAdapter.outputRegion(
+            pixelSize: plan.pixelSize
         )
-        return try await PeriodicRepeatExport.collectStableBaked(
-            strategy: strategy,
-            snapshot: snapshot,
-            renderer: stableCollectionRenderer,
-            outputGeometryRevision: outputGeometryRevision
+        let destination = try DocumentPaintTightBGRA8Descriptor(
+            outputRegion: fullRegion,
+            maximumByteCount:
+                DocumentPaintStableExportAdapter.limits.maximumOutputBytes
+        )
+        var bytes = [UInt8](repeating: 0, count: destination.byteCount)
+        var expectedGeneration: UInt64?
+        for piece in plan.pieces {
+            let collected = try await collectLayerComposite(
+                strategy: strategy,
+                outputRegion: piece.outputRegion,
+                outputGeometryRevision: outputGeometryRevision,
+                outputMapping: piece.outputMapping,
+                expectedGeneration: expectedGeneration
+            )
+            expectedGeneration = collected.generation
+            let image = collected.image
+            for row in 0..<piece.outputRegion.height {
+                let sourceOffset = row * image.bytesPerRow
+                let destinationOffset = (piece.outputRegion.minY + row)
+                    * destination.bytesPerRow
+                    + piece.outputRegion.minX * 4
+                bytes.replaceSubrange(
+                    destinationOffset..<(destinationOffset + image.bytesPerRow),
+                    with: image.bgra8PremultipliedBytes[
+                        sourceOffset..<(sourceOffset + image.bytesPerRow)
+                    ]
+                )
+            }
+        }
+        return PeriodicRepeatExport(
+            pixelSize: plan.pixelSize,
+            bytesPerRow: destination.bytesPerRow,
+            bgra8Bytes: bytes
         )
     }
 
@@ -1010,18 +1123,66 @@ final class DocumentPaintRenderContext {
         request: DocumentPaintStableFlattenedOutputRequest,
         outputGeometryRevision: UInt64
     ) async throws -> FlattenedSceneExport {
-        let snapshot = try registry.captureStableCanonicalSnapshot(
-            layerID: activeLayerID,
+        let image = try await collectLayerComposite(
+            strategy: strategy,
+            outputRegion: try DocumentPaintStableExportAdapter.outputRegion(
+                pixelSize: request.pixelSize
+            ),
+            outputGeometryRevision: outputGeometryRevision,
+            outputMapping: request.outputMapping
+        ).image
+        return FlattenedSceneExport(
+            pixelSize: request.pixelSize,
+            bytesPerRow: image.bytesPerRow,
+            bgra8Bytes: try DocumentPaintStableExportAdapter.destinationBytes(
+                image,
+                transparentBackground: request.transparentBackground
+            ),
+            hasTransparentBackground: request.transparentBackground
+        )
+    }
+
+    private func collectLayerComposite(
+        strategy: TilingStrategy,
+        outputRegion: SparseTileOutputRegion,
+        outputGeometryRevision: UInt64,
+        outputMapping: SparseTileSamplingOutputMapping,
+        expectedGeneration: UInt64? = nil
+    ) async throws -> (
+        generation: UInt64,
+        image: DocumentPaintEncodedPremultipliedBGRA8
+    ) {
+        try DocumentPaintStableSnapshotChunkPlanner.validateOutput(
+            outputRegion,
+            limits: stableCollectionRendererLimits
+        )
+        let descriptor = try DocumentPaintTightBGRA8Descriptor(
+            outputRegion: outputRegion,
+            maximumByteCount: stableCollectionRendererLimits.maximumOutputBytes
+        )
+        let plan = try registry.prepareLayerCompositePlan(
             addressing: Self.storageAddressing(for: strategy),
             addressingRevision: outputGeometryRevision,
-            outputMapping: request.outputMapping
+            outputRegion: outputRegion,
+            outputGeometryRevision: outputGeometryRevision,
+            outputMapping: outputMapping,
+            limits: .documentProduction
         )
-        return try await FlattenedSceneExport.collectStable(
-            request: request,
-            snapshot: snapshot,
-            renderer: stableCollectionRenderer,
-            outputGeometryRevision: outputGeometryRevision
+        if let expectedGeneration,
+           expectedGeneration != plan.documentGeneration {
+            plan.close()
+            throw DocumentPaintSurfaceStoreError.visibleCaptureContention(
+                maximumAttempts: 1
+            )
+        }
+        let collector = try DocumentPaintTightBGRA8Collector(
+            descriptor: descriptor
         )
+        try await layerCompositor.collect(
+            plan,
+            to: collector
+        )
+        return (plan.documentGeneration, try await collector.result())
     }
 
     private static func storageAddressing(
@@ -1076,19 +1237,134 @@ final class DocumentPaintRenderContext {
     func clear() async throws -> DocumentPaintSurfaceApplicationResult {
         let claim = try beginCommandOperation()
         defer { finishCommandOperation(claim) }
-        return try await transactionWorker.clear()
+        let layerID: UUID
+        do {
+            layerID = try registry.layerStack
+                .activeLayerForRasterMutation().id
+        } catch LayerStackError.activeLayerLocked(let lockedID) {
+            throw DocumentPaintRenderContextError.activeLayerLocked(lockedID)
+        }
+        return try await transactionWorker.clear(layerID: layerID)
+    }
+
+    func applyLayerStack(
+        _ target: LayerStack
+    ) throws -> DocumentPaintLayerApplicationResult {
+        let claim = try beginCommandOperation()
+        defer { finishCommandOperation(claim) }
+        let transaction = try registry.prepareLayerSurfaceTransaction(
+            layerStack: target
+        )
+        return try publishLayerTransaction(transaction)
+    }
+
+    private func publishLayerTransaction(
+        _ transaction: LayerSurfaceTransaction
+    ) throws -> DocumentPaintLayerApplicationResult {
+        let retainedBytes = transaction.historyRetainedBytes
+        let (usedBytes, usedOverflow) = revisionStore.residentBytes
+            .addingReportingOverflow(layerHistoryResidentBytes)
+        guard !usedOverflow, usedBytes <= maximumRevisionBytes else {
+            transaction.cancel()
+            throw DocumentPaintRenderContextError.layerHistoryBudgetExceeded(
+                required: retainedBytes,
+                available: 0
+            )
+        }
+        let availableBytes = maximumRevisionBytes - usedBytes
+        guard retainedBytes <= availableBytes else {
+            transaction.cancel()
+            throw DocumentPaintRenderContextError.layerHistoryBudgetExceeded(
+                required: retainedBytes,
+                available: availableBytes
+            )
+        }
+        guard nextLayerRevisionID < UInt64.max else {
+            transaction.cancel()
+            throw DocumentPaintRenderContextError
+                .layerHistoryIdentityOverflow
+        }
+        let (nextResidentBytes, residentOverflow) = layerHistoryResidentBytes
+            .addingReportingOverflow(retainedBytes)
+        guard !residentOverflow else {
+            transaction.cancel()
+            throw DocumentPaintRenderContextError.layerHistoryBudgetExceeded(
+                required: retainedBytes,
+                available: availableBytes
+            )
+        }
+        let beforeGeometry = registry.geometry
+        let id = StoredRasterRevisionID(
+            rawValue: nextLayerRevisionID,
+            namespace: layerRevisionStoreIdentity
+        )
+        let receipt = transaction.commit()
+        nextLayerRevisionID += 1
+        layerHistoryRevisions[id] = receipt.historyRevision
+        layerHistoryResidentBytes = nextResidentBytes
+        return DocumentPaintLayerApplicationResult(
+            before: receipt.before,
+            after: receipt.after,
+            beforeGeometry: beforeGeometry,
+            afterGeometry: registry.geometry,
+            baseGeneration: receipt.baseGeneration,
+            generation: receipt.generation,
+            revision: LayerSurfaceRevisionReference(
+                id: id,
+                retainedBytes: retainedBytes
+            )
+        )
+    }
+
+    func restoreLayerStack(
+        _ reference: LayerSurfaceRevisionReference,
+        endpoint: LayerSurfaceRevisionEndpoint
+    ) throws -> DocumentPaintLayerApplicationResult {
+        let claim = try beginCommandOperation()
+        defer { finishCommandOperation(claim) }
+        guard let revision = layerHistoryRevisions[reference.id],
+              revision.retainedBytes == reference.retainedBytes
+        else {
+            throw DocumentPaintRenderContextError
+                .missingLayerHistoryRevision(reference.id)
+        }
+        let beforeGeometry = registry.geometry
+        let receipt = try registry.prepareLayerSurfaceRestore(
+            revision,
+            endpoint: endpoint
+        ).commit()
+        return DocumentPaintLayerApplicationResult(
+            before: receipt.before,
+            after: receipt.after,
+            beforeGeometry: beforeGeometry,
+            afterGeometry: registry.geometry,
+            baseGeneration: receipt.baseGeneration,
+            generation: receipt.generation,
+            revision: reference
+        )
+    }
+
+    func containsLayerRevision(_ id: StoredRasterRevisionID) -> Bool {
+        layerHistoryRevisions[id] != nil
     }
 
     func resize(
         to candidateGeometry: DocumentPaintGeometry,
         targetRadialConfiguration: RadialSymmetryConfiguration? = nil
-    ) async throws -> DocumentPaintSurfaceApplicationResult {
+    ) async throws -> DocumentPaintLayerApplicationResult? {
         let claim = try beginCommandOperation()
         defer { finishCommandOperation(claim) }
-        return try await transactionWorker.resize(
+        guard let transaction = try await transactionWorker.resizeAllLayers(
             to: candidateGeometry,
             targetRadialConfiguration: targetRadialConfiguration
-        )
+        ) else { return nil }
+        do {
+            try Task.checkCancellation()
+            return try publishLayerTransaction(transaction)
+        } catch {
+            transaction.cancel()
+            throw error
+        }
     }
 
     func importEncodedBGRA8(
@@ -1130,7 +1406,20 @@ final class DocumentPaintRenderContext {
     func releaseRevisions(
         _ revisionIDs: Set<StoredRasterRevisionID>
     ) async throws {
-        try await transactionWorker.releaseRevisions(revisionIDs)
+        let layerRevisionIDs = revisionIDs.filter {
+            layerHistoryRevisions[$0] != nil
+        }
+        let rasterRevisionIDs = revisionIDs.subtracting(layerRevisionIDs)
+        if !rasterRevisionIDs.isEmpty {
+            try await transactionWorker.releaseRevisions(rasterRevisionIDs)
+        }
+        for id in layerRevisionIDs {
+            guard let revision = layerHistoryRevisions.removeValue(forKey: id)
+            else { preconditionFailure("Layer revision vanished during release") }
+            precondition(layerHistoryResidentBytes >= revision.retainedBytes)
+            layerHistoryResidentBytes -= revision.retainedBytes
+            revision.close()
+        }
     }
 
     func retryTransactionCleanup() async throws {
@@ -1274,6 +1563,78 @@ final class DocumentPaintRenderContext {
         )
     }
 
+    func prepareLayerDisplaySubmission(
+        transient: DocumentPaintTransientDisplaySource?,
+        addressing: SparseTileAddressing,
+        addressingRevision: UInt64,
+        outputRegion: SparseTileOutputRegion,
+        outputGeometryRevision: UInt64,
+        outputMapping: SparseTileSamplingOutputMapping,
+        parameters: SparseTileSamplingEncodeParameters
+    ) async throws -> PreparedLayerCompositeDisplaySubmission {
+        if let transient {
+            guard transient.contextIdentity == identity,
+                  activeTransientDisplaySource?.sourceIdentity
+                    == transient.sourceIdentity
+            else {
+                throw DocumentPaintRenderContextError
+                    .staleTransientDisplaySource
+            }
+            guard transient.acknowledgementStatus == .available else {
+                throw DocumentPaintVisiblePlanControllerError
+                    .transientSourceNotAvailable
+            }
+        }
+        let samplingParameters = SparseTileSamplingEncodeParameters(
+            outputMapping: outputMapping,
+            compositeMode: parameters.compositeMode,
+            liveVisible: parameters.liveVisible,
+            strokeOpacity: parameters.strokeOpacity,
+            accumulationLimit: parameters.accumulationLimit,
+            eraserStrength: parameters.eraserStrength
+        )
+        let transientInput = transient.map {
+            PreparedLayerCompositeTransientSource(
+                layerID: activeLayerID,
+                descriptor: $0.descriptor,
+                samplingParameters: samplingParameters
+            )
+        }
+        let plan = try registry.prepareLayerCompositePlan(
+            transient: transientInput,
+            addressing: addressing,
+            addressingRevision: addressingRevision,
+            outputRegion: outputRegion,
+            outputGeometryRevision: outputGeometryRevision,
+            outputMapping: outputMapping,
+            limits: .documentProduction
+        )
+        do {
+            let submission = try await layerCompositor.prepareDisplay(
+                plan,
+                parameters: parameters,
+                onTerminal: {
+                    guard let transient else { return }
+                    try? transient.requestAcknowledgement()
+                }
+            )
+            if let transient {
+                layerDisplayTransientObligations[transient.sourceIdentity] =
+                    LayerDisplayTransientObligation(
+                        source: transient,
+                        submission: submission
+                    )
+            }
+            return submission
+        } catch {
+            if let transient {
+                await visiblePlanController
+                    .retainAndSettleUnrequestedTransientSource(transient)
+            }
+            throw error
+        }
+    }
+
     /// Synchronous MainActor draw boundary. All fallible preparation and
     /// capacity reservation completed before this one-shot submission returned.
     func encodeDisplaySubmission(
@@ -1290,10 +1651,56 @@ final class DocumentPaintRenderContext {
         )
     }
 
+    func encodeLayerDisplaySubmission(
+        _ submission: PreparedLayerCompositeDisplaySubmission,
+        target: any MTLTexture,
+        commandBuffer: any MTLCommandBuffer,
+        renderPassDescriptor: MTLRenderPassDescriptor
+    ) throws {
+        try submission.encode(
+            target: target,
+            commandBuffer: commandBuffer,
+            renderPassDescriptor: renderPassDescriptor
+        )
+    }
+
     func cancelDisplaySubmission(
         _ submission: DocumentPaintPreparedDisplaySubmission
     ) throws {
         try submission.cancel(expectedOwner: identity)
+    }
+
+    func cancelLayerDisplaySubmission(
+        _ submission: PreparedLayerCompositeDisplaySubmission
+    ) throws {
+        try submission.cancel()
+        settleLayerDisplayAcknowledgements()
+    }
+
+    func retryLayerDisplayCompletions() async throws {
+        try await layerCompositor.retryDisplayCompletion()
+        settleLayerDisplayAcknowledgements()
+        try await visiblePlanController.retryRetirementsAndCompletions()
+        settleLayerDisplayAcknowledgements()
+    }
+
+    private func settleLayerDisplayAcknowledgements() {
+        for identity in Array(layerDisplayTransientObligations.keys) {
+            guard let obligation = layerDisplayTransientObligations[identity],
+                  obligation.submission.isTerminal
+            else { continue }
+            switch obligation.source.acknowledgementStatus {
+            case .available, .failed:
+                try? obligation.source.requestAcknowledgement()
+            case .pending:
+                break
+            case .fulfilled:
+                layerDisplayTransientObligations.removeValue(forKey: identity)
+                if activeTransientDisplaySource?.sourceIdentity == identity {
+                    activeTransientDisplaySource = nil
+                }
+            }
+        }
     }
 
     func retryVisiblePlanRetirementsAndCompletions() async throws {
@@ -1309,6 +1716,13 @@ final class DocumentPaintRenderContext {
         let claim = try beginShutdownOperation()
         defer { finishCommandOperation(claim) }
         hasRequestedShutdown = true
+        try await layerCompositor.shutdown()
+        for obligation in layerDisplayTransientObligations.values {
+            await visiblePlanController.retainAndSettleUnrequestedTransientSource(
+                obligation.source
+            )
+        }
+        layerDisplayTransientObligations.removeAll(keepingCapacity: false)
         if let source = activeTransientDisplaySource {
             await visiblePlanController
                 .retainAndSettleUnrequestedTransientSource(source)
@@ -1321,6 +1735,10 @@ final class DocumentPaintRenderContext {
             try capability.cancel(expectedOwnerIdentity: identity)
         }
         try await transactionWorker.shutdown()
+        let layerRevisions = Array(layerHistoryRevisions.values)
+        layerHistoryRevisions.removeAll(keepingCapacity: false)
+        layerHistoryResidentBytes = 0
+        for revision in layerRevisions { revision.close() }
         hasShutdown = true
         return controller
     }

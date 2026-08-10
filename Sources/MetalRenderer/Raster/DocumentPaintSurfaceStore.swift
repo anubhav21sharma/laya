@@ -1,3 +1,5 @@
+import CShaderTypes
+import EditorCore
 import Foundation
 import Metal
 import PatternEngine
@@ -14,6 +16,7 @@ public enum DocumentPaintSurfaceStoreError: Error, Equatable, Sendable {
     case geometryByteCountOverflow
     case radialStorageSizeMismatch(expected: PixelSize, actual: PixelSize)
     case duplicateLayerID(UUID)
+    case layerStackMismatch(expected: [UUID], actual: [UUID])
     case unknownLayerID(UUID)
     case staleGeneration(expected: UInt64, actual: UInt64)
     case generationOverflow
@@ -32,6 +35,11 @@ public enum DocumentPaintSurfaceStoreError: Error, Equatable, Sendable {
     case namespaceIdentityOverflow
     case transferByteCapacityOverflow
     case visibleCaptureContention(maximumAttempts: Int)
+    case closedLayerHistoryRevision
+    case foreignLayerHistoryRevision
+    case layerHistoryEndpointMismatch
+    case layerHistoryByteCountOverflow
+    case nativeImportRequiresEmptyStore
 }
 
 public struct DocumentPaintGeometry: Equatable, Sendable {
@@ -1043,6 +1051,7 @@ public struct DocumentPaintSurfaceStoreSnapshot: Equatable, Sendable {
 
     public let generation: UInt64
     public let geometry: DocumentPaintGeometry
+    public let layerStack: LayerStack
     public let layers: [Layer]
     public let tileByteBudget: Int
     public let residentTileBytes: Int
@@ -1085,10 +1094,120 @@ struct DocumentPaintTransientVisibleSourceDescriptor: @unchecked Sendable {
     }
 }
 
-fileprivate struct DocumentPaintLayerState: Sendable {
+struct DocumentPaintLayerState: Equatable, Sendable {
     let logicalSurfaceID: UUID
     let revision: RasterRevision
     let references: [PaintTileReference]
+}
+
+enum LayerSurfaceRevisionEndpoint: Equatable, Sendable {
+    case before
+    case after
+}
+
+/// One exact before/after layer-registry revision. Metadata is copied as
+/// immutable endpoint values while a single bounded snapshot token retains
+/// the union of physical tile identities until history releases it.
+final class LayerSurfaceHistoryRevision: @unchecked Sendable, Equatable {
+    fileprivate struct Endpoint: Equatable, Sendable {
+        let geometry: DocumentPaintGeometry
+        let layerStack: LayerStack
+        let layerStates: [UUID: DocumentPaintLayerState]
+        let persistedTileIdentities: PersistedPaintTileIdentitySnapshot
+    }
+
+    final class Borrow: @unchecked Sendable {
+        fileprivate let revision: LayerSurfaceHistoryRevision
+        private let lock = NSLock()
+        private var closed = false
+
+        fileprivate init(revision: LayerSurfaceHistoryRevision) {
+            self.revision = revision
+        }
+
+        func close() {
+            lock.lock()
+            guard !closed else {
+                lock.unlock()
+                return
+            }
+            closed = true
+            lock.unlock()
+            revision.closeBorrow()
+        }
+
+        deinit { close() }
+    }
+
+    fileprivate let identity = UUID()
+    fileprivate let registryIdentity: UUID
+    fileprivate let storeIdentity: PaintTileStoreIdentity
+    fileprivate let before: Endpoint
+    fileprivate let after: Endpoint
+    fileprivate let token: PaintTileSnapshotToken?
+    let retainedBytes: Int
+    private let lock = NSLock()
+    private var activeBorrowCount = 0
+    private var closeRequested = false
+    private var tokenClosed = false
+
+    fileprivate init(
+        registryIdentity: UUID,
+        storeIdentity: PaintTileStoreIdentity,
+        before: Endpoint,
+        after: Endpoint,
+        token: PaintTileSnapshotToken?,
+        retainedBytes: Int
+    ) {
+        self.registryIdentity = registryIdentity
+        self.storeIdentity = storeIdentity
+        self.before = before
+        self.after = after
+        self.token = token
+        self.retainedBytes = retainedBytes
+    }
+
+    static func == (
+        lhs: LayerSurfaceHistoryRevision,
+        rhs: LayerSurfaceHistoryRevision
+    ) -> Bool { lhs === rhs }
+
+    func borrow() throws -> Borrow {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closeRequested else {
+            throw DocumentPaintSurfaceStoreError.closedLayerHistoryRevision
+        }
+        activeBorrowCount += 1
+        return Borrow(revision: self)
+    }
+
+    func close() {
+        lock.lock()
+        guard !closeRequested else {
+            lock.unlock()
+            return
+        }
+        closeRequested = true
+        let shouldClose = activeBorrowCount == 0 && !tokenClosed
+        if shouldClose { tokenClosed = true }
+        lock.unlock()
+        if shouldClose { token?.close() }
+    }
+
+    private func closeBorrow() {
+        lock.lock()
+        precondition(activeBorrowCount > 0)
+        activeBorrowCount -= 1
+        let shouldClose = closeRequested
+            && activeBorrowCount == 0
+            && !tokenClosed
+        if shouldClose { tokenClosed = true }
+        lock.unlock()
+        if shouldClose { token?.close() }
+    }
+
+    deinit { close() }
 }
 
 /// One immutable, coherently published document registry state. Readers copy
@@ -1097,19 +1216,24 @@ fileprivate struct DocumentPaintLayerState: Sendable {
 private final class DocumentPaintSurfaceEpoch: @unchecked Sendable {
     let generation: UInt64
     let geometry: DocumentPaintGeometry
-    let orderedLayerIDs: [UUID]
+    let layerStack: LayerStack
     let layerStates: [UUID: DocumentPaintLayerState]
+    let persistedTileIdentities: PersistedPaintTileIdentitySnapshot
+
+    var orderedLayerIDs: [UUID] { layerStack.orderedLayerIDs }
 
     init(
         generation: UInt64,
         geometry: DocumentPaintGeometry,
-        orderedLayerIDs: [UUID],
-        layerStates: [UUID: DocumentPaintLayerState]
+        layerStack: LayerStack,
+        layerStates: [UUID: DocumentPaintLayerState],
+        persistedTileIdentities: PersistedPaintTileIdentitySnapshot
     ) {
         self.generation = generation
         self.geometry = geometry
-        self.orderedLayerIDs = orderedLayerIDs
+        self.layerStack = layerStack
         self.layerStates = layerStates
+        self.persistedTileIdentities = persistedTileIdentities
     }
 }
 
@@ -1126,8 +1250,11 @@ fileprivate struct DocumentPaintSurfaceCandidateBase: Sendable {
     let registryIdentity: UUID
     let generation: UInt64
     let geometry: DocumentPaintGeometry
-    let orderedLayerIDs: [UUID]
+    let layerStack: LayerStack
     let layers: [UUID: DocumentPaintLayerState]
+    let persistedTileIdentities: PersistedPaintTileIdentitySnapshot
+
+    var orderedLayerIDs: [UUID] { layerStack.orderedLayerIDs }
 }
 
 /// A transaction-only view captured under the registry lock. The binding and
@@ -1146,12 +1273,17 @@ public final class DocumentPaintSurfaceCandidate: @unchecked Sendable {
     fileprivate let registryIdentity: UUID
     fileprivate let store: PaintTileStore
     fileprivate let geometry: DocumentPaintGeometry
-    fileprivate let orderedLayerIDs: [UUID]
+    let baseLayerStack: LayerStack
+    let layerStack: LayerStack
+    fileprivate let basePersistedTileIdentities:
+        PersistedPaintTileIdentitySnapshot
     fileprivate let lock = NSLock()
     fileprivate var state: State = .open
     fileprivate var preparedCommit: DocumentPaintPreparedCommit?
     fileprivate var layerStatesStorage: [UUID: DocumentPaintLayerState]
     fileprivate var ownedReferencesStorage: [PaintTileReference]
+    fileprivate var persistedTileIdentitySnapshotStorage:
+        PersistedPaintTileIdentitySnapshot
 
     public let baseGeneration: UInt64
     public let generation: UInt64
@@ -1161,11 +1293,18 @@ public final class DocumentPaintSurfaceCandidate: @unchecked Sendable {
         withLock { ownedReferencesStorage }
     }
 
+    var persistedTileIdentitySnapshot: PersistedPaintTileIdentitySnapshot {
+        withLock { persistedTileIdentitySnapshotStorage }
+    }
+
     fileprivate init(
         registryIdentity: UUID,
         store: PaintTileStore,
         geometry: DocumentPaintGeometry,
-        orderedLayerIDs: [UUID],
+        baseLayerStack: LayerStack,
+        layerStack: LayerStack,
+        basePersistedTileIdentities: PersistedPaintTileIdentitySnapshot,
+        persistedTileIdentitySnapshot: PersistedPaintTileIdentitySnapshot,
         baseGeneration: UInt64,
         generation: UInt64,
         layerStates: [UUID: DocumentPaintLayerState],
@@ -1175,11 +1314,14 @@ public final class DocumentPaintSurfaceCandidate: @unchecked Sendable {
         self.registryIdentity = registryIdentity
         self.store = store
         self.geometry = geometry
-        self.orderedLayerIDs = orderedLayerIDs
+        self.baseLayerStack = baseLayerStack
+        self.layerStack = layerStack
+        self.basePersistedTileIdentities = basePersistedTileIdentities
         self.baseGeneration = baseGeneration
         self.generation = generation
         layerStatesStorage = layerStates
         ownedReferencesStorage = ownedReferences
+        persistedTileIdentitySnapshotStorage = persistedTileIdentitySnapshot
         self.ownedNamespaces = ownedNamespaces
     }
 
@@ -1221,17 +1363,20 @@ public final class DocumentPaintPreparedCommit: @unchecked Sendable {
     fileprivate let nextEpoch: DocumentPaintSurfaceEpoch
     fileprivate let replacedRetirement: PaintTilePreparedRetirement
     fileprivate let candidateRetirement: PaintTilePreparedRetirement
+    fileprivate let reactivation: PaintTilePreparedReactivation?
 
     fileprivate init(
         candidate: DocumentPaintSurfaceCandidate,
         nextEpoch: DocumentPaintSurfaceEpoch,
         replacedRetirement: PaintTilePreparedRetirement,
-        candidateRetirement: PaintTilePreparedRetirement
+        candidateRetirement: PaintTilePreparedRetirement,
+        reactivation: PaintTilePreparedReactivation? = nil
     ) {
         self.candidate = candidate
         self.nextEpoch = nextEpoch
         self.replacedRetirement = replacedRetirement
         self.candidateRetirement = candidateRetirement
+        self.reactivation = reactivation
     }
 
     #if DEBUG
@@ -1239,6 +1384,22 @@ public final class DocumentPaintPreparedCommit: @unchecked Sendable {
         ObjectIdentifier(nextEpoch)
     }
     #endif
+
+    var layerTransactionBaseGeneration: UInt64 {
+        candidate.baseGeneration
+    }
+
+    var layerTransactionGeneration: UInt64 {
+        candidate.generation
+    }
+
+    var layerTransactionBefore: LayerStack {
+        candidate.baseLayerStack
+    }
+
+    var layerTransactionAfter: LayerStack {
+        candidate.layerStack
+    }
 }
 
 /// A committed-collection plan is created only while the registry owns the
@@ -1480,6 +1641,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         snapshotPayloadLiabilityByteBudget: Int? = nil,
         geometry: DocumentPaintGeometry,
         layerIDs: [UUID],
+        layerStack: LayerStack? = nil,
         generation: UInt64 = 0
     ) throws {
         let (transferHeadroom, multiplicationOverflow) = byteBudget
@@ -1497,6 +1659,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             transferByteCapacity: transferByteCapacity,
             geometry: geometry,
             layerIDs: layerIDs,
+            layerStack: layerStack,
             generation: generation
         )
     }
@@ -1508,6 +1671,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         transferByteCapacity: Int,
         geometry: DocumentPaintGeometry,
         layerIDs: [UUID],
+        layerStack: LayerStack? = nil,
         generation: UInt64 = 0
     ) throws {
         var seen: Set<UUID> = []
@@ -1532,6 +1696,27 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                 references: []
             )
         }
+        let resolvedLayerStack: LayerStack
+        if let layerStack {
+            guard layerStack.orderedLayerIDs == layerIDs else {
+                throw DocumentPaintSurfaceStoreError.layerStackMismatch(
+                    expected: layerIDs,
+                    actual: layerStack.orderedLayerIDs
+                )
+            }
+            resolvedLayerStack = layerStack
+        } else {
+            guard let activeLayerID = layerIDs.first else {
+                throw LayerStackError.emptyStack
+            }
+            let descriptors = try layerIDs.enumerated().map { index, id in
+                try LayerDescriptor(id: id, name: "Layer \(index + 1)")
+            }
+            resolvedLayerStack = try LayerStack(
+                layers: descriptors,
+                activeLayerID: activeLayerID
+            )
+        }
         sharedTileStore = PaintTileStore(
             device: device,
             byteBudget: byteBudget,
@@ -1542,8 +1727,9 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         currentEpoch = DocumentPaintSurfaceEpoch(
             generation: generation,
             geometry: geometry,
-            orderedLayerIDs: layerIDs,
-            layerStates: states
+            layerStack: resolvedLayerStack,
+            layerStates: states,
+            persistedTileIdentities: .empty
         )
         nextNamespaceToken = initialNamespaceToken
     }
@@ -1555,6 +1741,171 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
     public var generation: UInt64 { withLock { currentEpoch.generation } }
     public var geometry: DocumentPaintGeometry { withLock { currentEpoch.geometry } }
     public var layerIDs: [UUID] { withLock { currentEpoch.orderedLayerIDs } }
+    public var layerStack: LayerStack { withLock { currentEpoch.layerStack } }
+
+    public func persistedTileIdentitySnapshot()
+        -> PersistedPaintTileIdentitySnapshot
+    {
+        withLock { currentEpoch.persistedTileIdentities }
+    }
+
+    public func captureNativeArchive()
+        throws -> DocumentPaintNativeArchiveCapture
+    {
+        try withLock {
+            let epoch = currentEpoch
+            let references = epoch.orderedLayerIDs.flatMap {
+                epoch.layerStates[$0]?.references ?? []
+            }
+            try PersistedPaintTileIdentityMap.validateExact(
+                epoch.persistedTileIdentities,
+                references: references
+            )
+
+            var providers: [TiledRasterExactReferenceProvider] = []
+            providers.reserveCapacity(epoch.orderedLayerIDs.count)
+            var layers: [DocumentPaintNativeArchiveLayer] = []
+            layers.reserveCapacity(epoch.orderedLayerIDs.count)
+            var payloadAuthorities:
+                [UUID: DocumentPaintNativeArchiveCapture.PayloadAuthority]
+                = [:]
+            for descriptor in epoch.layerStack.layers {
+                guard let state = epoch.layerStates[descriptor.id] else {
+                    throw DocumentPaintSurfaceStoreError
+                        .unknownLayerID(descriptor.id)
+                }
+                let binding = try makeBinding(
+                    for: descriptor.id,
+                    state: state,
+                    geometry: epoch.geometry,
+                    generation: epoch.generation
+                )
+                let provider = try binding.canonical
+                    .makeExactReferenceProvider()
+                providers.append(provider)
+                var tiles: [DocumentPaintNativeArchiveTile] = []
+                tiles.reserveCapacity(state.references.count)
+                for reference in state.references.sorted() {
+                    guard let persistedID = epoch.persistedTileIdentities
+                        .persistedID(for: reference.identity)
+                    else {
+                        throw PersistedPaintTileIdentityMapError
+                            .missingRuntimeIdentity(reference.identity)
+                    }
+                    tiles.append(DocumentPaintNativeArchiveTile(
+                        persistedID: persistedID,
+                        coordinate: reference.coordinate,
+                        logicalBounds: reference.descriptor.logicalBounds
+                    ))
+                    payloadAuthorities[persistedID] = .init(
+                        provider: provider,
+                        reference: reference
+                    )
+                }
+                layers.append(DocumentPaintNativeArchiveLayer(
+                    layerID: descriptor.id,
+                    rasterRevision: state.revision.rawValue,
+                    tiles: tiles
+                ))
+            }
+            let root = try TiledRasterExactReferenceCapture(
+                providers: providers
+            )
+            return DocumentPaintNativeArchiveCapture(
+                documentGeneration: epoch.generation,
+                geometry: epoch.geometry,
+                layerStack: epoch.layerStack,
+                layers: layers,
+                root: root,
+                payloadAuthorityByPersistedID: payloadAuthorities
+            )
+        }
+    }
+
+    func prepareNativeArchiveImport(
+        _ manifest: DocumentPaintNativeArchiveImportManifest
+    ) throws -> DocumentPaintNativeArchiveImportWriter {
+        let base = withLock {
+            let epoch = currentEpoch
+            return DocumentPaintSurfaceCandidateBase(
+                registryIdentity: identity,
+                generation: epoch.generation,
+                geometry: epoch.geometry,
+                layerStack: epoch.layerStack,
+                layers: epoch.layerStates,
+                persistedTileIdentities: epoch.persistedTileIdentities
+            )
+        }
+        guard base.layerStack == manifest.layerStack,
+              base.geometry == manifest.geometry,
+              base.layers.values.allSatisfy({ $0.references.isEmpty }),
+              base.persistedTileIdentities.bindings.isEmpty
+        else {
+            throw DocumentPaintSurfaceStoreError
+                .nativeImportRequiresEmptyStore
+        }
+        var dirty: [UUID: [PaintTileCoordinate]] = [:]
+        var imports: [PersistedPaintTileImportBinding] = []
+        var revisions: [UUID: RasterRevision] = [:]
+        var expectedIDs = Set<UUID>()
+        for layer in manifest.layers {
+            dirty[layer.layerID] = layer.tiles.map(\.coordinate)
+            revisions[layer.layerID] = RasterRevision(
+                rawValue: layer.rasterRevision
+            )
+            for tile in layer.tiles {
+                imports.append(PersistedPaintTileImportBinding(
+                    persistedID: tile.persistedID,
+                    layerID: layer.layerID,
+                    coordinate: tile.coordinate
+                ))
+                expectedIDs.insert(tile.persistedID)
+            }
+        }
+        let candidate = try makeCandidate(
+            from: base,
+            geometry: manifest.geometry,
+            layerStack: manifest.layerStack,
+            dirtyCoordinatesByLayer: dirty,
+            removingCoordinatesByLayer: [:],
+            importedPersistedTileBindings: imports,
+            importedRasterRevisionsByLayer: revisions,
+            failureInjection: nil
+        )
+        return DocumentPaintNativeArchiveImportWriter(
+            store: self,
+            candidate: candidate,
+            expectedIDs: expectedIDs
+        )
+    }
+
+    func installNativeArchivePayload(
+        _ payload: Data,
+        for persistedTileID: UUID,
+        into candidate: DocumentPaintSurfaceCandidate
+    ) throws {
+        let reference = try candidate.withLock { () throws
+            -> PaintTileReference in
+            guard candidate.registryIdentity == identity,
+                  candidate.store === sharedTileStore,
+                  candidate.state == .open,
+                  let runtimeIdentity = candidate
+                    .persistedTileIdentitySnapshotStorage
+                    .identity(for: persistedTileID),
+                  let reference = candidate.ownedReferencesStorage.first(
+                    where: { $0.identity == runtimeIdentity }
+                  )
+            else {
+                throw DocumentPaintNativeArchiveImportError
+                    .unexpectedPersistedTileID(persistedTileID)
+            }
+            return reference
+        }
+        try sharedTileStore.installNativeArchivePayload(
+            payload,
+            exactReference: reference
+        )
+    }
 
     #if DEBUG
     var testingCurrentEpochIdentity: ObjectIdentifier {
@@ -1776,6 +2127,189 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         )
     }
 
+    /// Freezes one validated stack and one immutable registry epoch into
+    /// bottom-to-top sparse layer plans. Pure viewport selection and plan
+    /// construction happen before Phase B installs one aggregate exact root.
+    func prepareLayerCompositePlan(
+        layerStack requestedLayerStack: LayerStack? = nil,
+        transient: PreparedLayerCompositeTransientSource? = nil,
+        addressing: SparseTileAddressing,
+        addressingRevision: UInt64,
+        outputRegion: SparseTileOutputRegion,
+        outputGeometryRevision: UInt64,
+        outputMapping: SparseTileSamplingOutputMapping = .affine(.identity),
+        limits: SparseTilePlanLimits
+    ) throws -> PreparedLayerCompositePlan {
+        let transientLease = transient?.descriptor.capability.namespaceLease
+        for _ in 0..<Self.maximumVisibleCaptureAttempts {
+            let attempt = try withLock { () throws -> (
+                epoch: DocumentPaintSurfaceEpoch,
+                layers: [(LayerDescriptor, DocumentPaintLayerState)],
+                transientNamespaceToken: UInt64?,
+                hook: (@Sendable () -> Void)?
+            ) in
+                let epoch = currentEpoch
+                let layerStack = requestedLayerStack ?? epoch.layerStack
+                guard requestedLayerStack == nil
+                    || epoch.layerStack == layerStack
+                else {
+                    throw DocumentPaintSurfaceStoreError.layerStackMismatch(
+                        expected: epoch.orderedLayerIDs,
+                        actual: layerStack.orderedLayerIDs
+                    )
+                }
+                try Self.validateVisibleAddressing(
+                    addressing,
+                    geometry: epoch.geometry
+                )
+                try Self.validateStableOutputMapping(
+                    outputMapping,
+                    addressing: addressing,
+                    geometry: epoch.geometry
+                )
+                if let transient, let transientLease {
+                    try validateTransientDescriptorLocked(
+                        transient.descriptor,
+                        lease: transientLease,
+                        layerID: transient.layerID,
+                        epoch: epoch,
+                        addressing: addressing
+                    )
+                }
+                let layers = layerStack.layers.compactMap { layer
+                    -> (LayerDescriptor, DocumentPaintLayerState)? in
+                    guard layer.isVisible,
+                          layer.opacity > 0,
+                          let state = epoch.layerStates[layer.id],
+                          !state.references.isEmpty
+                            || transient?.layerID == layer.id
+                    else { return nil }
+                    return (layer, state)
+                }
+                #if DEBUG
+                let hook = testingVisibleSelectionCompleted
+                #else
+                let hook: (@Sendable () -> Void)? = nil
+                #endif
+                return (
+                    epoch,
+                    layers,
+                    transientLease?.retirementToken,
+                    hook
+                )
+            }
+
+            var preparedLayers: [PreparedLayerCompositeLayer] = []
+            var capturedProviders: [TiledRasterExactReferenceProvider] = []
+            preparedLayers.reserveCapacity(attempt.layers.count)
+            capturedProviders.reserveCapacity(attempt.layers.count)
+            for (layer, state) in attempt.layers {
+                let binding = try makeBinding(
+                    for: layer.id,
+                    state: state,
+                    geometry: attempt.epoch.geometry,
+                    generation: attempt.epoch.generation
+                )
+                let source = try SparseTileAcceptedSourceAdapter.canonical(
+                    binding,
+                    addressing: addressing
+                )
+                let sources = transient?.layerID == layer.id
+                    ? [source] + transient!.descriptor.sources
+                    : [source]
+                let key = SparseTileSamplingPlanKey(
+                    documentGeneration: attempt.epoch.generation,
+                    orderedLayers: [SparseTileLayerContentKey(
+                        layerID: layer.id,
+                        roles: sources.map(\.contentKey)
+                    )],
+                    addressingRevision: addressingRevision,
+                    outputGeometryRevision: outputGeometryRevision,
+                    outputMapping: outputMapping
+                )
+                let selection = try SparseTileOwnedSourceBatch.selecting(
+                    sources: sources,
+                    key: key,
+                    outputRegion: outputRegion
+                )
+                guard try selection.selectedReferenceCount() > 0 else {
+                    continue
+                }
+                let restrictedSources = try selection.restrictedSources()
+                let snapshots = try restrictedSources.map {
+                    try SparseTileSourceSnapshot(
+                        contentKey: $0.contentKey,
+                        addressing: $0.addressing,
+                        layerID: $0.layerID,
+                        references: $0.references,
+                        changedCoordinates: $0.changedCoordinates,
+                        disposition: $0.disposition
+                    )
+                }
+                let content = try SparseTileSamplingPlanBuilder.buildFull(
+                    key: key,
+                    sources: snapshots,
+                    outputRegion: outputRegion,
+                    limits: limits
+                )
+                preparedLayers.append(PreparedLayerCompositeLayer(
+                    layerID: layer.id,
+                    opacity: layer.opacity,
+                    blendMode: layer.blendMode,
+                    samplingPlan: content,
+                    samplingParameters: transient?.layerID == layer.id
+                        ? transient!.samplingParameters
+                        : SparseTileSamplingEncodeParameters(
+                            outputMapping: outputMapping,
+                            compositeMode: PatternCompositeWireDraw,
+                            liveVisible: false,
+                            strokeOpacity: 1,
+                            accumulationLimit: 1,
+                            eraserStrength: 1
+                        ),
+                    sourceSelection: selection
+                ))
+                capturedProviders.append(contentsOf:
+                    restrictedSources.map(\.provider))
+            }
+            attempt.hook?()
+
+            let capture: TiledRasterExactReferenceCapture? = try withLock {
+                guard currentEpoch === attempt.epoch else { return nil }
+                if let transient, let transientLease {
+                    try validateTransientDescriptorLocked(
+                        transient.descriptor,
+                        lease: transientLease,
+                        layerID: transient.layerID,
+                        epoch: attempt.epoch,
+                        addressing: addressing
+                    )
+                    guard transientLease.retirementToken
+                            == attempt.transientNamespaceToken
+                    else {
+                        throw DocumentPaintStrokeSurfaceError.staleCapability
+                    }
+                }
+                return try TiledRasterExactReferenceCapture(
+                    providers: capturedProviders
+                )
+            }
+            guard let capture else { continue }
+            return PreparedLayerCompositePlan(
+                documentGeneration: attempt.epoch.generation,
+                geometry: attempt.epoch.geometry,
+                outputRegion: outputRegion,
+                outputMapping: outputMapping,
+                layers: preparedLayers,
+                sourceCapture: capture,
+                planLimits: limits
+            )
+        }
+        throw DocumentPaintSurfaceStoreError.visibleCaptureContention(
+            maximumAttempts: Self.maximumVisibleCaptureAttempts
+        )
+    }
+
     /// Captures one coherent canonical + authoritative + prediction union.
     /// Capability/provider freezing happens before this call. Registry state is
     /// consulted only under its lock; no capability or ownership lock is taken
@@ -1982,8 +2516,9 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                 registryIdentity: identity,
                 generation: epoch.generation,
                 geometry: epoch.geometry,
-                orderedLayerIDs: epoch.orderedLayerIDs,
-                layers: epoch.layerStates
+                layerStack: epoch.layerStack,
+                layers: epoch.layerStates,
+                persistedTileIdentities: epoch.persistedTileIdentities
             )
             return DocumentPaintSurfaceMutationBaseSnapshot(
                 generation: candidateBase.generation,
@@ -2001,8 +2536,11 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
 
     public func makeCandidate(
         geometry: DocumentPaintGeometry? = nil,
+        layerStack: LayerStack? = nil,
         dirtyCoordinatesByLayer: [UUID: [PaintTileCoordinate]] = [:],
         removingCoordinatesByLayer: [UUID: [PaintTileCoordinate]] = [:],
+        importedPersistedTileBindings:
+            [PersistedPaintTileImportBinding] = [],
         failureInjection: PaintTileAllocationFailureInjection? = nil
     ) throws -> DocumentPaintSurfaceCandidate {
         let base = withLock {
@@ -2011,15 +2549,18 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                 registryIdentity: identity,
                 generation: epoch.generation,
                 geometry: epoch.geometry,
-                orderedLayerIDs: epoch.orderedLayerIDs,
-                layers: epoch.layerStates
+                layerStack: epoch.layerStack,
+                layers: epoch.layerStates,
+                persistedTileIdentities: epoch.persistedTileIdentities
             )
         }
         return try makeCandidate(
             from: base,
             geometry: geometry,
+            layerStack: layerStack,
             dirtyCoordinatesByLayer: dirtyCoordinatesByLayer,
             removingCoordinatesByLayer: removingCoordinatesByLayer,
+            importedPersistedTileBindings: importedPersistedTileBindings,
             failureInjection: failureInjection
         )
     }
@@ -2027,8 +2568,11 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
     func makeCandidate(
         from snapshot: DocumentPaintSurfaceMutationBaseSnapshot,
         geometry: DocumentPaintGeometry? = nil,
+        layerStack: LayerStack? = nil,
         dirtyCoordinatesByLayer: [UUID: [PaintTileCoordinate]] = [:],
         removingCoordinatesByLayer: [UUID: [PaintTileCoordinate]] = [:],
+        importedPersistedTileBindings:
+            [PersistedPaintTileImportBinding] = [],
         failureInjection: PaintTileAllocationFailureInjection? = nil
     ) throws -> DocumentPaintSurfaceCandidate {
         guard snapshot.candidateBase.registryIdentity == identity else {
@@ -2037,8 +2581,10 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         return try makeCandidate(
             from: snapshot.candidateBase,
             geometry: geometry,
+            layerStack: layerStack,
             dirtyCoordinatesByLayer: dirtyCoordinatesByLayer,
             removingCoordinatesByLayer: removingCoordinatesByLayer,
+            importedPersistedTileBindings: importedPersistedTileBindings,
             failureInjection: failureInjection
         )
     }
@@ -2046,16 +2592,30 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
     private func makeCandidate(
         from base: DocumentPaintSurfaceCandidateBase,
         geometry: DocumentPaintGeometry?,
+        layerStack: LayerStack?,
         dirtyCoordinatesByLayer: [UUID: [PaintTileCoordinate]],
         removingCoordinatesByLayer: [UUID: [PaintTileCoordinate]],
+        importedPersistedTileBindings:
+            [PersistedPaintTileImportBinding],
+        importedRasterRevisionsByLayer:
+            [UUID: RasterRevision]? = nil,
         failureInjection: PaintTileAllocationFailureInjection?
     ) throws -> DocumentPaintSurfaceCandidate {
+        let candidateLayerStack = layerStack ?? base.layerStack
+        let candidateLayerIDs = Set(candidateLayerStack.orderedLayerIDs)
+        if let importedRasterRevisionsByLayer,
+           Set(importedRasterRevisionsByLayer.keys) != candidateLayerIDs {
+            throw DocumentPaintSurfaceStoreError.layerStackMismatch(
+                expected: candidateLayerStack.orderedLayerIDs,
+                actual: Array(importedRasterRevisionsByLayer.keys)
+            )
+        }
         for layerID in dirtyCoordinatesByLayer.keys
-        where base.layers[layerID] == nil {
+        where !candidateLayerIDs.contains(layerID) {
             throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
         }
         for layerID in removingCoordinatesByLayer.keys
-        where base.layers[layerID] == nil {
+        where !candidateLayerIDs.contains(layerID) {
             throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
         }
         guard base.generation < UInt64.max else {
@@ -2064,12 +2624,22 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         let candidateGeneration = base.generation + 1
         let candidateGeometry = geometry ?? base.geometry
         let geometryChanged = candidateGeometry != base.geometry
-        var candidateLayers = base.layers
+        var candidateLayers = base.layers.filter {
+            candidateLayerIDs.contains($0.key)
+        }
+        for layerID in candidateLayerStack.orderedLayerIDs
+        where candidateLayers[layerID] == nil {
+            candidateLayers[layerID] = DocumentPaintLayerState(
+                logicalSurfaceID: try nextLogicalSurfaceID(),
+                revision: RasterRevision(rawValue: 0),
+                references: []
+            )
+        }
         var owned: [PaintTileReference] = []
         var ownedNamespaces: [DocumentPaintSurfaceNamespace] = []
 
         do {
-            for layerID in base.orderedLayerIDs {
+            for layerID in candidateLayerStack.orderedLayerIDs {
                 let dirty = try Self.sortedUnique(
                     dirtyCoordinatesByLayer[layerID] ?? []
                 )
@@ -2100,7 +2670,8 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                         layerID: layerID,
                         generation: candidateGeneration,
                         role: .provisional,
-                        expectedActiveGeneration: base.generation
+                        expectedActiveGeneration: base.generation,
+                        requiresCurrentLayer: base.layers[layerID] != nil
                     )
                     ownedNamespaces.append(namespace)
                     let physicalSurfaceID = namespace.surfaceID
@@ -2143,7 +2714,8 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                 }
                 candidateLayers[layerID] = DocumentPaintLayerState(
                     logicalSurfaceID: old.logicalSurfaceID,
-                    revision: RasterRevision(rawValue: revisionValue),
+                    revision: importedRasterRevisionsByLayer?[layerID]
+                        ?? RasterRevision(rawValue: revisionValue),
                     references: mapping.values.sorted {
                         $0.coordinate < $1.coordinate
                     }
@@ -2157,11 +2729,34 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             }
             throw constructionError
         }
+        let persistedTileIdentities: PersistedPaintTileIdentitySnapshot
+        do {
+            persistedTileIdentities = try PersistedPaintTileIdentityMap
+                .transition(
+                    from: base.persistedTileIdentities,
+                    baseReferences: base.layers.values
+                        .flatMap(\.references),
+                    candidateReferences: candidateLayers.values
+                        .flatMap(\.references),
+                    candidateOwnedReferences: owned,
+                    imports: importedPersistedTileBindings
+                )
+        } catch let identityError {
+            do {
+                try retireCandidateOwnedReferences(owned.sorted())
+            } catch let cleanupError {
+                throw cleanupError
+            }
+            throw identityError
+        }
         return DocumentPaintSurfaceCandidate(
             registryIdentity: identity,
             store: sharedTileStore,
             geometry: candidateGeometry,
-            orderedLayerIDs: base.orderedLayerIDs,
+            baseLayerStack: base.layerStack,
+            layerStack: candidateLayerStack,
+            basePersistedTileIdentities: base.persistedTileIdentities,
+            persistedTileIdentitySnapshot: persistedTileIdentities,
             baseGeneration: base.generation,
             generation: candidateGeneration,
             layerStates: candidateLayers,
@@ -2195,8 +2790,182 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         )
     }
 
+    func prepareLayerSurfaceHistoryRevision(
+        for candidate: DocumentPaintSurfaceCandidate
+    ) throws -> LayerSurfaceHistoryRevision {
+        try withLock {
+            guard candidate.registryIdentity == identity,
+                  candidate.store === sharedTileStore
+            else { throw DocumentPaintSurfaceStoreError.foreignCandidate }
+            let candidateSnapshot = try candidate.withLock { () throws -> (
+                layers: [UUID: DocumentPaintLayerState],
+                persistedTileIdentities: PersistedPaintTileIdentitySnapshot
+            ) in
+                guard candidate.state == .open else {
+                    throw DocumentPaintSurfaceStoreError
+                        .candidateAlreadyConsumed
+                }
+                return (
+                    candidate.layerStatesStorage,
+                    candidate.persistedTileIdentitySnapshotStorage
+                )
+            }
+            let epoch = currentEpoch
+            guard candidate.baseGeneration == epoch.generation else {
+                throw DocumentPaintSurfaceStoreError.staleCandidate(
+                    expectedGeneration: epoch.generation,
+                    actualGeneration: candidate.baseGeneration
+                )
+            }
+            let beforeReferences = Set(
+                epoch.layerStates.values.flatMap(\.references)
+            )
+            let afterReferences = Set(
+                candidateSnapshot.layers.values.flatMap(\.references)
+            )
+            let sorted = beforeReferences
+                .symmetricDifference(afterReferences)
+                .sorted()
+            var union: [PaintTileReference] = []
+            union.reserveCapacity(sorted.count)
+            for reference in sorted where union.last != reference {
+                union.append(reference)
+            }
+            let token = union.isEmpty
+                ? nil
+                : try sharedTileStore.retainSnapshotReferences(union)
+            let (retainedBytes, overflow) = union.count
+                .multipliedReportingOverflow(
+                    by: PaintTileDescriptor.residentByteCount
+                )
+            guard !overflow else {
+                token?.close()
+                throw DocumentPaintSurfaceStoreError
+                    .layerHistoryByteCountOverflow
+            }
+            return LayerSurfaceHistoryRevision(
+                registryIdentity: identity,
+                storeIdentity: sharedTileStore.identity,
+                before: .init(
+                    geometry: epoch.geometry,
+                    layerStack: epoch.layerStack,
+                    layerStates: epoch.layerStates,
+                    persistedTileIdentities: epoch.persistedTileIdentities
+                ),
+                after: .init(
+                    geometry: candidate.geometry,
+                    layerStack: candidate.layerStack,
+                    layerStates: candidateSnapshot.layers,
+                    persistedTileIdentities:
+                        candidateSnapshot.persistedTileIdentities
+                ),
+                token: token,
+                retainedBytes: retainedBytes
+            )
+        }
+    }
+
+    func prepareLayerSurfaceRestoreCommit(
+        _ borrow: LayerSurfaceHistoryRevision.Borrow,
+        endpoint: LayerSurfaceRevisionEndpoint
+    ) throws -> DocumentPaintPreparedCommit {
+        let revision = borrow.revision
+        guard revision.registryIdentity == identity,
+              revision.storeIdentity == sharedTileStore.identity
+        else {
+            throw DocumentPaintSurfaceStoreError.foreignLayerHistoryRevision
+        }
+        let source: LayerSurfaceHistoryRevision.Endpoint
+        let target: LayerSurfaceHistoryRevision.Endpoint
+        switch endpoint {
+        case .before:
+            source = revision.after
+            target = revision.before
+        case .after:
+            source = revision.before
+            target = revision.after
+        }
+        let preparedBase = try withLock { () throws -> (
+            candidate: DocumentPaintSurfaceCandidate,
+            reactivation: PaintTilePreparedReactivation?
+        ) in
+            let epoch = currentEpoch
+            guard epoch.geometry == source.geometry,
+                  epoch.layerStack == source.layerStack,
+                  epoch.layerStates == source.layerStates,
+                  epoch.persistedTileIdentities
+                    == source.persistedTileIdentities
+            else {
+                throw DocumentPaintSurfaceStoreError
+                    .layerHistoryEndpointMismatch
+            }
+            guard epoch.generation < UInt64.max else {
+                throw DocumentPaintSurfaceStoreError.generationOverflow
+            }
+            try PersistedPaintTileIdentityMap.validateExact(
+                target.persistedTileIdentities,
+                references: target.layerStates.values.flatMap(\.references)
+            )
+            let currentReferences = Set(
+                epoch.layerStates.values.flatMap(\.references)
+            )
+            let reactivated = target.layerStates.values
+                .flatMap(\.references)
+                .filter { !currentReferences.contains($0) }
+                .sorted()
+            let reactivation: PaintTilePreparedReactivation?
+            if reactivated.isEmpty {
+                reactivation = nil
+            } else {
+                guard let token = revision.token else {
+                    throw DocumentPaintSurfaceStoreError
+                        .closedLayerHistoryRevision
+                }
+                reactivation = try sharedTileStore.prepareReactivation(
+                    reactivated,
+                    retainedBy: token
+                )
+            }
+            return (
+                DocumentPaintSurfaceCandidate(
+                    registryIdentity: identity,
+                    store: sharedTileStore,
+                    geometry: target.geometry,
+                    baseLayerStack: epoch.layerStack,
+                    layerStack: target.layerStack,
+                    basePersistedTileIdentities:
+                        epoch.persistedTileIdentities,
+                    persistedTileIdentitySnapshot:
+                        target.persistedTileIdentities,
+                    baseGeneration: epoch.generation,
+                    generation: epoch.generation + 1,
+                    layerStates: target.layerStates,
+                    ownedReferences: [],
+                    ownedNamespaces: []
+                ),
+                reactivation
+            )
+        }
+        do {
+            return try prepareCommit(
+                preparedBase.candidate,
+                reactivation: preparedBase.reactivation
+            )
+        } catch {
+            try? discard(preparedBase.candidate)
+            throw error
+        }
+    }
+
     public func prepareCommit(
         _ candidate: DocumentPaintSurfaceCandidate
+    ) throws -> DocumentPaintPreparedCommit {
+        try prepareCommit(candidate, reactivation: nil)
+    }
+
+    private func prepareCommit(
+        _ candidate: DocumentPaintSurfaceCandidate,
+        reactivation: PaintTilePreparedReactivation?
     ) throws -> DocumentPaintPreparedCommit {
         try withLock {
             guard candidate.registryIdentity == identity,
@@ -2204,14 +2973,16 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             else { throw DocumentPaintSurfaceStoreError.foreignCandidate }
             let candidateSnapshot = try candidate.withLock { () throws -> (
                 layers: [UUID: DocumentPaintLayerState],
-                ownedReferences: [PaintTileReference]
+                ownedReferences: [PaintTileReference],
+                persistedTileIdentities: PersistedPaintTileIdentitySnapshot
             ) in
                 guard candidate.state == .open else {
                     throw DocumentPaintSurfaceStoreError.candidateAlreadyConsumed
                 }
                 return (
                     candidate.layerStatesStorage,
-                    candidate.ownedReferencesStorage
+                    candidate.ownedReferencesStorage,
+                    candidate.persistedTileIdentitySnapshotStorage
                 )
             }
             let current = currentEpoch
@@ -2221,6 +2992,19 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
                     actualGeneration: candidate.baseGeneration
                 )
             }
+            guard candidate.basePersistedTileIdentities
+                    == current.persistedTileIdentities
+            else {
+                throw DocumentPaintSurfaceStoreError.staleCandidate(
+                    expectedGeneration: current.generation,
+                    actualGeneration: candidate.baseGeneration
+                )
+            }
+            try PersistedPaintTileIdentityMap.validateExact(
+                candidateSnapshot.persistedTileIdentities,
+                references: candidateSnapshot.layers.values
+                    .flatMap(\.references)
+            )
             guard preparedCandidateIdentity == nil else {
                 throw DocumentPaintSurfaceStoreError.ambiguousPreparedCandidate
             }
@@ -2244,14 +3028,17 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             let nextEpoch = DocumentPaintSurfaceEpoch(
                 generation: candidate.generation,
                 geometry: candidate.geometry,
-                orderedLayerIDs: candidate.orderedLayerIDs,
-                layerStates: candidateSnapshot.layers
+                layerStack: candidate.layerStack,
+                layerStates: candidateSnapshot.layers,
+                persistedTileIdentities:
+                    candidateSnapshot.persistedTileIdentities
             )
             let prepared = DocumentPaintPreparedCommit(
                 candidate: candidate,
                 nextEpoch: nextEpoch,
                 replacedRetirement: replacedRetirement,
-                candidateRetirement: candidateRetirement
+                candidateRetirement: candidateRetirement,
+                reactivation: reactivation
             )
             candidate.withLock {
                 precondition(candidate.state == .open)
@@ -2397,18 +3184,34 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             guard !references.isEmpty else { return }
 
             let retirement = try sharedTileStore.prepareRetirement(references)
-            candidate.withLock {
-                precondition(candidate.state == .open)
-                let removed = Set(references)
-                let layer = candidate.layerStatesStorage[layerID]!
-                candidate.layerStatesStorage[layerID] = DocumentPaintLayerState(
-                    logicalSurfaceID: layer.logicalSurfaceID,
-                    revision: layer.revision,
-                    references: layer.references.filter { !removed.contains($0) }
-                )
-                candidate.ownedReferencesStorage.removeAll {
-                    removed.contains($0)
+            do {
+                try candidate.withLock {
+                    precondition(candidate.state == .open)
+                    let removed = Set(references)
+                    let nextPersistedTileIdentities = try
+                        PersistedPaintTileIdentityMap.removing(
+                            Set(references.map(\.identity)),
+                            from: candidate
+                                .persistedTileIdentitySnapshotStorage
+                        )
+                    let layer = candidate.layerStatesStorage[layerID]!
+                    candidate.layerStatesStorage[layerID] =
+                        DocumentPaintLayerState(
+                            logicalSurfaceID: layer.logicalSurfaceID,
+                            revision: layer.revision,
+                            references: layer.references.filter {
+                                !removed.contains($0)
+                            }
+                        )
+                    candidate.ownedReferencesStorage.removeAll {
+                        removed.contains($0)
+                    }
+                    candidate.persistedTileIdentitySnapshotStorage =
+                        nextPersistedTileIdentities
                 }
+            } catch {
+                sharedTileStore.cancelRetirement(retirement)
+                throw error
             }
             sharedTileStore.requestRetirement(retirement)
         }
@@ -2425,6 +3228,7 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
             return DocumentPaintSurfaceStoreSnapshot(
                 generation: epoch.generation,
                 geometry: epoch.geometry,
+                layerStack: epoch.layerStack,
                 layers: epoch.orderedLayerIDs.compactMap { layerID in
                     epoch.layerStates[layerID].map {
                         .init(layerID: layerID, references: $0.references)
@@ -2590,15 +3394,28 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         }
     }
 
+    private func nextLogicalSurfaceID() throws -> UUID {
+        try withLock {
+            let (token, overflow) = nextNamespaceToken
+                .addingReportingOverflow(1)
+            guard !overflow else {
+                throw DocumentPaintSurfaceStoreError.namespaceIdentityOverflow
+            }
+            nextNamespaceToken = token
+            return Self.surfaceID(role: .canonical, token: token)
+        }
+    }
+
     private func issueSurfaceNamespace(
         layerID: UUID,
         generation: UInt64,
         role: DocumentPaintSurfaceRole,
-        expectedActiveGeneration: UInt64
+        expectedActiveGeneration: UInt64,
+        requiresCurrentLayer: Bool = true
     ) throws -> DocumentPaintSurfaceNamespace {
         try withLock {
             let epoch = currentEpoch
-            guard epoch.layerStates[layerID] != nil else {
+            guard !requiresCurrentLayer || epoch.layerStates[layerID] != nil else {
                 throw DocumentPaintSurfaceStoreError.unknownLayerID(layerID)
             }
             guard epoch.generation == expectedActiveGeneration else {
@@ -2654,6 +3471,9 @@ public final class DocumentPaintSurfaceStore: @unchecked Sendable {
         _ prepared: DocumentPaintPreparedCommit
     ) {
         let candidate = prepared.candidate
+        if let reactivation = prepared.reactivation {
+            sharedTileStore.commitReactivation(reactivation)
+        }
         // This is the sole logical publication point. Everything describing
         // the registry changes with one immutable epoch-reference assignment.
         #if DEBUG

@@ -25,6 +25,7 @@ public final class EditorModel {
     public private(set) var canUndo = false
     public private(set) var canRedo = false
     public private(set) var isBusy = false
+    public private(set) var layerStack = LayerStack.initial()
 
     public var selectedProgram: BrushProgram {
         EditorBrushCatalog.drawEntry(for: selectedRecipeID)?.program
@@ -168,5 +169,9 @@ public final class EditorModel {
 
     public func confirmBusy(_ isBusy: Bool) {
         self.isBusy = isBusy
+    }
+
+    public func confirmLayerStack(_ layerStack: LayerStack) {
+        self.layerStack = layerStack
     }
 }

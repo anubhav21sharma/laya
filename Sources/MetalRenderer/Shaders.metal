@@ -755,6 +755,77 @@ static float4 patternSourceOver(float4 source, float4 destination) {
     return source + destination * (1.0 - source.a);
 }
 
+static float4 patternLayerBlendValue(
+    float4 source,
+    float4 backdrop,
+    float opacity,
+    uint blendMode
+) {
+    const float4 scaledSource = source * opacity;
+    const float sourceAlpha = scaledSource.a;
+    const float backdropAlpha = backdrop.a;
+    const float3 sourceColor = source.a <= 0.0
+        ? float3(0.0) : source.rgb / source.a;
+    const float3 backdropColor = backdropAlpha <= 0.0
+        ? float3(0.0) : backdrop.rgb / backdropAlpha;
+    float3 blendedColor = sourceColor;
+    if (blendMode == PatternLayerBlendWireMultiply) {
+        blendedColor = sourceColor * backdropColor;
+    } else if (blendMode == PatternLayerBlendWireScreen) {
+        blendedColor = sourceColor + backdropColor
+            - sourceColor * backdropColor;
+    }
+    const float overlap = sourceAlpha * backdropAlpha;
+    const float3 rgb = scaledSource.rgb * (1.0 - backdropAlpha)
+        + backdrop.rgb * (1.0 - sourceAlpha)
+        + blendedColor * overlap;
+    const float alpha = sourceAlpha
+        + backdropAlpha * (1.0 - sourceAlpha);
+    return float4(rgb, alpha);
+}
+
+kernel void patternLayerBlendKernel(
+    texture2d<float, access::read> backdrop
+        [[texture(PatternTextureIndexLayerBlendBackdrop)]],
+    texture2d<float, access::read> source
+        [[texture(PatternTextureIndexLayerBlendSource)]],
+    texture2d<float, access::write> destination
+        [[texture(PatternTextureIndexLayerBlendDestination)]],
+    constant PatternCompositeUniforms& uniforms
+        [[buffer(PatternBufferIndexLayerBlendUniforms)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= destination.get_width()
+        || position.y >= destination.get_height()) {
+        return;
+    }
+    destination.write(patternLayerBlendValue(
+        source.read(position),
+        backdrop.read(position),
+        uniforms.parameters.x,
+        uint(uniforms.parameters.y)
+    ), position);
+}
+
+static float4 patternSparseInterchangeOutput(float4 linearPremultiplied);
+
+kernel void patternLayerInterchangePackKernel(
+    texture2d<float, access::read> source
+        [[texture(PatternTextureIndexLayerBlendSource)]],
+    texture2d<float, access::write> destination
+        [[texture(PatternTextureIndexLayerBlendDestination)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= destination.get_width()
+        || position.y >= destination.get_height()) {
+        return;
+    }
+    destination.write(
+        patternSparseInterchangeOutput(source.read(position)),
+        position
+    );
+}
+
 static float4 patternCompositeLive(
     float4 settledLive,
     float4 replayLive,
@@ -1023,7 +1094,7 @@ static float4 patternSparseComposeNeighbor(
     if (sparse.liveVisible == 0) {
         return canonical;
     }
-    return patternCompositeLive(
+    return float4(half4(patternCompositeLive(
         authoritative,
         prediction,
         canonical,
@@ -1031,7 +1102,7 @@ static float4 patternSparseComposeNeighbor(
         material.parameters.x,
         material.parameters.y,
         material.parameters.z
-    );
+    )));
 }
 
 static float4 patternSparseBilinear(
@@ -1294,6 +1365,31 @@ static float4 patternSparseRadialDisplayOverlay(
         );
     }
     return color;
+}
+
+fragment float4 patternLayerCompositeDisplayFragment(
+    PatternFullscreenOut input [[stage_in]],
+    texture2d<float> source
+        [[texture(PatternTextureIndexLayerBlendSource)]]
+) {
+    return source.read(uint2(input.screenPixel));
+}
+
+fragment float4 patternLayerCompositeRadialDisplayFragment(
+    PatternFullscreenOut input [[stage_in]],
+    constant PatternGridFrameUniforms& frame
+        [[buffer(PatternBufferIndexGridFrameUniforms)]],
+    constant PatternRadialFrameUniforms& radial
+        [[buffer(PatternBufferIndexRadialFrameUniforms)]],
+    texture2d<float> source
+        [[texture(PatternTextureIndexLayerBlendSource)]]
+) {
+    return patternSparseRadialDisplayOverlay(
+        source.read(uint2(input.screenPixel)),
+        input,
+        frame,
+        radial
+    );
 }
 
 static float4 patternSparseRadialSamplingTier2Value(

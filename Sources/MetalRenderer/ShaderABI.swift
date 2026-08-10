@@ -89,6 +89,7 @@ public enum ShaderABI {
             ) == 0
             && documentPaintMutationIsValid
             && sparseSamplingIsValid
+            && layerBlendIsValid
     }
 
     private static var documentPaintMutationIsValid: Bool {
@@ -330,6 +331,17 @@ public enum ShaderABI {
             && PatternSparseSamplingABIVersion == UInt32(
                 SparseSamplingABI.version
             )
+    }
+
+    private static var layerBlendIsValid: Bool {
+        PatternLayerBlendABIVersion == UInt32(LayerBlendABI.version)
+            && PatternBufferIndexLayerBlendUniforms == 15
+            && PatternTextureIndexLayerBlendBackdrop == 26
+            && PatternTextureIndexLayerBlendSource == 27
+            && PatternTextureIndexLayerBlendDestination == 28
+            && PatternLayerBlendWireNormal == 0
+            && PatternLayerBlendWireMultiply == 1
+            && PatternLayerBlendWireScreen == 2
     }
 
     public static func preconditionValid(

@@ -172,7 +172,7 @@ struct ContentView: View {
     @State private var fileOperationBusy = false
     @State private var importPresented = false
     @State private var exportPresented = false
-    @State private var exportDocument: PatternProjectFileDocument?
+    @State private var exportURL: URL?
     @State private var pointerCancellationGeneration: UInt = 0
     @FocusState private var focusTarget: EditorFocusTarget?
     #if DEBUG && os(macOS)
@@ -217,11 +217,17 @@ struct ContentView: View {
         }
         .fileExporter(
             isPresented: $exportPresented,
-            document: exportDocument,
-            contentType: .patternProject,
+            item: exportURL,
+            contentTypes: [.patternProject],
             defaultFilename: defaultProjectFilename
         ) { result in
-            exportDocument = nil
+            let temporaryURL = exportURL
+            exportURL = nil
+            if let temporaryURL {
+                try? FileManager.default.removeItem(
+                    at: temporaryURL.deletingLastPathComponent()
+                )
+            }
             if case let .failure(error) = result {
                 fileErrorMessage = error.localizedDescription
             }
@@ -261,7 +267,10 @@ struct ContentView: View {
                 saveProject: {
                     beginSave(controller)
                 },
-                fileOperationsEnabled: !fileOperationBusy
+                fileOperationsEnabled: !fileOperationBusy,
+                reportError: { error in
+                    fileErrorMessage = error.localizedDescription
+                }
             )
             Divider()
             HStack(spacing: 0) {
@@ -292,12 +301,22 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
-                TilingInspector(
-                    controller: controller,
-                    runtimeError: $runtimeError,
-                    focusTarget: $focusTarget,
-                    requestEditorFocus: requestEditorFocus
-                )
+                VStack(spacing: 0) {
+                    LayerPanel(
+                        controller: controller,
+                        reportError: { error in
+                            fileErrorMessage = error.localizedDescription
+                        },
+                        requestEditorFocus: requestEditorFocus
+                    )
+                    Divider()
+                    TilingInspector(
+                        controller: controller,
+                        runtimeError: $runtimeError,
+                        focusTarget: $focusTarget,
+                        requestEditorFocus: requestEditorFocus
+                    )
+                }
             }
         }
         .overlay(alignment: .top) {
@@ -414,17 +433,36 @@ struct ContentView: View {
                         forInfoDictionaryKey: "CFBundleShortVersionString"
                     ) as? String ?? "0.1.0"
                 )
-                let data = try await Task.detached(
+                let filename = defaultProjectFilename
+                let temporaryURL = try await Task.detached(
                     priority: .utility
                 ) {
-                    try PatternProjectPackageCodec.encode(
-                        metadata: captured.metadata,
-                        rastersByPath: captured.rastersByPath
+                    let directory = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(
+                            UUID().uuidString,
+                            isDirectory: true
+                        )
+                    try FileManager.default.createDirectory(
+                        at: directory,
+                        withIntermediateDirectories: false
                     )
+                    let destination = directory.appendingPathComponent(
+                        filename,
+                        isDirectory: false
+                    )
+                    do {
+                        try PatternProjectPackageCodec.save(
+                        metadata: captured.metadata,
+                            tilePayloadProvider: captured,
+                            to: destination
+                        )
+                        return destination
+                    } catch {
+                        try? FileManager.default.removeItem(at: directory)
+                        throw error
+                    }
                 }.value
-                exportDocument = PatternProjectFileDocument(
-                    archiveData: data
-                )
+                exportURL = temporaryURL
                 exportPresented = true
             } catch {
                 fileErrorMessage = error.localizedDescription
@@ -468,6 +506,7 @@ struct ContentView: View {
                     let renderer = try await PatternProjectBridge.makeRenderer(
                         from: decoded,
                         device: current.renderer.device,
+                        library: current.renderer.library,
                         drawableSize:
                             current.renderer.viewport.drawableSize
                     )

@@ -1,4 +1,5 @@
 import CShaderTypes
+import EditorCore
 import Foundation
 import Metal
 import MetalKit
@@ -188,6 +189,7 @@ private struct OffMainStrokeTraceInactivityWatchdog {
 public final class GridRenderer: NSObject, MTKViewDelegate {
     public let device: any MTLDevice
     public let historyByteBudget: Int
+    public var layerStack: LayerStack { paintContext.layerStack }
     private var documentPixelSizeState: PixelSize
     private var storagePixelSizeState: PixelSize
     public var pixelSize: PixelSize { documentPixelSizeState }
@@ -497,13 +499,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     }
 
     let commandQueue: any MTLCommandQueue
-    let library: any MTLLibrary
+    public let library: any MTLLibrary
     private let paintContext: DocumentPaintRenderContext
     private var paintOutputGeometryRevision: UInt64 = 0
     private var paintDisplayPreparationSequence: UInt64 = 0
     private var paintDisplayPreparationTask: Task<Void, Never>?
     private var preparedPaintDisplaySubmission:
-        DocumentPaintPreparedDisplaySubmission?
+        PreparedLayerCompositeDisplaySubmission?
     private var activePaintTransientSource:
         DocumentPaintTransientDisplaySource?
     private var paintCommitTask: Task<Void, Never>?
@@ -602,7 +604,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         device: any MTLDevice,
         drawableSize: PatternSize,
         configuration: TilingCanvasConfiguration,
-        initialLayerID: UUID = UUID(),
+        initialLayerStack: LayerStack = .initial(),
         historyByteBudget: Int = 200 * 1_024 * 1_024
     ) throws {
         guard let library = device.makeDefaultLibrary() else {
@@ -613,7 +615,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             library: library,
             drawableSize: drawableSize,
             configuration: configuration,
-            initialLayerID: initialLayerID,
+            initialLayerStack: initialLayerStack,
             historyByteBudget: historyByteBudget
         )
     }
@@ -623,7 +625,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         library: any MTLLibrary,
         drawableSize: PatternSize,
         configuration: TilingCanvasConfiguration,
-        initialLayerID: UUID = UUID(),
+        initialLayerStack: LayerStack = .initial(),
         historyByteBudget: Int = 200 * 1_024 * 1_024
     ) throws {
         ShaderABI.preconditionValid()
@@ -658,7 +660,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             commandQueue: commandQueue,
             library: library,
             geometry: geometry,
-            initialLayerID: initialLayerID,
+            initialLayerStack: initialLayerStack,
             byteBudget: 512 * 1_024 * 1_024,
             snapshotPayloadLiabilityByteBudget: 512 * 1_024 * 1_024,
             transferByteCapacity: 64 * 1_024 * 1_024,
@@ -846,11 +848,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             targetRadialConfiguration:
                 proposed.compiledSymmetry.domain.finite?.radial.configuration
         )
-        if let pair = result.historyPair {
-            try await paintContext.releaseRevisions([
-                pair.before.id,
-                pair.after.id,
-            ])
+        if let result {
+            try await paintContext.releaseRevisions([result.revision.id])
         }
         await refreshPaintRevisionResidentBytes()
         tilingStrategy = proposed
@@ -1857,7 +1856,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         paintDisplayPreparationTask?.cancel()
         paintDisplayPreparationTask = nil
         if let preparedPaintDisplaySubmission {
-            try? paintContext.cancelDisplaySubmission(
+            try? paintContext.cancelLayerDisplaySubmission(
                 preparedPaintDisplaySubmission
             )
             self.preparedPaintDisplaySubmission = nil
@@ -1895,7 +1894,8 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 guard !Task.isCancelled,
                       self.paintDisplayPreparationSequence == sequence
                 else {
-                    try self.paintContext.cancelDisplaySubmission(submission)
+                    try self.paintContext
+                        .cancelLayerDisplaySubmission(submission)
                     return
                 }
                 self.preparedPaintDisplaySubmission = submission
@@ -1922,7 +1922,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         outputPixelSize: PixelSize,
         transient: DocumentPaintTransientDisplaySource?,
         showGridLines: Bool? = nil
-    ) async throws -> DocumentPaintPreparedDisplaySubmission {
+    ) async throws -> PreparedLayerCompositeDisplaySubmission {
         let outputRegion = try SparseTileOutputRegion(
             minX: 0,
             minY: 0,
@@ -1930,30 +1930,13 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             maxY: outputPixelSize.height
         )
         let mapping = try paintOutputMapping(pixelSize: outputPixelSize)
-        let prepared: DocumentPaintPreparedVisiblePlanToken
-        if let transient {
-            let request = try await paintContext.requestTransientVisiblePlan(
-                transient,
-                addressingRevision: paintOutputGeometryRevision,
-                outputRegion: outputRegion,
-                outputGeometryRevision: paintOutputGeometryRevision,
-                outputMapping: mapping
-            )
-            prepared = try await paintContext.prepareTransientVisiblePlan(
-                request
-            )
-        } else {
-            let request = try await paintContext.requestCanonicalVisiblePlan(
-                addressing: paintAddressing,
-                addressingRevision: paintOutputGeometryRevision,
-                outputRegion: outputRegion,
-                outputGeometryRevision: paintOutputGeometryRevision,
-                outputMapping: mapping
-            )
-            prepared = try await paintContext.prepareVisiblePlan(request)
-        }
-        _ = try await paintContext.installVisiblePlan(prepared)
-        return try await paintContext.prepareDisplaySubmission(
+        return try await paintContext.prepareLayerDisplaySubmission(
+            transient: transient,
+            addressing: paintAddressing,
+            addressingRevision: paintOutputGeometryRevision,
+            outputRegion: outputRegion,
+            outputGeometryRevision: paintOutputGeometryRevision,
+            outputMapping: mapping,
             parameters: paintDisplayParameters(
                 outputMapping: mapping,
                 transient: transient != nil,
@@ -1981,6 +1964,83 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
     ) async throws {
         try await paintContext.releaseRevisions(revisionIDs)
         await refreshPaintRevisionResidentBytes()
+    }
+
+    public func applyLayerStack(
+        _ layerStack: LayerStack
+    ) throws -> LayerSurfaceRevisionReference {
+        let result = try paintContext.applyLayerStack(layerStack)
+        invalidatePaintDisplayPreparation()
+        return result.revision
+    }
+
+    public func restoreLayerStackBefore(
+        _ revision: LayerSurfaceRevisionReference
+    ) throws -> LayerStack {
+        let result = try paintContext.restoreLayerStack(
+            revision,
+            endpoint: .before
+        )
+        invalidatePaintDisplayPreparation()
+        return result.after
+    }
+
+    public func restoreLayerStackAfter(
+        _ revision: LayerSurfaceRevisionReference
+    ) throws -> LayerStack {
+        let result = try paintContext.restoreLayerStack(
+            revision,
+            endpoint: .after
+        )
+        invalidatePaintDisplayPreparation()
+        return result.after
+    }
+
+    public func restoreLayerGeometryBefore(
+        _ revision: LayerSurfaceRevisionReference
+    ) throws -> PixelSize {
+        try restoreLayerGeometry(revision, endpoint: .before)
+    }
+
+    public func restoreLayerGeometryAfter(
+        _ revision: LayerSurfaceRevisionReference
+    ) throws -> PixelSize {
+        try restoreLayerGeometry(revision, endpoint: .after)
+    }
+
+    private func restoreLayerGeometry(
+        _ revision: LayerSurfaceRevisionReference,
+        endpoint: LayerSurfaceRevisionEndpoint
+    ) throws -> PixelSize {
+        let result = try paintContext.restoreLayerStack(
+            revision,
+            endpoint: endpoint
+        )
+        let strategy = try TilingStrategy(
+            documentConfiguration: documentConfiguration,
+            canvasSize: result.afterGeometry.documentPixelSize
+        )
+        let storageSize = PixelSize(
+            width: Int(strategy.tileSize.width),
+            height: Int(strategy.tileSize.height)
+        )
+        guard storageSize == result.afterGeometry.storagePixelSize,
+              strategy.compiledSymmetry.domain.finite?.radial.layout
+                == result.afterGeometry.radialLayout
+        else {
+            throw MetalRendererError.commandFailed(
+                "Layer geometry revision does not match the active symmetry configuration."
+            )
+        }
+        installPaintGeometry(strategy: strategy)
+        invalidatePaintDisplayPreparation()
+        return result.afterGeometry.documentPixelSize
+    }
+
+    public func containsLayerRevision(
+        _ id: StoredRasterRevisionID
+    ) -> Bool {
+        paintContext.containsLayerRevision(id)
     }
 
     public func clearDocument(
@@ -2029,7 +2089,22 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             )
             await refreshPaintRevisionResidentBytes()
             installPaintGeometry(strategy: strategy)
-            try publishPaintMutation(result, token: token)
+            if let result {
+                stageRendererEvent(.operationCompleted(
+                    .layerGeometrySuccess(LayerGeometryMutationReceipt(
+                        token: token,
+                        beforePixelSize:
+                            result.beforeGeometry.documentPixelSize,
+                        afterPixelSize:
+                            result.afterGeometry.documentPixelSize,
+                        revision: result.revision
+                    ))
+                ))
+            } else {
+                stageRendererEvent(
+                    .operationCompleted(.operationSuccess(token))
+                )
+            }
             invalidatePaintDisplayPreparation()
         } catch {
             let rendererError = currentPaintError(error)
@@ -2140,6 +2215,28 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             radialGeometryLocked: radialGeometryLocked,
             outputGeometryRevision: paintOutputGeometryRevision
         )
+    }
+
+    public func captureNativeArchive() throws
+        -> DocumentPaintNativeArchiveCapture
+    {
+        try paintContext.captureNativeArchive()
+    }
+
+    public func importNativeArchive(
+        _ manifest: DocumentPaintNativeArchiveImportManifest,
+        documentDomainLocked: Bool,
+        radialGeometryLocked: Bool,
+        consume: @escaping @Sendable
+            (DocumentPaintNativeArchiveImportWriter) throws -> Void
+    ) async throws {
+        try await paintContext.importNativeArchive(
+            manifest,
+            consume: consume
+        )
+        self.documentDomainLocked = documentDomainLocked
+        self.radialGeometryLocked = radialGeometryLocked
+        invalidatePaintDisplayPreparation()
     }
 
     /// Resolves committed finite paint at document-pixel geometry. Transient
@@ -2269,9 +2366,16 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         -> GPUFrameMetrics
     {
         var frames: [GPUFrameMetrics] = []
-        let deadline = DispatchTime.now().uptimeNanoseconds
-            &+ 5_000_000_000
-        while DispatchTime.now().uptimeNanoseconds < deadline {
+        guard let mailbox = strokePreparationBridge?.mailbox else {
+            guard activeStroke == nil, isIdle else {
+                throw MetalRendererError.invalidStrokeLifecycle
+            }
+            return GPUFrameMetrics(
+                cpuEncodeMilliseconds: 0,
+                gpuMilliseconds: 0
+            )
+        }
+        while true {
             try drainCompletedInteractiveOperations()
             if activeStroke == nil, isIdle { break }
             if let frame = try await renderCurrentPaintFrameForHarness(
@@ -2282,12 +2386,33 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 frames.append(frame.metrics)
                 continue
             }
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
-        guard activeStroke == nil, isIdle else {
-            throw lastError ?? MetalRendererError.commandFailed(
-                "stroke completion exceeded its bound"
+            let progress = StrokePreparationAsyncProgressRegistration(
+                mailbox: mailbox
             )
+            let observedRevision = progress.currentRevision
+            defer { progress.remove() }
+            try drainCompletedInteractiveOperations()
+            if activeStroke == nil, isIdle { break }
+            if progress.currentRevision != observedRevision { continue }
+            guard try await progress.waitForProgress(
+                after: observedRevision
+            ) else {
+                let snapshot = mailbox.snapshot
+                let context = await paintContext.snapshot()
+                throw lastError ?? MetalRendererError.commandFailed(
+                    "stroke completion exceeded its inactivity bound "
+                        + "(workspace: \(strokeWorkspaceState), "
+                        + "input: \(snapshot.input.hasPendingInput), "
+                        + "results: \(snapshot.pendingResultCount), "
+                        + "awaitingACK: "
+                        + "\(snapshot.awaitingPreparedFrameSubmission), "
+                        + "worker: \(snapshot.workerIsProcessing), "
+                        + "layerDisplay: "
+                        + "\(context.pendingLayerDisplayAcknowledgementCount), "
+                        + "compositorBusy: "
+                        + "\(context.layerCompositor.isBusy))"
+                )
+            }
         }
         return GPUFrameMetrics(
             cpuEncodeMilliseconds: frames.reduce(0) {
@@ -2529,7 +2654,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     }
                     result = DocumentPaintSurfaceApplicationResult(
                         didPublish: false,
-                        layerID: self.paintContext.activeLayerID,
+                        layerID: capability.layerID,
                         generation: capability.generation,
                         historyPair: nil
                     )
@@ -2756,9 +2881,9 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             schedulePaintDisplayPreparation(in: view)
             return
         }
-        guard submission.specification.outputRegion.width
+        guard submission.outputRegion.width
                 == Int(view.drawableSize.width),
-              submission.specification.outputRegion.height
+              submission.outputRegion.height
                 == Int(view.drawableSize.height)
         else {
             invalidatePaintDisplayPreparation()
@@ -2779,7 +2904,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
 
         preparedPaintDisplaySubmission = nil
         do {
-            try paintContext.encodeDisplaySubmission(
+            try paintContext.encodeLayerDisplaySubmission(
                 submission,
                 target: drawable.texture,
                 commandBuffer: commandBuffer,
@@ -2812,7 +2937,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     guard let self else { return }
                     do {
                         try await self.paintContext
-                            .retryVisiblePlanRetirementsAndCompletions()
+                            .retryLayerDisplayCompletions()
                         if self.activePaintTransientSource?
                             .acknowledgementStatus == .fulfilled
                         {
@@ -2860,10 +2985,10 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             }
             commandBuffer.commit()
         } catch let error as MetalRendererError {
-            try? paintContext.cancelDisplaySubmission(submission)
+            try? paintContext.cancelLayerDisplaySubmission(submission)
             failActiveOperationIfNeeded(error)
         } catch {
-            try? paintContext.cancelDisplaySubmission(submission)
+            try? paintContext.cancelLayerDisplaySubmission(submission)
             failActiveOperationIfNeeded(
                 .commandFailed(error.localizedDescription)
             )
@@ -2902,11 +3027,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
         descriptor.storageMode = .shared
         descriptor.usage = [.renderTarget, .shaderRead]
         guard let texture = device.makeTexture(descriptor: descriptor) else {
-            try? paintContext.cancelDisplaySubmission(submission)
+            try? paintContext.cancelLayerDisplaySubmission(submission)
             throw MetalRendererError.textureAllocationFailed
         }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            try? paintContext.cancelDisplaySubmission(submission)
+            try? paintContext.cancelLayerDisplaySubmission(submission)
             throw MetalRendererError.commandBufferUnavailable
         }
         let pass = MTLRenderPassDescriptor()
@@ -2935,7 +3060,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                 .performMeasuredCPUPreparation(
                     clock: CFAbsoluteTimeGetCurrent,
                     preparation: {
-                        try paintContext.encodeDisplaySubmission(
+                        try paintContext.encodeLayerDisplaySubmission(
                             submission,
                             target: texture,
                             commandBuffer: commandBuffer,
@@ -2979,11 +3104,11 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
             if let runtimeFrameID {
                 discardStrokeRuntimeFrame(runtimeFrameID)
             }
-            try? paintContext.cancelDisplaySubmission(submission)
+            try? paintContext.cancelLayerDisplaySubmission(submission)
             throw error
         }
         let completion = measuredSubmission.completion
-        try await paintContext.retryVisiblePlanRetirementsAndCompletions()
+        try await paintContext.retryLayerDisplayCompletions()
         if activePaintTransientSource?.acknowledgementStatus == .fulfilled {
             activePaintTransientSource = nil
         }
@@ -3041,7 +3166,7 @@ public final class GridRenderer: NSObject, MTKViewDelegate {
                     return source
                 case .pending:
                     try await paintContext
-                        .retryVisiblePlanRetirementsAndCompletions()
+                        .retryLayerDisplayCompletions()
                 case .fulfilled:
                     if activePaintTransientSource?.sourceIdentity
                         == source.sourceIdentity

@@ -1,4 +1,5 @@
 import Foundation
+import EditorCore
 @preconcurrency import Metal
 @testable import MetalRenderer
 import PatternEngine
@@ -51,7 +52,7 @@ struct GridRendererSparseCutoverTests {
             library: library,
             drawableSize: PatternSize(width: 64, height: 64),
             configuration: configuration,
-            initialLayerID: layerID
+            initialLayerStack: try .single(id: layerID)
         )
 
         let initial = await renderer.paintStateSnapshotForTesting()
