@@ -11,8 +11,11 @@ final class StageDAppRouteUITests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let artifactDirectory = repository
-            .appendingPathComponent(".build/StageDAppRouteArtifacts")
+        let artifactDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "StageDAppRouteArtifacts",
+                isDirectory: true
+            )
         try? FileManager.default.removeItem(at: artifactDirectory)
         try FileManager.default.createDirectory(
             at: artifactDirectory,
